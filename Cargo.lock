@@ -66,6 +66,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounded-integer"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc54ef154ce8654be9ee10ed33106bdfd5bff6ee7735c25a160af2290ea938ab"
+
+[[package]]
 name = "bytemuck"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -237,6 +243,7 @@ name = "libnord"
 version = "0.1.0"
 dependencies = [
  "binrw",
+ "bounded-integer",
  "byteorder",
  "crcxx",
  "modular-bitfield",

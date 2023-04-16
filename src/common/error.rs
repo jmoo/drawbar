@@ -3,6 +3,7 @@ use std::fmt::{Debug, Formatter};
 pub enum Error {
     Io(std::io::Error),
     InvalidSchema,
+    OutOfBounds,
 }
 
 impl core::fmt::Display for Error {
@@ -10,6 +11,7 @@ impl core::fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "IO error: {}", e),
             Error::InvalidSchema => write!(f, "Invalid schema"),
+            Error::OutOfBounds => write!(f, "Out of bounds"),
         }
     }
 }
