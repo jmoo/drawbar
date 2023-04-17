@@ -2,6 +2,9 @@ pub mod bank;
 pub mod crc;
 pub mod song;
 pub mod program;
+pub mod piano;
+pub mod sample;
+pub mod settings;
 
 pub mod util;
 pub use util::{peek, FileType};

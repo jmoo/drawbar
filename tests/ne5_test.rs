@@ -9,7 +9,7 @@ fn test_ne5_read_song_bank() {
     const TEST_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/resources/ne5/",
-    "song_0610_0102_0103_0609.ne5t"
+    "song.ne5t"
     );
 
     let song = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -30,7 +30,7 @@ fn test_ne5_read_song_programs() {
     const TEST_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/resources/ne5/",
-    "song_0610_0102_0103_0609.ne5t"
+    "song.ne5t"
     );
 
     let song = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -51,7 +51,7 @@ fn test_ne5_write_song() {
     const TEST_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/resources/ne5/",
-    "song_0610_0102_0103_0609.ne5t"
+    "song.ne5t"
     );
 
     let song = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -153,5 +153,24 @@ fn test_ne5_read_program() {
             assert_eq!(coords, (0, 0));
         },
         _ => panic!("Expected Electro5 program"),
+    }
+}
+
+
+#[test]
+fn test_ne5_read_settings() {
+    const TEST_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/ne5/",
+    "settings.ne5s"
+    );
+
+    let program = libnord::from_path(TEST_FILE.clone()).unwrap();
+
+    match program {
+        Entity::Settings(libnord::Settings::Electro5(settings)) => {
+            let settings = settings as electro5::Settings;
+        },
+        _ => panic!("Expected Electro5 settings"),
     }
 }

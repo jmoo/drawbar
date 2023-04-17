@@ -15,7 +15,7 @@ pub type Coordinates = bank::Coordinates<BANK_COUNT, BANK_SIZE>;
 #[binrw]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0xa5 - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
 #[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0xa5 - 0x2c))]
-struct Schema {
+pub struct Schema {
     pub header: Header,
 
     pub version: u32,
