@@ -20,7 +20,8 @@ fn test_ne5_read_song_bank() {
             let coords = song.location();
 
             assert_eq!(coords, (0, 2));
-        }
+        },
+        _ => panic!("Expected Electro5 song"),
     }
 }
 
@@ -40,7 +41,8 @@ fn test_ne5_read_song_programs() {
             assert_eq!(song.get(1), (0, 1));
             assert_eq!(song.get(2), (0, 2));
             assert_eq!(song.get(3), (5, 8));
-        }
+        },
+        _ => panic!("Expected Electro5 song"),
     }
 }
 
@@ -62,7 +64,8 @@ fn test_ne5_write_song() {
             song.write_to(&mut Cursor::new(&mut output)).unwrap();
 
             assert_eq!(contents.as_slice(), output.as_slice());
-        }
+        },
+        _ => panic!("Expected Electro5 song"),
     }
 }
 
@@ -130,4 +133,25 @@ fn test_ne5_update_song_program() {
     assert_eq!(song.get(1), result.get(1));
     assert_eq!(song.get(2), result.get(2));
     assert_eq!(song.get(3), result.get(3));
+}
+
+#[test]
+fn test_ne5_read_program() {
+    const TEST_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/ne5/",
+    "program.ne5p"
+    );
+
+    let program = libnord::from_path(TEST_FILE.clone()).unwrap();
+
+    match program {
+        Entity::Program(libnord::Program::Electro5(program)) => {
+            let program = program as electro5::Program;
+            let coords = program.location();
+
+            assert_eq!(coords, (0, 0));
+        },
+        _ => panic!("Expected Electro5 program"),
+    }
 }

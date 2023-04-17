@@ -1,6 +1,7 @@
 pub mod bank;
 pub mod crc;
 pub mod song;
+pub mod program;
 
 pub mod util;
 pub use util::{peek, FileType};
