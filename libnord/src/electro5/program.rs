@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::io;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use crate::common;
@@ -78,3 +79,13 @@ impl bank::Item<BANK_COUNT, BANK_SIZE> for Program {
 }
 
 impl common::program::Program for Program { }
+
+impl Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Program")
+            .field("header", &self.schema.header)
+            .field("version", &self.schema.version)
+            .field("body", &self.schema.body)
+            .finish()
+    }
+}

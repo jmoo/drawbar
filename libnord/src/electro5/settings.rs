@@ -1,6 +1,7 @@
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use crate::common::crc::{CrcReader, CrcWriter};
 use std::{fmt, io};
+use std::fmt::Debug;
 use crate::common;
 use crate::common::Header;
 
@@ -20,6 +21,16 @@ struct Schema {
 
     #[brw(big, pad_before = 16)]
     body: [u8; (0x4e - 0x2c) as usize],
+}
+
+impl Debug for Schema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Schema")
+            .field("header", &self.header)
+            .field("version", &self.version)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 pub struct Settings {
@@ -58,3 +69,10 @@ impl Settings {
 
 impl common::settings::Settings for Settings {}
 
+impl Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Settings")
+            .field("schema", &self.schema)
+            .finish()
+    }
+}

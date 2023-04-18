@@ -4,32 +4,37 @@ pub mod schema;
 
 pub use common::util;
 
-use crate::common::{Error, piano, sample};
+use crate::common::{Error, piano, sample, song};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use util::{peek, FileType};
+use crate::common::sample::Sample;
 
 pub type NordResult<T> = Result<T, Error>;
 
+#[derive(Debug)]
 pub enum Program {
     Electro5(electro5::Program),
 }
 
+#[derive(Debug)]
 pub enum Song {
     Electro5(electro5::Song),
 }
 
+#[derive(Debug)]
 pub enum Settings {
     Electro5(electro5::Settings),
 }
 
+#[derive(Debug)]
 pub enum Entity {
     Song(Song),
     Program(Program),
     Piano(piano::Piano),
     Settings(Settings),
-    Sample(sample::Sample),
+    Sample(Sample),
 }
 
 pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, String> {

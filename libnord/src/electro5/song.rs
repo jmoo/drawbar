@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use crate::{common, NordResult};
 use crate::common::bank::{Item};
 use crate::common::bank;
@@ -138,5 +139,14 @@ impl common::song::Song<PROGRAM_BANK_COUNT, PROGRAM_BANK_SIZE> for Song {
 
     fn set(&mut self, slot: u16, coords: program::Coordinates) -> () {
         self.programs[slot as usize] = coords;
+    }
+}
+
+impl Debug for Song {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Song")
+            .field("location", &self.coordinates)
+            .field("programs", &self.programs)
+            .finish()
     }
 }

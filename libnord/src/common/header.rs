@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use binrw::{BinRead, BinWrite};
 
 #[derive(BinRead, BinWrite, Debug)]
@@ -7,7 +8,7 @@ pub struct Preamble {
     pub version: u32,
 
     #[br(count = 4, map = | x: Vec < u8 > | String::from_utf8_lossy(& x).to_string())]
-    #[bw(big, map = |x| x.as_bytes().to_vec())]
+    #[bw(big, map = | x | x.as_bytes().to_vec())]
     pub format: String,
 }
 
@@ -37,5 +38,15 @@ impl Header {
             slot,
             trailer: 0xFFFFFFFF,
         }
+    }
+}
+
+impl Debug for Header {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Header")
+            .field("preamble", &self.preamble)
+            .field("bank", &self.bank)
+            .field("slot", &self.slot)
+            .finish()
     }
 }

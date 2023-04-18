@@ -1,6 +1,7 @@
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use crate::common::crc::{CrcReader, CrcWriter};
 use std::{fmt, io};
+use std::fmt::Debug;
 use crate::common::Preamble;
 
 pub const FORMAT: &str = "nsmp";
@@ -40,5 +41,12 @@ impl Sample {
             Ok(_) => Ok(()),
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         }
+    }
+}
+
+impl Debug for Sample {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sample")
+            .finish()
     }
 }
