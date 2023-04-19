@@ -36,9 +36,7 @@ impl eframe::App for App {
     /// Called each time the UI needs repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let Self {
-            windows
-        } = self;
+        let Self { windows } = self;
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -52,8 +50,6 @@ impl eframe::App for App {
         });
 
         egui::SidePanel::left("side_panel").show(ctx, |ui| {
-
-
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;

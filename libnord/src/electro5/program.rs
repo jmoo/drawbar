@@ -1,9 +1,9 @@
-use std::fmt::Debug;
-use std::io;
-use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use crate::common;
 use crate::common::{bank, Header};
 use crate::crc::{CrcReader, CrcWriter};
+use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+use std::fmt::Debug;
+use std::io;
 
 pub const FORMAT: &str = "ne5p";
 
@@ -31,7 +31,7 @@ pub struct Schema {
 pub struct Program {
     schema: Schema,
     coordinates: Coordinates,
-    name: Option<String>
+    name: Option<String>,
 }
 
 impl Program {
@@ -89,7 +89,7 @@ impl bank::Item<BANK_COUNT, SLOT_COUNT> for Program {
     }
 }
 
-impl common::program::Program for Program { }
+impl common::program::Program for Program {}
 
 impl Debug for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

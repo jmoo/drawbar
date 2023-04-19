@@ -1,7 +1,3 @@
-#![feature(slice_pattern)]
-extern crate core;
-
-use core::slice::SlicePattern;
 use std::io::Read;
 
 use crcxx::crc32::{catalog::CRC_32_ISO_HDLC, *};
@@ -13,8 +9,8 @@ const CRC_32: Crc<LookupTable256xN<CRC_32_SLICES>> =
 fn main() {
     let mut stdin = std::io::stdin();
 
-    const CRC_START: usize = 0x18;
-    const CRC_SIZE: usize = 4;
+    // const CRC_START: usize = 0x18;
+    // const CRC_SIZE: usize = 4;
 
     let mut out: Vec<u8> = Vec::new();
     stdin.read_to_end(&mut out).unwrap();
@@ -31,8 +27,8 @@ fn main() {
             if (checksum == real_le) || (checksum == real_be) {
                 println!("{:0x?}-{:0x?}: {:0x?}", i, i + j, checksum);
             } //else {
-            //  println!("{:0x}-{:0x}: {:0x?} ({:0x?}:{:0x?})", i, j+i, checksum, real_le, real_be);
-            // }
+              //  println!("{:0x}-{:0x}: {:0x?} ({:0x?}:{:0x?})", i, j+i, checksum, real_le, real_be);
+              // }
         }
     }
 }

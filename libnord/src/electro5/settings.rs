@@ -1,9 +1,9 @@
-use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
-use crate::crc::{CrcReader, CrcWriter};
-use std::{fmt, io};
-use std::fmt::Debug;
 use crate::common;
 use crate::common::Header;
+use crate::crc::{CrcReader, CrcWriter};
+use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+use std::fmt::Debug;
+use std::{fmt, io};
 
 pub const FORMAT: &str = "ne5s";
 
@@ -43,7 +43,7 @@ impl Settings {
             schema: Schema {
                 header: Header::new(FORMAT, 0, 0),
                 body: [0; (0x4e - 0x2c) as usize],
-                version: 0
+                version: 0,
             },
         }
     }
@@ -54,9 +54,7 @@ impl Settings {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
 
-        Ok(Settings {
-            schema,
-        })
+        Ok(Settings { schema })
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {

@@ -5,8 +5,8 @@ pub use menu_bar::*;
 
 mod preview;
 
-pub use preview::*;
 use crate::Handle;
+pub use preview::*;
 
 mod song;
 
@@ -15,7 +15,8 @@ pub fn close_button(ui: &mut Ui, handler: &mut Handle) {
         .button("close")
         .on_hover_text("Close this window")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked() {
+        .clicked()
+    {
         handler.close();
     }
 }

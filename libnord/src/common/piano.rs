@@ -1,8 +1,8 @@
-use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt, until_eof};
-use crate::crc::{CrcReader, CrcWriter};
-use std::{fmt, io};
-use std::fmt::Debug;
 use crate::common::Header;
+
+use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+use std::fmt::Debug;
+use std::{fmt, io};
 
 pub const FORMAT: &str = "npno";
 
@@ -10,7 +10,6 @@ pub const FORMAT: &str = "npno";
 #[brw(assert(header.preamble.format == FORMAT))]
 struct Schema {
     header: Header,
-
     // #[br(parse_with = until_eof)]
     // body: Vec<u8>
 }
@@ -35,9 +34,7 @@ impl Piano {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
 
-        Ok(Piano {
-            schema,
-        })
+        Ok(Piano { schema })
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {

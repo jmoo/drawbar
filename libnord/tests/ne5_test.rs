@@ -1,16 +1,12 @@
+use libnord::common::bank::Item;
 use libnord::common::song::Song;
 use libnord::{electro5, Entity};
 use std::fs::read;
 use std::io::Cursor;
-use libnord::common::bank::Item;
 
 #[test]
 fn test_ne5_read_song_bank() {
-    const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/",
-    "song.ne5t"
-    );
+    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/", "song.ne5t");
 
     let song = libnord::from_path(TEST_FILE.clone()).unwrap();
 
@@ -20,18 +16,14 @@ fn test_ne5_read_song_bank() {
             let coords = song.location();
 
             assert_eq!(coords, (0, 2));
-        },
+        }
         _ => panic!("Expected Electro5 song"),
     }
 }
 
 #[test]
 fn test_ne5_read_song_programs() {
-    const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/",
-    "song.ne5t"
-    );
+    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/", "song.ne5t");
 
     let song = libnord::from_path(TEST_FILE.clone()).unwrap();
 
@@ -41,18 +33,14 @@ fn test_ne5_read_song_programs() {
             assert_eq!(song.get(1), (0, 1));
             assert_eq!(song.get(2), (0, 2));
             assert_eq!(song.get(3), (5, 8));
-        },
+        }
         _ => panic!("Expected Electro5 song"),
     }
 }
 
 #[test]
 fn test_ne5_write_song() {
-    const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/",
-    "song.ne5t"
-    );
+    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/", "song.ne5t");
 
     let song = libnord::from_path(TEST_FILE.clone()).unwrap();
     let contents = read(TEST_FILE.clone()).unwrap();
@@ -64,7 +52,7 @@ fn test_ne5_write_song() {
             song.write_to(&mut Cursor::new(&mut output)).unwrap();
 
             assert_eq!(contents.as_slice(), output.as_slice());
-        },
+        }
         _ => panic!("Expected Electro5 song"),
     }
 }
@@ -91,7 +79,6 @@ fn test_ne5_read_write_new_song() {
     song.write_to(&mut Cursor::new(&mut write_result)).unwrap();
 
     let result = electro5::Song::read_from(&mut Cursor::new(&mut write_result)).unwrap();
-
 
     // Assert those values are the same after writing and reading
     assert_eq!(song.location(), result.location());
@@ -138,9 +125,9 @@ fn test_ne5_update_song_program() {
 #[test]
 fn test_ne5_read_program() {
     const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/",
-    "program.ne5p"
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/ne5/",
+        "program.ne5p"
     );
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -151,18 +138,17 @@ fn test_ne5_read_program() {
             let coords = program.location();
 
             assert_eq!(coords, (0, 0));
-        },
+        }
         _ => panic!("Expected Electro5 program"),
     }
 }
 
-
 #[test]
 fn test_ne5_read_settings() {
     const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/",
-    "settings.ne5s"
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/ne5/",
+        "settings.ne5s"
     );
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -170,7 +156,7 @@ fn test_ne5_read_settings() {
     match program {
         Entity::Settings(libnord::Settings::Electro5(settings)) => {
             let settings = settings as electro5::Settings;
-        },
+        }
         _ => panic!("Expected Electro5 settings"),
     }
 }

@@ -21,11 +21,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
-        "nord util",
-        options,
-        Box::new(|cc| Box::new(App::new(cc))),
-    )
+    eframe::run_native("nord util", options, Box::new(|cc| Box::new(App::new(cc))))
 }
 
 // when compiling to web using trunk.
@@ -45,7 +41,7 @@ fn main() {
             web_options,
             Box::new(|cc| Box::new(App::new(cc))),
         )
-            .await
-            .expect("failed to start eframe");
+        .await
+        .expect("failed to start eframe");
     });
 }

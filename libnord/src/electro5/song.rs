@@ -1,16 +1,16 @@
-use std::fmt::Debug;
-use crate::{common, NordResult};
-use crate::common::bank::{Item};
 use crate::common::bank;
-use crate::crc::{CrcReader, CrcWriter};
-use crate::common::Header;
-use crate::common::Error;
-use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+use crate::common::bank::Item;
 
-use std::io;
+use crate::common::Header;
+use crate::crc::{CrcReader, CrcWriter};
+use crate::{common};
+use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+use std::fmt::Debug;
+
 use crate::electro5::program;
-use crate::electro5::program::SLOT_COUNT as PROGRAM_BANK_SIZE;
 use crate::electro5::program::BANK_COUNT as PROGRAM_BANK_COUNT;
+use crate::electro5::program::SLOT_COUNT as PROGRAM_BANK_SIZE;
+use std::io;
 
 pub const FORMAT: &str = "ne5t";
 
@@ -73,7 +73,7 @@ pub struct Song {
     schema: Schema,
     coordinates: Coordinates,
     programs: [program::Coordinates; 4],
-    name: Option<String>
+    name: Option<String>,
 }
 
 impl Song {
@@ -88,7 +88,7 @@ impl Song {
             schema: Schema::new(0, 0, 0, 0, 0, 0),
             coordinates: coords,
             programs: [a, b, c, d],
-            name: None
+            name: None,
         }
     }
 
@@ -107,7 +107,7 @@ impl Song {
                 program::Coordinates::from_value(schema.d),
             ],
             schema,
-            name: None
+            name: None,
         })
     }
 
@@ -146,7 +146,7 @@ impl bank::Item<BANK_COUNT, SLOT_COUNT> for Song {
 
 impl common::song::Song<PROGRAM_BANK_COUNT, PROGRAM_BANK_SIZE> for Song {
     fn get(&self, slot: u16) -> program::Coordinates {
-       self.programs[slot as usize]
+        self.programs[slot as usize]
     }
 
     fn set(&mut self, slot: u16, coords: program::Coordinates) -> () {

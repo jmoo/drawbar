@@ -1,8 +1,8 @@
+
+
 use std::collections::HashMap;
-use crate::common::Error;
-use crate::NordResult;
-use std::fmt::{Debug, Formatter, Result};
 use std::convert::From;
+use std::fmt::{Debug, Formatter, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Coordinates<const BANK_COUNT: u16, const SLOT_COUNT: u16> {
@@ -15,7 +15,9 @@ impl<const BANK_COUNT: u16, const SLOT_COUNT: u16> Coordinates<BANK_COUNT, SLOT_
             panic!("Value out of bounds: {}", value)
         }
 
-        Coordinates { inner: (value / SLOT_COUNT, value % SLOT_COUNT) }
+        Coordinates {
+            inner: (value / SLOT_COUNT, value % SLOT_COUNT),
+        }
     }
 
     pub fn from_coords(coords: (u16, u16)) -> Coordinates<BANK_COUNT, SLOT_COUNT> {
@@ -64,15 +66,22 @@ pub trait Item<const BANK_COUNT: u16, const SLOT_COUNT: u16> {
     fn set_location(&mut self, location: Coordinates<BANK_COUNT, SLOT_COUNT>) -> ();
 }
 
-pub struct Bank<const BANK_COUNT: u16, const SLOT_COUNT: u16, T: Item<BANK_COUNT, SLOT_COUNT> + Debug>
-{
+pub struct Bank<
+    const BANK_COUNT: u16,
+    const SLOT_COUNT: u16,
+    T: Item<BANK_COUNT, SLOT_COUNT> + Debug,
+> {
     items: HashMap<u16, T>,
 }
 
 impl<const BANK_COUNT: u16, const SLOT_COUNT: u16, T> Bank<BANK_COUNT, SLOT_COUNT, T>
-    where T: Item<BANK_COUNT, SLOT_COUNT> + Debug {
+where
+    T: Item<BANK_COUNT, SLOT_COUNT> + Debug,
+{
     pub fn new() -> Bank<BANK_COUNT, SLOT_COUNT, T> {
-        Bank { items: HashMap::new() }
+        Bank {
+            items: HashMap::new(),
+        }
     }
 
     pub fn replace(&mut self, item: T) {
@@ -91,13 +100,21 @@ impl<const BANK_COUNT: u16, const SLOT_COUNT: u16, T> Bank<BANK_COUNT, SLOT_COUN
 }
 
 impl<const B: u16, const S: u16, T> Debug for Bank<B, S, T>
-    where T: Item<B, S> + Debug {
+where
+    T: Item<B, S> + Debug,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "common::Bank(BANK_COUNT={}, SLOT_COUNT={}, ", B, S)?;
 
         for (k, v) in self.items.iter() {
             let coords = Coordinates::<B, S>::from_value(*k);
-            write!(f, "Item(bank: {}, slot: {}, inner: {:?}\n", coords.bank(), coords.slot(), v)?;
+            write!(
+                f,
+                "Item(bank: {}, slot: {}, inner: {:?}\n",
+                coords.bank(),
+                coords.slot(),
+                v
+            )?;
             write!(f, "), ")?;
         }
         writeln!(f, ")")?;

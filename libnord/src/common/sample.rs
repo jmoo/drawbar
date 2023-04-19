@@ -1,8 +1,8 @@
-use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
-use crate::crc::{CrcReader, CrcWriter};
-use std::{fmt, io};
-use std::fmt::Debug;
 use crate::common::Preamble;
+
+use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+use std::fmt::Debug;
+use std::{fmt, io};
 
 pub const FORMAT: &str = "nsmp";
 
@@ -20,7 +20,10 @@ impl Sample {
     pub fn new() -> Sample {
         Sample {
             schema: Schema {
-                preamble: Preamble { format: FORMAT.to_string(), version: 0 }
+                preamble: Preamble {
+                    format: FORMAT.to_string(),
+                    version: 0,
+                },
             },
         }
     }
@@ -31,9 +34,7 @@ impl Sample {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
 
-        Ok(Sample {
-            schema,
-        })
+        Ok(Sample { schema })
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {

@@ -1,17 +1,17 @@
 pub mod common;
+pub mod crc;
 pub mod electro5;
 pub mod error;
 pub mod util;
-pub mod crc;
 
 use error::Error;
 
-use crate::common::{ piano, sample, song};
+use crate::common::sample::Sample;
+use crate::common::{piano, sample};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use util::{peek, FileType};
-use crate::common::sample::Sample;
 
 pub type NordResult<T> = Result<T, Error>;
 

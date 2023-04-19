@@ -33,7 +33,10 @@ fn test_can_replace_items_in_bank() {
 
     let mut bank = Bank::<BANK_COUNT, SLOT_COUNT, TestItem>::new();
 
-    bank.replace(TestItem { value: 69, location: (4, 1).into() });
+    bank.replace(TestItem {
+        value: 69,
+        location: (4, 1).into(),
+    });
 
     if let Some(result) = bank.get((4, 1).into()) {
         assert_eq!(result.value, 69);

@@ -1,5 +1,5 @@
-use std::fmt::Debug;
 use binrw::{BinRead, BinWrite};
+use std::fmt::Debug;
 
 #[derive(BinRead, BinWrite, Debug)]
 #[brw(magic = b"CBIN")]

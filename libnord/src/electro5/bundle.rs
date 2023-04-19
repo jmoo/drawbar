@@ -1,10 +1,10 @@
-use std::io::{BufReader, Cursor, Read, SeekFrom};
-use binrw::BinReaderExt;
 use crate::common::bank::{Bank, Item};
-use crate::electro5::{program, song};
-use crate::{electro5, Entity, from_stream, Program, Song};
 use crate::common::piano::Piano;
 use crate::common::sample::Sample;
+use crate::electro5::{program, song};
+use crate::{electro5, from_stream, Entity, Program, Song};
+use binrw::BinReaderExt;
+use std::io::{Read};
 
 #[derive(Debug)]
 pub struct Bundle {
@@ -40,27 +40,25 @@ impl Bundle {
             let mut cursor = std::io::Cursor::new(buffer);
 
             match from_stream(&mut cursor) {
-                Ok(entity) => {
-                    match entity {
-                        Entity::Program(Program::Electro5(mut program)) => {
-                            program.set_name(name.clone());
-                            bundle.programs.replace(program);
-                        }
-                        Entity::Song(Song::Electro5(mut song)) => {
-                            song.set_name(name.clone());
-                            bundle.songs.replace(song);
-                        }
-                        Entity::Piano(piano) => {
-                            bundle.pianos.push(piano);
-                        }
-                        Entity::Sample(sample) => {
-                            bundle.samples.push(sample);
-                        }
-                        _ => {
-                            println!("Unknown entity in bundle: {}", name);
-                        }
+                Ok(entity) => match entity {
+                    Entity::Program(Program::Electro5(mut program)) => {
+                        program.set_name(name.clone());
+                        bundle.programs.replace(program);
                     }
-                }
+                    Entity::Song(Song::Electro5(mut song)) => {
+                        song.set_name(name.clone());
+                        bundle.songs.replace(song);
+                    }
+                    Entity::Piano(piano) => {
+                        bundle.pianos.push(piano);
+                    }
+                    Entity::Sample(sample) => {
+                        bundle.samples.push(sample);
+                    }
+                    _ => {
+                        println!("Unknown entity in bundle: {}", name);
+                    }
+                },
                 Err(e) => {
                     println!("Error reading file {}: {}", name, e);
                 }
@@ -78,7 +76,9 @@ impl Bundle {
         self.name = Some(name);
     }
 
-    pub fn programs(&self) -> &Bank<{ program::BANK_COUNT }, { program::SLOT_COUNT }, electro5::Program> {
+    pub fn programs(
+        &self,
+    ) -> &Bank<{ program::BANK_COUNT }, { program::SLOT_COUNT }, electro5::Program> {
         &self.programs
     }
 

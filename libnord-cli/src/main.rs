@@ -1,5 +1,5 @@
-use std::io::{Cursor, Read};
 use libnord::from_stream;
+use std::io::{Cursor, Read};
 
 fn main() {
     let mut stdin = std::io::stdin();

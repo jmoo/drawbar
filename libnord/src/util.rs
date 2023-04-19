@@ -1,9 +1,9 @@
 use binrw::{BinRead, BinReaderExt};
 use byteorder::ReadBytesExt;
 
-use std::io;
-use std::io::{Seek};
 use crate::common::header;
+use std::io;
+use std::io::Seek;
 
 pub enum FileType {
     Cbin,

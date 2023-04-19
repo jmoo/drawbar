@@ -1,10 +1,9 @@
 pub mod bank;
-pub mod song;
-pub mod program;
 pub mod piano;
+pub mod program;
 pub mod sample;
 pub mod settings;
-
+pub mod song;
 
 pub mod header;
 pub use header::Header;

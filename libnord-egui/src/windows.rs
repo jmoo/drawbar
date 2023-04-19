@@ -48,16 +48,19 @@ impl Manager {
         let hash = Id::new(id);
         let open = true;
 
-        self.windows.insert(id, Ref {
-            inner: window,
-            handle: Handle { open, id: hash }
-        });
+        self.windows.insert(
+            id,
+            Ref {
+                inner: window,
+                handle: Handle { open, id: hash },
+            },
+        );
 
         Handle { open, id: hash }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
-        let Self { windows, next_id } = self;
+        let Self { windows, next_id: _ } = self;
         let mut cleanup: Vec<u64> = Vec::new();
 
         for (id, item) in windows {
@@ -68,7 +71,7 @@ impl Manager {
             }
         }
 
-        let Self { windows, next_id } = self;
+        let Self { windows, next_id: _ } = self;
         for id in cleanup {
             windows.remove(&id);
         }
