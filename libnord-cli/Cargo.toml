@@ -10,5 +10,9 @@ libnord = { version = "0.1.0", path = "../libnord" }
 crcxx = "0.3.1"
 
 [[bin]]
-name = "libnord-cli"
+name = "nord-util"
 path = "src/main.rs"
+
+[[bin]]
+name = "findcrc"
+path = "src/findcrc.rs"

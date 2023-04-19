@@ -1,10 +1,9 @@
-use crate::schema::header;
-
 use binrw::{BinRead, BinReaderExt};
 use byteorder::ReadBytesExt;
 
 use std::io;
 use std::io::{Seek};
+use crate::common::header;
 
 pub enum FileType {
     Cbin,
@@ -41,9 +40,9 @@ pub fn peek(reader: &mut impl BinReaderExt) -> Result<Peek, io::Error> {
 
         0x43 => {
             if let Ok(preamble) = header::Preamble::read_be(reader) {
-                let schema = preamble.schema();
+                let format = preamble.format;
                 Ok(Peek {
-                    format: schema.to_string(),
+                    format,
                     file_type: FileType::Cbin,
                 })
             } else {

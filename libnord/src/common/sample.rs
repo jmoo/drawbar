@@ -1,5 +1,5 @@
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
-use crate::common::crc::{CrcReader, CrcWriter};
+use crate::crc::{CrcReader, CrcWriter};
 use std::{fmt, io};
 use std::fmt::Debug;
 use crate::common::Preamble;
@@ -46,7 +46,8 @@ impl Sample {
 
 impl Debug for Sample {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sample")
+        f.debug_struct("common::Sample")
+            .field("schema", &self.schema.preamble.format)
             .finish()
     }
 }

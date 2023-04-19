@@ -1,10 +1,12 @@
 pub mod common;
 pub mod electro5;
-pub mod schema;
+pub mod error;
+pub mod util;
+pub mod crc;
 
-pub use common::util;
+use error::Error;
 
-use crate::common::{Error, piano, sample, song};
+use crate::common::{ piano, sample, song};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
@@ -12,6 +14,11 @@ use util::{peek, FileType};
 use crate::common::sample::Sample;
 
 pub type NordResult<T> = Result<T, Error>;
+
+#[derive(Debug)]
+pub enum Bundle {
+    Electro5(electro5::Bundle),
+}
 
 #[derive(Debug)]
 pub enum Program {
@@ -35,6 +42,7 @@ pub enum Entity {
     Piano(piano::Piano),
     Settings(Settings),
     Sample(Sample),
+    Bundle(Bundle),
 }
 
 pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, String> {
@@ -44,6 +52,10 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, St
     };
 
     match header.file_type {
+        FileType::Zip => match electro5::Bundle::read_from(reader) {
+            Ok(bundle) => Ok(Entity::Bundle(Bundle::Electro5(bundle))),
+            Err(e) => Err(e.to_string()),
+        },
         FileType::Cbin => match header.format.as_str() {
             sample::FORMAT => match sample::Sample::read_from(reader) {
                 Ok(sample) => Ok(Entity::Sample(sample)),
@@ -61,10 +73,10 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, St
                 Ok(program) => Ok(Entity::Program(Program::Electro5(program))),
                 Err(e) => Err(e.to_string()),
             },
-            electro5::live::FORMAT => match electro5::Program::read_from(reader) {
-                Ok(program) => Ok(Entity::Program(Program::Electro5(program))),
-                Err(e) => Err(e.to_string()),
-            },
+            // electro5::live::FORMAT => match electro5::Program::read_from(reader) {
+            //     Ok(program) => Ok(Entity::Program(Program::Electro5(program))),
+            //     Err(e) => Err(e.to_string()),
+            // },
             electro5::settings::FORMAT => match electro5::Settings::read_from(reader) {
                 Ok(settings) => Ok(Entity::Settings(Settings::Electro5(settings))),
                 Err(e) => Err(e.to_string()),

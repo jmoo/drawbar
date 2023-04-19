@@ -3,15 +3,15 @@ use std::io;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use crate::common;
 use crate::common::{bank, Header};
-use crate::common::crc::{CrcReader, CrcWriter};
+use crate::crc::{CrcReader, CrcWriter};
 
 pub const FORMAT: &str = "ne5p";
 
 pub const BANK_COUNT: u16 = 8;
-pub const BANK_SIZE: u16 = 50;
+pub const SLOT_COUNT: u16 = 50;
 
-pub type Coordinates = bank::Coordinates<BANK_COUNT, BANK_SIZE>;
-
+pub type Coordinates = bank::Coordinates<BANK_COUNT, SLOT_COUNT>;
+pub type Bank = bank::Bank<BANK_COUNT, SLOT_COUNT, Program>;
 
 #[binrw]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0xa5 - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
@@ -31,12 +31,14 @@ pub struct Schema {
 pub struct Program {
     schema: Schema,
     coordinates: Coordinates,
+    name: Option<String>
 }
 
 impl Program {
     pub fn new(location: Coordinates) -> Program {
         Program {
             coordinates: location,
+            name: None,
             schema: Schema {
                 header: Header::new(FORMAT, location.bank(), location.slot()),
                 version: 1,
@@ -53,6 +55,7 @@ impl Program {
 
         Ok(Program {
             coordinates: Coordinates::from_coords((schema.header.bank, schema.header.slot)),
+            name: None,
             schema,
         })
     }
@@ -68,7 +71,15 @@ impl Program {
     }
 }
 
-impl bank::Item<BANK_COUNT, BANK_SIZE> for Program {
+impl bank::Item<BANK_COUNT, SLOT_COUNT> for Program {
+    fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    fn set_name(&mut self, name: String) -> () {
+        self.name = Some(name);
+    }
+
     fn location(&self) -> Coordinates {
         self.coordinates
     }
@@ -82,9 +93,10 @@ impl common::program::Program for Program { }
 
 impl Debug for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Program")
-            .field("header", &self.schema.header)
-            .field("version", &self.schema.version)
+        f.debug_struct("electro5::Program")
+            .field("schema", &self.schema.header.preamble.format)
+            .field("coordinates", &self.coordinates)
+            .field("name", &self.name)
             .field("body", &self.schema.body)
             .finish()
     }

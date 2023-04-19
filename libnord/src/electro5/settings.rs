@@ -1,5 +1,5 @@
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
-use crate::common::crc::{CrcReader, CrcWriter};
+use crate::crc::{CrcReader, CrcWriter};
 use std::{fmt, io};
 use std::fmt::Debug;
 use crate::common;
@@ -71,8 +71,8 @@ impl common::settings::Settings for Settings {}
 
 impl Debug for Settings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Settings")
-            .field("schema", &self.schema)
+        f.debug_struct("electro5::Settings")
+            .field("schema", &self.schema.header.preamble.format)
             .finish()
     }
 }

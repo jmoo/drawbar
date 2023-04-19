@@ -2,22 +2,23 @@ use std::fmt::Debug;
 use crate::{common, NordResult};
 use crate::common::bank::{Item};
 use crate::common::bank;
-use crate::common::crc::{CrcReader, CrcWriter};
+use crate::crc::{CrcReader, CrcWriter};
 use crate::common::Header;
 use crate::common::Error;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 
 use std::io;
 use crate::electro5::program;
-use crate::electro5::program::BANK_SIZE as PROGRAM_BANK_SIZE;
+use crate::electro5::program::SLOT_COUNT as PROGRAM_BANK_SIZE;
 use crate::electro5::program::BANK_COUNT as PROGRAM_BANK_COUNT;
 
 pub const FORMAT: &str = "ne5t";
 
 pub const BANK_COUNT: u16 = 4;
-pub const BANK_SIZE: u16 = 50;
+pub const SLOT_COUNT: u16 = 50;
 
-pub type Coordinates = bank::Coordinates<BANK_COUNT, BANK_SIZE>;
+pub type Coordinates = bank::Coordinates<BANK_COUNT, SLOT_COUNT>;
+pub type Bank = bank::Bank<BANK_COUNT, SLOT_COUNT, Song>;
 
 #[binrw]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x3d - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
@@ -72,6 +73,7 @@ pub struct Song {
     schema: Schema,
     coordinates: Coordinates,
     programs: [program::Coordinates; 4],
+    name: Option<String>
 }
 
 impl Song {
@@ -86,6 +88,7 @@ impl Song {
             schema: Schema::new(0, 0, 0, 0, 0, 0),
             coordinates: coords,
             programs: [a, b, c, d],
+            name: None
         }
     }
 
@@ -104,6 +107,7 @@ impl Song {
                 program::Coordinates::from_value(schema.d),
             ],
             schema,
+            name: None
         })
     }
 
@@ -122,7 +126,15 @@ impl Song {
     }
 }
 
-impl bank::Item<BANK_COUNT, BANK_SIZE> for Song {
+impl bank::Item<BANK_COUNT, SLOT_COUNT> for Song {
+    fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    fn set_name(&mut self, name: String) -> () {
+        self.name = Some(name);
+    }
+
     fn location(&self) -> Coordinates {
         self.coordinates
     }
@@ -144,8 +156,10 @@ impl common::song::Song<PROGRAM_BANK_COUNT, PROGRAM_BANK_SIZE> for Song {
 
 impl Debug for Song {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Song")
-            .field("location", &self.coordinates)
+        f.debug_struct("electro::Song")
+            .field("schema", &self.schema.header.preamble.format)
+            .field("coordinates", &self.coordinates)
+            .field("name", &self.name)
             .field("programs", &self.programs)
             .finish()
     }
