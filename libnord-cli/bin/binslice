@@ -74,9 +74,9 @@ EOF
   for f in "${fileArgs[@]}"; do
     if [ -d "$f" ]; then
       if [[ "$recursive" == "true" ]]; then
-        while IFS= read f; do files+=("$f"); done < <(find "$f" -type f)
+        while IFS= read -r f; do files+=("$f"); done < <(find "$f" -type f)
       else
-        while IFS= read f; do files+=("$f"); done < <(find "$f" -maxdepth 1 -type f)
+        while IFS= read -r f; do files+=("$f"); done < <(find "$f" -maxdepth 1 -type f)
       fi
     elif [ -e "$f" ]; then
       files+=("$f")
@@ -84,22 +84,22 @@ EOF
   done
 
   local matchedFiles=()
-  local nameLength=0
+  local maxNameLength=0
 
   for f in "${files[@]}"; do
     local nameLength="${#f}"
 
     if [[ "$fileNamePattern" != "" ]]; then
       if { basename "$f" | grep -q -E "$fileNamePattern"; }; then
-        if [[ "$nameLength" -gt "$nameLength" ]]; then
-          nameLength="$nameLength"
+        if [[ "$nameLength" -gt "$maxNameLength" ]]; then
+          maxNameLength="$nameLength"
         fi
 
         matchedFiles+=("$f")
       fi
     else
-      if [[ "$nameLength" -gt "$nameLength" ]]; then
-        nameLength="$nameLength"
+      if [[ "$nameLength" -gt "$maxNameLength" ]]; then
+        maxNameLength="$nameLength"
       fi
 
       matchedFiles+=("$f")
@@ -113,20 +113,23 @@ EOF
   local bytes=()
   local maxByte=0
 
-  while IFS= read r; do
+  while IFS= read -r r; do
+    # shellcheck disable=SC2155
     local start="$(echo "$r" | sed -E 's/([0-9a-f]+)-([0-9a-f]+).*/\1/g')"
+
+    # shellcheck disable=SC2155
     local end="$(echo "$r" | sed -E 's/([0-9a-f]+)-([0-9a-f]+).*/\2/g')"
 
-    while IFS= read b; do
-      if [[ ""$((16#$((b))))"" -gt "$maxByte" ]]; then
-        maxByte="$b"
+    while IFS= read -r b; do
+      if [[ $((16#${b})) -gt "$maxByte" ]]; then
+        maxByte="$((16#${b}))"
       fi
 
       bytes+=("$b")
-    done < <(seq "$((16#$((start))))" "$((16#$((end))))" | xargs printf "%02x\n") || exit 1
+    done < <(seq "$((16#${start}))" "$((16#${end}))" | xargs printf "%02x\n") || exit 1
   done < <(echo "$range" | sed -E 's/[ ]*,[ ]*/\n/g') || exit 1
 
-  local fileColumnWidth="$((nameLength+1))"
+  local fileColumnWidth="$((maxNameLength+1))"
 
   # shellcheck disable=SC2155
   local byteColumnWidth="$(if [[ "$binary" == "true" ]]; then
@@ -137,6 +140,7 @@ EOF
 
   if [[ "${#maxByte}" -gt "${byteColumnWidth}" ]]; then
     byteColumnWidth="${#maxByte}"
+    byteColumnWidth="$((byteColumnWidth+1))"
   fi
 
    printf "%-${fileColumnWidth}s" ""
@@ -147,9 +151,10 @@ EOF
 
   printf "\n"
 
+  # shellcheck disable=SC2155
   local bytePattern="$(echo "${bytes[@]}" | sed -E 's/ /|/g')"
 
-  local xxdArgs=(-g 1 -c 1 -s 0 -l "$((16#$((maxByte))+1))")
+  local xxdArgs=(-g 1 -c 1 -s 0 -l "$((maxByte+1))")
 
   if [[ "$binary" == "true" ]]; then
     xxdArgs+=(-b)
@@ -165,13 +170,6 @@ EOF
 
     printf "\n"
   done
-#
-#  ls \
-#  | grep -E "$pattern" \
-#  | sed -E 's/ /\\ /g' \
-#  | while IFS= read f; do
-#      printf "%s\t%s\n" "$(echo "$f" | sed -E 's/.ne5p.bin$//')" "$(cat "$f" | grep -E "($bytePattern)" | sed -E 's/^0+..:[ ]*([^ ]+[ ]).*/\1/g' | xargs echo 2>/dev/null)";
-#    done
 }
 
 run "$@"
