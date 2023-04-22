@@ -267,22 +267,24 @@ impl Program {
         }
     }
 
-    pub fn left_octave_shift(&self) -> i8 {
-        match self.schema.left_octave_shift {
-            0 => -1,
-            1 => 0,
-            2 => 1,
-            _ => 0,
-        }
+    pub fn left_octave_shift(&self) -> u8 {
+        self.schema.left_octave_shift
+        // match self.schema.left_octave_shift {
+        //     0 => -1,
+        //     1 => 0,
+        //     2 => 1,
+        //     _ => 0,
+        // }
     }
 
-    pub fn right_octave_shift(&self) -> i8 {
-        match self.schema.right_octave_shift {
-            0 => -1,
-            1 => 0,
-            2 => 1,
-            _ => 0,
-        }
+    pub fn right_octave_shift(&self) -> u8 {
+        self.schema.right_octave_shift
+        // match self.schema.right_octave_shift {
+        //     0 => -1,
+        //     1 => 0,
+        //     2 => 1,
+        //     _ => 0,
+        // }
     }
 }
 
@@ -312,7 +314,7 @@ impl Debug for Program {
             .field("schema", &self.schema.header.preamble.format)
             .field("coordinates", &self.coordinates)
             .field("name", &self.name)
-            .field("body", &self.schema.body)
+            //.field("body", &self.schema.body)
             .field("left_part", &self.left_part())
             .field("right_part", &self.right_part())
             .field("left_octave_shift", &self.left_octave_shift())

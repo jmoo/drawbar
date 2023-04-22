@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+
+run() {
+  local fileArgs=()
+  local files=()
+  local recursive=false
+  local fileNamePattern=""
+  local binary=false
+  local range="0-4"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help|help)
+          cat <<EOF
+Show a table of hex values for files matching a pattern
+
+Usage: hexslice [-h] [-R range] [-b] [-f fileNamePattern] [-r] [files...]
+
+Options:
+-h, --help, help
+  Show this help message
+--range, -R
+  Comma separated ranges of bytes to search for in hex (e.g. "2e", "2e,2f", "2e-2f,30-39")
+-b, --binary
+  Dump bits instead of hex
+-f, --file-name-match
+  Include files that match this pattern
+-r, --recursive
+  Recursively search for files
+EOF
+          return 0
+          ;;
+
+        --range|-R)
+          range="$2"
+          shift; shift
+          ;;
+
+        -b|--binary)
+          binary=true
+          shift
+          ;;
+
+        -f|--file-name-pattern)
+          fileNamePattern="$2"
+          shift; shift
+          ;;
+
+        -r|--recursive)
+          recursive=true
+          shift
+          ;;
+
+        --*=*)
+          local tmpArgs=("" "$(echo "$1" | sed -E "s/(^[^=]+)=.*/\1/g")" "$(echo "$1" | sed -E "s/^[^=]+=(.*)/\1/g")");
+          shift; set -- "${tmpArgs[@]}" "$@"; shift
+          ;;
+
+        -*)
+          echo -e "\033[1;31;1m✘ Unknown option: $1\033[0m" 1>&2; return 1
+          ;;
+
+        *)
+          fileArgs+=("$1")
+          shift
+          ;;
+    esac
+  done
+
+  if [[ "${#fileArgs[@]}" -eq 0 ]]; then
+    fileArgs+=(".")
+  fi
+
+  for f in "${fileArgs[@]}"; do
+    if [ -d "$f" ]; then
+      if [[ "$recursive" == "true" ]]; then
+        while IFS= read f; do files+=("$f"); done < <(find "$f" -type f)
+      else
+        while IFS= read f; do files+=("$f"); done < <(find "$f" -maxdepth 1 -type f)
+      fi
+    elif [ -e "$f" ]; then
+      files+=("$f")
+    fi
+  done
+
+  local matchedFiles=()
+  local nameLength=0
+
+  for f in "${files[@]}"; do
+    local nameLength="${#f}"
+
+    if [[ "$fileNamePattern" != "" ]]; then
+      if { basename "$f" | grep -q -E "$fileNamePattern"; }; then
+        if [[ "$nameLength" -gt "$nameLength" ]]; then
+          nameLength="$nameLength"
+        fi
+
+        matchedFiles+=("$f")
+      fi
+    else
+      if [[ "$nameLength" -gt "$nameLength" ]]; then
+        nameLength="$nameLength"
+      fi
+
+      matchedFiles+=("$f")
+    fi
+  done
+
+  if [[ "${#matchedFiles[@]}" -eq 0 ]]; then
+    echo -e "\033[1;31;1m✘ No files matched\033[0m" 1>&2; return 1
+  fi
+
+  local bytes=()
+  local maxByte=0
+
+  while IFS= read r; do
+    local start="$(echo "$r" | sed -E 's/([0-9a-f]+)-([0-9a-f]+).*/\1/g')"
+    local end="$(echo "$r" | sed -E 's/([0-9a-f]+)-([0-9a-f]+).*/\2/g')"
+
+    while IFS= read b; do
+      if [[ ""$((16#$((b))))"" -gt "$maxByte" ]]; then
+        maxByte="$b"
+      fi
+
+      bytes+=("$b")
+    done < <(seq "$((16#$((start))))" "$((16#$((end))))" | xargs printf "%02x\n") || exit 1
+  done < <(echo "$range" | sed -E 's/[ ]*,[ ]*/\n/g') || exit 1
+
+  local fileColumnWidth="$((nameLength+1))"
+
+  # shellcheck disable=SC2155
+  local byteColumnWidth="$(if [[ "$binary" == "true" ]]; then
+      echo "10";
+    else
+      echo "5";
+  fi)"
+
+  if [[ "${#maxByte}" -gt "${byteColumnWidth}" ]]; then
+    byteColumnWidth="${#maxByte}"
+  fi
+
+   printf "%-${fileColumnWidth}s" ""
+
+  for b in "${bytes[@]}"; do
+    printf "%-${byteColumnWidth}s" "0x$b"
+  done
+
+  printf "\n"
+
+  local bytePattern="$(echo "${bytes[@]}" | sed -E 's/ /|/g')"
+
+  local xxdArgs=(-g 1 -c 1 -s 0 -l "$((16#$((maxByte))+1))")
+
+  if [[ "$binary" == "true" ]]; then
+    xxdArgs+=(-b)
+  fi
+
+  for f in "${matchedFiles[@]}"; do
+    printf "%-${fileColumnWidth}s" "$f"
+
+    xxd "${xxdArgs[@]}" "$f" \
+    | grep -E "^0*($bytePattern):" \
+    | sed -E 's/^0+..:[ ]*([^ ]+).*/\1/g' \
+    | xargs printf "%-${byteColumnWidth}s" || exit 1
+
+    printf "\n"
+  done
+#
+#  ls \
+#  | grep -E "$pattern" \
+#  | sed -E 's/ /\\ /g' \
+#  | while IFS= read f; do
+#      printf "%s\t%s\n" "$(echo "$f" | sed -E 's/.ne5p.bin$//')" "$(cat "$f" | grep -E "($bytePattern)" | sed -E 's/^0+..:[ ]*([^ ]+[ ]).*/\1/g' | xargs echo 2>/dev/null)";
+#    done
+}
+
+run "$@"
