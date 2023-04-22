@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use util::{peek, FileType};
+use crate::common::bank::Coordinates;
 
 pub type NordResult<T> = Result<T, Error>;
 
