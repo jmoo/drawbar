@@ -4,7 +4,6 @@ use crate::crc::{CrcReader, CrcWriter};
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use std::fmt::Debug;
 use std::io;
-use modular_bitfield::prelude::*;
 
 pub const FORMAT: &str = "ne5p";
 
@@ -14,62 +13,62 @@ pub const SLOT_COUNT: u16 = 50;
 pub type Coordinates = bank::Coordinates<BANK_COUNT, SLOT_COUNT>;
 pub type Bank = bank::Bank<BANK_COUNT, SLOT_COUNT, Program>;
 
-// Program naming convention:
-// abcdabcdz e y
-// lower - upper - split - - z  y
-// ---------------------
-// a = part (n, o, p, s)
-// b = sustain (0,1)
-// c = control (0,1)
-// d = octave (-1,0,1)
-// ---------------------
-// z = transpose (-6..6)
-// e = split (0:off, 1:c3, 2:f3, 3:c4, 4:f4, 5c5, 6:f5, 7:upper)
-// y - part volume (-50..50)
-
-// 31 - 32
-#[derive(Copy, Clone)]
-#[bitfield]
+// 0x2e-0x2f
 #[binrw]
-#[br(map = Self::from_bytes)]
-#[bw(map = |&x| Self::into_bytes(x))]
-pub struct PanelSettings31 {
-    // 11111
-    pub b16: B1,
-    pub b15: B1,
-    pub b14: B1,
-    pub b13: B1,
-    pub b12: B1,
+pub struct CenterPanel {
+    #[brw(big)]
+    #[bw(calc =
+    (*left_part as u16) << 13
+    | (*right_part as u16) << 10
+    | (((*left_octave_shift + 7) as u16) << 6)
+    | (((*right_octave_shift + 7) as u16) << 2)
+    | ((*left_sustain as u16) << 1)
+    | (*right_sustain as u16)
+    )]
+    settings: u16,
 
-    // split volume
-    pub b11: B1,
-    pub b10: B1,
-    pub b9: B1,
-    pub b8: B1,
-    pub b7: B1,
-    pub b6: B1,
+    #[br(calc = ((settings & 0b1110000000000000) >> 13) as u8)]
+    #[bw(ignore)]
+    pub left_part: u8,
 
-    // ?????
-    pub b5: B1,
+    #[br(calc = ((settings & 0b0001110000000000) >> 10) as u8)]
+    #[bw(ignore)]
+    pub right_part: u8,
 
-    // transpose (0 to 12  big endian = -6 to -6 half steps transposition)
-    // 0111 1100  12
-    // 0111 10111 11
-    pub b4: B1,
-    pub b3: B1,
-    pub b2: B1,
-    pub b1: B1,
-}
+    #[br(calc = (((settings & 0b0000001111000000) >> 6) as i8) - 7)]
+    #[bw(ignore)]
+    pub left_octave_shift: i8,
 
-// 30
-#[derive(Copy, Clone)]
-#[bitfield]
-#[binrw]
-#[br(map = Self::from_bytes)]
-#[bw(map = |&x| Self::into_bytes(x))]
-pub struct PanelSettings30 {
-    // split enabled ????
-    pub b8: B1,
+    #[br(calc = (((settings & 0b0000000000111100) >> 2) as i8) - 7)]
+    #[bw(ignore)]
+    pub right_octave_shift: i8,
+
+    #[br(calc = (settings & 0b0000000000000010 >> 1) != 0)]
+    #[bw(ignore)]
+    pub left_sustain: bool,
+
+    #[br(calc = (settings & 0b0000000000000001) != 0)]
+    #[bw(ignore)]
+    pub right_sustain: bool,
+
+    #[brw(big)]
+    pub settings2: u8,
+
+    #[br(calc = ((settings2 & 0b10000000) >> 7) != 0)]
+    #[bw(ignore)]
+    pub left_control: bool,
+
+    #[br(calc = ((settings2 & 0b01000000) >> 6) != 0)]
+    #[bw(ignore)]
+    pub right_control: bool,
+
+    // #[br(calc = ((settings2 & 0b00100000) >> 5) as u8)]
+    // #[bw(ignore)]
+    // pub ??????: bool,
+
+    // #[br(calc = ((settings2 & 0b00011110) >> 1) as u8)]
+    // #[bw(ignore)]
+    // pub split_point: bool,
 
     // keyboard split
     // 0011  0  off (confirmed)
@@ -80,120 +79,53 @@ pub struct PanelSettings30 {
     // 1100  5  c5 (confirmed)
     // 1101  6  f5 (confirmed)
     // 1110  7  upper (confirmed)
-    pub b7: B1,
-    pub b6: B1,
-    pub b5: B1,
-    pub b4: B1,
+    // #[br(calc = (settings2 & 0b00000001) as u8)]
+    // #[bw(ignore)]
+    // pub split_enable???: bool,
 
-    // ???
-    pub b3: B1,
+    #[brw(big)]
+    pub settings3: u16,
 
-    // right control
-    pub b2: B1,
+    // transpose (0 to 12  big endian = -6 to -6 half steps transposition)
+    // 0111 1100  12
+    // 0111 10111 11
+    // #[br(calc = ((settings3 & 0b1111000000000000) >> 12) as u8)]
+    // #[bw(ignore)]
+    // pub transpose: u8,
 
-    // left control
-    pub b1: B1,
-}
+    // #[br(calc = ((settings3 & 0b0000100000000000) >> 11) != 0)]
+    // #[bw(ignore)]
+    // pub ??????: bool,
 
-// 2e-2f
-#[derive(Copy, Clone)]
-#[bitfield]
-#[binrw]
-#[br(map = Self::from_bytes)]
-#[bw(map = |&x| Self::into_bytes(x))]
-pub struct PanelSettings2e {
-    // right sustain
-    pub b16: B1,
+    // #[br(calc = ((settings3 & 0b0000011111100000) >> 5) as u8)]
+    // #[bw(ignore)]
+    // pub part_volume??: bool,
 
-    // left sustain
-    pub b15: B1,
-
-    // left and right octave
-    // 0111 0111   0 <-> 0
-    // 1000 0111   1 <-> 0
-    // 0111 1000   0 <-> 1
-
-    // 0110  -1 ????
-    // 0111   0
-    // 1000   1
-
-    // right octave shift
-    pub b14: B1,
-    pub b13: B1,
-    pub b12: B1,
-    pub b11: B1,
-
-    // left octave shift
-    pub b10: B1,
-    pub b9: B1,
-    pub b8: B1,
-    pub b7: B1,
-
-    // 000 -> right organ
-    // 001 -> right piano
-    // 010 -> right sample
-    pub b6: B1,
-    pub b5: B1,
-    pub b4: B1,
-
-    // 000 -> left organ
-    // 001 -> left piano
-    // 010 -> left sample
-    pub b3: B1,
-    pub b2: B1,
-    pub b1: B1,
+    // #[br(calc = ((settings3 & 0b0000000000011111)) as u8)]
+    // #[bw(ignore)]
+    // pub ??????: bool,
 }
 
 #[binrw]
-#[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0xa5 - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
-#[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0xa5 - 0x2c))]
+#[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0xa4 - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
+#[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0xa4 - 0x2c))]
 pub struct Schema {
     pub header: Header,
 
     pub version: u32,
 
+    /// 0x18-0x1a
     #[bw(try_calc = w.checksum())]
     crc32: u32,
 
+    /// 0x2c-0x2d
     #[brw(big, pad_before = 16)]
-    zeros: u8, // 0x2c
+    program_version: u16,
 
-    // version
-    four: u8, // 0x2d
+    /// 0x2e-0x2f
+    center_panel: CenterPanel,
 
-    #[brw(big)]
-    pub panel_settings_2e: u16, // 0x2e - 2f
-
-    #[brw(big)]
-    pub panel_settings_30: u8, // 0x30
-
-    pub panel_settings_31: u16, // 0x31 - 32
-
-    body: [u8; (0xa5 - 0x33) as usize],
-
-    #[br(calc = ((panel_settings_2e & 0b1110000000000000) >> 13) as u8)]
-    #[bw(ignore)]
-    pub left_part: u8,
-
-    #[br(calc = ((panel_settings_2e & 0b0001110000000000) >> 10) as u8)]
-    #[bw(ignore)]
-    pub right_part: u8,
-
-    #[br(calc = ((panel_settings_2e & 0b0000001111000000) >> 6) as u8)]
-    #[bw(ignore)]
-    pub left_octave_shift: u8,
-
-    #[br(calc = ((panel_settings_2e & 0b0000000000111100) >> 2) as u8)]
-    #[bw(ignore)]
-    pub right_octave_shift: u8,
-
-    #[br(calc = (panel_settings_2e & 0b0000000000000010 >> 1) != 0)]
-    #[bw(ignore)]
-    pub left_sustain: bool,
-
-    #[br(calc = (panel_settings_2e & 0b0000000000000001) != 0)]
-    #[bw(ignore)]
-    pub right_sustain: bool,
+    body: [u8; (0xa4 - 0x32) as usize],
 }
 
 pub struct Program {
@@ -210,18 +142,20 @@ impl Program {
             schema: Schema {
                 header: Header::new(FORMAT, location.bank(), location.slot()),
                 version: 4,
-                body: [0; (0xa5 - 0x33) as usize],
-                four: 4,
-                zeros: 0,
-                panel_settings_2e: 0,
-                panel_settings_30: 0,
-                panel_settings_31: 0,
-                left_octave_shift: 0,
-                right_octave_shift: 0,
-                left_part: 0,
-                right_part: 0,
-                left_sustain: false,
-                right_sustain: false,
+                body: [0; (0xa4 - 0x32) as usize],
+                program_version: 4,
+                center_panel: CenterPanel {
+                    left_octave_shift: 0,
+                    right_octave_shift: 0,
+                    left_part: 0,
+                    right_part: 0,
+                    left_sustain: false,
+                    right_sustain: false,
+                    settings2: 0,
+                    settings3: 0,
+                    left_control: false,
+                    right_control: false,
+                }
             },
         }
     }
@@ -250,7 +184,7 @@ impl Program {
     }
 
     pub fn left_part(&self) -> &str {
-        match self.schema.left_part {
+        match self.schema.center_panel.left_part {
             0 => "organ",
             1 => "piano",
             2 => "sample",
@@ -259,7 +193,7 @@ impl Program {
     }
 
     pub fn right_part(&self) -> &str {
-        match self.schema.right_part {
+        match self.schema.center_panel.right_part {
             0 => "organ",
             1 => "piano",
             2 => "sample",
@@ -267,24 +201,28 @@ impl Program {
         }
     }
 
-    pub fn left_octave_shift(&self) -> u8 {
-        self.schema.left_octave_shift
-        // match self.schema.left_octave_shift {
-        //     0 => -1,
-        //     1 => 0,
-        //     2 => 1,
-        //     _ => 0,
-        // }
+    pub fn left_octave_shift(&self) -> i8 {
+        self.schema.center_panel.left_octave_shift
     }
 
-    pub fn right_octave_shift(&self) -> u8 {
-        self.schema.right_octave_shift
-        // match self.schema.right_octave_shift {
-        //     0 => -1,
-        //     1 => 0,
-        //     2 => 1,
-        //     _ => 0,
-        // }
+    pub fn right_octave_shift(&self) -> i8 {
+        self.schema.center_panel.right_octave_shift
+    }
+
+    pub fn left_sustain(&self) -> bool {
+        self.schema.center_panel.left_sustain
+    }
+
+    pub fn right_sustain(&self) -> bool {
+        self.schema.center_panel.right_sustain
+    }
+
+    pub fn left_control(&self) -> bool {
+        self.schema.center_panel.left_control
+    }
+
+    pub fn right_control(&self) -> bool {
+        self.schema.center_panel.right_control
     }
 }
 
@@ -314,13 +252,14 @@ impl Debug for Program {
             .field("schema", &self.schema.header.preamble.format)
             .field("coordinates", &self.coordinates)
             .field("name", &self.name)
-            //.field("body", &self.schema.body)
             .field("left_part", &self.left_part())
             .field("right_part", &self.right_part())
             .field("left_octave_shift", &self.left_octave_shift())
             .field("right_octave_shift", &self.right_octave_shift())
-            .field("left_sustain", &self.schema.left_sustain)
-            .field("right_sustain", &self.schema.right_sustain)
+            .field("left_sustain", &self.left_sustain())
+            .field("right_sustain", &self.right_sustain())
+            .field("left_control", &self.left_control())
+            .field("right_control", &self.right_control())
             .finish()
     }
 }

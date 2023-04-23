@@ -31,7 +31,7 @@ EOF
           return 0
           ;;
 
-        --range|-R)
+        --range|-r)
           range="$2"
           shift; shift
           ;;
@@ -46,7 +46,7 @@ EOF
           shift; shift
           ;;
 
-        -r|--recursive)
+        -R|--recursive)
           recursive=true
           shift
           ;;

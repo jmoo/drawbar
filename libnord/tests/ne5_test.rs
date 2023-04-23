@@ -47,7 +47,7 @@ fn test_ne5_write_song() {
 
     match song {
         Entity::Song(libnord::Song::Electro5(mut song)) => {
-            let mut output = Vec::new();
+            let mut output: Vec<u8> = Vec::new();
 
             song.write_to(&mut Cursor::new(&mut output)).unwrap();
 
@@ -125,9 +125,9 @@ fn test_ne5_update_song_program() {
 #[test]
 fn test_ne5_read_program() {
     const TEST_FILE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/resources/ne5/",
-        "program.ne5p"
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/ne5/programs/",
+    "o00_1_p00_0_0_0.ne5p"
     );
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -137,7 +137,38 @@ fn test_ne5_read_program() {
             let program = program as electro5::Program;
             let coords = program.location();
 
-            assert_eq!(coords, (0, 0));
+            assert_eq!(coords, (7, 3));
+            assert_eq!(program.left_part(), "organ");
+            assert_eq!(program.right_part(), "piano");
+            assert_eq!(program.left_octave_shift(), 1);
+            assert_eq!(program.right_octave_shift(), 0);
+            assert_eq!(program.left_sustain(), false);
+            assert_eq!(program.right_sustain(), false);
+            assert_eq!(program.left_control(), false);
+            assert_eq!(program.right_control(), false);
+        }
+        _ => panic!("Expected Electro5 program"),
+    }
+}
+
+#[test]
+fn test_ne5_read_write_program() {
+    const TEST_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/ne5/programs/",
+        "o00_1_p00_0_0_0.ne5p"
+    );
+
+    let read_contents = read(TEST_FILE.clone()).unwrap();
+    let program = libnord::from_path(TEST_FILE.clone()).unwrap();
+
+    match program {
+        Entity::Program(libnord::Program::Electro5(mut program)) => {
+            let mut write_contents: Vec<u8> = Vec::new();
+
+            program.write_to(&mut Cursor::new(&mut write_contents)).unwrap();
+
+            assert_eq!(read_contents.as_slice(), write_contents.as_slice());
         }
         _ => panic!("Expected Electro5 program"),
     }
@@ -146,9 +177,9 @@ fn test_ne5_read_program() {
 #[test]
 fn test_ne5_read_settings() {
     const TEST_FILE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/resources/ne5/",
-        "settings.ne5s"
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/ne5/",
+    "settings.ne5s"
     );
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
