@@ -9,7 +9,7 @@ abc_d_abc_d_x_y_z.ne5p
 a = part instrument (n, o, p, s)
 b = sustain (0,1)
 c = control (0,1)
-d = octave (-5,0,6)
+d = octave (-5,0,5 or 6 or 7?)
 
 # global
 x = transpose (-6..6)
