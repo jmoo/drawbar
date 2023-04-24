@@ -3,6 +3,7 @@ use libnord::common::song::Song;
 use libnord::{electro5, Entity};
 use std::fs::read;
 use std::io::Cursor;
+use libnord::electro5::program::{Instrument, SplitPoint};
 
 #[test]
 fn test_ne5_read_song_bank() {
@@ -138,14 +139,16 @@ fn test_ne5_read_program() {
             let coords = program.location();
 
             assert_eq!(coords, (7, 3));
-            assert_eq!(program.left_part(), "organ");
-            assert_eq!(program.right_part(), "piano");
+            assert_eq!(program.left_part(), Instrument::Organ);
+            assert_eq!(program.right_part(), Instrument::Piano);
             assert_eq!(program.left_octave_shift(), 1);
             assert_eq!(program.right_octave_shift(), 0);
             assert_eq!(program.left_sustain(), false);
             assert_eq!(program.right_sustain(), false);
             assert_eq!(program.left_control(), false);
             assert_eq!(program.right_control(), false);
+            assert_eq!(program.split_enabled(), false);
+            assert_eq!(program.split_point(), SplitPoint::F4);
         }
         _ => panic!("Expected Electro5 program"),
     }

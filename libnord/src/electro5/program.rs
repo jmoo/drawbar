@@ -13,9 +13,85 @@ pub const SLOT_COUNT: u16 = 50;
 pub type Coordinates = bank::Coordinates<BANK_COUNT, SLOT_COUNT>;
 pub type Bank = bank::Bank<BANK_COUNT, SLOT_COUNT, Program>;
 
-// 0x2e-0x2f
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Instrument {
+    Organ,
+    Piano,
+    Sample
+}
+
+impl TryFrom<u8> for Instrument {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Instrument, Self::Error> {
+        match value {
+            0 => Ok(Instrument::Organ),
+            1 => Ok(Instrument::Piano),
+            2 => Ok(Instrument::Sample),
+            _ => Err(&"Value is out of range for instrument"),
+        }
+    }
+}
+
+impl Instrument {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Instrument::Organ => "organ",
+            Instrument::Piano => "piano",
+            Instrument::Sample => "sample",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SplitPoint {
+    C3,
+    F3,
+    C4,
+    F4,
+    C5,
+    F5,
+    Upper,
+    Lower
+}
+
+impl TryFrom<u8> for SplitPoint {
+    type Error =  &'static str;
+
+    fn try_from(value: u8) -> Result<SplitPoint, Self::Error> {
+        match value {
+            0 => Ok(SplitPoint::C3),
+            1 => Ok(SplitPoint::F3),
+            2 => Ok(SplitPoint::C4),
+            3 => Ok(SplitPoint::F4),
+            4 => Ok(SplitPoint::C5),
+            5 => Ok(SplitPoint::F5),
+            6 => Ok(SplitPoint::Upper),
+            7 => Ok(SplitPoint::Lower),
+            _ => Err(&"Value is out of range for split point")
+        }
+    }
+}
+
+impl SplitPoint {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SplitPoint::C3 => "c3",
+            SplitPoint::F3 => "f3",
+            SplitPoint::C4 => "c4",
+            SplitPoint::F4 => "f4",
+            SplitPoint::C5 => "c5",
+            SplitPoint::F5 => "f5",
+            SplitPoint::Upper => "upper",
+            SplitPoint::Lower => "lower",
+        }
+    }
+}
+
+// 0x2e-0x32
 #[binrw]
 pub struct CenterPanel {
+    // 0x2e-0x2f
     #[brw(big)]
     #[bw(calc =
     (*left_part as u16) << 13
@@ -27,13 +103,13 @@ pub struct CenterPanel {
     )]
     settings: u16,
 
-    #[br(calc = ((settings & 0b1110000000000000) >> 13) as u8)]
+    #[br(try_calc = (((settings & 0b1110000000000000) >> 13) as u8).try_into())]
     #[bw(ignore)]
-    pub left_part: u8,
+    pub left_part: Instrument,
 
-    #[br(calc = ((settings & 0b0001110000000000) >> 10) as u8)]
+    #[br(try_calc = (((settings & 0b0001110000000000) >> 10) as u8).try_into())]
     #[bw(ignore)]
-    pub right_part: u8,
+    pub right_part: Instrument,
 
     #[br(calc = (((settings & 0b0000001111000000) >> 6) as i8) - 7)]
     #[bw(ignore)]
@@ -51,6 +127,7 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub right_sustain: bool,
 
+    /// 0x30
     #[brw(big)]
     pub settings2: u8,
 
@@ -62,26 +139,21 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub right_control: bool,
 
-    // #[br(calc = ((settings2 & 0b00100000) >> 5) as u8)]
+    // #[br(calc = ((settings2 & 0b00100000) >> 5) != 0)]
     // #[bw(ignore)]
-    // pub ??????: bool,
+    // pub unknown_boolean1: bool,
 
-    // #[br(calc = ((settings2 & 0b00011110) >> 1) as u8)]
-    // #[bw(ignore)]
-    // pub split_point: bool,
+    #[br(calc = ((settings2 & 0b00010000) >> 4) != 0)]
+    #[bw(ignore)]
+    pub split_enabled: bool,
 
-    // keyboard split
-    // 0011  0  off (confirmed)
-    // 1000  1  c3 (confirmed)
-    // 1001  2  f3
-    // 1010  3  c4
-    // 1011  4
-    // 1100  5  c5 (confirmed)
-    // 1101  6  f5 (confirmed)
-    // 1110  7  upper (confirmed)
-    // #[br(calc = (settings2 & 0b00000001) as u8)]
+    #[br(try_calc = ((settings2 & 0b00001110) >> 1).try_into())]
+    #[bw(ignore)]
+    pub split_point: SplitPoint,
+
+    // #[br(calc = (settings2 & 0b00100001) != 0)]
     // #[bw(ignore)]
-    // pub split_enable???: bool,
+    // pub unknown_boolean2: bool,
 
     #[brw(big)]
     pub settings3: u16,
@@ -122,7 +194,7 @@ pub struct Schema {
     #[brw(big, pad_before = 16)]
     program_version: u16,
 
-    /// 0x2e-0x2f
+    /// 0x2e-0x32
     center_panel: CenterPanel,
 
     body: [u8; (0xa4 - 0x32) as usize],
@@ -147,14 +219,16 @@ impl Program {
                 center_panel: CenterPanel {
                     left_octave_shift: 0,
                     right_octave_shift: 0,
-                    left_part: 0,
-                    right_part: 0,
+                    left_part: Instrument::Organ,
+                    right_part: Instrument::Organ,
                     left_sustain: false,
                     right_sustain: false,
                     settings2: 0,
                     settings3: 0,
                     left_control: false,
                     right_control: false,
+                    split_point: SplitPoint::C4,
+                    split_enabled: false,
                 }
             },
         }
@@ -183,22 +257,12 @@ impl Program {
         }
     }
 
-    pub fn left_part(&self) -> &str {
-        match self.schema.center_panel.left_part {
-            0 => "organ",
-            1 => "piano",
-            2 => "sample",
-            _ => "unknown",
-        }
+    pub fn left_part(&self) -> Instrument {
+        self.schema.center_panel.left_part
     }
 
-    pub fn right_part(&self) -> &str {
-        match self.schema.center_panel.right_part {
-            0 => "organ",
-            1 => "piano",
-            2 => "sample",
-            _ => "unknown",
-        }
+    pub fn right_part(&self) -> Instrument {
+        self.schema.center_panel.right_part
     }
 
     pub fn left_octave_shift(&self) -> i8 {
@@ -223,6 +287,14 @@ impl Program {
 
     pub fn right_control(&self) -> bool {
         self.schema.center_panel.right_control
+    }
+
+    pub fn split_point(&self) -> SplitPoint {
+        self.schema.center_panel.split_point
+    }
+
+    pub fn split_enabled(&self) -> bool {
+        self.schema.center_panel.split_enabled
     }
 }
 
@@ -260,6 +332,8 @@ impl Debug for Program {
             .field("right_sustain", &self.right_sustain())
             .field("left_control", &self.left_control())
             .field("right_control", &self.right_control())
+            .field("split_enabled", &self.split_enabled())
+            .field("split_point", &self.split_point())
             .finish()
     }
 }
