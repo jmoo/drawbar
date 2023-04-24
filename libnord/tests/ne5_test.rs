@@ -147,7 +147,7 @@ fn test_ne5_read_program() {
             assert_eq!(program.right_sustain(), false);
             assert_eq!(program.left_control(), false);
             assert_eq!(program.right_control(), false);
-            assert_eq!(program.split_enabled(), false);
+            assert_eq!(program.split(), false);
             assert_eq!(program.split_point(), SplitPoint::F4);
         }
         _ => panic!("Expected Electro5 program"),

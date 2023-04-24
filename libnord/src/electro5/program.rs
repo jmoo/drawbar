@@ -129,6 +129,14 @@ pub struct CenterPanel {
 
     /// 0x30
     #[brw(big)]
+    #[bw(calc =
+    (*left_control as u8) << 7
+    | (*right_control as u8) << 6
+    | ((*unknown_boolean1 as u8) << 5)
+    | ((*split as u8) << 4)
+    | ((*split_point as u8) << 1)
+    | (*unknown_boolean2 as u8)
+    )]
     pub settings2: u8,
 
     #[br(calc = ((settings2 & 0b10000000) >> 7) != 0)]
@@ -139,21 +147,27 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub right_control: bool,
 
-    // #[br(calc = ((settings2 & 0b00100000) >> 5) != 0)]
-    // #[bw(ignore)]
-    // pub unknown_boolean1: bool,
+    #[br(calc = ((settings2 & 0b00100000) >> 5) != 0)]
+    #[bw(ignore)]
+    pub unknown_boolean1: bool,
 
     #[br(calc = ((settings2 & 0b00010000) >> 4) != 0)]
     #[bw(ignore)]
-    pub split_enabled: bool,
+    pub split: bool,
 
     #[br(try_calc = ((settings2 & 0b00001110) >> 1).try_into())]
     #[bw(ignore)]
     pub split_point: SplitPoint,
 
-    // #[br(calc = (settings2 & 0b00100001) != 0)]
-    // #[bw(ignore)]
-    // pub unknown_boolean2: bool,
+
+    // Pretty sure this boolean is either a part of transpose or just signals that the transpose
+    // has been set to something other than default. This bit is not set on any default programs,
+    // only programs that have has the transpose edited. It is even set on programs that have
+    // transpose set to 0. It seems that default programs might have their transpose set to 1 (off)
+    // instead of 0 (off)
+    #[br(calc = (settings2 & 0b00000001) != 0)]
+    #[bw(ignore)]
+    pub unknown_boolean2: bool,
 
     #[brw(big)]
     pub settings3: u16,
@@ -223,12 +237,13 @@ impl Program {
                     right_part: Instrument::Organ,
                     left_sustain: false,
                     right_sustain: false,
-                    settings2: 0,
                     settings3: 0,
                     left_control: false,
                     right_control: false,
                     split_point: SplitPoint::C4,
-                    split_enabled: false,
+                    split: false,
+                    unknown_boolean1: false,
+                    unknown_boolean2: false
                 }
             },
         }
@@ -293,8 +308,8 @@ impl Program {
         self.schema.center_panel.split_point
     }
 
-    pub fn split_enabled(&self) -> bool {
-        self.schema.center_panel.split_enabled
+    pub fn split(&self) -> bool {
+        self.schema.center_panel.split
     }
 }
 
@@ -332,7 +347,7 @@ impl Debug for Program {
             .field("right_sustain", &self.right_sustain())
             .field("left_control", &self.left_control())
             .field("right_control", &self.right_control())
-            .field("split_enabled", &self.split_enabled())
+            .field("split", &self.split())
             .field("split_point", &self.split_point())
             .finish()
     }
