@@ -15,3 +15,4 @@ pub mod program;
 pub use program::OctaveShift;
 pub use program::Transpose;
 pub use program::SplitPoint73;
+pub use program::PartMix;

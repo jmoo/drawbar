@@ -13,6 +13,10 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> RangedI8<OFFSET, MIN, MAX> 
     pub fn as_u8(&self) -> u8 {
         (self.inner + OFFSET as i8) as u8
     }
+
+    pub fn inner(&self) -> i8 {
+        self.inner
+    }
 }
 
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Debug for RangedI8<OFFSET, MIN, MAX> {

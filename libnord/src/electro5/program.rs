@@ -1,5 +1,5 @@
 use crate::common;
-use crate::common::bank;
+use crate::common::{bank, PartMix};
 use crate::crc::{CrcReader, CrcWriter};
 use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
@@ -104,19 +104,13 @@ pub struct CenterPanel {
     pub settings3: u16,
 
     // transpose (0 to 12  big endian = -6 to -6 half steps transposition)
-    // 0111 1100  12
-    // 0111 10111 11
     #[br(try_calc = ((settings3 & 0b1111000000000000) >> 12).try_into())]
     #[bw(ignore)]
     pub transpose: Transpose,
 
-    // #[br(calc = ((settings3 & 0b0000100000000000) >> 11) != 0)]
-    // #[bw(ignore)]
-    // pub ??????: bool,
-
-    // #[br(calc = ((settings3 & 0b0000011111100000) >> 5) as u8)]
-    // #[bw(ignore)]
-    // pub part_volume??: bool,
+    #[br(try_calc = ((settings3 & 0b0000111111100000) >> 5).try_into())]
+    #[bw(ignore)]
+    pub part_mix: PartMix,
 
     // #[br(calc = ((settings3 & 0b0000000000011111)) as u8)]
     // #[bw(ignore)]
@@ -178,6 +172,7 @@ impl Program {
                     unknown_boolean1: false,
                     transpose: (1_i8).try_into().unwrap(),
                     transpose_enabled: false,
+                    part_mix: (0_u8).try_into().unwrap(),
                 },
             },
         }
@@ -251,6 +246,10 @@ impl Program {
 
     pub fn transpose_enabled(&self) -> bool {
         self.schema.center_panel.transpose_enabled
+    }
+
+    pub fn part_mix(&self) -> PartMix {
+        self.schema.center_panel.part_mix
     }
 }
 

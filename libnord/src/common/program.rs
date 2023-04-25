@@ -1,8 +1,73 @@
+use std::fmt::{Debug, Formatter};
+use crate::error::ParseError;
 use crate::types::RangedI8;
 
 pub type OctaveShift<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
-
 pub type Transpose<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct PartMix {
+    inner: u8,
+}
+
+impl PartMix {
+    pub fn inner(&self) -> u8 {
+        self.inner
+    }
+
+    pub fn lower(&self) -> f32 {
+        let lower = 100_f32 - (((self.inner() as f32) / 127.0) * 100_f32);
+
+        if lower > 50_f32 {
+            50_f32
+        } else {
+            lower
+        }
+    }
+
+    pub fn upper(&self) -> f32 {
+        let upper = (((self.inner() as f32) / 127.0) * 100_f32);
+
+        if upper > 50_f32 {
+            50_f32
+        } else {
+            upper
+        }
+    }
+
+    pub fn as_string(&self) -> String {
+       format!("{:.1}/{:.1}", self.lower(), self.upper())
+    }
+}
+
+impl Debug for PartMix {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_string())
+    }
+}
+
+impl TryFrom<u8> for PartMix {
+    type Error = ParseError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        (value as u16).try_into()
+    }
+}
+
+impl TryFrom<u16> for PartMix {
+    type Error = ParseError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        if value > 127 || value < 0 {
+            return Err(ParseError::OutOfBounds(
+                format!("{:?}", value),
+                format!(" <{:?} >{:?}", 0, 127)
+            ));
+        }
+
+        Ok(PartMix { inner: value as u8 })
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SplitPoint73 {

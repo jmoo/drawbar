@@ -12,6 +12,7 @@ use crate::common;
 pub type OctaveShift = common::OctaveShift<7, -6, 6>;
 pub type Transpose = common::Transpose<6, -6, 6>;
 pub type SplitPoint = common::SplitPoint73;
+pub type PartMix = common::PartMix;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Instrument {
