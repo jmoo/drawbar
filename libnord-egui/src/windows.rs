@@ -60,7 +60,10 @@ impl Manager {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
-        let Self { windows, next_id: _ } = self;
+        let Self {
+            windows,
+            next_id: _,
+        } = self;
         let mut cleanup: Vec<u64> = Vec::new();
 
         for (id, item) in windows {
@@ -71,7 +74,10 @@ impl Manager {
             }
         }
 
-        let Self { windows, next_id: _ } = self;
+        let Self {
+            windows,
+            next_id: _,
+        } = self;
         for id in cleanup {
             windows.remove(&id);
         }

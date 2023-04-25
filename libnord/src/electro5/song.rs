@@ -1,24 +1,26 @@
+use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+
+use std::io;
+
+use crate::common;
+use crate::crc::{CrcReader, CrcWriter};
+
 use crate::common::bank;
 use crate::common::bank::Item;
 
-use crate::common::Header;
-use crate::crc::{CrcReader, CrcWriter};
-use crate::{common};
-use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
-use std::fmt::Debug;
-
 use crate::electro5::program;
-use crate::electro5::program::BANK_COUNT as PROGRAM_BANK_COUNT;
-use crate::electro5::program::SLOT_COUNT as PROGRAM_BANK_SIZE;
-use std::io;
+
+use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5t";
-
+pub const PROGRAM_COUNT: usize = 4;
 pub const BANK_COUNT: u16 = 4;
 pub const SLOT_COUNT: u16 = 50;
 
-pub type Coordinates = bank::Coordinates<BANK_COUNT, SLOT_COUNT>;
-pub type Bank = bank::Bank<BANK_COUNT, SLOT_COUNT, Song>;
+pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
+pub type Header = common::Header<Location>;
+pub type Bank = bank::Bank<Song, Location>;
+pub type Song = common::song::Song<PROGRAM_COUNT, Location, program::Location>;
 
 #[binrw]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x3d - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
@@ -32,34 +34,46 @@ struct Schema {
     crc32: u32,
 
     #[brw(big, pad_before = 16)]
-    #[bw(calc = ((*a as u64) << 39 | (*b as u64) << 30 | (*c as u64) << 21 | (*d as u64) << 12) | 0x01000000000000)]
+    #[bw(calc = (
+    ((* a).as_u16() as u64) << 39
+    | ((* b).as_u16() as u64) << 30
+    | ((* c).as_u16() as u64) << 21
+    | ((* d).as_u16() as u64) << 12)
+    | 0x01000000000000
+    )]
     map: u64,
 
     /// These bytes are part of the crc check so they cannot be skipped with the pad_after directive
     #[bw(calc = [0; 10])]
     pad: [u8; 10],
 
-    #[br(calc = (map >> 39 & 0b111111111) as u16)]
+    #[br(try_calc = ((map >> 39 & 0b111111111) as u16).try_into())]
     #[bw(ignore)]
-    pub a: u16,
+    pub a: program::Location,
 
-    #[br(calc = (map >> 30 & 0b111111111) as u16)]
+    #[br(try_calc = ((map >> 30 & 0b111111111) as u16).try_into())]
     #[bw(ignore)]
-    pub b: u16,
+    pub b: program::Location,
 
-    #[br(calc = (map >> 21 & 0b111111111) as u16)]
+    #[br(try_calc = ((map >> 21 & 0b111111111) as u16).try_into())]
     #[bw(ignore)]
-    pub c: u16,
+    pub c: program::Location,
 
-    #[br(calc = (map >> 12 & 0b111111111) as u16)]
+    #[br(try_calc = ((map >> 12 & 0b111111111) as u16).try_into())]
     #[bw(ignore)]
-    pub d: u16,
+    pub d: program::Location,
 }
 
 impl Schema {
-    pub fn new(bank: u16, location: u16, a: u16, b: u16, c: u16, d: u16) -> Schema {
+    pub fn new(
+        location: Location,
+        a: program::Location,
+        b: program::Location,
+        c: program::Location,
+        d: program::Location,
+    ) -> Schema {
         Schema {
-            header: Header::new(FORMAT, bank, location),
+            header: Header::new(1, FORMAT, location),
             version: 1,
             a,
             b,
@@ -69,98 +83,31 @@ impl Schema {
     }
 }
 
-pub struct Song {
-    schema: Schema,
-    coordinates: Coordinates,
-    programs: [program::Coordinates; 4],
-    name: Option<String>,
-}
-
 impl Song {
-    pub fn new(
-        coords: Coordinates,
-        a: program::Coordinates,
-        b: program::Coordinates,
-        c: program::Coordinates,
-        d: program::Coordinates,
-    ) -> Song {
-        Song {
-            schema: Schema::new(0, 0, 0, 0, 0, 0),
-            coordinates: coords,
-            programs: [a, b, c, d],
-            name: None,
-        }
-    }
-
     pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Song, std::io::Error> {
         let schema = match Schema::read_be(reader) {
             Ok(schema) => schema,
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
 
-        Ok(Song {
-            coordinates: Coordinates::from_coords((schema.header.bank, schema.header.slot)),
-            programs: [
-                program::Coordinates::from_value(schema.a),
-                program::Coordinates::from_value(schema.b),
-                program::Coordinates::from_value(schema.c),
-                program::Coordinates::from_value(schema.d),
-            ],
-            schema,
-            name: None,
-        })
+        Ok(Song::new(
+            schema.header.location,
+            [schema.a, schema.b, schema.c, schema.d],
+        ))
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        self.schema.header.bank = self.coordinates.bank();
-        self.schema.header.slot = self.coordinates.slot();
-        self.schema.a = self.programs[0].value();
-        self.schema.b = self.programs[1].value();
-        self.schema.c = self.programs[2].value();
-        self.schema.d = self.programs[3].value();
+        let mut schema = Schema::new(
+            self.location(),
+            self.programs()[0],
+            self.programs()[1],
+            self.programs()[2],
+            self.programs()[3],
+        );
 
-        match writer.write_be(&mut self.schema) {
+        match writer.write_be(&mut schema) {
             Ok(_) => Ok(()),
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         }
-    }
-}
-
-impl bank::Item<BANK_COUNT, SLOT_COUNT> for Song {
-    fn name(&self) -> Option<String> {
-        self.name.clone()
-    }
-
-    fn set_name(&mut self, name: String) -> () {
-        self.name = Some(name);
-    }
-
-    fn location(&self) -> Coordinates {
-        self.coordinates
-    }
-
-    fn set_location(&mut self, location: Coordinates) -> () {
-        self.coordinates = location;
-    }
-}
-
-impl common::song::Song<PROGRAM_BANK_COUNT, PROGRAM_BANK_SIZE> for Song {
-    fn get(&self, slot: u16) -> program::Coordinates {
-        self.programs[slot as usize]
-    }
-
-    fn set(&mut self, slot: u16, coords: program::Coordinates) -> () {
-        self.programs[slot as usize] = coords;
-    }
-}
-
-impl Debug for Song {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("electro::Song")
-            .field("schema", &self.schema.header.preamble.format)
-            .field("coordinates", &self.coordinates)
-            .field("name", &self.name)
-            .field("programs", &self.programs)
-            .finish()
     }
 }

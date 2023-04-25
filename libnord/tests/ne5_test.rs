@@ -1,9 +1,10 @@
 use libnord::common::bank::Item;
-use libnord::common::song::Song;
+
+use libnord::electro5::{Instrument, SplitPoint};
+use libnord::error::Error;
 use libnord::{electro5, Entity};
 use std::fs::read;
 use std::io::Cursor;
-use libnord::electro5::program::{Instrument, SplitPoint};
 
 #[test]
 fn test_ne5_read_song_bank() {
@@ -59,13 +60,15 @@ fn test_ne5_write_song() {
 }
 
 #[test]
-fn test_ne5_read_write_new_song() {
+fn test_ne5_read_write_new_song() -> Result<(), Error> {
     let mut song = electro5::Song::new(
-        (0, 1).into(),
-        (1, 2).into(),
-        (2, 3).into(),
-        (3, 4).into(),
-        (4, 5).into(),
+        (0, 1).try_into()?,
+        [
+            (1, 2).try_into()?,
+            (2, 3).try_into()?,
+            (3, 4).try_into()?,
+            (4, 5).try_into()?,
+        ],
     );
 
     // Assert song was created with correct values
@@ -87,20 +90,24 @@ fn test_ne5_read_write_new_song() {
     assert_eq!(song.get(1), result.get(1));
     assert_eq!(song.get(2), result.get(2));
     assert_eq!(song.get(3), result.get(3));
+
+    Ok(())
 }
 
 #[test]
-fn test_ne5_update_song_program() {
+fn test_ne5_update_song_program() -> Result<(), Error> {
     let mut song = electro5::Song::new(
-        (0, 1).into(),
-        (1, 2).into(),
-        (2, 3).into(),
-        (3, 4).into(),
-        (4, 5).into(),
+        (0, 1).try_into()?,
+        [
+            (1, 2).try_into()?,
+            (2, 3).try_into()?,
+            (3, 4).try_into()?,
+            (4, 5).try_into()?,
+        ],
     );
 
     // Update program 1
-    song.set(1, (5, 20).into());
+    song.set(1, (5, 20).try_into()?);
 
     // Assert song was updated with correct values
     assert_eq!(song.location(), (0, 1));
@@ -121,14 +128,16 @@ fn test_ne5_update_song_program() {
     assert_eq!(song.get(1), result.get(1));
     assert_eq!(song.get(2), result.get(2));
     assert_eq!(song.get(3), result.get(3));
+
+    Ok(())
 }
 
 #[test]
 fn test_ne5_read_program() {
     const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/programs/",
-    "o00_1_p00_0_0_0.ne5p"
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/ne5/programs/",
+        "o00_1_p00_0_0_0.ne5p"
     );
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -149,6 +158,8 @@ fn test_ne5_read_program() {
             assert_eq!(program.right_control(), false);
             assert_eq!(program.split(), false);
             assert_eq!(program.split_point(), SplitPoint::F4);
+            assert_eq!(program.transpose(), 1);
+            assert_eq!(program.transpose_enabled(), false);
         }
         _ => panic!("Expected Electro5 program"),
     }
@@ -169,7 +180,9 @@ fn test_ne5_read_write_program() {
         Entity::Program(libnord::Program::Electro5(mut program)) => {
             let mut write_contents: Vec<u8> = Vec::new();
 
-            program.write_to(&mut Cursor::new(&mut write_contents)).unwrap();
+            program
+                .write_to(&mut Cursor::new(&mut write_contents))
+                .unwrap();
 
             assert_eq!(read_contents.as_slice(), write_contents.as_slice());
         }
@@ -180,16 +193,16 @@ fn test_ne5_read_write_program() {
 #[test]
 fn test_ne5_read_settings() {
     const TEST_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/ne5/",
-    "settings.ne5s"
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/ne5/",
+        "settings.ne5s"
     );
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
 
     match program {
         Entity::Settings(libnord::Settings::Electro5(settings)) => {
-            let settings = settings as electro5::Settings;
+            let _settings = settings as electro5::Settings;
         }
         _ => panic!("Expected Electro5 settings"),
     }

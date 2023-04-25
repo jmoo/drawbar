@@ -1,7 +1,10 @@
-use binrw::{BinRead, BinWrite};
+use crate::common;
+use binrw::binrw;
+use common::bank::Location;
 use std::fmt::Debug;
 
-#[derive(BinRead, BinWrite, Debug)]
+#[binrw]
+#[derive(Debug)]
 #[brw(magic = b"CBIN")]
 pub struct Preamble {
     #[brw(little)]
@@ -12,41 +15,40 @@ pub struct Preamble {
     pub format: String,
 }
 
-#[derive(BinRead, BinWrite)]
+#[binrw]
+#[derive(Debug)]
 #[br(assert(trailer == 0xFFFFFFFF))]
-pub struct Header {
+pub struct Header<L>
+where
+    L: Location,
+{
     pub preamble: Preamble,
 
     #[brw(little)]
-    pub bank: u16,
+    #[bw(calc = location.x())]
+    bank: u16,
 
     #[brw(little)]
-    pub slot: u16,
+    #[bw(calc = location.y())]
+    slot: u16,
+
+    #[br(try_calc = match (bank, slot).try_into() { Ok(x) => Ok(x), Err(_) => Err(format!("invalid location: {} {}", bank, slot)) })]
+    #[bw(ignore)]
+    pub location: L,
 
     #[brw(little)]
     pub trailer: u32,
 }
 
-impl Header {
-    pub fn new(schema: &str, bank: u16, slot: u16) -> Header {
+impl<L: Location> Header<L> {
+    pub fn new(version: u32, schema: &str, location: L) -> Header<L> {
         Header {
             preamble: Preamble {
-                version: 0,
+                version,
                 format: schema.to_string(),
             },
-            bank,
-            slot,
+            location,
             trailer: 0xFFFFFFFF,
         }
-    }
-}
-
-impl Debug for Header {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Header")
-            .field("preamble", &self.preamble)
-            .field("bank", &self.bank)
-            .field("slot", &self.slot)
-            .finish()
     }
 }

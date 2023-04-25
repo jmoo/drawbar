@@ -1,16 +1,11 @@
 use crate::components::{close_button, song};
 use crate::{Handle, Window};
 
-
-
-use libnord::{Entity};
+use libnord::Entity;
 use poll_promise::Promise;
-use rfd::{AsyncFileDialog};
+use rfd::AsyncFileDialog;
 
 use std::io::Cursor;
-
-
-
 
 pub struct Preview {
     promise: Promise<Result<(String, Entity), String>>,

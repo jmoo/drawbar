@@ -1,10 +1,16 @@
-use crate::common::Header;
+use crate::common;
 
+use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use std::fmt::Debug;
 use std::{fmt, io};
 
 pub const FORMAT: &str = "npno";
+pub const BANK_COUNT: u16 = 8;
+pub const SLOT_COUNT: u16 = 50;
+
+pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
+pub type Header = common::Header<Location>;
 
 #[binrw]
 #[brw(assert(header.preamble.format == FORMAT))]
@@ -22,7 +28,7 @@ impl Piano {
     pub fn new() -> Piano {
         Piano {
             schema: Schema {
-                header: Header::new(FORMAT, 0, 0),
+                header: Header::new(0, FORMAT, (0, 0).try_into().unwrap()),
                 // body: Vec::new(),
             },
         }

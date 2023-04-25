@@ -2,6 +2,7 @@ use binrw::{BinRead, BinWrite};
 
 use crcxx::crc32::{catalog::CRC_32_ISO_HDLC, *};
 
+use crate::error::Error;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -116,7 +117,7 @@ impl<'a, W: Write + Seek> CrcWriter<'a, W> {
     }
 
     // If the checksum has already been calculated then return the result, otherwise buffer writes and calculate
-    pub fn checksum(&mut self) -> Result<u32, binrw::Error> {
+    pub fn checksum(&mut self) -> Result<u32, Error> {
         let pos = self.inner.seek(SeekFrom::Current(0))?;
 
         // Checksum should already be calculated at this point
@@ -128,7 +129,7 @@ impl<'a, W: Write + Seek> CrcWriter<'a, W> {
         if pos < self.calc.first_byte {
             // checksum() called before calculation completed
             if self.buffer_writes {
-                return Err(binrw::error::Error::Io(io::Error::new(
+                return Err(Error::Io(io::Error::new(
                     io::ErrorKind::Other,
                     "Attempted to calculate multiple checksums with single instance",
                 )));
@@ -141,7 +142,7 @@ impl<'a, W: Write + Seek> CrcWriter<'a, W> {
         }
 
         // We are in the middle of calculating the checksum so we cannot return a result yet
-        Err(binrw::error::Error::Io(io::Error::new(
+        Err(Error::Io(io::Error::new(
             io::ErrorKind::Other,
             "Attempted to calculate checksum in the middle of the buffer",
         )))

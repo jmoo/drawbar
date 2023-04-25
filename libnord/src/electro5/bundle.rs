@@ -1,10 +1,10 @@
-use crate::common::bank::{Bank, Item};
+use crate::common::bank::Item;
 use crate::common::piano::Piano;
 use crate::common::sample::Sample;
 use crate::electro5::{program, song};
-use crate::{electro5, from_stream, Entity, Program, Song};
+use crate::{from_stream, Entity, Program, Song};
 use binrw::BinReaderExt;
-use std::io::{Read};
+use std::io::Read;
 
 #[derive(Debug)]
 pub struct Bundle {
@@ -76,13 +76,11 @@ impl Bundle {
         self.name = Some(name);
     }
 
-    pub fn programs(
-        &self,
-    ) -> &Bank<{ program::BANK_COUNT }, { program::SLOT_COUNT }, electro5::Program> {
+    pub fn programs(&self) -> &program::Bank {
         &self.programs
     }
 
-    pub fn songs(&self) -> &Bank<{ song::BANK_COUNT }, { song::SLOT_COUNT }, electro5::Song> {
+    pub fn songs(&self) -> &song::Bank {
         &self.songs
     }
 }

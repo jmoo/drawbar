@@ -1,13 +1,16 @@
 use crate::common;
-use crate::common::Header;
 use crate::crc::{CrcReader, CrcWriter};
+use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use std::fmt::Debug;
-use std::{fmt, io};
+use std::io;
 
 pub const FORMAT: &str = "ne5s";
+pub type Location = RangedU16Pair<0, 0>;
+pub type Header = common::Header<Location>;
 
 #[binrw]
+#[derive(Debug)]
 #[brw(assert(header.preamble.format == FORMAT))]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x4e - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
 #[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0x4e - 0x2c))]
@@ -23,16 +26,7 @@ struct Schema {
     body: [u8; (0x4e - 0x2c) as usize],
 }
 
-impl Debug for Schema {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Schema")
-            .field("header", &self.header)
-            .field("version", &self.version)
-            .field("body", &self.body)
-            .finish()
-    }
-}
-
+#[derive(Debug)]
 pub struct Settings {
     schema: Schema,
 }
@@ -41,7 +35,7 @@ impl Settings {
     pub fn new() -> Settings {
         Settings {
             schema: Schema {
-                header: Header::new(FORMAT, 0, 0),
+                header: Header::new(1, FORMAT, (0, 0).try_into().unwrap()),
                 body: [0; (0x4e - 0x2c) as usize],
                 version: 0,
             },
@@ -66,11 +60,3 @@ impl Settings {
 }
 
 impl common::settings::Settings for Settings {}
-
-impl Debug for Settings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("electro5::Settings")
-            .field("schema", &self.schema.header.preamble.format)
-            .finish()
-    }
-}

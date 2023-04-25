@@ -1,6 +1,5 @@
 use crate::components::Preview;
-use crate::{Manager};
-
+use crate::Manager;
 
 pub fn menu_bar(
     _ctx: &egui::Context,

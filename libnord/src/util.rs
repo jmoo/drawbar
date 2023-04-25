@@ -2,13 +2,24 @@ use binrw::{BinRead, BinReaderExt};
 use byteorder::ReadBytesExt;
 
 use crate::common::header;
-use std::io;
+
+use crate::error::{Error, ParseError};
 use std::io::Seek;
 
 pub enum FileType {
     Cbin,
     Xml,
     Zip,
+}
+
+impl FileType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            FileType::Cbin => "cbin",
+            FileType::Xml => "xml",
+            FileType::Zip => "zip",
+        }
+    }
 }
 
 pub struct Peek {
@@ -19,15 +30,15 @@ pub struct Peek {
 /**
  * Peek at the first byte of a file to determine its type.
  */
-pub fn peek(reader: &mut impl BinReaderExt) -> Result<Peek, io::Error> {
+pub fn peek(reader: &mut impl BinReaderExt) -> Result<Peek, Error> {
     let head = match reader.read_u8() {
         Ok(head) => head,
-        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+        Err(e) => return Err(e.into()),
     };
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 
-    let result = match head {
+    let result: Result<Peek, Error> = match head {
         0x50 => Ok(Peek {
             format: String::from("unknown"),
             file_type: FileType::Zip,
@@ -38,28 +49,24 @@ pub fn peek(reader: &mut impl BinReaderExt) -> Result<Peek, io::Error> {
             file_type: FileType::Xml,
         }),
 
-        0x43 => {
-            if let Ok(preamble) = header::Preamble::read_be(reader) {
+        0x43 => match header::Preamble::read_be(reader) {
+            Ok(preamble) => {
                 let format = preamble.format;
                 Ok(Peek {
                     format,
                     file_type: FileType::Cbin,
                 })
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid file type",
-                ))
             }
-        }
+            Err(e) => Err(e.into()),
+        },
 
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid file type",
-        )),
+        _ => Err(ParseError::UnknownFormat(format!("first_byte = {:0x}", head)).into()),
     };
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 
-    result
+    match result {
+        Ok(peek) => Ok(peek),
+        Err(e) => Err(e.into()),
+    }
 }

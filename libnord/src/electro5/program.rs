@@ -1,103 +1,31 @@
 use crate::common;
-use crate::common::{bank, Header};
+use crate::common::bank;
 use crate::crc::{CrcReader, CrcWriter};
+use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 use std::fmt::Debug;
 use std::io;
+use crate::electro5::{Instrument, OctaveShift, SplitPoint, Transpose};
 
 pub const FORMAT: &str = "ne5p";
-
 pub const BANK_COUNT: u16 = 8;
 pub const SLOT_COUNT: u16 = 50;
 
-pub type Coordinates = bank::Coordinates<BANK_COUNT, SLOT_COUNT>;
-pub type Bank = bank::Bank<BANK_COUNT, SLOT_COUNT, Program>;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Instrument {
-    Organ,
-    Piano,
-    Sample
-}
-
-impl TryFrom<u8> for Instrument {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Instrument, Self::Error> {
-        match value {
-            0 => Ok(Instrument::Organ),
-            1 => Ok(Instrument::Piano),
-            2 => Ok(Instrument::Sample),
-            _ => Err(&"Value is out of range for instrument"),
-        }
-    }
-}
-
-impl Instrument {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Instrument::Organ => "organ",
-            Instrument::Piano => "piano",
-            Instrument::Sample => "sample",
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum SplitPoint {
-    C3,
-    F3,
-    C4,
-    F4,
-    C5,
-    F5,
-    Upper,
-    Lower
-}
-
-impl TryFrom<u8> for SplitPoint {
-    type Error =  &'static str;
-
-    fn try_from(value: u8) -> Result<SplitPoint, Self::Error> {
-        match value {
-            0 => Ok(SplitPoint::C3),
-            1 => Ok(SplitPoint::F3),
-            2 => Ok(SplitPoint::C4),
-            3 => Ok(SplitPoint::F4),
-            4 => Ok(SplitPoint::C5),
-            5 => Ok(SplitPoint::F5),
-            6 => Ok(SplitPoint::Upper),
-            7 => Ok(SplitPoint::Lower),
-            _ => Err(&"Value is out of range for split point")
-        }
-    }
-}
-
-impl SplitPoint {
-    fn as_str(&self) -> &'static str {
-        match self {
-            SplitPoint::C3 => "c3",
-            SplitPoint::F3 => "f3",
-            SplitPoint::C4 => "c4",
-            SplitPoint::F4 => "f4",
-            SplitPoint::C5 => "c5",
-            SplitPoint::F5 => "f5",
-            SplitPoint::Upper => "upper",
-            SplitPoint::Lower => "lower",
-        }
-    }
-}
+pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
+pub type Header = common::Header<Location>;
+pub type Bank = bank::Bank<Program, Location>;
 
 // 0x2e-0x32
 #[binrw]
+#[derive(Debug)]
 pub struct CenterPanel {
     // 0x2e-0x2f
     #[brw(big)]
     #[bw(calc =
     (*left_part as u16) << 13
     | (*right_part as u16) << 10
-    | (((*left_octave_shift + 7) as u16) << 6)
-    | (((*right_octave_shift + 7) as u16) << 2)
+    | ((((*left_octave_shift).as_u8()) as u16) << 6)
+    | ((((*right_octave_shift).as_u8()) as u16) << 2)
     | ((*left_sustain as u16) << 1)
     | (*right_sustain as u16)
     )]
@@ -111,13 +39,13 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub right_part: Instrument,
 
-    #[br(calc = (((settings & 0b0000001111000000) >> 6) as i8) - 7)]
+    #[br(try_calc = (((settings & 0b0000001111000000) >> 6) as u8).try_into())]
     #[bw(ignore)]
-    pub left_octave_shift: i8,
+    pub left_octave_shift: OctaveShift,
 
-    #[br(calc = (((settings & 0b0000000000111100) >> 2) as i8) - 7)]
+    #[br(try_calc = (((settings & 0b0000000000111100) >> 2) as u8).try_into())]
     #[bw(ignore)]
-    pub right_octave_shift: i8,
+    pub right_octave_shift: OctaveShift,
 
     #[br(calc = (settings & 0b0000000000000010 >> 1) != 0)]
     #[bw(ignore)]
@@ -135,49 +63,52 @@ pub struct CenterPanel {
     | ((*unknown_boolean1 as u8) << 5)
     | ((*split as u8) << 4)
     | ((*split_point as u8) << 1)
-    | (*unknown_boolean2 as u8)
+    | (*transpose_enabled as u8)
     )]
     pub settings2: u8,
 
+    // 0x30
     #[br(calc = ((settings2 & 0b10000000) >> 7) != 0)]
     #[bw(ignore)]
     pub left_control: bool,
 
+    // 0x30
     #[br(calc = ((settings2 & 0b01000000) >> 6) != 0)]
     #[bw(ignore)]
     pub right_control: bool,
 
+    // 0x30
     #[br(calc = ((settings2 & 0b00100000) >> 5) != 0)]
     #[bw(ignore)]
     pub unknown_boolean1: bool,
 
+    // 0x30
     #[br(calc = ((settings2 & 0b00010000) >> 4) != 0)]
     #[bw(ignore)]
     pub split: bool,
 
+    // 0x30
     #[br(try_calc = ((settings2 & 0b00001110) >> 1).try_into())]
     #[bw(ignore)]
     pub split_point: SplitPoint,
 
-
-    // Pretty sure this boolean is either a part of transpose or just signals that the transpose
-    // has been set to something other than default. This bit is not set on any default programs,
-    // only programs that have has the transpose edited. It is even set on programs that have
-    // transpose set to 0. It seems that default programs might have their transpose set to 1 (off)
-    // instead of 0 (off)
+    // 0x30
+    // NOTE: Sometimes the electro 5 leaves this as true even when the transpose is 0. It will
+    // not show a transpose light when this happens
     #[br(calc = (settings2 & 0b00000001) != 0)]
     #[bw(ignore)]
-    pub unknown_boolean2: bool,
+    pub transpose_enabled: bool,
 
+    // 0x31
     #[brw(big)]
     pub settings3: u16,
 
     // transpose (0 to 12  big endian = -6 to -6 half steps transposition)
     // 0111 1100  12
     // 0111 10111 11
-    // #[br(calc = ((settings3 & 0b1111000000000000) >> 12) as u8)]
-    // #[bw(ignore)]
-    // pub transpose: u8,
+    #[br(try_calc = ((settings3 & 0b1111000000000000) >> 12).try_into())]
+    #[bw(ignore)]
+    pub transpose: Transpose,
 
     // #[br(calc = ((settings3 & 0b0000100000000000) >> 11) != 0)]
     // #[bw(ignore)]
@@ -193,6 +124,7 @@ pub struct CenterPanel {
 }
 
 #[binrw]
+#[derive(Debug)]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0xa4 - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
 #[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0xa4 - 0x2c))]
 pub struct Schema {
@@ -214,25 +146,26 @@ pub struct Schema {
     body: [u8; (0xa4 - 0x32) as usize],
 }
 
+#[derive(Debug)]
 pub struct Program {
     schema: Schema,
-    coordinates: Coordinates,
+    location: Location,
     name: Option<String>,
 }
 
 impl Program {
-    pub fn new(location: Coordinates) -> Program {
+    pub fn new(location: Location) -> Program {
         Program {
-            coordinates: location,
+            location: location,
             name: None,
             schema: Schema {
-                header: Header::new(FORMAT, location.bank(), location.slot()),
+                header: Header::new(1, FORMAT, location),
                 version: 4,
                 body: [0; (0xa4 - 0x32) as usize],
                 program_version: 4,
                 center_panel: CenterPanel {
-                    left_octave_shift: 0,
-                    right_octave_shift: 0,
+                    left_octave_shift: (0_i8).try_into().unwrap(),
+                    right_octave_shift: (0_i8).try_into().unwrap(),
                     left_part: Instrument::Organ,
                     right_part: Instrument::Organ,
                     left_sustain: false,
@@ -243,8 +176,9 @@ impl Program {
                     split_point: SplitPoint::C4,
                     split: false,
                     unknown_boolean1: false,
-                    unknown_boolean2: false
-                }
+                    transpose: (1_i8).try_into().unwrap(),
+                    transpose_enabled: false,
+                },
             },
         }
     }
@@ -256,15 +190,14 @@ impl Program {
         };
 
         Ok(Program {
-            coordinates: Coordinates::from_coords((schema.header.bank, schema.header.slot)),
+            location: schema.header.location,
             name: None,
             schema,
         })
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        self.schema.header.bank = self.coordinates.bank();
-        self.schema.header.slot = self.coordinates.slot();
+        self.schema.header.location = self.location;
 
         match writer.write_be(&mut self.schema) {
             Ok(_) => Ok(()),
@@ -280,11 +213,11 @@ impl Program {
         self.schema.center_panel.right_part
     }
 
-    pub fn left_octave_shift(&self) -> i8 {
+    pub fn left_octave_shift(&self) -> OctaveShift {
         self.schema.center_panel.left_octave_shift
     }
 
-    pub fn right_octave_shift(&self) -> i8 {
+    pub fn right_octave_shift(&self) -> OctaveShift {
         self.schema.center_panel.right_octave_shift
     }
 
@@ -311,9 +244,17 @@ impl Program {
     pub fn split(&self) -> bool {
         self.schema.center_panel.split
     }
+
+    pub fn transpose(&self) -> Transpose {
+        self.schema.center_panel.transpose
+    }
+
+    pub fn transpose_enabled(&self) -> bool {
+        self.schema.center_panel.transpose_enabled
+    }
 }
 
-impl bank::Item<BANK_COUNT, SLOT_COUNT> for Program {
+impl bank::Item<Location> for Program {
     fn name(&self) -> Option<String> {
         self.name.clone()
     }
@@ -322,33 +263,13 @@ impl bank::Item<BANK_COUNT, SLOT_COUNT> for Program {
         self.name = Some(name);
     }
 
-    fn location(&self) -> Coordinates {
-        self.coordinates
+    fn location(&self) -> Location {
+        self.location
     }
 
-    fn set_location(&mut self, location: Coordinates) -> () {
-        self.coordinates = location;
+    fn set_location(&mut self, location: Location) -> () {
+        self.location = location;
     }
 }
 
 impl common::program::Program for Program {}
-
-impl Debug for Program {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("electro5::Program")
-            .field("schema", &self.schema.header.preamble.format)
-            .field("coordinates", &self.coordinates)
-            .field("name", &self.name)
-            .field("left_part", &self.left_part())
-            .field("right_part", &self.right_part())
-            .field("left_octave_shift", &self.left_octave_shift())
-            .field("right_octave_shift", &self.right_octave_shift())
-            .field("left_sustain", &self.left_sustain())
-            .field("right_sustain", &self.right_sustain())
-            .field("left_control", &self.left_control())
-            .field("right_control", &self.right_control())
-            .field("split", &self.split())
-            .field("split_point", &self.split_point())
-            .finish()
-    }
-}
