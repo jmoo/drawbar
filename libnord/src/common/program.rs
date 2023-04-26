@@ -16,7 +16,7 @@ impl PartMix {
     }
 
     pub fn lower(&self) -> f32 {
-        let lower = 100_f32 - (((self.inner() as f32) / 127.0) * 100_f32);
+        let lower = 100_f32 - ((self.inner() as f32) / 127.0) * 100_f32;
 
         if lower > 50_f32 {
             50_f32
@@ -26,7 +26,7 @@ impl PartMix {
     }
 
     pub fn upper(&self) -> f32 {
-        let upper = (((self.inner() as f32) / 127.0) * 100_f32);
+        let upper = ((self.inner() as f32) / 127.0) * 100_f32;
 
         if upper > 50_f32 {
             50_f32

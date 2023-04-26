@@ -22,12 +22,12 @@ pub struct CenterPanel {
     // 0x2e-0x2f
     #[brw(big)]
     #[bw(calc =
-    (*left_part as u16) << 13
-    | (*right_part as u16) << 10
-    | ((((*left_octave_shift).as_u8()) as u16) << 6)
-    | ((((*right_octave_shift).as_u8()) as u16) << 2)
-    | ((*left_sustain as u16) << 1)
-    | (*right_sustain as u16)
+    (* left_part as u16) << 13
+    | (* right_part as u16) << 10
+    | ((((* left_octave_shift).as_u8()) as u16) << 6)
+    | ((((* right_octave_shift).as_u8()) as u16) << 2)
+    | ((* left_sustain as u16) << 1)
+    | (* right_sustain as u16)
     )]
     settings: u16,
 
@@ -58,12 +58,12 @@ pub struct CenterPanel {
     /// 0x30
     #[brw(big)]
     #[bw(calc =
-    (*left_control as u8) << 7
-    | (*right_control as u8) << 6
-    | ((*unknown_boolean1 as u8) << 5)
-    | ((*split as u8) << 4)
-    | ((*split_point as u8) << 1)
-    | (*transpose_enabled as u8)
+    (* left_control as u8) << 7
+    | (* right_control as u8) << 6
+    | ((* unknown_boolean1 as u8) << 5)
+    | ((* split as u8) << 4)
+    | ((* split_point as u8) << 1)
+    | (* transpose_enabled as u8)
     )]
     pub settings2: u8,
 
@@ -99,22 +99,96 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub transpose_enabled: bool,
 
-    // 0x31
+    // 0x31 - 34
     #[brw(big)]
-    pub settings3: u16,
+    pub settings3: u32,
 
     // transpose (0 to 12  big endian = -6 to -6 half steps transposition)
-    #[br(try_calc = ((settings3 & 0b1111000000000000) >> 12).try_into())]
+    #[br(try_calc = (((settings3 & 0b11110000_00000000_00000000_00000000) >> ((8 * 2) + 12)) as u16).try_into())]
     #[bw(ignore)]
     pub transpose: Transpose,
 
-    #[br(try_calc = ((settings3 & 0b0000111111100000) >> 5).try_into())]
+    #[br(try_calc = (((settings3 & 0b00001111_11100000_00000000_00000000) >> ((8 * 2) + 5)) as u16).try_into())]
     #[bw(ignore)]
     pub part_mix: PartMix,
 
-    // #[br(calc = ((settings3 & 0b0000000000011111)) as u8)]
-    // #[bw(ignore)]
-    // pub ??????: bool,
+    // 0..127 (0..10)
+    #[br(calc = ((settings3 & 0b00000000_00011111_11000000_00000000) >> ((8 * 1) + 6)) as u8)]
+    #[bw(ignore)]
+    pub gain: u8,
+}
+
+// 0x93-0x96
+#[binrw]
+#[derive(Debug)]
+pub struct EffectsPanel {
+    ///                        0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
+    settings: u64,
+
+    /// fx1 (0: off, 1: lower, 2: upper)
+    #[br(calc = ((settings & 0b11000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 6)) as u8)]
+    #[bw(ignore)]
+    pub fx1: u8,
+
+    /// fx1 type (pan1, pan2, pan1&2, wah, rm, trem1, trem2, trem1&2)
+    #[br(calc = ((settings & 0b00111000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 3)) as u8)]
+    #[bw(ignore)]
+    pub fx1_type: u8,
+
+    /// fx1 rate 0..127 (0..10)
+    #[br(calc = ((settings & 0b00000011_11111000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 3)) as u8)]
+    #[bw(ignore)]
+    pub fx1_rate: u8,
+
+    /// fx2 rate 0..127 (0..10)
+    #[br(calc = ((settings & 0b00000000_00000000_00011111_11000000_00000000_00000000_00000000_00000000) >> ((8 * 4) + 6)) as u8)]
+    #[bw(ignore)]
+    pub fx2_rate: u8,
+
+    /// fx4 rate 0..127 (750ms..20ms)
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000011_11111000_00000000_00000000_00000000) >> ((8 * 3) + 3)) as u8)]
+    #[bw(ignore)]
+    pub fx4_tempo: u8,
+
+    /// fx4 wet/dry 0..127 (0..10)
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000111_11110000_00000000_00000000) >> ((8 * 2) + 4)) as u8)]
+    #[bw(ignore)]
+    pub fx4_moisture: u8,
+
+    ///                        0x9b      0x9c      0x9d     0x9e
+    settings2: u32,
+
+    /// fx3 (0: off, 1: lower, 2: upper)
+    #[br(calc = ((settings & 0b00000000_00011000_00000000_00000000) >> ((8 * 2) + 3)) as u8)]
+    #[bw(ignore)]
+    pub fx3: u8,
+
+    /// fx3 type (none, twin, rotary, comp, small, jc)
+    #[br(calc = ((settings & 0b00000000_00000111_00000000_00000000) >> ((8 * 2) + 0)) as u8)]
+    #[bw(ignore)]
+    pub fx3_type: u8,
+
+    /// fx3 rate 0..127 (0..10)
+    #[br(calc = ((settings & 0b00000000_00000000_11111110_00000000) >> ((8 * 1) + 1)) as u8)]
+    #[bw(ignore)]
+    pub fx3_compression: u8,
+}
+
+/// 0xa1-0xa4
+#[binrw]
+#[derive(Debug)]
+pub struct Extra {
+    settings: u32,
+
+    /// fx1 control pedal (0: off, 1: on)
+    #[br(calc = ((settings & 0b00010000_00000000_00000000_00000000) >> ((8 * 3) + 4)) != 0)]
+    #[bw(ignore)]
+    pub fx1_control: bool,
+
+    /// fx1 deep (0: off, 1: on)
+    #[br(calc = ((settings & 0b00001000_00000000_00000000_00000000) >> ((8 * 3) + 3)) != 0)]
+    #[bw(ignore)]
+    pub fx2_deep: bool,
 }
 
 #[binrw]
@@ -134,10 +208,10 @@ pub struct Schema {
     #[brw(big, pad_before = 16)]
     program_version: u16,
 
-    /// 0x2e-0x32
+    /// 0x2e-0x34
     center_panel: CenterPanel,
 
-    body: [u8; (0xa4 - 0x32) as usize],
+    body: [u8; (0xa4 - 0x34) as usize],
 }
 
 #[derive(Debug)]
@@ -155,7 +229,7 @@ impl Program {
             schema: Schema {
                 header: Header::new(1, FORMAT, location),
                 version: 4,
-                body: [0; (0xa4 - 0x32) as usize],
+                body: [0; (0xa4 - 0x34) as usize],
                 program_version: 4,
                 center_panel: CenterPanel {
                     left_octave_shift: (0_i8).try_into().unwrap(),
@@ -173,6 +247,7 @@ impl Program {
                     transpose: (1_i8).try_into().unwrap(),
                     transpose_enabled: false,
                     part_mix: (0_u8).try_into().unwrap(),
+                    gain: 0,
                 },
             },
         }
@@ -250,6 +325,10 @@ impl Program {
 
     pub fn part_mix(&self) -> PartMix {
         self.schema.center_panel.part_mix
+    }
+
+    pub fn gain(&self) -> u8 {
+        self.schema.center_panel.gain
     }
 }
 

@@ -1,6 +1,6 @@
 pub mod components;
-mod windows;
-
+pub mod frames;
 pub mod db;
 
-pub use windows::*;
+mod frame;
+pub use frame::*;

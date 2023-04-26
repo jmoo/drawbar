@@ -1,17 +1,19 @@
-use libnord_egui::{components, Manager};
+use libnord_egui::{components, FrameRenderer, FrameManager};
+use libnord_egui::frames::Type;
+
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
     #[serde(skip)]
-    windows: Manager,
+    frames: FrameManager<Type>,
 }
 
 impl Default for App {
-    fn default() -> Self {
+    fn default() -> Self { ;
         Self {
-            windows: Manager::new(),
+            frames: FrameManager::new()
         }
     }
 }
@@ -32,11 +34,11 @@ impl App {
     }
 }
 
-impl eframe::App for App {
+impl <'a> eframe::App for App {
     /// Called each time the UI needs repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let Self { windows } = self;
+        let Self { frames } = self;
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -46,7 +48,7 @@ impl eframe::App for App {
         #[cfg(not(target_arch = "wasm32"))] // no File->Quit on web pages!
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             // The top panel is often a good place for a menu bar:
-            components::menu_bar(ctx, ui, _frame, windows);
+            components::menu_bar(ctx, ui, _frame, frames);
         });
 
         egui::SidePanel::left("side_panel").show(ctx, |ui| {
@@ -78,7 +80,7 @@ impl eframe::App for App {
             egui::warn_if_debug_build(ui);
         });
 
-        windows.show(ctx);
+        frames.render(Type::Window, ctx);
     }
 
     /// Called by the frame work to save state before shutdown.
