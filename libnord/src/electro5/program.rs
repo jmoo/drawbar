@@ -19,7 +19,7 @@ pub type Bank = bank::Bank<Program, Location>;
 #[binrw]
 #[derive(Debug)]
 pub struct CenterPanel {
-    // 0x2e-0x2f
+    // 0x2e..0x2f                 0x2e     0x2f
     #[brw(big)]
     #[bw(calc =
     (* left_part as u16) << 13
@@ -31,31 +31,31 @@ pub struct CenterPanel {
     )]
     settings: u16,
 
-    #[br(try_calc = (((settings & 0b1110000000000000) >> 13) as u8).try_into())]
+    #[br(try_calc = (((settings & 0b11100000_00000000) >> ((8*1)+5)) as u8).try_into())]
     #[bw(ignore)]
     pub left_part: Instrument,
 
-    #[br(try_calc = (((settings & 0b0001110000000000) >> 10) as u8).try_into())]
+    #[br(try_calc = (((settings & 0b00011100_00000000) >> ((8*1)+2)) as u8).try_into())]
     #[bw(ignore)]
     pub right_part: Instrument,
 
-    #[br(try_calc = (((settings & 0b0000001111000000) >> 6) as u8).try_into())]
+    #[br(try_calc = (((settings & 0b00000011_11000000) >> ((8*0)+6)) as u8).try_into())]
     #[bw(ignore)]
     pub left_octave_shift: OctaveShift,
 
-    #[br(try_calc = (((settings & 0b0000000000111100) >> 2) as u8).try_into())]
+    #[br(try_calc = (((settings & 0b00000000_00111100) >> ((8*0)+2)) as u8).try_into())]
     #[bw(ignore)]
     pub right_octave_shift: OctaveShift,
 
-    #[br(calc = (settings & 0b0000000000000010 >> 1) != 0)]
+    #[br(calc = ((settings & 0b00000000_00000010) >> ((8*0)+1)) != 0)]
     #[bw(ignore)]
     pub left_sustain: bool,
 
-    #[br(calc = (settings & 0b0000000000000001) != 0)]
+    #[br(calc = ((settings & 0b00000000_00000001) >> ((8*0)+0)) != 0)]
     #[bw(ignore)]
     pub right_sustain: bool,
 
-    /// 0x30
+    // 0x30                    0x30
     #[brw(big)]
     #[bw(calc =
     (* left_control as u8) << 7
@@ -99,7 +99,7 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub transpose_enabled: bool,
 
-    // 0x31 - 34
+    // 0x31..34                     0x31      0x32      0x33     0x34
     #[brw(big)]
     pub settings3: u32,
 
@@ -118,74 +118,79 @@ pub struct CenterPanel {
     pub gain: u8,
 }
 
-// 0x93-0x96
+// 0x93..0x9e
 #[binrw]
 #[derive(Debug)]
 pub struct EffectsPanel {
-    ///                        0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
+    // 0x93..0x9a              0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
     settings: u64,
 
-    /// fx1 (0: off, 1: lower, 2: upper)
+    // fx1 (0: off, 1: lower, 2: upper)
     #[br(calc = ((settings & 0b11000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 6)) as u8)]
     #[bw(ignore)]
     pub fx1: u8,
 
-    /// fx1 type (pan1, pan2, pan1&2, wah, rm, trem1, trem2, trem1&2)
+    // fx1 type (pan1, pan2, pan1&2, wah, rm, trem1, trem2, trem1&2)
     #[br(calc = ((settings & 0b00111000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 3)) as u8)]
     #[bw(ignore)]
     pub fx1_type: u8,
 
-    /// fx1 rate 0..127 (0..10)
+    // fx1 rate 0..127 (0..10)
     #[br(calc = ((settings & 0b00000011_11111000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 3)) as u8)]
     #[bw(ignore)]
     pub fx1_rate: u8,
 
-    /// fx2 rate 0..127 (0..10)
+    // fx2 type (flang, choir1, choir2, vibe, phas1, phas2)
+    #[br(calc = ((settings & 0b00000000_00000110_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 1)) as u8)]
+    #[bw(ignore)]
+    pub fx2_type: u8,
+
+    // fx2 rate 0..127 (0..10)
     #[br(calc = ((settings & 0b00000000_00000000_00011111_11000000_00000000_00000000_00000000_00000000) >> ((8 * 4) + 6)) as u8)]
     #[bw(ignore)]
     pub fx2_rate: u8,
 
-    /// fx4 rate 0..127 (750ms..20ms)
+    // fx4 rate 0..127 (750ms..20ms)
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000011_11111000_00000000_00000000_00000000) >> ((8 * 3) + 3)) as u8)]
     #[bw(ignore)]
     pub fx4_tempo: u8,
 
-    /// fx4 wet/dry 0..127 (0..10)
+    // fx4 wet/dry 0..127 (0..10)
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000111_11110000_00000000_00000000) >> ((8 * 2) + 4)) as u8)]
     #[bw(ignore)]
     pub fx4_moisture: u8,
 
-    ///                        0x9b      0x9c      0x9d     0x9e
+    // 0x9b..0x9e              0x9b      0x9c      0x9d     0x9e
     settings2: u32,
 
-    /// fx3 (0: off, 1: lower, 2: upper)
+    // fx3 (0: off, 1: lower, 2: upper)
     #[br(calc = ((settings & 0b00000000_00011000_00000000_00000000) >> ((8 * 2) + 3)) as u8)]
     #[bw(ignore)]
     pub fx3: u8,
 
-    /// fx3 type (none, twin, rotary, comp, small, jc)
+    // fx3 type (none, twin, rotary, comp, small, jc)
     #[br(calc = ((settings & 0b00000000_00000111_00000000_00000000) >> ((8 * 2) + 0)) as u8)]
     #[bw(ignore)]
     pub fx3_type: u8,
 
-    /// fx3 rate 0..127 (0..10)
+    // fx3 rate 0..127 (0..10)
     #[br(calc = ((settings & 0b00000000_00000000_11111110_00000000) >> ((8 * 1) + 1)) as u8)]
     #[bw(ignore)]
     pub fx3_compression: u8,
 }
 
-/// 0xa1-0xa4
+// 0xa1..0xa4
 #[binrw]
 #[derive(Debug)]
 pub struct Extra {
     settings: u32,
 
-    /// fx1 control pedal (0: off, 1: on)
+    // fx1 control pedal (0: off, 1: on)
     #[br(calc = ((settings & 0b00010000_00000000_00000000_00000000) >> ((8 * 3) + 4)) != 0)]
     #[bw(ignore)]
     pub fx1_control: bool,
 
-    /// fx1 deep (0: off, 1: on)
+    // fx1 deep (0: off, 1: on)
     #[br(calc = ((settings & 0b00001000_00000000_00000000_00000000) >> ((8 * 3) + 3)) != 0)]
     #[bw(ignore)]
     pub fx2_deep: bool,
@@ -200,18 +205,28 @@ pub struct Schema {
 
     pub version: u32,
 
-    /// 0x18-0x1a
+    // 0x18..0x1a
     #[bw(try_calc = w.checksum())]
     crc32: u32,
 
-    /// 0x2c-0x2d
+    // 0x2c..0x2d
     #[brw(big, pad_before = 16)]
     program_version: u16,
 
-    /// 0x2e-0x34
+    // 0x2e..0x34
     center_panel: CenterPanel,
 
-    body: [u8; (0xa4 - 0x34) as usize],
+    // 0x35..0x92
+    todo1: [u8; (0x92 - 0x34) as usize],
+
+    // 0x93..0x9e
+    effects_panel: EffectsPanel,
+
+    // 0x9f..0xa0
+    todo2: [u8; (0xa0 - 0x9e) as usize],
+
+    // 0xa1..0xa4
+    extra: Extra,
 }
 
 #[derive(Debug)]
@@ -229,7 +244,8 @@ impl Program {
             schema: Schema {
                 header: Header::new(1, FORMAT, location),
                 version: 4,
-                body: [0; (0xa4 - 0x34) as usize],
+                todo1: [0; (0x92 - 0x34) as usize],
+                todo2: [0; (0xa0 - 0x9e) as usize],
                 program_version: 4,
                 center_panel: CenterPanel {
                     left_octave_shift: (0_i8).try_into().unwrap(),
@@ -248,6 +264,25 @@ impl Program {
                     transpose_enabled: false,
                     part_mix: (0_u8).try_into().unwrap(),
                     gain: 0,
+                },
+                effects_panel: EffectsPanel {
+                    settings:0,
+                    fx1: 0,
+                    fx1_type: 0,
+                    fx1_rate: 0,
+                    fx2_type: 0,
+                    fx2_rate: 0,
+                    fx4_tempo: 0,
+                    fx4_moisture: 0,
+                    settings2: 0,
+                    fx3: 0,
+                    fx3_type: 0,
+                    fx3_compression: 0,
+                },
+                extra: Extra {
+                    settings: 0,
+                    fx1_control: false,
+                    fx2_deep: false,
                 },
             },
         }
@@ -275,35 +310,35 @@ impl Program {
         }
     }
 
-    pub fn left_part(&self) -> Instrument {
+    pub fn lower_part(&self) -> Instrument {
         self.schema.center_panel.left_part
     }
 
-    pub fn right_part(&self) -> Instrument {
+    pub fn upper_part(&self) -> Instrument {
         self.schema.center_panel.right_part
     }
 
-    pub fn left_octave_shift(&self) -> OctaveShift {
+    pub fn lower_octave_shift(&self) -> OctaveShift {
         self.schema.center_panel.left_octave_shift
     }
 
-    pub fn right_octave_shift(&self) -> OctaveShift {
+    pub fn upper_octave_shift(&self) -> OctaveShift {
         self.schema.center_panel.right_octave_shift
     }
 
-    pub fn left_sustain(&self) -> bool {
+    pub fn lower_sustain(&self) -> bool {
         self.schema.center_panel.left_sustain
     }
 
-    pub fn right_sustain(&self) -> bool {
+    pub fn upper_sustain(&self) -> bool {
         self.schema.center_panel.right_sustain
     }
 
-    pub fn left_control(&self) -> bool {
+    pub fn lower_control(&self) -> bool {
         self.schema.center_panel.left_control
     }
 
-    pub fn right_control(&self) -> bool {
+    pub fn upper_control(&self) -> bool {
         self.schema.center_panel.right_control
     }
 
@@ -329,6 +364,14 @@ impl Program {
 
     pub fn gain(&self) -> u8 {
         self.schema.center_panel.gain
+    }
+
+    pub fn fx_panel(&self) -> &EffectsPanel {
+        &self.schema.effects_panel
+    }
+
+    pub fn extra(&self) -> &Extra {
+        &self.schema.extra
     }
 }
 

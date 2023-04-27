@@ -38,6 +38,10 @@ impl PartMix {
     pub fn as_string(&self) -> String {
        format!("{:.1}/{:.1}", self.lower(), self.upper())
     }
+
+    pub fn as_tuple(&self) -> (f32, f32) {
+        (self.lower(), self.upper())
+    }
 }
 
 impl Debug for PartMix {

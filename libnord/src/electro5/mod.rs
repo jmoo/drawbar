@@ -22,15 +22,15 @@ pub enum Instrument {
 }
 
 impl Instrument {
-    fn as_u8(&self) -> u8 {
+    pub fn as_u8(&self) -> u8 {
         *self as u8
     }
 
-    fn as_u16(&self) -> u16 {
+    pub fn as_u16(&self) -> u16 {
         *self as u16
     }
 
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Instrument::Organ => "organ",
             Instrument::Piano => "piano",

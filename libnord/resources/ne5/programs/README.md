@@ -2,8 +2,7 @@
 
 ### Center panel tests
 ```
-abc_d_abc_d_x_y_z.ne5p
-([lower][upper][transpose][split][part-volume]).ne5p
+abc_d_abc_d_x_y_z_z.ne5p
 
 # lower/upper
 a = part instrument (n, o, p, s)
@@ -14,26 +13,27 @@ d = octave (-5,0,5 or 6 or 7?)
 # global
 x = transpose (-6..6)
 y = split (0:off, 1:c3, 2:f3, 3:c4, 4:f4, 5c5, 6:f5, 7:upper)
-z - part volume (-50..50)
+z - part mix lower (0..50)
+z - part mix upper (0..50)
 ```
 
 ### Part mix tests
 ```
-mix a b.ne5p
+a_b.ne5p
 a = lower (0..50)
 b = upper (0..50)
 ```
 
 ### Gain tests
 ```
-gain a.ne5p
+a.ne5p
 
 a = gain (0..10)
 ```
 
 ### FX panel tests
 ```
-fx1 abc d.ne5p
+fx1_abc_d.ne5p
 
 a = part select (0: low, 1: up)
 b = control (0,1)
@@ -42,7 +42,7 @@ d = rate (0..10)
 ```
 
 ```
-fx2 abc d.ne5p
+fx2_abc_d.ne5p
 
 a = part select (0: low, 1: up)
 b = deep (0,1)
@@ -51,7 +51,7 @@ d = rate (0..10.5Hz)
 ```
 
 ```
-fx3 abc d.ne5p
+fx3_abc_d.ne5p
 
 a = part select (0: low, 1: up)
 b = drive on/off (0,1)
@@ -60,7 +60,7 @@ d = compression (0..10)
 ```
 
 ```
-fx4 abc d e.ne5p
+fx4_abc_d_e.ne5p
 
 a = part select (0: low, 1: up)
 b = ping pong (0,1)
