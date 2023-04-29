@@ -427,7 +427,6 @@ fn test_ne5_program_read_write_fx() {
                             println!("  ctrl_on:\t{}", switch_enabled);
                             println!("  fx_type:\t{}", fx_type);
                             println!("  fx_rate:\t{}", fx_value);
-
                             assert_eq!(program.schema.effects_panel.fx1, part_select + 1, "fx1 part select mismatch in file {}", path);
                             assert_eq!(program.schema.extra.fx1_control, switch_enabled != 0, "fx1 control mismatch in file {}", path);
                             assert_eq!(program.schema.effects_panel.fx1_rate, ((fx_value / 10_f32) * 127_f32).floor() as u8, "fx1 rate mismatch in file {}", path);
@@ -464,34 +463,44 @@ fn test_ne5_program_read_write_fx() {
                             println!("  drive_on:\t{}", switch_enabled);
                             println!("  fx_type:\t{}", fx_type);
                             println!("  fx_compr:\t{}", fx_value);
-                           // assert_eq!(program.schema.effects_panel.fx3, part_select + 1, "fx3 part select mismatch in file {}", path)
-                            // assert_eq!(program.schema.effects_panel.fx3_type, match fx_type {
-                            //     0 => 1, //
-                            //    // 5 => 1,
-                            //     a => a
-                            // }, "fx3 type mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx3, part_select + 1, "fx3 part select mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx3_compression as f32, fx_value, "fx3 compression mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx3_compression > 0, switch_enabled != 0, "fx3 drive on mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx3_type, match fx_type {
+                                0 => 0, // none
+                                1 => 3, // twin
+                                2 => 4, // rotary
+                                3 => 5, // comp
+                                4 => 1, // small
+                                5 => 2, // jc
+                                a => panic!("unknown fx3 type {} in file {}", a, path)
+                            }, "fx3 type mismatch in file {}", path);
                         },
                         4 => {
-                            let tempo = fx_value2.unwrap();
-
                             println!("  ping_png:\t{}", switch_enabled);
                             println!("  feedback:\t{}", fx_type);
                             println!("  moisture:\t{}", fx_value);
-                            println!("  tempo:\t{:?}", tempo);
+                            println!("  tempo:\t{:?}", fx_value2.unwrap());
                             assert_eq!(program.schema.effects_panel.fx4, part_select + 1, "fx4 part select mismatch in file {}", path);
                             assert_eq!(program.schema.effects_panel.fx4_ping_pong, switch_enabled != 0, "fx4 ping pong mismatch in file {}", path);
                             assert_eq!(program.schema.effects_panel.fx4_moisture as f32, ((fx_value / 10_f32) * 127_f32).floor(), "fx4 moisture mismatch in file {}", path);
                             assert_eq!(program.schema.effects_panel.fx4_tempo as f32, fx_value2.unwrap().floor(), "fx4 tempo mismatch in file {}", path);
                             assert_eq!(program.schema.effects_panel.fx4_feedback, fx_type, "fx4 type mismatch in file {}", path);
-
                         }
                         5 => {
                             println!("  enabled:\t{}", part_select);
                             println!("  type:\t{}", fx_type);
                             println!("  moisture:\t{}", fx_value);
-                            // a = on/off (0: on, 1: off)
-                            // c = type (0: stage, 1: hall-soft, 2: hall, 3: room, 4: stage-soft)
-                            // d = moisture (0..10)
+                            assert_eq!(program.schema.effects_panel.fx5, part_select == 1, "fx5 part select mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx5_moisture as f32, fx_value, "fx5 moisture mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx5_type, match fx_type {
+                                0 => 2, // stage
+                                1 => 3, // hall-soft
+                                2 => 4, // hall
+                                3 => 0, // room
+                                4 => 1, // stage-soft
+                                a => panic!("unknown fx5 type {} in file {}", a, path)
+                            }, "fx5 type mismatch in file {}", path);
                         }
                         _ => panic!("unknown fx {} in file {}", fx, path),
                     }

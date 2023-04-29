@@ -118,17 +118,16 @@ pub struct CenterPanel {
     pub gain: u8,
 }
 
-// 0x93..0x9e
+// 0x93..0x9F
 #[binrw]
 #[derive(Debug)]
 pub struct EffectsPanel {
-    // 0x93..0x9a              0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
+    // 0x93..0x9a                   0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
     #[brw(big)]
-    #[br(dbg)]
     settings: u64,
 
     // fx1 (0: off, 1: lower, 2: upper)
-    #[br(dbg, calc = ((settings & 0b11000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 6)) as u8)]
+    #[br(calc = ((settings & 0b11000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 6)) as u8)]
     #[bw(ignore)]
     pub fx1: u8,
 
@@ -180,23 +179,41 @@ pub struct EffectsPanel {
     #[bw(ignore)]
     pub fx4_ping_pong: bool,
 
-    // 0x9b..0x9e              0x9b      0x9c      0x9d     0x9e
+    // 0x9b..0x9e             0x9b      0x9c      0x9d     0x9e
+    #[brw(big)]
     settings2: u32,
 
     // fx3 (0: off, 1: lower, 2: upper)
-    #[br(calc = ((settings & 0b00000000_00011000_00000000_00000000) >> ((8 * 2) + 3)) as u8)]
+    #[br(calc = ((settings2 & 0b00000000_00011000_00000000_00000000) >> ((8 * 2) + 3)) as u8)]
     #[bw(ignore)]
     pub fx3: u8,
 
     // fx3 type (none, twin, rotary, comp, small, jc)
-    #[br(calc = ((settings & 0b00000000_00000111_00000000_00000000) >> ((8 * 2) + 0)) as u8)]
+    #[br(calc = ((settings2 & 0b00000000_00000111_00000000_00000000) >> ((8 * 2) + 0)) as u8)]
     #[bw(ignore)]
     pub fx3_type: u8,
 
     // fx3 rate 0..127 (0..10)
-    #[br(calc = ((settings & 0b00000000_00000000_11111110_00000000) >> ((8 * 1) + 1)) as u8)]
+    #[br(calc = ((settings2 & 0b00000000_00000000_11111110_00000000) >> ((8 * 1) + 1)) as u8)]
     #[bw(ignore)]
     pub fx3_compression: u8,
+
+    #[br(calc = ((settings2 & 0b00000000_00000000_00000001_00000000) >> ((8 * 1) + 0)) != 0)]
+    #[bw(ignore)]
+    pub fx5: bool,
+
+    #[br(calc = ((settings2 & 0b00000000_00000000_00000000_11100000) >> ((8 * 0) + 5)) as u8)]
+    #[bw(ignore)]
+    pub fx5_type: u8,
+
+    // 0x9f
+    #[brw(big)]
+    settings3: u8,
+
+    // 0x9b..0x9f                  0x9b      0x9c      0x9d     0x9e                                   0x9f
+    #[br(calc = ((((settings2 & 0b00000000_00000000_00000000_00011111)) << 2) as u8) + ((settings3 & 0b11000000) >> 6))]
+    #[bw(ignore)]
+    pub fx5_moisture: u8,
 }
 
 // 0xa1..0xa4
@@ -240,11 +257,11 @@ pub struct Schema {
     // 0x35..0x92
     todo1: [u8; (0x92 - 0x34) as usize],
 
-    // 0x93..0x9e
+    // 0x93..0x9f
     pub effects_panel: EffectsPanel,
 
-    // 0x9f..0xa0
-    todo2: [u8; (0xa0 - 0x9e) as usize],
+    // 0xa0..0xa0
+    todo2: [u8; (0xa0 - 0x9f) as usize],
 
     // 0xa1..0xa4
     pub extra: Extra,
@@ -266,7 +283,7 @@ impl Program {
                 header: Header::new(1, FORMAT, location),
                 version: 4,
                 todo1: [0; (0x92 - 0x34) as usize],
-                todo2: [0; (0xa0 - 0x9e) as usize],
+                todo2: [0; (0xa0 - 0x9f) as usize],
                 program_version: 4,
                 center_panel: CenterPanel {
                     left_octave_shift: (0_i8).try_into().unwrap(),
@@ -302,7 +319,11 @@ impl Program {
                     fx3_compression: 0,
                     fx4: 0,
                     fx4_feedback: 0,
-                    fx4_ping_pong: false
+                    fx4_ping_pong: false,
+                    fx5_moisture: 0,
+                    settings3:0,
+                    fx5: false,
+                    fx5_type: 0
                 },
                 extra: Extra {
                     settings: 0,

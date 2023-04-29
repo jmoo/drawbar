@@ -26,7 +26,7 @@ fx3_abc_d.ne5p
 a = part select (0: off, 1: low, 2: upper)
 b = drive on/off (0,1)
 c = (0: none, 1: twin, 2: rotary, 3: comp, 4: small, 5: jc)
-d = compression (0..10)
+d = compression (0: 0 -> 127: 10)
 ```
 
 Delay
@@ -46,5 +46,5 @@ fx5_a0c_d.ne5p
 
 a = on/off (0: on, 1: off)
 c = type (0: stage, 1: hall-soft, 2: hall, 3: room, 4: stage-soft)
-d = moisture (0..10)
+d = moisture (0: 0 -> 127: 10)
 ```
