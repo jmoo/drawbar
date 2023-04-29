@@ -123,14 +123,16 @@ pub struct CenterPanel {
 #[derive(Debug)]
 pub struct EffectsPanel {
     // 0x93..0x9a              0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
+    #[brw(big)]
+    #[br(dbg)]
     settings: u64,
 
     // fx1 (0: off, 1: lower, 2: upper)
-    #[br(calc = ((settings & 0b11000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 6)) as u8)]
+    #[br(dbg, calc = ((settings & 0b11000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 6)) as u8)]
     #[bw(ignore)]
     pub fx1: u8,
 
-    // fx1 type (pan1, pan2, pan1&2, wah, rm, trem1, trem2, trem1&2)
+    // fx1 type (1: pan1, pan2, pan1&2, 2: wah, rm, trem1, trem2, trem1&2)
     #[br(calc = ((settings & 0b00111000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 3)) as u8)]
     #[bw(ignore)]
     pub fx1_type: u8,
@@ -143,12 +145,28 @@ pub struct EffectsPanel {
     // fx2 type (flang, choir1, choir2, vibe, phas1, phas2)
     #[br(calc = ((settings & 0b00000000_00000110_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 1)) as u8)]
     #[bw(ignore)]
+    pub fx2: u8,
+
+    #[br(calc = 0)]
+    #[bw(ignore)]
     pub fx2_type: u8,
 
     // fx2 rate 0..127 (0..10)
     #[br(calc = ((settings & 0b00000000_00000000_00011111_11000000_00000000_00000000_00000000_00000000) >> ((8 * 4) + 6)) as u8)]
     #[bw(ignore)]
     pub fx2_rate: u8,
+
+    #[br(calc = 0)]
+    #[bw(ignore)]
+    pub fx4: u8,
+
+    #[br(calc = 0)]
+    #[bw(ignore)]
+    pub fx4_ping_pong: u8,
+
+    #[br(calc = 0)]
+    #[bw(ignore)]
+    pub fx4_feedback: u8,
 
     // fx4 rate 0..127 (750ms..20ms)
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000011_11111000_00000000_00000000_00000000) >> ((8 * 3) + 3)) as u8)]
@@ -220,7 +238,7 @@ pub struct Schema {
     todo1: [u8; (0x92 - 0x34) as usize],
 
     // 0x93..0x9e
-    effects_panel: EffectsPanel,
+    pub effects_panel: EffectsPanel,
 
     // 0x9f..0xa0
     todo2: [u8; (0xa0 - 0x9e) as usize],
@@ -231,7 +249,7 @@ pub struct Schema {
 
 #[derive(Debug)]
 pub struct Program {
-    schema: Schema,
+    pub schema: Schema,
     location: Location,
     name: Option<String>,
 }
@@ -275,9 +293,13 @@ impl Program {
                     fx4_tempo: 0,
                     fx4_moisture: 0,
                     settings2: 0,
+                    fx2: 0,
                     fx3: 0,
                     fx3_type: 0,
                     fx3_compression: 0,
+                    fx4: 0,
+                    fx4_feedback: 0,
+                    fx4_ping_pong: 0
                 },
                 extra: Extra {
                     settings: 0,

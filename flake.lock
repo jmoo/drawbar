@@ -38,13 +38,18 @@
     },
     "nixpkgs": {
       "locked": {
-        "narHash": "sha256-tdCZMbFwpK68nB+d62q2t+PxUgQhcdbF/WMvIJ35V84=",
-        "type": "tarball",
-        "url": "http://nixos.org/channels/nixos-22.11/nixexprs.tar.xz"
+        "lastModified": 1682538316,
+        "narHash": "sha256-YuHgVsR7S9zxJWHo7lo2ugd+uDC4ESWg1hA4bEZQv3Y=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "15b75800dce80225b44f067c9012b09de37dfad2",
+        "type": "github"
       },
       "original": {
-        "type": "tarball",
-        "url": "http://nixos.org/channels/nixos-22.11/nixexprs.tar.xz"
+        "owner": "NixOS",
+        "ref": "nixos-22.11",
+        "repo": "nixpkgs",
+        "type": "github"
       }
     },
     "nixpkgs_2": {
@@ -76,11 +81,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1682129965,
-        "narHash": "sha256-1KRPIorEL6pLpJR04FwAqqnt4Tzcm4MqD84yhlD+XSk=",
+        "lastModified": 1682561982,
+        "narHash": "sha256-x0LtoiGT9gQ7Sn8SvjV3CIUqGu/GLDBDAoa5lXyef/8=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "2c417c0460b788328220120c698630947547ee83",
+        "rev": "cc85c38ed6f7ecb9d7eb3d71be3c6f01b87e92f9",
         "type": "github"
       },
       "original": {
