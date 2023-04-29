@@ -410,23 +410,9 @@ fn test_ne5_program_read_write_fx() {
                     };
                     
                     let fx = u8::from_str(matches.get(1).unwrap().as_str()).unwrap();
-
-                    let part_select = match matches.get(2).unwrap().as_str() {
-                        "0" => 0,
-                        "1" => 1,
-                        "2" => 2,
-                        "3" => 3,
-                        _ => panic!("unknown part select {} in file {}", matches.get(2).unwrap().as_str(), path),
-                    };
-
-                    let switch_enabled = match matches.get(3).unwrap().as_str() {
-                        "0" => false,
-                        "1" => true,
-                        _ => panic!("unknown control {} in file {}", matches.get(3).unwrap().as_str(), path),
-                    };
-
+                    let part_select = u8::from_str(matches.get(2).unwrap().as_str()).unwrap();
+                    let switch_enabled = u8::from_str(matches.get(3).unwrap().as_str()).unwrap();;
                     let fx_type = u8::from_str(matches.get(4).unwrap().as_str()).unwrap();
-
                     let fx_value = f32::from_str(matches.get(5).unwrap().as_str()).unwrap();
 
                     let fx_value2 = match matches.get(6) {
@@ -443,27 +429,42 @@ fn test_ne5_program_read_write_fx() {
                             println!("  fx_rate:\t{}", fx_value);
 
                             assert_eq!(program.schema.effects_panel.fx1, part_select + 1, "fx1 part select mismatch in file {}", path);
-                            assert_eq!(program.schema.effects_panel.fx1_type, match fx_type {
-                                0 => 1, // pan1
-                                3 => 2, // wah
-                                a => a
-                            }, "fx1 type mismatch in file {}", path);
+                            assert_eq!(program.schema.extra.fx1_control, switch_enabled != 0, "fx1 control mismatch in file {}", path);
                             assert_eq!(program.schema.effects_panel.fx1_rate, ((fx_value / 10_f32) * 127_f32).floor() as u8, "fx1 rate mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx1_type, match fx_type {
+                                0 => 3, // pan 1
+                                1 => 4, // pan 2
+                                2 => 5, // pan 1&2
+                                3 => 6, // wah
+                                4 => 7, // rm
+                                5 => 0, // trem 1
+                                6 => 1, // trem 2
+                                7 => 2, // trem 1&2
+                                a => panic!("unknown fx1 type {} in file {}", a, path)
+                            }, "fx1 type mismatch in file {}", path);
                         },
                         2 => {
                             println!("  deep_on:\t{}", switch_enabled);
                             println!("  fx_type:\t{}", fx_type);
                             println!("  fx_rate:\t{}", fx_value);
                             assert_eq!(program.schema.effects_panel.fx2, part_select + 1, "fx2 part select mismatch in file {}", path);
-                            // assert_eq!(program.schema.effects_panel.fx2_type, match fx_type {
-                            //     a => a
-                            // }, "fx2 type mismatch in file {}", path);
+                            assert_eq!(program.schema.extra.fx2_deep, switch_enabled != 0, "fx2 deep mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx2_rate, fx_value.floor() as u8, "fx2 rate mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx2_type, match fx_type {
+                                0 => 2, // flang
+                                1 => 3, // choir1
+                                2 => 4, // choir2
+                                3 => 5, // vibe
+                                4 => 0, // phas1
+                                5 => 1, // phas2
+                                a => panic!("unknown fx2 type {} in file {}", a, path)
+                            }, "fx2 type mismatch in file {}", path);
                         },
                         3 => {
                             println!("  drive_on:\t{}", switch_enabled);
                             println!("  fx_type:\t{}", fx_type);
                             println!("  fx_compr:\t{}", fx_value);
-                            //assert_eq!(program.schema.effects_panel.fx3, part_select, "fx3 part select mismatch in file {}", path)
+                           // assert_eq!(program.schema.effects_panel.fx3, part_select + 1, "fx3 part select mismatch in file {}", path)
                             // assert_eq!(program.schema.effects_panel.fx3_type, match fx_type {
                             //     0 => 1, //
                             //    // 5 => 1,
@@ -477,7 +478,20 @@ fn test_ne5_program_read_write_fx() {
                             println!("  feedback:\t{}", fx_type);
                             println!("  moisture:\t{}", fx_value);
                             println!("  tempo:\t{:?}", tempo);
-                            //assert_eq!(program.schema.effects_panel.fx4, part_select, "fx1 part select mismatch in file {}", path)
+                            assert_eq!(program.schema.effects_panel.fx4, part_select + 1, "fx4 part select mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx4_ping_pong, switch_enabled != 0, "fx4 ping pong mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx4_moisture as f32, ((fx_value / 10_f32) * 127_f32).floor(), "fx4 moisture mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx4_tempo as f32, fx_value2.unwrap().floor(), "fx4 tempo mismatch in file {}", path);
+                            assert_eq!(program.schema.effects_panel.fx4_feedback, fx_type, "fx4 type mismatch in file {}", path);
+
+                        }
+                        5 => {
+                            println!("  enabled:\t{}", part_select);
+                            println!("  type:\t{}", fx_type);
+                            println!("  moisture:\t{}", fx_value);
+                            // a = on/off (0: on, 1: off)
+                            // c = type (0: stage, 1: hall-soft, 2: hall, 3: room, 4: stage-soft)
+                            // d = moisture (0..10)
                         }
                         _ => panic!("unknown fx {} in file {}", fx, path),
                     }

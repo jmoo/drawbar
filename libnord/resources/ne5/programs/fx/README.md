@@ -16,7 +16,7 @@ fx2_abc_d.ne5p
 a = part select (0: off, 1: low, 2: upper)
 b = deep (0,1)
 c = type (0: flang, 1: choir1, 2: choir2, 3: vibe, 4: phas1, 5: phas2)
-d = rate (0..10.5Hz)
+d = rate (0: 0 -> 127: 10.5Hz)
 ```
 
 Spkr/Comp
@@ -37,7 +37,7 @@ a = part select (0: off, 1: low, 2: upper)
 b = ping pong (0,1)
 c = feedback (0,1,2,3)
 d = moisture (0..10)
-e = tempo (20ms...750ms)
+e = tempo (127: 20ms -> 0: 750ms)
 ```
 
 Reverb

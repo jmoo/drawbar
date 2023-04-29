@@ -133,7 +133,7 @@ pub struct EffectsPanel {
     pub fx1: u8,
 
     // fx1 type (1: pan1, pan2, pan1&2, 2: wah, rm, trem1, trem2, trem1&2)
-    #[br(calc = ((settings & 0b00111000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 3)) as u8)]
+    #[br(calc = ((settings & 0b00111100_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 2)) as u8)]
     #[bw(ignore)]
     pub fx1_type: u8,
 
@@ -142,12 +142,13 @@ pub struct EffectsPanel {
     #[bw(ignore)]
     pub fx1_rate: u8,
 
-    // fx2 type (flang, choir1, choir2, vibe, phas1, phas2)
+    // fx2 (0: off, 1: lower, 2: upper
     #[br(calc = ((settings & 0b00000000_00000110_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 1)) as u8)]
     #[bw(ignore)]
     pub fx2: u8,
 
-    #[br(calc = 0)]
+    // fx2 type (flang, choir1, choir2, vibe, phas1, phas2)
+    #[br(calc = ((settings & 0b00000000_00000001_11100000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 5) + 5)) as u8)]
     #[bw(ignore)]
     pub fx2_type: u8,
 
@@ -156,15 +157,12 @@ pub struct EffectsPanel {
     #[bw(ignore)]
     pub fx2_rate: u8,
 
-    #[br(calc = 0)]
+    // fx4 (0: off, 1: lower, 2: upper)
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00110000_00000000_00000000_00000000_00000000) >> ((8 * 4) + 4)) as u8)]
     #[bw(ignore)]
     pub fx4: u8,
 
-    #[br(calc = 0)]
-    #[bw(ignore)]
-    pub fx4_ping_pong: u8,
-
-    #[br(calc = 0)]
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00001100_00000000_00000000_00000000_00000000) >> ((8 * 4) + 2)) as u8)]
     #[bw(ignore)]
     pub fx4_feedback: u8,
 
@@ -177,6 +175,10 @@ pub struct EffectsPanel {
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000111_11110000_00000000_00000000) >> ((8 * 2) + 4)) as u8)]
     #[bw(ignore)]
     pub fx4_moisture: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00001000_00000000_00000000) >> ((8 * 2) + 3)) != 0)]
+    #[bw(ignore)]
+    pub fx4_ping_pong: bool,
 
     // 0x9b..0x9e              0x9b      0x9c      0x9d     0x9e
     settings2: u32,
@@ -201,6 +203,7 @@ pub struct EffectsPanel {
 #[binrw]
 #[derive(Debug)]
 pub struct Extra {
+    #[brw(big)]
     settings: u32,
 
     // fx1 control pedal (0: off, 1: on)
@@ -244,7 +247,7 @@ pub struct Schema {
     todo2: [u8; (0xa0 - 0x9e) as usize],
 
     // 0xa1..0xa4
-    extra: Extra,
+    pub extra: Extra,
 }
 
 #[derive(Debug)]
@@ -299,7 +302,7 @@ impl Program {
                     fx3_compression: 0,
                     fx4: 0,
                     fx4_feedback: 0,
-                    fx4_ping_pong: 0
+                    fx4_ping_pong: false
                 },
                 extra: Extra {
                     settings: 0,
