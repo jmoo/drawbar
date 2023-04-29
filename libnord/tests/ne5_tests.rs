@@ -408,10 +408,11 @@ fn test_ne5_program_read_write_fx() {
                     if let Some(skip) = matches.get(7) {
                         continue;
                     };
-                    
+
                     let fx = u8::from_str(matches.get(1).unwrap().as_str()).unwrap();
                     let part_select = u8::from_str(matches.get(2).unwrap().as_str()).unwrap();
-                    let switch_enabled = u8::from_str(matches.get(3).unwrap().as_str()).unwrap();;
+                    let switch_enabled = u8::from_str(matches.get(3).unwrap().as_str()).unwrap();
+                    ;
                     let fx_type = u8::from_str(matches.get(4).unwrap().as_str()).unwrap();
                     let fx_value = f32::from_str(matches.get(5).unwrap().as_str()).unwrap();
 
@@ -421,7 +422,7 @@ fn test_ne5_program_read_write_fx() {
                     };
 
                     print!("test test_ne5_program_read_write_fx{}: {} (\n  part_sel:\t{}  \n", fx, path, part_select);
-                    
+
                     match fx {
                         1 => {
                             println!("  ctrl_on:\t{}", switch_enabled);
@@ -441,7 +442,7 @@ fn test_ne5_program_read_write_fx() {
                                 7 => 2, // trem 1&2
                                 a => panic!("unknown fx1 type {} in file {}", a, path)
                             }, "fx1 type mismatch in file {}", path);
-                        },
+                        }
                         2 => {
                             println!("  deep_on:\t{}", switch_enabled);
                             println!("  fx_type:\t{}", fx_type);
@@ -458,7 +459,7 @@ fn test_ne5_program_read_write_fx() {
                                 5 => 1, // phas2
                                 a => panic!("unknown fx2 type {} in file {}", a, path)
                             }, "fx2 type mismatch in file {}", path);
-                        },
+                        }
                         3 => {
                             println!("  drive_on:\t{}", switch_enabled);
                             println!("  fx_type:\t{}", fx_type);
@@ -475,7 +476,7 @@ fn test_ne5_program_read_write_fx() {
                                 5 => 2, // jc
                                 a => panic!("unknown fx3 type {} in file {}", a, path)
                             }, "fx3 type mismatch in file {}", path);
-                        },
+                        }
                         4 => {
                             println!("  ping_png:\t{}", switch_enabled);
                             println!("  feedback:\t{}", fx_type);
@@ -504,11 +505,192 @@ fn test_ne5_program_read_write_fx() {
                         }
                         _ => panic!("unknown fx {} in file {}", fx, path),
                     }
-                    
+
                     println!(")");
 
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
+                    assert_eq!(contents.as_slice(), output.as_slice(), "read/write mismatch in file {}", path);
+                }
+                _ => panic!("expected electro5 song in file {}", path),
+            }
+        } else if !path.contains("README.md") {
+            panic!("invalid file name: {}", path)
+        }
+    }
+}
+
+#[test]
+fn test_ne5_program_read_write_equalizer() {
+    const TEST_FILES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/equalizer");
+
+    let paths = fs::read_dir(TEST_FILES.clone()).unwrap();
+
+    let equalizer_re = Regex::new(r"([0-9]+)_([0-9]{3})([0-9]{3})([0-9]{3})([0-9]{3})[.](skip[.])?ne5p$").unwrap();
+
+    for path in paths {
+        let inner = path.unwrap();
+
+        if !inner.metadata().unwrap().is_file() {
+            continue;
+        }
+
+        let path = inner.path().display().to_string();
+
+        if let Some(matches) = equalizer_re.captures(path.as_str()) {
+            let program = libnord::from_path(path.as_str()).unwrap();
+            let contents = read(path.as_str()).unwrap();
+
+            if let Some(skip) = matches.get(6) {
+                continue;
+            };
+
+            let part_select = u8::from_str(matches.get(1).unwrap().as_str()).unwrap();
+            let bass = u8::from_str(matches.get(2).unwrap().as_str()).unwrap();
+            let freq = u8::from_str(matches.get(3).unwrap().as_str()).unwrap();
+            let freq_gain = u8::from_str(matches.get(4).unwrap().as_str()).unwrap();
+            let treble = u8::from_str(matches.get(5).unwrap().as_str()).unwrap();
+
+            match program {
+                Entity::Program(libnord::Program::Electro5(mut program)) => {
+                    println!("test test_ne5_program_read_write_equalizer: {} (  \n\
+                        part_select:\t{}\n  \
+                        bass:\t{}\n  \
+                        freq:\t{}\n  \
+                        freq_gain:\t{}\n  \
+                        treble:\t{}\n  \
+                    )", path, part_select, bass, freq, freq_gain, treble);
+
+                    let mut output: Vec<u8> = Vec::new();
+                    program.write_to(&mut Cursor::new(&mut output)).unwrap();
+
+                    assert_eq!(contents.as_slice(), output.as_slice(), "read/write mismatch in file {}", path);
+                }
+                _ => panic!("expected electro5 song in file {}", path),
+            }
+        } else if !path.contains("README.md") {
+            panic!("invalid file name: {}", path)
+        }
+    }
+}
+
+#[test]
+fn test_ne5_program_read_sample() {
+    const TEST_FILES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/sample");
+
+    let paths = fs::read_dir(TEST_FILES.clone()).unwrap();
+
+    let sample_re = Regex::new(r"([0-9])([0-9])([0-9])_([a-fA-F0-9]{2})_([0-9]{3})_([dsr])([0-9]{3})[.](skip[.])?ne5p$").unwrap();
+
+    for path in paths {
+        let inner = path.unwrap();
+
+        if !inner.metadata().unwrap().is_file() {
+            continue;
+        }
+
+        let path = inner.path().display().to_string();
+
+        if let Some(matches) = sample_re.captures(path.as_str()) {
+            let program = libnord::from_path(path.as_str()).unwrap();
+            let contents = read(path.as_str()).unwrap();
+
+            if let Some(skip) = matches.get(8) {
+                continue;
+            };
+
+            let part_select = u8::from_str(matches.get(1).unwrap().as_str()).unwrap();
+            let dynamics = u8::from_str(matches.get(2).unwrap().as_str()).unwrap();
+            let filter = u8::from_str(matches.get(3).unwrap().as_str()).unwrap();
+            let sample_id = matches.get(4).unwrap().as_str();
+            let attack = u8::from_str(matches.get(5).unwrap().as_str()).unwrap();
+            let decay_release_type = matches.get(6).unwrap().as_str();
+            let decay_release = u8::from_str(matches.get(7).unwrap().as_str()).unwrap();
+
+            match program {
+                Entity::Program(libnord::Program::Electro5(mut program)) => {
+                    println!("test test_ne5_program_read_write_sample: {} (  \n\
+                        part_select:\t{}\n  \
+                        dynamics:\t{}\n  \
+                        filter:\t{}\n  \
+                        sample_id:\t{}\n  \
+                        attack:\t{}\n  \
+                        decay_release_type:\t{}\n  \
+                        decay_release:\t{}\n  \
+                    )", path, part_select, dynamics, filter, sample_id, attack, decay_release_type, decay_release);
+
+                    let mut output: Vec<u8> = Vec::new();
+                    program.write_to(&mut Cursor::new(&mut output)).unwrap();
+
+                    assert_eq!(contents.as_slice(), output.as_slice(), "read/write mismatch in file {}", path);
+                }
+                _ => panic!("expected electro5 song in file {}", path),
+            }
+        } else if !path.contains("README.md") {
+            panic!("invalid file name: {}", path)
+        }
+    }
+}
+
+#[test]
+fn test_ne5_program_read_organ() {
+    const TEST_FILES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/organ");
+
+    let paths = fs::read_dir(TEST_FILES.clone()).unwrap();
+
+    let organ_re = Regex::new(r"([0-9])([0-9])([0-9])([0-9])(_|([0-9])([0-9])([0-9])([0-9])([0-9]))([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])[.](skip[.])?ne5p$").unwrap();
+
+    for path in paths {
+        let inner = path.unwrap();
+
+        if !inner.metadata().unwrap().is_file() {
+            continue;
+        }
+
+        let path = inner.path().display().to_string();
+
+        if let Some(matches) = organ_re.captures(path.as_str()) {
+            let program = libnord::from_path(path.as_str()).unwrap();
+            let contents = read(path.as_str()).unwrap();
+
+            if let Some(skip) = matches.get(8) {
+                continue;
+            };
+
+            let preset = u8::from_str(matches.get(1).unwrap().as_str()).unwrap();
+            let model = if matches.get(6).is_some() { 0 } else { u8::from_str(matches.get(2).unwrap().as_str()).unwrap() };
+            let rotary_speed = if matches.get(6).is_some() { 0 } else { u8::from_str(matches.get(3).unwrap().as_str()).unwrap() };
+            let rotary_stop = if matches.get(6).is_some() { 0 } else { u8::from_str(matches.get(4).unwrap().as_str()).unwrap() };
+            let perc = if matches.get(6).is_some() { u8::from_str(matches.get(6).unwrap().as_str()).unwrap() } else { 0 };
+            let perc_third = if matches.get(6).is_some() { u8::from_str(matches.get(7).unwrap().as_str()).unwrap() } else { 0 };
+            let perc_speed = if matches.get(6).is_some() { u8::from_str(matches.get(8).unwrap().as_str()).unwrap() } else { 0 };
+            let vib_chorus = if matches.get(6).is_some() { u8::from_str(matches.get(9).unwrap().as_str()).unwrap() } else { 0 };
+            let vib_chorus_type = if matches.get(6).is_some() { u8::from_str(matches.get(10).unwrap().as_str()).unwrap() } else { 0 };
+            let mut draw_1 = matches.get(11).unwrap().as_str();
+            let mut draw_2 = matches.get(12).unwrap().as_str();
+            let mut draw_3 = matches.get(13).unwrap().as_str();
+            let mut draw_4 = matches.get(14).unwrap().as_str();
+            let mut draw_5 = matches.get(15).unwrap().as_str();
+            let mut draw_6 = matches.get(16).unwrap().as_str();
+            let mut draw_7 = matches.get(17).unwrap().as_str();
+            let mut draw_8 = matches.get(18).unwrap().as_str();
+            let mut draw_9 = matches.get(19).unwrap().as_str();
+
+            match program {
+                Entity::Program(libnord::Program::Electro5(mut program)) => {
+                    // println!("test test_ne5_program_read_write_sample: {} (  \n\
+                    //     part_select:\t{}\n  \
+                    //     dynamics:\t{}\n  \
+                    //     filter:\t{}\n  \
+                    //     sample_id:\t{}\n  \
+                    //     attack:\t{}\n  \
+                    //     decay_release_type:\t{}\n  \
+                    //     decay_release:\t{}\n  \
+                    // )", path, part_select, dynamics, filter, sample_id, attack, decay_release_type, decay_release);
+
+                    let mut output: Vec<u8> = Vec::new();
+                    program.write_to(&mut Cursor::new(&mut output)).unwrap();
+
                     assert_eq!(contents.as_slice(), output.as_slice(), "read/write mismatch in file {}", path);
                 }
                 _ => panic!("expected electro5 song in file {}", path),

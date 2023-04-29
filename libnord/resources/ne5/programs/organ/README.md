@@ -16,13 +16,13 @@ h: draw bar positions (0..8)
 
 Type-B
 ```
-abcde_fffffffff.ne5p
+abcd_fffffffff.ne5p
 
 a: preset 1/2 (1, 2)
 b: model (0: b3, 1: b3+bass, 2: pipe, 3: vox, 4: farf)
 c: rotary speed (0: slow, 1: fast)
 d: rotary stop mode (0: off, 1: on)
-e: draw bar positions (0..8)
+f: draw bar positions (0..8)
 ```
 
 Drawbar aliases
