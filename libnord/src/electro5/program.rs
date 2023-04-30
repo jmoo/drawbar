@@ -77,6 +77,7 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub right_control: bool,
 
+    // always zero
     // 0x30
     #[br(calc = ((settings2 & 0b00100000) >> 5) != 0)]
     #[bw(ignore)]
@@ -118,11 +119,44 @@ pub struct CenterPanel {
     pub gain: u8,
 }
 
+// 0x46..0x4d
+#[binrw]
+#[derive(Debug, Default)]
+pub struct SamplePanel {
+    // 0x46..0x4d               0x46      0x47     0x48     0x49     0x4a     0x4b     0x4c    0x4d
+    #[brw(big)]
+    settings: u64,
+
+    #[br(calc = ((settings & 0b11111110_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 1)) as u8)]
+    #[bw(ignore)]
+    pub attack: u8,
+
+    #[br(calc = ((settings & 0b00000001_11111100_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 2)) as u8)]
+    #[bw(ignore)]
+    pub decay_release: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000011_11111100_00000000_00000000_00000000_00000000_00000000) >> ((8 * 0) + 0)) as u8)]
+    #[bw(ignore)]
+    pub sample_number: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 0) + 0)) as u8)]
+    #[bw(ignore)]
+    pub sample_id: u32,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000000_00000011_00000000) >> ((8 * 1) + 0)) as u8)]
+    #[bw(ignore)]
+    pub dynamics: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000000_00000000_10000000) >> ((8 * 0) + 7)) != 0)]
+    #[bw(ignore)]
+    pub filter: bool,
+}
+
 // 0x93..0x9F
 #[binrw]
 #[derive(Debug)]
 pub struct EffectsPanel {
-    // 0x93..0x9a                   0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
+    // 0x93..0x9a               0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
     #[brw(big)]
     settings: u64,
 
@@ -179,9 +213,31 @@ pub struct EffectsPanel {
     #[bw(ignore)]
     pub fx4_ping_pong: bool,
 
-    // 0x9b..0x9e             0x9b      0x9c      0x9d     0x9e
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000110_00000000_00000000) >> ((8 * 2) + 1)) as u8)]
+    #[bw(ignore)]
+    pub equalizer_part_select: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000001_11111100_00000000) >> ((8 * 1) + 2)) as u8)]
+    #[bw(ignore)]
+    pub equalizer_freq: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000000_00000011_11111000) >> ((8 * 0) + 3)) as u8)]
+    #[bw(ignore)]
+    pub equalizer_treble: u8,
+
+    // 0x9b..0x9e
     #[brw(big)]
     settings2: u32,
+
+    //                           0x9a                                     0x9b      0x9c     0x9d      0x9e
+    #[br(calc = (((settings & 0b00000111) << 4) as u8) + (((settings2 & 0b11110000_00000000_00000000_00000000) >> ((8 * 3) + 4)) as u8))]
+    #[bw(ignore)]
+    pub equalizer_freq_gain: u8,
+
+    //                           0x9b      0x9c      0x9d     0x9e
+    #[br(calc = ((settings2 & 0b00001111_11100000_00000000_00000000) >> ((8 * 2) + 5)) as u8)]
+    #[bw(ignore)]
+    pub equalizer_bass: u8,
 
     // fx3 (0: off, 1: lower, 2: upper)
     #[br(calc = ((settings2 & 0b00000000_00011000_00000000_00000000) >> ((8 * 2) + 3)) as u8)]
@@ -254,14 +310,29 @@ pub struct Schema {
     // 0x2e..0x34
     center_panel: CenterPanel,
 
-    // 0x35..0x92
-    todo1: [u8; (0x92 - 0x34) as usize],
+    // 0x35..0x45
+    todo1: [u8; (0x45 - 0x34) as usize],
+
+    // 0x35..0x3b
+    // pad1: [0; (0x39 - 0x34) as usize],
+
+    // 0x3a..0x40
+    // pub piano_panel: PianoPanel,
+
+    // 0x41..0x45
+    // pad2: [0; (0x45 - 0x40) as usize],
+
+    // 0x46..0x4d
+    pub sample_panel: SamplePanel,
+
+    // 0x4e..0x92
+    todo2: [u8; (0x92 - 0x4d) as usize],
 
     // 0x93..0x9f
     pub effects_panel: EffectsPanel,
 
     // 0xa0..0xa0
-    todo2: [u8; (0xa0 - 0x9f) as usize],
+    todo3: [u8; (0xa0 - 0x9f) as usize],
 
     // 0xa1..0xa4
     pub extra: Extra,
@@ -282,8 +353,9 @@ impl Program {
             schema: Schema {
                 header: Header::new(1, FORMAT, location),
                 version: 4,
-                todo1: [0; (0x92 - 0x34) as usize],
-                todo2: [0; (0xa0 - 0x9f) as usize],
+                todo1: [0; (0x45 - 0x34) as usize],
+                todo2: [0; (0x92 - 0x4d) as usize],
+                todo3: [0; (0xa0 - 0x9f) as usize],
                 program_version: 4,
                 center_panel: CenterPanel {
                     left_octave_shift: (0_i8).try_into().unwrap(),
@@ -303,6 +375,7 @@ impl Program {
                     part_mix: (0_u8).try_into().unwrap(),
                     gain: 0,
                 },
+                sample_panel: SamplePanel::default(),
                 effects_panel: EffectsPanel {
                     settings:0,
                     fx1: 0,
@@ -323,7 +396,12 @@ impl Program {
                     fx5_moisture: 0,
                     settings3:0,
                     fx5: false,
-                    fx5_type: 0
+                    fx5_type: 0,
+                    equalizer_bass: 0,
+                    equalizer_treble: 0,
+                    equalizer_freq: 0,
+                    equalizer_freq_gain: 0,
+                    equalizer_part_select: 0
                 },
                 extra: Extra {
                     settings: 0,
