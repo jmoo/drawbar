@@ -633,12 +633,12 @@ fn test_ne5_program_read_sample() {
 }
 
 #[test]
-fn test_ne5_program_read_organ() {
+fn test_ne5_program_read_write_organ() {
     const TEST_FILES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/organ");
 
     let paths = fs::read_dir(TEST_FILES.clone()).unwrap();
 
-    let organ_re = Regex::new(r"([0-9])([0-9])([0-9])([0-9])(_|([0-9])([0-9])([0-9])([0-9])([0-9]))([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])([0-9a-z])[.](skip[.])?ne5p$").unwrap();
+    let organ_re = Regex::new(r"([0-9])([0-9])([0-9])([0-9])(_|([0-9])([0-9]))([0-9a-z]{9})[.](skip[.])?ne5p$").unwrap();
 
     for path in paths {
         let inner = path.unwrap();
@@ -653,40 +653,40 @@ fn test_ne5_program_read_organ() {
             let program = libnord::from_path(path.as_str()).unwrap();
             let contents = read(path.as_str()).unwrap();
 
-            if let Some(skip) = matches.get(8) {
+            if let Some(skip) = matches.get(9) {
                 continue;
             };
 
+            let type_a = matches.get(6).is_some();
             let preset = u8::from_str(matches.get(1).unwrap().as_str()).unwrap();
-            let model = if matches.get(6).is_some() { 0 } else { u8::from_str(matches.get(2).unwrap().as_str()).unwrap() };
-            let rotary_speed = if matches.get(6).is_some() { 0 } else { u8::from_str(matches.get(3).unwrap().as_str()).unwrap() };
-            let rotary_stop = if matches.get(6).is_some() { 0 } else { u8::from_str(matches.get(4).unwrap().as_str()).unwrap() };
-            let perc = if matches.get(6).is_some() { u8::from_str(matches.get(6).unwrap().as_str()).unwrap() } else { 0 };
-            let perc_third = if matches.get(6).is_some() { u8::from_str(matches.get(7).unwrap().as_str()).unwrap() } else { 0 };
-            let perc_speed = if matches.get(6).is_some() { u8::from_str(matches.get(8).unwrap().as_str()).unwrap() } else { 0 };
-            let vib_chorus = if matches.get(6).is_some() { u8::from_str(matches.get(9).unwrap().as_str()).unwrap() } else { 0 };
-            let vib_chorus_type = if matches.get(6).is_some() { u8::from_str(matches.get(10).unwrap().as_str()).unwrap() } else { 0 };
-            let mut draw_1 = matches.get(11).unwrap().as_str();
-            let mut draw_2 = matches.get(12).unwrap().as_str();
-            let mut draw_3 = matches.get(13).unwrap().as_str();
-            let mut draw_4 = matches.get(14).unwrap().as_str();
-            let mut draw_5 = matches.get(15).unwrap().as_str();
-            let mut draw_6 = matches.get(16).unwrap().as_str();
-            let mut draw_7 = matches.get(17).unwrap().as_str();
-            let mut draw_8 = matches.get(18).unwrap().as_str();
-            let mut draw_9 = matches.get(19).unwrap().as_str();
+            let drawbars = matches.get(8).unwrap().as_str();
+
+            // type_a
+            let perc = if type_a { u8::from_str(matches.get(2).unwrap().as_str()).unwrap() } else { 0 };
+            let perc_third = if type_a { u8::from_str(matches.get(3).unwrap().as_str()).unwrap() } else { 0 };
+            let perc_speed = if type_a { u8::from_str(matches.get(4).unwrap().as_str()).unwrap() } else { 0 };
+            let vib_chorus = if type_a { u8::from_str(matches.get(6).unwrap().as_str()).unwrap() } else { 0 };
+            let vib_chorus_type = if type_a { u8::from_str(matches.get(7).unwrap().as_str()).unwrap() } else { 0 };
+
+            // type_b
+            let model = if type_a { 0 } else { u8::from_str(matches.get(2).unwrap().as_str()).unwrap() };
+            let rotary_speed = if type_a { 0 } else { u8::from_str(matches.get(3).unwrap().as_str()).unwrap() };
+            let rotary_stop = if type_a { 0 } else { u8::from_str(matches.get(4).unwrap().as_str()).unwrap() };
 
             match program {
                 Entity::Program(libnord::Program::Electro5(mut program)) => {
-                    // println!("test test_ne5_program_read_write_sample: {} (  \n\
-                    //     part_select:\t{}\n  \
-                    //     dynamics:\t{}\n  \
-                    //     filter:\t{}\n  \
-                    //     sample_id:\t{}\n  \
-                    //     attack:\t{}\n  \
-                    //     decay_release_type:\t{}\n  \
-                    //     decay_release:\t{}\n  \
-                    // )", path, part_select, dynamics, filter, sample_id, attack, decay_release_type, decay_release);
+                    println!("test test_ne5_program_read_write_organ: {} (  \n\
+                        preset:\t{}\n  \
+                        model:\t{}\n  \
+                        rotary_speed:\t{}\n  \
+                        rotary_stop:\t{}\n  \
+                        perc:\t{}\n  \
+                        perc_third:\t{}\n  \
+                        perc_speed:\t{}\n  \
+                        vib_chorus:\t{}\n  \
+                        vib_chorus_type:\t{}\n  \
+                        drawbars:\t{}\n  \
+                    )", path, preset, model, rotary_speed, rotary_stop, perc, perc_third, perc_speed, vib_chorus, vib_chorus_type, drawbars);
 
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
