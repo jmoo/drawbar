@@ -4,7 +4,7 @@ use crate::common::bank::Location;
 use crate::error::ParseError;
 
 /// An i8 value that is bounded by MIN and MAX and can be converted to a u8 by adding OFFSET.
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Default, Clone, PartialEq, Eq, Hash)]
 pub struct RangedI8<const OFFSET: u8, const MIN: i8, const MAX: i8> {
     inner: i8,
 }
@@ -92,7 +92,7 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> PartialEq<i32> for RangedI8
 }
 
 /// A pair of u16 values that are guaranteed to be within a given range.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, Copy, PartialEq, Eq, Hash)]
 pub struct RangedU16Pair<const XMax: u16, const YMax: u16> {
     inner: (u16, u16),
 }

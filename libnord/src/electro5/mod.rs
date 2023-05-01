@@ -14,8 +14,9 @@ pub type Transpose = common::Transpose<6, -6, 6>;
 pub type SplitPoint = common::SplitPoint73;
 pub type PartMix = common::PartMix;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum Instrument {
+    #[default]
     Organ,
     Piano,
     Sample,

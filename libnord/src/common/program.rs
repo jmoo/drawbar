@@ -5,7 +5,7 @@ use crate::types::RangedI8;
 pub type OctaveShift<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
 pub type Transpose<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Default, Clone, PartialEq, Eq)]
 pub struct PartMix {
     inner: u8,
 }
@@ -73,8 +73,9 @@ impl TryFrom<u16> for PartMix {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum SplitPoint73 {
+    #[default]
     C3,
     F3,
     C4,
@@ -118,7 +119,9 @@ impl SplitPoint73 {
     }
 }
 
+#[derive(Default)]
 pub enum Instrument {
+    #[default]
     Organ,
     Piano,
     Sample,

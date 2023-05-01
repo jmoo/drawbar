@@ -17,7 +17,7 @@ pub type Bank = bank::Bank<Program, Location>;
 
 // 0x2e-0x32
 #[binrw]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CenterPanel {
     // 0x2e..0x2f                 0x2e     0x2f
     #[brw(big)]
@@ -117,6 +117,62 @@ pub struct CenterPanel {
     #[br(calc = ((settings3 & 0b00000000_00011111_11000000_00000000) >> ((8 * 1) + 6)) as u8)]
     #[bw(ignore)]
     pub gain: u8,
+
+    #[br(calc = ((settings3 & 0b00000000_00000000_00111000_00000000) >> ((8 * 1) + 3)) as u8)]
+    #[bw(ignore)]
+    pub organ_type: u8,
+
+    // always 1
+    #[br(calc = ((settings3 & 0b00000000_00000000_00000100_00000000) >> ((8 * 1) + 2)) != 0)]
+    #[bw(ignore)]
+    pub unknown_boolean_2: bool,
+
+    // always 1
+    #[br(calc = ((settings3 & 0b00000000_00000000_00000010_00000000) >> ((8 * 1) + 1)) != 0)]
+    #[bw(ignore)]
+    pub unknown_boolean_3: bool,
+
+    #[br(calc = ((settings3 & 0b00000000_00000000_00000001_00000000) >> ((8 * 1) + 0)) != 0)]
+    #[bw(ignore)]
+    pub drawbar_live: bool,
+}
+
+// 0x3a..0x41
+#[binrw]
+#[derive(Debug, Default)]
+pub struct PianoPanel {
+    // 0x3a..0x41               0x3a      0x3b     0x3c     0x3d     0x3e     0x3f     0x40    0x41
+    #[brw(big)]
+    settings: u64,
+
+    // 5 == 0, 6 == 1, 1 == 2, 2 == 3, 3 == 4, 4 == 5
+    #[br(calc = ((settings & 0b11100000_00000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 7) + 5)) as u8)]
+    #[bw(ignore)]
+    pub category: u8,
+
+    #[br(calc = ((settings & 0b00000111_11000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 0)) as u8)]
+    #[bw(ignore)]
+    pub piano_model: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000001_10000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 5) + 7)) as u8)]
+    #[bw(ignore)]
+    pub clav_model: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_01100000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 5) + 5)) as u8)]
+    #[bw(ignore)]
+    pub acoustics: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00011000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 5) + 3)) as u8)]
+    #[bw(ignore)]
+    pub touch: u8,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000100_00000000_00000000_00000000_00000000_00000000) >> ((8 * 5) + 2)) != 0)]
+    #[bw(ignore)]
+    pub mono: bool,
+
+    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 1) + 2)) != 0)]
+    #[bw(ignore)]
+    pub id: bool,
 }
 
 // 0x46..0x4d
@@ -137,11 +193,11 @@ pub struct SamplePanel {
 
     #[br(calc = ((settings & 0b00000000_00000011_11111100_00000000_00000000_00000000_00000000_00000000) >> ((8 * 0) + 0)) as u8)]
     #[bw(ignore)]
-    pub sample_number: u8,
+    pub number: u8,
 
-    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 0) + 0)) as u8)]
+    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 0) + 0)) as u32)]
     #[bw(ignore)]
-    pub sample_id: u32,
+    pub id: u32,
 
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000000_00000011_00000000) >> ((8 * 1) + 0)) as u8)]
     #[bw(ignore)]
@@ -154,7 +210,7 @@ pub struct SamplePanel {
 
 // 0x93..0x9F
 #[binrw]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct EffectsPanel {
     // 0x93..0x9a               0x93      0x94     0x95     0x96     0x97     0x98     0x99    0x9a
     #[brw(big)]
@@ -274,7 +330,7 @@ pub struct EffectsPanel {
 
 // 0xa1..0xa4
 #[binrw]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Extra {
     #[brw(big)]
     settings: u32,
@@ -310,29 +366,26 @@ pub struct Schema {
     // 0x2e..0x34
     center_panel: CenterPanel,
 
-    // 0x35..0x45
-    todo1: [u8; (0x45 - 0x34) as usize],
-
     // 0x35..0x3b
-    // pad1: [0; (0x39 - 0x34) as usize],
+    pad1: [u8; (0x39 - 0x34) as usize],
 
-    // 0x3a..0x40
-    // pub piano_panel: PianoPanel,
+    // 0x3a..0x41
+    pub piano_panel: PianoPanel,
 
-    // 0x41..0x45
-    // pad2: [0; (0x45 - 0x40) as usize],
+    // 0x42..0x45
+    pad2: [u8; (0x45 - 0x41) as usize],
 
     // 0x46..0x4d
     pub sample_panel: SamplePanel,
 
     // 0x4e..0x92
-    todo2: [u8; (0x92 - 0x4d) as usize],
+    todo1: [u8; (0x92 - 0x4d) as usize],
 
     // 0x93..0x9f
     pub effects_panel: EffectsPanel,
 
     // 0xa0..0xa0
-    todo3: [u8; (0xa0 - 0x9f) as usize],
+    todo2: [u8; (0xa0 - 0x9f) as usize],
 
     // 0xa1..0xa4
     pub extra: Extra,
@@ -348,66 +401,21 @@ pub struct Program {
 impl Program {
     pub fn new(location: Location) -> Program {
         Program {
-            location: location,
+            location,
             name: None,
             schema: Schema {
                 header: Header::new(1, FORMAT, location),
                 version: 4,
-                todo1: [0; (0x45 - 0x34) as usize],
-                todo2: [0; (0x92 - 0x4d) as usize],
-                todo3: [0; (0xa0 - 0x9f) as usize],
+                pad1: [0; (0x39 - 0x34) as usize],
+                pad2: [0; (0x45 - 0x41) as usize],
+                todo1: [0; (0x92 - 0x4d) as usize],
+                todo2: [0; (0xa0 - 0x9f) as usize],
                 program_version: 4,
-                center_panel: CenterPanel {
-                    left_octave_shift: (0_i8).try_into().unwrap(),
-                    right_octave_shift: (0_i8).try_into().unwrap(),
-                    left_part: Instrument::Organ,
-                    right_part: Instrument::Organ,
-                    left_sustain: false,
-                    right_sustain: false,
-                    settings3: 0,
-                    left_control: false,
-                    right_control: false,
-                    split_point: SplitPoint::C4,
-                    split: false,
-                    unknown_boolean1: false,
-                    transpose: (1_i8).try_into().unwrap(),
-                    transpose_enabled: false,
-                    part_mix: (0_u8).try_into().unwrap(),
-                    gain: 0,
-                },
+                center_panel: CenterPanel::default(),
+                piano_panel: PianoPanel::default(),
                 sample_panel: SamplePanel::default(),
-                effects_panel: EffectsPanel {
-                    settings:0,
-                    fx1: 0,
-                    fx1_type: 0,
-                    fx1_rate: 0,
-                    fx2_type: 0,
-                    fx2_rate: 0,
-                    fx4_tempo: 0,
-                    fx4_moisture: 0,
-                    settings2: 0,
-                    fx2: 0,
-                    fx3: 0,
-                    fx3_type: 0,
-                    fx3_compression: 0,
-                    fx4: 0,
-                    fx4_feedback: 0,
-                    fx4_ping_pong: false,
-                    fx5_moisture: 0,
-                    settings3:0,
-                    fx5: false,
-                    fx5_type: 0,
-                    equalizer_bass: 0,
-                    equalizer_treble: 0,
-                    equalizer_freq: 0,
-                    equalizer_freq_gain: 0,
-                    equalizer_part_select: 0
-                },
-                extra: Extra {
-                    settings: 0,
-                    fx1_control: false,
-                    fx2_deep: false,
-                },
+                effects_panel: EffectsPanel::default(),
+                extra: Extra::default(),
             },
         }
     }
