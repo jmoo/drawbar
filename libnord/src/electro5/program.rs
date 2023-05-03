@@ -104,6 +104,7 @@ pub struct CenterPanel {
     #[brw(big)]
     pub settings3: u32,
 
+    // -6, 5, 4, 3, 2, 1, 0, 1 111
     // transpose (0 to 12  big endian = -6 to -6 half steps transposition)
     #[br(try_calc = (((settings3 & 0b11110000_00000000_00000000_00000000) >> ((8 * 2) + 12)) as u16).try_into())]
     #[bw(ignore)]
@@ -122,15 +123,13 @@ pub struct CenterPanel {
     #[bw(ignore)]
     pub organ_type: u8,
 
-    // always 1
     #[br(calc = ((settings3 & 0b00000000_00000000_00000100_00000000) >> ((8 * 1) + 2)) != 0)]
     #[bw(ignore)]
-    pub unknown_boolean_2: bool,
+    pub lower_enabled: bool,
 
-    // always 1
     #[br(calc = ((settings3 & 0b00000000_00000000_00000010_00000000) >> ((8 * 1) + 1)) != 0)]
     #[bw(ignore)]
-    pub unknown_boolean_3: bool,
+    pub upper_enabled: bool,
 
     #[br(calc = ((settings3 & 0b00000000_00000000_00000001_00000000) >> ((8 * 1) + 0)) != 0)]
     #[bw(ignore)]
@@ -206,6 +205,63 @@ pub struct SamplePanel {
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000000_00000000_10000000) >> ((8 * 0) + 7)) != 0)]
     #[bw(ignore)]
     pub filter: bool,
+}
+
+// 0x4e..0x92
+#[binrw]
+#[derive(Debug)]
+pub struct OrganPanel {
+    todo: [u8; (0x92 - 0x4d) as usize],
+
+    // Drawbars: 9 with 4 bits each representing a value of 0..8
+    // 0x4e..0x50      - pad
+    // 0x51 0b11100000 - preset 1/2 b3/b3-bass vib selection (010: 0, 101: 3)
+    // 0x51 0b00010000 - preset 1/2 b3/b3-bass perc third (0,1)
+    // 0x51 0b00001100 - preset 1/2 b3/b3-bass perc speed (10: 1, 01: 2, 11: 3)
+    // 0x52 0b00000000 - pad
+    // 0x53 0b01000000 - b3/b3-bass preset selection
+    // 0x54 0b00000000 - ?
+    // 0x55 0b11111111_11111111_11111111_11111111_11110000 - preset1 drawbars (b3 normal, b3-bass inverted for first two and then normal for the rest except their value is ignored)
+    // 0x59 0b00001000 - preset 1 b3/b3-bass vib on/off (0,1)
+    // 0x59 0b00000100 - preset 1 b3/b3-bass perc on/off (0,1)
+    // 0x59 0b00000010 - ?
+    // 0x59 0b00000001 - ?
+    // 0x5a 0b00000000 - ?
+    // 0x5b 0b00000000 - pad
+    // 0x5c 0b11111111_11111111_11111111_11111111_11110000 - preset2 drawbars (b3 normal, b3-bass normal)
+    // 0x60 0b00000100 - preset 2 b3/b3-bass vib on/off (0,1)
+    // 0x60 0b00000100 - preset 2 b3/b3-bass perc on/off (0,1)
+    // 0x60 0b00000010 - unknown boolean (true on all programs i have created, false on a bunch of random presets)
+    // 0x61 0b00100000 - unknown boolean (true on all programs i have created, false on a bunch of random presets)
+    // 0x62 0b00000000 - pad
+    // 0x63 0b11100000 - preset 1/2 vox vib selection (000: 4, 010: 2, 001: 0)
+    // 0x64 0b00000000 - pad
+    // 0x65 0b01000000 - vox preset selection
+    // 0x66 0b00000000 - pad
+    // 0x67 0b11111111_11111111_11111111_11111111_11110000 - preset1 drawbars (vox normal but 8th drawbar value is ignored)
+    // 0x6b 0b00001000 - preset 1 vox vib on/off
+    // 0x6c 0b00000000 - pad
+    // 0x6d 0b11111111_11111111_11111111_11111111_11110000 - preset1 drawbars (vox normal but 8th drawbar value is ignored)
+    // 0x71 0b00001000 - preset 2 vox vib on/off
+    // 0x72 0b00000000 - pad
+    // 0x73 0b11100000 - preset 1/2 farfisa vib selection (000: 4, 011: 3, 010: 1, 001: 0)
+    // 0x74 0b00000000 - pad
+    // 0x75 0b01000000 - farf preset selection
+    // 0x76 0b00000000 - pad
+    // 0x77 0b11111111_11111111_11111111_11111111_11110000 - preset1 drawbars (farfisa normal values but >= 5 is interpreted as 1 and anything else is interpreted as 0)
+    // 0x7b 0b00001000 - preset 1 farfisa vib on/off
+    // 0x7c 0b00000000 - pad
+    // 0x7d 0b11111111_11111111_11111111_11111111_11110000 - preset2 drawbars (farfisa normal values but >= 5 is interpreted as 1 and anything else is interpreted as 0)
+    // 0x81 0b00001000 - preset 2 farfisa vib on/off
+    // 0x82 0b00000000 - pad
+    // 0x83 0b00000000 - pad
+    // 0x84 - pad
+    // 0x85 0b01000000 - pipe preset selection
+    // 0x86 - pad
+    // 0x87 0b11111111_11111111_11111111_11111111_11110000 - preset1 drawbars (pipe normal)
+    // 0x8b 0b00001000 - unknown boolean (always true except for included preset 'Sunday')
+    // 0x8c 0b00000000 - pad
+    // 0x8d 0b11111111_11111111_11111111_11111111_11110000 - preset2 drawbars (pipe, normal)
 }
 
 // 0x93..0x9F
@@ -326,6 +382,16 @@ pub struct EffectsPanel {
     #[br(calc = ((((settings2 & 0b00000000_00000000_00000000_00011111)) << 2) as u8) + ((settings3 & 0b11000000) >> 6))]
     #[bw(ignore)]
     pub fx5_moisture: u8,
+
+    // 0 = off, 1 = on
+    #[br(calc = ((settings3 & 0b00100000) >> ((8 * 0) + 5)) as u8)]
+    #[bw(ignore)]
+    pub rotary_stop: u8,
+
+    // 0 = slow, 1 = fast
+    #[br(calc = ((settings3 & 0b00010000) >> ((8 * 0) + 4)) as u8)]
+    #[bw(ignore)]
+    pub rotary_speed: u8,
 }
 
 // 0xa1..0xa4
@@ -364,7 +430,7 @@ pub struct Schema {
     program_version: u16,
 
     // 0x2e..0x34
-    center_panel: CenterPanel,
+    pub center_panel: CenterPanel,
 
     // 0x35..0x3b
     pad1: [u8; (0x39 - 0x34) as usize],
@@ -379,13 +445,13 @@ pub struct Schema {
     pub sample_panel: SamplePanel,
 
     // 0x4e..0x92
-    todo1: [u8; (0x92 - 0x4d) as usize],
+    pub organ_panel: OrganPanel,
 
     // 0x93..0x9f
     pub effects_panel: EffectsPanel,
 
-    // 0xa0..0xa0
-    todo2: [u8; (0xa0 - 0x9f) as usize],
+    // 0xa0
+    todo: u8,
 
     // 0xa1..0xa4
     pub extra: Extra,
@@ -408,12 +474,12 @@ impl Program {
                 version: 4,
                 pad1: [0; (0x39 - 0x34) as usize],
                 pad2: [0; (0x45 - 0x41) as usize],
-                todo1: [0; (0x92 - 0x4d) as usize],
-                todo2: [0; (0xa0 - 0x9f) as usize],
+                todo: 0,
                 program_version: 4,
                 center_panel: CenterPanel::default(),
                 piano_panel: PianoPanel::default(),
                 sample_panel: SamplePanel::default(),
+                organ_panel: OrganPanel {  todo: [0; (0x92 - 0x4d) as usize] },
                 effects_panel: EffectsPanel::default(),
                 extra: Extra::default(),
             },

@@ -7,6 +7,7 @@ run() {
   local fileNamePattern=""
   local binary=false
   local range="0-4"
+  local quiet=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -27,6 +28,8 @@ Options:
   Include files that match this pattern
 -r, --recursive
   Recursively search for files
+-q, --quiet
+  Only print the byte values
 EOF
           return 0
           ;;
@@ -38,6 +41,11 @@ EOF
 
         -b|--binary)
           binary=true
+          shift
+          ;;
+
+        -q|--quiet)
+          quiet=true
           shift
           ;;
 
@@ -143,13 +151,18 @@ EOF
     byteColumnWidth="$((byteColumnWidth+1))"
   fi
 
-   printf "%-${fileColumnWidth}s" ""
+  if [[ "$quiet" = "true" ]]; then
+    fileColumnWidth=1
+    byteColumnWidth=1
+  else
+    printf "%-${fileColumnWidth}s" ""
 
-  for b in "${bytes[@]}"; do
-    printf "%-${byteColumnWidth}s" "0x$b"
-  done
+    for b in "${bytes[@]}"; do
+      printf "%-${byteColumnWidth}s" "0x$b"
+    done
 
-  printf "\n"
+    printf "\n"
+  fi
 
   # shellcheck disable=SC2155
   local bytePattern="$(echo "${bytes[@]}" | sed -E 's/ /|/g')"
@@ -161,7 +174,10 @@ EOF
   fi
 
   for f in "${matchedFiles[@]}"; do
-    printf "%-${fileColumnWidth}s" "$f"
+    if ! [[ "$quiet" = "true" ]]; then
+      printf "%-${fileColumnWidth}s" "$f"
+    fi
+
 
     xxd "${xxdArgs[@]}" "$f" \
     | grep -E "^0*($bytePattern):" \

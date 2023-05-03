@@ -138,7 +138,7 @@ fn test_ne5_update_song_program() -> Result<(), Error> {
 
 #[test]
 fn test_ne5_read_program() {
-    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/center_panel/o00_1_p00_0_0_0_50_50.ne5p");
+    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/center_panel/o00_1_p000_0_1_0_50_50.ne5p");
 
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
 
@@ -167,7 +167,7 @@ fn test_ne5_read_program() {
 
 #[test]
 fn test_ne5_read_write_program() {
-    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/center_panel/o00_1_p00_0_0_0_50_50.ne5p");
+    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/programs/center_panel/o00_1_p000_0_1_0_50_50.ne5p");
 
     let read_contents = read(TEST_FILE.clone()).unwrap();
     let program = libnord::from_path(TEST_FILE.clone()).unwrap();
@@ -206,7 +206,7 @@ fn test_ne5_program_read_write_center_panel() {
 
     let paths = fs::read_dir(TEST_FILES.clone()).unwrap();
 
-    let center_panel_re = Regex::new(r"([osp])([0-9])([0-9])_([0-9.-]+)_([osp])([0-9])([0-9])_([0-9.-]+)_([0-9.-]+)_([0-9.-]+)_([0-9.-]+)_([0-9.-]+)[.](skip[.])?ne5p$").unwrap();
+    let center_panel_re = Regex::new(r"([ospx])([01])([01])_([0-9.-]+)_([ospx])([01])([01])([01])_([0-9.-]+)_([0-9.-]+)_([0-9.-]+)_([0-9.-]+)_([0-9.-]+)[.](skip[.])?ne5p$").unwrap();
 
     for path in paths {
         let inner = path.unwrap();
@@ -222,9 +222,10 @@ fn test_ne5_program_read_write_center_panel() {
             let contents = read(path.as_str()).unwrap();
 
             let lower_instrument = match matches.get(1).unwrap().as_str() {
-                "o" => Instrument::Organ,
-                "s" => Instrument::Sample,
-                "p" => Instrument::Piano,
+                "o" => Some(Instrument::Organ),
+                "s" => Some(Instrument::Sample),
+                "p" => Some(Instrument::Piano),
+                "x" => None,
                 _ => panic!("invalid instrument in file {}", path),
             };
 
@@ -243,9 +244,10 @@ fn test_ne5_program_read_write_center_panel() {
             let lower_octave_shift = i8::from_str(matches.get(4).unwrap().as_str()).unwrap();
 
             let upper_instrument = match matches.get(5).unwrap().as_str() {
-                "o" => Instrument::Organ,
-                "s" => Instrument::Sample,
-                "p" => Instrument::Piano,
+                "o" => Some(Instrument::Organ),
+                "s" => Some(Instrument::Sample),
+                "p" => Some(Instrument::Piano),
+                "x" => None,
                 _ => panic!("invalid instrument in file {}", path),
             };
 
@@ -261,16 +263,22 @@ fn test_ne5_program_read_write_center_panel() {
                 _ => panic!("invalid control in file {}", path),
             };
 
-            let upper_octave_shift = i8::from_str(matches.get(8).unwrap().as_str()).unwrap();
-            let transpose = i8::from_str(matches.get(9).unwrap().as_str()).unwrap();
-            let split = u8::from_str(matches.get(10).unwrap().as_str()).unwrap();
+            let transpose_enabled = match matches.get(8).unwrap().as_str() {
+                "0" => false,
+                "1" => true,
+                _ => panic!("invalid transpose enabled in file {}", path),
+            };
+
+            let upper_octave_shift = i8::from_str(matches.get(9).unwrap().as_str()).unwrap();
+            let transpose = i8::from_str(matches.get(10).unwrap().as_str()).unwrap();
+            let split = u8::from_str(matches.get(11).unwrap().as_str()).unwrap();
 
             let part_mix = (
-                f32::from_str(matches.get(11).unwrap().as_str()).unwrap(),
-                f32::from_str(matches.get(12).unwrap().as_str()).unwrap()
+                f32::from_str(matches.get(12).unwrap().as_str()).unwrap(),
+                f32::from_str(matches.get(13).unwrap().as_str()).unwrap()
             );
 
-            if let Some(skip) = matches.get(13) {
+            if let Some(skip) = matches.get(14) {
                 continue;
             };
 
@@ -307,9 +315,21 @@ fn test_ne5_program_read_write_center_panel() {
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
 
+                    if let Some(lower_instrument) = lower_instrument {
+                        assert_eq!(program.lower_part(), lower_instrument, "lower instrument mismatch in file {}", path);
+                        assert_eq!(program.schema.center_panel.lower_enabled, true, "lower part enabled mismatch in file {}", path);
+                    } else {
+                        assert_eq!(program.schema.center_panel.lower_enabled, false, "lower part enabled mismatch in file {}", path);
+                    }
+
+                    if let Some(upper_instrument) = upper_instrument {
+                        assert_eq!(program.upper_part(), upper_instrument, "upper instrument mismatch in file {}", path);
+                        assert_eq!(program.schema.center_panel.upper_enabled, true, "upper part enabled mismatch in file {}", path);
+                    } else {
+                        assert_eq!(program.schema.center_panel.upper_enabled, false, "upper part enabled mismatch in file {}", path);
+                    }
+
                     assert_eq!(contents.as_slice(), output.as_slice(), "read/write mismatch in file {}", path);
-                    assert_eq!(program.lower_part(), lower_instrument, "lower instrument mismatch in file {}", path);
-                    assert_eq!(program.upper_part(), upper_instrument, "upper instrument mismatch in file {}", path);
                     assert_eq!(program.lower_octave_shift(), lower_octave_shift, "lower octave shift mismatch in file {}", path);
                     assert_eq!(program.upper_octave_shift(), upper_octave_shift, "upper octave shift mismatch in file {}", path);
                     assert_eq!(program.lower_sustain(), lower_sustain, "lower sustain mismatch in file {}", path);
@@ -317,13 +337,10 @@ fn test_ne5_program_read_write_center_panel() {
                     assert_eq!(program.lower_control(), lower_control, "lower control mismatch in file {}", path);
                     assert_eq!(program.upper_control(), upper_control, "upper control mismatch in file {}", path);
                     assert_eq!(program.split(), split != 0, "split enabled mismatch in file {}", path);
-                    assert_eq!(program.transpose_enabled(), transpose != 0, "transpose enabled mismatch in file {}", path);
+                    assert_eq!(program.transpose_enabled(), transpose_enabled, "transpose enabled mismatch in file {}", path);
                     assert_eq!(program.part_mix().lower().round(), part_mix.0.round(), "lower part mix mismatch in file {}", path);
                     assert_eq!(program.part_mix().upper().round(), part_mix.1.round(), "upper part mix mismatch in file {}", path);
-
-                    if transpose != 0 {
-                        assert_eq!(program.transpose(), transpose, "transpose mismatch in file {}", path);
-                    }
+                    assert_eq!(program.transpose(), transpose, "transpose mismatch in file {}", path);
 
                     if split != 0 {
                         assert_eq!(program.split_point() as u8, split - 1, "split point mismatch in file {}", path);
