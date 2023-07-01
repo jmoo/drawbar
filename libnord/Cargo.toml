@@ -3,19 +3,20 @@ name = "libnord"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 binrw = "0.11.1"
 bounded-integer = { version = "0.5.6", features = ["types"] }
 byteorder = "1.4.3"
 crcxx = "0.3.1"
 modular-bitfield = "0.11.2"
+modular-bitfield-msb = "0.11.2"
 quick-xml = "0.28.1"
 regex = "1.8.1"
 serde = "1.0.159"
 thiserror = "1.0.40"
+ux = "0.1.5"
 zip = "0.6.4"
+libnord_derive = { path = "../libnord_derive" }
 
 [lib]
 name = "libnord"

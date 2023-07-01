@@ -1,6 +1,10 @@
 { pkgs, lib, ... }:
 let
-  rust-bin = pkgs.rust-bin.nightly.latest.default;
+  #rust-bin = pkgs.rust-bin.nightly.latest.default;
+  rust-bin = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+    extensions = [ "rust-src" ];
+  });
+
 in
 {
   name = "nord-utils";
@@ -8,6 +12,8 @@ in
   packages = with pkgs; [
     trunk
     rust-bin
+    rust-analyzer
+    nil
   ] ++ (if pkgs.stdenv.isDarwin then [
     # Darwin only
     libiconv

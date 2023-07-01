@@ -6,8 +6,8 @@ pub use song::Song;
 pub mod program;
 pub use program::Program;
 pub mod bundle;
-pub use bundle::Bundle;
 use crate::common;
+pub use bundle::Bundle;
 
 pub type OctaveShift = common::OctaveShift<7, -6, 6>;
 pub type Transpose = common::Transpose<6, -6, 6>;

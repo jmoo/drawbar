@@ -1,5 +1,5 @@
 [package]
-name = "libnord-cli"
+name = "cli"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,6 +8,10 @@ edition = "2021"
 [dependencies]
 libnord = { version = "0.1.0", path = "../libnord" }
 crcxx = "0.3.1"
+modular-bitfield-msb = "0.11.2"
+modular-bitfield = "0.11.2"
+ux = "0.1.5"
+libnord_derive = { version = "0.1.0", path = "../libnord_derive" }
 
 [[bin]]
 name = "nord-util"

@@ -1,6 +1,6 @@
 [workspace]
 members = [
     "libnord",
-    "libnord-egui",
-    "libnord-cli"
+    "libnord_derive",
+    "cli"
 ]

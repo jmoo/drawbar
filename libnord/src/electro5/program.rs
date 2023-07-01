@@ -1,11 +1,14 @@
 use crate::common;
 use crate::common::{bank, PartMix};
 use crate::crc::{CrcReader, CrcWriter};
+use crate::electro5::{Instrument, OctaveShift, SplitPoint, Transpose};
 use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
+
+
+
 use std::fmt::Debug;
 use std::io;
-use crate::electro5::{Instrument, OctaveShift, SplitPoint, Transpose};
 
 pub const FORMAT: &str = "ne5p";
 pub const BANK_COUNT: u16 = 8;
@@ -212,6 +215,29 @@ pub struct SamplePanel {
 #[derive(Debug)]
 pub struct OrganPanel {
     todo: [u8; (0x92 - 0x4d) as usize],
+    // // 0x4e..0x50
+    // pad: B24,
+    //
+    // // 0x51 0b11100000
+    // pub b3_vib_type: B3,
+    //
+    // // 0x51 0b00010000
+    // pub b3_perc_third: bool,
+    //
+    // // 0x51 0b00001100
+    // pub b3_perc_speed: B3,
+    //
+    // // 0x52
+    // pad2: u8,
+    //
+    // // 0x53 0b01000000
+    // pub b3_bass_preset: bool,
+    //
+    // // 0x54
+    // pub unknown_byte: u8,
+    //
+    // // 0x55 0b11111111_11111111_11111111_11111111_11110000
+    // pub preset1_b3_drawbars: Drawbars,
 
     // Drawbars: 9 with 4 bits each representing a value of 0..8
     // 0x4e..0x50      - pad
@@ -479,7 +505,9 @@ impl Program {
                 center_panel: CenterPanel::default(),
                 piano_panel: PianoPanel::default(),
                 sample_panel: SamplePanel::default(),
-                organ_panel: OrganPanel {  todo: [0; (0x92 - 0x4d) as usize] },
+                organ_panel: OrganPanel {
+                    todo: [0; (0x92 - 0x4d) as usize],
+                },
                 effects_panel: EffectsPanel::default(),
                 extra: Extra::default(),
             },

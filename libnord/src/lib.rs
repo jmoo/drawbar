@@ -1,3 +1,4 @@
+pub mod cbin;
 pub mod common;
 pub mod crc;
 pub mod electro5;

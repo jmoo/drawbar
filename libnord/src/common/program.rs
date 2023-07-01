@@ -1,6 +1,6 @@
-use std::fmt::{Debug, Formatter};
 use crate::error::ParseError;
 use crate::types::RangedI8;
+use std::fmt::{Debug, Formatter};
 
 pub type OctaveShift<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
 pub type Transpose<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
@@ -36,7 +36,7 @@ impl PartMix {
     }
 
     pub fn as_string(&self) -> String {
-       format!("{:.1}/{:.1}", self.lower(), self.upper())
+        format!("{:.1}/{:.1}", self.lower(), self.upper())
     }
 
     pub fn as_tuple(&self) -> (f32, f32) {
@@ -65,7 +65,7 @@ impl TryFrom<u16> for PartMix {
         if value > 127 || value < 0 {
             return Err(ParseError::OutOfBounds(
                 format!("{:?}", value),
-                format!(" <{:?} >{:?}", 0, 127)
+                format!(" <{:?} >{:?}", 0, 127),
             ));
         }
 
