@@ -40,6 +40,7 @@ where
     pub trailer: u32,
 }
 
+
 impl<L: Location> Header<L> {
     pub fn new(version: u32, schema: &str, location: L) -> Header<L> {
         Header {

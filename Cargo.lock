@@ -200,9 +200,8 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0558d22a7b463ed0241e993f76f09f30b126687447751a8638587b864e4b3944"
+version = "0.20.2"
+source = "git+https://github.com/TedDriggs/darling?rev=8c4d6ad#8c4d6adca2d71c4f80da019fef5bd6366a6c8bfe"
 dependencies = [
  "darling_core",
  "darling_macro",
@@ -210,9 +209,8 @@ dependencies = [
 
 [[package]]
 name = "darling_core"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8bfa2e259f8ee1ce5e97824a3c55ec4404a0d772ca7fa96bf19f0752a046eb"
+version = "0.20.2"
+source = "git+https://github.com/TedDriggs/darling?rev=8c4d6ad#8c4d6adca2d71c4f80da019fef5bd6366a6c8bfe"
 dependencies = [
  "fnv",
  "ident_case",
@@ -224,9 +222,8 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29a358ff9f12ec09c3e61fef9b5a9902623a695a46a917b07f269bff1445611a"
+version = "0.20.2"
+source = "git+https://github.com/TedDriggs/darling?rev=8c4d6ad#8c4d6adca2d71c4f80da019fef5bd6366a6c8bfe"
 dependencies = [
  "darling_core",
  "quote",

@@ -1,8 +1,12 @@
+use std::u8::MAX;
+
 use darling::ast::NestedMeta;
-use darling::{FromField, FromMeta};
+use darling::{FromField, FromMeta, util::parse_expr};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::{DeriveInput, Field, FieldsNamed, Visibility};
+use syn::{parse_quote, Expr};
+
 
 #[derive(Debug, FromMeta)]
 struct CBinArgs {}
@@ -12,6 +16,15 @@ struct CBinArgs {}
 struct CBinAttrArgs {
     #[darling(default)]
     bits: usize,
+
+    #[darling(default)]
+    bytes: usize,
+
+    #[darling(map = Some)]
+    from: Option<Expr>,
+
+    #[darling(map = Some)]
+    try_from: Option<Expr>,
 }
 
 pub struct CBinGenerator {
@@ -94,11 +107,11 @@ impl CBinGenerator {
 
     pub fn expand(&mut self) -> syn::Result<TokenStream> {
         let expanded_struct = self.expand_struct();
-        let expanded_from_reader = self.expand_from_reader();
+        let expanded_reader = self.expand_reader();
 
         let output = quote! {
             #expanded_struct
-            #expanded_from_reader
+            #expanded_reader
         };
 
         Ok(output)
@@ -118,20 +131,53 @@ impl CBinGenerator {
         }
     }
 
-    fn expand_from_reader(&self) -> TokenStream {
+    fn expand_reader(&self) -> TokenStream {
         let name = &self.name;
         let debug_args = format!("{:?}", self.args);
         let debug_fields = format!("{:?}", self.schema);
 
         let mut i = 0;
-        let read_mappers = self.schema.iter().map(|field| {
-            let name = &self.fields[i].ident.clone().unwrap();
-            let bits = &field.bits;
+        let read_mappers = self.schema.iter().map(|schema| {
+            let field = &self.fields[i];
             i = i + 1;
 
-            quote! {
-                instance.#name = reader.take_bits(#bits)?;
+            let name = field.ident.clone().unwrap();
+            
+            // size config
+            let bytes = &schema.bytes + (if schema.bits > 0 { (schema.bits / 8) + 1 } else { 0 });
+            let bits = schema.bits % 8;
 
+            // mapping overrides
+            let from = &schema.from;
+            let try_from = &schema.try_from;
+
+            let read_expr = if bytes> 0 {
+                quote! {
+                    let mut out = [0u8; #bytes];
+                    reader.read_bits_exact(&mut out, #bits)?;
+                }
+            } else {
+                quote! {
+                    let mut out: Vec<u8> = Vec::new();
+                    reader.read_to_end(&mut out)?;
+                }
+            };
+
+            if let Some(try_from) = try_from {
+                quote! {
+                    #read_expr
+                    instance.#name = (#try_from)(out)?;
+                }
+            } else if let Some(from) = from {
+                quote! {
+                    #read_expr
+                    instance.#name = (#from)(out);
+                }
+            } else {
+                quote! {
+                    #read_expr
+                    instance.#name = out;
+                }
             }
         });
 

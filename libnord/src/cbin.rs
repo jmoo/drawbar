@@ -10,8 +10,7 @@ pub struct BitReader<'a> {
 
 impl<'a> std::io::Read for BitReader<'a> {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, std::io::Error> {
-        self.read_bits(out, 0)?;
-        Ok(out.len())
+        self.read_bits(out, 0)
     }
 }
 
@@ -24,22 +23,21 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    pub fn take_bits(&mut self, bits: usize) -> Result<u8, std::io::Error> {
-        assert!(bits <= 8);
-
-        let mut out = [0 as u8];
-        self.read_bits(&mut out, bits % 8)?;
-        Ok(out[0])
-    }
-
-    fn read_bits(&mut self, out: &mut [u8], bits: usize) -> Result<(), std::io::Error> {
+    pub fn read_bits(&mut self, out: &mut [u8], bits: usize) -> Result<usize, std::io::Error> {
         assert!(bits < 8);
 
+        let mut bytes_read = 0;
+        let mut eof = false;
+
         if self.offset == 0 {
-            self.reader.read_exact(out)?;
+            bytes_read = self.reader.read(out)?;
+
+            if bytes_read < out.len() {
+                eof = true;
+            }
 
             if bits == 0 {
-                return Ok(());
+                return Ok(bytes_read);
             }
         }
 
@@ -60,11 +58,19 @@ impl<'a> BitReader<'a> {
             let mask = 0b1111_1111 << offset_inverse;
 
             for i in 0..out.len() {
+                bytes_read += 1;
                 buff = buff << self.offset;
 
                 if i < out.len() - 1 + overflow {
                     let mut byte = [0 as u8];
-                    self.reader.read_exact(&mut byte)?;
+
+                    if eof {
+                        break;
+                    }
+                    if self.reader.read(&mut byte)? == 0 {
+                        eof = true;
+                    }
+
                     cap = byte[0];
 
                     buff = buff | ((mask & byte[0]) >> offset_inverse);
@@ -89,6 +95,16 @@ impl<'a> BitReader<'a> {
             self.buffer = 0;
         }
 
-        Ok(())
+        Ok(bytes_read)
+    }
+
+    pub fn read_bits_exact(&mut self, out: &mut [u8], bits: usize) -> Result<(), std::io::Error> {
+        let bytes_read = self.read_bits(out, bits)?;
+        
+        if bytes_read != out.len() {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("unexpected end: {} bytes read out of {}", bytes_read, out.len())));
+        } else {
+            Ok(())
+        }
     }
 }
