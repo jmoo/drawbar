@@ -15,6 +15,7 @@ pub struct Preamble {
     pub format: String,
 }
 
+
 #[binrw]
 #[derive(Debug)]
 #[br(assert(trailer == 0xFFFFFFFF))]

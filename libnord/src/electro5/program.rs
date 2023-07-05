@@ -5,8 +5,6 @@ use crate::electro5::{Instrument, OctaveShift, SplitPoint, Transpose};
 use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
 
-
-
 use std::fmt::Debug;
 use std::io;
 

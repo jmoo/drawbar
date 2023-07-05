@@ -4,7 +4,7 @@ mod cbin;
 
 #[proc_macro_attribute]
 pub fn cbin(args: TokenStream, input: TokenStream) -> TokenStream {
-    cbin::CBinGenerator::new(args.into(), input.into())
+    cbin::Generator::new(args.into(), input.into())
         .unwrap()
         .expand()
         .unwrap()

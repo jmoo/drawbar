@@ -335,8 +335,6 @@ dependencies = [
 name = "libnord_derive"
 version = "0.1.0"
 dependencies = [
- "binrw",
- "binrw_derive",
  "darling",
  "proc-macro2",
  "quote",

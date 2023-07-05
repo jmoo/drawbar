@@ -67,6 +67,7 @@ impl<'a> BitReader<'a> {
                     if eof {
                         break;
                     }
+
                     if self.reader.read(&mut byte)? == 0 {
                         eof = true;
                     }
@@ -91,6 +92,7 @@ impl<'a> BitReader<'a> {
 
         if self.offset > 0 {
             self.buffer = cap;
+
         } else {
             self.buffer = 0;
         }
@@ -102,7 +104,16 @@ impl<'a> BitReader<'a> {
         let bytes_read = self.read_bits(out, bits)?;
         
         if bytes_read != out.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("unexpected end: {} bytes read out of {}", bytes_read, out.len())));
+            return Err(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof, 
+                    format!("unexpected end: {} bytes read out of {}", 
+                        bytes_read, 
+                        out.len()
+                    )
+                )
+            );
+
         } else {
             Ok(())
         }

@@ -9,8 +9,6 @@ edition = "2021"
 proc-macro2 = "1.0.56"
 quote = "1.0.26"
 syn = "2.0.15"
-binrw = "0.11.1"
-binrw_derive = "0.11.1"
 darling = { git = "https://github.com/TedDriggs/darling", rev = "8c4d6ad" }
 
 
