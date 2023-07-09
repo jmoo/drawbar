@@ -62,8 +62,7 @@ pub struct TestBitOffsets {
     #[cbin(bits = 3)]
     pub b: [u8; 1],
 
-    #[cbin(bytes = 1)]
-    pub c: [u8; 1],
+    pub c: u8,
 
     #[cbin(bits = 2)]
     pub d: [u8; 1],
@@ -94,7 +93,7 @@ fn test_bit_offsets() {
 
     assert_eq!(test.a[0], 0b110, "test.a: fetching bits (0b{:03b} != 0b{:03b})", test.a[0], 0b110);
     assert_eq!(test.b[0], 0b011, "test.b: fetching bits with an offset (0b{:03b} != 0b{:03b})", test.b[0], 0b011);
-    assert_eq!(test.c[0], 0b00111111, "test.c: fetching bytes with an offset (0b{:08b} != 0b{:08b})", test.c[0], 0b00111111);
+    assert_eq!(test.c, 0b00111111, "test.c: fetching bytes with an offset (0b{:08b} != 0b{:08b})", test.c, 0b00111111);
     assert_eq!(test.d[0], 0b01, "test.d: fetching bits with an offset and zero remaining offset (0b{:02b} != 0b{:02b})", test.d[0], 0b01);
     assert_eq!(test.e, 0b0001101100111001, "test.e: fetching bits and bytes (0b{:016b} != 0b{:016b})", test.e, 0b01101100111001);
     assert_eq!(test.f, 0b1101011001, "test.f: fetching bits and bytes with an offset (0b{:016b} != 0b{:016b})", test.f, 0b1101011001);

@@ -1,8 +1,9 @@
 use darling::ast::NestedMeta;
 use darling::{FromField, FromMeta};
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::quote;
-use syn::{parse_quote, Expr};
+use quote::{quote, ToTokens};
+use syn::token::Type;
+use syn::{parse_quote, Expr, TypeArray};
 use syn::{DeriveInput, Field, FieldsNamed, Visibility};
 
 #[derive(Debug, FromMeta)]
@@ -49,7 +50,7 @@ struct Spec {
 
 impl Spec {
     pub fn from_field(field: &Field) -> Result<Self, syn::Error> {
-        let args = AttrArgs::from_field(field)?;
+        let mut args = AttrArgs::from_field(field)?;
 
         if args.ignore {
             let field = field.clone();
@@ -79,8 +80,63 @@ impl Spec {
                 (#from)(&_out)
             }
         } else {
-            quote! {
-                _out.try_into().unwrap()
+            match field.ty.clone() {
+                syn::Type::Array(arr) => {
+                    let size: usize = syn::LitInt::new(&arr.len.to_token_stream().to_string(), Span::call_site())
+                        .base10_parse()
+                        .unwrap();
+
+                    if args.bytes == 0 && args.bits == 0 {
+                        args.bytes = size;
+                    } else {
+                        let buffer_size = args.bytes + (if args.bits > 0 { (args.bits / 8) + 1 } else { 0 });
+
+                        if buffer_size != size {
+                            panic!("Unable to map [u8; {}] to [u8; {}] for field {}", size, buffer_size, field.ident.to_token_stream().to_string())
+                        }
+                    }
+
+                    quote! {
+                        _out.try_into().unwrap()
+                    }
+                },
+                // syn::Type::BareFn(_) => todo!(),
+                // syn::Type::Group(_) => todo!(),
+                // syn::Type::ImplTrait(_) => todo!(),
+                // syn::Type::Infer(_) => todo!(),
+                // syn::Type::Macro(_) => todo!(),
+                // syn::Type::Never(_) => todo!(),
+                // syn::Type::Paren(_) => todo!(),
+                // syn::Type::Path(_) => todo!(),
+                // syn::Type::Ptr(_) => todo!(),
+                // syn::Type::Reference(_) => todo!(),
+                // syn::Type::Slice(_) => todo!(),
+                // syn::Type::TraitObject(_) => todo!(),
+                // syn::Type::Tuple(_) => todo!(),
+                syn::Type::Path(expr) => {
+                    let ty = expr.to_token_stream().to_string();
+
+                    match ty.as_str() {
+                        "u8" => {
+                            if args.bytes == 0 && args.bits == 0 {
+                                args.bytes = 1;
+                            } else {
+                                let buffer_size = args.bytes + (if args.bits > 0 { (args.bits / 8) + 1 } else { 0 });
+
+                                if buffer_size != 1 {
+                                    panic!("Unable to map [u8; {}] to u8 for field {}", buffer_size, field.ident.to_token_stream().to_string())
+                                }
+                            }
+
+                            quote! {
+                                u8::from_be_bytes([_out[0]]);
+                            }
+                        },
+                        _ => panic!("No default mapper for [u8] -> {} for filed {}", ty, field.ident.to_token_stream().to_string())
+                    }
+
+                },
+                _ => panic!("Unable to map [u8] to {} for field '{}'", field.ty.to_token_stream().to_string(), field.ident.to_token_stream().to_string())
             }
         };
 
