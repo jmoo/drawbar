@@ -1,8 +1,3 @@
-
-
-
-
-
 pub mod bank;
 pub mod piano;
 pub mod sample;
@@ -18,7 +13,6 @@ use crate::error;
 pub use error::Error;
 
 pub mod program;
-
 
 pub use program::OctaveShift;
 pub use program::PartMix;

@@ -15,7 +15,6 @@ pub struct Preamble {
     pub format: String,
 }
 
-
 #[binrw]
 #[derive(Debug)]
 #[br(assert(trailer == 0xFFFFFFFF))]
@@ -40,7 +39,6 @@ where
     #[brw(little)]
     pub trailer: u32,
 }
-
 
 impl<L: Location> Header<L> {
     pub fn new(version: u32, schema: &str, location: L) -> Header<L> {

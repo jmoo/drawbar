@@ -14,6 +14,7 @@ in
     rust-bin
     rust-analyzer
     nil
+    nixfmt
   ] ++ (if pkgs.stdenv.isDarwin then [
     # Darwin only
     libiconv

@@ -2,9 +2,8 @@ use darling::ast::NestedMeta;
 use darling::{FromField, FromMeta};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
-use syn::{DeriveInput, Field, FieldsNamed, Visibility};
 use syn::{parse_quote, Expr};
-
+use syn::{DeriveInput, Field, FieldsNamed, Visibility};
 
 #[derive(Debug, FromMeta)]
 struct Args {
@@ -60,7 +59,7 @@ impl Spec {
                 map_read: None,
                 field: Some(quote! {
                     #field
-                })
+                }),
             });
         }
 
@@ -73,15 +72,15 @@ impl Spec {
 
         let map_read = if let Some(try_from) = args.try_from {
             quote! {
-                (#try_from)(_out)?
+                (#try_from)(&_out)?
             }
         } else if let Some(from) = args.from {
             quote! {
-                (#from)(_out)
+                (#from)(&_out)
             }
         } else {
             quote! {
-                _out
+                _out.try_into().unwrap()
             }
         };
 
@@ -102,13 +101,17 @@ impl Spec {
         } else {
             let vis = field.vis.clone();
             let ty = field.ty.clone();
-            let attrs: Vec<_> =  field.attrs.iter().filter_map(|attr| {
-                if attr.path().is_ident("cbin") {
-                    None
-                } else {
-                    Some(attr.clone())
-                }
-            }).collect();
+            let attrs: Vec<_> = field
+                .attrs
+                .iter()
+                .filter_map(|attr| {
+                    if attr.path().is_ident("cbin") {
+                        None
+                    } else {
+                        Some(attr.clone())
+                    }
+                })
+                .collect();
 
             Some(quote! {
                 #(#attrs)*
@@ -120,7 +123,7 @@ impl Spec {
             map_read: Some(map_read),
             field,
             bits: args.bits,
-            bytes: args.bytes
+            bytes: args.bytes,
         })
     }
 }
@@ -176,28 +179,34 @@ impl Generator {
 
         let mut schema: Vec<Spec> = vec![
             Spec {
-                field: None, bytes: 4, bits: 0, map_read: Some(parse_quote! { 
+                field: None,
+                bytes: 4,
+                bits: 0,
+                map_read: Some(parse_quote! {
                     let magic_str = String::from_utf8_lossy(&_out).to_string();
                     assert_eq!(magic_str, "CBIN");
-                })
+                }),
             },
-
             Spec {
-                field: None, bytes: 4, bits: 0, map_read: Some(parse_quote! { 
-                    let file_version = u32::from_be_bytes(_out);
-                })
+                field: None,
+                bytes: 4,
+                bits: 0,
+                map_read: Some(parse_quote! {
+                    let file_version = u32::from_be_bytes(_out.try_into().unwrap());
+                }),
             },
         ];
 
         if let Some(format) = args.format {
-            schema.append(&mut vec![
-                Spec {
-                    field: None, bytes: 4, bits: 0, map_read: Some(parse_quote! { 
-                        let format_str = String::from_utf8_lossy(&_out).to_string();
-                        assert_eq!(format_str, #format);
-                    })
-                },
-            ]);
+            schema.append(&mut vec![Spec {
+                field: None,
+                bytes: 4,
+                bits: 0,
+                map_read: Some(parse_quote! {
+                    let format_str = String::from_utf8_lossy(&_out).to_string();
+                    assert_eq!(format_str, #format);
+                }),
+            }]);
 
             if args.bank_count + args.slot_count > 0 {
                 let bank_count = args.bank_count;
@@ -210,29 +219,28 @@ impl Generator {
                     ));
                 }
 
-                schema.append(&mut vec![
-                    Spec {
-                        bytes: 4, 
-                        bits: 0, 
-                        field: Some(quote! {
-                            pub location: ::libnord::types::RangedU16Pair<#bank_count, #slot_count>
-                        }), 
-                        map_read: Some(parse_quote! {
-                            let bank = u16::from_le_bytes([_out[0], _out[1]]);
-                            let slot = u16::from_le_bytes([_out[2], _out[3]]);
-                            instance.location = (bank, slot).try_into().unwrap();
-                        })
-                    }
-                ]);
+                schema.append(&mut vec![Spec {
+                    bytes: 4,
+                    bits: 0,
+                    field: Some(quote! {
+                        pub location: ::libnord::types::RangedU16Pair<#bank_count, #slot_count>
+                    }),
+                    map_read: Some(parse_quote! {
+                        let bank = u16::from_le_bytes([_out[0], _out[1]]);
+                        let slot = u16::from_le_bytes([_out[2], _out[3]]);
+                        instance.location = (bank, slot).try_into().unwrap();
+                    }),
+                }]);
 
-                schema.append(&mut vec![
-                    Spec {
-                        field: None, bytes: 4, bits: 0, map_read: Some(parse_quote! {
-                            let header_trailer = u32::from_be_bytes(_out);
-                            assert_eq!(header_trailer, 0xffffffff);
-                        })
-                    }
-                ]);
+                schema.append(&mut vec![Spec {
+                    field: None,
+                    bytes: 4,
+                    bits: 0,
+                    map_read: Some(parse_quote! {
+                        let header_trailer = u32::from_be_bytes(_out.try_into().unwrap());
+                        assert_eq!(header_trailer, 0xffffffff);
+                    }),
+                }]);
             }
         }
 
@@ -242,7 +250,7 @@ impl Generator {
             input: struct_input,
             name: struct_name.clone(),
             vis: struct_vis.clone(),
-            schema
+            schema,
         })
     }
 
@@ -262,10 +270,12 @@ impl Generator {
         let name = &self.name;
         let vis = &self.vis;
         let attrs = &self.input.attrs;
-        
-        let fields = self.schema.iter().filter_map(|spec| {
-            spec.field.clone()
-        }).collect::<Vec<_>>();
+
+        let fields = self
+            .schema
+            .iter()
+            .filter_map(|spec| spec.field.clone())
+            .collect::<Vec<_>>();
 
         quote! {
             #(#attrs)*
@@ -278,54 +288,87 @@ impl Generator {
     fn expand_reader(&self) -> TokenStream {
         let name = &self.name;
 
-        let mut total_bytes = 0;
-        let mut total_bits = 0;
+        let mut cursor: usize = 0;
+        let mut offset: usize = 0;
 
-        let readers: Vec<_> = self.schema.iter().map(|schema| {
-            if let Some(map_expr) = schema.map_read.clone() {
-                let schema_bytes = schema.bytes;
-                let schema_bits = schema.bits;
+        let mut readers: Vec<TokenStream> = vec![];
 
-                total_bytes += schema_bytes;
-                total_bits += schema_bits;
+        for schema in self.schema.iter() {
+            assert!(offset < 8);
 
-                let bytes = schema.bytes + (if schema.bits > 0 { (schema.bits / 8) + 1 } else { 0 });
-                let bits = schema.bits % 8;
+            if schema.map_read.is_none() {
+                continue;
+            }
 
-                if bytes > 0 {
-                    return quote! {
-                        let mut _out = [0u8; #bytes];
-                        reader.read_bits_exact(&mut _out, #bits)?;
-                        #map_expr
+            let map_expr = schema.map_read.clone().unwrap();
+            let buffer_size = schema.bytes + (if schema.bits > 0 { (schema.bits / 8) + 1 } else { 0 });
+            let start = cursor;
+            let end = cursor + buffer_size;
+
+            if offset > 0 || (schema.bits % 8 > 0) {
+                readers.push(quote! {
+                    let mut _out = [0u8; #buffer_size];
+                });
+
+                for i in 0..buffer_size {
+                    // total bits needed
+                    let need = if i > 0 || schema.bits % 8 == 0 { 8 } else { schema.bits % 8 };
+
+                    // bits to skip from the left
+                    let skip = offset + 0;
+
+                    // bits to keep in the current byte
+                    let keep = 8 - (8 - need).max(offset);
+
+                    // bits needed from the next byte
+                    let replace = need - keep;
+
+                    if replace > 0 {
+                        readers.push(quote! {
+                            _out[#i] = ((_buffer[#cursor] << #skip) >> (8 - #need)) | (_buffer[#cursor + 1] >> (8 - #replace));
+                        });
+                    } else {
+                        readers.push(quote! {
+                            _out[#i] = (_buffer[#cursor] << #skip) >> (8 - #need);
+                        });
                     }
-                } else {
-                    return quote! {
-                        println!(#schema_bits, #schema_bytes)
-                        let mut _out: Vec<u8> = Vec::new();
-                        reader.read_to_end(&mut _out)?;
-                        #map_expr
-                    }
+
+                    if replace > 0 || (offset + need) == 8 {
+                        cursor += 1;
+                        offset = replace;
+                    } else {
+                        offset = (offset + need) % 8;
+                    }   
                 }
+
             } else {
-                quote! {
-                    // Ignored field (no map_read)
-                }
-            } 
-        }).collect();
+                readers.push(quote! {
+                    let _out = &_buffer[#start..#end];
+                });
 
-        if (total_bits % 8) > 0 {
-            panic!("Total bits is not a multiple of 8");
+                cursor = end;
+            }
+
+            readers.push(quote! {
+                #map_expr
+            });
+
         }
-
-        total_bytes += total_bits % 8;
 
         quote! {
             impl ::libnord::cbin::FromReader<Self> for #name {
                 fn from_reader(reader: &mut (impl std::io::Read)) -> Result<Self, std::io::Error> {
+                    let mut _buffer = [0u8; #cursor];
+
+                    reader.read_exact(&mut _buffer)?;
+
+                    <Self as ::libnord::cbin::FromBytes<Self>>::from_bytes(&_buffer)
+                }
+            }
+
+            impl ::libnord::cbin::FromBytes<Self> for #name {
+                fn from_bytes(_buffer: &[u8]) -> Result<Self, std::io::Error> {
                     let mut instance = Self::default();
-                    let mut reader = ::libnord::cbin::BitReader::new(reader);
-                    // let mut crc32 = ::libnord::crc::CrcReader::new(0x2c, 0x2c - #total_bytes);
-                    let size = #total_bytes;
 
                     #(#readers)*
 

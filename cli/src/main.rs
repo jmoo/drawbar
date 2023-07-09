@@ -1,6 +1,5 @@
-
 use std::fmt::{Debug, Formatter};
-use std::io::{Read};
+use std::io::Read;
 
 use modular_bitfield_msb::error::{InvalidBitPattern, OutOfBounds};
 use modular_bitfield_msb::prelude::*;
