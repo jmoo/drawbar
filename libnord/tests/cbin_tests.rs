@@ -67,10 +67,10 @@ pub struct TestBitOffsets {
     #[cbin(bits = 2)]
     pub d: [u8; 1],
 
-    #[cbin(bits = 14, from = |x: &[u8] | u16::from_be_bytes([x[0], x[1]]))]
+    #[cbin(bits = 14, from = u16::from_be_bytes)]
     pub e: u16,
 
-    #[cbin(bytes = 1, bits = 2, from = |x: &[u8] | u16::from_be_bytes([x[0], x[1]]))]
+    #[cbin(bytes = 1, bits = 2, from = u16::from_be_bytes)]
     pub f: u16,
 
     #[cbin(bytes = 1)]
@@ -100,7 +100,6 @@ fn test_bit_offsets() {
     assert_eq!(test.g[0], 0, "test.g: sanity check to make sure no '1' bits are left in the buffer (0b{:08b} != 0b{:08b})", test.g[0], 0);
 }
 
-
 #[cbin(format = "ne5p", bank_count = 8, slot_count = 50)]
 #[derive(Default)]
 pub struct TestHangingBits {
@@ -120,4 +119,28 @@ fn test_hanging_bits_without_panic() {
     assert_eq!(test.a[0], 0b001, "0b{:03b} != 0b{:03b}", test.a[0], 0b001);
 }
 
+#[cbin(fragment)]
+#[derive(Default)]
+pub struct TestChild {
+    pub a: u8,
+}
+
+#[cbin(format = "ne5p", bank_count = 8, slot_count = 50)]
+#[derive(Default)]
+pub struct TestNested {
+    #[cbin(bytes = 1)]
+    pub child: TestChild,
+}
+
+#[test]
+fn test_nested() {
+    let mut bytes = cbin_header.to_vec();
+
+    bytes.append(&mut vec![
+        0b00110011
+    ]);
+
+    let test = <TestNested as ::libnord::cbin::FromBytes<TestNested>>::from_bytes(&bytes).unwrap();
+    assert_eq!(test.child.a, 0b00110011, "0b{:03b} != 0b{:03b}", test.child.a, 0b00110011);
+}
 
