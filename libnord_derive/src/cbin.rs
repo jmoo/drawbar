@@ -1,11 +1,11 @@
 use darling::ast::NestedMeta;
-use darling::{FromMeta};
+use darling::FromMeta;
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote};
-use syn::{parse_quote};
+use quote::quote;
+use syn::parse_quote;
 use syn::{DeriveInput, Field, FieldsNamed, Visibility};
 
-use crate::spec::{Spec, SpecField, SpecArgs};
+use crate::spec::{Spec, SpecArgs, SpecField};
 
 #[derive(Debug, FromMeta)]
 struct Args {
@@ -19,7 +19,7 @@ struct Args {
     slot_count: u16,
 
     #[darling(default)]
-    fragment: bool
+    fragment: bool,
 }
 
 pub struct Generator {
@@ -49,7 +49,9 @@ impl Generator {
         };
 
         let fields: Vec<Field> = match contents.fields {
-            syn::Fields::Named(FieldsNamed { named, .. }) => named.iter().map(|f| f.clone()).collect(),
+            syn::Fields::Named(FieldsNamed { named, .. }) => {
+                named.iter().map(|f| f.clone()).collect()
+            }
             _ => {
                 return Err(syn::Error::new(
                     Span::call_site(),
@@ -60,12 +62,12 @@ impl Generator {
 
         let mut spec = Spec::new(&fields)?;
 
-         if !args.fragment {
-             spec.append(vec! [
+        if !args.fragment {
+            spec.append(vec![
                 // 0x00 - CBIN magic string
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_magic_str }),
-                    from: Some(parse_quote! { 
+                    from: Some(parse_quote! {
                         |x: [u8; 4]| {
                             let mapped = String::from_utf8_lossy(&x).to_string();
                             assert_eq!(mapped, "CBIN"); mapped
@@ -76,8 +78,8 @@ impl Generator {
                     temp: true,
                     bytes: 4,
                     ..Default::default()
-                })?.unwrap(),
-
+                })?
+                .unwrap(),
                 // 0x04 - CBIN file version
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_version }),
@@ -85,19 +87,19 @@ impl Generator {
                     seek: Some(0x04),
                     temp: true,
                     ..Default::default()
-                })?.unwrap(),
-
+                })?
+                .unwrap(),
                 // 0x08 - CBIN file format
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_format }),
-                    from: Some(if let Some(format) = args.format { 
-                        parse_quote! { 
+                    from: Some(if let Some(format) = args.format {
+                        parse_quote! {
                             |x: [u8; 4]| {
                                 let mapped = String::from_utf8_lossy(&x).to_string();
                                 assert_eq!(mapped, #format); mapped
-                            } 
+                            }
                         }
-                    } else { 
+                    } else {
                         parse_quote! { |x: [u8; 4]| String::from_utf8_lossy(&x).to_string() }
                     }),
                     mapped_type: Some(parse_quote! { String }),
@@ -105,8 +107,8 @@ impl Generator {
                     temp: true,
                     bytes: 4,
                     ..Default::default()
-                })?.unwrap(),
-
+                })?
+                .unwrap(),
                 // 0x10 - CBIN header trailer
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_trailer }),
@@ -121,8 +123,9 @@ impl Generator {
                     seek: Some(0x10),
                     temp: true,
                     ..Default::default()
-                })?.unwrap(),
-             ]);
+                })?
+                .unwrap(),
+            ]);
 
             // 0x0C - CBIN entity bank location
             if args.bank_count + args.slot_count > 0 {
@@ -157,7 +160,7 @@ impl Generator {
             input: struct_input,
             name: struct_name.clone(),
             vis: struct_vis.clone(),
-            spec
+            spec,
         })
     }
 
@@ -201,14 +204,16 @@ impl Generator {
         let buffer = quote! { _buffer };
         let instance = quote! { instance };
 
-        let readers = self.spec.iter().map(|spec| {
-            spec.assign(
-                spec.map_read(
-                    spec.read(buffer.clone())
-                ),
-                Some(instance.clone())
-            )
-        }).collect::<Vec<TokenStream>>(); 
+        let readers = self
+            .spec
+            .iter()
+            .map(|spec| {
+                spec.assign(
+                    spec.map_read(spec.read(buffer.clone())),
+                    Some(instance.clone()),
+                )
+            })
+            .collect::<Vec<TokenStream>>();
 
         quote! {
             impl ::libnord::cbin::FromReader<Self> for #name {
