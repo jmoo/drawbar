@@ -1,7 +1,7 @@
 use darling::FromField;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::VecDeque};
 use syn::{Attribute, Expr, Field, Visibility};
 
 #[derive(Debug, FromField, Default)]
@@ -456,51 +456,74 @@ impl Spec {
         let mut offset = 0;
         let mut index = 0;
 
-        // @todo: slot unpinned fields in between pinned fields and panic if they overlap
+        let (mut pinned, mut unpinned): (Vec<_>, Vec<_>) = self.fields.drain(..).partition(|f| f.pinned);
 
-        self.fields.sort_by(|a, b| {
-            if a.pinned && b.pinned {
-                a.cursor.cmp(&b.cursor)
-            } else if a.pinned {
-                Ordering::Less
-            } else if b.pinned {
-                Ordering::Greater
-            } else {
-                a.index.cmp(&b.index)
-            }
-        });
+        pinned.sort_by(|a, b| a.cursor.cmp(&b.cursor));
+        unpinned.sort_by(|a, b| a.index.cmp(&b.index));
 
-        for mut field in self.fields.iter_mut() {
-            field.index = index;
-            index += 1;
+        let mut pinned = VecDeque::from(pinned);
+        let mut unpinned = VecDeque::from(unpinned);
 
-            if field.pinned {
+        if pinned.len() > 0 {
+            while !pinned.is_empty() {
+                let mut field = pinned.pop_front().unwrap();
+
+                field.index = index;
+                index += 1;
+
                 if cursor == field.cursor {
                     field.offset = offset;
                 } else {
                     field.offset = 0;
                 }
 
-                cursor = field.cursor + field.bytes;
-                offset = field.offset + field.bits;
-            } else {
-                field.cursor = cursor;
-                field.offset = offset;
+                cursor = field.cursor + field.bytes + offset / 8;
+                offset = (field.offset + field.bits) % 8;
 
-                cursor += field.bytes;
-                offset += field.bits;
+                self.fields.push(field);
+
+                if !pinned.is_empty() && !unpinned.is_empty() && pinned[0].cursor > cursor {
+                    let mut field = unpinned.pop_front().unwrap();
+                    
+                    field.index = index;
+                    index += 1;
+
+                    field.cursor = cursor;
+                    field.offset = offset;
+
+                    cursor += field.bytes + (offset / 8);
+                    offset = (offset + field.bits) % 8;
+
+                    if cursor > pinned[0].cursor {
+                        panic!("Field {} overlaps with pinned field {}", field.name, pinned[0].name);
+                    }
+
+                    self.fields.push(field);
+                }
             }
-
-            cursor += offset / 8;
-            offset %= 8;
         }
 
+        while !unpinned.is_empty() {
+            let mut field = unpinned.pop_front().unwrap();
+
+            field.index = index;
+            index += 1;
+
+            field.cursor = cursor;
+            field.offset = offset;
+
+            cursor += field.bytes + ((offset + field.bits) / 8);
+            offset = (offset + field.bits) % 8;
+
+            self.fields.push(field);
+        }
+
+        self.size = cursor;
         self.bits = offset;
         self.bytes = if self.bits > 0 && cursor > 0 {
             cursor - 1
         } else {
             cursor
         };
-        self.size = cursor;
     }
 }

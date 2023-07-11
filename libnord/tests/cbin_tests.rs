@@ -1,17 +1,17 @@
 use std::fs::File;
 use std::io::BufReader;
+use std::io::Cursor;
 use std::io::Read;
 
 use libnord::cbin::FromReader;
 use libnord_derive::cbin;
 
 const cbin_header: [u8; 20] = [
-    // magic string (CBIN)
-    0b01000011, 0b01000010, 0b01001001, 0b01001110, // file veresion (1)
-    0b00000001, 0b00000000, 0b00000000, 0b00000000, // file type (ne5p)
-    0b01101110, 0b01100101, 0b00110101, 0b01110000, // bank location (7,3)
-    0b00000111, 0b00000000, 0b00000011, 0b00000000, // trailer
-    0b11111111, 0b11111111, 0b11111111, 0b11111111,
+    0b01000011, 0b01000010, 0b01001001, 0b01001110, // magic string (CBIN)
+    0b00000001, 0b00000000, 0b00000000, 0b00000000, // file veresion (1)
+    0b01101110, 0b01100101, 0b00110101, 0b01110000, // file type (ne5p)
+    0b00000111, 0b00000000, 0b00000011, 0b00000000, // bank location (7,3)
+    0b11111111, 0b11111111, 0b11111111, 0b11111111, // trailer
 ];
 
 // Todo:
@@ -30,17 +30,9 @@ const cbin_header: [u8; 20] = [
 pub struct TestProgramHeader {}
 
 #[test]
-fn test_parse_cbin_header_from_file() {
-    const TEST_FILE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/resources/ne5/programs/center_panel/o00_1_p000_0_1_0_50_50.ne5p"
-    );
-
-    let file = File::open(TEST_FILE).unwrap();
-    let mut reader = BufReader::new(file);
-
+fn test_parse_cbin_header_from_reader() {
+    let mut reader = BufReader::new(Cursor::new(cbin_header.clone()));
     let test = TestProgramHeader::from_reader(&mut reader).unwrap();
-
     assert_eq!(test.location, (7, 3));
 }
 
@@ -73,13 +65,22 @@ fn test_bit_offsets() {
     let mut bytes = cbin_header.to_vec();
 
     bytes.append(&mut vec![
-        //|a| |b| |     c    | |d|   | e[0] |    e[1] ||f[0]
-        0b110_011_00,
-        0b111111_01,
+        //aaabbbcc
+        0b11001100,
+
+        //ccccccdd
+        0b11111101,
+
+        //eeeeeeee
         0b01101100,
-        0b111001_11,
-        //|  f[1] |  |       g   |
+
+        //eeeeeeff
+        0b11100111,
+
+        //ffffffff
         0b01011001,
+
+        //gggggggg
         0b00000000,
     ]);
 
@@ -106,16 +107,19 @@ fn test_bit_offsets() {
         "test.d: fetching bits with an offset and zero remaining offset (0b{:02b} != 0b{:02b})",
         test.d[0], 0b01
     );
+
     assert_eq!(
         test.e, 0b0001101100111001,
         "test.e: fetching bits and bytes (0b{:016b} != 0b{:016b})",
         test.e, 0b01101100111001
     );
+
     assert_eq!(
         test.f, 0b1101011001,
         "test.f: fetching bits and bytes with an offset (0b{:016b} != 0b{:016b})",
         test.f, 0b1101011001
     );
+    
     assert_eq!(test.g[0], 0, "test.g: sanity check to make sure no '1' bits are left in the buffer (0b{:08b} != 0b{:08b})", test.g[0], 0);
 }
 

@@ -335,6 +335,14 @@ dependencies = [
 name = "libnord_derive"
 version = "0.1.0"
 dependencies = [
+ "libnord_derive_internal",
+ "syn 2.0.22",
+]
+
+[[package]]
+name = "libnord_derive_internal"
+version = "0.1.0"
+dependencies = [
  "darling",
  "proc-macro2",
  "quote",

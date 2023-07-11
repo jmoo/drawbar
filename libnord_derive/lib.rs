@@ -1,7 +1,5 @@
 use proc_macro::{self, TokenStream};
-
-mod cbin;
-pub(crate) mod spec;
+use libnord_derive_internal::cbin;
 
 #[proc_macro_attribute]
 pub fn cbin(args: TokenStream, input: TokenStream) -> TokenStream {
