@@ -9,6 +9,28 @@ use std::fs::read;
 use std::io::Cursor;
 use std::str::FromStr;
 
+
+#[test]
+fn test_ne5_read_song_macro() {
+    const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/", "song.ne5t");
+
+    let song = libnord::from_path(TEST_FILE.clone()).unwrap();
+
+    match song {
+        Entity::Song(libnord::Song::Electro5(song)) => {
+            let song = song as electro5::Song;
+            let coords = song.location();
+
+            assert_eq!(coords, (0, 2));
+            assert_eq!(song.get(0), (5, 9));
+            assert_eq!(song.get(1), (0, 1));
+            assert_eq!(song.get(2), (0, 2));
+            assert_eq!(song.get(3), (5, 8));
+        }
+        _ => panic!("expected electro5 song"),
+    }
+}
+
 #[test]
 fn test_ne5_read_song_bank() {
     const TEST_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ne5/", "song.ne5t");

@@ -180,6 +180,14 @@ impl<const X: u16, const Y: u16> TryFrom<(u16, u16)> for RangedU16Pair<X, Y> {
     }
 }
 
+impl<const X: u16, const Y: u16> TryFrom<[u8; 4]> for RangedU16Pair<X, Y> {
+    type Error = ParseError;
+
+    fn try_from(value: [u8; 4]) -> Result<Self, Self::Error> {
+        RangedU16Pair::new(u16::from_be_bytes([value[0], value[1]]), u16::from_be_bytes([value[1], value[2]]))
+    }
+}
+
 impl<const X: u16, const Y: u16> TryFrom<u16> for RangedU16Pair<X, Y> {
     type Error = ParseError;
 

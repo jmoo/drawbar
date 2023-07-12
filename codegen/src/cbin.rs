@@ -4,19 +4,12 @@ use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::parse_quote;
 use syn::{DeriveInput, Field, FieldsNamed, Visibility};
-
-use crate::spec::{Spec, SpecArgs, SpecField};
+use crate::binrw::{Spec, SpecArgs, SpecField};
 
 #[derive(Debug, FromMeta)]
 struct Args {
     #[darling(default)]
     format: Option<String>,
-
-    #[darling(default)]
-    bank_count: u16,
-
-    #[darling(default)]
-    slot_count: u16,
 
     #[darling(default)]
     fragment: bool,
@@ -80,6 +73,7 @@ impl Generator {
                     ..Default::default()
                 })?
                 .unwrap(),
+
                 // 0x04 - CBIN file version
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_version }),
@@ -89,6 +83,7 @@ impl Generator {
                     ..Default::default()
                 })?
                 .unwrap(),
+
                 // 0x08 - CBIN file format
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_format }),
@@ -109,6 +104,7 @@ impl Generator {
                     ..Default::default()
                 })?
                 .unwrap(),
+
                 // 0x10 - CBIN header trailer
                 SpecField::new(SpecArgs {
                     name: Some(parse_quote! { _cbin_trailer }),
@@ -126,34 +122,6 @@ impl Generator {
                 })?
                 .unwrap(),
             ]);
-
-            // 0x0C - CBIN entity bank location
-            if args.bank_count + args.slot_count > 0 {
-                let bank_count = args.bank_count;
-                let slot_count = args.slot_count;
-
-                if bank_count == 0 || slot_count == 0 {
-                    return Err(syn::Error::new(
-                        Span::call_site(),
-                        "Both `bank_count` and `slot_count` must be specified if one is specified",
-                    ));
-                }
-
-                spec.append(vec! [
-                    SpecField::new(SpecArgs {
-                        name: Some(parse_quote! { location}),
-                        mapped_type: Some(parse_quote! { ::libnord::types::RangedU16Pair<#bank_count, #slot_count> }),
-                        from: Some(parse_quote! { |x: [u8; 4] | (u16::from_le_bytes([x[0], x[1]]), u16::from_le_bytes([x[2], x[3]]))
-                            .try_into()
-                            .unwrap()
-                        }),
-                        seek: Some(0x0C),
-                        visibility: Some(parse_quote! { pub }),
-                        bytes: 4,
-                        ..Default::default()
-                    })?.unwrap(),
-                ]);
-            };
         }
 
         Ok(Self {
@@ -216,26 +184,35 @@ impl Generator {
             .collect::<Vec<TokenStream>>();
 
         quote! {
-            impl ::libnord::cbin::FromReader<Self> for #name {
-                fn from_reader(reader: &mut (impl std::io::Read)) -> Result<Self, std::io::Error> {
-                    let mut _buffer = [0u8; #size];
+            impl #name {
+                const SIZE: usize = #size;
+                const BYTES: usize = #bytes;
+                const BITS: usize = #bits;
+            }
 
-                    reader.read_exact(&mut _buffer)?;
+            impl TryFrom<&[u8]> for #name {
+                type Error = std::io::Error;
 
-                    <Self as ::libnord::cbin::FromBytes<Self>>::from_bytes(&_buffer)
+                fn try_from(_buffer: &[u8]) -> Result<Self, Self::Error> {
+                    let mut instance = Self::default();
+                    #(#readers);*;
+                    Ok(instance)
                 }
             }
 
-            impl ::libnord::cbin::FromBytes<Self> for #name {
-                const BYTES: usize = #bytes;
-                const BITS: usize = #bits;
+            impl TryFrom<[u8; #size]> for #name {
+                type Error = std::io::Error;
 
-                fn from_bytes(_buffer: &[u8]) -> Result<Self, std::io::Error> {
-                    let mut instance = Self::default();
+                fn try_from(_buffer: [u8; #size]) -> Result<Self, Self::Error> {
+                    Self::try_from(_buffer.as_slice())
+                }
+            }
 
-                    #(#readers);*;
+            impl TryFrom<Vec<u8>> for #name {
+                type Error = std::io::Error;
 
-                    Ok(instance)
+                fn try_from(_buffer: Vec<u8>) -> Result<Self, Self::Error> {
+                    Self::try_from(_buffer.as_slice())
                 }
             }
         }

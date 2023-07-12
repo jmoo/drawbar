@@ -1,2 +1,2 @@
 pub mod cbin;
-pub mod spec;
+pub mod binrw;

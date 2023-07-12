@@ -1,5 +1,5 @@
 [package]
-name = "libnord_derive_internal"
+name = "libnord_codegen"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,5 +12,5 @@ syn = "2.0.15"
 darling = { git = "https://github.com/TedDriggs/darling", rev = "8c4d6ad" }
 
 [lib]
-path = "mod.rs"
+path = "src/lib.rs"
 

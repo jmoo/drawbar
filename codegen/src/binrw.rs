@@ -1,7 +1,7 @@
 use darling::FromField;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
-use std::{cmp::Ordering, collections::VecDeque};
+use std::{collections::VecDeque};
 use syn::{Attribute, Expr, Field, Visibility};
 
 #[derive(Debug, FromField, Default)]
@@ -120,14 +120,14 @@ impl SpecField {
                         "u128" => (16, quote! { u128::from_be_bytes }),
                         "String" => (
                             size,
-                            quote! { | x: [u8; #size] | ::libnord::cbin::FromBytes::from_bytes(&x) },
+                            quote! { | x: [u8; #size] | String::from_utf8_lossy(&x).to_string() },
                         ),
                         _ => {
-                            infallible_read = false;
+                            infallible_read = true;
                             (
                                 size,
                                 quote! {
-                                    <#expr as ::libnord::cbin::FromBytes<#expr>>::from_bytes
+                                    | x: [u8; #size] | x.try_into().unwrap()
                                 },
                             )
                         }

@@ -16,7 +16,8 @@ serde = "1.0.159"
 thiserror = "1.0.40"
 ux = "0.1.5"
 zip = "0.6.4"
-libnord_derive = { path = "../libnord_derive" }
+libnord_codegen = { path = "../codegen" }
+libnord_proc_macro = { path = "../proc-macro" }
 
 [lib]
 name = "libnord"

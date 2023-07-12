@@ -1,10 +1,15 @@
-pub mod cbin;
 pub mod common;
 pub mod crc;
 pub mod electro5;
 pub mod error;
 pub mod types;
 pub mod util;
+
+extern crate self as libnord;
+
+pub mod prelude {
+    pub use libnord_proc_macro::*;
+}
 
 use crate::common::sample::Sample;
 use crate::common::{piano, sample};

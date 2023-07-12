@@ -1,7 +1,8 @@
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, BinWriterExt};
-
+use libnord::prelude::*;
 use std::io;
-
+// use libnord_derive::cbin;
+// use ::libnord_derive_internal::cbin::FromReader;
 use crate::common;
 use crate::crc::{CrcReader, CrcWriter};
 
@@ -22,7 +23,14 @@ pub type Header = common::Header<Location>;
 pub type Bank = bank::Bank<Song, Location>;
 pub type Song = common::song::Song<PROGRAM_COUNT, Location, program::Location>;
 
-#[binrw]
+#[cbin(format = "ne5t")]
+#[derive(Default)]
+struct CBinSong {
+    #[cbin(bytes = 4)]
+    location: Location,
+}
+
+#[binrw] 
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x3d - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
 #[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0x3d - 0x2c))]
 struct Schema {

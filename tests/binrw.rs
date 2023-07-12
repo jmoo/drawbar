@@ -1,13 +1,13 @@
-use libnord_derive_internal::spec::{Spec, SpecField, SpecArgs};
+use libnord_codegen::binrw::{Spec, SpecField, SpecArgs};
 use syn::parse_quote;
-
+ 
 #[test]
-fn test_initialize_empty_spec() {
+fn test_binrw_initialize_empty_spec() {
 	Spec::new(&vec![]).unwrap();
 }
 
 #[test]
-fn test_align_increments_cursor() {
+fn test_binrw_align_increments_cursor() {
 	let mut spec = Spec::new(&vec![]).unwrap();
 
 	spec.append(vec![

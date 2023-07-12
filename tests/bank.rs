@@ -4,7 +4,7 @@ use libnord::error::Error;
 use libnord::types::RangedU16Pair;
 
 #[test]
-fn test_can_replace_items_in_bank() -> Result<(), Error> {
+fn test_bank_can_replace_items() -> Result<(), Error> {
     const BANK_COUNT: u16 = 5;
     const SLOT_COUNT: u16 = 2;
 
