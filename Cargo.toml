@@ -1,20 +1,13 @@
 [package]
-name = "libnord_tests"
+name = "quick-start"
 version = "0.1.0"
 edition = "2021"
-publish = false
+license = "MIT"
 
-[dev-dependencies]
-libnord = { path = "lib" }
-libnord_codegen = { path = "codegen" }
-libnord_proc_macro = { path = "proc-macro" }
-regex = "1.8.1"
-syn = "2.0.15"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[workspace]
-members = [
-    "cli",
-    "codegen",
-    "lib",
-    "proc-macro"
-]
+[dependencies]
+nom = "8.0.0"
+nom_locate = "5.0.0"
+serde = "1.0.217"
+thiserror = "2.0.11"

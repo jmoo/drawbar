@@ -1,1 +1,4 @@
-specimen
+/target
+result*
+.*
+-*
