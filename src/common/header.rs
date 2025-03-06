@@ -1,13 +1,12 @@
 use nom::bytes::complete::tag;
-use nom::number::complete::{le_u16, le_u32, le_u8};
+use nom::number::complete::{le_u16, le_u32};
 use nom::{Compare, Input};
 use nom_locate::LocatedSpan;
-use std::convert::TryInto;
 use std::io::{BufReader, Read, Write};
 use std::{fmt, str};
 
-const CBIN_MAGIC: &[u8; 4] = b"CBIN";
-const TRAILER_MAGIC: &[u8; 4] = b"\xff\xff\xff\xff";
+pub const CBIN_MAGIC: &[u8; 4] = b"CBIN";
+pub const TRAILER_MAGIC: &[u8; 4] = b"\xff\xff\xff\xff";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Format(u32);
@@ -20,7 +19,7 @@ impl Format {
 
     pub fn parse<I>(input: I) -> nom::IResult<I, Self>
     where
-        I: Input<Item = u8> 
+        I: Input<Item = u8>,
     {
         let (input, format) = le_u32(input)?;
         Ok((input, Format(format)))
@@ -89,121 +88,82 @@ impl Read for Preamble {
     }
 }
 
-#[derive(Clone, Default, Copy, PartialEq, Eq, Hash)]
-pub struct Location<const SLOT_MAX: u32, const BANK_MAX: u32>(u32);
+#[derive(Debug)]
+pub struct Location {
+    pub bank: u16,
+    pub slot: u16,
+}
 
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> Location<SLOT_MAX, BANK_MAX> {
+impl Location {
     pub fn parse<I>(input: I) -> nom::IResult<I, Self>
     where
         I: Input<Item = u8> + Compare<&'static [u8]>,
     {
-        let (input, location) = le_u32(input)?;
-        Ok((input, Location(location)))
+        // let (input, preamble) = Preamble::parse(input)?;
+        let (input, bank) = le_u16(input)?;
+        let (input, slot) = le_u16(input)?;
+
+        Ok((input, Location { bank, slot }))
     }
 }
 
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> Into<u32> for Location<SLOT_MAX, BANK_MAX> {
-    fn into(self) -> u32 {
-        self.0
-    }
-}
-
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> From<Location<SLOT_MAX, BANK_MAX>> for (u32, u32) {
-    fn from(value: Location<SLOT_MAX, BANK_MAX>) -> (u32, u32) {
-        let value: u32 = value.into();
-        (value / BANK_MAX, value % BANK_MAX)
-    }
-}
-
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> TryInto<Location<SLOT_MAX, BANK_MAX>> for u32 {
-    type Error = ();
-
-    fn try_into(self) -> Result<Location<SLOT_MAX, BANK_MAX>, Self::Error> {
-        if self < SLOT_MAX * BANK_MAX {
-            Ok(Location(self))
-        } else {
-            Err(())
-        }
-    }
-}
-
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> Read for Location<SLOT_MAX, BANK_MAX> {
-    fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
-        let value: u32 = (*self).into();
-        let written = buf.write(&value.to_le_bytes())?;
-        Ok(written)
-    }
-}
-
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> std::fmt::Debug for Location<SLOT_MAX, BANK_MAX> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value: u32 = (*self).into();
-        let pair: (u32, u32) = (*self).try_into().unwrap();
-
-        f.debug_struct("Location")
-            .field("value", &value)
-            .field("slot", &pair.0)
-            .field("bank", &pair.1)
-            .finish()
-    }
-}
-
-pub struct Trailer();
-
-impl Trailer {
-    pub fn parse<I>(input: I) -> nom::IResult<I, Self>
-    where
-        I: Input<Item = u8> + Compare<&'static [u8]>,
-    {
-        let (input, _) = tag(&TRAILER_MAGIC[..])(input)?;
-        Ok((input, Trailer()))
-    }
-}
-
-impl Read for Trailer {
-    fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
-        let written = buf.write(TRAILER_MAGIC)?;
+impl Read for Location {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut written = 0;
+        written += (&mut buf[written..]).write(&self.bank.to_le_bytes())?;
+        written += (&mut buf[written..]).write(&self.slot.to_le_bytes())?;
+        written += (&mut buf[written..]).write(&TRAILER_MAGIC[..])?;
         Ok(written)
     }
 }
 
 #[derive(Debug)]
-pub struct Header<const SLOT_MAX: u32, const BANK_MAX: u32> {
+pub struct Header {
     pub preamble: Preamble,
-    pub location: Location<SLOT_MAX, BANK_MAX>,
+    pub location: Location,
 }
 
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> Header<SLOT_MAX, BANK_MAX> {
+impl Header {
     pub fn parse<I>(input: I) -> nom::IResult<I, Self>
     where
         I: Input<Item = u8> + Compare<&'static [u8]>,
     {
         let (input, preamble) = Preamble::parse(input)?;
         let (input, location) = Location::parse(input)?;
-        let (input, _) = Trailer::parse(input)?;
+        let (input, _) = tag(&TRAILER_MAGIC[..])(input)?;
         Ok((input, Header { preamble, location }))
     }
 }
 
-impl<const SLOT_MAX: u32, const BANK_MAX: u32> Read for Header<SLOT_MAX, BANK_MAX> {
+impl Read for Header {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut written = 0;
-        written += self.preamble.read(buf)?;
+        written += self.preamble.read(&mut buf[..])?;
         written += self.location.read(&mut buf[written..])?;
-        written += Trailer().read(&mut buf[written..])?;
+        written += (&mut buf[written..]).write(&TRAILER_MAGIC[..])?;
         Ok(written)
     }
 }
 
-type Span<'a> = LocatedSpan<&'a [u8]>;
-
 #[cfg(test)]
 mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
+    type Span<'a> = LocatedSpan<&'a [u8]>;
+
     #[test]
-    fn test_add() {
-        assert_eq!(3, 3);
+    fn test_parse_header() {
+        let bytes = b"CBIN\x01\x00\x00\x00ne5p\x07\x00\x02\x00\xff\xff\xff\xff";
+        let input = Span::new(bytes);
+        let (_, header) = Header::parse(input).unwrap();
+        assert_eq!(header.preamble.version, 1);
+        assert_eq!(header.preamble.format.to_le_bytes(), *b"ne5p");
+        assert_eq!(header.location.bank, 7);
+        assert_eq!(header.location.slot, 2);
+
+        let mut buffer = [0; 20];
+        let mut reader = BufReader::new(header);
+        reader.read(buffer.as_mut()).unwrap();
+        assert_eq!(*bytes, buffer)
     }
 }
