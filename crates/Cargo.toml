@@ -1,0 +1,18 @@
+[workspace]
+members = [
+  "anki-tool",
+]
+resolver = "2"
+
+# Shared metadata for every crate in the monorepo. Individual crates inherit
+# these with `field.workspace = true` in their own Cargo.toml.
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+# Cargo profiles only take effect at the workspace root, so anki-tool's release
+# tuning lives here and applies to every crate.
+[profile.release]
+lto = true
+strip = true
