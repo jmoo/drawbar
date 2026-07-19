@@ -1,0 +1,16 @@
+[package]
+name = "nord-cli"
+description = "Command-line tool for inspecting Clavia / Nord keyboard files (dogfoods nord-format)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+# The binary is just `nord`; the crate/package is `nord-cli`.
+[[bin]]
+name = "nord"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+# Pull in the `bundle` feature so `nord inspect` can also open ZIP backup bundles.
+nord-format = { path = "../nord-format", features = ["bundle"] }
