@@ -3,6 +3,7 @@ members = [
   "anki-tool",
   "nord-cli",
   "nord-format",
+  "nord-usb",
 ]
 resolver = "2"
 
