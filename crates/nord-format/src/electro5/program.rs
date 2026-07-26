@@ -150,7 +150,9 @@ pub struct PianoPanel {
     #[bw(ignore)]
     pub category: u8,
 
-    #[br(calc = ((settings & 0b00000111_11000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 0)) as u8)]
+    /// Zero-based model slot *within* [`category`](Self::category) — the panel's
+    /// Model dial. A slot coordinate, not an identity; see [`id`](Self::id).
+    #[br(calc = ((settings & 0b00000111_11000000_00000000_00000000_00000000_00000000_00000000_00000000) >> ((8 * 6) + 6)) as u8)]
     #[bw(ignore)]
     pub piano_model: u8,
 
@@ -191,7 +193,12 @@ pub struct SamplePanel {
     #[bw(ignore)]
     pub decay_release: u8,
 
-    #[br(calc = ((settings & 0b00000000_00000011_11111100_00000000_00000000_00000000_00000000_00000000) >> ((8 * 0) + 0)) as u8)]
+    /// Zero-based slot of the sample in the instrument's Samp Lib, i.e. the
+    /// number shown on the panel minus one. This is a *position*, not an
+    /// identity: adding or deleting samples renumbers it, and the corpus has
+    /// ids that appear under several numbers (and numbers reused by several
+    /// ids). Use [`id`](Self::id) to resolve the dependency.
+    #[br(calc = ((settings & 0b00000000_00000011_11111100_00000000_00000000_00000000_00000000_00000000) >> ((8 * 5) + 2)) as u8)]
     #[bw(ignore)]
     pub number: u8,
 
