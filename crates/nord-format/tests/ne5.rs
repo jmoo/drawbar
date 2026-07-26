@@ -19,6 +19,7 @@ use nord_format::common::bank::Item;
 use nord_format::electro5::{Instrument, SplitPoint};
 use nord_format::{electro5, Entity};
 use regex::Regex;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::read;
 use std::io::Cursor;
@@ -992,8 +993,14 @@ fn test_ne5_b3_bass_drawbars_match_filenames() {
             continue;
         }
         let mut head = head.chars();
-        let preset = head.next().and_then(|c| c.to_digit(10)).expect("preset digit") as u8;
-        let model = head.next().and_then(|c| c.to_digit(10)).expect("model digit");
+        let preset = head
+            .next()
+            .and_then(|c| c.to_digit(10))
+            .expect("preset digit") as u8;
+        let model = head
+            .next()
+            .and_then(|c| c.to_digit(10))
+            .expect("model digit");
         if model != 1 || preset != 1 {
             continue; // bass manual is preset 1 of b3+bass only
         }
@@ -1003,10 +1010,7 @@ fn test_ne5_b3_bass_drawbars_match_filenames() {
             other => panic!("{name}: expected an electro5 program, got {other:?}"),
         };
         let got = program.organ().b3_bass_drawbars();
-        let want = [
-            bars.as_bytes()[0] - b'0',
-            bars.as_bytes()[1] - b'0',
-        ];
+        let want = [bars.as_bytes()[0] - b'0', bars.as_bytes()[1] - b'0'];
         assert_eq!(got, want, "bass drawbars in {name}");
 
         // The main block's first two nibbles are stale in this mode and must not be
@@ -1018,5 +1022,383 @@ fn test_ne5_b3_bass_drawbars_match_filenames() {
         checked += 1;
     }
 
-    assert!(checked >= 4, "expected several b3+bass preset-1 specimens, saw {checked}");
+    assert!(
+        checked >= 4,
+        "expected several b3+bass preset-1 specimens, saw {checked}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Piano / sample dependency ids
+// ---------------------------------------------------------------------------
+//
+// Both panels carry a 32-bit reference to the piano (`.npno`) or sample
+// (`.nsmp`) the program needs, in bits 41..=10 of the panel word. Everything
+// else in those panels is a *slot coordinate* — the piano category + model
+// dials, the Samp Lib number — which moves when the instrument's library
+// changes. The id is the stable key: it is what resolves the song -> program ->
+// piano chain, and what Nord Sound Manager checks before offering a Restore.
+//
+// The width and the shift are pinned from three independent angles:
+//
+//   * `programs/piano` and `programs/sample` are change-one-knob specimens, so
+//     the id must be *invariant* under every neighbouring field, and must equal
+//     a known value. The golden ids below are not self-referential: each was
+//     read off the USB captures, where the vendor protocol transmits the same
+//     id as a plain big-endian u32 immediately followed by a length-prefixed
+//     piano name (see `usb/program/relink_piano_*`). Byte alignment there is
+//     what fixes the shift — a decode that is off by even one bit produces
+//     values that appear nowhere on the wire.
+//   * across all 624 corpus programs each piano id must occupy exactly one
+//     (category, model) slot and vice versa. A too-narrow id over-splits a slot
+//     into several ids; a too-wide one merges distinct pianos under one id.
+//   * the backup's own member list says how many pianos each category shipped,
+//     which must equal the number of model slots the programs reference — bar
+//     the single missing dependency documented below.
+
+/// Piano `category` as stored, and the backup directory it corresponds to. The
+/// dial order on disk starts at Grand, so the two are not in step.
+const PIANO_CATEGORIES: [(u8, &str); 6] = [
+    (0, "Grand"),
+    (1, "Upright"),
+    (2, "EPiano1"),
+    (3, "EPiano2"),
+    (4, "Clavinet"),
+    (5, "Harps"),
+];
+
+/// `(category, model, id, name)` for every piano slot the `programs/piano`
+/// specimens select. Ids and names come from the USB captures, not from this
+/// decoder; the names are the shipped `.npno` basenames.
+const PIANO_IDS: [(u8, u8, u32, &str); 11] = [
+    (0, 0, 0xd303_b5f2, "Royal Grand 3D YaS6 XL 5.4"),
+    (0, 5, 0x4ca6_ab08, "Electric Grand 1 CP80  5.3"),
+    (1, 0, 0x645f_053e, "Grand Upright YaU3 Lrg 5.4"),
+    (1, 5, 0x42a7_a3a3, "HonkyTonkUpright      Sml 5.3"),
+    (2, 0, 0x6434_2577, "EPiano 1    Mk I Low Deep  5.3"),
+    (2, 9, 0x19c5_f749, "EP8 Nefertiti Lrg 6.0"),
+    (3, 0, 0xd1ac_cddd, "DX7 FullTines  Lrg 5.4"),
+    (3, 2, 0x17a8_d178, "Ballad EP1  Sml 5.2"),
+    (4, 0, 0x9bed_fa45, "Clavinet D6  5.0"),
+    (5, 0, 0xf121_ce36, "Ital Harpsich 1B Long Stri 5.0"),
+    (5, 2, 0x1251_b69a, "Ital Harpsich 1D Lute 5.0"),
+];
+
+/// `(samp lib number, id)` for the sample slots `programs/sample` selects. As
+/// above, the ids are the ones the vendor protocol puts on the wire.
+const SAMPLE_IDS: [(u8, u32); 3] = [(0, 0x47c8_b4f8), (41, 0x89be_e289), (158, 0x0ac2_1363)];
+
+/// Every `.ne5p` under `dir`, recursively, sorted for deterministic failures.
+fn ne5p_files(dir: &PathBuf) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.clone()];
+
+    while let Some(next) = stack.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+
+            if entry.metadata().unwrap().is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "ne5p") {
+                out.push(path);
+            }
+        }
+    }
+
+    out.sort();
+    out
+}
+
+/// Read a program and assert it still round-trips byte-exact. The id fields are
+/// read-only views over a verbatim `settings` word, so decoding more of it must
+/// never cost the round-trip.
+fn read_program_checked(path: &PathBuf) -> electro5::Program {
+    let name = path.display().to_string();
+    let contents = read(path).unwrap();
+
+    let Entity::Program(nord_format::Program::Electro5(mut program)) =
+        nord_format::from_path(name.as_str()).unwrap()
+    else {
+        panic!("expected an electro5 program in {name}")
+    };
+
+    let mut output: Vec<u8> = Vec::new();
+    program.write_to(&mut Cursor::new(&mut output)).unwrap();
+    assert_eq!(
+        contents.as_slice(),
+        output.as_slice(),
+        "read/write mismatch in {name}",
+    );
+
+    program
+}
+
+/// A two-character panel number as the Electro 5 displays it: the tens digit
+/// runs `0`..`9` then `A`..`F`, the units digit `0`..`9`, so `F9` is 159.
+fn panel_number(text: &str) -> u8 {
+    let bytes = text.as_bytes();
+    assert_eq!(bytes.len(), 2, "not a panel number: {text}");
+
+    let tens = match bytes[0] {
+        c @ b'0'..=b'9' => c - b'0',
+        c @ b'A'..=b'F' => c - b'A' + 10,
+        c @ b'a'..=b'f' => c - b'a' + 10,
+        c => panic!("bad panel number digit: {}", c as char),
+    };
+    let units = bytes[1] - b'0';
+    assert!(units < 10, "bad panel number digit: {text}");
+
+    tens * 10 + units
+}
+
+#[test]
+fn test_ne5_program_piano_id() {
+    // `abcd_ee_ff.ne5p` — a: part, b: acoustics, c: mono, d: touch, ee: type,
+    // ff: model. See `programs/piano/README.md`.
+    let piano_re = Regex::new(r"([0-9])([0-3])([01])([0-3])_([0-9]{2})_([0-9A-Fa-f]{2})\.ne5p$")
+        .expect("piano filename pattern");
+
+    // Filename type digit -> the value stored in `category`.
+    fn category_of(ee: u8) -> u8 {
+        match ee {
+            1 => 2, // ep1
+            2 => 3, // ep2
+            3 => 4, // clav
+            4 => 5, // harps
+            5 => 0, // grand
+            6 => 1, // upright
+            _ => panic!("bad piano type digit: {ee}"),
+        }
+    }
+
+    let golden: BTreeMap<(u8, u8), (u32, &str)> = PIANO_IDS
+        .iter()
+        .map(|&(category, model, id, name)| ((category, model), (id, name)))
+        .collect();
+
+    let mut checks = 0usize;
+    let mut covered: BTreeSet<(u8, u8)> = BTreeSet::new();
+
+    for path in ne5p_files(&corpus_dir().join("programs/piano")) {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let matches = piano_re
+            .captures(name.as_str())
+            .unwrap_or_else(|| panic!("invalid file name: {name}"));
+
+        let acoustics = u8::from_str(&matches[2]).unwrap();
+        let mono = &matches[3] == "1";
+        let touch = u8::from_str(&matches[4]).unwrap();
+        let category = category_of(u8::from_str(&matches[5]).unwrap());
+
+        let piano = &read_program_checked(&path).schema.piano_panel;
+
+        assert_eq!(piano.category, category, "category in {name}");
+        assert_eq!(piano.acoustics, acoustics, "acoustics in {name}");
+        assert_eq!(piano.mono, mono, "mono in {name}");
+        assert_eq!(piano.touch, touch, "touch in {name}");
+
+        // Clav's model field is a variant code (`0A`, `0d`) rather than a slot
+        // number — those two specimens differ only in `clav_model` and both sit
+        // in model slot 0.
+        if category != category_of(3) {
+            // The panel shows a 1-based model number; the field stores the slot.
+            let model = panel_number(&matches[6]) - 1;
+            assert_eq!(piano.piano_model, model, "piano_model in {name}");
+        }
+
+        let slot = (piano.category, piano.piano_model);
+        let (id, piano_name) = golden
+            .get(&slot)
+            .unwrap_or_else(|| panic!("no golden id for slot {slot:?}, from {name}"));
+
+        // The value, not just its stability: this is the number the instrument
+        // puts on the wire for "{piano_name}".
+        assert_eq!(
+            piano.id, *id,
+            "piano id in {name} should reference {piano_name}",
+        );
+
+        covered.insert(slot);
+        checks += 1;
+    }
+
+    assert!(
+        checks > 0,
+        "no piano specimens found — is the corpus present?"
+    );
+    assert_eq!(
+        covered.len(),
+        PIANO_IDS.len(),
+        "the golden table lists slots the corpus no longer covers",
+    );
+}
+
+#[test]
+fn test_ne5_program_sample_id() {
+    // `abc_dd_eee_fggg.ne5p` — a: part, b: dynamics, c: filter, dd: sample
+    // number, eee: attack, f/ggg: decay-release. See `programs/sample/README.md`.
+    let sample_re =
+        Regex::new(r"([0-9])([0-3])([01])_([0-9A-Fa-f]{2})_([0-9]{3})_([dsr])([0-9]{3})\.ne5p$")
+            .expect("sample filename pattern");
+
+    let golden: BTreeMap<u8, u32> = SAMPLE_IDS.iter().copied().collect();
+
+    let mut checks = 0usize;
+    let mut covered: BTreeSet<u8> = BTreeSet::new();
+
+    for path in ne5p_files(&corpus_dir().join("programs/sample")) {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.contains(".skip.") {
+            continue;
+        }
+        let matches = sample_re
+            .captures(name.as_str())
+            .unwrap_or_else(|| panic!("invalid file name: {name}"));
+
+        let dynamics = u8::from_str(&matches[2]).unwrap();
+        let filter = &matches[3] == "1";
+        // The panel shows a 1-based number; the field stores the slot index.
+        let number = panel_number(&matches[4]) - 1;
+        let decay_release = u8::from_str(&matches[7]).unwrap();
+
+        let sample = &read_program_checked(&path).schema.sample_panel;
+
+        assert_eq!(sample.dynamics, dynamics, "dynamics in {name}");
+        assert_eq!(sample.filter, filter, "filter in {name}");
+        assert_eq!(sample.number, number, "sample number in {name}");
+        assert_eq!(
+            sample.decay_release, decay_release,
+            "decay_release in {name}",
+        );
+
+        // `number`, `id`, `dynamics` and `filter` are packed shoulder to
+        // shoulder in one word, so a shift that is off by a bit smears one into
+        // the next; asserting all four together catches that.
+        let id = golden
+            .get(&number)
+            .unwrap_or_else(|| panic!("no golden id for sample number {number}, from {name}"));
+        assert_eq!(sample.id, *id, "sample id in {name}");
+
+        covered.insert(number);
+        checks += 1;
+    }
+
+    assert!(
+        checks > 0,
+        "no sample specimens found — is the corpus present?"
+    );
+    assert_eq!(
+        covered.len(),
+        SAMPLE_IDS.len(),
+        "the golden table lists samples the corpus no longer covers",
+    );
+}
+
+#[test]
+fn test_ne5_backup_dependency_ids() {
+    let backup = corpus_dir().join("usb/backup/full_backup");
+
+    // The backup's member list: what the instrument actually shipped. The blobs
+    // themselves are private-tier and absent here, but the listing tells us how
+    // many pianos each category held.
+    let members = fs::read_to_string(backup.join("backup.members.tsv")).unwrap();
+    let mut shipped: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut samples = 0usize;
+
+    for line in members.lines().skip(1) {
+        let Some(name) = line.split('\t').next() else {
+            continue;
+        };
+
+        if name.ends_with(".nsmp") {
+            samples += 1;
+        } else if name.ends_with(".npno") {
+            let mut parts = name.split('/');
+            let (Some("Piano"), Some(category)) = (parts.next(), parts.next()) else {
+                panic!("unexpected piano member path: {name}")
+            };
+            *shipped.entry(category).or_default() += 1;
+        }
+    }
+    assert!(
+        !shipped.is_empty() && samples > 0,
+        "member list looks empty"
+    );
+
+    let mut slot_of: BTreeMap<u32, (u8, u8)> = BTreeMap::new();
+    let mut id_of: BTreeMap<(u8, u8), u32> = BTreeMap::new();
+    let mut sample_ids: BTreeSet<u32> = BTreeSet::new();
+    let mut programs = 0usize;
+
+    for path in ne5p_files(&backup.join("contents/Program")) {
+        let name = path.display().to_string();
+        let schema = read_program_checked(&path).schema;
+        let (piano, sample) = (&schema.piano_panel, &schema.sample_panel);
+
+        if piano.id != 0 {
+            let slot = (piano.category, piano.piano_model);
+
+            // (category, model) and id are two names for the same piano, so the
+            // map between them is a bijection across all 624 programs.
+            assert_eq!(
+                *slot_of.entry(piano.id).or_insert(slot),
+                slot,
+                "piano id {:#010x} spans more than one (category, model) slot, at {name}",
+                piano.id,
+            );
+            assert_eq!(
+                *id_of.entry(slot).or_insert(piano.id),
+                piano.id,
+                "slot {slot:?} names more than one piano id, at {name}",
+            );
+        }
+
+        if sample.id != 0 {
+            sample_ids.insert(sample.id);
+        }
+
+        programs += 1;
+    }
+
+    assert!(
+        programs > 0,
+        "no backup programs found — is the corpus present?"
+    );
+
+    // Per category: the model slots the programs reference must be exactly
+    // `0..n`, and `n` must be what the backup shipped — with one exception. The
+    // programs reference a seventh Upright that the instrument no longer holds,
+    // and that single dangling reference is the whole reason this field matters:
+    // it is what Nord Sound Manager sees as a missing dependency and gates
+    // "Restore" on. If this trips, check whether the corpus gained or lost a
+    // piano before assuming the decode moved.
+    for (category, directory) in PIANO_CATEGORIES {
+        let models: BTreeSet<u8> = id_of
+            .keys()
+            .filter(|(c, _)| *c == category)
+            .map(|(_, model)| *model)
+            .collect();
+        let expected = shipped[directory] + usize::from(directory == "Upright");
+
+        assert_eq!(
+            models.len(),
+            expected,
+            "{directory}: programs reference {} model slots, expected {expected}",
+            models.len(),
+        );
+        assert!(
+            models.iter().copied().eq(0..expected as u8),
+            "{directory}: model slots are not contiguous from 0: {models:?}",
+        );
+    }
+
+    // Samples have no slot coordinate to cross-check against — `number` is a
+    // volatile Samp Lib position that the corpus reuses across ids — so bound
+    // the id count by the shipped library instead.
+    assert!(
+        sample_ids.len() <= samples,
+        "{} distinct sample ids referenced but only {samples} `.nsmp` members shipped",
+        sample_ids.len(),
+    );
 }

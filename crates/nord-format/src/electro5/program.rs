@@ -172,9 +172,16 @@ pub struct PianoPanel {
     #[bw(ignore)]
     pub mono: bool,
 
-    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 1) + 2)) != 0)]
+    /// The piano (`.npno`) this program depends on: a stable 32-bit id in bits
+    /// 41..=10, independent of where the piano sits in the instrument's library.
+    /// `0` means "no piano referenced". This — not
+    /// [`category`](Self::category)/[`piano_model`](Self::piano_model), which are
+    /// slot coordinates — is what resolves the song → program → piano chain, and
+    /// what Nord Sound Manager checks to decide whether a Restore is missing a
+    /// dependency.
+    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 1) + 2)) as u32)]
     #[bw(ignore)]
-    pub id: bool,
+    pub id: u32,
 }
 
 // 0x46..0x4d
@@ -202,7 +209,10 @@ pub struct SamplePanel {
     #[bw(ignore)]
     pub number: u8,
 
-    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 0) + 0)) as u32)]
+    /// The sample (`.nsmp`) this program depends on: a stable 32-bit id in bits
+    /// 41..=10, laid out exactly as [`PianoPanel::id`]. `0` means "no sample
+    /// referenced".
+    #[br(calc = ((settings & 0b00000000_00000000_00000011_11111111_11111111_11111111_11111100_00000000) >> ((8 * 1) + 2)) as u32)]
     #[bw(ignore)]
     pub id: u32,
 
