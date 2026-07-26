@@ -303,7 +303,7 @@ pub struct OrganPanel {
     // 0x5a 0b00000000 - ?
     // 0x5b 0b00000000 - pad
     // 0x5c 0b11111111_11111111_11111111_11111111_11110000 - preset2 drawbars (b3 normal, b3-bass normal)
-    // 0x60 0b00000100 - preset 2 b3/b3-bass vib on/off (0,1)
+    // 0x60 0b00001000 - preset 2 b3/b3-bass vib on/off (0,1)
     // 0x60 0b00000100 - preset 2 b3/b3-bass perc on/off (0,1)
     // 0x60 0b00000010 - unknown boolean (true on all programs i have created, false on a bunch of random presets)
     // 0x61 0b00100000 - unknown boolean (true on all programs i have created, false on a bunch of random presets)
@@ -396,6 +396,48 @@ impl OrganPanel {
     /// applied.
     pub fn drawbars(&self, model: OrganModel, preset: u8) -> [u8; 9] {
         read_drawbars(&self.raw, Self::drawbar_offset(model, preset))
+    }
+
+    /// The two bass drawbars of **B3-with-bass, preset 1** — the bass manual.
+    ///
+    /// These are *not* in the nine-nibble block. In b3+bass mode preset 1 is the bass
+    /// manual (only bars 1–2 are live) and preset 2 is the ordinary B3; the bass
+    /// registration lives in a 12-bit field spanning the low nibble of `0x59` and all
+    /// of `0x5a`:
+    ///
+    /// ```text
+    /// field = ((raw[0x59] & 0x0F) << 8) | raw[0x5a]
+    /// bar1  = (field >> 6) & 0xF      bar2 = (field >> 2) & 0xF
+    /// ```
+    ///
+    /// Values are identity (`8` stores `8`); the low 2 bits of the field are unused.
+    /// The `& 0xF` masks matter: `0x59` also carries B3 vibrato-on (`0x08`) and
+    /// percussion-on (`0x04`), which land at field bits 11 and 10, and its *high*
+    /// nibble is bar 9 of the main block.
+    ///
+    /// ⚠️ Do **not** read bars 1–2 from [`Self::drawbars`] in this mode — those two
+    /// nibbles hold stale leftovers, not zero and not the bass values.
+    ///
+    /// Derived by diffing corpus specimens and confirmed against hardware captures
+    /// `1100_400000000` / `1100_040000000`.
+    pub fn b3_bass_drawbars(&self) -> [u8; 2] {
+        let field = ((self.raw[org(0x59)] as u16 & 0x0F) << 8) | self.raw[org(0x5a)] as u16;
+        [((field >> 6) & 0xF) as u8, ((field >> 2) & 0xF) as u8]
+    }
+
+    /// Farfisa drawbars as the instrument actually treats them: **on/off tabs**, not
+    /// continuous positions.
+    ///
+    /// A stored nibble of **≥5 reads as on**, anything lower as off. Use this rather
+    /// than [`Self::drawbars`] for Farfisa — the raw 0..=8 value is stored faithfully
+    /// but has no meaning beyond which side of the threshold it falls.
+    pub fn farfisa_tabs(&self, preset: u8) -> [bool; 9] {
+        let bars = self.drawbars(OrganModel::Farfisa, preset);
+        let mut tabs = [false; 9];
+        for (tab, bar) in tabs.iter_mut().zip(bars) {
+            *tab = bar >= 5;
+        }
+        tabs
     }
 
     /// Panel-relative index of the per-preset vib/perc byte for `model`, or
@@ -789,3 +831,74 @@ impl bank::Item<Location> for Program {
 }
 
 impl common::program::Program for Program {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an organ panel from `(absolute offset, byte)` pairs; everything else 0.
+    fn panel(bytes: &[(usize, u8)]) -> OrganPanel {
+        let mut raw = [0u8; ORGAN_LEN];
+        for &(at, b) in bytes {
+            raw[org(at)] = b;
+        }
+        OrganPanel { raw }
+    }
+
+    /// The bass drawbars of b3+bass preset 1 live outside the nine-nibble block, in a
+    /// 12-bit field across `0x59`'s low nibble and `0x5a`. Values are from real
+    /// specimens: `1100_400000000`, `1100_040000000`, `1100_87gfedcba`.
+    #[test]
+    fn b3_bass_drawbars_decode_from_the_packed_field() {
+        // bar1 = 4, bar2 = 0  ->  field 0x100
+        assert_eq!(panel(&[(0x59, 0x01), (0x5a, 0x00)]).b3_bass_drawbars(), [4, 0]);
+        // bar1 = 0, bar2 = 4  ->  field 0x010
+        assert_eq!(panel(&[(0x59, 0x00), (0x5a, 0x10)]).b3_bass_drawbars(), [0, 4]);
+        // bar1 = 8, bar2 = 7  ->  field 0x21c
+        assert_eq!(panel(&[(0x59, 0x02), (0x5a, 0x1c)]).b3_bass_drawbars(), [8, 7]);
+        // bar1 = 8, bar2 = 8  ->  field 0x220
+        assert_eq!(panel(&[(0x59, 0x02), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+        // all down
+        assert_eq!(panel(&[]).b3_bass_drawbars(), [0, 0]);
+    }
+
+    /// `0x59` is shared. Its high nibble is bar 9 of the main block and bits 3/2 are
+    /// vibrato/percussion — none of which may leak into the bass drawbars. Regression
+    /// guard for the `& 0xF` masks.
+    #[test]
+    fn b3_bass_drawbars_ignore_the_flags_sharing_that_byte() {
+        // Same field as `1100_88iiiiiii`: bar 9 = 8 in the high nibble, bars still 8,8.
+        assert_eq!(panel(&[(0x59, 0x82), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+        // Vibrato (0x08) and percussion (0x04) on must not disturb the reading.
+        assert_eq!(panel(&[(0x59, 0x0e), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+        assert_eq!(panel(&[(0x59, 0xfe), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+    }
+
+    /// Farfisa's drawbars are on/off tabs: >= 5 is on. The raw nibble is still stored
+    /// faithfully, it just carries no meaning beyond the threshold.
+    #[test]
+    fn farfisa_drawbars_are_on_off_tabs() {
+        // 0x77 is Farfisa preset 1: nine nibbles, high-nibble first.
+        // bars 0..8 = 8,7,6,5,4,3,2,1,0 -> on for >= 5.
+        let p = panel(&[(0x77, 0x87), (0x78, 0x65), (0x79, 0x43), (0x7a, 0x21), (0x7b, 0x00)]);
+        assert_eq!(p.drawbars(OrganModel::Farfisa, 1), [8, 7, 6, 5, 4, 3, 2, 1, 0]);
+        assert_eq!(
+            p.farfisa_tabs(1),
+            [true, true, true, true, false, false, false, false, false]
+        );
+        // The threshold sits between 4 and 5.
+        let edge = panel(&[(0x77, 0x54), (0x78, 0x00), (0x79, 0x00), (0x7a, 0x00), (0x7b, 0x00)]);
+        assert_eq!(edge.farfisa_tabs(1)[0], true, "5 should read as on");
+        assert_eq!(edge.farfisa_tabs(1)[1], false, "4 should read as off");
+    }
+
+    /// Preset 2 reads from its own block, so the two presets never alias.
+    #[test]
+    fn farfisa_presets_are_independent() {
+        let p = panel(&[(0x77, 0x80), (0x7d, 0x08)]);
+        assert_eq!(p.farfisa_tabs(1)[0], true);
+        assert_eq!(p.farfisa_tabs(1)[1], false);
+        assert_eq!(p.farfisa_tabs(2)[0], false);
+        assert_eq!(p.farfisa_tabs(2)[1], true);
+    }
+}

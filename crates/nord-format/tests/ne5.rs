@@ -963,3 +963,60 @@ fn test_ne5_program_read_write_organ() {
         "no organ assertions ran — is the organ corpus present?"
     );
 }
+
+/// b3+bass preset 1 keeps its two bass drawbars outside the nine-nibble block, so
+/// `drawbars()` cannot see them. Check `b3_bass_drawbars()` against the filename for
+/// every Type-B b3+bass specimen (`1 1 r s _ DDDDDDDDD`, model digit 1).
+///
+/// This is the real-data counterpart to the unit tests in `program.rs`: those pin the
+/// bit layout, this pins it to specimens captured off the instrument.
+#[test]
+fn test_ne5_b3_bass_drawbars_match_filenames() {
+    use nord_format::electro5::program::OrganModel;
+
+    let dir = corpus_dir().join("programs/organ");
+    let mut checked = 0;
+
+    for entry in std::fs::read_dir(&dir).expect("organ corpus") {
+        let path = entry.expect("dir entry").path();
+        let name = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Type-B: `abcd_fffffffff`, model digit (b) == 1 is b3+bass.
+        let (head, bars) = match name.split_once('_') {
+            Some(parts) => parts,
+            None => continue,
+        };
+        if head.len() != 4 || bars.len() != 9 || !bars.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let mut head = head.chars();
+        let preset = head.next().and_then(|c| c.to_digit(10)).expect("preset digit") as u8;
+        let model = head.next().and_then(|c| c.to_digit(10)).expect("model digit");
+        if model != 1 || preset != 1 {
+            continue; // bass manual is preset 1 of b3+bass only
+        }
+
+        let program = match nord_format::from_path(&path).expect("parse") {
+            nord_format::Entity::Program(nord_format::Program::Electro5(p)) => p,
+            other => panic!("{name}: expected an electro5 program, got {other:?}"),
+        };
+        let got = program.organ().b3_bass_drawbars();
+        let want = [
+            bars.as_bytes()[0] - b'0',
+            bars.as_bytes()[1] - b'0',
+        ];
+        assert_eq!(got, want, "bass drawbars in {name}");
+
+        // The main block's first two nibbles are stale in this mode and must not be
+        // mistaken for the bass values — assert we are genuinely reading elsewhere.
+        let main = program.organ().drawbars(OrganModel::B3, 1);
+        if want != [0, 0] && (main[0], main[1]) == (want[0], want[1]) {
+            panic!("{name}: bass values also appear in the main block — offsets may be wrong");
+        }
+        checked += 1;
+    }
+
+    assert!(checked >= 4, "expected several b3+bass preset-1 specimens, saw {checked}");
+}
