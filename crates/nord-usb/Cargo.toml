@@ -8,6 +8,13 @@ version.workspace = true
 [lib]
 name = "nord_usb"
 
+# Features the Nix build must enable when running tests. The golden replay tests in
+# `tests/ops.rs` and `tests/status.rs` are `#![cfg(feature = "replay")]`, and `replay`
+# is deliberately not a default feature — without this they compile to nothing and the
+# build reports a pass having verified none of the wire encoding.
+[package.metadata.nix]
+testFeatures = ["replay"]
+
 [features]
 default = ["nusb"]
 # Desktop backend: macOS (IOKit), Linux (usbfs), Windows (WinUSB). Pure Rust, so
@@ -18,12 +25,15 @@ web = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sy
 # Drive the protocol from committed corpus captures, with no hardware. Used by
 # the golden-shape tests; platform-independent, so it runs on wasm32 too.
 replay = []
+# Block on the async API from synchronous callers (the CLI). Tiny; not a runtime.
+blocking = ["dep:pollster"]
 # Corpus-backed golden shape tests (NORD_CORPUS_DIR), mirroring nord-format.
 corpus = ["replay"]
 
 [dependencies]
 nord-format = { path = "../nord-format" }
 thiserror = "2"
+pollster = { version = "0.4", optional = true }
 
 nusb = { version = "0.1", optional = true }
 

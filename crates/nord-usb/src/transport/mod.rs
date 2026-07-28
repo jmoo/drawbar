@@ -6,6 +6,16 @@
 
 use crate::error::Result;
 
+#[cfg(feature = "nusb")]
+pub mod usb;
+#[cfg(feature = "nusb")]
+pub use usb::UsbTransport;
+
+#[cfg(feature = "replay")]
+pub mod replay;
+#[cfg(feature = "replay")]
+pub use replay::{Direction, ReplayTransport, Step};
+
 /// Vendor bulk IN endpoint (device → host). Settled across every corpus capture.
 pub const EP_IN: u8 = 0x82;
 /// Vendor bulk OUT endpoint (host → device).

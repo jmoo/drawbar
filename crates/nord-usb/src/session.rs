@@ -1,7 +1,7 @@
 //! The transaction wrapper every operation runs inside.
 //!
 //! Each operation is enclosed by the same exchange sequence, independent of what the
-//! operation actually does:
+//! operation does:
 //!
 //! ```text
 //! O18 I22, O22 I26, [ operation ], O22 I42, O18 I22, O18 I22
@@ -16,69 +16,138 @@
 //! async nor fallible, so a failed close would be silently swallowed — unacceptable
 //! where a half-open transaction may leave the device in an odd state. Closing is
 //! explicit; `Drop` only *complains* in debug builds.
-//!
-//! `open_on_device` omits the closing `O22 I42` entirely, so the wrapper is a property
-//! each operation declares rather than something applied unconditionally.
 
-use crate::error::Result;
+use std::marker::PhantomData;
+
+use crate::error::{Error, Result};
 use crate::transport::Transport;
+use crate::wire::{cmd, ui, Message, ObjectClass, Service};
 
 /// Read-only capability. Cannot reach any operation that mutates the device.
 #[derive(Debug)]
 pub struct ReadOnly;
 
-/// Read-write capability, reachable only through an explicit escalation. Device
-/// writes can destroy patches, so "did I gate this?" is a compile error, not a
-/// review question.
+/// Read-write capability, reachable only through an explicit escalation.
 #[derive(Debug)]
 pub struct ReadWrite;
 
 pub struct Session<'t, T: Transport, C = ReadOnly> {
     // `Option` rather than a plain `&mut` so the capability escalation can move the
-    // borrow out. A type implementing `Drop` cannot be destructured, so `take()` is
-    // the way to hand the transport onward without upsetting the borrow checker.
-    #[allow(dead_code)]
+    // borrow out: a type implementing `Drop` cannot be destructured.
     transport: Option<&'t mut T>,
+    class: ObjectClass,
     closed: bool,
-    _capability: std::marker::PhantomData<C>,
+    _capability: PhantomData<C>,
 }
 
 impl<'t, T: Transport> Session<'t, T, ReadOnly> {
-    /// Run the opening exchanges and hand back a read-only session.
-    pub async fn open(transport: &'t mut T) -> Result<Self> {
-        // TODO: emit SESSION_OPEN once ops land; the codes are in wire::cmd.
-        Ok(Self {
-            transport: Some(transport),
-            closed: false,
-            _capability: std::marker::PhantomData,
-        })
+    /// Open a transaction scoped to one [`ObjectClass`].
+    ///
+    /// The class matters: `STATUS` and the addressing operations all report on
+    /// whichever class was opened, so opening the wrong one yields correct-looking
+    /// numbers about the wrong thing.
+    pub async fn open(transport: &'t mut T, class: ObjectClass) -> Result<Self> {
+        let mut s =
+            Self { transport: Some(transport), class, closed: false, _capability: PhantomData };
+
+        // The UI/session-service handshake, then the class-scoped open.
+        //
+        // Errors are caught rather than propagated with `?` so the half-built session
+        // can be marked closed first. Otherwise a failed open drops a session that was
+        // never established, and the Drop assertion fires on what is really just a
+        // failed connection — the assertion is there to catch *forgotten* commits.
+        let result = async {
+            s.request(Service::Ui, ui::SUBSYSTEM, ui::HELLO, &[]).await?;
+            s.request(Service::Program, 10, cmd::SESSION_OPEN, &class.to_raw().to_be_bytes())
+                .await?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => Ok(s),
+            Err(e) => {
+                s.closed = true; // nothing was opened, so there is nothing to close
+                Err(e)
+            }
+        }
     }
 
     /// Escalate to a session that can mutate the device.
     ///
-    /// Deliberately verbose and deliberately not `From`/`Into`: per the architecture's
-    /// safety-first rule, callers should back up before writing.
+    /// Deliberately verbose and deliberately not `From`/`Into`: device writes can
+    /// destroy patches, so callers should back up first.
     pub fn allow_destructive_writes(mut self) -> Session<'t, T, ReadWrite> {
         let transport = self.transport.take();
-        let closed = self.closed;
-        // The husk is about to drop; it no longer owns the transaction, so silence
-        // its debug assertion. The returned session inherits the real state.
+        let (class, closed) = (self.class, self.closed);
+        // The husk is about to drop and no longer owns the transaction.
         self.closed = true;
-        Session { transport, closed, _capability: std::marker::PhantomData }
+        Session { transport, class, closed, _capability: PhantomData }
     }
 }
 
 impl<T: Transport, C> Session<'_, T, C> {
+    pub fn class(&self) -> ObjectClass {
+        self.class
+    }
+
+    /// Send one request and read its response, enforcing the framing invariants: the
+    /// reply must be `command + 1`, and must report success.
+    pub(crate) async fn request(
+        &mut self,
+        service: Service,
+        subsystem: u32,
+        command: u32,
+        args: &[u8],
+    ) -> Result<Message> {
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| Error::Transport("session has no transport".into()))?;
+
+        let req = Message::new(service, subsystem, command, args.to_vec());
+        transport.write(&req.encode()).await?;
+
+        let raw = transport.read(crate::transport::READ_BUFFER).await?;
+        let resp = Message::decode_response(&raw)?;
+
+        if resp.command != command + 1 {
+            return Err(Error::UnexpectedResponse { expected: command + 1, got: resp.command });
+        }
+        match resp.status() {
+            Some(0) | None => Ok(resp),
+            Some(code) => Err(Error::DeviceStatus(code)),
+        }
+    }
+
+    /// Send a fire-and-forget message without waiting for a reply.
+    ///
+    /// The UI progress strings ([`ui::label`], [`ui::percent`]) are sent this way: the
+    /// device never acknowledges them, so routing them through [`Self::request`] would
+    /// block forever on a response that never comes.
+    ///
+    /// Like [`Self::request`] this does not test `closed`, and does not need to:
+    /// [`Self::commit`] and [`Self::abort`] both consume `self`, so a closed session
+    /// cannot be reached again. The flag exists only for the `Drop` assertion.
+    pub(crate) async fn notify(&mut self, msg: &Message) -> Result<()> {
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| Error::Transport("session has no transport".into()))?;
+        transport.write(&msg.encode()).await
+    }
+
     /// Run the closing exchanges. Always prefer this over dropping.
     pub async fn commit(mut self) -> Result<()> {
+        self.request(Service::Program, 10, cmd::SESSION_CLOSE, &[]).await?;
+        self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[]).await?;
         self.closed = true;
         Ok(())
     }
 
-    /// Abandon the transaction without committing.
-    pub async fn abort(mut self) -> Result<()> {
+    /// Abandon the transaction without running the closing exchanges.
+    pub fn abort(mut self) {
         self.closed = true;
-        Ok(())
     }
 }
 

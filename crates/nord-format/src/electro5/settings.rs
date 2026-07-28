@@ -6,6 +6,10 @@ use std::fmt::Debug;
 use std::io;
 
 pub const FORMAT: &str = "ne5s";
+/// Schema versions validated against the corpus. Both specimens report 0.
+pub const KNOWN_VERSIONS: &[u32] = &[0];
+/// Total file length: 44-byte CBIN header + 34-byte body.
+pub const FILE_LEN: usize = 78;
 
 /// Length of the settings body block (`0x2c..=0x4d`), the region covered by the
 /// CRC. Currently held verbatim; see [`Settings`] for the decode target.
@@ -71,6 +75,17 @@ impl Settings {
             Ok(schema) => schema,
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
+
+        if !KNOWN_VERSIONS.contains(&schema.version) {
+            return Err(io::Error::other(
+                crate::error::ParseError::UnsupportedVersion {
+                    format: FORMAT,
+                    version: schema.version,
+                    supported: KNOWN_VERSIONS,
+                }
+                .to_string(),
+            ));
+        }
 
         Ok(Settings { schema })
     }

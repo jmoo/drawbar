@@ -22,6 +22,9 @@ pub enum Error {
     #[error("transport: {0}")]
     Transport(String),
 
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("{0}")]
     Format(#[from] nord_format::error::Error),
 

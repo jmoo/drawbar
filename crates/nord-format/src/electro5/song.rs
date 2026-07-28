@@ -12,6 +12,11 @@ use crate::electro5::program;
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5t";
+/// Schema versions this build's field offsets have been validated against: 0 is the
+/// eight factory demo songs, 1 is everything user-written.
+pub const KNOWN_VERSIONS: &[u32] = &[0, 1];
+/// Total file length: 44-byte CBIN header + 18-byte body.
+pub const FILE_LEN: usize = 62;
 pub const PROGRAM_COUNT: usize = 4;
 pub const BANK_COUNT: u16 = 4;
 pub const SLOT_COUNT: u16 = 50;
@@ -32,13 +37,17 @@ struct Schema {
     #[bw(try_calc = w.checksum())]
     crc32: u32,
 
+    // Bits 48.. carry the version again. The container header is never transmitted
+    // over USB — the device sends only this body — so the version is echoed into the
+    // payload where the wire side can see it. Writing a constant `1 << 48` here (as
+    // this did) rewrites a version-0 song as version 1.
     #[brw(big, pad_before = 16)]
     #[bw(calc = (
     ((* a).as_u16() as u64) << 39
     | ((* b).as_u16() as u64) << 30
     | ((* c).as_u16() as u64) << 21
     | ((* d).as_u16() as u64) << 12)
-    | 0x01000000000000
+    | ((* version as u64) << 48)
     )]
     map: u64,
 
@@ -66,6 +75,7 @@ struct Schema {
 impl Schema {
     pub fn new(
         location: Location,
+        version: u32,
         a: program::Location,
         b: program::Location,
         c: program::Location,
@@ -73,7 +83,7 @@ impl Schema {
     ) -> Schema {
         Schema {
             header: Header::new(1, FORMAT, location),
-            version: 1,
+            version,
             a,
             b,
             c,
@@ -89,15 +99,29 @@ impl Song {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
 
-        Ok(Song::new(
+        if !KNOWN_VERSIONS.contains(&schema.version) {
+            return Err(io::Error::other(
+                crate::error::ParseError::UnsupportedVersion {
+                    format: FORMAT,
+                    version: schema.version,
+                    supported: KNOWN_VERSIONS,
+                }
+                .to_string(),
+            ));
+        }
+
+        let mut song = Song::new(
             schema.header.location,
             [schema.a, schema.b, schema.c, schema.d],
-        ))
+        );
+        song.set_version(schema.version);
+        Ok(song)
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
         let mut schema = Schema::new(
             self.location(),
+            self.version(),
             self.programs()[0],
             self.programs()[1],
             self.programs()[2],
@@ -150,6 +174,50 @@ mod tests {
         assert_eq!(song.get(2), result.get(2));
         assert_eq!(song.get(3), result.get(3));
 
+        Ok(())
+    }
+
+    /// A version-0 song must come back out as version 0.
+    ///
+    /// The eight factory demo songs are version 0 and everything user-written is
+    /// version 1. The writer used to hardcode `version: 1` and a constant `1 << 48` in
+    /// the map word, so re-emitting a factory song silently promoted it — a real
+    /// difference at offset `0x14` and again in the body, on every one of the eight.
+    #[test]
+    fn version_survives_a_round_trip() -> Result<(), Error> {
+        for version in [0u32, 1] {
+            let mut song = Song::new(
+                (0, 5).try_into()?,
+                [
+                    (1, 2).try_into()?,
+                    (2, 3).try_into()?,
+                    (3, 4).try_into()?,
+                    (4, 5).try_into()?,
+                ],
+            );
+            song.set_version(version);
+
+            let mut bytes = Vec::new();
+            song.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+
+            // Header field at 0x14, little-endian.
+            assert_eq!(
+                u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap()),
+                version,
+                "header version for v{version}",
+            );
+            // ...and the echo in the top bits of the big-endian map word at 0x2c, which
+            // is the only copy the device ever sees.
+            assert_eq!(
+                u16::from_be_bytes(bytes[0x2c..0x2e].try_into().unwrap()) as u32,
+                version,
+                "body version echo for v{version}",
+            );
+
+            let back = Song::read_from(&mut Cursor::new(&mut bytes)).unwrap();
+            assert_eq!(back.version(), version);
+            assert_eq!(back.get(0), song.get(0));
+        }
         Ok(())
     }
 

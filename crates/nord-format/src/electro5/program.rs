@@ -9,6 +9,11 @@ use std::fmt::Debug;
 use std::io;
 
 pub const FORMAT: &str = "ne5p";
+/// Schema versions this build's field offsets have been validated against. Every one of
+/// the 624 corpus programs reports 4. See [`crate::error::ParseError::UnsupportedVersion`].
+pub const KNOWN_VERSIONS: &[u32] = &[4];
+/// Total file length: 44-byte CBIN header + 121-byte body.
+pub const FILE_LEN: usize = 165;
 pub const BANK_COUNT: u16 = 8;
 pub const SLOT_COUNT: u16 = 50;
 
@@ -575,9 +580,16 @@ pub struct EffectsPanel {
     #[bw(ignore)]
     pub fx4_ping_pong: bool,
 
-    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000110_00000000_00000000) >> ((8 * 2) + 1)) as u8)]
+    /// EQ engaged. **Which part it applies to is not in this word** — see
+    /// [`Extra::equalizer_part`].
+    ///
+    /// This was previously decoded as a two-bit `equalizer_part_select`, which could
+    /// only ever answer 0 or 2: diffing the four named `equalizer/{0,1,2,3}_…`
+    /// specimens shows they are byte-identical across `0x93..0x9a` apart from this
+    /// single bit, and the lower/upper/both choice lives at `0xa1`.
+    #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000100_00000000_00000000) >> ((8 * 2) + 2)) != 0)]
     #[bw(ignore)]
-    pub equalizer_part_select: u8,
+    pub equalizer_on: bool,
 
     #[br(calc = ((settings & 0b00000000_00000000_00000000_00000000_00000000_00000001_11111100_00000000) >> ((8 * 1) + 2)) as u8)]
     #[bw(ignore)]
@@ -660,6 +672,16 @@ pub struct Extra {
     #[br(calc = ((settings & 0b00001000_00000000_00000000_00000000) >> ((8 * 3) + 3)) != 0)]
     #[bw(ignore)]
     pub fx2_deep: bool,
+
+    /// Which part the equalizer applies to: `0` lower, `1` upper, `2` lower+upper.
+    ///
+    /// Whether the EQ is engaged at all is a separate bit,
+    /// [`EffectsPanel::equalizer_on`] — so `0` here means *lower*, not *off*. Located
+    /// by diffing the `equalizer/{0,1,2,3}_…` specimens, which differ only at `0xa1`
+    /// (and in the enable bit and CRC).
+    #[br(calc = ((settings & 0b00000110_00000000_00000000_00000000) >> ((8 * 3) + 1)) as u8)]
+    #[bw(ignore)]
+    pub equalizer_part: u8,
 }
 
 #[binrw]
@@ -743,6 +765,16 @@ impl Program {
             Ok(schema) => schema,
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
         };
+        if !KNOWN_VERSIONS.contains(&schema.version) {
+            return Err(io::Error::other(
+                crate::error::ParseError::UnsupportedVersion {
+                    format: FORMAT,
+                    version: schema.version,
+                    supported: KNOWN_VERSIONS,
+                }
+                .to_string(),
+            ));
+        }
 
         Ok(Program {
             location: schema.header.location,
@@ -827,6 +859,34 @@ impl Program {
     pub fn organ(&self) -> &OrganPanel {
         &self.schema.organ_panel
     }
+
+    /// Which organ the program has selected: `0` b3, `1` b3+bass, `2` pipe, `3` vox,
+    /// `4` farfisa. Ordering is from the named specimens in
+    /// `nord-corpus/ne5/programs/organ/` (the type-B convention).
+    ///
+    /// **b3+bass is a selection, not a fifth model.** It shares the B3's storage, but
+    /// its two presets are different instruments: preset 1 is the bass manual, where
+    /// only drawbars 1–2 do anything and they live outside the nine-nibble block (see
+    /// [`OrganPanel::b3_bass_drawbars`]); preset 2 is an ordinary B3. Reading preset 1's
+    /// nine nibbles in that mode shows stale values.
+    pub fn organ_type(&self) -> u8 {
+        self.schema.center_panel.organ_type
+    }
+
+    /// The piano panel, including [`PianoPanel::id`] — the program's **piano dependency
+    /// reference**. It is the same id the instrument reports for this program over USB
+    /// in a `DEPENDENCIES` reply, which is what lets a file on disk be matched to the
+    /// library content it needs. The wire carries the piano's *name* too; the file does
+    /// not, so resolving one to the other needs the device or a bundle manifest.
+    pub fn piano(&self) -> &PianoPanel {
+        &self.schema.piano_panel
+    }
+
+    /// The sample panel, including [`SamplePanel::id`] — the sample dependency
+    /// reference, the counterpart to [`Program::piano`].
+    pub fn sample(&self) -> &SamplePanel {
+        &self.schema.sample_panel
+    }
 }
 
 impl bank::Item<Location> for Program {
@@ -852,6 +912,36 @@ impl common::program::Program for Program {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unknown schema version is refused at read, not decoded on a guess.
+    ///
+    /// Field offsets are only validated for the versions in the corpus. A future
+    /// firmware bumping `ne5p` to 5 could move fields; decoding it with version-4
+    /// offsets would yield plausible but wrong values, and writing it back would then
+    /// persist them. Refusing is the only safe default.
+    #[test]
+    fn an_unknown_schema_version_is_refused() {
+        use std::io::Cursor;
+
+        let mut program = Program::new((0, 0).try_into().unwrap());
+        let mut bytes = Vec::new();
+        program.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(bytes.len(), FILE_LEN);
+
+        // Sanity: as written, it reads back.
+        assert!(Program::read_from(&mut Cursor::new(&mut bytes.clone())).is_ok());
+
+        // The schema version lives at 0x14, little-endian.
+        assert_eq!(u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap()), 4);
+        bytes[0x14..0x18].copy_from_slice(&5u32.to_le_bytes());
+
+        let err = Program::read_from(&mut Cursor::new(&mut bytes))
+            .expect_err("version 5 must not decode");
+        assert!(
+            err.to_string().contains("not supported"),
+            "unhelpful error: {err}",
+        );
+    }
 
     /// Build an organ panel from `(absolute offset, byte)` pairs; everything else 0.
     fn panel(bytes: &[(usize, u8)]) -> OrganPanel {

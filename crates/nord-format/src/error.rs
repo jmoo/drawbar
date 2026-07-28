@@ -14,6 +14,29 @@ pub enum ParseError {
 
     #[error("{0}")]
     AssertFail(String),
+
+    /// A file whose schema version this build has never been validated against.
+    ///
+    /// Field offsets are only known to be right for the versions in the corpus.
+    /// Decoding a newer one would produce plausible-looking but wrong values, and
+    /// writing it back would then persist them — so refuse instead.
+    #[error("{format}: schema version {version} is not supported (known: {supported:?}); \
+             refusing to decode rather than risk misreading fields")]
+    UnsupportedVersion {
+        format: &'static str,
+        version: u32,
+        supported: &'static [u32],
+    },
+
+    /// A re-encode that did not produce the length the format declares. Guards against
+    /// a writer silently emitting a truncated file.
+    #[error("{format}: re-encoded to {got} bytes but the format is {expected}; \
+             refusing to emit a truncated file")]
+    BadEncodedLength {
+        format: &'static str,
+        got: usize,
+        expected: usize,
+    },
 }
 
 #[derive(ThisError, Debug)]
