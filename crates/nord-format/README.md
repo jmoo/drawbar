@@ -78,12 +78,20 @@ NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
 nix build .#checks.<system>.nord-format-corpus
 ```
 
-
 ## Where this fits
 
 This project started in 2023 as my personal 'learn rust' project. The goal was to be able to read/write clavia files for my electro 5. After I got most of the ne5 formats RE'd, I got a new job that was pretty demanding and I didn't have much free time to continue.
 
 The goal now is to finish reverse engineering ne5 files, add support for more models, and to reverse engineer the USB protocol. The end game is to have a portable toolkit that could be the foundation of an open source nord manager alternative with linux support.
+
+## Current State
+
+Messy and incomplete but solid for reading and writing electro 5 files due to lossless round trips and large test corpus.
+Nord Electro 5 Program and Song files are nearly 100% solved for the file versions I've encountered, and the library safely errors when
+encountering unexpected files or versions. Settings, bundles, backups, live, piano, and sample files are still incomplete.
+
+Expect refactoring, API changes, and other misc changes until a stable version is released. I would also like to support
+more nord models, but will not work on those until I'm 100% satisfied with the Electro 5 support.
 
 ## Prior art
 
