@@ -96,7 +96,8 @@
             nativeBuildInputs = [
               toolchain
               rustPlatform.cargoSetupHook
-            ] ++ lib.optional (spec ? cc) spec.cc;
+            ]
+            ++ lib.optional (spec ? cc) spec.cc;
 
             buildPhase = ''
               runHook preBuild
@@ -139,8 +140,7 @@
             meta.description = "${crate} cross-compiled for ${spec.triple}";
           }
           // lib.optionalAttrs (spec ? cc) {
-            "CARGO_TARGET_${envTriple spec.triple}_LINKER" =
-              "${spec.cc}/bin/${spec.cc.targetPrefix}cc";
+            "CARGO_TARGET_${envTriple spec.triple}_LINKER" = "${spec.cc}/bin/${spec.cc.targetPrefix}cc";
           }
           // lib.optionalAttrs (spec ? libs) {
             # Put the target's static libs on rustc's search path directly. Going
@@ -164,9 +164,7 @@
 
       crossed = lib.concatMapAttrs (
         crate: names:
-        lib.listToAttrs (
-          map (n: lib.nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names
-        )
+        lib.listToAttrs (map (n: lib.nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names)
       ) crateTargets;
 
       # Actually *run* each foreign binary. Cross-compiling only proves it linked;
