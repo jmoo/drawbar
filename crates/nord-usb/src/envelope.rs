@@ -32,7 +32,11 @@ fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -44,7 +48,9 @@ fn crc32(data: &[u8]) -> u32 {
 pub fn wrap(format: &str, at: Location, body: &[u8]) -> Result<Vec<u8>> {
     let tag = format.as_bytes();
     if tag.len() != 4 {
-        return Err(Error::Transport(format!("format tag {format:?} is not 4 characters")));
+        return Err(Error::Transport(format!(
+            "format tag {format:?} is not 4 characters"
+        )));
     }
 
     let mut out = vec![0u8; HEADER_LEN + body.len()];
@@ -68,7 +74,10 @@ pub fn wrap(format: &str, at: Location, body: &[u8]) -> Result<Vec<u8>> {
 /// format tag and the slot the file claims to belong to.
 pub fn unwrap(file: &[u8]) -> Result<(String, Location, &[u8])> {
     if file.len() <= HEADER_LEN {
-        return Err(Error::Truncated { got: file.len(), need: HEADER_LEN + 1 });
+        return Err(Error::Truncated {
+            got: file.len(),
+            need: HEADER_LEN + 1,
+        });
     }
     if &file[0..4] != MAGIC {
         return Err(Error::Transport("not a CBIN file (bad magic)".into()));
@@ -96,11 +105,15 @@ mod tests {
     use super::*;
 
     /// A real `.ne5p` read off bank 8 slot 14, split at the header boundary.
-    const HEADER: &str = "4342494e010000006e65357007000d00ffffffff04000000b65d46a500000000000000000000000000000000";
+    const HEADER: &str =
+        "4342494e010000006e65357007000d00ffffffff04000000b65d46a500000000000000000000000000000000";
     const BODY: &str = "000401df06781fc60000000000000000000000000000000000000100000000000000000000400000000000000002200000000000022000400000008888000008008888000008000000000080000000000080000000000000000000800000000800800000000800020010060401020408140010000000000000";
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
@@ -127,6 +140,9 @@ mod tests {
         let body = hex(BODY);
         let mut file = wrap("ne5p", Location::from_user(8, 14), &body).unwrap();
         *file.last_mut().unwrap() ^= 0xFF;
-        assert!(unwrap(&file).is_err(), "a corrupted body should fail the checksum");
+        assert!(
+            unwrap(&file).is_err(),
+            "a corrupted body should fail the checksum"
+        );
     }
 }

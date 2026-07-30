@@ -329,13 +329,21 @@ fn main() -> ExitCode {
                     };
                     device::run(source, json)
                 }
-                DeviceAction::Read { at, out, class, raw } => {
-                    device::parse_location(&at).and_then(|at| device::read(at, out, class, raw))
-                }
+                DeviceAction::Read {
+                    at,
+                    out,
+                    class,
+                    raw,
+                } => device::parse_location(&at).and_then(|at| device::read(at, out, class, raw)),
                 DeviceAction::Write { file, at, yes } => {
                     device::parse_location(&at).and_then(|at| device::write(file, at, yes))
                 }
-                DeviceAction::Move { from, to, class, yes } => device::parse_location(&from)
+                DeviceAction::Move {
+                    from,
+                    to,
+                    class,
+                    yes,
+                } => device::parse_location(&from)
                     .and_then(|from| Ok((from, device::parse_location(&to)?)))
                     .and_then(|(from, to)| device::move_object(from, to, class, yes)),
                 DeviceAction::Delete { slots, class, yes } => slots
@@ -343,10 +351,20 @@ fn main() -> ExitCode {
                     .map(|s| device::parse_location(s))
                     .collect::<Result<Vec<_>, _>>()
                     .and_then(|locs| device::delete(&locs, class, yes)),
-                DeviceAction::Rename { at, name, class, yes } => {
+                DeviceAction::Rename {
+                    at,
+                    name,
+                    class,
+                    yes,
+                } => {
                     device::parse_location(&at).and_then(|at| device::rename(at, name, class, yes))
                 }
-                DeviceAction::Duplicate { from, to, class, yes } => device::parse_location(&from)
+                DeviceAction::Duplicate {
+                    from,
+                    to,
+                    class,
+                    yes,
+                } => device::parse_location(&from)
                     .and_then(|from| Ok((from, device::parse_location(&to)?)))
                     .and_then(|(from, to)| device::duplicate(from, to, class, yes)),
                 DeviceAction::Select { at, class } => {
@@ -398,8 +416,8 @@ fn verify(files: &[PathBuf]) -> Result<(), String> {
                 continue;
             }
         };
-        let reencoded = nord_format::from_path(path)
-            .and_then(|mut entity| nord_format::to_bytes(&mut entity));
+        let reencoded =
+            nord_format::from_path(path).and_then(|mut entity| nord_format::to_bytes(&mut entity));
         match reencoded {
             Ok(bytes) if bytes == original => {
                 println!("ok     {} ({} bytes)", path.display(), original.len());
@@ -435,9 +453,12 @@ fn verify(files: &[PathBuf]) -> Result<(), String> {
 /// the panel's own ordering (stored 0 is trem 1, not pan 1). The rotation is pinned by
 /// the named specimens in `nord-corpus/ne5/programs/fx/` and the mapping in
 /// nord-format's `tests/ne5.rs` — it is not inferred from the panel layout.
-const FX1_TYPES: [&str; 8] =
-    ["trem 1", "trem 2", "trem 1&2", "pan 1", "pan 2", "pan 1&2", "wah", "rm"];
-const FX2_TYPES: [&str; 6] = ["phaser 1", "phaser 2", "flanger", "chorus 1", "chorus 2", "vibe"];
+const FX1_TYPES: [&str; 8] = [
+    "trem 1", "trem 2", "trem 1&2", "pan 1", "pan 2", "pan 1&2", "wah", "rm",
+];
+const FX2_TYPES: [&str; 6] = [
+    "phaser 1", "phaser 2", "flanger", "chorus 1", "chorus 2", "vibe",
+];
 const FX3_TYPES: [&str; 6] = ["none", "small", "jc", "twin", "rotary", "comp"];
 const FX5_TYPES: [&str; 5] = ["room", "stage soft", "stage", "hall soft", "hall"];
 
@@ -452,7 +473,9 @@ fn knob(v: u8) -> String {
 }
 
 fn fx_type(table: &[&str], v: u8) -> String {
-    table.get(v as usize).map_or_else(|| format!("unknown ({v})"), |s| (*s).to_string())
+    table
+        .get(v as usize)
+        .map_or_else(|| format!("unknown ({v})"), |s| (*s).to_string())
 }
 
 /// Which part an effect is routed to.
@@ -529,7 +552,10 @@ pub(crate) fn print_summary(entity: &Entity) {
             );
             println!(
                 "  sample:    number {}  attack {}  decay/rel {}  dynamics {}  filter {}",
-                sample.number, sample.attack, sample.decay_release, sample.dynamics,
+                sample.number,
+                sample.attack,
+                sample.decay_release,
+                sample.dynamics,
                 yn(sample.filter),
             );
             // The two library references. `nord device deps` reports these same ids
@@ -677,11 +703,17 @@ pub(crate) fn print_summary(entity: &Entity) {
                                 .iter()
                                 .map(|on| if *on { '|' } else { '.' })
                                 .collect();
-                            let pos: String =
-                                o.drawbars(model, preset).iter().map(u8::to_string).collect();
+                            let pos: String = o
+                                .drawbars(model, preset)
+                                .iter()
+                                .map(u8::to_string)
+                                .collect();
                             format!("{tabs} ({pos})")
                         } else {
-                            o.drawbars(model, preset).iter().map(u8::to_string).collect()
+                            o.drawbars(model, preset)
+                                .iter()
+                                .map(u8::to_string)
+                                .collect()
                         };
 
                         let vib = match o.vib_type(model) {

@@ -16,11 +16,17 @@ use nord_usb::wire::ObjectClass;
 use nord_usb::Session;
 
 fn hex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 fn step(d: Direction, s: &str) -> Step {
-    Step { direction: d, bytes: hex(s) }
+    Step {
+        direction: d,
+        bytes: hex(s),
+    }
 }
 
 /// One complete program-class transaction: open, STATUS, close.
@@ -35,7 +41,12 @@ fn program_status_script() -> Vec<Step> {
         step(In, "0000001a0000000c0000000a00000005000000000000000467b0"),
         // STATUS -> count 375, free 3525, used 52875
         step(Out, "000000160000000c0000000a00000008000000042933"),
-        step(In, "0000002a0000000c0000000a0000000900000000000001770000 0dc50000ce8b0000000000000000ac2e".replace(' ', "").as_str()),
+        step(
+            In,
+            "0000002a0000000c0000000a0000000900000000000001770000 0dc50000ce8b0000000000000000ac2e"
+                .replace(' ', "")
+                .as_str(),
+        ),
         // SESSION_CLOSE, then the UI side
         step(Out, "000000120000000c0000000a000000066500"),
         step(In, "000000160000000c0000000a00000007000000000c4e"),
@@ -50,7 +61,12 @@ fn program_status_script() -> Vec<Step> {
 fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     fn vtable() -> &'static RawWakerVTable {
-        &RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), vtable()), |_| {}, |_| {}, |_| {})
+        &RawWakerVTable::new(
+            |_| RawWaker::new(std::ptr::null(), vtable()),
+            |_| {},
+            |_| {},
+            |_| {},
+        )
     }
     let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), vtable())) };
     let mut cx = Context::from_waker(&waker);
@@ -84,7 +100,11 @@ fn status_round_trips_a_real_transaction() {
     // Every scripted step consumed: the transaction ran to completion, and — because
     // ReplayTransport is Exact by default — every byte sent matched the real host's.
     assert!(t.is_exhausted(), "did not consume the whole exchange");
-    assert_eq!(t.sent().len(), 5, "expected 5 host messages in this transaction");
+    assert_eq!(
+        t.sent().len(),
+        5,
+        "expected 5 host messages in this transaction"
+    );
 }
 
 #[test]
@@ -101,7 +121,10 @@ fn wrong_bytes_are_caught() {
             Err(e) => Some(e),
         }
     });
-    assert!(err.is_some(), "opening the wrong object class should have been rejected");
+    assert!(
+        err.is_some(),
+        "opening the wrong object class should have been rejected"
+    );
 }
 
 #[test]
@@ -126,21 +149,41 @@ fn lenient_mode_tolerates_differing_requests() {
 fn derives_slots_only_for_fixed_size_classes() {
     use nord_usb::wire::Status;
 
-    let programs = Status { class: ObjectClass::Program, count: 380, free: 2820, used: 53580 };
+    let programs = Status {
+        class: ObjectClass::Program,
+        count: 380,
+        free: 2820,
+        used: 53580,
+    };
     assert_eq!(programs.blocks_per_item(), Some(141));
     assert_eq!(programs.slots(), Some(400));
 
-    let set_lists = Status { class: ObjectClass::SetList, count: 63, free: 5206, used: 2394 };
+    let set_lists = Status {
+        class: ObjectClass::SetList,
+        count: 63,
+        free: 5206,
+        used: 2394,
+    };
     assert_eq!(set_lists.blocks_per_item(), Some(38));
     assert_eq!(set_lists.slots(), Some(200));
 
     // Pianos genuinely vary in size, so there is no per-item constant to report.
-    let pianos = Status { class: ObjectClass::Piano, count: 29, free: 1, used: 4012 };
+    let pianos = Status {
+        class: ObjectClass::Piano,
+        count: 29,
+        free: 1,
+        used: 4012,
+    };
     assert_eq!(pianos.blocks_per_item(), None);
     assert_eq!(pianos.slots(), None);
 
     // An empty class must not divide by zero.
-    let empty = Status { class: ObjectClass::Unknown(6), count: 0, free: 363, used: 0 };
+    let empty = Status {
+        class: ObjectClass::Unknown(6),
+        count: 0,
+        free: 363,
+        used: 0,
+    };
     assert_eq!(empty.slots(), None);
 }
 
@@ -189,14 +232,23 @@ fn read_program_reproduces_nsm_and_rebuilds_the_file() {
     let mut t = ReplayTransport::new(script);
     let file = block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
-        let f = match op::read_program(&mut s, at).await { Ok(f) => f, Err(e) => { s.abort(); panic!("read_program failed: {e}") } };
+        let f = match op::read_program(&mut s, at).await {
+            Ok(f) => f,
+            Err(e) => {
+                s.abort();
+                panic!("read_program failed: {e}")
+            }
+        };
         s.commit().await.unwrap();
         f
     });
 
     // The real 165-byte .ne5p NSM saved for this slot.
     let expected = hex("4342494e010000006e65357007000d00ffffffff04000000b65d46a500000000000000000000000000000000000401df06781fc60000000000000000000000000000000000000100000000000000000000400000000000000002200000000000022000400000008888000008008888000008000000000080000000000080000000000000000000800000000800800000000800020010060401020408140010000000000000");
-    assert_eq!(file, expected, "reconstructed .ne5p differs from the file NSM saved");
+    assert_eq!(
+        file, expected,
+        "reconstructed .ne5p differs from the file NSM saved"
+    );
 
     // And it survives a trip back out to the wire body.
     let (format, loc, body) = envelope::unwrap(&file).unwrap();

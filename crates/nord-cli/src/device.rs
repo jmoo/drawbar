@@ -34,8 +34,8 @@ pub fn run(source: Source, json: bool) -> Result<(), String> {
             collect(&mut transport)?
         }
         Source::Replay(path) => {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let mut transport = nord_usb::ReplayTransport::from_script(&text)
                 .map_err(|e| e.to_string())?
                 .lenient();
@@ -72,10 +72,19 @@ fn print_table(report: &[Status]) {
             ),
             None => {
                 any_variable = true;
-                (format!("{} / {} blocks", s.used, s.total()), format!("{} items", s.count))
+                (
+                    format!("{} / {} blocks", s.used, s.total()),
+                    format!("{} items", s.count),
+                )
             }
         };
-        println!("{:<10} {:>20} {:>6.1}%  {}", s.class.label(), used, s.used_percent(), of);
+        println!(
+            "{:<10} {:>20} {:>6.1}%  {}",
+            s.class.label(),
+            used,
+            s.used_percent(),
+            of
+        );
     }
     if any_variable {
         // Only worth saying for the classes where the number is genuinely opaque.
@@ -178,16 +187,32 @@ pub fn read(at: Location, out: Option<PathBuf>, class: u32, raw: bool) -> Result
         finish(r, closed)
     })
     .map_err(|e| e.to_string())?;
-    eprintln!("  class={:?} format={:?} body_len={}", class, info.format, info.body_len);
+    eprintln!(
+        "  class={:?} format={:?} body_len={}",
+        class, info.format, info.body_len
+    );
 
     let path = out.unwrap_or_else(|| {
         // Default to the slot name, which is what the corpus convention keys on.
-        let stem = if info.name.is_empty() { "entity".into() } else { info.name.clone() };
-        let ext = if raw { "body".to_string() } else { info.format.clone() };
+        let stem = if info.name.is_empty() {
+            "entity".into()
+        } else {
+            info.name.clone()
+        };
+        let ext = if raw {
+            "body".to_string()
+        } else {
+            info.format.clone()
+        };
         PathBuf::from(format!("{stem}.{ext}"))
     });
     std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
-    eprintln!("read {} ({} bytes) -> {}", info.name, file.len(), path.display());
+    eprintln!(
+        "read {} ({} bytes) -> {}",
+        info.name,
+        file.len(),
+        path.display()
+    );
     Ok(())
 }
 
@@ -226,7 +251,9 @@ pub fn write(path: PathBuf, at: Location, confirmed: bool) -> Result<(), String>
         .unwrap_or(0);
 
     nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program).await?.allow_destructive_writes();
+        let mut s = Session::open(&mut t, ObjectClass::Program)
+            .await?
+            .allow_destructive_writes();
         let r = usb_op::write_program(&mut s, at, &file, timestamp).await;
         // Close the transaction either way; leaving it half-open is worse than the
         // original error.
@@ -235,7 +262,12 @@ pub fn write(path: PathBuf, at: Location, confirmed: bool) -> Result<(), String>
     })
     .map_err(|e| e.to_string())?;
 
-    eprintln!("wrote {} -> bank {} slot {}", path.display(), at.bank + 1, at.slot + 1);
+    eprintln!(
+        "wrote {} -> bank {} slot {}",
+        path.display(),
+        at.bank + 1,
+        at.slot + 1
+    );
     Ok(())
 }
 
@@ -246,7 +278,11 @@ fn shown(at: Location) -> String {
 
 /// Read one slot's name/format in a throwaway read-only session — used to show what a
 /// mutation is about to affect before it happens.
-fn peek(t: &mut nord_usb::transport::UsbTransport, class: ObjectClass, at: Location) -> Result<String, String> {
+fn peek(
+    t: &mut nord_usb::transport::UsbTransport,
+    class: ObjectClass,
+    at: Location,
+) -> Result<String, String> {
     nord_usb::block_on(async {
         let mut s = Session::open(t, class).await?;
         let r = usb_op::info(&mut s, at).await;
@@ -263,7 +299,11 @@ fn peek(t: &mut nord_usb::transport::UsbTransport, class: ObjectClass, at: Locat
 /// the normal case and makes `INFO` error, and refusing to move into a free slot because
 /// it is free would be absurd. A real transport fault surfaces on the operation itself a
 /// moment later.
-fn peek_dest(t: &mut nord_usb::transport::UsbTransport, class: ObjectClass, at: Location) -> String {
+fn peek_dest(
+    t: &mut nord_usb::transport::UsbTransport,
+    class: ObjectClass,
+    at: Location,
+) -> String {
     match peek(t, class, at) {
         Ok(name) => format!("OVERWRITING {name:?}"),
         Err(_) => "destination reads as empty".into(),
@@ -275,20 +315,36 @@ fn require_yes(confirmed: bool) -> Result<(), String> {
     if confirmed {
         Ok(())
     } else {
-        Err("refusing to modify the device without --yes (back up first: `nord device read`)".into())
+        Err(
+            "refusing to modify the device without --yes (back up first: `nord device read`)"
+                .into(),
+        )
     }
 }
 
 /// Move an object from one slot to another. Destructive; requires `--yes`.
-pub fn move_object(from: Location, to: Location, class: u32, confirmed: bool) -> Result<(), String> {
+pub fn move_object(
+    from: Location,
+    to: Location,
+    class: u32,
+    confirmed: bool,
+) -> Result<(), String> {
     let class = ObjectClass::from_raw(class);
     let mut t = open_usb()?;
     let name = peek(&mut t, class, from)?;
     let dest = peek_dest(&mut t, class, to);
-    eprintln!("moving {:?} from {} to {} — {}", name, shown(from), shown(to), dest);
+    eprintln!(
+        "moving {:?} from {} to {} — {}",
+        name,
+        shown(from),
+        shown(to),
+        dest
+    );
     require_yes(confirmed)?;
     nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, class).await?.allow_destructive_writes();
+        let mut s = Session::open(&mut t, class)
+            .await?
+            .allow_destructive_writes();
         let r = usb_op::move_object(&mut s, from, to).await;
         r.and(s.commit().await)
     })
@@ -308,7 +364,9 @@ pub fn delete(slots: &[Location], class: u32, confirmed: bool) -> Result<(), Str
     }
     require_yes(confirmed)?;
     nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, class).await?.allow_destructive_writes();
+        let mut s = Session::open(&mut t, class)
+            .await?
+            .allow_destructive_writes();
         let mut r = Ok(());
         for &at in slots {
             r = usb_op::delete(&mut s, at).await;
@@ -331,7 +389,9 @@ pub fn rename(at: Location, name: String, class: u32, confirmed: bool) -> Result
     eprintln!("renaming {} from {:?} to {:?}", shown(at), old, name);
     require_yes(confirmed)?;
     nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, class).await?.allow_destructive_writes();
+        let mut s = Session::open(&mut t, class)
+            .await?
+            .allow_destructive_writes();
         let r = usb_op::rename(&mut s, at, &name).await;
         r.and(s.commit().await)
     })
@@ -347,10 +407,18 @@ pub fn duplicate(from: Location, to: Location, class: u32, confirmed: bool) -> R
     let mut t = open_usb()?;
     let name = peek(&mut t, class, from)?;
     let dest = peek_dest(&mut t, class, to);
-    eprintln!("duplicating {:?} from {} to {} — {}", name, shown(from), shown(to), dest);
+    eprintln!(
+        "duplicating {:?} from {} to {} — {}",
+        name,
+        shown(from),
+        shown(to),
+        dest
+    );
     require_yes(confirmed)?;
     nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, class).await?.allow_destructive_writes();
+        let mut s = Session::open(&mut t, class)
+            .await?
+            .allow_destructive_writes();
         let r = usb_op::duplicate(&mut s, from, to).await;
         r.and(s.commit().await)
     })
@@ -453,17 +521,32 @@ pub fn program_get(at: Location, out: Option<PathBuf>) -> Result<(), String> {
 
     if let Some(path) = out {
         std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
-        eprintln!("read {:?} from {} -> {}", info.name, shown(at), path.display());
+        eprintln!(
+            "read {:?} from {} -> {}",
+            info.name,
+            shown(at),
+            path.display()
+        );
         return Ok(());
     }
 
     // Parse the bytes we just built rather than reporting the wire fields directly:
     // that exercises the same path `nord inspect` uses, so a decode regression shows up
     // here too instead of only in file-land.
-    let entity = nord_format::from_stream(&mut std::io::Cursor::new(&file))
-        .map_err(|e| format!("{} decoded off the device but did not parse: {e}", shown(at)))?;
+    let entity = nord_format::from_stream(&mut std::io::Cursor::new(&file)).map_err(|e| {
+        format!(
+            "{} decoded off the device but did not parse: {e}",
+            shown(at)
+        )
+    })?;
 
-    println!("{} — {:?}  ({}, version {})", shown(at), info.name, info.format, info.version);
+    println!(
+        "{} — {:?}  ({}, version {})",
+        shown(at),
+        info.name,
+        info.format,
+        info.version
+    );
     crate::print_summary(&entity);
     Ok(())
 }
@@ -485,7 +568,10 @@ mod tests {
 
     #[test]
     fn whitespace_around_the_numbers_is_tolerated() {
-        assert_eq!(parse_location(" 8 : 14 ").unwrap(), parse_location("8:14").unwrap());
+        assert_eq!(
+            parse_location(" 8 : 14 ").unwrap(),
+            parse_location("8:14").unwrap()
+        );
     }
 
     /// Zero is the giveaway that someone passed a wire index instead of a panel label.

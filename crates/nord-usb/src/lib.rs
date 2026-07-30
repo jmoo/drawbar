@@ -27,8 +27,8 @@ pub mod wire;
 
 pub use error::{Error, Result};
 pub use session::{ReadOnly, ReadWrite, Session};
-pub use wire::ObjectClass as _ObjectClassReexportGuard;
 pub use transport::Transport;
+pub use wire::ObjectClass as _ObjectClassReexportGuard;
 pub use wire::{Location, Message, ObjectClass, Service, Status};
 
 #[cfg(feature = "replay")]

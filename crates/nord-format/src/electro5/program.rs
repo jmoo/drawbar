@@ -958,13 +958,25 @@ mod tests {
     #[test]
     fn b3_bass_drawbars_decode_from_the_packed_field() {
         // bar1 = 4, bar2 = 0  ->  field 0x100
-        assert_eq!(panel(&[(0x59, 0x01), (0x5a, 0x00)]).b3_bass_drawbars(), [4, 0]);
+        assert_eq!(
+            panel(&[(0x59, 0x01), (0x5a, 0x00)]).b3_bass_drawbars(),
+            [4, 0]
+        );
         // bar1 = 0, bar2 = 4  ->  field 0x010
-        assert_eq!(panel(&[(0x59, 0x00), (0x5a, 0x10)]).b3_bass_drawbars(), [0, 4]);
+        assert_eq!(
+            panel(&[(0x59, 0x00), (0x5a, 0x10)]).b3_bass_drawbars(),
+            [0, 4]
+        );
         // bar1 = 8, bar2 = 7  ->  field 0x21c
-        assert_eq!(panel(&[(0x59, 0x02), (0x5a, 0x1c)]).b3_bass_drawbars(), [8, 7]);
+        assert_eq!(
+            panel(&[(0x59, 0x02), (0x5a, 0x1c)]).b3_bass_drawbars(),
+            [8, 7]
+        );
         // bar1 = 8, bar2 = 8  ->  field 0x220
-        assert_eq!(panel(&[(0x59, 0x02), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+        assert_eq!(
+            panel(&[(0x59, 0x02), (0x5a, 0x20)]).b3_bass_drawbars(),
+            [8, 8]
+        );
         // all down
         assert_eq!(panel(&[]).b3_bass_drawbars(), [0, 0]);
     }
@@ -975,10 +987,19 @@ mod tests {
     #[test]
     fn b3_bass_drawbars_ignore_the_flags_sharing_that_byte() {
         // Same field as `1100_88iiiiiii`: bar 9 = 8 in the high nibble, bars still 8,8.
-        assert_eq!(panel(&[(0x59, 0x82), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+        assert_eq!(
+            panel(&[(0x59, 0x82), (0x5a, 0x20)]).b3_bass_drawbars(),
+            [8, 8]
+        );
         // Vibrato (0x08) and percussion (0x04) on must not disturb the reading.
-        assert_eq!(panel(&[(0x59, 0x0e), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
-        assert_eq!(panel(&[(0x59, 0xfe), (0x5a, 0x20)]).b3_bass_drawbars(), [8, 8]);
+        assert_eq!(
+            panel(&[(0x59, 0x0e), (0x5a, 0x20)]).b3_bass_drawbars(),
+            [8, 8]
+        );
+        assert_eq!(
+            panel(&[(0x59, 0xfe), (0x5a, 0x20)]).b3_bass_drawbars(),
+            [8, 8]
+        );
     }
 
     /// Farfisa's drawbars are on/off tabs: >= 5 is on. The raw nibble is still stored
@@ -987,14 +1008,29 @@ mod tests {
     fn farfisa_drawbars_are_on_off_tabs() {
         // 0x77 is Farfisa preset 1: nine nibbles, high-nibble first.
         // bars 0..8 = 8,7,6,5,4,3,2,1,0 -> on for >= 5.
-        let p = panel(&[(0x77, 0x87), (0x78, 0x65), (0x79, 0x43), (0x7a, 0x21), (0x7b, 0x00)]);
-        assert_eq!(p.drawbars(OrganModel::Farfisa, 1), [8, 7, 6, 5, 4, 3, 2, 1, 0]);
+        let p = panel(&[
+            (0x77, 0x87),
+            (0x78, 0x65),
+            (0x79, 0x43),
+            (0x7a, 0x21),
+            (0x7b, 0x00),
+        ]);
+        assert_eq!(
+            p.drawbars(OrganModel::Farfisa, 1),
+            [8, 7, 6, 5, 4, 3, 2, 1, 0]
+        );
         assert_eq!(
             p.farfisa_tabs(1),
             [true, true, true, true, false, false, false, false, false]
         );
         // The threshold sits between 4 and 5.
-        let edge = panel(&[(0x77, 0x54), (0x78, 0x00), (0x79, 0x00), (0x7a, 0x00), (0x7b, 0x00)]);
+        let edge = panel(&[
+            (0x77, 0x54),
+            (0x78, 0x00),
+            (0x79, 0x00),
+            (0x7a, 0x00),
+            (0x7b, 0x00),
+        ]);
         assert_eq!(edge.farfisa_tabs(1)[0], true, "5 should read as on");
         assert_eq!(edge.farfisa_tabs(1)[1], false, "4 should read as off");
     }

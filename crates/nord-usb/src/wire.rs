@@ -216,7 +216,10 @@ impl ProgramInfo {
         }
         let p = msg.payload();
         if p.len() < Self::NAME_LEN_AT + 4 {
-            return Err(Error::Truncated { got: p.len(), need: Self::NAME_LEN_AT + 4 });
+            return Err(Error::Truncated {
+                got: p.len(),
+                need: Self::NAME_LEN_AT + 4,
+            });
         }
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
 
@@ -239,9 +242,14 @@ impl ProgramInfo {
         let name_start = Self::NAME_LEN_AT + 4;
         let name_end = name_start + name_len;
         if name_end > p.len() {
-            return Err(Error::Truncated { got: p.len(), need: name_end });
+            return Err(Error::Truncated {
+                got: p.len(),
+                need: name_end,
+            });
         }
-        let name = String::from_utf8_lossy(&p[name_start..name_end]).trim_end().to_owned();
+        let name = String::from_utf8_lossy(&p[name_start..name_end])
+            .trim_end()
+            .to_owned();
 
         // Trailing word, past the padding. Absent if the reply stops at the name.
         let crc32 = match p.len() >= name_end + 4 {
@@ -253,7 +261,10 @@ impl ProgramInfo {
         };
 
         Ok(Self {
-            location: Location { bank: word(0), slot: word(4) },
+            location: Location {
+                bank: word(0),
+                slot: word(4),
+            },
             body_len: word(8),
             format: String::from_utf8_lossy(&p[12..16]).into_owned(),
             version: word(16),
@@ -305,7 +316,10 @@ impl Dependency {
         }
         let p = msg.payload();
         if p.len() < 12 {
-            return Err(Error::Truncated { got: p.len(), need: 12 });
+            return Err(Error::Truncated {
+                got: p.len(),
+                need: 12,
+            });
         }
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
         let count = word(8) as usize;
@@ -315,7 +329,10 @@ impl Dependency {
         for _ in 0..count {
             // flag(1) + reserved(4) + class(4) + id(4) + name_len(4) = 17 bytes.
             if i + 17 > p.len() {
-                return Err(Error::Truncated { got: p.len(), need: i + 17 });
+                return Err(Error::Truncated {
+                    got: p.len(),
+                    need: i + 17,
+                });
             }
             let flag = p[i];
             let class = ObjectClass::from_raw(word(i + 5));
@@ -325,13 +342,24 @@ impl Dependency {
             let name_end = name_start + name_len;
             // name + has_location(4) + bank(4) + slot(4).
             if name_end + 12 > p.len() {
-                return Err(Error::Truncated { got: p.len(), need: name_end + 12 });
+                return Err(Error::Truncated {
+                    got: p.len(),
+                    need: name_end + 12,
+                });
             }
             let name = String::from_utf8_lossy(&p[name_start..name_end]).into_owned();
             let has_location = word(name_end) != 0;
-            let location = has_location
-                .then(|| Location { bank: word(name_end + 4), slot: word(name_end + 8) });
-            out.push(Self { flag, class, id, name, location });
+            let location = has_location.then(|| Location {
+                bank: word(name_end + 4),
+                slot: word(name_end + 8),
+            });
+            out.push(Self {
+                flag,
+                class,
+                id,
+                name,
+                location,
+            });
             i = name_end + 12;
         }
         Ok(out)
@@ -374,7 +402,13 @@ pub struct Message {
 impl Message {
     /// A request, to send to the device.
     pub fn new(service: Service, subsystem: u32, command: u32, args: Vec<u8>) -> Self {
-        Self { service, subsystem, command, args, is_response: false }
+        Self {
+            service,
+            subsystem,
+            command,
+            args,
+            is_response: false,
+        }
     }
 
     /// Whether this message was decoded as a device response.
@@ -431,11 +465,17 @@ impl Message {
     /// Prefer [`Self::decode_response`] for anything read off the wire.
     pub fn decode(buf: &[u8]) -> Result<Self> {
         if buf.len() < HEADER_LEN + CRC_LEN {
-            return Err(Error::Truncated { got: buf.len(), need: HEADER_LEN + CRC_LEN });
+            return Err(Error::Truncated {
+                got: buf.len(),
+                need: HEADER_LEN + CRC_LEN,
+            });
         }
         let declared = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
         if declared != buf.len() {
-            return Err(Error::LengthMismatch { declared, actual: buf.len() });
+            return Err(Error::LengthMismatch {
+                declared,
+                actual: buf.len(),
+            });
         }
 
         let split = buf.len() - CRC_LEN;
@@ -494,8 +534,12 @@ impl ObjectClass {
 
     /// The classes worth querying for an inventory. Codes 6 and 7 also answer, but
     /// reported zero items on every instrument seen so far.
-    pub const INVENTORY: [ObjectClass; 4] =
-        [ObjectClass::Piano, ObjectClass::Sample, ObjectClass::Program, ObjectClass::SetList];
+    pub const INVENTORY: [ObjectClass; 4] = [
+        ObjectClass::Piano,
+        ObjectClass::Sample,
+        ObjectClass::Program,
+        ObjectClass::SetList,
+    ];
 
     pub fn label(self) -> String {
         match self {
@@ -568,10 +612,18 @@ impl Status {
     pub fn decode(class: ObjectClass, msg: &Message) -> Result<Self> {
         let p = msg.payload();
         if p.len() < 12 {
-            return Err(Error::Truncated { got: p.len(), need: 12 });
+            return Err(Error::Truncated {
+                got: p.len(),
+                need: 12,
+            });
         }
         let word = |i: usize| u32::from_be_bytes(p[i * 4..i * 4 + 4].try_into().unwrap());
-        Ok(Self { class, count: word(0), free: word(1), used: word(2) })
+        Ok(Self {
+            class,
+            count: word(0),
+            free: word(1),
+            used: word(2),
+        })
     }
 }
 
@@ -587,7 +639,10 @@ pub struct Location {
 impl Location {
     /// From the one-indexed numbering used by the UI and capture names.
     pub fn from_user(bank: u32, slot: u32) -> Self {
-        Self { bank: bank - 1, slot: slot - 1 }
+        Self {
+            bank: bank - 1,
+            slot: slot - 1,
+        }
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
@@ -607,7 +662,10 @@ mod tests {
         "000000260000000c0000000a0000001900000000000000070000000c000000060000000f7197";
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
@@ -648,24 +706,39 @@ mod tests {
     #[test]
     fn direction_is_not_inferable_from_command_parity() {
         // Request: cmd 0x2f, args (0, 1) -- displayed set list 1:2.
-        let req = Message::decode(&hex("0000001a0000000c0000000a0000002f00000000000000017f71")).unwrap();
+        let req =
+            Message::decode(&hex("0000001a0000000c0000000a0000002f00000000000000017f71")).unwrap();
         assert_eq!(req.command, 0x2f);
         assert!(req.command & 1 == 1, "this request really is odd-numbered");
-        assert!(!req.is_response(), "an odd command must still decode as a request");
+        assert!(
+            !req.is_response(),
+            "an odd command must still decode as a request"
+        );
         assert_eq!(req.status(), None);
         // A request's payload must not have four bytes eaten as a status word.
         assert_eq!(req.payload().len(), 8);
 
         // Response: cmd 0x30 (even), status 0, then the echoed args.
-        let resp = Message::decode_response(
-            &hex("0000001e0000000c0000000a0000003000000000000000000000000112c4"),
-        )
+        let resp = Message::decode_response(&hex(
+            "0000001e0000000c0000000a0000003000000000000000000000000112c4",
+        ))
         .unwrap();
         assert_eq!(resp.command, req.command + 1);
-        assert!(resp.command & 1 == 0, "this response really is even-numbered");
+        assert!(
+            resp.command & 1 == 0,
+            "this response really is even-numbered"
+        );
         assert!(resp.is_response());
-        assert_eq!(resp.status(), Some(0), "status must be readable despite even command");
-        assert_eq!(resp.payload(), req.payload(), "args line up once status is stripped");
+        assert_eq!(
+            resp.status(),
+            Some(0),
+            "status must be readable despite even command"
+        );
+        assert_eq!(
+            resp.payload(),
+            req.payload(),
+            "args line up once status is stripped"
+        );
     }
 
     #[test]
@@ -747,7 +820,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(info.name, "3 Violins SM_Chamberlin_MMaster mono small version 2.0");
+        assert_eq!(
+            info.name,
+            "3 Violins SM_Chamberlin_MMaster mono small version 2.0"
+        );
         assert_eq!(info.name.len(), 54);
     }
 
@@ -763,8 +839,14 @@ mod tests {
     /// Percent clamps rather than erroring — no `u16` can produce a malformed frame.
     #[test]
     fn percent_clamps_to_100() {
-        assert_eq!(super::ui::percent(101).encode(), super::ui::percent(100).encode());
-        assert_eq!(super::ui::percent(u16::MAX).encode(), super::ui::percent(100).encode());
+        assert_eq!(
+            super::ui::percent(101).encode(),
+            super::ui::percent(100).encode()
+        );
+        assert_eq!(
+            super::ui::percent(u16::MAX).encode(),
+            super::ui::percent(100).encode()
+        );
     }
 
     /// Decoding a dependency list from a *request*-decoded message would shift every

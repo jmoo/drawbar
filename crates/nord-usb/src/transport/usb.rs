@@ -68,7 +68,10 @@ impl UsbTransport {
         ))?;
 
         let read_queue = interface.bulk_in_queue(EP_IN);
-        Ok(Self { interface, read_queue })
+        Ok(Self {
+            interface,
+            read_queue,
+        })
     }
 }
 

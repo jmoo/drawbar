@@ -29,8 +29,14 @@ use crate::wire::{cmd, ui, Dependency, Location, ObjectClass, ProgramInfo, Servi
 /// against real hardware.
 pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Status> {
     let class = session.class();
-    let resp =
-        session.request(Service::Program, 10, cmd::STATUS, &class.to_raw().to_be_bytes()).await?;
+    let resp = session
+        .request(
+            Service::Program,
+            10,
+            cmd::STATUS,
+            &class.to_raw().to_be_bytes(),
+        )
+        .await?;
     Status::decode(class, &resp)
 }
 
@@ -66,7 +72,9 @@ pub async fn info<T: Transport, C>(
 ) -> Result<ProgramInfo> {
     let mut args = Vec::new();
     at.write_to(&mut args);
-    let resp = session.request(Service::Program, 10, cmd::INFO, &args).await?;
+    let resp = session
+        .request(Service::Program, 10, cmd::INFO, &args)
+        .await?;
     ProgramInfo::decode(&resp)
 }
 
@@ -121,16 +129,26 @@ async fn transfer_out<T: Transport, C>(
 
     let mut args = Vec::new();
     at.write_to(&mut args);
-    session.request(Service::Program, 10, cmd::BEGIN_READ, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::BEGIN_READ, &args)
+        .await?;
 
     let mut req = args.clone();
     req.extend_from_slice(&0u32.to_be_bytes()); // offset
     req.extend_from_slice(&meta.body_len.to_be_bytes());
-    let resp = session.request(Service::Program, 10, cmd::READ, &req).await?;
+    let resp = session
+        .request(Service::Program, 10, cmd::READ, &req)
+        .await?;
 
     // Payload is bank, slot, offset, length, then the body.
     let p = resp.payload();
-    let body = p.get(16..).ok_or(Error::Truncated { got: p.len(), need: 16 })?.to_vec();
+    let body = p
+        .get(16..)
+        .ok_or(Error::Truncated {
+            got: p.len(),
+            need: 16,
+        })?
+        .to_vec();
     if body.len() != meta.body_len as usize {
         return Err(Error::Transport(format!(
             "device announced a {}-byte body but sent {}",
@@ -140,7 +158,9 @@ async fn transfer_out<T: Transport, C>(
     }
 
     session.notify(&ui::percent(100)).await?;
-    session.request(Service::Program, 10, cmd::END_TRANSFER, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::END_TRANSFER, &args)
+        .await?;
     Ok((meta, body))
 }
 
@@ -172,20 +192,26 @@ pub async fn write_program<T: Transport>(
     begin.extend_from_slice(&u32::MAX.to_be_bytes());
     begin.extend_from_slice(&1u32.to_be_bytes());
     begin.push(b'0'); // trailing flag byte, copied from the observed capture
-    session.request(Service::Program, 10, cmd::BEGIN_WRITE, &begin).await?;
+    session
+        .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
+        .await?;
 
     let mut data = Vec::new();
     at.write_to(&mut data);
     data.extend_from_slice(&0u32.to_be_bytes()); // offset
     data.extend_from_slice(&(body.len() as u32).to_be_bytes());
     data.extend_from_slice(body);
-    session.request(Service::Program, 10, cmd::WRITE_DATA, &data).await?;
+    session
+        .request(Service::Program, 10, cmd::WRITE_DATA, &data)
+        .await?;
 
     session.notify(&ui::percent(100)).await?;
 
     let mut args = Vec::new();
     at.write_to(&mut args);
-    session.request(Service::Program, 10, cmd::END_TRANSFER, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::END_TRANSFER, &args)
+        .await?;
     Ok(())
 }
 
@@ -194,13 +220,12 @@ pub async fn write_program<T: Transport>(
 ///
 /// **Non-destructive** — nothing stored changes, so this needs no [`ReadWrite`] session.
 /// This is the one command with inverted parity (`0x2f` request, `0x30` response).
-pub async fn select<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-    at: Location,
-) -> Result<()> {
+pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Location) -> Result<()> {
     let mut args = Vec::new();
     at.write_to(&mut args);
-    session.request(Service::Program, 10, cmd::SELECT, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::SELECT, &args)
+        .await?;
     Ok(())
 }
 
@@ -214,7 +239,9 @@ pub async fn dependencies<T: Transport, C>(
 ) -> Result<Vec<Dependency>> {
     let mut args = Vec::new();
     at.write_to(&mut args);
-    let resp = session.request(Service::Program, 10, cmd::DEPENDENCIES, &args).await?;
+    let resp = session
+        .request(Service::Program, 10, cmd::DEPENDENCIES, &args)
+        .await?;
     Dependency::decode_all(&resp)
 }
 
@@ -231,7 +258,9 @@ pub async fn move_object<T: Transport>(
     let mut args = Vec::new();
     from.write_to(&mut args);
     to.write_to(&mut args);
-    session.request(Service::Program, 10, cmd::MOVE, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::MOVE, &args)
+        .await?;
     Ok(())
 }
 
@@ -246,7 +275,9 @@ pub async fn delete<T: Transport>(
     session.notify(&ui::label("Deleting...")?).await?;
     let mut args = Vec::new();
     at.write_to(&mut args);
-    session.request(Service::Program, 10, cmd::DELETE, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::DELETE, &args)
+        .await?;
     Ok(())
 }
 
@@ -263,7 +294,9 @@ pub async fn rename<T: Transport>(
     at.write_to(&mut args);
     args.extend_from_slice(&(name.len() as u32).to_be_bytes());
     args.extend_from_slice(name.as_bytes());
-    session.request(Service::Program, 10, cmd::RENAME, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::RENAME, &args)
+        .await?;
     Ok(())
 }
 
@@ -281,7 +314,9 @@ pub async fn duplicate<T: Transport>(
     let mut args = Vec::new();
     from.write_to(&mut args);
     to.write_to(&mut args);
-    session.request(Service::Program, 10, cmd::COPY, &args).await?;
+    session
+        .request(Service::Program, 10, cmd::COPY, &args)
+        .await?;
     Ok(())
 }
 
@@ -290,7 +325,11 @@ fn crc32_of(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc

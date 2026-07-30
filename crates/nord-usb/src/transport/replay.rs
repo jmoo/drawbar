@@ -45,7 +45,12 @@ pub struct ReplayTransport {
 
 impl ReplayTransport {
     pub fn new(script: Vec<Step>) -> Self {
-        Self { script, pos: 0, sent: Vec::new(), strictness: Strictness::Exact }
+        Self {
+            script,
+            pos: 0,
+            sent: Vec::new(),
+            strictness: Strictness::Exact,
+        }
     }
 
     pub fn lenient(mut self) -> Self {
@@ -73,9 +78,9 @@ impl ReplayTransport {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (tag, hex) = line
-                .split_once(char::is_whitespace)
-                .ok_or_else(|| Error::Transport(format!("line {}: expected '<O|I> <hex>'", n + 1)))?;
+            let (tag, hex) = line.split_once(char::is_whitespace).ok_or_else(|| {
+                Error::Transport(format!("line {}: expected '<O|I> <hex>'", n + 1))
+            })?;
             let direction = match tag {
                 "O" | "o" => Direction::Out,
                 "I" | "i" => Direction::In,
@@ -106,7 +111,10 @@ impl Transport for ReplayTransport {
         self.sent.push(buf.to_vec());
 
         let step = self.script.get(self.pos).ok_or_else(|| {
-            Error::Transport(format!("script exhausted; host sent an extra {} bytes", buf.len()))
+            Error::Transport(format!(
+                "script exhausted; host sent an extra {} bytes",
+                buf.len()
+            ))
         })?;
         if step.direction != Direction::Out {
             return Err(Error::Transport(

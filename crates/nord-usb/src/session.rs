@@ -47,8 +47,12 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     /// whichever class was opened, so opening the wrong one yields correct-looking
     /// numbers about the wrong thing.
     pub async fn open(transport: &'t mut T, class: ObjectClass) -> Result<Self> {
-        let mut s =
-            Self { transport: Some(transport), class, closed: false, _capability: PhantomData };
+        let mut s = Self {
+            transport: Some(transport),
+            class,
+            closed: false,
+            _capability: PhantomData,
+        };
 
         // The UI/session-service handshake, then the class-scoped open.
         //
@@ -57,9 +61,15 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         // never established, and the Drop assertion fires on what is really just a
         // failed connection — the assertion is there to catch *forgotten* commits.
         let result = async {
-            s.request(Service::Ui, ui::SUBSYSTEM, ui::HELLO, &[]).await?;
-            s.request(Service::Program, 10, cmd::SESSION_OPEN, &class.to_raw().to_be_bytes())
+            s.request(Service::Ui, ui::SUBSYSTEM, ui::HELLO, &[])
                 .await?;
+            s.request(
+                Service::Program,
+                10,
+                cmd::SESSION_OPEN,
+                &class.to_raw().to_be_bytes(),
+            )
+            .await?;
             Ok(())
         }
         .await;
@@ -82,7 +92,12 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         let (class, closed) = (self.class, self.closed);
         // The husk is about to drop and no longer owns the transaction.
         self.closed = true;
-        Session { transport, class, closed, _capability: PhantomData }
+        Session {
+            transport,
+            class,
+            closed,
+            _capability: PhantomData,
+        }
     }
 }
 
@@ -112,7 +127,10 @@ impl<T: Transport, C> Session<'_, T, C> {
         let resp = Message::decode_response(&raw)?;
 
         if resp.command != command + 1 {
-            return Err(Error::UnexpectedResponse { expected: command + 1, got: resp.command });
+            return Err(Error::UnexpectedResponse {
+                expected: command + 1,
+                got: resp.command,
+            });
         }
         match resp.status() {
             Some(0) | None => Ok(resp),
@@ -139,8 +157,10 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Run the closing exchanges. Always prefer this over dropping.
     pub async fn commit(mut self) -> Result<()> {
-        self.request(Service::Program, 10, cmd::SESSION_CLOSE, &[]).await?;
-        self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[]).await?;
+        self.request(Service::Program, 10, cmd::SESSION_CLOSE, &[])
+            .await?;
+        self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
+            .await?;
         self.closed = true;
         Ok(())
     }
