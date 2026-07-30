@@ -33,12 +33,21 @@ pub struct CenterPanel {
     pub split: bool,
     #[bits(20..=22)]
     pub split_point: SplitPoint,
-    /// Sometimes left true even when the transpose is 0, in which case the instrument
-    /// shows no transpose light.
+    /// Sticky: the instrument sets this the first time transposition is changed and never
+    /// clears it again, so it stays true after the value is put back to 0. It marks that
+    /// transposition has been *touched*, not that the program is transposed.
+    ///
+    /// The transpose light is on for `transpose_enabled && transpose != 0`. Neither field
+    /// answers on its own — a caller reporting or editing transposition must read both.
+    /// Confirmed on hardware.
     #[bits(23..=23)]
     pub transpose_enabled: bool,
 
     /// Half-step transposition, `-6..=6`, stored biased by 6.
+    ///
+    /// Carries no meaning while [`transpose_enabled`](Self::transpose_enabled) is clear: an
+    /// untouched program stores `+1` there rather than `0`. Inferred from specimens; every
+    /// specimen with the enable clear holds `+1`.
     #[bits(24..=27)]
     pub transpose: Transpose,
     #[bits(28..=34)]
