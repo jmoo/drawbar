@@ -43,6 +43,13 @@ pub enum ParseError {
     },
 }
 
+/// Lets an infallible decode sit alongside fallible ones behind the same `?`.
+impl From<std::convert::Infallible> for ParseError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
+}
+
 #[derive(ThisError, Debug)]
 pub enum Error {
     #[error("{0}")]

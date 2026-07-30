@@ -1,17 +1,9 @@
-// Bit positions in this crate are written as `(8 * byte) + bit`, so that a shift can be
-// read straight off a hex dump against the offset tables in the format notes. Clippy
-// sees the `8 * 0` and `+ 0` in the first byte's worth of those and reports
-// `erasing_op` / `identity_op` — 9 hard errors and 27 warnings, enough that
-// `cargo clippy` cannot gate anything on this crate. The convention is deliberate and
-// worth more than the lint: normalising `>> ((8 * 0) + 6)` to `>> 6` would break the
-// visual correspondence with the dump for exactly the fields that are easiest to
-// misread.
-#![allow(clippy::erasing_op, clippy::identity_op)]
-
+pub mod bits;
 pub mod common;
 pub mod crc;
 pub mod electro5;
 pub mod error;
+pub mod panel;
 pub mod types;
 pub mod util;
 
@@ -45,6 +37,12 @@ pub enum Settings {
     Electro5(electro5::Settings),
 }
 
+/// One decoded file.
+///
+/// `Program` is much the largest variant: a decoded panel holds its fields *and* the
+/// bytes it came from, and the organ panel's bytes alone are 69. Left unboxed — one of
+/// these exists per file being read, never in a collection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Entity {
     Song(Song),

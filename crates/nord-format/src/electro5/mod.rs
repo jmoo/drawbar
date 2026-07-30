@@ -4,7 +4,10 @@ pub use settings::Settings;
 pub mod song;
 pub use song::Song;
 pub mod program;
-pub use program::{OrganModel, PercSpeed, Program, VibChorus};
+pub use program::{
+    B3PercSpeed, B3Vib, Drawbars, EqualizerPart, FarfisaVib, Fx1Type, Fx2Type, Fx3Type, Fx5Type,
+    OrganModel, OrganType, PianoCategory, Program, Routing, VoxVib,
+};
 #[cfg(feature = "bundle")]
 pub mod bundle;
 use crate::common;
@@ -15,6 +18,7 @@ pub type OctaveShift = common::OctaveShift<7, -6, 6>;
 pub type Transpose = common::Transpose<6, -6, 6>;
 pub type SplitPoint = common::SplitPoint73;
 pub type PartMix = common::PartMix;
+pub use common::{Level, PercSpeed, VibChorus};
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum Instrument {
@@ -39,6 +43,21 @@ impl Instrument {
             Instrument::Piano => "piano",
             Instrument::Sample => "sample",
         }
+    }
+}
+
+impl crate::bits::Packed for Instrument {
+    // Three variants, so two bits — even though the panel's slot is three bits wide.
+    const MAX_BITS: u32 = 2;
+    type Error = crate::error::ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, Self::Error> {
+        Instrument::try_from(bits as u8)
+            .map_err(|e| crate::error::ParseError::OutOfBounds(format!("{bits}"), e.to_string()))
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.as_u8() as u64
     }
 }
 

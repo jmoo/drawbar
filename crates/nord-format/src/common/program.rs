@@ -1,3 +1,4 @@
+use crate::bits::Packed;
 use crate::error::ParseError;
 use crate::types::RangedI8;
 use std::fmt::{Debug, Formatter};
@@ -50,26 +51,31 @@ impl Debug for PartMix {
     }
 }
 
+impl Packed for PartMix {
+    const MAX_BITS: u32 = 7;
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        (bits as u8).try_into()
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.inner() as u64
+    }
+}
+
 impl TryFrom<u8> for PartMix {
     type Error = ParseError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        (value as u16).try_into()
-    }
-}
-
-impl TryFrom<u16> for PartMix {
-    type Error = ParseError;
-
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
         if value > 127 {
             return Err(ParseError::OutOfBounds(
-                format!("{:?}", value),
-                format!(" <{:?} >{:?}", 0, 127),
+                format!("{value}"),
+                format!("{}", 127),
             ));
         }
 
-        Ok(PartMix { inner: value as u8 })
+        Ok(PartMix { inner: value })
     }
 }
 
@@ -101,6 +107,20 @@ impl TryFrom<u8> for SplitPoint73 {
             7 => Ok(SplitPoint73::Lower),
             _ => Err("Value is out of range for split point"),
         }
+    }
+}
+
+impl Packed for SplitPoint73 {
+    const MAX_BITS: u32 = 3;
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        SplitPoint73::try_from(bits as u8)
+            .map_err(|e| ParseError::OutOfBounds(format!("{bits}"), e.to_string()))
+    }
+
+    fn to_bits(&self) -> u64 {
+        *self as u64
     }
 }
 

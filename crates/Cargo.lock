@@ -608,6 +608,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nord-bits-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "nord-cli"
 version = "0.1.0"
 dependencies = [
@@ -622,6 +631,7 @@ version = "0.1.0"
 dependencies = [
  "binrw",
  "crcxx",
+ "nord-bits-derive",
  "regex",
  "thiserror",
  "zip",

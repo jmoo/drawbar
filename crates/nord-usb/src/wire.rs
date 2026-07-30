@@ -119,9 +119,7 @@ pub mod cmd {
 ///
 /// The progress messages ([`label`], [`percent`]) are **fire-and-forget** — the device
 /// never replies. They must be sent with [`crate::Session::notify`], never `request`,
-/// which would block forever waiting for a response that never comes. (An earlier
-/// version stopped sending them on the belief they were malformed; that came from a bad
-/// hand transcription and was wrong — every example on the wire is well-formed.)
+/// which would block forever waiting for a response that never comes.
 pub mod ui {
     use super::{Message, Service};
     use crate::error::{Error, Result};
@@ -233,11 +231,9 @@ impl ProgramInfo {
         // but carry content-specific values for library objects, so they are read as
         // opaque and skipped rather than asserted.
         //
-        // An earlier version scanned forward for the first plausible length word
-        // instead, because only one example was available. That scan was bounded at
-        // `n <= 32` — and this capture contains a 54-character sample name
-        // ("3 Violins SM_Chamberlin_MMaster mono small version 2.0"), which it would
-        // have skipped straight past, returning the wrong name or none at all.
+        // The name length is read, never searched for: names run long, and the corpus
+        // holds a 54-character one ("3 Violins SM_Chamberlin_MMaster mono small version
+        // 2.0").
         let name_len = word(Self::NAME_LEN_AT) as usize;
         let name_start = Self::NAME_LEN_AT + 4;
         let name_end = name_start + name_len;
@@ -306,8 +302,7 @@ impl Dependency {
         // [`Message::payload`] strips the leading status word only when the message is
         // marked as a response. Decoding a DEPENDENCIES reply with `Message::decode`
         // instead of `decode_response` would leave that word in place and shift every
-        // offset below by four — the same silent four-byte misalignment that inferring
-        // direction from command parity used to cause. Refuse rather than misparse.
+        // offset below by four. Refuse rather than misparse.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "dependency list must be decoded from a response (use Message::decode_response)"
@@ -413,13 +408,12 @@ impl Message {
 
     /// Whether this message was decoded as a device response.
     ///
-    /// **Direction, not parity.** An earlier version inferred this from the command
-    /// being odd, which held for every op decoded at the time and is wrong in general:
-    /// the "select in instrument" command is `0x2f` (odd) with response `0x30` (even),
-    /// exactly inverting the guess. The `response == request + 1` rule does hold — only
-    /// the parity of the request does not. Getting this backwards silently misaligns
-    /// [`Self::payload`] by four bytes and hides device errors, so it is now recorded
-    /// at decode time by the side that knows.
+    /// **Direction, not parity.** Parity invites the guess and does not support it: the
+    /// "select in instrument" command is `0x2f` (odd) with response `0x30` (even),
+    /// exactly inverting it. The `response == request + 1` rule does hold — only the
+    /// parity of the request does not. Getting this backwards silently misaligns
+    /// [`Self::payload`] by four bytes and hides device errors, so it is recorded at
+    /// decode time by the side that knows.
     pub fn is_response(&self) -> bool {
         self.is_response
     }

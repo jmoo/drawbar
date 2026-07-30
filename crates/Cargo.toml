@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "anki-tool",
+  "nord-bits-derive",
   "nord-cli",
   "nord-format",
   "nord-usb",

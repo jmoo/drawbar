@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Formatter};
 
+use crate::bits::{bits_for, Packed};
 use crate::common::bank::Location;
 use crate::error::ParseError;
 
@@ -19,6 +20,20 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> RangedI8<OFFSET, MIN, MAX> 
     }
 }
 
+/// Stored biased by `OFFSET`, so the widest encoding is `MAX + OFFSET`.
+impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Packed for RangedI8<OFFSET, MIN, MAX> {
+    const MAX_BITS: u32 = bits_for((MAX as i16 + OFFSET as i16) as u64);
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        (bits as u8).try_into()
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.as_u8() as u64
+    }
+}
+
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Debug for RangedI8<OFFSET, MIN, MAX> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.inner)
@@ -30,14 +45,6 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<u8> for RangedI8<OF
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         ((value as i8) - (OFFSET as i8)).try_into()
-    }
-}
-
-impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<u16> for RangedI8<OFFSET, MIN, MAX> {
-    type Error = ParseError;
-
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        (value as u8).try_into()
     }
 }
 
@@ -88,6 +95,87 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> PartialEq<i8> for RangedI8<
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> PartialEq<i32> for RangedI8<OFFSET, MIN, MAX> {
     fn eq(&self, other: &i32) -> bool {
         (self.inner as i32) == *other
+    }
+}
+
+/// An unsigned value constrained to `0..=MAX`.
+///
+/// The counterpart to [`RangedI8`] for fields that are still plain integers — knob
+/// positions, model slots, selectors. Expressing the bound in the type means the value
+/// cannot be built too wide for its slot, so encoding it can never fail.
+///
+/// `MAX` is what the *slot* holds, not what the instrument uses: tightening it to the
+/// real range would reject files this decoder currently accepts.
+#[derive(Copy, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RangedU8<const MAX: u8> {
+    inner: u8,
+}
+
+impl<const MAX: u8> RangedU8<MAX> {
+    /// The largest value this type can hold.
+    pub const MAX: u8 = MAX;
+
+    pub fn new(value: u8) -> Result<Self, ParseError> {
+        value.try_into()
+    }
+
+    pub fn as_u8(&self) -> u8 {
+        self.inner
+    }
+
+    pub fn inner(&self) -> u8 {
+        self.inner
+    }
+}
+
+impl<const MAX: u8> Packed for RangedU8<MAX> {
+    const MAX_BITS: u32 = bits_for(MAX as u64);
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        (bits as u8).try_into()
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.inner as u64
+    }
+}
+
+impl<const MAX: u8> TryFrom<u8> for RangedU8<MAX> {
+    type Error = ParseError;
+
+    fn try_from(value: u8) -> Result<Self, ParseError> {
+        if value > MAX {
+            return Err(ParseError::OutOfBounds(
+                format!("{value}"),
+                format!("{MAX}"),
+            ));
+        }
+        Ok(RangedU8 { inner: value })
+    }
+}
+
+impl<const MAX: u8> From<RangedU8<MAX>> for u8 {
+    fn from(value: RangedU8<MAX>) -> u8 {
+        value.inner
+    }
+}
+
+impl<const MAX: u8> Debug for RangedU8<MAX> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<const MAX: u8> std::fmt::Display for RangedU8<MAX> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<const MAX: u8> PartialEq<u8> for RangedU8<MAX> {
+    fn eq(&self, other: &u8) -> bool {
+        self.inner == *other
     }
 }
 

@@ -1,0 +1,707 @@
+# Every field of a fixed handful of specimens. The companion to
+# decode_fields.snapshot: one concrete file per constructed panel, so a decode
+# change has a readable place to land.
+
+=== programs/center_panel/o00_0_p000_0_1_6_50_50.ne5p
+CenterPanel.lower_part             0..=2                  raw 0            Organ
+CenterPanel.upper_part             3..=5                  raw 1            Piano
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 0            false
+CenterPanel.upper_sustain          15..=15                raw 0            false
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 1            true
+CenterPanel.split_point            20..=22                raw 5            F5
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 2            EPiano1
+PianoPanel.piano_model             5..=9                  raw 3            3
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 1842562946   1842562946
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 0            0
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [8, 8]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 64           64
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 0            false
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 64           64
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 64           64
+EffectsPanel.equalizer_bass        68..=74                raw 64           64
+EffectsPanel.fx3                   75..=76                raw 0            Off
+EffectsPanel.fx3_type              77..=79                raw 0            None_
+EffectsPanel.fx3_compression       80..=86                raw 0            0
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== programs/equalizer/1_000000000064.ne5p
+CenterPanel.lower_part             0..=2                  raw 1            Piano
+CenterPanel.upper_part             3..=5                  raw 2            Sample
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 1            true
+CenterPanel.upper_sustain          15..=15                raw 1            true
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 0            Grand
+PianoPanel.piano_model             5..=9                  raw 0            0
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 0            0
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 0            0
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [8, 8]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 64           64
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 1            true
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 0            0
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 0            0
+EffectsPanel.equalizer_bass        68..=74                raw 0            0
+EffectsPanel.fx3                   75..=76                raw 0            Off
+EffectsPanel.fx3_type              77..=79                raw 0            None_
+EffectsPanel.fx3_compression       80..=86                raw 0            0
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== programs/fx/fx1_100_5.ne5p
+CenterPanel.lower_part             0..=2                  raw 0            Organ
+CenterPanel.upper_part             3..=5                  raw 2            Sample
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 0            false
+CenterPanel.upper_sustain          15..=15                raw 0            false
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 2            EPiano1
+PianoPanel.piano_model             5..=9                  raw 3            3
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 1842562946   1842562946
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 1204335864   1204335864
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [2, 8, 8, 0, 4, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [2, 8]
+EffectsPanel.fx1                   0..=1                  raw 2            Lower
+EffectsPanel.fx1_type              2..=5                  raw 3            Pan1
+EffectsPanel.fx1_rate              6..=12                 raw 63           63
+EffectsPanel.fx2                   13..=14                raw 1            Unknown
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 1            Unknown
+EffectsPanel.fx4_feedback          28..=29                raw 0            0
+EffectsPanel.fx4_tempo             30..=36                raw 0            0
+EffectsPanel.fx4_moisture          37..=43                raw 54           54
+EffectsPanel.fx4_ping_pong         44..=44                raw 1            true
+EffectsPanel.equalizer_on          45..=45                raw 0            false
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 64           64
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 64           64
+EffectsPanel.equalizer_bass        68..=74                raw 64           64
+EffectsPanel.fx3                   75..=76                raw 0            Off
+EffectsPanel.fx3_type              77..=79                raw 5            Comp
+EffectsPanel.fx3_compression       80..=86                raw 127          127
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== programs/gain/10.ne5p
+CenterPanel.lower_part             0..=2                  raw 0            Organ
+CenterPanel.upper_part             3..=5                  raw 2            Sample
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 0            false
+CenterPanel.upper_sustain          15..=15                raw 0            false
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 2            EPiano1
+PianoPanel.piano_model             5..=9                  raw 3            3
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 1842562946   1842562946
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 1204335864   1204335864
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 8, 8, 0, 4, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [8, 8]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 64           64
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 0            false
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 64           64
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 64           64
+EffectsPanel.equalizer_bass        68..=74                raw 64           64
+EffectsPanel.fx3                   75..=76                raw 0            Off
+EffectsPanel.fx3_type              77..=79                raw 0            None_
+EffectsPanel.fx3_compression       80..=86                raw 0            0
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== programs/organ/1000000876543210.ne5p
+CenterPanel.lower_part             0..=2                  raw 0            Organ
+CenterPanel.upper_part             3..=5                  raw 0            Organ
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 1            true
+CenterPanel.upper_sustain          15..=15                raw 1            true
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 0            Grand
+PianoPanel.piano_model             5..=9                  raw 0            0
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 0            0
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 0            0
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 7, 6, 5, 4, 3, 2, 1, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [0, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(V2)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 0            false
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [8, 8]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 64           64
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 0            false
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 64           64
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 64           64
+EffectsPanel.equalizer_bass        68..=74                raw 64           64
+EffectsPanel.fx3                   75..=76                raw 2            Lower
+EffectsPanel.fx3_type              77..=79                raw 4            Rotary
+EffectsPanel.fx3_compression       80..=86                raw 0            0
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== programs/piano/0000_02_01.ne5p
+CenterPanel.lower_part             0..=2                  raw 1            Piano
+CenterPanel.upper_part             3..=5                  raw 0            Organ
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 1            true
+CenterPanel.upper_sustain          15..=15                raw 1            true
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 3            EPiano2
+PianoPanel.piano_model             5..=9                  raw 0            0
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 3517763037   3517763037
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 0            0
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [8, 8]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 64           64
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 0            false
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 64           64
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 64           64
+EffectsPanel.equalizer_bass        68..=74                raw 64           64
+EffectsPanel.fx3                   75..=76                raw 0            Off
+EffectsPanel.fx3_type              77..=79                raw 0            None_
+EffectsPanel.fx3_compression       80..=86                raw 0            0
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== programs/sample/100_01_000_s064.ne5p
+CenterPanel.lower_part             0..=2                  raw 1            Piano
+CenterPanel.upper_part             3..=5                  raw 2            Sample
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 1            true
+CenterPanel.upper_sustain          15..=15                raw 1            true
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 64           49.6/50.0
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 0            B3
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 1            true
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 2            EPiano1
+PianoPanel.piano_model             5..=9                  raw 3            3
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 1842562946   1842562946
+SamplePanel.attack                 0..=6                  raw 0            0
+SamplePanel.decay_release          7..=13                 raw 64           64
+SamplePanel.number                 14..=21                raw 0            0
+SamplePanel.id                     22..=53                raw 1204335864   1204335864
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [8, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V3)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Off
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [8, 8]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 64           64
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 0            false
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 64           64
+EffectsPanel.equalizer_treble      54..=60                raw 64           64
+EffectsPanel.equalizer_freq_gain   61..=67                raw 64           64
+EffectsPanel.equalizer_bass        68..=74                raw 64           64
+EffectsPanel.fx3                   75..=76                raw 0            Off
+EffectsPanel.fx3_type              77..=79                raw 0            None_
+EffectsPanel.fx3_compression       80..=86                raw 0            0
+EffectsPanel.fx5                   87..=87                raw 0            false
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false
+
+=== usb/backup/full_backup/contents/Program/Bank 1/Amped Vox.ne5p
+CenterPanel.lower_part             0..=2                  raw 0            Organ
+CenterPanel.upper_part             3..=5                  raw 2            Sample
+CenterPanel.lower_octave_shift     6..=9                  raw 7            0
+CenterPanel.upper_octave_shift     10..=13                raw 7            0
+CenterPanel.lower_sustain          14..=14                raw 1            true
+CenterPanel.upper_sustain          15..=15                raw 1            true
+CenterPanel.lower_control          16..=16                raw 0            false
+CenterPanel.upper_control          17..=17                raw 0            false
+CenterPanel.unknown_boolean1       18..=18                raw 0            false
+CenterPanel.split                  19..=19                raw 0            false
+CenterPanel.split_point            20..=22                raw 3            F4
+CenterPanel.transpose_enabled      23..=23                raw 0            false
+CenterPanel.transpose              24..=27                raw 7            1
+CenterPanel.part_mix               28..=34                raw 62           50.0/48.8
+CenterPanel.gain                   35..=41                raw 127          127
+CenterPanel.organ_type             42..=44                raw 3            Vox
+CenterPanel.lower_enabled          45..=45                raw 1            true
+CenterPanel.upper_enabled          46..=46                raw 0            false
+CenterPanel.drawbar_live           47..=47                raw 0            false
+PianoPanel.category                0..=2                  raw 0            Grand
+PianoPanel.piano_model             5..=9                  raw 0            0
+PianoPanel.clav_model              15..=16                raw 0            0
+PianoPanel.acoustics               17..=18                raw 0            0
+PianoPanel.touch                   19..=20                raw 0            0
+PianoPanel.mono                    21..=21                raw 0            false
+PianoPanel.id                      22..=53                raw 3540235762   3540235762
+SamplePanel.attack                 0..=6                  raw 32           32
+SamplePanel.decay_release          7..=13                 raw 32           32
+SamplePanel.number                 14..=21                raw 1            1
+SamplePanel.id                     22..=53                raw 3825550921   3825550921
+SamplePanel.dynamics               54..=55                raw 0            0
+SamplePanel.filter                 56..=56                raw 0            false
+OrganPanel.drawbars(B3,1)          0x55..0x59             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(B3,2)          0x5c..0x60             raw —            [8, 8, 8, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(B3)              0x53[6:6]              raw 0            1
+OrganPanel.vib_type(B3)            0x51[7:5]              raw —            Some(C3)
+OrganPanel.vib_on(B3,1)            0x59[3:3]              raw 0            false
+OrganPanel.vib_on(B3,2)            0x60[3:3]              raw 0            false
+OrganPanel.drawbars(Vox,1)         0x67..0x6b             raw —            [5, 4, 8, 8, 5, 0, 0, 4, 3]
+OrganPanel.drawbars(Vox,2)         0x6d..0x71             raw —            [4, 8, 8, 8, 0, 0, 0, 0, 0]
+OrganPanel.preset(Vox)             0x65[6:6]              raw 0            1
+OrganPanel.vib_type(Vox)           0x63[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Vox,1)           0x6b[3:3]              raw 1            true
+OrganPanel.vib_on(Vox,2)           0x71[3:3]              raw 1            true
+OrganPanel.drawbars(Farfisa,1)     0x77..0x7b             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.drawbars(Farfisa,2)     0x7d..0x81             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Farfisa)         0x75[6:6]              raw 0            1
+OrganPanel.vib_type(Farfisa)       0x73[7:5]              raw —            Some(V1)
+OrganPanel.vib_on(Farfisa,1)       0x7b[3:3]              raw 0            false
+OrganPanel.vib_on(Farfisa,2)       0x81[3:3]              raw 0            false
+OrganPanel.drawbars(Pipe,1)        0x87..0x8b             raw —            [8, 0, 0, 4, 4, 4, 2, 0, 0]
+OrganPanel.drawbars(Pipe,2)        0x8d..0x91             raw —            [8, 0, 0, 0, 0, 0, 0, 0, 0]
+OrganPanel.preset(Pipe)            0x85[6:6]              raw 0            1
+OrganPanel.vib_type(Pipe)          —                      raw —            None
+OrganPanel.b3_perc_on(1)           0x59[2:2]              raw 0            false
+OrganPanel.b3_perc_on(2)           0x60[2:2]              raw 0            false
+OrganPanel.b3_perc_third           0x51[4:4]              raw 1            true
+OrganPanel.b3_perc_speed           0x51[3:2]              raw —            Soft
+OrganPanel.b3_bass_drawbars        0x59[3:0]+0x5a[7:0]    raw —            [0, 0]
+EffectsPanel.fx1                   0..=1                  raw 0            Off
+EffectsPanel.fx1_type              2..=5                  raw 0            Trem1
+EffectsPanel.fx1_rate              6..=12                 raw 57           57
+EffectsPanel.fx2                   13..=14                raw 0            Off
+EffectsPanel.fx2_type              15..=18                raw 0            Phaser1
+EffectsPanel.fx2_rate              19..=25                raw 64           64
+EffectsPanel.fx4                   26..=27                raw 0            Off
+EffectsPanel.fx4_feedback          28..=29                raw 1            1
+EffectsPanel.fx4_tempo             30..=36                raw 64           64
+EffectsPanel.fx4_moisture          37..=43                raw 64           64
+EffectsPanel.fx4_ping_pong         44..=44                raw 0            false
+EffectsPanel.equalizer_on          45..=45                raw 1            true
+EffectsPanel.equalizer_part        117..=118              raw 0            Lower
+EffectsPanel.equalizer_freq        47..=53                raw 81           81
+EffectsPanel.equalizer_treble      54..=60                raw 97           97
+EffectsPanel.equalizer_freq_gain   61..=67                raw 91           91
+EffectsPanel.equalizer_bass        68..=74                raw 88           88
+EffectsPanel.fx3                   75..=76                raw 2            Lower
+EffectsPanel.fx3_type              77..=79                raw 2            Jc
+EffectsPanel.fx3_compression       80..=86                raw 39           39
+EffectsPanel.fx5                   87..=87                raw 1            true
+EffectsPanel.fx5_type              88..=90                raw 0            Room
+EffectsPanel.fx5_moisture          91..=97                raw 64           64
+EffectsPanel.rotary_stop           98..=98                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.fx1_control           115..=115              raw 0            false
+EffectsPanel.fx2_deep              116..=116              raw 0            false

@@ -1,0 +1,434 @@
+# Per-field decode over every .ne5p in the corpus: where each field sits and
+# every value the corpus has been seen to put there. No specimen count, so
+# adding specimens only shows up when they reach a value not reached before.
+# A field listing one value is a field the corpus cannot check.
+
+CenterPanel.lower_part
+  at      0..=2
+  raw     3    [0, 1, 2]
+  decoded 3    [Organ, Piano, Sample]
+
+CenterPanel.upper_part
+  at      3..=5
+  raw     3    [0, 1, 2]
+  decoded 3    [Organ, Piano, Sample]
+
+CenterPanel.lower_octave_shift
+  at      6..=9
+  raw     4    [6, 7, 8, 9]
+  decoded 4    [-1, 0, 1, 2]
+
+CenterPanel.upper_octave_shift
+  at      10..=13
+  raw     3    [6, 7, 8]
+  decoded 3    [-1, 0, 1]
+
+CenterPanel.lower_sustain
+  at      14..=14
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.upper_sustain
+  at      15..=15
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.lower_control
+  at      16..=16
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.upper_control
+  at      17..=17
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.unknown_boolean1
+  at      18..=18  UNVARYING
+  raw     1    [0]
+  decoded 1    [false]
+
+CenterPanel.split
+  at      19..=19
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.split_point
+  at      20..=22
+  raw     7    [0, 1, 2, 3, 4, 5, 6]
+  decoded 7    [C3, C4, C5, F3, F4, F5, Upper]
+
+CenterPanel.transpose_enabled
+  at      23..=23
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.transpose
+  at      24..=27
+  raw     11   [10, 11, 12, 2, 3, 4, 5, 6, 7, 8, …]
+  decoded 11   [-1, -2, -3, -4, 0, 1, 2, 3, 4, 5, …]
+
+CenterPanel.part_mix
+  at      28..=34
+  raw     60   [0, 102, 103, 108, 11, 110, 112, 116, 13, 15, …]
+  decoded 60   [11.8/50.0, 13.4/50.0, 15.0/50.0, 18.9/50.0, 19.7/50.0, 22.0/50.0, 22.8/50.0, 24.4/50.0, 25.2/50.0, 26.8/50.0, …]
+
+CenterPanel.gain
+  at      35..=41
+  raw     27   [0, 100, 101, 102, 104, 105, 107, 108, 110, 111, …]
+  decoded 27   [0, 100, 101, 102, 104, 105, 107, 108, 110, 111, …]
+
+CenterPanel.organ_type
+  at      42..=44
+  raw     5    [0, 1, 2, 3, 4]
+  decoded 5    [B3, B3Bass, Farfisa, Pipe, Vox]
+
+CenterPanel.lower_enabled
+  at      45..=45
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.upper_enabled
+  at      46..=46
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+CenterPanel.drawbar_live
+  at      47..=47
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+PianoPanel.category
+  at      0..=2
+  raw     6    [0, 1, 2, 3, 4, 5]
+  decoded 6    [Clavinet, EPiano1, EPiano2, Grand, Harpsichord, Upright]
+
+PianoPanel.piano_model
+  at      5..=9
+  raw     10   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  decoded 10   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+PianoPanel.clav_model
+  at      15..=16
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [0, 1, 2, 3]
+
+PianoPanel.acoustics
+  at      17..=18
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [0, 1, 2, 3]
+
+PianoPanel.touch
+  at      19..=20
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [0, 1, 2, 3]
+
+PianoPanel.mono
+  at      21..=21
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+PianoPanel.id
+  at      22..=53
+  raw     31   [0, 1028341268, 107622570, 1118282659, 1214451683, 1285991176, 1423349205, 1474457778, 1681139063, 1683948862, …]
+  decoded 31   [0, 1028341268, 107622570, 1118282659, 1214451683, 1285991176, 1423349205, 1474457778, 1681139063, 1683948862, …]
+
+SamplePanel.attack
+  at      0..=6
+  raw     24   [0, 1, 127, 13, 14, 2, 21, 28, 32, 33, …]
+  decoded 24   [0, 1, 127, 13, 14, 2, 21, 28, 32, 33, …]
+
+SamplePanel.decay_release
+  at      7..=13
+  raw     37   [0, 101, 102, 105, 127, 29, 32, 37, 44, 64, …]
+  decoded 37   [0, 101, 102, 105, 127, 29, 32, 37, 44, 64, …]
+
+SamplePanel.number
+  at      14..=21
+  raw     92   [0, 1, 10, 100, 103, 104, 107, 109, 110, 111, …]
+  decoded 92   [0, 1, 10, 100, 103, 104, 107, 109, 110, 111, …]
+
+SamplePanel.id
+  at      22..=53
+  raw     100  [0, 1034274759, 1040524584, 1053816799, 1108514987, 1164187294, 1170640709, 1204335864, 1245106700, 1259507025, …]
+  decoded 100  [0, 1034274759, 1040524584, 1053816799, 1108514987, 1164187294, 1170640709, 1204335864, 1245106700, 1259507025, …]
+
+SamplePanel.dynamics
+  at      54..=55
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [0, 1, 2, 3]
+
+SamplePanel.filter
+  at      56..=56
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.drawbars(B3,1)
+  at      0x55..0x59
+  raw     1    [—]
+  decoded 75   [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 1, 0, 0, 0, 0], [0, 0, 0, 1, 0, 0, 1, 0, 0], [0, 0, 0, 7, 0, 5, 0, 0, 0], [0, 0, 6, 5, 4, 3, 2, 1, 0], [0, 0, 8, 6, 5, 8, 8, 8, 8], [0, 0, 8, 8, 8, 8, 8, 8, 8], [0, 8, 8, 0, 0, 0, 0, 0, 0], [1, 0, 1, 0, 8, 0, 0, 0, 0], [1, 1, 4, 0, 5, 5, 5, 4, 3], …]
+
+OrganPanel.drawbars(B3,2)
+  at      0x5c..0x60
+  raw     1    [—]
+  decoded 36   [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 8, 8, 8, 0, 0], [0, 0, 1, 7, 3, 0, 3, 3, 0], [0, 8, 8, 0, 0, 0, 6, 6, 0], [3, 4, 4, 5, 4, 4, 4, 4, 4], [3, 8, 4, 0, 3, 0, 1, 2, 0], [4, 0, 8, 8, 0, 3, 0, 0, 4], [4, 4, 4, 5, 5, 5, 6, 6, 4], [4, 5, 5, 0, 6, 4, 4, 4, 4], [5, 5, 5, 7, 7, 7, 4, 0, 4], …]
+
+OrganPanel.preset(B3)
+  at      0x53[6:6]
+  raw     2    [0, 1]
+  decoded 2    [1, 2]
+
+OrganPanel.vib_type(B3)
+  at      0x51[7:5]
+  raw     1    [—]
+  decoded 6    [Some(C1), Some(C2), Some(C3), Some(V1), Some(V2), Some(V3)]
+
+OrganPanel.vib_on(B3,1)
+  at      0x59[3:3]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.vib_on(B3,2)
+  at      0x60[3:3]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.drawbars(Vox,1)
+  at      0x67..0x6b
+  raw     1    [—]
+  decoded 16   [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 6, 8, 0, 0, 1, 0, 0], [0, 0, 8, 0, 1, 0, 0, 0, 0], [4, 8, 8, 8, 0, 0, 0, 0, 0], [5, 3, 3, 6, 0, 0, 0, 4, 0], [5, 4, 8, 8, 5, 0, 0, 4, 3], [8, 0, 0, 8, 8, 0, 8, 8, 8], [8, 0, 8, 8, 3, 3, 4, 0, 1], [8, 4, 8, 0, 2, 8, 8, 0, 1], [8, 7, 6, 5, 4, 3, 2, 1, 0], …]
+
+OrganPanel.drawbars(Vox,2)
+  at      0x6d..0x71
+  raw     1    [—]
+  decoded 8    [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 8, 8, 3, 3, 0, 0, 0], [4, 8, 8, 8, 0, 0, 0, 0, 0], [6, 4, 4, 4, 0, 4, 4, 4, 0], [8, 7, 6, 5, 4, 3, 2, 1, 0], [8, 8, 0, 8, 0, 4, 0, 0, 5], [8, 8, 8, 8, 0, 0, 0, 0, 0], [8, 8, 8, 8, 8, 0, 0, 0, 1]]
+
+OrganPanel.preset(Vox)
+  at      0x65[6:6]
+  raw     2    [0, 1]
+  decoded 2    [1, 2]
+
+OrganPanel.vib_type(Vox)
+  at      0x63[7:5]
+  raw     1    [—]
+  decoded 3    [Some(V1), Some(V2), Some(V3)]
+
+OrganPanel.vib_on(Vox,1)
+  at      0x6b[3:3]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.vib_on(Vox,2)
+  at      0x71[3:3]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.drawbars(Farfisa,1)
+  at      0x77..0x7b
+  raw     1    [—]
+  decoded 19   [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 8, 8, 0, 0], [0, 0, 4, 4, 0, 0, 0, 0, 0], [0, 0, 8, 0, 0, 0, 8, 0, 8], [0, 0, 8, 8, 0, 6, 0, 5, 5], [0, 0, 8, 8, 8, 8, 8, 0, 0], [0, 8, 8, 6, 8, 3, 6, 0, 0], [0, 8, 8, 8, 0, 0, 0, 0, 8], [1, 1, 3, 5, 4, 0, 0, 6, 0], [3, 3, 3, 3, 3, 3, 3, 3, 3], …]
+
+OrganPanel.drawbars(Farfisa,2)
+  at      0x7d..0x81
+  raw     1    [—]
+  decoded 9    [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 8, 8, 8, 0, 0], [0, 8, 8, 8, 8, 8, 0, 0, 0], [8, 0, 0, 0, 0, 0, 0, 0, 0], [8, 0, 0, 0, 0, 5, 1, 0, 0], [8, 7, 6, 5, 4, 3, 2, 1, 0], [8, 7, 7, 0, 0, 5, 6, 0, 0], [8, 8, 0, 0, 0, 8, 8, 0, 0], [8, 8, 8, 8, 8, 8, 8, 8, 7]]
+
+OrganPanel.preset(Farfisa)
+  at      0x75[6:6]
+  raw     2    [0, 1]
+  decoded 2    [1, 2]
+
+OrganPanel.vib_type(Farfisa)
+  at      0x73[7:5]
+  raw     1    [—]
+  decoded 4    [Some(C2), Some(C3), Some(V1), Some(V2)]
+
+OrganPanel.vib_on(Farfisa,1)
+  at      0x7b[3:3]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.vib_on(Farfisa,2)
+  at      0x81[3:3]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.drawbars(Pipe,1)
+  at      0x87..0x8b
+  raw     1    [—]
+  decoded 27   [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 6, 6, 0, 8, 4, 0, 0], [0, 0, 6, 7, 5, 4, 4, 0, 0], [0, 8, 0, 0, 0, 0, 0, 4, 0], [4, 0, 0, 0, 0, 0, 0, 0, 0], [4, 0, 4, 4, 0, 2, 0, 0, 0], [4, 0, 8, 8, 0, 4, 4, 0, 4], [4, 0, 8, 8, 2, 0, 1, 1, 0], [4, 1, 6, 6, 0, 3, 0, 0, 0], [4, 4, 0, 0, 0, 0, 2, 4, 4], …]
+
+OrganPanel.drawbars(Pipe,2)
+  at      0x8d..0x91
+  raw     1    [—]
+  decoded 18   [[0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 3, 0, 0, 0, 0, 0, 5, 0], [0, 8, 8, 0, 0, 6, 6, 6, 0], [3, 0, 4, 4, 0, 4, 0, 0, 3], [3, 3, 4, 5, 5, 4, 0, 0, 0], [4, 1, 5, 5, 5, 0, 0, 0, 4], [6, 5, 5, 5, 4, 3, 1, 2, 2], [7, 4, 7, 1, 1, 3, 1, 0, 0], [7, 6, 5, 5, 4, 4, 0, 0, 0], [8, 0, 0, 0, 0, 0, 0, 0, 0], …]
+
+OrganPanel.preset(Pipe)
+  at      0x85[6:6]
+  raw     2    [0, 1]
+  decoded 2    [1, 2]
+
+OrganPanel.vib_type(Pipe)
+  at      —  UNVARYING
+  raw     1    [—]
+  decoded 1    [None]
+
+OrganPanel.b3_perc_on(1)
+  at      0x59[2:2]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.b3_perc_on(2)
+  at      0x60[2:2]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.b3_perc_third
+  at      0x51[4:4]
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+OrganPanel.b3_perc_speed
+  at      0x51[3:2]
+  raw     1    [—]
+  decoded 4    [Both, Fast, Off, Soft]
+
+OrganPanel.b3_bass_drawbars
+  at      0x59[3:0]+0x5a[7:0]
+  raw     1    [—]
+  decoded 12   [[0, 0], [0, 4], [2, 8], [4, 0], [6, 4], [7, 5], [8, 0], [8, 2], [8, 3], [8, 6], …]
+
+EffectsPanel.fx1
+  at      0..=1
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Lower, Off, Unknown, Upper]
+
+EffectsPanel.fx1_type
+  at      2..=5
+  raw     8    [0, 1, 2, 3, 4, 5, 6, 7]
+  decoded 8    [Pan1, Pan1And2, Pan2, Rm, Trem1, Trem1And2, Trem2, Wah]
+
+EffectsPanel.fx1_rate
+  at      6..=12
+  raw     41   [0, 1, 11, 12, 13, 15, 17, 18, 19, 2, …]
+  decoded 41   [0, 1, 11, 12, 13, 15, 17, 18, 19, 2, …]
+
+EffectsPanel.fx2
+  at      13..=14
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Lower, Off, Unknown, Upper]
+
+EffectsPanel.fx2_type
+  at      15..=18
+  raw     6    [0, 1, 2, 3, 4, 5]
+  decoded 6    [Chorus1, Chorus2, Flanger, Phaser1, Phaser2, Vibe]
+
+EffectsPanel.fx2_rate
+  at      19..=25
+  raw     56   [0, 1, 10, 101, 11, 12, 124, 127, 13, 14, …]
+  decoded 56   [0, 1, 10, 101, 11, 12, 124, 127, 13, 14, …]
+
+EffectsPanel.fx4
+  at      26..=27
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Lower, Off, Unknown, Upper]
+
+EffectsPanel.fx4_feedback
+  at      28..=29
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [0, 1, 2, 3]
+
+EffectsPanel.fx4_tempo
+  at      30..=36
+  raw     33   [0, 10, 106, 117, 127, 16, 17, 18, 19, 20, …]
+  decoded 33   [0, 10, 106, 117, 127, 16, 17, 18, 19, 20, …]
+
+EffectsPanel.fx4_moisture
+  at      37..=43
+  raw     37   [0, 1, 10, 11, 12, 13, 14, 15, 16, 17, …]
+  decoded 37   [0, 1, 10, 11, 12, 13, 14, 15, 16, 17, …]
+
+EffectsPanel.fx4_ping_pong
+  at      44..=44
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+EffectsPanel.equalizer_on
+  at      45..=45
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+EffectsPanel.equalizer_part
+  at      117..=118
+  raw     3    [0, 1, 2]
+  decoded 3    [Both, Lower, Upper]
+
+EffectsPanel.equalizer_freq
+  at      47..=53
+  raw     66   [0, 101, 102, 104, 105, 106, 11, 115, 127, 28, …]
+  decoded 66   [0, 101, 102, 104, 105, 106, 11, 115, 127, 28, …]
+
+EffectsPanel.equalizer_treble
+  at      54..=60
+  raw     66   [0, 102, 108, 127, 19, 20, 21, 27, 29, 3, …]
+  decoded 66   [0, 102, 108, 127, 19, 20, 21, 27, 29, 3, …]
+
+EffectsPanel.equalizer_freq_gain
+  at      61..=67
+  raw     50   [0, 100, 113, 127, 37, 38, 39, 41, 44, 45, …]
+  decoded 50   [0, 100, 113, 127, 37, 38, 39, 41, 44, 45, …]
+
+EffectsPanel.equalizer_bass
+  at      68..=74
+  raw     54   [0, 102, 104, 127, 20, 28, 29, 30, 31, 32, …]
+  decoded 54   [0, 102, 104, 127, 20, 28, 29, 30, 31, 32, …]
+
+EffectsPanel.fx3
+  at      75..=76
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Lower, Off, Unknown, Upper]
+
+EffectsPanel.fx3_type
+  at      77..=79
+  raw     6    [0, 1, 2, 3, 4, 5]
+  decoded 6    [Comp, Jc, None_, Rotary, Small, Twin]
+
+EffectsPanel.fx3_compression
+  at      80..=86
+  raw     57   [0, 1, 10, 107, 11, 114, 12, 127, 13, 15, …]
+  decoded 57   [0, 1, 10, 107, 11, 114, 12, 127, 13, 15, …]
+
+EffectsPanel.fx5
+  at      87..=87
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+EffectsPanel.fx5_type
+  at      88..=90
+  raw     5    [0, 1, 2, 3, 4]
+  decoded 5    [Hall, HallSoft, Room, Stage, StageSoft]
+
+EffectsPanel.fx5_moisture
+  at      91..=97
+  raw     66   [0, 10, 11, 12, 127, 13, 14, 15, 16, 17, …]
+  decoded 66   [0, 10, 11, 12, 127, 13, 14, 15, 16, 17, …]
+
+EffectsPanel.rotary_stop
+  at      98..=98
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+EffectsPanel.rotary_speed
+  at      99..=99
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+EffectsPanel.fx1_control
+  at      115..=115
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+EffectsPanel.fx2_deep
+  at      116..=116
+  raw     2    [0, 1]
+  decoded 2    [false, true]
