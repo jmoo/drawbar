@@ -89,7 +89,7 @@ pub async fn read_program<T: Transport, C>(
 ) -> Result<Vec<u8>> {
     let (meta, body) = transfer_out(session, at).await?;
 
-    let file = envelope::wrap(&meta.format, at, &body)?;
+    let file = envelope::wrap(&meta.format, at, meta.version, &body)?;
     if let Some(expected) = meta.crc32 {
         let (_, _, wrapped) = envelope::unwrap(&file)?;
         let actual = crc32_of(wrapped);
@@ -114,9 +114,19 @@ pub async fn read_body<T: Transport, C>(
     Ok(transfer_out(session, at).await?.1)
 }
 
+/// Body bytes to ask for in one `READ`. A body larger than this arrives across several
+/// requests with the offset advancing by exactly this much and a short final chunk.
+///
+/// Confirmed from captures: NSM asks for `32720`. Some objects are instead read at
+/// `32726` throughout — a fixed 6-byte difference that is per object, not per chunk, and
+/// unexplained. Both fit inside one `READ_BUFFER`, and the host chooses the number, so
+/// the smaller is used uniformly.
+const READ_CHUNK: u32 = 32720;
+
 /// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
 /// body length, the `"Uploading..."` progress label the instrument paints, `BEGIN_READ`,
-/// `READ`, the 100% bar, then `END_TRANSFER`. Returns the metadata and the raw body.
+/// one `READ` per [`READ_CHUNK`] with the bar advancing as they arrive, then
+/// `END_TRANSFER`. Returns the metadata and the reassembled body.
 ///
 /// ("Uploading" is NSM's own — and backwards — word for keyboard → host.)
 async fn transfer_out<T: Transport, C>(
@@ -133,31 +143,50 @@ async fn transfer_out<T: Transport, C>(
         .request(Service::Program, 10, cmd::BEGIN_READ, &args)
         .await?;
 
-    let mut req = args.clone();
-    req.extend_from_slice(&0u32.to_be_bytes()); // offset
-    req.extend_from_slice(&meta.body_len.to_be_bytes());
-    let resp = session
-        .request(Service::Program, 10, cmd::READ, &req)
-        .await?;
+    let mut body = Vec::with_capacity(meta.body_len as usize);
+    let mut painted = None;
+    while (body.len() as u32) < meta.body_len {
+        let offset = body.len() as u32;
+        let want = READ_CHUNK.min(meta.body_len - offset);
 
-    // Payload is bank, slot, offset, length, then the body.
-    let p = resp.payload();
-    let body = p
-        .get(16..)
-        .ok_or(Error::Truncated {
+        let mut req = args.clone();
+        req.extend_from_slice(&offset.to_be_bytes());
+        req.extend_from_slice(&want.to_be_bytes());
+        let resp = session
+            .request(Service::Program, 10, cmd::READ, &req)
+            .await?;
+
+        // Payload is bank, slot, offset, length, then this chunk of the body.
+        let p = resp.payload();
+        let chunk = p.get(16..).ok_or(Error::Truncated {
             got: p.len(),
             need: 16,
-        })?
-        .to_vec();
-    if body.len() != meta.body_len as usize {
-        return Err(Error::Transport(format!(
-            "device announced a {}-byte body but sent {}",
-            meta.body_len,
-            body.len()
-        )));
+        })?;
+        // A short chunk would silently misalign every subsequent offset, so it is an
+        // error rather than something to resynchronise from.
+        if chunk.len() != want as usize {
+            return Err(Error::Transport(format!(
+                "asked for {want} bytes at offset {offset} but the device sent {}",
+                chunk.len()
+            )));
+        }
+        body.extend_from_slice(chunk);
+
+        // The bar is bytes transferred over bytes expected, and only moves on a whole
+        // percent — one message per step, the way NSM drives it. A body inside one chunk
+        // therefore still produces exactly one `100`.
+        let pct = (body.len() as u64 * 100 / (meta.body_len.max(1)) as u64) as u16;
+        if painted != Some(pct) {
+            session.notify(&ui::percent(pct)).await?;
+            painted = Some(pct);
+        }
     }
 
-    session.notify(&ui::percent(100)).await?;
+    // A zero-length body never enters the loop, so the bar would otherwise never be
+    // cleared off the instrument's display.
+    if painted != Some(100) {
+        session.notify(&ui::percent(100)).await?;
+    }
     session
         .request(Service::Program, 10, cmd::END_TRANSFER, &args)
         .await?;

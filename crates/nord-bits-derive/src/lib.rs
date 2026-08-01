@@ -17,9 +17,12 @@
 //!
 //! Bits are numbered MSB-first from byte 0 of the panel, as `nord-format`'s `bits` module
 //! describes. Generates both directions of the conversion between the panel and its
-//! `[u8; N]`, a `Debug` over the decoded fields, and a `Panel` impl that lists them. Bits
-//! no field claims are preserved, and are reported in the panel's generated doc; two
-//! ranges may not overlap.
+//! `[u8; N]`, a `Debug` over the decoded fields, and a `Panel` impl that lists them,
+//! describes them, and sets them by name. Bits no field claims are preserved, and are
+//! reported in the panel's generated doc; two ranges may not overlap.
+//!
+//! `Panel::field_values` and `Panel::field_specs` are emitted in declaration order and
+//! describe the same fields, so callers may zip them positionally.
 //!
 //! Encoding is total. Every field's type has to carry its own range, so the fit is proven
 //! at compile time: a raw `u8` in a 7-bit slot fails to compile.
@@ -160,6 +163,8 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let mut debug = Vec::new();
     let mut fields = Vec::new();
     let mut values = Vec::new();
+    let mut specs = Vec::new();
+    let mut setters = Vec::new();
 
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named fields");
@@ -220,7 +225,28 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
                 name: stringify!(#ident),
                 placement: #placement,
                 raw: crate::bits::Field::<u64, #lo, #hi>::read(&self.raw),
+                bits: <#ty as crate::bits::Packed>::to_bits(&self.#ident),
                 value: ::std::format!("{:?}", &self.#ident),
+            }
+        });
+
+        let width = hi - lo + 1;
+        specs.push(quote! {
+            crate::panel::FieldSpec {
+                name: stringify!(#ident),
+                placement: #placement,
+                width: #width,
+                legal: || crate::panel::legal_values::<#ty>(#width),
+            }
+        });
+
+        // The parse is the type's, so a value it cannot hold fails here rather than
+        // being clamped into the slot.
+        setters.push(quote! {
+            stringify!(#ident) => {
+                self.#ident = crate::panel::parse_field::<#ty>(#width, value)
+                    .map_err(|e| e.at(stringify!(#ident)))?;
+                Ok(())
             }
         });
 
@@ -279,6 +305,24 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
 
             fn field_values(&self) -> ::std::vec::Vec<crate::panel::FieldValue> {
                 ::std::vec![#(#values,)*]
+            }
+
+            fn field_specs() -> ::std::vec::Vec<crate::panel::FieldSpec> {
+                ::std::vec![#(#specs,)*]
+            }
+
+            fn set_field(
+                &mut self,
+                name: &str,
+                value: &str,
+            ) -> ::core::result::Result<(), crate::panel::FieldError> {
+                match name {
+                    #(#setters)*
+                    other => Err(crate::panel::FieldError::UnknownField {
+                        panel: <Self as crate::panel::Panel>::NAME,
+                        name: other.to_string(),
+                    }),
+                }
             }
         }
 

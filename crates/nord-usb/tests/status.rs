@@ -258,3 +258,134 @@ fn read_program_reproduces_nsm_and_rebuilds_the_file() {
 
     assert!(t.is_exhausted(), "did not consume the whole exchange");
 }
+
+/// A body larger than one `READ` arrives across several requests, and the offsets must
+/// advance by exactly what was asked for.
+///
+/// The framing here is built rather than captured — the captured-bytes test above already
+/// pins that. What this pins is the chunking: three exchanges at offsets 0 / 32720 / 65440
+/// with lengths 32720 / 32720 / 777, in that order, under an exact-match transport. A
+/// single whole-body request, a wrong offset, or a dropped final chunk all fail it.
+#[test]
+fn a_large_body_is_read_in_chunks() {
+    use nord_usb::wire::{cmd, Message, Service};
+    use Direction::{In, Out};
+
+    const CHUNK: u32 = 32720;
+    const TAIL: u32 = 777;
+    let body_len = CHUNK * 2 + TAIL;
+
+    // Position-dependent, so chunks reassembled out of order or with a gap are caught.
+    let body: Vec<u8> = (0..body_len).map(|i| (i % 251) as u8).collect();
+
+    // bank 8 slot 14 -> 7, 13 on the wire.
+    let (bank, slot) = (7u32, 13u32);
+    let loc = |v: &mut Vec<u8>| {
+        v.extend_from_slice(&bank.to_be_bytes());
+        v.extend_from_slice(&slot.to_be_bytes());
+    };
+    let response = |command: u32, rest: &[u8]| {
+        let mut args = vec![0, 0, 0, 0]; // status 0
+        args.extend_from_slice(rest);
+        Message::new(Service::Program, 10, command, args).encode()
+    };
+
+    let mut info_args = Vec::new();
+    loc(&mut info_args);
+    info_args.extend_from_slice(&body_len.to_be_bytes());
+    info_args.extend_from_slice(b"ne5p");
+    info_args.extend_from_slice(&4u32.to_be_bytes()); // version
+    info_args.extend_from_slice(&u32::MAX.to_be_bytes());
+    info_args.extend_from_slice(&u32::MAX.to_be_bytes());
+    info_args.extend_from_slice(&8u32.to_be_bytes()); // name length
+    info_args.extend_from_slice(b"chunked ");
+    info_args.extend_from_slice(&0u32.to_be_bytes()); // crc32: none
+
+    let mut script = vec![
+        step(Out, "0000001200000006000000010000000006a1"),
+        step(In, "000000160000000600000001000000010000000044ec"),
+        step(Out, "000000160000000c0000000a0000000400000004a218"),
+        step(In, "0000001a0000000c0000000a00000005000000000000000467b0"),
+        step(Out, "0000001a0000000c0000000a0000001e000000070000000dc608"),
+        Step {
+            direction: In,
+            bytes: response(cmd::INFO + 1, &info_args),
+        },
+        step(
+            Out,
+            "000000250000000600000001000000060000000000000c55706c6f6164696e672e2e2ee94e",
+        ),
+        step(Out, "0000001a0000000c0000000a0000000c000000070000000d5391"),
+        step(
+            In,
+            "0000001e0000000c0000000a0000000d00000000000000070000000dc4d4",
+        ),
+    ];
+
+    // The bar after each chunk: 32720/66217 = 49.4%, 65440/66217 = 98.8%, then done.
+    // Written out rather than recomputed, so a wrong formula fails instead of agreeing
+    // with itself.
+    for (offset, want, pct) in [
+        (0, CHUNK, 49u16),
+        (CHUNK, CHUNK, 98),
+        (CHUNK * 2, TAIL, 100),
+    ] {
+        let mut req = Vec::new();
+        loc(&mut req);
+        req.extend_from_slice(&offset.to_be_bytes());
+        req.extend_from_slice(&want.to_be_bytes());
+        script.push(Step {
+            direction: Out,
+            bytes: Message::new(Service::Program, 10, cmd::READ, req.clone()).encode(),
+        });
+
+        let mut resp = req.clone();
+        resp.extend_from_slice(&body[offset as usize..(offset + want) as usize]);
+        script.push(Step {
+            direction: In,
+            bytes: response(cmd::READ + 1, &resp),
+        });
+        script.push(Step {
+            direction: Out,
+            bytes: nord_usb::wire::ui::percent(pct).encode(),
+        });
+    }
+
+    script.extend([
+        step(Out, "0000001a0000000c0000000a0000000e000000070000000d95f6"),
+        step(
+            In,
+            "0000001e0000000c0000000a0000000f00000000000000070000000d4e12",
+        ),
+        step(Out, "000000120000000c0000000a000000066500"),
+        step(In, "000000160000000c0000000a00000007000000000c4e"),
+        step(Out, "0000001200000006000000010000000226e3"),
+        step(In, "0000001600000006000000010000000300000000006f"),
+    ]);
+
+    let at = nord_usb::Location::from_user(8, 14);
+    let mut t = ReplayTransport::new(script);
+    let got = block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let r = match op::read_body(&mut s, at).await {
+            Ok(b) => b,
+            Err(e) => {
+                s.abort();
+                panic!("read_body failed: {e}")
+            }
+        };
+        s.commit().await.unwrap();
+        r
+    });
+
+    assert_eq!(
+        got.len(),
+        body_len as usize,
+        "reassembled body is the wrong length"
+    );
+    assert_eq!(
+        got, body,
+        "reassembled body differs from what the device sent"
+    );
+    assert!(t.is_exhausted(), "did not consume the whole exchange");
+}

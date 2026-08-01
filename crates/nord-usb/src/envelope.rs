@@ -5,8 +5,13 @@
 //! determined by the body plus the slot it came from, so a read can be turned into a
 //! byte-exact file and a file can be stripped back down for a write.
 //!
-//! **Verified**: rebuilding the header from `(body, bank, slot)` reproduces all 41
-//! program specimens in the corpus byte-for-byte.
+//! **Verified**: rebuilding the header from `(body, bank, slot, version)` reproduces all
+//! 41 program specimens in the corpus byte-for-byte.
+//!
+//! ⚠️ The header is *not* fully determined by the body and slot alone: the schema version
+//! at `0x14` differs per format tag (`ne5p` is 4, `ne5t` is 0 or 1), so it has to be
+//! supplied by the caller from the device's own `0x1e` object-info response. Substituting
+//! a constant reproduces programs correctly and silently corrupts every other class.
 //!
 //! This mirrors the layout `nord_format::common::header` parses. Anything written here
 //! is checked by parsing the result back through `nord-format` before it is handed to a
@@ -21,10 +26,10 @@ pub const HEADER_LEN: usize = 44;
 const MAGIC: &[u8; 4] = b"CBIN";
 /// Offset of the CRC-32 within the header. The checksum covers the whole body.
 const CRC_OFFSET: usize = 0x18;
-/// Header version seen on every Electro 5 specimen (type-1, i.e. with CRC).
-const VERSION: u32 = 1;
-/// Constant at offset 0x14 on every specimen. Meaning unknown; preserved verbatim.
-const UNKNOWN_0X14: u32 = 4;
+/// Header type seen on every Electro 5 specimen (type-1, i.e. with CRC).
+const HEADER_TYPE: u32 = 1;
+/// Offset of the schema version within the header.
+const VERSION_OFFSET: usize = 0x14;
 
 /// CRC-32/ISO-HDLC, the same checksum `nord-format` verifies in the file header.
 fn crc32(data: &[u8]) -> u32 {
@@ -44,8 +49,10 @@ fn crc32(data: &[u8]) -> u32 {
 
 /// Wrap a wire body in a `CBIN` header, producing the bytes of a `.ne5p`-style file.
 ///
-/// `format` is the four-character tag the device reported for the slot.
-pub fn wrap(format: &str, at: Location, body: &[u8]) -> Result<Vec<u8>> {
+/// `format` and `version` are the tag and schema version the device reported for the
+/// slot — both come from `0x1e` object info. `version` is per format tag, so passing a
+/// program's 4 for a set list writes a header `nord-format` will refuse to read.
+pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec<u8>> {
     let tag = format.as_bytes();
     if tag.len() != 4 {
         return Err(Error::Transport(format!(
@@ -55,14 +62,14 @@ pub fn wrap(format: &str, at: Location, body: &[u8]) -> Result<Vec<u8>> {
 
     let mut out = vec![0u8; HEADER_LEN + body.len()];
     out[0..4].copy_from_slice(MAGIC);
-    out[4..8].copy_from_slice(&VERSION.to_le_bytes());
+    out[4..8].copy_from_slice(&HEADER_TYPE.to_le_bytes());
     out[8..12].copy_from_slice(tag);
     // Location is two little-endian u16s, zero-indexed — the same numbering the wire
     // uses, and one below what the instrument displays.
     out[12..14].copy_from_slice(&(at.bank as u16).to_le_bytes());
     out[14..16].copy_from_slice(&(at.slot as u16).to_le_bytes());
     out[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
-    out[20..24].copy_from_slice(&UNKNOWN_0X14.to_le_bytes());
+    out[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
     out[HEADER_LEN..].copy_from_slice(body);
 
     let checksum = crc32(&out[HEADER_LEN..]);
@@ -121,14 +128,28 @@ mod tests {
         let body = hex(BODY);
         let file = [hex(HEADER), body.clone()].concat();
         // Bank 8 slot 14 on the instrument; 7 and 13 on the wire.
-        let built = wrap("ne5p", Location::from_user(8, 14), &body).unwrap();
+        let built = wrap("ne5p", Location::from_user(8, 14), 4, &body).unwrap();
         assert_eq!(built, file, "rebuilt header differs from the real file");
+    }
+
+    /// The version is the device's to report, not ours to assume: a set list is 0 or 1
+    /// where a program is 4, and stamping a constant makes `nord-format` refuse the file.
+    #[test]
+    fn wrap_writes_the_version_it_is_given() {
+        let body = hex(BODY);
+        for version in [0u32, 1, 4, 540] {
+            let file = wrap("ne5t", Location::from_user(1, 1), version, &body).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(file[0x14..0x18].try_into().unwrap()),
+                version
+            );
+        }
     }
 
     #[test]
     fn unwrap_is_the_inverse() {
         let body = hex(BODY);
-        let file = wrap("ne5p", Location::from_user(8, 14), &body).unwrap();
+        let file = wrap("ne5p", Location::from_user(8, 14), 4, &body).unwrap();
         let (format, at, got) = unwrap(&file).unwrap();
         assert_eq!(format, "ne5p");
         assert_eq!(at, Location::from_user(8, 14));
@@ -138,7 +159,7 @@ mod tests {
     #[test]
     fn unwrap_rejects_a_corrupted_body() {
         let body = hex(BODY);
-        let mut file = wrap("ne5p", Location::from_user(8, 14), &body).unwrap();
+        let mut file = wrap("ne5p", Location::from_user(8, 14), 4, &body).unwrap();
         *file.last_mut().unwrap() ^= 0xFF;
         assert!(
             unwrap(&file).is_err(),
