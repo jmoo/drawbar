@@ -142,8 +142,9 @@ enum SlotAction {
         #[arg(value_name = "BANK:SLOT")]
         at: String,
 
-        /// Write the object to this file instead of printing a summary.
-        #[arg(short, long, value_name = "FILE")]
+        /// Write the object to this file instead of printing a summary. With `--sweep`,
+        /// the directory every capture lands in.
+        #[arg(short, long, value_name = "FILE|DIR")]
         out: Option<PathBuf>,
 
         /// Save the wire body verbatim instead of wrapping it in a CBIN header. For
@@ -151,6 +152,14 @@ enum SlotAction {
         /// fabricate a wrong file. Needs `--out`.
         #[arg(long)]
         body: bool,
+
+        /// Read the slot over and over, once per prompt, into the `--out` directory.
+        ///
+        /// Change one thing on the instrument, say what you changed, and that capture is
+        /// filed under your answer; repeat until a blank line. For building the
+        /// one-field-at-a-time corpus that pins down where a field lives.
+        #[arg(long, requires = "out")]
+        sweep: bool,
     },
 
     /// Write a file into a slot, OVERWRITING it. Requires --yes.
@@ -314,7 +323,19 @@ fn main() -> ExitCode {
 /// Dispatch one verb against a fixed object class, whichever noun asked for it.
 fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), String> {
     match action {
-        SlotAction::Get { at, out, body } => device::get(ui, slot::parse(&at)?, out, class, body),
+        SlotAction::Get {
+            at,
+            out,
+            body,
+            sweep,
+        } => {
+            let at = slot::parse(&at)?;
+            match (sweep, out) {
+                (true, Some(dir)) => device::sweep(ui, at, dir, class, body),
+                (true, None) => Err("--sweep fills a directory; give -o a path".into()),
+                (false, out) => device::get(ui, at, out, class, body),
+            }
+        }
         SlotAction::Put { file, at, yes } => device::put(ui, file, slot::parse(&at)?, class, yes),
         SlotAction::Move { from, to, yes } => {
             device::move_object(ui, slot::parse(&from)?, slot::parse(&to)?, class, yes)

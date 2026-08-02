@@ -8,11 +8,12 @@
 //! `duplicate`) each describe what they will touch and then refuse to proceed without
 //! `--yes`.
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use nord_usb::op;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{Location, Status};
+use nord_usb::wire::{Location, ProgramInfo, Status};
 use nord_usb::{op as usb_op, ObjectClass, Session};
 
 use crate::slot::shown;
@@ -201,6 +202,33 @@ fn open_usb() -> Result<nord_usb::transport::UsbTransport, String> {
     nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())
 }
 
+/// One read in its own session: the slot's metadata, then its bytes.
+///
+/// `body` returns the wire body verbatim; otherwise the bytes are a whole CBIN file.
+fn read_object(
+    t: &mut nord_usb::transport::UsbTransport,
+    at: Location,
+    class: ObjectClass,
+    body: bool,
+) -> Result<(ProgramInfo, Vec<u8>), String> {
+    nord_usb::block_on(async {
+        let mut s = Session::open(t, class).await?;
+        let r = async {
+            let info = usb_op::info(&mut s, at).await?;
+            let file = if body {
+                usb_op::read_body(&mut s, at).await?
+            } else {
+                usb_op::read_program(&mut s, at).await?
+            };
+            Ok::<_, nord_usb::Error>((info, file))
+        }
+        .await;
+        let closed = s.commit().await;
+        finish(r, closed)
+    })
+    .map_err(|e| explain(e, at))
+}
+
 /// Read one object off the instrument. Read-only.
 ///
 /// With `out` set, writes the file; otherwise decodes and prints a summary.
@@ -221,22 +249,7 @@ pub fn get(
         return Err("--body writes a file; give -o a path".into());
     }
     let mut t = open_usb()?;
-    let (info, file) = nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, class).await?;
-        let r = async {
-            let info = usb_op::info(&mut s, at).await?;
-            let file = if body {
-                usb_op::read_body(&mut s, at).await?
-            } else {
-                usb_op::read_program(&mut s, at).await?
-            };
-            Ok::<_, nord_usb::Error>((info, file))
-        }
-        .await;
-        let closed = s.commit().await;
-        finish(r, closed)
-    })
-    .map_err(|e| explain(e, at))?;
+    let (info, file) = read_object(&mut t, at, class, body)?;
 
     if let Some(path) = out {
         std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -269,6 +282,130 @@ pub fn get(
     ));
     crate::summary::print(ui, &entity);
     Ok(())
+}
+
+/// Read the same slot once per change the operator makes on the panel, filing each
+/// capture under what they say changed. Read-only.
+///
+/// ⚠️ **The read happens after the answer, not before.** The answer is the operator
+/// saying the instrument is now in the state to capture; reading first would file every
+/// capture under the change that comes next.
+///
+/// A failed read is reported and the sweep continues — one fumbled step should not cost
+/// the session, and nothing already written is at risk.
+///
+/// ⚠️ The prompt sits *between* sessions, never inside one. Ctrl-C there ends the process
+/// outright ([`Ui::ask`]), and an interrupt taken mid-session would leave the instrument
+/// holding its progress label with no way out but a power cycle.
+pub fn sweep(
+    ui: &Ui,
+    at: Location,
+    dir: PathBuf,
+    class: ObjectClass,
+    body: bool,
+) -> Result<(), String> {
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut t = open_usb()?;
+    ui.note(format!(
+        "sweeping {} ({}) into {}",
+        shown(at),
+        class.label(),
+        dir.display()
+    ));
+    ui.note("change one thing on the instrument, then say what it was");
+    ui.note("each prompt reopens with your last answer, editable; clear it to finish");
+
+    let mut captured = 0usize;
+    // The previous answer, waiting in the next prompt's buffer. A sweep walks one field
+    // along its range, so consecutive answers differ by a digit and retyping the whole
+    // line each step is most of the work.
+    let mut previous = String::new();
+    while let Some(label) = ui.ask("what changed", &previous)? {
+        previous = label.clone();
+        let stem = match stem(&label) {
+            Ok(s) => s,
+            Err(e) => {
+                ui.warn(e);
+                continue;
+            }
+        };
+        // Refuse a name already used *before* reading: the read is the slow part, and a
+        // capture that silently replaced an earlier one would leave the corpus holding
+        // two states under one description.
+        if taken(&dir, &stem) {
+            ui.warn(format!(
+                "{stem:?} is already captured; give this one another name"
+            ));
+            continue;
+        }
+
+        let (info, file) = match read_object(&mut t, at, class, body) {
+            Ok(read) => read,
+            Err(e) => {
+                ui.warn(e);
+                continue;
+            }
+        };
+        // The extension says what the bytes are: a wrapped file carries the device's own
+        // format tag, a `--body` dump is a fragment and no format at all.
+        let path = dir.join(match body {
+            true => format!("{stem}.bin"),
+            false => format!("{stem}.{}", info.format),
+        });
+        std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
+        captured += 1;
+        ui.note(format!("  {} ({} bytes)", path.display(), file.len()));
+    }
+
+    ui.note(format!("captured {captured} file(s) in {}", dir.display()));
+    Ok(())
+}
+
+/// Turn what the operator typed into a filename stem.
+///
+/// The answer is prose — `split point C4`, `vol 5 -> 6` — and in the corpus directory it
+/// is the only record of what the bytes mean, so it stays readable: whitespace runs
+/// become one `-`, and only what a path cannot carry is dropped.
+fn stem(label: &str) -> Result<String, String> {
+    // A separator is owed rather than written, so a run of them collapses to one `-` and
+    // nothing trailing survives. `-` itself is owed too: `5 -> 6` loses the `>` to the
+    // rule below, and three dashes in its place read as noise.
+    let mut owed = false;
+    let mut out = String::with_capacity(label.len());
+    for c in label.chars() {
+        match c {
+            '-' => owed = !out.is_empty(),
+            _ if c.is_whitespace() => owed = !out.is_empty(),
+            // Path separators, plus the characters a Windows filename cannot hold — a
+            // corpus is read on both.
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => owed = !out.is_empty(),
+            _ if c.is_control() => {}
+            _ => {
+                if std::mem::take(&mut owed) {
+                    out.push('-');
+                }
+                out.push(c);
+            }
+        }
+    }
+    // A leading dot hides the file, dots alone spell `.` and `..`, and a trailing one is
+    // dropped by Windows. Leading dashes go with them: a name starting with one is an
+    // option to every tool that later reads this directory.
+    let out = out.trim_matches(['.', '-']);
+    if out.is_empty() {
+        return Err(format!("{label:?} leaves nothing usable as a filename"));
+    }
+    Ok(out.to_string())
+}
+
+/// Whether a capture under this name already exists, whatever extension it took.
+fn taken(dir: &Path, stem: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|e| Path::new(&e.file_name()).file_stem() == Some(OsStr::new(stem)))
 }
 
 /// Write a file into a slot, overwriting it.
@@ -802,5 +939,31 @@ mod tests {
     fn unparseable_bytes_still_get_rescued() {
         let at = Location { bank: 0, slot: 0 };
         assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
+    }
+
+    /// The answer is the only description the corpus will ever have of these bytes, so it
+    /// survives into the filename rather than being reduced to something opaque.
+    #[test]
+    fn a_swept_capture_keeps_the_words_it_was_described_with() {
+        assert_eq!(stem("split point C4").unwrap(), "split-point-C4");
+        assert_eq!(stem("  transpose +1  ").unwrap(), "transpose-+1");
+        assert_eq!(stem("organ vol 5 -> 6").unwrap(), "organ-vol-5-6");
+    }
+
+    /// The stem is joined to the output directory, so nothing in it may climb out.
+    #[test]
+    fn a_swept_name_cannot_leave_the_output_directory() {
+        assert_eq!(stem("../../etc/passwd").unwrap(), "etc-passwd");
+        assert_eq!(stem("rotary:fast").unwrap(), "rotary-fast");
+        assert_eq!(stem(".hidden").unwrap(), "hidden");
+    }
+
+    /// Rejected, not silently turned into some default — an unnamed capture in a sweep is
+    /// indistinguishable from the ones around it.
+    #[test]
+    fn an_answer_with_no_filename_in_it_is_refused() {
+        for bad in ["...", "/", "  ", "?*", "-"] {
+            assert!(stem(bad).is_err(), "{bad:?}");
+        }
     }
 }

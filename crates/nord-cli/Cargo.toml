@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# Line editing for `--sweep`, which prefills each prompt with the previous answer — the
+# terminal's own line discipline cannot be handed a starting buffer. Defaults off: the
+# password/editor/fuzzy prompts are all unused.
+dialoguer = { version = "0.12", default-features = false }
 # Pull in the `bundle` feature so `nord inspect` can also open ZIP backup bundles.
 nord-format = { path = "../nord-format", features = ["bundle"] }
 nord-usb = { path = "../nord-usb", features = ["blocking", "replay"] }

@@ -157,6 +157,32 @@ impl Ui {
             _ => Err("cancelled".into()),
         }
     }
+
+    /// Ask for a line of free text, with `initial` already in the buffer and editable.
+    /// `None` is the operator saying they are done — an empty line, and only that.
+    ///
+    /// ⚠️ This takes the terminal out of line mode to do its own editing, so unlike
+    /// [`Ui::note`] it must never run against a stream that is not a terminal. Off a TTY
+    /// it is an error rather than a wait on a stdin nobody is attached to.
+    ///
+    /// ⚠️ **Ctrl-C never arrives here.** The raw-mode reader raises `SIGINT` on itself,
+    /// so an interrupt at the prompt ends the *process*: a caller cannot run any cleanup
+    /// after one, and must leave nothing that needs undoing while this is waiting. Ctrl-D,
+    /// Ctrl-U and Esc are all read as nothing at all.
+    pub fn ask(&self, question: &str, initial: &str) -> Result<Option<String>, String> {
+        if !self.interactive {
+            return Err(format!("{question:?} needs a terminal to ask on"));
+        }
+        // Reads and echoes on stderr, which is where every other prompt here goes.
+        let answer = dialoguer::Input::<String>::new()
+            .with_prompt(question)
+            .with_initial_text(initial)
+            .allow_empty(true)
+            .interact_text()
+            .map_err(|e| format!("reading the answer: {e}"))?;
+        let answer = answer.trim();
+        Ok((!answer.is_empty()).then(|| answer.to_string()))
+    }
 }
 
 const BOLD: &str = "1";
@@ -210,5 +236,18 @@ mod tests {
         assert!(ui.confirm(true).is_ok());
         let err = ui.confirm(false).unwrap_err();
         assert!(err.contains("--yes"), "{err}");
+    }
+
+    /// An open-ended question has no `--yes` to stand in for an answer, so off a TTY it
+    /// can only fail — never block waiting for a line.
+    #[test]
+    fn a_pipe_is_never_asked_an_open_question() {
+        let ui = Ui {
+            color: false,
+            unicode: false,
+            interactive: false,
+        };
+        let err = ui.ask("what changed", "").unwrap_err();
+        assert!(err.contains("terminal"), "{err}");
     }
 }
