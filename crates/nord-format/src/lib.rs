@@ -88,12 +88,10 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
                 Ok(settings) => Ok(Entity::Settings(Settings::Electro5(settings))),
                 Err(e) => Err(e.into()),
             },
-            e => Err(Error::ParseError(ParseError::UnknownFormat(
-                e.parse().unwrap(),
-            ))),
+            e => Err(Error::ParseError(ParseError::UnknownFormat(e.to_string()))),
         },
         e => Err(Error::ParseError(ParseError::UnknownFileType(
-            e.as_str().parse().unwrap(),
+            e.as_str().to_string(),
         ))),
     }
 }

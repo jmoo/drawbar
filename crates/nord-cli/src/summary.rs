@@ -463,6 +463,11 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 "note",
                 ui.dim("use --raw to list contained programs/songs"),
             ));
+            // Chatter, not data: a partial read is something the operator should see,
+            // but a pipe consuming the summary should not.
+            for (name, why) in b.skipped() {
+                ui.warn(format!("bundle entry skipped: {name}: {why}"));
+            }
             let _ = (b.programs(), b.songs()); // decoded; shown via --raw
         }
     }

@@ -12,7 +12,7 @@ resolver = "2"
 # these with `field.workspace = true` in their own Cargo.toml.
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "BSD-3-Clause"
 version = "0.1.0"
 
 # Cargo profiles only take effect at the workspace root, so anki-tool's release

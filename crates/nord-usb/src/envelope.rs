@@ -13,9 +13,9 @@
 //! supplied by the caller from the device's own `0x1e` object-info response. Substituting
 //! a constant reproduces programs correctly and silently corrupts every other class.
 //!
-//! This mirrors the layout `nord_format::common::header` parses. Anything written here
-//! is checked by parsing the result back through `nord-format` before it is handed to a
-//! caller, so the two cannot silently drift.
+//! This mirrors the layout `nord_format::common::header` parses — a second statement of
+//! the same bytes, kept honest by the specimen tests here and by the CLI, which parses
+//! every wrapped read back through `nord-format` before summarising it.
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
@@ -32,7 +32,7 @@ const HEADER_TYPE: u32 = 1;
 const VERSION_OFFSET: usize = 0x14;
 
 /// CRC-32/ISO-HDLC, the same checksum `nord-format` verifies in the file header.
-fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {
         crc ^= b as u32;

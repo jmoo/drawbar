@@ -177,12 +177,21 @@ fn finish<T>(
 
 /// Turn the device's bare status code into something actionable.
 ///
-/// Status `0x1` from a slot-addressed read means the slot is empty. Confirmed on
-/// hardware, against vacant and occupied slots.
+/// All three confirmed on hardware 2026-07-31: `0x1` from a vacant slot, `0x3` from
+/// `9:1` and `8:51`, `0x4` from a write aimed at an occupied slot.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
         nord_usb::Error::DeviceStatus(1) => {
             format!("{} is empty", shown(at))
+        }
+        nord_usb::Error::DeviceStatus(3) => {
+            format!("{} is out of range for this instrument", shown(at))
+        }
+        nord_usb::Error::DeviceStatus(4) => {
+            format!(
+                "{} is occupied, and the instrument does not overwrite in place",
+                shown(at)
+            )
         }
         other => other.to_string(),
     }
@@ -206,6 +215,11 @@ pub fn get(
     class: ObjectClass,
     body: bool,
 ) -> Result<(), String> {
+    // Before the transport opens: a piano read is minutes long, and finding out at the
+    // end that there was nowhere to put it is the worst possible time.
+    if body && out.is_none() {
+        return Err("--body writes a file; give -o a path".into());
+    }
     let mut t = open_usb()?;
     let (info, file) = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
@@ -234,10 +248,6 @@ pub fn get(
             path.display(),
         ));
         return Ok(());
-    }
-
-    if body {
-        return Err("--body writes a file; give -o a path".into());
     }
 
     // Parse the bytes just built rather than reporting the wire fields directly, so this
@@ -459,7 +469,7 @@ fn peek(
         let closed = s.commit().await;
         finish(r, closed).map(|info| info.name)
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| explain(e, at))
 }
 
 /// Describe what currently occupies a *destination* slot, for the pre-flight line —

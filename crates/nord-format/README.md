@@ -16,7 +16,7 @@ CLI) without dragging in a transport stack.
 | `ne5p` program | ✅ | ✅ | Center / piano / sample / FX / EQ panels ✅. **Organ**: drawbars, preset, vibrato/chorus (all models) and B3 percussion ✅ — B3-bass & Farfisa drawbar *display* transforms still pending. |
 | `ne5t` song / set | ✅ | ✅ | ✅ (four program slots) |
 | `ne5s` settings | ✅ | ✅ | Raw body only — round-trips byte-exact; field decode is pending a specimen corpus (the System/MIDI/Sound catalog is documented on `electro5::settings::Settings`). |
-| `npno` piano / `nsmp` sample | ✅ (header) | ✅ | Header / reference only. |
+| `npno` piano / `nsmp` sample | ✅ (header) | ⬜ header only | Only the header is parsed and re-emitted, so a full library file does **not** round-trip yet — `nord verify` on one reports the truncation. |
 | backup bundle (ZIP) | ✅ | — | Partial; behind the `bundle` feature. |
 
 Everything that parses **round-trips byte-for-byte**, verified against a

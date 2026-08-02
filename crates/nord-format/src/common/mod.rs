@@ -2,7 +2,6 @@ pub mod bank;
 pub mod components;
 pub mod piano;
 pub mod sample;
-pub mod settings;
 pub mod song;
 
 pub mod header;

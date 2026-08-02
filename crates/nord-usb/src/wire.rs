@@ -183,8 +183,8 @@ pub struct ProgramInfo {
     /// Schema/content version, the same field the CBIN header carries at `0x14` and
     /// the one NSM prints in its "Version" column.
     ///
-    /// Per format tag, not a per-item counter: `ne5p` reports 4 and `ne5t` reports 0 or
-    /// 1. For library content it is the version in the object's own *name*, ×100 —
+    /// Per format tag, not a per-item counter: `ne5p` reports 4 and `ne5t` reports 0
+    /// or 1. For library content it is the version in the object's own *name*, ×100 —
     /// `Royal Grand 3D YaS6 XL 5.4` reports `540`.
     pub version: u32,
     /// CRC-32 of the body, as the device reports it. Lets a read be verified
@@ -319,7 +319,11 @@ impl Dependency {
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
         let count = word(8) as usize;
 
-        let mut out = Vec::with_capacity(count);
+        // `count` is device-supplied and unvalidated; the smallest entry is 29 bytes,
+        // so a payload of this length bounds how many can really follow. Without the
+        // clamp a corrupt count is a multi-gigabyte allocation before the loop's
+        // truncation checks ever run.
+        let mut out = Vec::with_capacity(count.min((p.len() - 12) / 29));
         let mut i = 12;
         for _ in 0..count {
             // flag(1) + reserved(4) + class(4) + id(4) + name_len(4) = 17 bytes.
@@ -575,13 +579,13 @@ impl Status {
     /// the content really does differ per item — do not divide evenly and yield
     /// `None`.
     pub fn blocks_per_item(&self) -> Option<u32> {
-        if self.count == 0 || self.used == 0 || self.used % self.count != 0 {
+        if self.count == 0 || self.used == 0 || !self.used.is_multiple_of(self.count) {
             return None;
         }
         let per = self.used / self.count;
         // Only trust it if the class capacity is also a whole number of items;
         // otherwise the division is a coincidence.
-        (per != 0 && self.total() % per == 0).then_some(per)
+        (per != 0 && self.total().is_multiple_of(per)).then_some(per)
     }
 
     /// Total item slots, for classes where items are fixed-size.
@@ -604,6 +608,14 @@ impl Status {
     /// Decode a [`cmd::STATUS`] response. Arguments after the status word are
     /// `count, free, used, …`.
     pub fn decode(class: ObjectClass, msg: &Message) -> Result<Self> {
+        // Same guard as `ProgramInfo::decode`: `payload` only strips the status word
+        // from a response, so a request-decoded message would shift every counter by
+        // four bytes.
+        if !msg.is_response() {
+            return Err(Error::InvalidArgument(
+                "status must be decoded from a response (use Message::decode_response)".into(),
+            ));
+        }
         let p = msg.payload();
         if p.len() < 12 {
             return Err(Error::Truncated {
@@ -632,7 +644,15 @@ pub struct Location {
 
 impl Location {
     /// From the one-indexed numbering used by the UI and capture names.
+    ///
+    /// Zero is not a user address — the panel counts from 1 — and underflows here, so
+    /// callers own validating input (the CLI rejects `0:1` with a message naming the
+    /// numbering).
     pub fn from_user(bank: u32, slot: u32) -> Self {
+        debug_assert!(
+            bank >= 1 && slot >= 1,
+            "from_user takes the panel's one-indexed numbering; got {bank}:{slot}"
+        );
         Self {
             bank: bank - 1,
             slot: slot - 1,

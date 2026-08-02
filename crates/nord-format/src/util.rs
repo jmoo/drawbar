@@ -37,7 +37,7 @@ pub fn peek(reader: &mut impl BinReaderExt) -> Result<Peek, Error> {
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 
-    let result: Result<Peek, Error> = match head {
+    let result = match head {
         0x50 => Ok(Peek {
             format: String::from("unknown"),
             file_type: FileType::Zip,
@@ -64,8 +64,5 @@ pub fn peek(reader: &mut impl BinReaderExt) -> Result<Peek, Error> {
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 
-    match result {
-        Ok(peek) => Ok(peek),
-        Err(e) => Err(e),
-    }
+    result
 }

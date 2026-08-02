@@ -21,8 +21,8 @@ pub type Header = common::Header<Location>;
 #[binrw]
 #[derive(Debug)]
 #[brw(assert(header.preamble.format == FORMAT))]
-#[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x4e - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
-#[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0x4e - 0x2c))]
+#[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x4d - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
+#[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0x4d - 0x2c))]
 struct Schema {
     header: Header,
 
@@ -73,7 +73,7 @@ impl Settings {
     pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Settings, std::io::Error> {
         let schema = match Schema::read_be(reader) {
             Ok(schema) => schema,
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => return Err(io::Error::other(e.to_string())),
         };
 
         if !KNOWN_VERSIONS.contains(&schema.version) {
@@ -91,9 +91,9 @@ impl Settings {
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        match writer.write_be(&mut self.schema) {
+        match writer.write_be(&self.schema) {
             Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => Err(io::Error::other(e.to_string())),
         }
     }
 
@@ -111,4 +111,41 @@ impl Default for Settings {
     }
 }
 
-impl common::settings::Settings for Settings {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// A settings file writes out at its declared length and reads back.
+    ///
+    /// The CRC region ends at the last byte of the file, and `CrcWriter` only flushes
+    /// its buffered body after the write position *passes* the region — so an
+    /// off-by-one in the region bound silently truncates the output to the bytes ahead
+    /// of the checksum. This is the only ne5 format whose body runs to EOF, which is
+    /// why it needs its own writer test.
+    #[test]
+    fn a_settings_file_round_trips_at_full_length() {
+        let mut settings = Settings::new();
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(bytes.len(), FILE_LEN);
+
+        let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(back.raw(), settings.raw());
+    }
+
+    /// The body is held verbatim, so any byte pattern in it survives a round trip.
+    #[test]
+    fn the_raw_body_survives_verbatim() {
+        let mut settings = Settings::new();
+        for (i, b) in settings.schema.raw.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0xa5;
+        }
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(bytes.len(), FILE_LEN);
+
+        let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(back.raw(), settings.raw());
+    }
+}

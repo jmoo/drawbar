@@ -187,7 +187,7 @@ impl Program {
     pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Program, std::io::Error> {
         let schema = match Schema::read_be(reader) {
             Ok(schema) => schema,
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => return Err(io::Error::other(e.to_string())),
         };
         if !KNOWN_VERSIONS.contains(&schema.version) {
             return Err(io::Error::other(
@@ -210,9 +210,9 @@ impl Program {
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
         self.schema.header.location = self.location;
 
-        match writer.write_be(&mut self.schema) {
+        match writer.write_be(&self.schema) {
             Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => Err(io::Error::other(e.to_string())),
         }
     }
 }
@@ -234,8 +234,6 @@ impl bank::Item<Location> for Program {
         self.location = location;
     }
 }
-
-impl common::program::Program for Program {}
 
 #[cfg(test)]
 mod tests {

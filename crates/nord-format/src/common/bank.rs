@@ -45,13 +45,7 @@ where
     }
 
     pub fn replace(&mut self, item: T) {
-        let id = item.location().as_u16();
-
-        if self.items.contains_key(&id) {
-            self.items.remove(&id);
-        }
-
-        self.items.insert(id, item);
+        self.items.insert(item.location().as_u16(), item);
     }
 
     pub fn get(&self, location: L) -> Option<&T> {

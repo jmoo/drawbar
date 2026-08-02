@@ -57,7 +57,12 @@ pub async fn inventory<T: Transport>(transport: &mut T) -> Result<Vec<Status>> {
                 session.commit().await?;
                 out.push(s);
             }
-            Err(_) => session.abort(),
+            // The class is skipped, but the transaction still gets its closing
+            // exchanges — an abandoned session strands the instrument on its progress
+            // screen. A close that fails too is genuinely unrecoverable here.
+            Err(_) => {
+                let _ = session.commit().await;
+            }
         }
     }
     Ok(out)
@@ -91,8 +96,7 @@ pub async fn read_program<T: Transport, C>(
 
     let file = envelope::wrap(&meta.format, at, meta.version, &body)?;
     if let Some(expected) = meta.crc32 {
-        let (_, _, wrapped) = envelope::unwrap(&file)?;
-        let actual = crc32_of(wrapped);
+        let actual = envelope::crc32(&body);
         if expected != actual {
             return Err(Error::Transport(format!(
                 "body checksum mismatch: device reported {expected:08x}, received {actual:08x}"
@@ -143,7 +147,10 @@ async fn transfer_out<T: Transport, C>(
         .request(Service::Program, 10, cmd::BEGIN_READ, &args)
         .await?;
 
-    let mut body = Vec::with_capacity(meta.body_len as usize);
+    // Capacity is clamped: `body_len` is device-supplied, and a corrupt or hostile
+    // value must not become a gigabyte allocation up front. Real bodies larger than the
+    // clamp (pianos) just grow the vector as chunks arrive.
+    let mut body = Vec::with_capacity((meta.body_len as usize).min(1 << 20));
     let mut painted = None;
     while (body.len() as u32) < meta.body_len {
         let offset = body.len() as u32;
@@ -193,14 +200,19 @@ async fn transfer_out<T: Transport, C>(
     Ok((meta, body))
 }
 
-/// Write a `.ne5p` file into a slot, **overwriting whatever is there**.
+/// Write a `.ne5p` file into a slot. Requires a [`ReadWrite`] session, which callers
+/// must obtain deliberately.
 ///
-/// Requires a [`ReadWrite`] session, which callers must obtain deliberately.
+/// ⚠️ **The destination must be empty.** The device refuses to overwrite in place with
+/// status `4` (confirmed on hardware; NSM greys out its write button for a filled slot,
+/// so no capture of a replace exists). Replacing a slot is delete-then-write, and the
+/// window in between — where the only copy is in host memory — belongs to the caller.
 ///
 /// ⚠️ The `BEGIN_WRITE` argument layout is only partly understood: the fourth word is
 /// a Unix timestamp (NSM sends the file's mtime) and the trailing bytes are copied
-/// from an observed capture. This has been validated against a recorded exchange but
-/// **not yet against real hardware**. Back up before using it.
+/// from an observed capture. The path is hardware-verified for programs (a field
+/// edited in Rust, written over USB, confirmed on the panel), but only ever with
+/// those captured trailing bytes. Back up before using it.
 pub async fn write_program<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -347,19 +359,4 @@ pub async fn duplicate<T: Transport>(
         .request(Service::Program, 10, cmd::COPY, &args)
         .await?;
     Ok(())
-}
-
-fn crc32_of(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
 }

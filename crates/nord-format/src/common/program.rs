@@ -123,30 +123,3 @@ impl Packed for SplitPoint73 {
         *self as u64
     }
 }
-
-impl SplitPoint73 {
-    #[allow(dead_code)]
-    fn as_str(&self) -> &'static str {
-        match self {
-            SplitPoint73::C3 => "c3",
-            SplitPoint73::F3 => "f3",
-            SplitPoint73::C4 => "c4",
-            SplitPoint73::F4 => "f4",
-            SplitPoint73::C5 => "c5",
-            SplitPoint73::F5 => "f5",
-            SplitPoint73::Upper => "upper",
-            SplitPoint73::Lower => "lower",
-        }
-    }
-}
-
-#[derive(Default)]
-pub enum Instrument {
-    #[default]
-    Organ,
-    Piano,
-    Sample,
-    Synth,
-}
-
-pub trait Program {}

@@ -157,11 +157,15 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Run the closing exchanges. Always prefer this over dropping.
     pub async fn commit(mut self) -> Result<()> {
+        // Marked closed before the exchanges, not after: a transaction gets one close
+        // attempt, and a failed one must surface as the `Err` it is. Marking afterwards
+        // means a failure drops `self` unclosed inside this call, and the `Drop`
+        // assertion panics over the very error the caller was owed.
+        self.closed = true;
         self.request(Service::Program, 10, cmd::SESSION_CLOSE, &[])
             .await?;
         self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
             .await?;
-        self.closed = true;
         Ok(())
     }
 

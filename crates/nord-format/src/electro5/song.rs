@@ -39,8 +39,9 @@ struct Schema {
 
     // Bits 48.. carry the version again. The container header is never transmitted
     // over USB — the device sends only this body — so the version is echoed into the
-    // payload where the wire side can see it. Writing a constant `1 << 48` here (as
-    // this did) rewrites a version-0 song as version 1.
+    // payload where the wire side can see it. ⚠️ It must be the *read* version, never a
+    // constant: the eight factory demo songs are version 0, and stamping 1 here
+    // silently rewrites them.
     #[brw(big, pad_before = 16)]
     #[bw(calc = (
     ((* a).as_u16() as u64) << 39
@@ -96,7 +97,7 @@ impl Song {
     pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Song, std::io::Error> {
         let schema = match Schema::read_be(reader) {
             Ok(schema) => schema,
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => return Err(io::Error::other(e.to_string())),
         };
 
         if !KNOWN_VERSIONS.contains(&schema.version) {
@@ -119,7 +120,7 @@ impl Song {
     }
 
     pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        let mut schema = Schema::new(
+        let schema = Schema::new(
             self.location(),
             self.version(),
             self.programs()[0],
@@ -128,9 +129,9 @@ impl Song {
             self.programs()[3],
         );
 
-        match writer.write_be(&mut schema) {
+        match writer.write_be(&schema) {
             Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => Err(io::Error::other(e.to_string())),
         }
     }
 }

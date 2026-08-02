@@ -63,23 +63,6 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<i8> for RangedI8<OF
     }
 }
 
-impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<i32> for RangedI8<OFFSET, MIN, MAX> {
-    type Error = ParseError;
-
-    fn try_from(value: i32) -> Result<Self, Self::Error> {
-        if value < (MIN as i32) || value > (MAX as i32) {
-            return Err(ParseError::OutOfBounds(
-                format!("{:?}", value),
-                format!(" <{:?} >{:?}", MIN, MAX),
-            ));
-        }
-
-        Ok(RangedI8 {
-            inner: (value as i8) - (OFFSET as i8),
-        })
-    }
-}
-
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> PartialEq<u8> for RangedI8<OFFSET, MIN, MAX> {
     fn eq(&self, other: &u8) -> bool {
         self.as_u8() == *other
@@ -205,17 +188,14 @@ impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
     }
 
     pub fn from_u16(value: u16) -> Result<Self, ParseError> {
-        if Y_MAX == 0 {
-            if value > 0 {
-                Err(ParseError::OutOfBounds(
-                    format!("{:?}", value),
-                    format!("{:?}", X_MAX),
-                ))
-            } else {
-                (0, 0).try_into()
-            }
-        } else {
-            (value / Y_MAX, value % Y_MAX).try_into()
+        match (value.checked_div(Y_MAX), value.checked_rem(Y_MAX)) {
+            (Some(x), Some(y)) => (x, y).try_into(),
+            // `Y_MAX == 0` is the degenerate single-location type; only 0 encodes.
+            _ if value == 0 => (0, 0).try_into(),
+            _ => Err(ParseError::OutOfBounds(
+                format!("{:?}", value),
+                format!("{:?}", X_MAX),
+            )),
         }
     }
 
@@ -265,17 +245,6 @@ impl<const X: u16, const Y: u16> TryFrom<(u16, u16)> for RangedU16Pair<X, Y> {
 
     fn try_from(value: (u16, u16)) -> Result<Self, Self::Error> {
         RangedU16Pair::new(value.0, value.1)
-    }
-}
-
-impl<const X: u16, const Y: u16> TryFrom<[u8; 4]> for RangedU16Pair<X, Y> {
-    type Error = ParseError;
-
-    fn try_from(value: [u8; 4]) -> Result<Self, Self::Error> {
-        RangedU16Pair::new(
-            u16::from_be_bytes([value[0], value[1]]),
-            u16::from_be_bytes([value[1], value[2]]),
-        )
     }
 }
 

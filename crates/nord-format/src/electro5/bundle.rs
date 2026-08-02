@@ -12,6 +12,10 @@ pub struct Bundle {
     songs: song::Bank,
     pianos: Vec<Piano>,
     samples: Vec<Sample>,
+    /// Entries the walk could not place: `(archive member name, why)`. Kept on the
+    /// bundle rather than printed — a library owns no terminal — so a caller can decide
+    /// whether a partial read is acceptable.
+    skipped: Vec<(String, String)>,
     name: Option<String>,
 }
 
@@ -22,6 +26,7 @@ impl Bundle {
             songs: song::Bank::new(),
             pianos: Vec::new(),
             samples: Vec::new(),
+            skipped: Vec::new(),
             name: None,
         }
     }
@@ -36,7 +41,7 @@ impl Bundle {
             let name = file.name().to_string();
 
             let mut buffer: Vec<u8> = Vec::new();
-            file.read_to_end(&mut buffer).unwrap();
+            file.read_to_end(&mut buffer)?;
             let mut cursor = std::io::Cursor::new(buffer);
 
             match from_stream(&mut cursor) {
@@ -55,13 +60,11 @@ impl Bundle {
                     Entity::Sample(sample) => {
                         bundle.samples.push(sample);
                     }
-                    _ => {
-                        println!("Unknown entity in bundle: {}", name);
-                    }
+                    other => bundle
+                        .skipped
+                        .push((name, format!("no place in a bundle for {other:?}"))),
                 },
-                Err(e) => {
-                    println!("Error reading file {}: {}", name, e);
-                }
+                Err(e) => bundle.skipped.push((name, e.to_string())),
             }
         }
 
@@ -82,6 +85,20 @@ impl Bundle {
 
     pub fn songs(&self) -> &song::Bank {
         &self.songs
+    }
+
+    pub fn pianos(&self) -> &[Piano] {
+        &self.pianos
+    }
+
+    pub fn samples(&self) -> &[Sample] {
+        &self.samples
+    }
+
+    /// Archive members that did not become entities, with the reason each was skipped.
+    /// Empty means the whole bundle was understood.
+    pub fn skipped(&self) -> &[(String, String)] {
+        &self.skipped
     }
 }
 

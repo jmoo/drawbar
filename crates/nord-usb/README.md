@@ -54,15 +54,17 @@ Two things that cost real time and are worth knowing up front:
 ## Usage
 
 ```rust
-use nord_usb::{op, ObjectClass, Session};
+use nord_usb::{op, Location, ObjectClass, Session};
 use nord_usb::transport::UsbTransport;
 
 let mut transport = UsbTransport::open_first()?;
 
 // Read-only by default — the type system will not let a mutating op through.
+// `from_user` takes the instrument's own one-indexed numbering: 7:4 on the panel.
 let mut session = Session::open(&mut transport, ObjectClass::Program).await?;
-let info = op::info(&mut session, "7:4".parse()?).await?;
-let file = op::read_program(&mut session, "7:4".parse()?).await?;
+let at = Location::from_user(7, 4);
+let info = op::info(&mut session, at).await?;
+let file = op::read_program(&mut session, at).await?;
 session.commit().await?;
 ```
 
@@ -86,7 +88,7 @@ carries a `Drop` assertion to catch the mistake in debug builds.
 | Feature | Default | What it gives you |
 |---|:--:|---|
 | `nusb` | ✅ | Desktop backend — macOS (IOKit), Linux (usbfs), Windows (WinUSB). Pure Rust. |
-| `web` | | Browser backend over WebUSB. Chrome/Edge only; Firefox and Safari declined the spec. |
+| `web` | | **Reserved; no backend exists yet.** Pulls the WebUSB deps so the wasm32 CI check proves the API stays wasm-compatible. Chrome/Edge only once real — Firefox and Safari declined the spec. |
 | `replay` | | Drive the protocol from committed captures, no hardware. Used by the golden tests. |
 | `blocking` | | Block on the async API from synchronous callers (the CLI). Tiny; not a runtime. |
 | `corpus` | | Corpus-backed tests (`NORD_CORPUS_DIR`), implies `replay`. |

@@ -177,6 +177,25 @@ fn test_ne5_read_settings() {
 }
 
 #[test]
+fn test_ne5_write_settings() {
+    let test_file = corpus_dir().join("settings.ne5s");
+
+    let settings = nord_format::from_path(&test_file).unwrap();
+    let contents = read(&test_file).unwrap();
+
+    match settings {
+        Entity::Settings(nord_format::Settings::Electro5(mut settings)) => {
+            let mut output: Vec<u8> = Vec::new();
+
+            settings.write_to(&mut Cursor::new(&mut output)).unwrap();
+
+            assert_eq!(contents.as_slice(), output.as_slice());
+        }
+        _ => panic!("expected electro5 settings"),
+    }
+}
+
+#[test]
 fn test_ne5_program_read_write_center_panel() {
     let test_files = corpus_dir().join("programs/center_panel");
 
@@ -1138,9 +1157,9 @@ const PIANO_IDS: [(PianoCategory, u8, u32, &str); 11] = [
 const SAMPLE_IDS: [(u8, u32); 3] = [(0, 0x47c8_b4f8), (41, 0x89be_e289), (158, 0x0ac2_1363)];
 
 /// Every `.ne5p` under `dir`, recursively, sorted for deterministic failures.
-fn ne5p_files(dir: &PathBuf) -> Vec<PathBuf> {
+fn ne5p_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![dir.clone()];
+    let mut stack = vec![dir.to_path_buf()];
 
     while let Some(next) = stack.pop() {
         for entry in fs::read_dir(&next).unwrap() {
@@ -1162,7 +1181,7 @@ fn ne5p_files(dir: &PathBuf) -> Vec<PathBuf> {
 /// Read a program and assert it still round-trips byte-exact. The id fields are
 /// read-only views over a verbatim `settings` word, so decoding more of it must
 /// never cost the round-trip.
-fn read_program_checked(path: &PathBuf) -> electro5::Program {
+fn read_program_checked(path: &std::path::Path) -> electro5::Program {
     let name = path.display().to_string();
     let contents = read(path).unwrap();
 

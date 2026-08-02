@@ -121,11 +121,15 @@ the offset of the first difference if not. It is the only thing that exercises
 the write path end to end:
 
 ```
-$ nord verify song.ne5t settings.ne5s
+$ nord verify song.ne5t settings.ne5s grand.npno
 ok     song.ne5t (62 bytes)
-error  settings.ne5s (ne5s: re-encoded to 24 bytes but the format is 78; refusing to emit a truncated file)
-error: 1 of 2 file(s) did not round-trip
+ok     settings.ne5s (78 bytes)
+DIFFER grand.npno (in 209564996 bytes, out 20; first difference at the end (length differs))
+error: 1 of 3 file(s) did not round-trip
 ```
+
+(A `DIFFER` on a piano or sample is expected for now — only their headers are
+parsed and re-emitted; see the `nord-format` format table.)
 
 ## Working with an instrument
 

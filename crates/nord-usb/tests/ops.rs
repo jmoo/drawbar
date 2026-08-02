@@ -71,6 +71,44 @@ fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
     }
 }
 
+/// A close that the device refuses must surface as the `Err` it is.
+///
+/// `commit()` consumes the session, so a failure inside it drops the session mid-close;
+/// if `closed` were only marked on success, the debug `Drop` assertion would panic over
+/// the very error the caller was owed — in exactly the always-close error paths the CLI
+/// is built around. The golden replays never fail a close, so only this test reaches it.
+#[test]
+fn a_failed_commit_reports_rather_than_panicking() {
+    use Direction::{In, Out};
+    let mut t = ReplayTransport::new(vec![
+        step(Out, "0000001200000006000000010000000006a1"),
+        step(In, "000000160000000600000001000000010000000044ec"),
+        step(Out, "000000160000000c0000000a0000000400000004a218"),
+        step(In, "0000001a0000000c0000000a00000005000000000000000467b0"),
+        step(Out, "000000120000000c0000000a000000066500"),
+        // SESSION_CLOSE answered with device status 5 instead of success. Framed by the
+        // codec so the CRC is right; the decoder marks direction, not the bytes.
+        Step {
+            direction: In,
+            bytes: nord_usb::Message::new(
+                nord_usb::Service::Program,
+                10,
+                0x07,
+                5u32.to_be_bytes().to_vec(),
+            )
+            .encode(),
+        },
+    ]);
+    let err = block_on(async {
+        let s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        s.commit().await.expect_err("the device refused the close")
+    });
+    assert!(
+        matches!(err, nord_usb::Error::DeviceStatus(5)),
+        "wrong error: {err}"
+    );
+}
+
 /// `move_prog_8-13_to_7-16`: a single MOVE with two addresses in one small op.
 #[test]
 fn move_reproduces_the_capture() {
