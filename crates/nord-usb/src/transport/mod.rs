@@ -11,10 +11,29 @@ pub mod usb;
 #[cfg(feature = "nusb")]
 pub use usb::UsbTransport;
 
+// ⚠️ Also gated on the architecture, not just the feature: `web-sys` only emits its
+// WebUSB bindings under `--cfg=web_sys_unstable_apis`, which `crates/.cargo/config.toml`
+// sets for the wasm target alone. Off wasm32 the module is simply absent, so a host
+// build of a workspace member that enables `web` still compiles.
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+pub mod web;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+pub use web::WebUsbTransport;
+
 #[cfg(feature = "replay")]
 pub mod replay;
 #[cfg(feature = "replay")]
 pub use replay::{Direction, ReplayTransport, Step};
+
+/// Clavia DMI AB. Read off the device descriptor in a firmware-update capture.
+pub const VENDOR_ID: u16 = 0x0ffc;
+/// Nord Electro 5.
+pub const PRODUCT_ID_ELECTRO5: u16 = 0x0027;
+
+/// USB vendor-specific interface class. The protocol rides this; the instrument's
+/// other interface is USB-MIDI (audio class), which every backend must leave alone so
+/// CoreMIDI/ALSA keep working — and which the browser would refuse to claim anyway.
+pub const CLASS_VENDOR_SPECIFIC: u8 = 0xff;
 
 /// Vendor bulk IN endpoint (device → host). Settled across every corpus capture.
 pub const EP_IN: u8 = 0x82;

@@ -1,0 +1,34 @@
+[package]
+name = "nord-web-demo"
+description = "Browser POC driving nord-usb's WebUSB transport against a Nord instrument"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nord-usb = { path = "../nord-usb", default-features = false, features = ["web"] }
+
+js-sys = "0.3"
+# ⚠️ Exact, and it pins the whole workspace lock: `wasm-bindgen-cli` refuses a module
+# built by any other version of the crate, and nixpkgs ships 0.2.121. Move both
+# together or neither — see this crate's README.
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "0.4"
+# Enumeration (`Usb`, `UsbDeviceRequestOptions`, `UsbDeviceFilter`) is here rather than
+# in nord-usb: it needs a user gesture, which only a page can supply.
+web-sys = { version = "0.3", features = [
+  "Document",
+  "Element",
+  "EventTarget",
+  "HtmlInputElement",
+  "Navigator",
+  "Usb",
+  "UsbDevice",
+  "UsbDeviceFilter",
+  "UsbDeviceRequestOptions",
+  "Window",
+] }

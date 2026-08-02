@@ -7,18 +7,10 @@
 use nusb::transfer::{Queue, RequestBuffer};
 use nusb::{DeviceInfo, Interface};
 
-use super::{Transport, EP_IN, EP_OUT};
+use super::{Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::error::{Error, Result};
 
-/// Clavia DMI AB. Read off the device descriptor in a firmware-update capture.
-pub const VENDOR_ID: u16 = 0x0ffc;
-/// Nord Electro 5.
-pub const PRODUCT_ID_ELECTRO5: u16 = 0x0027;
-
-/// USB vendor-specific interface class. The protocol rides this; the instrument's
-/// other interface is USB-MIDI (audio class), which we deliberately leave alone so
-/// CoreMIDI/ALSA keep working.
-const CLASS_VENDOR_SPECIFIC: u8 = 0xff;
+pub use super::{PRODUCT_ID_ELECTRO5, VENDOR_ID};
 
 fn map_err<E: std::fmt::Display>(what: &str) -> impl FnOnce(E) -> Error + '_ {
     move |e| Error::Transport(format!("{what}: {e}"))

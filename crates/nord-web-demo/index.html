@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>nord-usb WebUSB POC</title>
+    <style>
+      body {
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 2rem auto;
+        max-width: 46rem;
+        padding: 0 1rem;
+      }
+      #out {
+        background: #f4f4f4;
+        border-radius: 4px;
+        margin-top: 1.5rem;
+        min-height: 6rem;
+        padding: 1rem;
+        white-space: pre;
+        overflow-x: auto;
+      }
+      label { margin-right: 1rem; }
+      input { font: inherit; width: 6rem; }
+    </style>
+  </head>
+  <body>
+    <h1>nord-usb over WebUSB</h1>
+
+    <p>
+      Read-only: an inventory sweep, plus <code>INFO</code> for one slot if you name
+      one. Nothing here can modify the instrument. Chrome or Edge only.
+    </p>
+
+    <p>
+      <label>slot (panel numbering, e.g. <code>7:4</code>; blank to skip)
+        <input id="slot" placeholder="7:4" />
+      </label>
+      <button id="connect">Connect and scan</button>
+    </p>
+
+    <div id="out">Loading…</div>
+
+    <script type="module">
+      // Nothing touches USB on load: `boot` only attaches the click handler, because
+      // requestDevice() needs a user gesture.
+      import init, { boot } from "./pkg/nord_web_demo.js";
+      await init();
+      boot();
+    </script>
+  </body>
+</html>

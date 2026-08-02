@@ -5,6 +5,7 @@ members = [
   "nord-cli",
   "nord-format",
   "nord-usb",
+  "nord-web-demo",
 ]
 resolver = "2"
 

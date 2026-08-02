@@ -1,0 +1,9 @@
+# ⚠️ WebUSB is gated behind `web_sys_unstable_apis` in web-sys: without this flag the
+# `Usb*` bindings do not exist at all and `nord-usb`'s `web` feature fails to compile
+# with "no `UsbDevice` in the root". It is scoped to the wasm target, so host builds
+# are untouched.
+#
+# Cargo discovers this file by walking up from the *working directory*, so wasm builds
+# must be run from `crates/` (or below) for it to apply.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
