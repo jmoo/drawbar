@@ -19,11 +19,12 @@ pub use sample::SamplePanel;
 use crate::common;
 use crate::common::bank;
 use crate::crc::{CrcReader, CrcWriter};
+use crate::error::{Error, ParseError};
 use crate::panel::{FieldError, Panel};
 use crate::types::RangedU16Pair;
-use binrw::{binrw, BinRead, BinReaderExt, BinWriterExt};
+use binrw::{binrw, BinRead, BinWriterExt};
 
-use std::io;
+use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "ne5p";
 /// Schema versions this build's field offsets have been validated against. Every corpus
@@ -157,17 +158,18 @@ impl Schema {
     }
 }
 
+/// The slot lives in one place: `schema.header.location`. It used to be duplicated
+/// beside the schema and re-synced during `write_to`, which is what forced writes to
+/// take `&mut self`.
 #[derive(Debug)]
 pub struct Program {
     pub schema: Schema,
-    location: Location,
     name: Option<String>,
 }
 
 impl Program {
     pub fn new(location: Location) -> Program {
         Program {
-            location,
             name: None,
             schema: Schema {
                 header: Header::new(1, FORMAT, location),
@@ -184,36 +186,23 @@ impl Program {
         }
     }
 
-    pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Program, std::io::Error> {
-        let schema = match Schema::read_be(reader) {
-            Ok(schema) => schema,
-            Err(e) => return Err(io::Error::other(e.to_string())),
-        };
+    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Program, Error> {
+        let schema = Schema::read_be(reader)?;
         if !KNOWN_VERSIONS.contains(&schema.version) {
-            return Err(io::Error::other(
-                crate::error::ParseError::UnsupportedVersion {
-                    format: FORMAT,
-                    version: schema.version,
-                    supported: KNOWN_VERSIONS,
-                }
-                .to_string(),
-            ));
+            return Err(ParseError::UnsupportedVersion {
+                format: FORMAT,
+                version: schema.version,
+                supported: KNOWN_VERSIONS,
+            }
+            .into());
         }
 
-        Ok(Program {
-            location: schema.header.location,
-            name: None,
-            schema,
-        })
+        Ok(Program { name: None, schema })
     }
 
-    pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        self.schema.header.location = self.location;
-
-        match writer.write_be(&self.schema) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::other(e.to_string())),
-        }
+    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
+        writer.write_be(&self.schema)?;
+        Ok(())
     }
 }
 
@@ -227,11 +216,11 @@ impl bank::Item<Location> for Program {
     }
 
     fn location(&self) -> Location {
-        self.location
+        self.schema.header.location
     }
 
     fn set_location(&mut self, location: Location) {
-        self.location = location;
+        self.schema.header.location = location;
     }
 }
 
@@ -250,7 +239,7 @@ mod tests {
     fn an_unknown_schema_version_is_refused() {
         use std::io::Cursor;
 
-        let mut program = Program::new((0, 0).try_into().unwrap());
+        let program = Program::new((0, 0).try_into().unwrap());
         let mut bytes = Vec::new();
         program.write_to(&mut Cursor::new(&mut bytes)).unwrap();
         assert_eq!(bytes.len(), FILE_LEN);
@@ -264,8 +253,16 @@ mod tests {
 
         let err = Program::read_from(&mut Cursor::new(&mut bytes))
             .expect_err("version 5 must not decode");
+        // The refusal is a matchable variant carrying the facts, not a string.
         assert!(
-            err.to_string().contains("not supported"),
+            matches!(
+                err,
+                Error::Parse(crate::error::ParseError::UnsupportedVersion {
+                    format: "ne5p",
+                    version: 5,
+                    ..
+                })
+            ),
             "unhelpful error: {err}",
         );
     }
@@ -311,7 +308,7 @@ mod tests {
     fn no_decode_path_can_skip_validation() {
         use binrw::BinRead;
 
-        let mut program = Program::new((0, 0).try_into().unwrap());
+        let program = Program::new((0, 0).try_into().unwrap());
         let mut bytes = Vec::new();
         program.write_to(&mut Cursor::new(&mut bytes)).unwrap();
 
@@ -326,8 +323,12 @@ mod tests {
 
         let front = Program::read_from(&mut Cursor::new(&mut bytes))
             .expect_err("the front door accepted an undecodable panel");
+        // Structural, not textual: the typed refusal must survive binrw's wrapping.
         assert!(
-            front.to_string().contains("exceeds bound"),
+            matches!(
+                front,
+                Error::Parse(crate::error::ParseError::OutOfBounds { .. })
+            ),
             "refused for the wrong reason: {front}",
         );
         assert!(

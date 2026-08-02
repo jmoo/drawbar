@@ -2,9 +2,9 @@ use crate::common::bank::Item;
 use crate::common::piano::Piano;
 use crate::common::sample::Sample;
 use crate::electro5::{program, song};
+use crate::error::Error;
 use crate::{from_stream, Entity, Program, Song};
-use binrw::BinReaderExt;
-use std::io::Read;
+use std::io::{Read, Seek};
 
 #[derive(Debug)]
 pub struct Bundle {
@@ -31,7 +31,7 @@ impl Bundle {
         }
     }
 
-    pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Bundle, std::io::Error> {
+    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Bundle, Error> {
         let mut bundle = Bundle::new();
 
         let mut zip = zip::ZipArchive::new(reader)?;

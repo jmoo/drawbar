@@ -78,14 +78,14 @@ impl ReplayTransport {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (tag, hex) = line.split_once(char::is_whitespace).ok_or_else(|| {
-                Error::Transport(format!("line {}: expected '<O|I> <hex>'", n + 1))
-            })?;
+            let (tag, hex) = line
+                .split_once(char::is_whitespace)
+                .ok_or_else(|| Error::Replay(format!("line {}: expected '<O|I> <hex>'", n + 1)))?;
             let direction = match tag {
                 "O" | "o" => Direction::Out,
                 "I" | "i" => Direction::In,
                 other => {
-                    return Err(Error::Transport(format!(
+                    return Err(Error::Replay(format!(
                         "line {}: unknown direction {other:?}, want O or I",
                         n + 1
                     )))
@@ -93,13 +93,13 @@ impl ReplayTransport {
             };
             let hex = hex.trim();
             if hex.len() % 2 != 0 {
-                return Err(Error::Transport(format!("line {}: odd-length hex", n + 1)));
+                return Err(Error::Replay(format!("line {}: odd-length hex", n + 1)));
             }
             let bytes = (0..hex.len())
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
                 .collect::<std::result::Result<Vec<u8>, _>>()
-                .map_err(|e| Error::Transport(format!("line {}: {e}", n + 1)))?;
+                .map_err(|e| Error::Replay(format!("line {}: {e}", n + 1)))?;
             script.push(Step { direction, bytes });
         }
         Ok(Self::new(script))
@@ -111,18 +111,18 @@ impl Transport for ReplayTransport {
         self.sent.push(buf.to_vec());
 
         let step = self.script.get(self.pos).ok_or_else(|| {
-            Error::Transport(format!(
+            Error::Replay(format!(
                 "script exhausted; host sent an extra {} bytes",
                 buf.len()
             ))
         })?;
         if step.direction != Direction::Out {
-            return Err(Error::Transport(
+            return Err(Error::Replay(
                 "host wrote, but the script expects the device to speak next".into(),
             ));
         }
         if self.strictness == Strictness::Exact && step.bytes != buf {
-            return Err(Error::Transport(format!(
+            return Err(Error::Replay(format!(
                 "sent bytes differ from the script at step {}\n  expected {}\n  got      {}",
                 self.pos,
                 hex(&step.bytes),
@@ -137,9 +137,9 @@ impl Transport for ReplayTransport {
         let step = self
             .script
             .get(self.pos)
-            .ok_or_else(|| Error::Transport("script exhausted; host expected a response".into()))?;
+            .ok_or_else(|| Error::Replay("script exhausted; host expected a response".into()))?;
         if step.direction != Direction::In {
-            return Err(Error::Transport(
+            return Err(Error::Replay(
                 "host read, but the script expects the host to speak next".into(),
             ));
         }

@@ -48,10 +48,10 @@ impl TryFrom<u8> for Level {
 
     fn try_from(value: u8) -> Result<Self, ParseError> {
         if value > Self::MAX {
-            return Err(ParseError::OutOfBounds(
-                format!("{value}"),
-                format!("{}", Self::MAX),
-            ));
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: format!("0..={}", Self::MAX),
+            });
         }
         Ok(Level { inner: value })
     }

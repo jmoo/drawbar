@@ -1,9 +1,10 @@
-use binrw::{binrw, BinRead, BinReaderExt, BinWriterExt};
-use std::io;
+use binrw::{binrw, BinRead, BinWriterExt};
+use std::io::{Read, Seek, Write};
 
 use crate::common;
 use crate::common::bank::Item;
 use crate::crc::{CrcReader, CrcWriter};
+use crate::error::{Error, ParseError};
 
 use crate::common::bank;
 
@@ -94,21 +95,16 @@ impl Schema {
 }
 
 impl Song {
-    pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Song, std::io::Error> {
-        let schema = match Schema::read_be(reader) {
-            Ok(schema) => schema,
-            Err(e) => return Err(io::Error::other(e.to_string())),
-        };
+    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Song, Error> {
+        let schema = Schema::read_be(reader)?;
 
         if !KNOWN_VERSIONS.contains(&schema.version) {
-            return Err(io::Error::other(
-                crate::error::ParseError::UnsupportedVersion {
-                    format: FORMAT,
-                    version: schema.version,
-                    supported: KNOWN_VERSIONS,
-                }
-                .to_string(),
-            ));
+            return Err(ParseError::UnsupportedVersion {
+                format: FORMAT,
+                version: schema.version,
+                supported: KNOWN_VERSIONS,
+            }
+            .into());
         }
 
         let mut song = Song::new(
@@ -119,7 +115,7 @@ impl Song {
         Ok(song)
     }
 
-    pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
+    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
         let schema = Schema::new(
             self.location(),
             self.version(),
@@ -129,10 +125,8 @@ impl Song {
             self.programs()[3],
         );
 
-        match writer.write_be(&schema) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::other(e.to_string())),
-        }
+        writer.write_be(&schema)?;
+        Ok(())
     }
 }
 
@@ -145,7 +139,7 @@ mod tests {
 
     #[test]
     fn read_write_new_song() -> Result<(), Error> {
-        let mut song = Song::new(
+        let song = Song::new(
             (0, 1).try_into()?,
             [
                 (1, 2).try_into()?,

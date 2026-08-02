@@ -69,10 +69,10 @@ impl TryFrom<u8> for PartMix {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         if value > 127 {
-            return Err(ParseError::OutOfBounds(
-                format!("{value}"),
-                format!("{}", 127),
-            ));
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: "0..=127".to_string(),
+            });
         }
 
         Ok(PartMix { inner: value })
@@ -115,8 +115,10 @@ impl Packed for SplitPoint73 {
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
-        SplitPoint73::try_from(bits as u8)
-            .map_err(|e| ParseError::OutOfBounds(format!("{bits}"), e.to_string()))
+        SplitPoint73::try_from(bits as u8).map_err(|_| ParseError::OutOfBounds {
+            value: format!("{bits}"),
+            bound: "0..=7 (SplitPoint73)".to_string(),
+        })
     }
 
     fn to_bits(&self) -> u64 {

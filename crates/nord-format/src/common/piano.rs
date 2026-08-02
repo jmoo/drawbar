@@ -1,9 +1,11 @@
 use crate::common;
 
+use crate::error::Error;
 use crate::types::RangedU16Pair;
-use binrw::{binrw, BinRead, BinReaderExt, BinWriterExt};
+use binrw::{binrw, BinRead, BinWriterExt};
+use std::fmt;
 use std::fmt::Debug;
-use std::{fmt, io};
+use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "npno";
 pub const BANK_COUNT: u16 = 8;
@@ -31,20 +33,14 @@ impl Piano {
         }
     }
 
-    pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Piano, std::io::Error> {
-        let schema = match Schema::read_be(reader) {
-            Ok(schema) => schema,
-            Err(e) => return Err(io::Error::other(e.to_string())),
-        };
-
+    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Piano, Error> {
+        let schema = Schema::read_be(reader)?;
         Ok(Piano { schema })
     }
 
-    pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        match writer.write_be(&self.schema) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::other(e.to_string())),
-        }
+    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
+        writer.write_be(&self.schema)?;
+        Ok(())
     }
 }
 

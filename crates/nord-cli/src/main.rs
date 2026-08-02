@@ -372,7 +372,7 @@ fn verify(ui: &Ui, files: &[PathBuf]) -> Result<(), String> {
             }
         };
         let reencoded =
-            nord_format::from_path(path).and_then(|mut entity| nord_format::to_bytes(&mut entity));
+            nord_format::from_path(path).and_then(|entity| nord_format::to_bytes(&entity));
         match reencoded {
             Ok(bytes) if bytes == original => {
                 ui.out(format!(

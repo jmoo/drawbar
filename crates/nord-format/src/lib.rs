@@ -59,48 +59,33 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
 
     match header.file_type {
         #[cfg(feature = "bundle")]
-        FileType::Zip => match electro5::Bundle::read_from(reader) {
-            Ok(bundle) => Ok(Entity::Bundle(Bundle::Electro5(bundle))),
-            Err(e) => Err(e.into()),
-        },
+        FileType::Zip => Ok(Entity::Bundle(Bundle::Electro5(
+            electro5::Bundle::read_from(reader)?,
+        ))),
         #[cfg(not(feature = "bundle"))]
-        FileType::Zip => Err(Error::ParseError(ParseError::UnknownFileType(
-            "zip (bundle feature disabled)".to_string(),
-        ))),
+        FileType::Zip => {
+            Err(ParseError::UnknownFileType("zip (bundle feature disabled)".to_string()).into())
+        }
         FileType::Cbin => match header.format.as_str() {
-            sample::FORMAT => match sample::Sample::read_from(reader) {
-                Ok(sample) => Ok(Entity::Sample(sample)),
-                Err(e) => Err(e.into()),
-            },
-            piano::FORMAT => match piano::Piano::read_from(reader) {
-                Ok(piano) => Ok(Entity::Piano(piano)),
-                Err(e) => Err(e.into()),
-            },
-            electro5::song::FORMAT => match electro5::Song::read_from(reader) {
-                Ok(song) => Ok(Entity::Song(Song::Electro5(song))),
-                Err(e) => Err(e.into()),
-            },
-            electro5::program::FORMAT => match electro5::Program::read_from(reader) {
-                Ok(program) => Ok(Entity::Program(Program::Electro5(program))),
-                Err(e) => Err(e.into()),
-            },
-            electro5::settings::FORMAT => match electro5::Settings::read_from(reader) {
-                Ok(settings) => Ok(Entity::Settings(Settings::Electro5(settings))),
-                Err(e) => Err(e.into()),
-            },
-            e => Err(Error::ParseError(ParseError::UnknownFormat(e.to_string()))),
+            sample::FORMAT => Ok(Entity::Sample(sample::Sample::read_from(reader)?)),
+            piano::FORMAT => Ok(Entity::Piano(piano::Piano::read_from(reader)?)),
+            electro5::song::FORMAT => Ok(Entity::Song(Song::Electro5(electro5::Song::read_from(
+                reader,
+            )?))),
+            electro5::program::FORMAT => Ok(Entity::Program(Program::Electro5(
+                electro5::Program::read_from(reader)?,
+            ))),
+            electro5::settings::FORMAT => Ok(Entity::Settings(Settings::Electro5(
+                electro5::Settings::read_from(reader)?,
+            ))),
+            e => Err(ParseError::UnknownFormat(e.to_string()).into()),
         },
-        e => Err(Error::ParseError(ParseError::UnknownFileType(
-            e.as_str().to_string(),
-        ))),
+        e => Err(ParseError::UnknownFileType(e.as_str().to_string()).into()),
     }
 }
 
 pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
-    match File::open(path) {
-        Ok(file) => from_stream(&mut BufReader::new(file)),
-        Err(e) => Err(e.into()),
-    }
+    from_stream(&mut BufReader::new(File::open(path)?))
 }
 
 /// Serialise an [`Entity`] back to the bytes of its file — the counterpart to
@@ -118,7 +103,7 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
 ///
 /// Bundles are unsupported: [`electro5::Bundle`] is a ZIP walk over other entities,
 /// not a `binrw` structure, so there is nothing to re-emit.
-pub fn to_bytes(entity: &mut Entity) -> Result<Vec<u8>, Error> {
+pub fn to_bytes(entity: &Entity) -> Result<Vec<u8>, Error> {
     use std::io::Cursor;
 
     let mut out = Cursor::new(Vec::new());
@@ -150,20 +135,22 @@ pub fn to_bytes(entity: &mut Entity) -> Result<Vec<u8>, Error> {
         }
         #[cfg(feature = "bundle")]
         Entity::Bundle(_) => {
-            return Err(Error::ParseError(ParseError::UnknownFormat(
+            return Err(ParseError::UnknownFormat(
                 "bundle (an archive, not a re-emittable entity)".to_string(),
-            )))
+            )
+            .into())
         }
     };
 
     let bytes = out.into_inner();
     if let Some((format, expected)) = expected {
         if bytes.len() != expected {
-            return Err(Error::ParseError(ParseError::BadEncodedLength {
+            return Err(ParseError::BadEncodedLength {
                 format,
                 got: bytes.len(),
                 expected,
-            }));
+            }
+            .into());
         }
     }
     Ok(bytes)

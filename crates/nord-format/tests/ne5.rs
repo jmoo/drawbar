@@ -101,7 +101,7 @@ fn test_ne5_write_song() {
     let contents = read(&test_file).unwrap();
 
     match song {
-        Entity::Song(nord_format::Song::Electro5(mut song)) => {
+        Entity::Song(nord_format::Song::Electro5(song)) => {
             let mut output: Vec<u8> = Vec::new();
 
             song.write_to(&mut Cursor::new(&mut output)).unwrap();
@@ -149,7 +149,7 @@ fn test_ne5_read_write_program() {
     let program = nord_format::from_path(&test_file).unwrap();
 
     match program {
-        Entity::Program(nord_format::Program::Electro5(mut program)) => {
+        Entity::Program(nord_format::Program::Electro5(program)) => {
             let mut write_contents: Vec<u8> = Vec::new();
 
             program
@@ -184,7 +184,7 @@ fn test_ne5_write_settings() {
     let contents = read(&test_file).unwrap();
 
     match settings {
-        Entity::Settings(nord_format::Settings::Electro5(mut settings)) => {
+        Entity::Settings(nord_format::Settings::Electro5(settings)) => {
             let mut output: Vec<u8> = Vec::new();
 
             settings.write_to(&mut Cursor::new(&mut output)).unwrap();
@@ -278,7 +278,7 @@ fn test_ne5_program_read_write_center_panel() {
             };
 
             match program {
-                Entity::Program(nord_format::Program::Electro5(mut program)) => {
+                Entity::Program(nord_format::Program::Electro5(program)) => {
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
 
@@ -430,7 +430,7 @@ fn test_ne5_program_read_write_gain() {
             };
 
             match program {
-                Entity::Program(nord_format::Program::Electro5(mut program)) => {
+                Entity::Program(nord_format::Program::Electro5(program)) => {
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
 
@@ -479,7 +479,7 @@ fn test_ne5_program_read_write_fx() {
             let contents = read(path.as_str()).unwrap();
 
             match program {
-                Entity::Program(nord_format::Program::Electro5(mut program)) => {
+                Entity::Program(nord_format::Program::Electro5(program)) => {
                     if matches.get(7).is_some() {
                         continue;
                     };
@@ -714,7 +714,7 @@ fn test_ne5_program_read_write_equalizer() {
             let _treble = u8::from_str(matches.get(5).unwrap().as_str()).unwrap();
 
             match program {
-                Entity::Program(nord_format::Program::Electro5(mut program)) => {
+                Entity::Program(nord_format::Program::Electro5(program)) => {
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
 
@@ -770,7 +770,7 @@ fn test_ne5_program_read_sample() {
             let _decay_release = u8::from_str(matches.get(7).unwrap().as_str()).unwrap();
 
             match program {
-                Entity::Program(nord_format::Program::Electro5(mut program)) => {
+                Entity::Program(nord_format::Program::Electro5(program)) => {
                     let mut output: Vec<u8> = Vec::new();
                     program.write_to(&mut Cursor::new(&mut output)).unwrap();
 
@@ -919,7 +919,7 @@ fn test_ne5_program_read_write_organ() {
         };
 
         let contents = read(&path).unwrap();
-        let mut program = match nord_format::from_path(&path).unwrap() {
+        let program = match nord_format::from_path(&path).unwrap() {
             Entity::Program(nord_format::Program::Electro5(p)) => p,
             _ => panic!("expected electro5 program in file {name}"),
         };
@@ -1185,7 +1185,7 @@ fn read_program_checked(path: &std::path::Path) -> electro5::Program {
     let name = path.display().to_string();
     let contents = read(path).unwrap();
 
-    let Entity::Program(nord_format::Program::Electro5(mut program)) =
+    let Entity::Program(nord_format::Program::Electro5(program)) =
         nord_format::from_path(name.as_str()).unwrap()
     else {
         panic!("expected an electro5 program in {name}")
@@ -1484,7 +1484,7 @@ fn test_ne5_every_panel_re_encodes_to_the_same_bytes() {
     for path in &paths {
         let name = path.display().to_string();
         let original = read(path).unwrap();
-        let mut program = read_program_checked(path);
+        let program = read_program_checked(path);
 
         let mut rewritten: Vec<u8> = Vec::new();
         program.write_to(&mut Cursor::new(&mut rewritten)).unwrap();

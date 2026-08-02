@@ -239,8 +239,10 @@ impl OrganPanel {
     /// Select the vibrato/chorus mode for `model`, shared across presets. Fails for a
     /// mode the model does not offer; Pipe has none.
     pub fn set_vib_type(&mut self, model: OrganModel, vib: VibChorus) -> Result<(), ParseError> {
-        let refuse =
-            |why: &str| ParseError::OutOfBounds(format!("{vib:?}"), format!("{model:?} {why}"));
+        let refuse = |why: &str| ParseError::OutOfBounds {
+            value: format!("{vib:?}"),
+            bound: format!("{model:?} {why}"),
+        };
         match model {
             OrganModel::B3 => {
                 self.b3_vib = B3Vib::select(vib).ok_or_else(|| refuse("does not offer it"))?
@@ -458,10 +460,10 @@ impl Drawbars {
     /// Nine positions, each `0..=8`.
     pub fn new(bars: [u8; Self::BARS]) -> Result<Self, ParseError> {
         match bars.iter().find(|&&b| b > Self::MAX) {
-            Some(&bad) => Err(ParseError::OutOfBounds(
-                format!("{bad}"),
-                format!("{}", Self::MAX),
-            )),
+            Some(&bad) => Err(ParseError::OutOfBounds {
+                value: format!("{bad}"),
+                bound: format!("0..={}", Self::MAX),
+            }),
             None => Ok(Drawbars(bars)),
         }
     }

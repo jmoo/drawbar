@@ -52,8 +52,10 @@ impl crate::bits::Packed for Instrument {
     type Error = crate::error::ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
-        Instrument::try_from(bits as u8)
-            .map_err(|e| crate::error::ParseError::OutOfBounds(format!("{bits}"), e.to_string()))
+        Instrument::try_from(bits as u8).map_err(|_| crate::error::ParseError::OutOfBounds {
+            value: format!("{bits}"),
+            bound: "0..=2 (Instrument)".to_string(),
+        })
     }
 
     fn to_bits(&self) -> u64 {

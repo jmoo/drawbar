@@ -55,7 +55,7 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
 pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec<u8>> {
     let tag = format.as_bytes();
     if tag.len() != 4 {
-        return Err(Error::Transport(format!(
+        return Err(Error::Envelope(format!(
             "format tag {format:?} is not 4 characters"
         )));
     }
@@ -87,14 +87,14 @@ pub fn unwrap(file: &[u8]) -> Result<(String, Location, &[u8])> {
         });
     }
     if &file[0..4] != MAGIC {
-        return Err(Error::Transport("not a CBIN file (bad magic)".into()));
+        return Err(Error::Envelope("not a CBIN file (bad magic)".into()));
     }
 
     let body = &file[HEADER_LEN..];
     let stored = u32::from_le_bytes(file[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
     let actual = crc32(body);
     if stored != actual {
-        return Err(Error::Transport(format!(
+        return Err(Error::Envelope(format!(
             "file checksum mismatch: header says {stored:08x}, body computes {actual:08x}"
         )));
     }

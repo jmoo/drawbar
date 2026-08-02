@@ -1,9 +1,10 @@
 use crate::common;
 use crate::crc::{CrcReader, CrcWriter};
+use crate::error::{Error, ParseError};
 use crate::types::RangedU16Pair;
-use binrw::{binrw, BinRead, BinReaderExt, BinWriterExt};
+use binrw::{binrw, BinRead, BinWriterExt};
 use std::fmt::Debug;
-use std::io;
+use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "ne5s";
 /// Schema versions validated against the corpus. Both specimens report 0.
@@ -70,31 +71,24 @@ impl Settings {
         }
     }
 
-    pub fn read_from(reader: &mut impl BinReaderExt) -> Result<Settings, std::io::Error> {
-        let schema = match Schema::read_be(reader) {
-            Ok(schema) => schema,
-            Err(e) => return Err(io::Error::other(e.to_string())),
-        };
+    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Settings, Error> {
+        let schema = Schema::read_be(reader)?;
 
         if !KNOWN_VERSIONS.contains(&schema.version) {
-            return Err(io::Error::other(
-                crate::error::ParseError::UnsupportedVersion {
-                    format: FORMAT,
-                    version: schema.version,
-                    supported: KNOWN_VERSIONS,
-                }
-                .to_string(),
-            ));
+            return Err(ParseError::UnsupportedVersion {
+                format: FORMAT,
+                version: schema.version,
+                supported: KNOWN_VERSIONS,
+            }
+            .into());
         }
 
         Ok(Settings { schema })
     }
 
-    pub fn write_to(&mut self, writer: &mut impl BinWriterExt) -> Result<(), std::io::Error> {
-        match writer.write_be(&self.schema) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::other(e.to_string())),
-        }
+    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
+        writer.write_be(&self.schema)?;
+        Ok(())
     }
 
     /// The raw 34-byte settings body (`0x2c..=0x4d`). Field decode is not yet
@@ -125,7 +119,7 @@ mod tests {
     /// why it needs its own writer test.
     #[test]
     fn a_settings_file_round_trips_at_full_length() {
-        let mut settings = Settings::new();
+        let settings = Settings::new();
         let mut bytes = Vec::new();
         settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
         assert_eq!(bytes.len(), FILE_LEN);

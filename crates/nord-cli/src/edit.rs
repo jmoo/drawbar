@@ -54,10 +54,10 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
         }
         Target::Slot(at) => crate::device::fetch(*at, ObjectClass::Program)?,
         Target::Default => {
-            let mut entity = Entity::Program(Program::Electro5(electro5::Program::new(
+            let entity = Entity::Program(Program::Electro5(electro5::Program::new(
                 (0, 0).try_into().map_err(|e| format!("{e}"))?,
             )));
-            nord_format::to_bytes(&mut entity).map_err(|e| e.to_string())?
+            nord_format::to_bytes(&entity).map_err(|e| e.to_string())?
         }
     };
 
@@ -96,7 +96,7 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let edited = nord_format::to_bytes(&mut entity).map_err(|e| e.to_string())?;
+    let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
     print_byte_diff(ui, &original, &edited);
 
     if args.dry_run {

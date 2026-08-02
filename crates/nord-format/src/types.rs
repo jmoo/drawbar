@@ -53,10 +53,10 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<i8> for RangedI8<OF
 
     fn try_from(value: i8) -> Result<Self, Self::Error> {
         if value < MIN || value > MAX {
-            return Err(ParseError::OutOfBounds(
-                format!("{:?}", value),
-                format!(" <{:?} >{:?}", MIN, MAX),
-            ));
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: format!("{MIN}..={MAX}"),
+            });
         }
 
         Ok(RangedI8 { inner: value })
@@ -129,10 +129,10 @@ impl<const MAX: u8> TryFrom<u8> for RangedU8<MAX> {
 
     fn try_from(value: u8) -> Result<Self, ParseError> {
         if value > MAX {
-            return Err(ParseError::OutOfBounds(
-                format!("{value}"),
-                format!("{MAX}"),
-            ));
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: format!("0..={MAX}"),
+            });
         }
         Ok(RangedU8 { inner: value })
     }
@@ -171,17 +171,17 @@ pub struct RangedU16Pair<const X_MAX: u16, const Y_MAX: u16> {
 impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
     pub fn new(x: u16, y: u16) -> Result<Self, ParseError> {
         if x > X_MAX {
-            return Err(ParseError::OutOfBounds(
-                format!("{:?}", x),
-                format!("{:?}", X_MAX),
-            ));
+            return Err(ParseError::OutOfBounds {
+                value: format!("{x}"),
+                bound: format!("0..={X_MAX}"),
+            });
         }
 
         if y > Y_MAX {
-            return Err(ParseError::OutOfBounds(
-                format!("{:?}", y),
-                format!("{:?}", Y_MAX),
-            ));
+            return Err(ParseError::OutOfBounds {
+                value: format!("{y}"),
+                bound: format!("0..={Y_MAX}"),
+            });
         }
 
         Ok(RangedU16Pair { inner: (x, y) })
@@ -192,10 +192,10 @@ impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
             (Some(x), Some(y)) => (x, y).try_into(),
             // `Y_MAX == 0` is the degenerate single-location type; only 0 encodes.
             _ if value == 0 => (0, 0).try_into(),
-            _ => Err(ParseError::OutOfBounds(
-                format!("{:?}", value),
-                format!("{:?}", X_MAX),
-            )),
+            _ => Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: format!("0..={X_MAX}"),
+            }),
         }
     }
 

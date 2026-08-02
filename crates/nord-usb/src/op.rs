@@ -98,7 +98,7 @@ pub async fn read_program<T: Transport, C>(
     if let Some(expected) = meta.crc32 {
         let actual = envelope::crc32(&body);
         if expected != actual {
-            return Err(Error::Transport(format!(
+            return Err(Error::Envelope(format!(
                 "body checksum mismatch: device reported {expected:08x}, received {actual:08x}"
             )));
         }
