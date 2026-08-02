@@ -497,8 +497,11 @@ impl Message {
 ///
 /// `SESSION_OPEN` carries one of these, and [`cmd::STATUS`] then reports on that class
 /// alone — which is why the same instrument reports different totals depending on what
-/// was opened. Names are inferred from item counts cross-checked against a full backup
-/// (29 pianos, 139 samples, ~375 programs); the numeric codes are what the device
+/// was opened. Names for 1/3/4/5 are inferred from item counts cross-checked against a
+/// full backup (29 pianos, 139 samples, ~375 programs); 6 and 7 are read from the
+/// backup capture itself, whose closing transactions open class 6 and fetch the three
+/// `ne5l` Live bodies, then open class 7 and fetch the 34-byte `ne5s` settings body —
+/// byte-identical to the files NSM extracts. The numeric codes are what the device
 /// actually sends, so an unrecognised one is preserved rather than rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectClass {
@@ -506,6 +509,11 @@ pub enum ObjectClass {
     Sample,
     Program,
     SetList,
+    /// The three Live slots. Wire-addressed `0:0..0:2`; bodies are `ne5p`-shaped.
+    Live,
+    /// The global settings singleton, wire-addressed `0:0`. Reports no body checksum
+    /// (`0xffffffff`), like the library classes.
+    Settings,
     Unknown(u32),
 }
 
@@ -516,6 +524,8 @@ impl ObjectClass {
             3 => ObjectClass::Sample,
             4 => ObjectClass::Program,
             5 => ObjectClass::SetList,
+            6 => ObjectClass::Live,
+            7 => ObjectClass::Settings,
             other => ObjectClass::Unknown(other),
         }
     }
@@ -526,12 +536,14 @@ impl ObjectClass {
             ObjectClass::Sample => 3,
             ObjectClass::Program => 4,
             ObjectClass::SetList => 5,
+            ObjectClass::Live => 6,
+            ObjectClass::Settings => 7,
             ObjectClass::Unknown(v) => v,
         }
     }
 
-    /// The classes worth querying for an inventory. Codes 6 and 7 also answer, but
-    /// reported zero items on every instrument seen so far.
+    /// The classes worth querying for an inventory. Live and Settings also answer, but
+    /// report zero items — they are singletons, not slot-counted storage.
     pub const INVENTORY: [ObjectClass; 4] = [
         ObjectClass::Piano,
         ObjectClass::Sample,
@@ -545,6 +557,8 @@ impl ObjectClass {
             ObjectClass::Sample => "samples".into(),
             ObjectClass::Program => "programs".into(),
             ObjectClass::SetList => "set lists".into(),
+            ObjectClass::Live => "live slots".into(),
+            ObjectClass::Settings => "settings".into(),
             ObjectClass::Unknown(v) => format!("class {v}"),
         }
     }
