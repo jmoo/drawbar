@@ -54,30 +54,53 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             _capability: PhantomData,
         };
 
-        // The UI/session-service handshake, then the class-scoped open.
+        // The UI/session-service handshake, then the class-scoped open, one fallible
+        // step at a time — each failure needs to know whether the `HELLO` reached the
+        // device, because from that moment on it holds a UI session that only `GOODBYE`
+        // releases.
+        //
+        // ⚠️ Left half-open the device does not hang or refuse: it keeps answering, and
+        // reports device status 0x1 ("empty") for every slot in every object class. That
+        // survives reopening the session and clears only on a power cycle. Confirmed on
+        // hardware.
         //
         // Errors are caught rather than propagated with `?` so the half-built session
-        // can be marked closed first. Otherwise a failed open drops a session that was
-        // never established, and the Drop assertion fires on what is really just a
-        // failed connection — the assertion is there to catch *forgotten* commits.
-        let result = async {
-            s.request(Service::Ui, ui::SUBSYSTEM, ui::HELLO, &[])
-                .await?;
-            s.request(
+        // can be marked closed first — the Drop assertion is there to catch *forgotten*
+        // commits, not failed connections. And marked closed *before* the best-effort
+        // GOODBYE: that send is the transaction's one release attempt, and the caller is
+        // owed the original error, so a failure there is deliberately dropped.
+        let hello = Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO, Vec::new());
+        if let Err(e) = s.notify(&hello).await {
+            s.closed = true; // the write itself failed: the device never saw the HELLO
+            return Err(e);
+        }
+        if let Err(e) = s.response_to(ui::HELLO).await {
+            // The write landed, so the device may already be holding the UI session
+            // even though its reply was unusable.
+            s.closed = true;
+            let _ = s
+                .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
+                .await;
+            return Err(e);
+        }
+
+        let opened = s
+            .request(
                 Service::Program,
                 10,
                 cmd::SESSION_OPEN,
                 &class.to_raw().to_be_bytes(),
             )
-            .await?;
-            Ok(())
-        }
-        .await;
+            .await;
 
-        match result {
-            Ok(()) => Ok(s),
+        match opened {
+            Ok(_) => Ok(s),
             Err(e) => {
-                s.closed = true; // nothing was opened, so there is nothing to close
+                // The HELLO landed, so the UI session is open and must be released.
+                s.closed = true;
+                let _ = s
+                    .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
+                    .await;
                 Err(e)
             }
         }
@@ -115,13 +138,18 @@ impl<T: Transport, C> Session<'_, T, C> {
         command: u32,
         args: &[u8],
     ) -> Result<Message> {
+        let req = Message::new(service, subsystem, command, args.to_vec());
+        self.notify(&req).await?;
+        self.response_to(command).await
+    }
+
+    /// Read the reply to `command`, enforcing the framing invariants: it must carry
+    /// `command + 1` and must report success.
+    async fn response_to(&mut self, command: u32) -> Result<Message> {
         let transport = self
             .transport
             .as_mut()
             .ok_or_else(|| Error::Transport("session has no transport".into()))?;
-
-        let req = Message::new(service, subsystem, command, args.to_vec());
-        transport.write(&req.encode()).await?;
 
         let raw = transport.read(crate::transport::READ_BUFFER).await?;
         let resp = Message::decode_response(&raw)?;
@@ -162,8 +190,19 @@ impl<T: Transport, C> Session<'_, T, C> {
         // means a failure drops `self` unclosed inside this call, and the `Drop`
         // assertion panics over the very error the caller was owed.
         self.closed = true;
-        self.request(Service::Program, 10, cmd::SESSION_CLOSE, &[])
-            .await?;
+        if let Err(e) = self
+            .request(Service::Program, 10, cmd::SESSION_CLOSE, &[])
+            .await
+        {
+            // ⚠️ Still say GOODBYE: the HELLO is the half that wedges the instrument
+            // into answering "empty" for every slot (see `open`), so a refused close
+            // must not strand it. The caller is owed the close's error, so a failure
+            // here is deliberately dropped.
+            let _ = self
+                .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
+                .await;
+            return Err(e);
+        }
         self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
             .await?;
         Ok(())

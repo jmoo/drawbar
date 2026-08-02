@@ -71,12 +71,16 @@ fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
     }
 }
 
-/// A close that the device refuses must surface as the `Err` it is.
+/// A close that the device refuses must surface as the `Err` it is — and must still
+/// release the UI session.
 ///
 /// `commit()` consumes the session, so a failure inside it drops the session mid-close;
 /// if `closed` were only marked on success, the debug `Drop` assertion would panic over
 /// the very error the caller was owed — in exactly the always-close error paths the CLI
-/// is built around. The golden replays never fail a close, so only this test reaches it.
+/// is built around. And the `HELLO` is the half that wedges the instrument, so the
+/// refused `SESSION_CLOSE` must not skip the `GOODBYE`: the script ends with that
+/// exchange, so `is_exhausted` is the assertion that it was sent. The golden replays
+/// never fail a close, so only this test reaches either property.
 #[test]
 fn a_failed_commit_reports_rather_than_panicking() {
     use Direction::{In, Out};
@@ -98,6 +102,8 @@ fn a_failed_commit_reports_rather_than_panicking() {
             )
             .encode(),
         },
+        step(Out, "0000001200000006000000010000000226e3"),
+        step(In, "0000001600000006000000010000000300000000006f"),
     ]);
     let err = block_on(async {
         let s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
@@ -106,6 +112,103 @@ fn a_failed_commit_reports_rather_than_panicking() {
     assert!(
         matches!(err, nord_usb::Error::DeviceStatus(5)),
         "wrong error: {err}"
+    );
+    assert!(
+        t.is_exhausted(),
+        "the refused close did not send GOODBYE, leaving the device half-open"
+    );
+}
+
+/// A `SESSION_OPEN` the device refuses must still release the UI session the preceding
+/// `HELLO` opened.
+///
+/// Left half-open the instrument keeps answering and reports every slot in every class as
+/// empty — a wrong answer that looks like a right one, surviving reopening and clearing
+/// only on a power cycle. The script ends with the `GOODBYE` exchange, so `is_exhausted`
+/// is the assertion that it was sent.
+#[test]
+fn a_refused_open_still_says_goodbye() {
+    use Direction::{In, Out};
+    let mut t = ReplayTransport::new(vec![
+        step(Out, "0000001200000006000000010000000006a1"),
+        step(In, "000000160000000600000001000000010000000044ec"),
+        step(Out, "000000160000000c0000000a0000000400000004a218"),
+        // SESSION_OPEN answered with device status 5 instead of success.
+        Step {
+            direction: In,
+            bytes: nord_usb::Message::new(
+                nord_usb::Service::Program,
+                10,
+                0x05,
+                5u32.to_be_bytes().to_vec(),
+            )
+            .encode(),
+        },
+        step(Out, "0000001200000006000000010000000226e3"),
+        step(In, "0000001600000006000000010000000300000000006f"),
+    ]);
+    // `Session` is deliberately not `Debug`, so this is `expect_err` by hand. The `abort`
+    // keeps the failing case from panicking a second time inside `Drop` during unwind.
+    let err = block_on(async {
+        match Session::open(&mut t, ObjectClass::Program).await {
+            Ok(s) => {
+                s.abort();
+                panic!("the device refused the open, but it was reported as success");
+            }
+            Err(e) => e,
+        }
+    });
+    assert!(
+        matches!(err, nord_usb::Error::DeviceStatus(5)),
+        "wrong error: {err}"
+    );
+    assert!(
+        t.is_exhausted(),
+        "the refused open did not send GOODBYE, leaving the device half-open"
+    );
+}
+
+/// A `HELLO` whose reply is unusable must still release the session best-effort.
+///
+/// The write landed, so the device may already be holding the UI session even though it
+/// answered with a refusal — and a held UI session is the wedge described on
+/// [`a_refused_open_still_says_goodbye`]. Same script shape: it ends with the `GOODBYE`
+/// exchange, so `is_exhausted` is the assertion that it was sent.
+#[test]
+fn a_refused_hello_still_says_goodbye() {
+    use Direction::{In, Out};
+    let mut t = ReplayTransport::new(vec![
+        step(Out, "0000001200000006000000010000000006a1"),
+        // HELLO answered with device status 5 instead of success.
+        Step {
+            direction: In,
+            bytes: nord_usb::Message::new(
+                nord_usb::Service::Ui,
+                1,
+                0x01,
+                5u32.to_be_bytes().to_vec(),
+            )
+            .encode(),
+        },
+        step(Out, "0000001200000006000000010000000226e3"),
+        step(In, "0000001600000006000000010000000300000000006f"),
+    ]);
+    let err = block_on(async {
+        match Session::open(&mut t, ObjectClass::Program).await {
+            Ok(s) => {
+                s.abort();
+                panic!("the device refused the HELLO, but it was reported as success");
+            }
+            Err(e) => e,
+        }
+    });
+    assert!(
+        matches!(err, nord_usb::Error::DeviceStatus(5)),
+        "wrong error: {err}"
+    );
+    assert!(
+        t.is_exhausted(),
+        "the refused HELLO did not attempt GOODBYE"
     );
 }
 

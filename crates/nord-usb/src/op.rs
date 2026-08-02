@@ -289,6 +289,11 @@ pub async fn dependencies<T: Transport, C>(
 /// Move an object from one slot to another. The device relocates it internally — no
 /// body crosses the wire.
 ///
+/// An occupied destination is **swapped, not overwritten**: its occupant ends up in the
+/// source slot, byte-identical. Nothing is destroyed, and no delete-first step is needed
+/// (unlike a write, which the device refuses into an occupied slot with status `0x4`).
+/// Confirmed on hardware.
+///
 /// Requires a [`ReadWrite`] session. Class-generalised: works for whichever object
 /// class the session opened (programs, set lists).
 pub async fn move_object<T: Transport>(

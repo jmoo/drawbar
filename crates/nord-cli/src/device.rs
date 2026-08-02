@@ -45,6 +45,19 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
         }
     };
 
+    // Not merely an empty inventory: every class is queried, so nothing coming back
+    // means no class answered at all. Reporting that as success would make a wedged
+    // instrument look like a working one with nothing on it — but a connection failing
+    // mid-run produces the same empty report, so the message cannot assert the wedge.
+    if report.is_empty() {
+        return Err(
+            "no object class answered — either the instrument is not in a usable \
+             session state (a power cycle clears it), or the connection failed. \
+             `nord device info` shows what is on the bus."
+                .into(),
+        );
+    }
+
     if json {
         print_json(ui, &report);
     } else {
@@ -101,10 +114,6 @@ fn collect<T: Transport>(transport: &mut T) -> Result<Vec<Status>, String> {
 }
 
 fn print_table(ui: &Ui, report: &[Status]) {
-    if report.is_empty() {
-        ui.out("no classes answered");
-        return;
-    }
     ui.out(ui.dim(format!(
         "{:<10} {:>20} {:>7}  {}",
         "class", "used", "full", "of"
@@ -609,8 +618,19 @@ fn peek(
     .map_err(|e| explain(e, at))
 }
 
-/// Describe what currently occupies a *destination* slot, for the pre-flight line —
-/// `move` and `duplicate` overwrite it, so it is the thing at risk.
+/// What the operation does to whatever occupies the destination slot.
+enum DestFate {
+    /// Replaced, and lost.
+    Overwritten,
+    /// Exchanged with the source slot's contents. Nothing is lost.
+    Swapped,
+}
+
+/// Describe what currently occupies a *destination* slot, for the pre-flight line.
+///
+/// ⚠️ The two fates need different words, and saying "overwriting" for a swap is worse
+/// than saying nothing: it invites the reader to delete the destination first to protect
+/// it, which destroys the very thing the swap would have preserved.
 ///
 /// Unlike [`peek`] this never fails: `INFO` errors on an empty destination, which is the
 /// normal case here. A real transport fault surfaces on the operation itself a moment
@@ -620,14 +640,17 @@ fn peek_dest(
     t: &mut nord_usb::transport::UsbTransport,
     class: ObjectClass,
     at: Location,
+    fate: DestFate,
 ) -> String {
-    match peek(t, class, at) {
-        Ok(name) => format!("{} {name:?}", ui.danger("OVERWRITING")),
-        Err(_) => "destination reads as empty".into(),
+    match (peek(t, class, at), fate) {
+        (Ok(name), DestFate::Overwritten) => format!("{} {name:?}", ui.danger("OVERWRITING")),
+        (Ok(name), DestFate::Swapped) => format!("{} {name:?}", ui.bold("SWAPPING WITH")),
+        (Err(_), _) => "destination reads as empty".into(),
     }
 }
 
-/// Move an object from one slot to another. Destructive; requires confirmation.
+/// Move an object from one slot to another. Requires confirmation: it changes both slots,
+/// though an occupied destination is swapped rather than destroyed.
 pub fn move_object(
     ui: &Ui,
     from: Location,
@@ -637,7 +660,7 @@ pub fn move_object(
 ) -> Result<(), String> {
     let mut t = open_usb()?;
     let name = peek(&mut t, class, from)?;
-    let dest = peek_dest(ui, &mut t, class, to);
+    let dest = peek_dest(ui, &mut t, class, to, DestFate::Swapped);
     ui.note(format!(
         "moving {:?} from {} to {} {} {}",
         name,
@@ -736,7 +759,7 @@ pub fn duplicate(
 ) -> Result<(), String> {
     let mut t = open_usb()?;
     let name = peek(&mut t, class, from)?;
-    let dest = peek_dest(ui, &mut t, class, to);
+    let dest = peek_dest(ui, &mut t, class, to, DestFate::Overwritten);
     ui.note(format!(
         "duplicating {:?} from {} to {} {} {}",
         name,
