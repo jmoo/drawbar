@@ -195,6 +195,381 @@ fn test_ne5_write_settings() {
     }
 }
 
+/// `(specimen stem, field, the value it must decode to)` for the change-one-setting
+/// sweep. **The filename is the oracle**: a round trip proves the bytes survive, only
+/// this proves the decode reads the setting the operator actually changed.
+///
+/// Values are the field's own `Debug` rendering, which is what `nord inspect` prints.
+///
+/// Stems are keyed through [`oracle_key`], so a negative value spelled `--6` and one
+/// spelled `-6` are the same row.
+const SETTINGS_ORACLE: &[(&str, &str, &str)] = &[
+    ("b3-key-bounce-mode-off", "b3_key_bounce", "false"),
+    ("b3-key-bounce-mode-on", "b3_key_bounce", "true"),
+    ("b3-key-click-lvl-low", "b3_key_click_level", "Low"),
+    ("b3-key-click-lvl-normal", "b3_key_click_level", "Normal"),
+    ("b3-key-click-lvl-high", "b3_key_click_level", "High"),
+    ("b3-key-click-lvl-higher", "b3_key_click_level", "Higher"),
+    ("b3-perc-DB9-mute-mode-off", "b3_perc_db9_mute", "false"),
+    ("b3-perc-DB9-mute-mode-on", "b3_perc_db9_mute", "true"),
+    ("b3-perc-decay-fast-short", "b3_perc_decay_fast", "Short"),
+    ("b3-perc-decay-fast-medium", "b3_perc_decay_fast", "Medium"),
+    ("b3-perc-decay-fast-long", "b3_perc_decay_fast", "Long"),
+    ("b3-perc-decay-slow-short", "b3_perc_decay_slow", "Short"),
+    ("b3-perc-decay-slow-medium", "b3_perc_decay_slow", "Medium"),
+    ("b3-perc-decay-slow-long", "b3_perc_decay_slow", "Long"),
+    ("b3-perc-vol-normal-low", "b3_perc_volume_normal", "Low"),
+    (
+        "b3-perc-vol-normal-medium",
+        "b3_perc_volume_normal",
+        "Medium",
+    ),
+    ("b3-perc-vol-normal-high", "b3_perc_volume_normal", "High"),
+    // `slow` in the filename is the panel's *low*; the soft volume has no speed.
+    ("b3-perc-vol-soft-slow", "b3_perc_volume_soft", "Low"),
+    ("b3-perc-vol-soft-medium", "b3_perc_volume_soft", "Medium"),
+    ("b3-perc-vol-soft-high", "b3_perc_volume_soft", "High"),
+    ("b3-tonewheel-mode-clean", "b3_tonewheel_mode", "Clean"),
+    (
+        "b3-tonewheel-mode-vintage1",
+        "b3_tonewheel_mode",
+        "Vintage1",
+    ),
+    (
+        "b3-tonewheel-mode-vintage2",
+        "b3_tonewheel_mode",
+        "Vintage2",
+    ),
+    (
+        "b3-tonewheel-mode-vintage3",
+        "b3_tonewheel_mode",
+        "Vintage3",
+    ),
+    ("ctr-pedal-gain-1", "ctrl_pedal_gain", "1"),
+    ("ctr-pedal-gain-10", "ctrl_pedal_gain", "10"),
+    ("ctr-pedal-type-Roland-EV7", "ctrl_pedal_type", "RolandEv7"),
+    ("ctrl-pedal-type-yamaha-FC7", "ctrl_pedal_type", "YamahaFc7"),
+    ("ctr-pedal-type-Korg-EXP2", "ctrl_pedal_type", "KorgExp2"),
+    ("ctr-pedal-type-Korg-XVP10", "ctrl_pedal_type", "KorgXvp10"),
+    (
+        "ctr-pedal-type-Boss-FV500L",
+        "ctrl_pedal_type",
+        "BossFv500L",
+    ),
+    ("ctr-pedal-type-Fatar-SL", "ctrl_pedal_type", "FatarSl"),
+    // `50c` with no sign is minus fifty; the plus is spelled out when it is one.
+    ("fine-tune-50c", "fine_tune", "-50"),
+    ("fine-tune-0c", "fine_tune", "0"),
+    ("fine-tune-+50c", "fine_tune", "50"),
+    ("global-transpose--6", "global_transpose", "-6"),
+    ("global-transpose-1", "global_transpose", "-1"),
+    ("global-transpose-+1", "global_transpose", "1"),
+    ("global-transpose-+6", "global_transpose", "6"),
+    ("midi-chan-global-off", "global_channel", "off"),
+    ("midi-chan-global-1", "global_channel", "1"),
+    ("midi-chan-global-2", "global_channel", "2"),
+    ("midi-chan-global-16", "global_channel", "16"),
+    ("midi-chan-lower-recv-off", "lower_receive_channel", "off"),
+    ("midi-chan-lower-recv-1", "lower_receive_channel", "1"),
+    ("midi-chan-lower-recv-12", "lower_receive_channel", "12"),
+    ("midi-chan-lower-recv-16", "lower_receive_channel", "16"),
+    ("midi-chan-upper-recv-off", "upper_receive_channel", "off"),
+    ("midi-chan-upper-recv-1", "upper_receive_channel", "1"),
+    ("midi-chan-upper-recv-2", "upper_receive_channel", "2"),
+    ("midi-chan-upper-recv-16", "upper_receive_channel", "16"),
+    ("midi-chan-upper-split-off", "upper_split_channel", "off"),
+    ("midi-chan-upper-split-1", "upper_split_channel", "1"),
+    ("midi-chan-upper-split-2", "upper_split_channel", "2"),
+    ("midi-chan-upper-split-16", "upper_split_channel", "16"),
+    ("midi-ctrl-change-mode-off", "control_change_mode", "Off"),
+    ("midi-ctrl-change-mode-send", "control_change_mode", "Send"),
+    (
+        "midi-ctrl-change-mode-recv",
+        "control_change_mode",
+        "Receive",
+    ),
+    (
+        "midi-ctrl-change-mode-send-recv",
+        "control_change_mode",
+        "SendReceive",
+    ),
+    ("midi-prgrm-change-mode-off", "program_change_mode", "Off"),
+    ("midi-prgrm-change-mode-send", "program_change_mode", "Send"),
+    (
+        "midi-prgrm-change-mode-recv",
+        "program_change_mode",
+        "Receive",
+    ),
+    (
+        "midi-prgrm-change-mode-send-recv",
+        "program_change_mode",
+        "SendReceive",
+    ),
+    ("midi-transpose-at-midi-in", "transpose_at", "MidiIn"),
+    ("midi-transpose-at-midi-out", "transpose_at", "MidiOut"),
+    ("organ-b3-trig-mode-normal", "b3_trig_mode", "Normal"),
+    ("organ-b3-trig-mode-fast", "b3_trig_mode", "Fast"),
+    ("output-routing-mode-stereo", "output_routing", "Stereo"),
+    (
+        "output-routing-mode-pLLpUR",
+        "output_routing",
+        "LowerLeftUpperRight",
+    ),
+    ("piano-str-res-lvl--6db", "piano_string_resonance", "-6"),
+    ("piano-str-res-lvl-0db", "piano_string_resonance", "0"),
+    ("piano-str-res-lvl-+6db", "piano_string_resonance", "6"),
+    (
+        "rotary-balance-bass-horn-70-30",
+        "rotary_balance",
+        "Bass70Horn30",
+    ),
+    (
+        "rotary-balance-bass-horn-60-40",
+        "rotary_balance",
+        "Bass60Horn40",
+    ),
+    (
+        "rotary-balance-bass-horn-50-50",
+        "rotary_balance",
+        "Bass50Horn50",
+    ),
+    (
+        "rotary-balance-bass-horn-40-60",
+        "rotary_balance",
+        "Bass40Horn60",
+    ),
+    (
+        "rotary-balance-bass-horn-30-70",
+        "rotary_balance",
+        "Bass30Horn70",
+    ),
+    // The panel calls value 0 *closed*; the filename spells it half-closed.
+    ("rotary-ctrl-type-half-closed", "rotary_ctrl_type", "Closed"),
+    ("rotary-ctrl-type-open", "rotary_ctrl_type", "Open"),
+    ("rotary-ctrl-type-half-moon", "rotary_ctrl_type", "HalfMoon"),
+    ("rotary-horn-acc-low", "rotary_horn_acceleration", "Low"),
+    (
+        "rotary-horn-acc-normal",
+        "rotary_horn_acceleration",
+        "Normal",
+    ),
+    ("rotary-horn-acc-high", "rotary_horn_acceleration", "High"),
+    ("rotary-horn-speed-low", "rotary_horn_speed", "Low"),
+    ("rotary-horn-speed-normal", "rotary_horn_speed", "Normal"),
+    ("rotary-horn-speed-high", "rotary_horn_speed", "High"),
+    ("rotary-pedal-mode-hold", "rotary_pedal_mode", "Hold"),
+    ("rotary-pedal-mode-toggle", "rotary_pedal_mode", "Toggle"),
+    ("rotary-rotor-acc-low", "rotary_rotor_acceleration", "Low"),
+    (
+        "rotary-rotor-acc-normal",
+        "rotary_rotor_acceleration",
+        "Normal",
+    ),
+    ("rotary-rotor-acc-high", "rotary_rotor_acceleration", "High"),
+    ("rotary-rotor-speed-normal", "rotary_rotor_speed", "Normal"),
+    ("rotary-rotor-speed-high", "rotary_rotor_speed", "High"),
+    (
+        "rotary-speaker-type-122",
+        "rotary_speaker_type",
+        "Rotary122",
+    ),
+    (
+        "rotary-speaker-type-122close",
+        "rotary_speaker_type",
+        "Rotary122Close",
+    ),
+    ("sus-pedal-auto=open", "sustain_pedal_type", "Auto"),
+    ("sus-pedal-closed", "sustain_pedal_type", "Closed"),
+    ("sus-pedal-open", "sustain_pedal_type", "Open"),
+    ("sus-pedal-mode-sus", "sustain_pedal_mode", "Sustain"),
+    (
+        "sus-pedal-mode-sus+rotor-hold",
+        "sustain_pedal_mode",
+        "SustainRotorHold",
+    ),
+    (
+        "sus-pedal-mode-sus+rotor-toggle",
+        "sustain_pedal_mode",
+        "SustainRotorToggle",
+    ),
+];
+
+/// `(specimen stem, the sibling it is byte-identical to)`.
+///
+/// Every one of these was captured to change a setting and changed nothing. That identity
+/// is the finding, so it is asserted rather than skipped: a corrected capture makes this
+/// fail, which is when the decode has something new to learn.
+///
+/// * `mem-protect-*` and `midi-local-ctrl-mode-*` are the two catalogued settings with no
+///   decoded home — toggling either moves no bit of the body.
+/// * `rotary-rotor-speed-low` is a duplicate of the `high` capture, so `low` is the one
+///   rate value the sweep never reaches.
+const SETTINGS_UNMOVED: &[(&str, &str)] = &[
+    ("mem-protect-on", "baseline"),
+    ("mem-protect-off", "baseline"),
+    ("midi-local-ctrl-mode-on", "midi-local-ctrl-mode-off"),
+    ("midi-local-ctrl-mode-off", "midi-local-ctrl-mode-on"),
+    ("rotary-rotor-speed-low", "rotary-rotor-speed-high"),
+];
+
+/// Every `.ne5s` the corpus ships: the sweep, the standalone file and the backup's copy.
+fn ne5s_files(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = vec![
+        root.join("settings.ne5s"),
+        root.join("usb/backup/full_backup/contents/Settings/Settings/Settings.ne5s"),
+    ];
+    for entry in fs::read_dir(root.join("settings")).expect("settings corpus") {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "ne5s") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+fn read_settings(path: &std::path::Path) -> electro5::Settings {
+    match nord_format::from_path(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())) {
+        Entity::Settings(nord_format::Settings::Electro5(s)) => s,
+        other => panic!("{} is not Electro 5 settings: {other:?}", path.display()),
+    }
+}
+
+fn stem(path: &std::path::Path) -> String {
+    path.file_stem().unwrap().to_string_lossy().to_string()
+}
+
+/// A specimen stem as [`SETTINGS_ORACLE`] keys it.
+///
+/// The corpus spells a negative value both ways — `global-transpose-6` and
+/// `global-transpose--6` are the same capture, the doubled dash disambiguating it from the
+/// `+6` sibling. Collapsing the pair keeps one row per specimen.
+fn oracle_key(stem: &str) -> String {
+    stem.replace("--", "-")
+}
+
+/// Every settings file re-encodes to the bytes it came from, including the unexplained
+/// leading bits that belong to no field.
+#[test]
+fn test_ne5_settings_re_encode_to_the_same_bytes() {
+    let paths = ne5s_files(&corpus_dir());
+    assert!(
+        paths.len() > 100,
+        "found only {} settings files — is the corpus present?",
+        paths.len()
+    );
+
+    for path in &paths {
+        let original = read(path).unwrap();
+        let mut rewritten: Vec<u8> = Vec::new();
+        read_settings(path)
+            .write_to(&mut Cursor::new(&mut rewritten))
+            .unwrap();
+        assert_eq!(
+            original.as_slice(),
+            rewritten.as_slice(),
+            "re-encoding changed {}",
+            path.display(),
+        );
+    }
+}
+
+/// Each sweep specimen decodes to the setting its filename names.
+#[test]
+fn test_ne5_settings_decode_to_their_filenames() {
+    use nord_format::panel::Panel;
+
+    let dir = corpus_dir().join("settings");
+    let oracle: BTreeMap<String, (&str, &str)> = SETTINGS_ORACLE
+        .iter()
+        .map(|&(file, field, value)| (oracle_key(file), (field, value)))
+        .collect();
+    assert_eq!(
+        oracle.len(),
+        SETTINGS_ORACLE.len(),
+        "a specimen is listed twice"
+    );
+    let unmoved: BTreeMap<&str, &str> = SETTINGS_UNMOVED.iter().copied().collect();
+
+    let mut checked: BTreeSet<String> = BTreeSet::new();
+
+    for entry in fs::read_dir(&dir).expect("settings corpus") {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "ne5s") {
+            continue;
+        }
+        let name = stem(&path);
+        // The baseline is every field at once; the decode snapshot pins it.
+        if name == "baseline" {
+            continue;
+        }
+        let key = oracle_key(&name);
+
+        if let Some(sibling) = unmoved.get(key.as_str()) {
+            assert_eq!(
+                read(&path).unwrap(),
+                read(dir.join(format!("{sibling}.ne5s"))).unwrap(),
+                "{name} is no longer identical to {sibling} — the corpus gained a \
+                 capture that moves something, so this specimen can now be asserted",
+            );
+            checked.insert(key);
+            continue;
+        }
+
+        let (field, want) = oracle
+            .get(&key)
+            .unwrap_or_else(|| panic!("{name} has no expected value — add it to the oracle"));
+
+        let values = read_settings(&path).schema.panel.field_values();
+        let got = values
+            .iter()
+            .find(|v| v.name == *field)
+            .unwrap_or_else(|| panic!("{name}: the panel declares no field {field}"));
+        assert_eq!(&got.value, want, "{field} in {name}");
+
+        checked.insert(key);
+    }
+
+    let listed: BTreeSet<String> = oracle
+        .keys()
+        .cloned()
+        .chain(unmoved.keys().map(|s| s.to_string()))
+        .collect();
+    let stale: Vec<_> = listed.difference(&checked).collect();
+    assert!(
+        stale.is_empty(),
+        "the oracle lists specimens the corpus no longer holds: {stale:?}",
+    );
+}
+
+/// No settings file decodes to a value with no name.
+///
+/// Every enumeration here is wider than the values named for it, so an unrecognized one
+/// is preserved rather than refused — this is where it gets noticed.
+#[test]
+fn test_ne5_no_corpus_settings_hold_an_unrecognized_value() {
+    use nord_format::panel::Panel;
+
+    let mut unknowns: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+
+    for path in ne5s_files(&corpus_dir()) {
+        for value in read_settings(&path).schema.panel.field_values() {
+            if value.value.starts_with("unknown") {
+                unknowns
+                    .entry(value.name.to_string())
+                    .or_default()
+                    .insert(value.raw);
+            }
+        }
+    }
+
+    assert!(
+        unknowns.is_empty(),
+        "the corpus holds settings values no component can name — worth investigating, \
+         not suppressing: {unknowns:?}",
+    );
+}
+
 #[test]
 fn test_ne5_program_read_write_center_panel() {
     let test_files = corpus_dir().join("programs/center_panel");

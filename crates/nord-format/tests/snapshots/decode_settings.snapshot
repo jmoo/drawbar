@@ -1,0 +1,197 @@
+# Per-field decode over every .ne5s in the corpus: where each field sits and
+# every value the corpus has been seen to put there. A field listing one value
+# is a field the corpus cannot check.
+
+SettingsPanel.rotary_ctrl_type
+  at      52..=53
+  raw     3    [0, 1, 2]
+  decoded 3    [Closed, HalfMoon, Open]
+
+SettingsPanel.rotary_pedal_mode
+  at      54..=54
+  raw     2    [0, 1]
+  decoded 2    [Hold, Toggle]
+
+SettingsPanel.sustain_pedal_mode
+  at      134..=135
+  raw     3    [0, 1, 2]
+  decoded 3    [Sustain, SustainRotorHold, SustainRotorToggle]
+
+SettingsPanel.sustain_pedal_type
+  at      43..=44
+  raw     3    [0, 1, 2]
+  decoded 3    [Auto, Closed, Open]
+
+SettingsPanel.ctrl_pedal_type
+  at      45..=47
+  raw     6    [0, 1, 2, 3, 4, 5]
+  decoded 6    [BossFv500L, FatarSl, KorgExp2, KorgXvp10, RolandEv7, YamahaFc7]
+
+SettingsPanel.ctrl_pedal_gain
+  at      138..=141
+  raw     2    [0, 9]
+  decoded 2    [1, 10]
+
+SettingsPanel.b3_trig_mode
+  at      117..=117
+  raw     2    [0, 1]
+  decoded 2    [Fast, Normal]
+
+SettingsPanel.output_routing
+  at      128..=128
+  raw     2    [0, 1]
+  decoded 2    [LowerLeftUpperRight, Stereo]
+
+SettingsPanel.global_transpose
+  at      68..=71
+  raw     5    [0, 12, 5, 6, 7]
+  decoded 5    [-1, -6, 0, 1, 6]
+
+SettingsPanel.fine_tune
+  at      55..=61
+  raw     4    [0, 100, 50, 55]
+  decoded 4    [-50, 0, 5, 50]
+
+SettingsPanel.global_channel
+  at      72..=76
+  raw     4    [0, 1, 15, 16]
+  decoded 4    [1, 16, 2, off]
+
+SettingsPanel.lower_receive_channel
+  at      118..=122
+  raw     4    [0, 11, 15, 16]
+  decoded 4    [1, 12, 16, off]
+
+SettingsPanel.upper_receive_channel
+  at      123..=127
+  raw     4    [0, 1, 15, 16]
+  decoded 4    [1, 16, 2, off]
+
+SettingsPanel.upper_split_channel
+  at      129..=133
+  raw     4    [0, 1, 15, 16]
+  decoded 4    [1, 16, 2, off]
+
+SettingsPanel.control_change_mode
+  at      38..=39
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Off, Receive, Send, SendReceive]
+
+SettingsPanel.program_change_mode
+  at      40..=41
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Off, Receive, Send, SendReceive]
+
+SettingsPanel.transpose_at
+  at      137..=137
+  raw     2    [0, 1]
+  decoded 2    [MidiIn, MidiOut]
+
+SettingsPanel.piano_string_resonance
+  at      64..=67
+  raw     3    [0, 12, 6]
+  decoded 3    [-6, 0, 6]
+
+SettingsPanel.b3_tonewheel_mode
+  at      109..=111
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [Clean, Vintage1, Vintage2, Vintage3]
+
+SettingsPanel.b3_key_click_level
+  at      113..=114
+  raw     4    [0, 1, 2, 3]
+  decoded 4    [High, Higher, Low, Normal]
+
+SettingsPanel.b3_key_bounce
+  at      116..=116
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+SettingsPanel.b3_perc_db9_mute
+  at      112..=112
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+SettingsPanel.b3_perc_decay_fast
+  at      97..=99
+  raw     3    [0, 1, 2]
+  decoded 3    [Long, Medium, Short]
+
+SettingsPanel.b3_perc_decay_slow
+  at      100..=102
+  raw     3    [0, 1, 2]
+  decoded 3    [Long, Medium, Short]
+
+SettingsPanel.b3_perc_volume_normal
+  at      103..=105
+  raw     3    [0, 1, 2]
+  decoded 3    [High, Low, Medium]
+
+SettingsPanel.b3_perc_volume_soft
+  at      106..=108
+  raw     3    [0, 1, 2]
+  decoded 3    [High, Low, Medium]
+
+SettingsPanel.rotary_speaker_type
+  at      79..=81
+  raw     2    [0, 1]
+  decoded 2    [Rotary122, Rotary122Close]
+
+SettingsPanel.rotary_balance
+  at      94..=96
+  raw     5    [0, 1, 2, 3, 4]
+  decoded 5    [Bass30Horn70, Bass40Horn60, Bass50Horn50, Bass60Horn40, Bass70Horn30]
+
+SettingsPanel.rotary_horn_speed
+  at      82..=84
+  raw     3    [0, 1, 2]
+  decoded 3    [High, Low, Normal]
+
+SettingsPanel.rotary_horn_acceleration
+  at      88..=90
+  raw     3    [0, 1, 2]
+  decoded 3    [High, Low, Normal]
+
+SettingsPanel.rotary_rotor_speed
+  at      85..=87
+  raw     2    [1, 2]
+  decoded 2    [High, Normal]
+
+SettingsPanel.rotary_rotor_acceleration
+  at      91..=93
+  raw     3    [0, 1, 2]
+  decoded 3    [High, Low, Normal]
+
+=== settings/baseline.ne5s
+SettingsPanel.rotary_ctrl_type               52..=53      raw 1      Open
+SettingsPanel.rotary_pedal_mode              54..=54      raw 1      Toggle
+SettingsPanel.sustain_pedal_mode             134..=135    raw 2      SustainRotorToggle
+SettingsPanel.sustain_pedal_type             43..=44      raw 0      Auto
+SettingsPanel.ctrl_pedal_type                45..=47      raw 1      YamahaFc7
+SettingsPanel.ctrl_pedal_gain                138..=141    raw 9      10
+SettingsPanel.b3_trig_mode                   117..=117    raw 1      Fast
+SettingsPanel.output_routing                 128..=128    raw 0      Stereo
+SettingsPanel.global_transpose               68..=71      raw 6      0
+SettingsPanel.fine_tune                      55..=61      raw 55     5
+SettingsPanel.global_channel                 72..=76      raw 0      1
+SettingsPanel.lower_receive_channel          118..=122    raw 11     12
+SettingsPanel.upper_receive_channel          123..=127    raw 1      2
+SettingsPanel.upper_split_channel            129..=133    raw 1      2
+SettingsPanel.control_change_mode            38..=39      raw 3      SendReceive
+SettingsPanel.program_change_mode            40..=41      raw 3      SendReceive
+SettingsPanel.transpose_at                   137..=137    raw 0      MidiIn
+SettingsPanel.piano_string_resonance         64..=67      raw 6      0
+SettingsPanel.b3_tonewheel_mode              109..=111    raw 1      Vintage1
+SettingsPanel.b3_key_click_level             113..=114    raw 1      Normal
+SettingsPanel.b3_key_bounce                  116..=116    raw 1      true
+SettingsPanel.b3_perc_db9_mute               112..=112    raw 0      false
+SettingsPanel.b3_perc_decay_fast             97..=99      raw 1      Medium
+SettingsPanel.b3_perc_decay_slow             100..=102    raw 1      Medium
+SettingsPanel.b3_perc_volume_normal          103..=105    raw 1      Medium
+SettingsPanel.b3_perc_volume_soft            106..=108    raw 1      Medium
+SettingsPanel.rotary_speaker_type            79..=81      raw 0      Rotary122
+SettingsPanel.rotary_balance                 94..=96      raw 2      Bass50Horn50
+SettingsPanel.rotary_horn_speed              82..=84      raw 1      Normal
+SettingsPanel.rotary_horn_acceleration       88..=90      raw 1      Normal
+SettingsPanel.rotary_rotor_speed             85..=87      raw 1      Normal
+SettingsPanel.rotary_rotor_acceleration      91..=93      raw 1      Normal

@@ -1,20 +1,31 @@
+//! The Electro 5 global settings format (`.ne5s`).
+//!
+//! Reads top-down: the format's constants, then [`Schema`] — the file as `binrw` sees
+//! it — then [`Settings`]. The body is one `#[bitpanel]`, in [`panel`].
+
+pub mod panel;
+
+pub use panel::{
+    B3TrigMode, CtrlPedalGain, CtrlPedalType, FineTune, GlobalTranspose, KeyClickLevel, Menu,
+    MidiChannel, MidiMessageMode, OutputRouting, PercDecay, PercVolume, ResonanceLevel,
+    RotaryBalance, RotaryCtrlType, RotaryPedalMode, RotaryRate, RotarySpeakerType, Setting,
+    SettingsPanel, SustainPedalMode, SustainPedalType, TonewheelMode, TransposeAt,
+};
+
 use crate::common;
 use crate::crc::{CrcReader, CrcWriter};
 use crate::error::{Error, ParseError};
 use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinWriterExt};
+use panel::BODY_LEN;
 use std::fmt::Debug;
 use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "ne5s";
-/// Schema versions validated against the corpus. Both specimens report 0.
+/// Schema versions validated against the corpus. Every corpus settings file reports 0.
 pub const KNOWN_VERSIONS: &[u32] = &[0];
 /// Total file length: 44-byte CBIN header + 34-byte body.
 pub const FILE_LEN: usize = 78;
-
-/// Length of the settings body block (`0x2c..=0x4d`), the region covered by the
-/// CRC. Currently held verbatim; see [`Settings`] for the decode target.
-const BODY_LEN: usize = 0x4e - 0x2c;
 
 pub type Location = RangedU16Pair<0, 0>;
 pub type Header = common::Header<Location>;
@@ -24,7 +35,7 @@ pub type Header = common::Header<Location>;
 #[brw(assert(header.preamble.format == FORMAT))]
 #[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x4d - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
 #[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0x4d - 0x2c))]
-struct Schema {
+pub struct Schema {
     header: Header,
 
     pub version: u32,
@@ -32,32 +43,20 @@ struct Schema {
     #[bw(try_calc = w.checksum())]
     crc32: u32,
 
-    /// The raw settings body (`0x2c..=0x4d`), stored verbatim so the file
-    /// round-trips byte-exact. Field decode is pending a specimen corpus — see
-    /// the catalog on [`Settings`].
+    // 0x2c..0x4d
     #[brw(big, pad_before = 16)]
-    raw: [u8; BODY_LEN],
+    #[br(try_map = |raw: [u8; BODY_LEN]| SettingsPanel::try_from(raw))]
+    #[bw(map = |p: &SettingsPanel| <[u8; BODY_LEN]>::from(p))]
+    pub panel: SettingsPanel,
 }
 
-/// Electro 5 global settings (`ne5s`): system, MIDI, and sound preferences.
+/// Electro 5 global settings (`ne5s`): the System, MIDI and Sound menus.
 ///
-/// **System:** memory protection; rotary ctrl type (closed/open/half-moon);
-/// rotary pedal mode (hold/toggle); sustain pedal mode; B3 trig mode
-/// (normal/fast); output routing (stereo / L+U split); sustain pedal type;
-/// ctrl pedal type (ev7/fc7/exp2/xvp10/fv500l/fatar-SL); global transpose
-/// (-6..6 semitones); fine tune (-50..50 cent); ctrl pedal gain (1..10).
-///
-/// **MIDI:** local control; global channel (off/1..16); lower/upper receive
-/// channels; upper split channel; control-change mode; program-change mode;
-/// transpose-at (in/out).
-///
-/// **Sound:** piano string-resonance level (-6..6 dB); B3 tonewheel mode
-/// (clean/vintage1-3); B3 keyclick level; B3 keybounce; B3 perc DB9 mute; B3
-/// perc decay fast/slow; B3 perc volume normal/soft; rotary speaker type;
-/// rotary bass/horn balance; rotary horn speed/acc; rotary rotor speed/acc.
+/// The whole file is one panel plus its CBIN header; there is no slot to speak of, since
+/// the instrument holds exactly one of these.
 #[derive(Debug)]
 pub struct Settings {
-    schema: Schema,
+    pub schema: Schema,
 }
 
 impl Settings {
@@ -65,7 +64,7 @@ impl Settings {
         Settings {
             schema: Schema {
                 header: Header::new(1, FORMAT, (0, 0).try_into().unwrap()),
-                raw: [0; BODY_LEN],
+                panel: SettingsPanel::default(),
                 version: 0,
             },
         }
@@ -91,11 +90,9 @@ impl Settings {
         Ok(())
     }
 
-    /// The raw 34-byte settings body (`0x2c..=0x4d`). Field decode is not yet
-    /// implemented (see the [`Settings`] catalog); this exposes the bytes for
-    /// inspection and future reverse-engineering.
-    pub fn raw(&self) -> &[u8] {
-        &self.schema.raw
+    /// The settings body as stored, `0x2c..=0x4d`. Includes the bits no field claims.
+    pub fn body(&self) -> [u8; BODY_LEN] {
+        <[u8; BODY_LEN]>::from(&self.schema.panel)
     }
 }
 
@@ -125,21 +122,52 @@ mod tests {
         assert_eq!(bytes.len(), FILE_LEN);
 
         let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
-        assert_eq!(back.raw(), settings.raw());
+        assert_eq!(back.body(), settings.body());
     }
 
-    /// The body is held verbatim, so any byte pattern in it survives a round trip.
+    /// Bits no field claims are kept, so a body the decoder accepts survives verbatim.
     #[test]
-    fn the_raw_body_survives_verbatim() {
+    fn the_unclaimed_bits_survive_a_round_trip() {
         let mut settings = Settings::new();
-        for (i, b) in settings.schema.raw.iter_mut().enumerate() {
-            *b = (i as u8) ^ 0xa5;
+        // Bits 0..=37 are unexplained and belong to no field; 0x2e..0x30 is the middle of
+        // that run. A pattern there has to come back untouched.
+        let mut body = settings.body();
+        for (i, at) in [0x2e, 0x2f, 0x30].into_iter().enumerate() {
+            body[at - 0x2c] = [0x83, 0x74, 0x07][i];
         }
+        settings.schema.panel = SettingsPanel::try_from(body).unwrap();
+
         let mut bytes = Vec::new();
         settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
         assert_eq!(bytes.len(), FILE_LEN);
 
         let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
-        assert_eq!(back.raw(), settings.raw());
+        assert_eq!(back.body(), body);
+    }
+
+    /// An unknown schema version is refused at read rather than decoded on a guess: a
+    /// firmware that bumps it could move every field below.
+    #[test]
+    fn an_unknown_schema_version_is_refused() {
+        let settings = Settings::new();
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        assert!(Settings::read_from(&mut Cursor::new(&mut bytes.clone())).is_ok());
+
+        // The schema version lives at 0x14, little-endian.
+        bytes[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+        let err = Settings::read_from(&mut Cursor::new(&mut bytes))
+            .expect_err("version 1 must not decode");
+        assert!(
+            matches!(
+                err,
+                Error::Parse(ParseError::UnsupportedVersion {
+                    format: FORMAT,
+                    version: 1,
+                    ..
+                })
+            ),
+            "unhelpful error: {err}",
+        );
     }
 }

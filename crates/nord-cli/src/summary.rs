@@ -35,6 +35,8 @@ fn dep_id(id: u32) -> String {
 const LABEL_WIDTH: usize = 11;
 /// Same, for the effect-name column, whose longest entry is `reverb`.
 const FX_WIDTH: usize = 7;
+/// Same, for a setting's name, whose longest entry is `rotary rotor acceleration`.
+const SETTING_WIDTH: usize = 27;
 
 /// `label:     value`, label dimmed so the eye runs down the values. `indent` is 2 for
 /// the file's own identity and 4 for anything sitting under a section heading.
@@ -420,20 +422,17 @@ pub fn print(ui: &Ui, entity: &Entity) {
         }
         Entity::Settings(Settings::Electro5(s)) => {
             ui.out(field(ui, 2, "type", "Electro 5 settings (ne5s)"));
-            ui.out(field(
-                ui,
-                2,
-                "note",
-                ui.dim("field decode pending specimens; raw body below"),
-            ));
-            // Sixteen bytes to a line, so column structure in an undecoded body shows.
-            for (i, chunk) in s.raw().chunks(16).enumerate() {
-                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-                ui.out(format!(
-                    "  {}{}",
-                    ui.dim(format!("{:04x}  ", i * 16)),
-                    hex.join(" ")
-                ));
+            // Grouped and ordered by the instrument's own menus, which is not the order
+            // the fields sit in the file.
+            for (menu, fields) in s.schema.panel.by_menu() {
+                section(ui, menu.title());
+                for f in fields {
+                    ui.out(format!(
+                        "    {}{}",
+                        ui.dim(format!("{:<SETTING_WIDTH$}", f.name.replace('_', " "))),
+                        f.value,
+                    ));
+                }
             }
         }
         Entity::Piano(_) => {

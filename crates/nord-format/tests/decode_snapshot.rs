@@ -1,9 +1,9 @@
 #![cfg(feature = "corpus")]
-//! Per-field decode snapshots for the Electro 5 program format.
+//! Per-field decode snapshots for the Electro 5 formats.
 //!
 //! ⚠️ Byte-exact round-trip cannot catch a wrong bit range: a panel keeps the bytes it
 //! was decoded from, so a field reading its neighbour's bits still writes the file back
-//! identically. These two snapshots watch the decode itself.
+//! identically. These snapshots watch the decode itself.
 //!
 //! [`fields`] pins **where every field sits and which values the corpus has ever shown
 //! there**. It deliberately records no specimen count and no per-file detail, so adding
@@ -12,9 +12,10 @@
 //! values change on nearly every field.
 //!
 //! [`specimens`] pins every field of a short fixed list of files, so a change has one
-//! concrete, readable place to show itself.
+//! concrete, readable place to show itself. [`settings`] is both views of the one `.ne5s`
+//! panel in a single file.
 //!
-//! Regenerate both with `UPDATE_SNAPSHOTS=1`, and **read the diff** — these files are the
+//! Regenerate them with `UPDATE_SNAPSHOTS=1`, and **read the diff** — these files are the
 //! record of what the decode claims, so an unexamined re-bless costs exactly what the
 //! snapshot was bought for.
 //!
@@ -397,6 +398,102 @@ fn specimens() {
     }
 
     compare("decode_specimens.snapshot", &out);
+}
+
+/// Every `.ne5s` the corpus ships, in a stable order.
+fn all_settings(root: &Path) -> Vec<PathBuf> {
+    let mut found = vec![
+        root.join("settings.ne5s"),
+        root.join("usb/backup/full_backup/contents/Settings/Settings/Settings.ne5s"),
+    ];
+    for entry in fs::read_dir(root.join("settings")).expect("settings corpus") {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "ne5s") {
+            found.push(path);
+        }
+    }
+    found.sort();
+    assert!(
+        found.len() > 100,
+        "found only {} settings files under {} — is this a nord-corpus/ne5 checkout?",
+        found.len(),
+        root.display()
+    );
+    found
+}
+
+fn read_settings(path: &Path) -> electro5::Settings {
+    match nord_format::from_path(path)
+        .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()))
+    {
+        Entity::Settings(nord_format::Settings::Electro5(s)) => s,
+        other => panic!("{} is not Electro 5 settings: {other:?}", path.display()),
+    }
+}
+
+/// The settings panel over the whole `.ne5s` corpus, then one specimen in full.
+///
+/// Same two views as [`fields`] and [`specimens`], in one file because there is one panel:
+/// where each field sits with every value the corpus puts there, then the baseline capture
+/// field by field.
+#[test]
+fn settings() {
+    let root = corpus_dir();
+    let paths = all_settings(&root);
+
+    let mut order = Vec::new();
+    let mut placements: BTreeMap<String, String> = BTreeMap::new();
+    let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for path in &paths {
+        for row in packed(&read_settings(path).schema.panel) {
+            let raw = row.raw_str();
+            if placements.insert(row.key.clone(), row.placement).is_none() {
+                order.push(row.key.clone());
+            }
+            raws.entry(row.key.clone()).or_default().insert(raw);
+            values.entry(row.key).or_default().insert(row.value);
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(
+        "# Per-field decode over every .ne5s in the corpus: where each field sits and\n\
+         # every value the corpus has been seen to put there. A field listing one value\n\
+         # is a field the corpus cannot check.\n",
+    );
+    for key in &order {
+        let single = if raws[key].len() == 1 && values[key].len() == 1 {
+            "  UNVARYING"
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            "\n{key}\n  at      {}{single}\n  raw     {}\n  decoded {}\n",
+            placements[key],
+            summarise(&raws[key]),
+            summarise(&values[key]),
+        );
+    }
+
+    // The sweep's own reference capture: every setting at once, so a moved range has a
+    // concrete place to show itself as well as an aggregate one.
+    let baseline = root.join("settings/baseline.ne5s");
+    let _ = write!(out, "\n=== settings/baseline.ne5s\n");
+    for row in packed(&read_settings(&baseline).schema.panel) {
+        let _ = writeln!(
+            out,
+            "{:<44} {:<12} raw {:<6} {}",
+            row.key,
+            row.placement,
+            row.raw_str(),
+            row.value
+        );
+    }
+
+    compare("decode_settings.snapshot", &out);
 }
 
 /// Compare against the committed snapshot, or rewrite it under `UPDATE_SNAPSHOTS=1`.
