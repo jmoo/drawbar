@@ -10,7 +10,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-nord-usb = { path = "../nord-usb", default-features = false, features = ["web"] }
+nord-usb = { path = "../nord-usb", default-features = false, features = [
+  "web",
+] }
 
 js-sys = "0.3"
 # ⚠️ Exact, and it pins the whole workspace lock: `wasm-bindgen-cli` refuses a module
