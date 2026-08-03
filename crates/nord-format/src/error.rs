@@ -15,6 +15,12 @@ pub enum ParseError {
     #[error("unknown filetype: {0}")]
     UnknownFileType(String),
 
+    /// A CBIN tag other than the one the reader was asked for. Formats sharing a body
+    /// layout decode each other's files without complaint, so the tag is the only thing
+    /// that tells them apart.
+    #[error("expected a {expected} file, got {got}")]
+    WrongFormat { expected: &'static str, got: String },
+
     #[error("{0}")]
     AssertFail(String),
 

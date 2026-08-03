@@ -214,7 +214,7 @@ fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
     }
 }
 
-fn list_fields(ui: &Ui, schema: &electro5::program::Schema) {
+fn list_fields(ui: &Ui, schema: &electro5::program::Schema<electro5::program::Location>) {
     ui.out(format!(
         "{:<40} {:<12} {:<28} {}",
         "path", "bits", "value", "accepts"

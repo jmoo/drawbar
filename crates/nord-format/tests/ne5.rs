@@ -1531,8 +1531,9 @@ const PIANO_IDS: [(PianoCategory, u8, u32, &str); 11] = [
 /// above, the ids are the ones the vendor protocol puts on the wire.
 const SAMPLE_IDS: [(u8, u32); 3] = [(0, 0x47c8_b4f8), (41, 0x89be_e289), (158, 0x0ac2_1363)];
 
-/// Every `.ne5p` under `dir`, recursively, sorted for deterministic failures.
-fn ne5p_files(dir: &std::path::Path) -> Vec<PathBuf> {
+/// Every file under `dir` with extension `ext`, recursively, sorted for deterministic
+/// failures.
+fn files_with(dir: &std::path::Path, ext: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
 
@@ -1543,7 +1544,7 @@ fn ne5p_files(dir: &std::path::Path) -> Vec<PathBuf> {
 
             if entry.metadata().unwrap().is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "ne5p") {
+            } else if path.extension().is_some_and(|e| e == ext) {
                 out.push(path);
             }
         }
@@ -1551,6 +1552,22 @@ fn ne5p_files(dir: &std::path::Path) -> Vec<PathBuf> {
 
     out.sort();
     out
+}
+
+/// Every `.ne5p` under `dir`, recursively.
+fn ne5p_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    files_with(dir, "ne5p")
+}
+
+/// Every `.ne5l` in the corpus. The live slots ship inside the full backup rather than in
+/// a directory of their own, so this searches from the root.
+fn ne5l_files() -> Vec<PathBuf> {
+    let paths = files_with(&corpus_dir(), "ne5l");
+    assert!(
+        !paths.is_empty(),
+        "no live slots found — is the corpus present?"
+    );
+    paths
 }
 
 /// Read a program and assert it still round-trips byte-exact. The id fields are
@@ -2079,4 +2096,96 @@ fn test_ne5_no_corpus_program_holds_an_unrecognized_value() {
         "corpus holds values no component can name — worth investigating, not \
          suppressing: {unknowns:?}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Live slots (`ne5l`)
+// ---------------------------------------------------------------------------
+
+/// Every live slot re-encodes byte for byte, tag and all.
+#[test]
+fn test_ne5_live_re_encodes_to_the_same_bytes() {
+    for path in ne5l_files() {
+        let name = path.display().to_string();
+        let original = read(&path).unwrap();
+
+        let Entity::Live(nord_format::Live::Electro5(live)) =
+            nord_format::from_path(&path).unwrap()
+        else {
+            panic!("expected an electro5 live slot in {name}")
+        };
+
+        let mut rewritten: Vec<u8> = Vec::new();
+        live.write_to(&mut Cursor::new(&mut rewritten)).unwrap();
+        assert_eq!(
+            original.as_slice(),
+            rewritten.as_slice(),
+            "re-encoding changed {name}",
+        );
+    }
+}
+
+/// The three live slots are `0:0`, `0:1` and `0:2` on the wire, and nothing else.
+#[test]
+fn test_ne5_live_occupies_three_slots_of_one_bank() {
+    let mut seen: BTreeSet<(u16, u16)> = BTreeSet::new();
+
+    for path in ne5l_files() {
+        let name = path.display().to_string();
+        let Entity::Live(nord_format::Live::Electro5(live)) =
+            nord_format::from_path(&path).unwrap()
+        else {
+            panic!("expected an electro5 live slot in {name}")
+        };
+        let at = live.location();
+        assert_eq!(at.x(), 0, "live slot outside bank 0 in {name}");
+        seen.insert(at.inner());
+    }
+
+    assert_eq!(
+        seen,
+        BTreeSet::from([(0, 0), (0, 1), (0, 2)]),
+        "the corpus no longer covers all three live slots",
+    );
+}
+
+/// A live specimen with its tag swapped is a valid program, down to the last field.
+///
+/// Confirmed on hardware: the same panel state read as a live slot and as a program gives
+/// byte-identical bodies. One `Schema` serves both, so the field values cannot disagree —
+/// what this pins on real specimens is that everything around them agrees too: the slot
+/// falls in the program space, the version is one programs accept, and the body checksum
+/// still holds.
+#[test]
+fn test_ne5_a_live_body_decodes_as_a_program() {
+    for path in ne5l_files() {
+        let name = path.display().to_string();
+        let Entity::Live(nord_format::Live::Electro5(live)) =
+            nord_format::from_path(&path).unwrap()
+        else {
+            panic!("expected an electro5 live slot in {name}")
+        };
+
+        // The tag is the whole difference: the CRC covers `0x2c..` and never sees the
+        // header, so retagging in place leaves a valid file.
+        let mut bytes = read(&path).unwrap();
+        bytes[0x08..0x0c].copy_from_slice(electro5::program::FORMAT.as_bytes());
+
+        let Entity::Program(nord_format::Program::Electro5(program)) =
+            nord_format::from_stream(&mut Cursor::new(&bytes)).unwrap()
+        else {
+            panic!("a retagged live slot did not decode as a program: {name}")
+        };
+
+        let named = |fields: Vec<electro5::program::Field>| -> Vec<(String, String)> {
+            fields.into_iter().map(|f| (f.path, f.display)).collect()
+        };
+        let fields = named(live.schema.fields());
+        assert!(!fields.is_empty(), "no fields to compare");
+        assert_eq!(
+            fields,
+            named(program.schema.fields()),
+            "live and program decodes disagree on {name}",
+        );
+    }
 }

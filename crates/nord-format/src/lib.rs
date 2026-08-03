@@ -27,6 +27,13 @@ pub enum Program {
     Electro5(electro5::Program),
 }
 
+/// The live buffer — the panel as it stands, not a saved program. Same body as
+/// [`Program`], under its own format tag.
+#[derive(Debug)]
+pub enum Live {
+    Electro5(electro5::Live),
+}
+
 #[derive(Debug)]
 pub enum Song {
     Electro5(electro5::Song),
@@ -47,6 +54,7 @@ pub enum Settings {
 pub enum Entity {
     Song(Song),
     Program(Program),
+    Live(Live),
     Piano(piano::Piano),
     Settings(Settings),
     Sample(Sample),
@@ -75,6 +83,9 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
             electro5::program::FORMAT => Ok(Entity::Program(Program::Electro5(
                 electro5::Program::read_from(reader)?,
             ))),
+            electro5::live::FORMAT => Ok(Entity::Live(Live::Electro5(electro5::Live::read_from(
+                reader,
+            )?))),
             electro5::settings::FORMAT => Ok(Entity::Settings(Settings::Electro5(
                 electro5::Settings::read_from(reader)?,
             ))),
@@ -116,6 +127,10 @@ pub fn to_bytes(entity: &Entity) -> Result<Vec<u8>, Error> {
         Entity::Program(Program::Electro5(p)) => {
             p.write_to(&mut out)?;
             Some((electro5::program::FORMAT, electro5::program::FILE_LEN))
+        }
+        Entity::Live(Live::Electro5(l)) => {
+            l.write_to(&mut out)?;
+            Some((electro5::live::FORMAT, electro5::live::FILE_LEN))
         }
         Entity::Song(Song::Electro5(s)) => {
             s.write_to(&mut out)?;

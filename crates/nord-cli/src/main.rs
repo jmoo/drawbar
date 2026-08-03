@@ -2,10 +2,11 @@
 //!
 //! Not a product; it exists to exercise the libraries and surface API friction.
 //!
-//! The nouns are the protocol's object classes: `nord program` and `nord setlist` are
-//! [`slot_action`] with the class fixed, and the hidden `nord raw --class N` is the same
-//! with the class given as a number. `inspect`/`verify` dispatch on the CBIN format tag
-//! rather than on a class, so they sit at the top level.
+//! The nouns are the protocol's object classes: `nord program`, `nord setlist` and
+//! `nord live` are [`slot_action`] with the class fixed, and the hidden
+//! `nord raw --class N` is the same with the class given as a number.
+//! `inspect`/`verify` dispatch on the CBIN format tag rather than on a class, so they sit
+//! at the top level.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own, which today is pianos (1) and samples (3).
@@ -39,8 +40,8 @@ struct Cli {
 enum Command {
     /// Parse Nord file(s) and print a summary of the decoded contents.
     Inspect {
-        /// Files to read (.ne5p program, .ne5t song, .ne5s settings, .npno
-        /// piano, .nsmp sample, or a ZIP backup bundle).
+        /// Files to read (.ne5p program, .ne5l live slot, .ne5t song, .ne5s
+        /// settings, .npno piano, .nsmp sample, or a ZIP backup bundle).
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
@@ -78,13 +79,19 @@ enum Command {
         action: SlotAction,
     },
 
+    /// The live buffer — the panel as it stands (object class 6), in slots 1:1 to 1:3.
+    Live {
+        #[command(subcommand)]
+        action: LiveAction,
+    },
+
     /// The class-generic primitives, addressed by object-class number.
     ///
     /// Every typed noun above is this with the class fixed. Use it for a class with no
     /// noun — pianos are `--class 1`, samples `--class 3`.
     #[command(hide = true)]
     Raw {
-        /// Object class: 1 pianos, 3 samples, 4 programs, 5 set lists.
+        /// Object class: 1 pianos, 3 samples, 4 programs, 5 set lists, 6 live.
         #[arg(long, global = true, value_name = "N", default_value_t = 4)]
         class: u32,
 
@@ -129,6 +136,54 @@ enum ProgramAction {
     /// With no target the program is a fresh default one, so `--fields` needs nothing to
     /// read and `-o` writes a blank `.ne5p` to start from.
     Edit(EditArgs),
+}
+
+/// `nord live`: the verbs that mean anything for the live buffer.
+///
+/// The live buffer is the panel as it stands, not a library — there is nothing to name,
+/// nothing to delete, and `select` is what the *other* classes do to it. What is left is
+/// the read-only subset, spelled exactly as [`SlotAction`] spells it.
+#[derive(Subcommand)]
+enum LiveAction {
+    /// Read a live slot off the instrument. Read-only.
+    ///
+    /// Prints a summary by default; with `--out` writes the file instead.
+    Get {
+        /// Slot to read: 1:1, 1:2 or 1:3.
+        #[arg(value_name = "BANK:SLOT")]
+        at: String,
+
+        /// Write the object to this file instead of printing a summary. With `--sweep`,
+        /// the directory every capture lands in.
+        #[arg(short, long, value_name = "FILE|DIR")]
+        out: Option<PathBuf>,
+
+        /// Save the wire body verbatim instead of wrapping it in a CBIN header.
+        /// Needs `--out`.
+        #[arg(long)]
+        body: bool,
+
+        /// Read the slot over and over, once per prompt, into the `--out` directory.
+        ///
+        /// The live slot is the panel itself, so this captures a change-one-knob corpus
+        /// without saving a program between steps.
+        #[arg(long, requires = "out")]
+        sweep: bool,
+    },
+
+    /// Report everything the instrument knows about a live slot. Read-only.
+    Info {
+        /// Slot to describe: 1:1, 1:2 or 1:3.
+        #[arg(value_name = "BANK:SLOT")]
+        at: String,
+    },
+
+    /// List the piano/sample library objects the live panel depends on. Read-only.
+    Deps {
+        /// Slot to inspect: 1:1, 1:2 or 1:3.
+        #[arg(value_name = "BANK:SLOT")]
+        at: String,
+    },
 }
 
 /// The verb vocabulary, identical for every object class.
@@ -308,6 +363,7 @@ fn main() -> ExitCode {
             ProgramAction::Edit(args) => edit::run(&ui, args),
         },
         Command::Setlist { action } => slot_action(&ui, action, ObjectClass::SetList),
+        Command::Live { action } => slot_action(&ui, action.into(), ObjectClass::Live),
         Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::from_raw(class)),
     };
 
@@ -316,6 +372,26 @@ fn main() -> ExitCode {
         Err(e) => {
             ui.note(format!("{}: {e}", ui.danger("error")));
             ExitCode::FAILURE
+        }
+    }
+}
+
+impl From<LiveAction> for SlotAction {
+    fn from(action: LiveAction) -> SlotAction {
+        match action {
+            LiveAction::Get {
+                at,
+                out,
+                body,
+                sweep,
+            } => SlotAction::Get {
+                at,
+                out,
+                body,
+                sweep,
+            },
+            LiveAction::Info { at } => SlotAction::Info { at },
+            LiveAction::Deps { at } => SlotAction::Deps { at },
         }
     }
 }
