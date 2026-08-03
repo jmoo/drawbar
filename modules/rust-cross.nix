@@ -238,11 +238,14 @@
       # earns, and it has to stay tested to stay usable.
       slotVerbs = "get put move rename duplicate delete select info deps";
       surface = {
-        "" = "inspect verify device program setlist help";
+        "" = "inspect verify device program setlist live settings sample help";
         "device" = "status info help";
+        "live" = "get info deps edit help";
         "program" = "${slotVerbs} edit help";
-        "setlist" = "${slotVerbs} help";
         "raw" = "${slotVerbs} help";
+        "sample" = "${slotVerbs} edit help";
+        "setlist" = "${slotVerbs} help";
+        "settings" = "edit help";
       };
 
       surfaceChecks = ''
@@ -318,7 +321,7 @@
         run inspect edited.ne5p > decoded.txt 2>err.txt || {
           echo "inspect failed on the edited file:"; cat err.txt; exit 1;
         }
-        grep -q 'transpose: -5  (yes)' decoded.txt || {
+        grep -q 'transpose: -5  (on)' decoded.txt || {
           echo "the edited value did not come back out of the decode:"
           cat decoded.txt; exit 1;
         }
