@@ -31,6 +31,7 @@ fn noun(format: &str) -> Option<&'static str> {
         "ne5p" => Some("nord program"),
         "ne5t" => Some("nord setlist"),
         "ne5l" => Some("nord live"),
+        "nsmp" => Some("nord sample"),
         _ => None,
     }
 }
@@ -111,14 +112,23 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let row = |label: &str, value: String| {
         ui.out(format!("  {}{value}", ui.dim(format!("{label:<11}"))));
     };
-    row(
-        "location:",
-        format!(
-            "{} {}",
-            shown(at),
-            ui.dim("(the slot the file was saved from)")
-        ),
-    );
+    // Library files (samples) carry `0xffff:0xffff` where slot files keep bank/slot —
+    // a library object has no slot until an instrument gives it one.
+    if (at.bank, at.slot) == (0xffff, 0xffff) {
+        row(
+            "location:",
+            format!("none {}", ui.dim("(a library file, not a slot save)")),
+        );
+    } else {
+        row(
+            "location:",
+            format!(
+                "{} {}",
+                shown(at),
+                ui.dim("(the slot the file was saved from)")
+            ),
+        );
+    }
     row("name:", format!("none {}", ui.dim("(files store no name)")));
     row("format:", format);
     row("version:", version.to_string());

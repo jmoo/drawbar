@@ -2,19 +2,21 @@
 //!
 //! Not a product; it exists to exercise the libraries and surface API friction.
 //!
-//! The nouns are the protocol's object classes: `nord program`, `nord setlist` and
-//! `nord live` are [`slot_action`] with the class fixed, `nord settings` carries the
-//! one verb its singleton needs (`edit`), and the hidden `nord raw --class N` is
-//! [`slot_action`] with the class given as a number.
+//! The nouns are the protocol's object classes: `nord program`, `nord sample`,
+//! `nord setlist` and `nord live` are [`slot_action`] with the class fixed, `nord
+//! settings` carries the one verb its singleton needs (`edit`), and the hidden
+//! `nord raw --class N` is [`slot_action`] with the class given as a number.
 //! `inspect`/`verify` dispatch on the CBIN format tag rather than on a class, so they sit
 //! at the top level.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
-//! its own, which today is pianos (1) and samples (3).
+//! its own, which today is pianos (1).
 
 mod device;
 mod edit;
 mod file;
+mod note;
+mod sample;
 mod slot;
 mod summary;
 mod ui;
@@ -94,10 +96,17 @@ enum Command {
         action: SettingsAction,
     },
 
+    /// Sample instruments — the library on the instrument (object class 3), or
+    /// `.nsmp` files.
+    Sample {
+        #[command(subcommand)]
+        action: SampleAction,
+    },
+
     /// The class-generic primitives, addressed by object-class number.
     ///
     /// Every typed noun above is this with the class fixed. Use it for a class with no
-    /// noun — pianos are `--class 1`, samples `--class 3`.
+    /// noun — pianos are `--class 1`.
     #[command(hide = true)]
     Raw {
         /// Object class: 1 pianos, 3 samples, 4 programs, 5 set lists, 6 live.
@@ -145,6 +154,20 @@ enum ProgramAction {
     /// With no target the program is a fresh default one, so `--fields` needs nothing to
     /// read and `-o` writes a blank `.ne5p` to start from.
     Edit(EditArgs),
+}
+
+/// `nord sample`: every class-generic verb, plus the one that edits files.
+#[derive(Subcommand)]
+enum SampleAction {
+    #[command(flatten)]
+    Slot(SlotAction),
+
+    /// Change fields inside a sample instrument, in a file or in a slot.
+    ///
+    /// A sample is mostly encoded audio; what is settable is what the format can
+    /// patch in place — the name, and each zone's root key and top note. `--fields`
+    /// lists them.
+    Edit(sample::EditArgs),
 }
 
 /// `nord live`: the verbs that mean anything for the live buffer.
@@ -404,6 +427,10 @@ fn main() -> ExitCode {
         Command::Program { action } => match action {
             ProgramAction::Slot(action) => slot_action(&ui, action, ObjectClass::Program),
             ProgramAction::Edit(args) => edit::run(&ui, args, ObjectClass::Program),
+        },
+        Command::Sample { action } => match action {
+            SampleAction::Slot(action) => slot_action(&ui, action, ObjectClass::Sample),
+            SampleAction::Edit(args) => sample::run(&ui, args),
         },
         Command::Setlist { action } => slot_action(&ui, action, ObjectClass::SetList),
         Command::Live { action } => match action {

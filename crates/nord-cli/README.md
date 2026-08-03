@@ -28,6 +28,7 @@ Expect large changes to this tool over time while I develop the libraries.
 | `setlist` | Set lists on the instrument (object class 5) |
 | `live` | The three Live slots (object class 6) |
 | `settings` | The global settings singleton (object class 7) |
+| `sample` | Sample instruments — the library (object class 3), or `.nsmp` files |
 | `raw` | Hidden: the same verbs, addressed by class number |
 
 `inspect` and `verify` work on files. The other nouns are the protocol's object
@@ -39,7 +40,7 @@ and `setlist` share one verb vocabulary:
 get put            transfer
 move rename duplicate delete select   organisation
 info deps          interrogation
-edit               content (program, live, settings)
+edit               content (program, live, settings, sample)
 ```
 
 `live` keeps only the read-only subset plus `edit` — the live buffer is the panel
@@ -47,8 +48,7 @@ as it stands, so there is nothing to name, delete, or select. `settings` is a
 singleton with nothing to organise at all, so `edit` is its whole verb set.
 
 `nord raw --class N` is those same verbs with the class given as a number. It is
-how to reach a class that has no noun of its own — pianos are class 1, samples
-class 3.
+how to reach a class that has no noun of its own — pianos are class 1.
 
 Slots are written **`BANK:SLOT`**, the way the instrument and Nord Sound Manager
 show them — `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
@@ -153,8 +153,8 @@ DIFFER grand.npno (in 209564996 bytes, out 20; first difference at the end (leng
 error: 1 of 3 file(s) did not round-trip
 ```
 
-(A `DIFFER` on a piano or sample is expected for now — only their headers are
-parsed and re-emitted; see the `nord-format` format table.)
+(A `DIFFER` on a piano is expected for now — only its header is parsed and
+re-emitted; see the `nord-format` format table. Samples round-trip.)
 
 ## Working with an instrument
 
@@ -221,11 +221,12 @@ to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
 ## Editing an object
 
 `edit` is the only verb that changes what is *inside* an object, and it exists on
-three nouns: `nord program edit`, `nord live edit` (the live buffer is the
-program body under another tag, so the fields are identical), and `nord settings
-edit` (`panel.*` for the menus, `selection.*` for the restored panel state). Its
-field paths are `nord-format`'s own names, generated from the panel declarations,
-so `--fields` lists whatever the library currently knows:
+four nouns: `nord program edit`, `nord live edit` (the live buffer is the
+program body under another tag, so the fields are identical), `nord settings
+edit` (`panel.*` for the menus, `selection.*` for the restored panel state), and
+`nord sample edit` (below). For the first three the field paths are
+`nord-format`'s own names, generated from the panel declarations, so `--fields`
+lists whatever the library currently knows:
 
 ```sh
 nord program edit --fields                       # what is settable, and what it takes
@@ -276,6 +277,20 @@ center_panel.transpose                   0 -> -5
 > ignored while `center_panel.transpose_enabled` is clear, the instrument never
 > clears that bit once it is set, and an untouched program holds `+1` rather than
 > `0`. Setting one half without the other warns; it is not refused.
+
+### `nord sample edit`
+
+A sample instrument is mostly encoded audio, so its settable fields are the ones
+the format can patch in place without touching a sample: the name, and each
+zone's root key and top note. Notes are spelled as names (`C4`, `F#3` — middle C
+is C4) or numbers 0–127, and zones are numbered from 1, top of the keyboard
+first, the way `inspect` lists them:
+
+```sh
+nord sample edit inst.nsmp --fields
+nord sample edit inst.nsmp --set name="My Piano" --set zone2.top_note=C4 -o out.nsmp
+nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
+```
 
 ## Status
 

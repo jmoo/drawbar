@@ -4,10 +4,12 @@
 //! has to work.
 
 use nord_format::common::bank::{Item, Location};
+use nord_format::common::sample::{stroke, Sample};
 use nord_format::electro5::program::Schema;
 use nord_format::electro5::{Instrument, OrganModel};
 use nord_format::{Entity, Live, Program, Settings, Song};
 
+use crate::note;
 use crate::ui::Ui;
 
 /// One-indexed `bank N slot M` — matches how the hardware labels locations.
@@ -405,6 +407,78 @@ fn panels<L: Location>(ui: &Ui, kind: &str, at: L, p: &Schema<L>) {
     }
 }
 
+/// The sample-instrument printout: identity, then the zone map.
+fn sample(ui: &Ui, s: &Sample) {
+    ui.out(field(ui, 2, "type", "sample instrument (nsmp)"));
+    match s.name() {
+        Ok(name) => ui.out(field(ui, 2, "name", name)),
+        Err(e) => ui.warn(format!("name unreadable: {e}")),
+    }
+    // Content version, `format * 100 + revision`: 200 reads back as 2.0.
+    let v = s.header.version;
+    ui.out(field(ui, 2, "version", format!("{}.{}", v / 100, v % 100)));
+    let categories = s.categories();
+    if !categories.is_empty() {
+        ui.out(field(ui, 2, "category", categories.join(" / ")));
+    }
+
+    section(ui, "Zones");
+    let (zones, strokes) = match (s.zones(), s.strokes()) {
+        (Ok(z), Ok(st)) => (z, st),
+        (Err(e), _) | (_, Err(e)) => {
+            ui.warn(format!("zone table unreadable: {e}"));
+            return;
+        }
+    };
+    if zones.len() != strokes.len() {
+        ui.warn(format!(
+            "{} zones but {} strokes; showing what pairs up",
+            zones.len(),
+            strokes.len()
+        ));
+    }
+    ui.out(format!(
+        "    {}",
+        ui.dim("high to low; the last zone reaches the bottom of the keyboard")
+    ));
+    for (i, (zone, stroke)) in zones.iter().zip(&strokes).enumerate() {
+        // A zone's bottom is one above the next record's top note.
+        let range = match zones.get(i + 1) {
+            Some(below) => format!(
+                "{}..{}",
+                note::name(below.top_note.saturating_add(1)),
+                note::name(zone.top_note)
+            ),
+            None => format!("..{}", note::name(zone.top_note)),
+        };
+        ui.out(field(
+            ui,
+            4,
+            &format!("zone {}", i + 1),
+            format!(
+                "{range:<10} {} {} ({})  {} {}",
+                ui.dim("root"),
+                note::name(stroke.root_key),
+                stroke.root_key,
+                ui.dim("packets"),
+                stroke.packets,
+            ),
+        ));
+    }
+    let packets: usize = strokes.iter().map(|s| s.packets).sum();
+    ui.out(field(
+        ui,
+        4,
+        "audio",
+        format!(
+            "{} {packets}  {} {}",
+            ui.dim("packets"),
+            ui.dim("encoded bytes"),
+            packets * stroke::PACKET_LEN,
+        ),
+    ));
+}
+
 pub fn print(ui: &Ui, entity: &Entity) {
     match entity {
         Entity::Program(Program::Electro5(p)) => {
@@ -475,14 +549,7 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 format!("piano (npno) {} header/reference only", ui.dash()),
             ));
         }
-        Entity::Sample(_) => {
-            ui.out(field(
-                ui,
-                2,
-                "type",
-                format!("sample (nsmp) {} header/reference only", ui.dash()),
-            ));
-        }
+        Entity::Sample(s) => sample(ui, s),
         Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
             if let Some(name) = b.name() {

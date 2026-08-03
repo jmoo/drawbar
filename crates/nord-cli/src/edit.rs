@@ -158,6 +158,7 @@ fn steer(tag: &str) -> &'static str {
         "ne5p" => " — try `nord program edit`",
         "ne5l" => " — try `nord live edit`",
         "ne5s" => " — try `nord settings edit`",
+        "nsmp" => " — try `nord sample edit`",
         _ => "",
     }
 }
@@ -190,7 +191,7 @@ fn stage(ui: &Ui, args: &EditArgs, schema: &mut impl Editable) -> Result<Option<
     Ok(Some(report_changes(ui, &before, &after)))
 }
 
-fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     ui.note(format!("wrote {} ({} bytes)", path.display(), bytes.len()));
     Ok(())
@@ -250,7 +251,7 @@ fn report_changes(
 ///
 /// The CRC moves with any body change; the row is annotated so it does not read as a
 /// second unexplained edit.
-fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
+pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
     if before.len() != after.len() {
         ui.warn(format!(
             "length changed: {} -> {} bytes",
@@ -263,7 +264,7 @@ fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
         if b == a {
             continue;
         }
-        // The `ne5p` body checksum, stamped by `nord-format` during encode rather than
+        // The CBIN body checksum, stamped by `nord-format` during encode rather than
         // set by anyone.
         let note = if (0x18..0x1c).contains(&i) {
             "  (body crc32)"
@@ -323,8 +324,11 @@ mod tests {
         let err = mismatch(&settings, ObjectClass::Program);
         assert!(err.contains("nord settings edit"), "{err}");
 
-        // Set lists and library content have no edit, so no steer may be invented.
-        for tag in ["ne5t", "npno", "nsmp", "zip"] {
+        // Samples have their own edit, outside this command.
+        assert!(steer("nsmp").contains("nord sample edit"));
+
+        // Set lists and pianos have no edit, so no steer may be invented.
+        for tag in ["ne5t", "npno", "zip"] {
             assert_eq!(steer(tag), "", "{tag}");
         }
     }

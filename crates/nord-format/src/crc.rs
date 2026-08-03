@@ -8,6 +8,15 @@ const CRC_32_SLICES: usize = 16;
 const CRC_32: Crc<LookupTable256xN<CRC_32_SLICES>> =
     Crc::<LookupTable256xN<CRC_32_SLICES>>::new(&CRC_32_ISO_HDLC);
 
+/// CRC-32 (ISO-HDLC) of a contiguous slice.
+///
+/// For formats whose checksummed region is simply "the body to end of file", where the
+/// streaming [`MultipartCrc32`] has nothing to skip over and its length is not known
+/// until the file is read.
+pub fn crc32(bytes: &[u8]) -> u32 {
+    CRC_32.compute(bytes)
+}
+
 /// Accumulates the CRC of bytes falling inside one region of a stream.
 ///
 /// ⚠️ `length` is the region's **last byte index minus `first_byte`** — an inclusive

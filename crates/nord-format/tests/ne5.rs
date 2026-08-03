@@ -16,6 +16,7 @@
 //! test case — see `Projects/Nord Utils.md`.
 
 use nord_format::common::bank::Item;
+use nord_format::common::sample::Sample;
 use nord_format::electro5::settings::LiveSlot;
 use nord_format::electro5::{
     EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Instrument, PianoCategory, Routing,
@@ -2280,4 +2281,216 @@ fn test_ne5_a_live_body_decodes_as_a_program() {
             "live and program decodes disagree on {name}",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sample instruments (`.nsmp`)
+// ---------------------------------------------------------------------------
+
+/// Every specimen in `samples/`, as `(path, stem)`.
+fn sample_specimens() -> Vec<(PathBuf, String)> {
+    let dir = corpus_dir().join("samples");
+    let mut out: Vec<(PathBuf, String)> = fs::read_dir(&dir)
+        .expect("samples corpus")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "nsmp"))
+        .map(|p| {
+            let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+            (p, stem)
+        })
+        .collect();
+    out.sort();
+    assert!(!out.is_empty(), "no .nsmp specimens in {}", dir.display());
+    out
+}
+
+fn read_sample(path: &PathBuf) -> Sample {
+    match nord_format::from_path(path).unwrap() {
+        Entity::Sample(s) => s,
+        other => panic!("{} decoded as {other:?}", path.display()),
+    }
+}
+
+/// Parse, checksum and byte-exact round trip across every specimen.
+///
+/// The section chain is required to land exactly on end of file, so this also proves
+/// every declared section length, and the checksum is verified on read.
+#[test]
+fn test_nsmp_round_trip() {
+    for (path, stem) in sample_specimens() {
+        let sample = read_sample(&path);
+        assert_eq!(sample.header.format, nord_format::common::sample::FORMAT);
+        assert_eq!(
+            sample.to_bytes(),
+            read(&path).unwrap(),
+            "{stem} did not round-trip byte-exactly"
+        );
+    }
+}
+
+/// Every stroke decomposes into its header plus whole packets.
+///
+/// A wrong header rule shows up here as a leftover remainder, on every specimen at once.
+#[test]
+fn test_nsmp_strokes_decompose() {
+    let mut seen = 0;
+    for (path, stem) in sample_specimens() {
+        let sample = read_sample(&path);
+        let zones = sample.zones().unwrap();
+        let strokes = sample.strokes().unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(
+            strokes.len(),
+            zones.len(),
+            "{stem}: {} zones but {} strokes",
+            zones.len(),
+            strokes.len()
+        );
+        seen += strokes.len();
+    }
+    assert!(
+        seen >= 30,
+        "only {seen} strokes walked; is the corpus stale?"
+    );
+}
+
+/// Zone key ranges match what the editor lays out from the root keys — **except where
+/// they were overridden by hand**, which is what `D7-upperkey` exists to demonstrate.
+///
+/// So the derivation is the editor's default, not a rule the format enforces: the top
+/// note really is stored, and a reader must take it as read rather than recompute it.
+#[test]
+fn test_nsmp_zone_ranges_are_the_editors_default_unless_overridden() {
+    use nord_format::common::sample::zone;
+
+    /// Specimens whose upper key was deliberately moved off the default.
+    const OVERRIDDEN: &[&str] = &["D7-upperkey"];
+
+    let mut checked = 0;
+    for (path, stem) in sample_specimens() {
+        let sample = read_sample(&path);
+        let roots: Vec<u8> = sample
+            .strokes()
+            .unwrap()
+            .iter()
+            .map(|s| s.root_key)
+            .collect();
+        let stored: Vec<u8> = sample.zones().unwrap().iter().map(|z| z.top_note).collect();
+        let derived = zone::derive_top_notes(&roots);
+
+        if OVERRIDDEN.contains(&stem.as_str()) {
+            assert_ne!(
+                stored, derived,
+                "{stem} is listed as hand-edited but matches the default layout"
+            );
+            continue;
+        }
+        assert_eq!(
+            stored, derived,
+            "{stem}: stored key ranges disagree with the ones its root keys {roots:?} imply"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 30,
+        "only {checked} specimens checked; is the corpus stale?"
+    );
+}
+
+/// The named multi-zone specimens, decoded field by field. The filename is the oracle.
+#[test]
+fn test_nsmp_named_specimens() {
+    let dir = corpus_dir().join("samples");
+    for (stem, name, roots, tops) in [
+        ("D1-one-zone", "TEST", vec![60u8], vec![84u8]),
+        ("E-name-14char", "D1-one-zone-C4", vec![60], vec![84]),
+        ("D2-rootkey-C3", "TEST", vec![48], vec![72]),
+        ("D3-2zones", "D3-2zones", vec![60, 48], vec![84, 53]),
+        ("D4-3zones", "D4-3zones", vec![72, 60, 48], vec![96, 65, 53]),
+        ("D8-2zones-hi", "D8-2zones-hi", vec![72, 60], vec![96, 65]),
+    ] {
+        let sample = read_sample(&dir.join(format!("{stem}.nsmp")));
+        assert_eq!(sample.name().unwrap(), name, "{stem}: name");
+        assert_eq!(sample.header.version, 200, "{stem}: content version");
+        assert_eq!(
+            sample
+                .strokes()
+                .unwrap()
+                .iter()
+                .map(|s| s.root_key)
+                .collect::<Vec<_>>(),
+            roots,
+            "{stem}: root keys"
+        );
+        assert_eq!(
+            sample
+                .zones()
+                .unwrap()
+                .iter()
+                .map(|z| z.top_note)
+                .collect::<Vec<_>>(),
+            tops,
+            "{stem}: zone top notes"
+        );
+    }
+}
+
+/// Rename and remap reproduce a specimen the editor itself wrote.
+///
+/// `D7-upperkey` is `D4-3zones` with the middle zone's upper key moved and a new name.
+/// Making the same two edits must give back the same bytes — which also pins that a
+/// remap leaves the encoded audio alone, and that the checksum is recomputed correctly.
+#[test]
+fn test_nsmp_edits_reproduce_the_editors_own_output() {
+    let dir = corpus_dir().join("samples");
+    let mut sample = read_sample(&dir.join("D4-3zones.nsmp"));
+
+    sample.set_name("D7-upperkey").unwrap();
+    sample.set_zone_top_note(1, 60).unwrap();
+
+    assert_eq!(
+        sample.to_bytes(),
+        read(dir.join("D7-upperkey.nsmp")).unwrap(),
+        "rename + remap did not reproduce the editor's own file"
+    );
+}
+
+/// Retuning a zone moves the root key and nothing else but the checksum.
+#[test]
+fn test_nsmp_retune_touches_one_byte() {
+    let dir = corpus_dir().join("samples");
+    let before = read(dir.join("D1-one-zone.nsmp")).unwrap();
+    let mut sample = read_sample(&dir.join("D1-one-zone.nsmp"));
+
+    sample.set_root_key(0, 48).unwrap();
+    let after = sample.to_bytes();
+
+    let differing: Vec<usize> = (0..before.len())
+        .filter(|&i| before[i] != after[i])
+        .collect();
+    // The checksum at 0x18..0x1c, plus the one root-key byte.
+    assert_eq!(differing.len(), 5, "changed bytes: {differing:?}");
+    assert!(differing[..4].iter().eq([0x18, 0x19, 0x1a, 0x1b].iter()));
+    assert_eq!(sample.strokes().unwrap()[0].root_key, 48);
+}
+
+/// A name longer than the writer is willing to emit is refused, not truncated.
+#[test]
+fn test_nsmp_overlong_name_is_refused() {
+    let dir = corpus_dir().join("samples");
+    let mut sample = read_sample(&dir.join("D1-one-zone.nsmp"));
+    assert!(sample.set_name("a name that is far too long").is_err());
+    assert_eq!(
+        sample.name().unwrap(),
+        "TEST",
+        "a refused rename still changed it"
+    );
+}
+
+/// A corrupted body is refused on read rather than decoded.
+#[test]
+fn test_nsmp_bad_checksum_is_refused() {
+    let mut bytes = read(corpus_dir().join("samples/D1-one-zone.nsmp")).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
 }
