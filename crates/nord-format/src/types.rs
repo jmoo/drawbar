@@ -216,6 +216,19 @@ impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
     }
 }
 
+impl<const X_MAX: u16, const Y_MAX: u16> Packed for RangedU16Pair<X_MAX, Y_MAX> {
+    const MAX_BITS: u32 = bits_for((X_MAX * Y_MAX + Y_MAX) as u64);
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        Self::from_u16(bits as u16)
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.as_u16() as u64
+    }
+}
+
 impl<const X: u16, const Y: u16> Debug for RangedU16Pair<X, Y> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {})", self.inner.0, self.inner.1)

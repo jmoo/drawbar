@@ -16,6 +16,7 @@
 //! test case — see `Projects/Nord Utils.md`.
 
 use nord_format::common::bank::Item;
+use nord_format::electro5::settings::LiveSlot;
 use nord_format::electro5::{
     EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Instrument, PianoCategory, Routing,
     SplitPoint,
@@ -503,6 +504,11 @@ fn test_ne5_settings_decode_to_their_filenames() {
         if name == "baseline" {
             continue;
         }
+        // The reboot specimens name no setting — they vary the instrument's selection
+        // state, which `test_ne5_settings_selection_decodes_to_their_filenames` asserts.
+        if name.starts_with("reboot-") {
+            continue;
+        }
         let key = oracle_key(&name);
 
         if let Some(sibling) = unmoved.get(key.as_str()) {
@@ -542,6 +548,84 @@ fn test_ne5_settings_decode_to_their_filenames() {
     );
 }
 
+/// Each reboot specimen decodes to the selection its filename names.
+///
+/// These are captured after a power cycle with no menu setting touched, so what the
+/// filename records is where the instrument was: `5_2` is program bank 5 slot 2, `live-2`
+/// is Live mode on LIVE 2. Locations are compared zero-based, as stored.
+///
+/// The Live slot and the program are each *retained* across a change of the other, which
+/// is why the `live-*` specimens all name program `5:2` and `program-5_3` still sits on
+/// LIVE 3 — expectations here follow capture order, not the filename alone.
+#[test]
+fn test_ne5_settings_selection_decodes_to_their_filenames() {
+    // (specimen, live mode, live slot, program (bank, slot))
+    const SELECTION_ORACLE: &[(&str, bool, LiveSlot, (u16, u16))] = &[
+        ("reboot-program-5_1", false, LiveSlot::Live1, (4, 0)),
+        ("reboot-program-5_2", false, LiveSlot::Live1, (4, 1)),
+        ("reboot-program-5_3", false, LiveSlot::Live3, (4, 2)),
+        ("reboot-live-1", true, LiveSlot::Live1, (4, 1)),
+        ("reboot-live-2", true, LiveSlot::Live2, (4, 1)),
+        ("reboot-live-3", true, LiveSlot::Live3, (4, 1)),
+        ("reboot-sus-connected-off", true, LiveSlot::Live3, (4, 1)),
+        ("reboot-sus-connected-on", true, LiveSlot::Live3, (4, 1)),
+        ("reboot-sus-disconnected", true, LiveSlot::Live3, (4, 1)),
+        ("reboot-ctrl-connected", true, LiveSlot::Live3, (4, 1)),
+        ("reboot-ctrl-disconnected", true, LiveSlot::Live3, (4, 1)),
+    ];
+
+    let dir = corpus_dir().join("settings");
+    for &(name, live_mode, live_slot, program) in SELECTION_ORACLE {
+        let selection = read_settings(&dir.join(format!("{name}.ne5s")))
+            .schema
+            .selection;
+        assert_eq!(selection.live_mode, live_mode, "live_mode in {name}");
+        assert_eq!(selection.live_slot, live_slot, "live_slot in {name}");
+        assert_eq!(selection.program.inner(), program, "program in {name}");
+        assert!(!selection.set_list_mode, "set_list_mode in {name}");
+    }
+
+    // Every pedal specimen was captured in the state `reboot-live-3` left behind, so a
+    // pedal moving any bit of the body would show up as a difference here.
+    let live3 = read(dir.join("reboot-live-3.ne5s")).unwrap();
+    for name in [
+        "reboot-sus-connected-off",
+        "reboot-sus-connected-on",
+        "reboot-sus-disconnected",
+        "reboot-ctrl-connected",
+        "reboot-ctrl-disconnected",
+    ] {
+        assert_eq!(
+            read(dir.join(format!("{name}.ne5s"))).unwrap(),
+            live3,
+            "{name} is no longer identical to reboot-live-3 — a pedal moved something, \
+             so the settings body does carry pedal state after all",
+        );
+    }
+}
+
+/// The set list song is the one selection field the sweep never moves, so the two
+/// specimens that do move it are what pin it.
+#[test]
+fn test_ne5_settings_set_list_song_decodes() {
+    let root = corpus_dir();
+    // Captured before the sweep, in set list mode.
+    let early = read_settings(&root.join("settings.ne5s")).schema.selection;
+    assert!(early.set_list_mode);
+    assert_eq!(early.song.inner(), (0, 1));
+    assert_eq!(early.program.inner(), (4, 21));
+
+    // The full backup. Its archive holds exactly two set lists, 1 and 3, and this is the
+    // only specimen pointing outside the first.
+    let backup = read_settings(
+        &root.join("usb/backup/full_backup/contents/Settings/Settings/Settings.ne5s"),
+    )
+    .schema
+    .selection;
+    assert!(!backup.set_list_mode);
+    assert_eq!(backup.song.inner(), (2, 3));
+}
+
 /// No settings file decodes to a value with no name.
 ///
 /// Every enumeration here is wider than the values named for it, so an unrecognized one
@@ -553,7 +637,15 @@ fn test_ne5_no_corpus_settings_hold_an_unrecognized_value() {
     let mut unknowns: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
 
     for path in ne5s_files(&corpus_dir()) {
-        for value in read_settings(&path).schema.panel.field_values() {
+        let schema = read_settings(&path).schema;
+        // Both panels over the body — the selection's `live_slot` can hold an
+        // unrecognized value too.
+        let values = schema
+            .panel
+            .field_values()
+            .into_iter()
+            .chain(schema.selection.field_values());
+        for value in values {
             if value.value.starts_with("unknown") {
                 unknowns
                     .entry(value.name.to_string())

@@ -9,19 +9,21 @@
 //! panel moves exactly the bits that setting's field claims, and nothing else. Where a
 //! field's *range* runs past the values the captures reach, the field says so.
 //!
-//! **Bits 0..=37 are unexplained.** They are not constant: three settings files captured
-//! outside the change-one-setting sweep disagree across bits 16, 19, 25, 27, 29, 31, 32
-//! and 35..=37, while every one of the 34 catalogued settings leaves them alone. Whatever
-//! they are, they survive a re-encode untouched.
+//! Bits 0..=15 are the schema version echoed into the body, which every `ne5` format
+//! carries at `0x2c` because the container header is not transmitted over USB — see
+//! [`crate::electro5::song`]. `ne5s` is version 0, so they read zero.
+//!
+//! Bits 16..=37 are not settings at all: they are where the instrument *was*, and they
+//! live in [`Selection`]. **Bit 18 is the only bit below the settings that no field
+//! claims.** It is clear in every specimen. Whatever it is, it survives a re-encode
+//! untouched, as does everything past the last setting.
 //!
 //! **Two catalogued settings have no home here.** Toggling *memory protect* and *local
-//! control* on the panel and re-reading the object moves no bit of the body, so neither is
-//! decoded. Bit 29 is the only bit in the body that moves without a field to explain it —
-//! it is set in every settings file captured before the sweep's second session and clear
-//! in every one after — but the memory-protect specimen pair does not move it, so naming
-//! it would be a guess.
+//! control* on the panel and re-reading the object moves no bit of the body, so neither
+//! is decoded.
 
 use crate::common::components::sparse_enum;
+use crate::electro5::{program, song};
 use crate::error::ParseError;
 use crate::types::RangedI8;
 use nord_bits_derive::bitpanel;
@@ -30,6 +32,19 @@ use std::fmt::{self, Debug, Display, Formatter};
 
 /// Length of the settings body block, `0x2c..=0x4d`.
 pub const BODY_LEN: usize = 0x4e - 0x2c;
+
+/// Write a settings body from the two panels that share it.
+///
+/// ⚠️ The threading is load-bearing. A panel re-encodes onto the bytes it was decoded
+/// from, so each carries a stale copy of the other's fields; feeding the settings'
+/// output through the selection's encode is what keeps both sets of edits. Encoding each
+/// from its own bytes and keeping either result silently reverts the other. The order
+/// only decides whose copy supplies the bits neither panel claims — the same bytes
+/// whenever both came from one decode.
+pub fn encode(settings: &SettingsPanel, selection: &Selection) -> [u8; BODY_LEN] {
+    let raw = <[u8; BODY_LEN]>::from(settings);
+    <[u8; BODY_LEN]>::from(&Selection { raw, ..*selection })
+}
 
 /// Half-step global transposition, `-6..=6`, stored biased by 6.
 pub type GlobalTranspose = RangedI8<6, -6, 6>;
@@ -124,6 +139,48 @@ pub struct SettingsPanel {
     pub rotary_rotor_acceleration: RotaryRate,
 }
 
+/// Where the instrument was, stored alongside the settings in the same body.
+///
+/// None of this appears in a menu and none of it is a setting: it is the panel state the
+/// instrument restores at power-up. Changing any of the 34 catalogued settings leaves
+/// every bit here alone, and a settings file written by a different capture session
+/// differs here and nowhere else.
+///
+/// Both locations are `bank * 50 + slot`, zero-based — the packing
+/// [`crate::electro5::song`] uses for its program references.
+///
+/// `live_slot` survives leaving Live mode and `program` survives entering it, so each
+/// holds the last selection of its kind rather than the current one.
+#[bitpanel(34)]
+#[derive(Clone, Copy)]
+pub struct Selection {
+    /// Inferred from specimens; not confirmed on hardware. One specimen holds it — the
+    /// one capture made in set list mode. The full backup moves `song` without it, so
+    /// the bit tracks the mode, not the song.
+    #[bits(16..=16)]
+    pub set_list_mode: bool,
+    #[bits(17..=17)]
+    pub live_mode: bool,
+    #[bits(19..=20)]
+    pub live_slot: LiveSlot,
+    #[bits(21..=29)]
+    pub program: program::Location,
+    /// Inferred from specimens; not confirmed on hardware. The sweep never leaves the
+    /// first slot, and the two files that do move it are a full backup and a capture
+    /// predating the sweep.
+    #[bits(30..=37)]
+    pub song: song::Location,
+}
+
+sparse_enum!(
+    /// Which of the three Live slots is selected.
+    LiveSlot, 2, {
+        0 => Live1, "live 1";
+        1 => Live2, "live 2";
+        2 => Live3, "live 3";
+    }
+);
+
 /// The instrument's menu a setting is shown under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Menu {
@@ -156,6 +213,14 @@ pub struct Setting {
 impl Default for SettingsPanel {
     fn default() -> Self {
         SettingsPanel::try_from([0; BODY_LEN]).expect("every settings field decodes totally")
+    }
+}
+
+/// As [`SettingsPanel`]: the decode of zeroed bytes, which is program `1:1` with Live and
+/// set list mode off.
+impl Default for Selection {
+    fn default() -> Self {
+        Selection::try_from([0; BODY_LEN]).expect("every selection field decodes totally")
     }
 }
 

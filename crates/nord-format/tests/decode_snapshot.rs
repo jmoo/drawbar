@@ -447,7 +447,13 @@ fn settings() {
     let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for path in &paths {
-        for row in packed(&read_settings(path).schema.panel) {
+        let settings = read_settings(path);
+        // Both panels over the body, so the selection state is recorded next to the
+        // menu settings rather than going unwatched.
+        let rows = packed(&settings.schema.panel)
+            .into_iter()
+            .chain(packed(&settings.schema.selection));
+        for row in rows {
             let raw = row.raw_str();
             if placements.insert(row.key.clone(), row.placement).is_none() {
                 order.push(row.key.clone());

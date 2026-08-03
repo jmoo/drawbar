@@ -6,10 +6,10 @@
 pub mod panel;
 
 pub use panel::{
-    B3TrigMode, CtrlPedalGain, CtrlPedalType, FineTune, GlobalTranspose, KeyClickLevel, Menu,
-    MidiChannel, MidiMessageMode, OutputRouting, PercDecay, PercVolume, ResonanceLevel,
-    RotaryBalance, RotaryCtrlType, RotaryPedalMode, RotaryRate, RotarySpeakerType, Setting,
-    SettingsPanel, SustainPedalMode, SustainPedalType, TonewheelMode, TransposeAt,
+    B3TrigMode, CtrlPedalGain, CtrlPedalType, FineTune, GlobalTranspose, KeyClickLevel, LiveSlot,
+    Menu, MidiChannel, MidiMessageMode, OutputRouting, PercDecay, PercVolume, ResonanceLevel,
+    RotaryBalance, RotaryCtrlType, RotaryPedalMode, RotaryRate, RotarySpeakerType, Selection,
+    Setting, SettingsPanel, SustainPedalMode, SustainPedalType, TonewheelMode, TransposeAt,
 };
 
 use crate::common;
@@ -43,11 +43,21 @@ pub struct Schema {
     #[bw(try_calc = w.checksum())]
     crc32: u32,
 
-    // 0x2c..0x4d
+    // 0x2c..0x4d. Two panels share these bytes: the menu settings and the instrument's
+    // selection state, interleaved rather than split (the set list song runs 30..=37 and
+    // the first setting starts at 38), so the body is read once and decoded twice.
     #[brw(big, pad_before = 16)]
-    #[br(try_map = |raw: [u8; BODY_LEN]| SettingsPanel::try_from(raw))]
-    #[bw(map = |p: &SettingsPanel| <[u8; BODY_LEN]>::from(p))]
+    #[br(temp)]
+    #[bw(calc = panel::encode(panel, selection))]
+    body: [u8; BODY_LEN],
+
+    #[br(try_calc = SettingsPanel::try_from(body))]
+    #[bw(ignore)]
     pub panel: SettingsPanel,
+
+    #[br(try_calc = Selection::try_from(body))]
+    #[bw(ignore)]
+    pub selection: Selection,
 }
 
 /// Electro 5 global settings (`ne5s`): the System, MIDI and Sound menus.
@@ -65,6 +75,7 @@ impl Settings {
             schema: Schema {
                 header: Header::new(1, FORMAT, (0, 0).try_into().unwrap()),
                 panel: SettingsPanel::default(),
+                selection: Selection::default(),
                 version: 0,
             },
         }
@@ -92,7 +103,7 @@ impl Settings {
 
     /// The settings body as stored, `0x2c..=0x4d`. Includes the bits no field claims.
     pub fn body(&self) -> [u8; BODY_LEN] {
-        <[u8; BODY_LEN]>::from(&self.schema.panel)
+        panel::encode(&self.schema.panel, &self.schema.selection)
     }
 }
 
@@ -129,13 +140,14 @@ mod tests {
     #[test]
     fn the_unclaimed_bits_survive_a_round_trip() {
         let mut settings = Settings::new();
-        // Bits 0..=37 are unexplained and belong to no field; 0x2e..0x30 is the middle of
-        // that run. A pattern there has to come back untouched.
+        // Bit 18 is the only bit inside the decoded run that belongs to no field — the
+        // third bit of `0x2e` — and `0x3e` onwards is past the last field, which ends at
+        // bit 141. Both have to come back untouched.
         let mut body = settings.body();
-        for (i, at) in [0x2e, 0x2f, 0x30].into_iter().enumerate() {
-            body[at - 0x2c] = [0x83, 0x74, 0x07][i];
-        }
+        body[0x2e - 0x2c] = 0x20;
+        body[0x3e - 0x2c] = 0x5a;
         settings.schema.panel = SettingsPanel::try_from(body).unwrap();
+        settings.schema.selection = Selection::try_from(body).unwrap();
 
         let mut bytes = Vec::new();
         settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
@@ -143,6 +155,27 @@ mod tests {
 
         let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
         assert_eq!(back.body(), body);
+    }
+
+    /// Both panels share the body, so editing one must not revert the other.
+    ///
+    /// Each carries a stale copy of the other's fields in the bytes it was decoded from;
+    /// this is what catches an encode that keeps only one panel's output instead of
+    /// threading it through the other's.
+    #[test]
+    fn the_two_panels_do_not_overwrite_each_other() {
+        let mut settings = Settings::new();
+        settings.schema.panel.b3_tonewheel_mode = TonewheelMode::Vintage3;
+        settings.schema.selection.live_mode = true;
+        settings.schema.selection.program = (4, 2).try_into().unwrap();
+
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
+
+        assert_eq!(back.schema.panel.b3_tonewheel_mode, TonewheelMode::Vintage3);
+        assert!(back.schema.selection.live_mode);
+        assert_eq!(back.schema.selection.program.inner(), (4, 2));
     }
 
     /// An unknown schema version is refused at read rather than decoded on a guess: a

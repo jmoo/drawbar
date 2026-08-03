@@ -124,11 +124,23 @@ macro_rules! sparse_enum {
         $name:ident, $bits:expr, { $($value:expr => $variant:ident, $label:expr;)+ }
     ) => {
         $(#[$meta])*
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub enum $name {
             $($variant,)+
             /// A stored value with no known meaning.
             Unknown(u8),
+        }
+
+        /// Named variants as their names; an unknown as `unknown (raw)`. ⚠️ The corpus
+        /// tripwires match the lowercase spelling — a derived `Unknown(raw)` slips past
+        /// them.
+        impl ::core::fmt::Debug for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                match self {
+                    $($name::$variant => f.write_str(stringify!($variant)),)+
+                    $name::Unknown(raw) => write!(f, "unknown ({raw})"),
+                }
+            }
         }
 
         impl $name {

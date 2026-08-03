@@ -162,6 +162,31 @@ SettingsPanel.rotary_rotor_acceleration
   raw     3    [0, 1, 2]
   decoded 3    [High, Low, Normal]
 
+Selection.set_list_mode
+  at      16..=16
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+Selection.live_mode
+  at      17..=17
+  raw     2    [0, 1]
+  decoded 2    [false, true]
+
+Selection.live_slot
+  at      19..=20
+  raw     3    [0, 1, 2]
+  decoded 3    [Live1, Live2, Live3]
+
+Selection.program
+  at      21..=29
+  raw     4    [200, 201, 202, 221]
+  decoded 4    [(4, 0), (4, 1), (4, 2), (4, 21)]
+
+Selection.song
+  at      30..=37
+  raw     3    [0, 1, 103]
+  decoded 3    [(0, 0), (0, 1), (2, 3)]
+
 === settings/baseline.ne5s
 SettingsPanel.rotary_ctrl_type               52..=53      raw 1      Open
 SettingsPanel.rotary_pedal_mode              54..=54      raw 1      Toggle

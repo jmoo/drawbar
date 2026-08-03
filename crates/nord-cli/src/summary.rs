@@ -430,6 +430,30 @@ pub fn print(ui: &Ui, entity: &Entity) {
         }
         Entity::Settings(Settings::Electro5(s)) => {
             ui.out(field(ui, 2, "type", "Electro 5 settings (ne5s)"));
+
+            // Not a menu — where the instrument was when the object was written. The
+            // Live slot and the program are each retained while the other is in use, so
+            // both are shown whichever mode is active.
+            let sel = &s.schema.selection;
+            section(ui, "Selection");
+            for (name, value) in [
+                ("program", location(sel.program.x(), sel.program.y())),
+                ("live mode", yn(sel.live_mode).to_string()),
+                ("live slot", sel.live_slot.to_string()),
+                ("set list mode", yn(sel.set_list_mode).to_string()),
+                // The hardware numbers set lists, not banks.
+                (
+                    "set list song",
+                    format!("list {} song {}", sel.song.x() + 1, sel.song.y() + 1),
+                ),
+            ] {
+                ui.out(format!(
+                    "    {}{}",
+                    ui.dim(format!("{name:<SETTING_WIDTH$}")),
+                    value,
+                ));
+            }
+
             // Grouped and ordered by the instrument's own menus, which is not the order
             // the fields sit in the file.
             for (menu, fields) in s.schema.panel.by_menu() {
