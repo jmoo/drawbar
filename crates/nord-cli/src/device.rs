@@ -797,7 +797,7 @@ pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
 }
 
 /// Thousands separators. A nine-digit byte count is otherwise counted by eye.
-fn grouped(n: u32) -> String {
+pub(crate) fn grouped(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -810,7 +810,7 @@ fn grouped(n: u32) -> String {
 }
 
 /// Rounded binary size, or `None` below a kibibyte where the byte count already reads.
-fn human_size(n: u32) -> Option<String> {
+pub(crate) fn human_size(n: u32) -> Option<String> {
     const UNITS: [&str; 3] = ["KiB", "MiB", "GiB"];
     if n < 1024 {
         return None;

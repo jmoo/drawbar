@@ -3,8 +3,9 @@
 //! Not a product; it exists to exercise the libraries and surface API friction.
 //!
 //! The nouns are the protocol's object classes: `nord program`, `nord setlist` and
-//! `nord live` are [`slot_action`] with the class fixed, and the hidden
-//! `nord raw --class N` is the same with the class given as a number.
+//! `nord live` are [`slot_action`] with the class fixed, `nord settings` carries the
+//! one verb its singleton needs (`edit`), and the hidden `nord raw --class N` is
+//! [`slot_action`] with the class given as a number.
 //! `inspect`/`verify` dispatch on the CBIN format tag rather than on a class, so they sit
 //! at the top level.
 //!
@@ -13,6 +14,7 @@
 
 mod device;
 mod edit;
+mod file;
 mod slot;
 mod summary;
 mod ui;
@@ -67,7 +69,7 @@ enum Command {
     },
 
     /// Programs on the instrument (object class 4). Slots are `BANK:SLOT`, as the
-    /// instrument displays them.
+    /// instrument displays them; the read-only verbs and `edit` take a file instead.
     Program {
         #[command(subcommand)]
         action: ProgramAction,
@@ -83,6 +85,13 @@ enum Command {
     Live {
         #[command(subcommand)]
         action: LiveAction,
+    },
+
+    /// The global settings singleton (object class 7): the System, MIDI and Sound
+    /// menus, plus the panel state the instrument restores at power-up.
+    Settings {
+        #[command(subcommand)]
+        action: SettingsAction,
     },
 
     /// The class-generic primitives, addressed by object-class number.
@@ -142,15 +151,43 @@ enum ProgramAction {
 ///
 /// The live buffer is the panel as it stands, not a library — there is nothing to name,
 /// nothing to delete, and `select` is what the *other* classes do to it. What is left is
-/// the read-only subset, spelled exactly as [`SlotAction`] spells it.
+/// the read-only subset, spelled exactly as [`SlotAction`] spells it, plus `edit`,
+/// whose output stops at a file.
 #[derive(Subcommand)]
 enum LiveAction {
-    /// Read a live slot off the instrument. Read-only.
+    #[command(flatten)]
+    Slot(LiveSlotAction),
+
+    /// Change fields inside a live slot, in a `.ne5l` file.
+    ///
+    /// The live buffer is the program body under another tag, so the fields are exactly
+    /// `nord program edit`'s. A slot target is read off the instrument but never
+    /// written back — the edit needs `-o`.
+    Edit(EditArgs),
+}
+
+/// `nord settings`: the instrument holds exactly one of these, so there is nothing to
+/// move, copy, name or delete, and `edit` is the whole verb set. The class-generic
+/// verbs remain reachable as `raw --class 7`.
+#[derive(Subcommand)]
+enum SettingsAction {
+    /// Change fields inside the global settings, in a `.ne5s` file.
+    ///
+    /// Fields are `panel.*` (the menu settings) and `selection.*` (the restored panel
+    /// state); `--fields` lists them. A slot target is read off the instrument but
+    /// never written back — the edit needs `-o`.
+    Edit(EditArgs),
+}
+
+/// The [`SlotAction`] verbs the live buffer keeps, spelled identically.
+#[derive(Subcommand)]
+enum LiveSlotAction {
+    /// Read a live slot off the instrument, or a `.ne5l` file. Read-only.
     ///
     /// Prints a summary by default; with `--out` writes the file instead.
     Get {
-        /// Slot to read: 1:1, 1:2 or 1:3.
-        #[arg(value_name = "BANK:SLOT")]
+        /// Slot to read: 1:1, 1:2 or 1:3 — or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
 
         /// Write the object to this file instead of printing a summary. With `--sweep`,
@@ -171,17 +208,18 @@ enum LiveAction {
         sweep: bool,
     },
 
-    /// Report everything the instrument knows about a live slot. Read-only.
+    /// Report everything the instrument knows about a live slot, or a `.ne5l` file's
+    /// header. Read-only.
     Info {
-        /// Slot to describe: 1:1, 1:2 or 1:3.
-        #[arg(value_name = "BANK:SLOT")]
+        /// Slot to describe: 1:1, 1:2 or 1:3 — or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 
     /// List the piano/sample library objects the live panel depends on. Read-only.
     Deps {
-        /// Slot to inspect: 1:1, 1:2 or 1:3.
-        #[arg(value_name = "BANK:SLOT")]
+        /// Slot to inspect: 1:1, 1:2 or 1:3 — or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 }
@@ -189,12 +227,12 @@ enum LiveAction {
 /// The verb vocabulary, identical for every object class.
 #[derive(Subcommand)]
 enum SlotAction {
-    /// Read an object off the instrument. Read-only.
+    /// Read an object off the instrument, or from a file. Read-only.
     ///
     /// Prints a summary by default; with `--out` writes the file instead.
     Get {
-        /// Slot to read, e.g. 7:4.
-        #[arg(value_name = "BANK:SLOT")]
+        /// Slot to read, e.g. 7:4, or a file to read with no instrument attached.
+        #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
 
         /// Write the object to this file instead of printing a summary. With `--sweep`,
@@ -204,7 +242,7 @@ enum SlotAction {
 
         /// Save the wire body verbatim instead of wrapping it in a CBIN header. For
         /// classes whose header layout is not yet known, where wrapping it would
-        /// fabricate a wrong file. Needs `--out`.
+        /// fabricate a wrong file. On a file, strips the header instead. Needs `--out`.
         #[arg(long)]
         body: bool,
 
@@ -290,29 +328,34 @@ enum SlotAction {
         at: String,
     },
 
-    /// Report everything the instrument knows about one slot. Read-only.
+    /// Report everything the instrument knows about one slot, or a file's header.
+    /// Read-only.
     ///
     /// Shows the fields the CBIN header carries but the wire never transmits — format
     /// tag, version, CRC-32 — plus the slot name, which no file stores at all.
     Info {
-        /// Slot to describe, e.g. 7:4.
-        #[arg(value_name = "BANK:SLOT")]
+        /// Slot to describe, e.g. 7:4, or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 
     /// List the piano/sample library objects an entity depends on. Read-only.
+    ///
+    /// A file yields the stored ids alone; the slot form asks the instrument, which
+    /// attaches the names.
     Deps {
-        /// Slot to inspect, e.g. 7:3.
-        #[arg(value_name = "BANK:SLOT")]
+        /// Slot to inspect, e.g. 7:3, or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 }
 
 #[derive(Args)]
 pub struct EditArgs {
-    /// A `.ne5p` file, or a slot on the instrument (`7:4`). A slot makes this a
+    /// A file (`.ne5p` under `nord program`, `.ne5l` under `nord live`, `.ne5s` under
+    /// `nord settings`), or a slot on the instrument (`7:4`). A slot makes this a
     /// read-modify-write over USB, so it is a mutation and obeys `--yes`. Omit it to
-    /// start from a fresh default program, which then needs `-o`.
+    /// start from a fresh default, which then needs `-o`.
     #[arg(
         value_name = "FILE|BANK:SLOT",
         required_unless_present_any = ["fields", "out"],
@@ -328,11 +371,11 @@ pub struct EditArgs {
     pub dry_run: bool,
 
     /// List every settable field with its placement and current value, then exit. With
-    /// no target, lists the fields of a default program.
+    /// no target, lists the fields of a fresh default.
     #[arg(long)]
     pub fields: bool,
 
-    /// Write the edited program here instead of over the input file.
+    /// Write the edit here instead of over the input file.
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
@@ -360,10 +403,16 @@ fn main() -> ExitCode {
         },
         Command::Program { action } => match action {
             ProgramAction::Slot(action) => slot_action(&ui, action, ObjectClass::Program),
-            ProgramAction::Edit(args) => edit::run(&ui, args),
+            ProgramAction::Edit(args) => edit::run(&ui, args, ObjectClass::Program),
         },
         Command::Setlist { action } => slot_action(&ui, action, ObjectClass::SetList),
-        Command::Live { action } => slot_action(&ui, action.into(), ObjectClass::Live),
+        Command::Live { action } => match action {
+            LiveAction::Slot(action) => slot_action(&ui, action.into(), ObjectClass::Live),
+            LiveAction::Edit(args) => edit::run(&ui, args, ObjectClass::Live),
+        },
+        Command::Settings { action } => match action {
+            SettingsAction::Edit(args) => edit::run(&ui, args, ObjectClass::Settings),
+        },
         Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::from_raw(class)),
     };
 
@@ -376,10 +425,10 @@ fn main() -> ExitCode {
     }
 }
 
-impl From<LiveAction> for SlotAction {
-    fn from(action: LiveAction) -> SlotAction {
+impl From<LiveSlotAction> for SlotAction {
+    fn from(action: LiveSlotAction) -> SlotAction {
         match action {
-            LiveAction::Get {
+            LiveSlotAction::Get {
                 at,
                 out,
                 body,
@@ -390,13 +439,16 @@ impl From<LiveAction> for SlotAction {
                 body,
                 sweep,
             },
-            LiveAction::Info { at } => SlotAction::Info { at },
-            LiveAction::Deps { at } => SlotAction::Deps { at },
+            LiveSlotAction::Info { at } => SlotAction::Info { at },
+            LiveSlotAction::Deps { at } => SlotAction::Deps { at },
         }
     }
 }
 
 /// Dispatch one verb against a fixed object class, whichever noun asked for it.
+///
+/// The read-only verbs take a file as well as a slot ([`slot::Target`]); the rest name
+/// device storage, which no file stands in for.
 fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), String> {
     match action {
         SlotAction::Get {
@@ -404,14 +456,18 @@ fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), St
             out,
             body,
             sweep,
-        } => {
-            let at = slot::parse(&at)?;
-            match (sweep, out) {
+        } => match slot::target(&at)? {
+            slot::Target::File(path) if sweep => Err(format!(
+                "--sweep re-reads the instrument as the panel changes; {} has only one state",
+                path.display()
+            )),
+            slot::Target::File(path) => file::get(ui, &path, out, class, body),
+            slot::Target::Slot(at) => match (sweep, out) {
                 (true, Some(dir)) => device::sweep(ui, at, dir, class, body),
                 (true, None) => Err("--sweep fills a directory; give -o a path".into()),
                 (false, out) => device::get(ui, at, out, class, body),
-            }
-        }
+            },
+        },
         SlotAction::Put { file, at, yes } => device::put(ui, file, slot::parse(&at)?, class, yes),
         SlotAction::Move { from, to, yes } => {
             device::move_object(ui, slot::parse(&from)?, slot::parse(&to)?, class, yes)
@@ -426,8 +482,14 @@ fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), St
             device::delete(ui, &slot::parse_all(&slots)?, class, yes)
         }
         SlotAction::Select { at } => device::select(ui, slot::parse(&at)?, class),
-        SlotAction::Info { at } => device::slot_info(ui, slot::parse(&at)?, class),
-        SlotAction::Deps { at } => device::deps(ui, slot::parse(&at)?, class),
+        SlotAction::Info { at } => match slot::target(&at)? {
+            slot::Target::File(path) => file::info(ui, &path, class),
+            slot::Target::Slot(at) => device::slot_info(ui, at, class),
+        },
+        SlotAction::Deps { at } => match slot::target(&at)? {
+            slot::Target::File(path) => file::deps(ui, &path, class),
+            slot::Target::Slot(at) => device::deps(ui, at, class),
+        },
     }
 }
 

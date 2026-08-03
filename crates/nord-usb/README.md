@@ -48,8 +48,8 @@ Two things that cost real time and are worth knowing up front:
   argument by four bytes and hides device error codes.
 - **Operations are primitives parameterised by an object class**, not per-type
   opcodes. `SESSION_OPEN` carries the class (1 piano, 3 sample, 4 program, 5 set
-  list) and the same `rename` / `move` / `delete` / `copy` commands then apply to
-  whichever it is.
+  list, 6 live, 7 settings) and the same `rename` / `move` / `delete` / `copy`
+  commands then apply to whichever it is.
 
 ## Usage
 
@@ -132,8 +132,11 @@ The Nix build enables it via `[package.metadata.nix] testFeatures` in `Cargo.tom
 > pre-1.0. Do not point it at a Nord device you care about.
 
 The wire protocol is decoded and validated. Implemented and hardware-verified on
-macOS: inventory, object info, dependencies, program read/write, and the slot
-organisation set (move, delete, rename, duplicate, select).
+macOS: inventory, object info, dependencies, program read/write, the slot
+organisation set (move, delete, rename, duplicate, select), and reads of the
+live slots (class 6) and the settings singleton (class 7). Writes of those two
+classes are unproven — whether either survives the delete-then-write sequence is
+unconfirmed on hardware, so nothing here has attempted one.
 
 The WebUSB backend is hardware-verified for the read-only path (Chrome on macOS:
 inventory and object info, via `nord-web-demo`); its writes and multi-chunk bulk

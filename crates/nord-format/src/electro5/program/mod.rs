@@ -121,7 +121,7 @@ pub struct Field {
 ///
 /// `field_specs` and `field_values` are emitted in declaration order and describe the
 /// same fields, so the positional zip is sound — see `nord_bits_derive`.
-fn describe<P: Panel>(prefix: &str, panel: &P) -> Vec<Field> {
+pub(crate) fn describe<P: Panel>(prefix: &str, panel: &P) -> Vec<Field> {
     P::field_specs()
         .into_iter()
         .zip(panel.field_values())

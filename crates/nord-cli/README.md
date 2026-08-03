@@ -26,18 +26,25 @@ Expect large changes to this tool over time while I develop the libraries.
 | `device` | The instrument itself — what is on the bus, and what it holds |
 | `program` | Programs on the instrument (object class 4) |
 | `setlist` | Set lists on the instrument (object class 5) |
+| `live` | The three Live slots (object class 6) |
+| `settings` | The global settings singleton (object class 7) |
 | `raw` | Hidden: the same verbs, addressed by class number |
 
-`inspect` and `verify` work on files. Everything else talks to an attached
-instrument, and the nouns are the protocol's object classes. `program` and
-`setlist` share one verb vocabulary:
+`inspect` and `verify` work on files. The other nouns are the protocol's object
+classes, and normally talk to an attached instrument — but the read-only verbs
+(`get`, `info`, `deps`) and `edit` also take a file in place of a slot. `program`
+and `setlist` share one verb vocabulary:
 
 ```
 get put            transfer
 move rename duplicate delete select   organisation
 info deps          interrogation
-edit               content (programs only, for now)
+edit               content (program, live, settings)
 ```
+
+`live` keeps only the read-only subset plus `edit` — the live buffer is the panel
+as it stands, so there is nothing to name, delete, or select. `settings` is a
+singleton with nothing to organise at all, so `edit` is its whole verb set.
 
 `nord raw --class N` is those same verbs with the class given as a number. It is
 how to reach a class that has no noun of its own — pianos are class 1, samples
@@ -111,8 +118,26 @@ preset 1 is the bass manual, whose two drawbars live outside the nine-nibble
 block. It renders as `04.......` rather than nine positions, since the nine
 nibbles hold stale values in that mode.
 
-Songs list their four program slots; settings print the raw body (field decode is
-still pending); bundles need the `bundle` feature (enabled here) to open.
+Songs list their four program slots; settings print the decoded System, MIDI and
+Sound menus plus the selection the instrument restores at power-up; bundles need
+the `bundle` feature (enabled here) to open.
+
+### The slot verbs on a file
+
+`get`, `info` and `deps` take a file wherever they take a `BANK:SLOT`, so a file
+already on disk can be read with no instrument attached:
+
+```sh
+nord program get patch.ne5p             # the same summary the slot form prints
+nord program get patch.ne5p --body -o patch.body   # strip the CBIN header
+nord program info patch.ne5p            # the header: format tag, version, crc32
+nord program deps patch.ne5p            # stored library ids
+```
+
+A path that exists wins over a slot reading, so a file named `7:4` is still a
+file. What a file does not carry is reported as living on the instrument rather
+than guessed at: files store no slot name, and `deps` on a file prints ids only —
+the slot form asks the instrument, which attaches the names.
 
 ### `verify`
 
@@ -193,9 +218,12 @@ instrument refuses to overwrite in place. `nord` reads the occupant first and
 puts it back if the write fails; if the restore fails too, the bytes are written
 to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
 
-## Editing a program
+## Editing an object
 
-`nord program edit` is the only verb that changes what is *inside* an object. Its
+`edit` is the only verb that changes what is *inside* an object, and it exists on
+three nouns: `nord program edit`, `nord live edit` (the live buffer is the
+program body under another tag, so the fields are identical), and `nord settings
+edit` (`panel.*` for the menus, `selection.*` for the restored panel state). Its
 field paths are `nord-format`'s own names, generated from the panel declarations,
 so `--fields` lists whatever the library currently knows:
 
@@ -210,6 +238,11 @@ nord program edit --set center_panel.gain=64 -o blank.ne5p             # a fresh
 A file and a slot are the same command; the slot form is a read-modify-write over
 USB, so it asks before writing. Editing a file in place asks too — pass `-o` to
 write somewhere else instead.
+
+For `live` and `settings` the slot form reads off the instrument but **refuses to
+write back**: writing is a delete followed by a write, and whether the live
+buffer or the settings singleton survives that is unconfirmed on hardware. An
+edited slot of either class stops at a file, via `-o`.
 
 **A value is spelled the way `nord inspect` and `--fields` print it**, and one
 the field cannot hold is rejected before anything is written:

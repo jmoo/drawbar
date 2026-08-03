@@ -15,7 +15,8 @@ CLI) without dragging in a transport stack.
 |---|:--:|:--:|---|
 | `ne5p` program | ✅ | ✅ | Center / piano / sample / FX / EQ panels ✅. **Organ**: drawbars, preset, vibrato/chorus (all models) and B3 percussion ✅ — B3-bass & Farfisa drawbar *display* transforms still pending. |
 | `ne5t` song / set | ✅ | ✅ | ✅ (four program slots) |
-| `ne5s` settings | ✅ | ✅ | Raw body only — round-trips byte-exact; field decode is pending a specimen corpus (the System/MIDI/Sound catalog is documented on `electro5::settings::Settings`). |
+| `ne5l` live slot | ✅ | ✅ | Same as `ne5p` — the live buffer is the program body under another tag (confirmed on hardware), so it shares the program schema in the three live slots. |
+| `ne5s` settings | ✅ | ✅ | System / MIDI / Sound menus plus the power-up selection ✅ — 32 of the 34 catalogued settings are pinned by a change-one-setting hardware sweep; memory protect and local control move no bit of the body and stay undecoded. |
 | `npno` piano / `nsmp` sample | ✅ (header) | ⬜ header only | Only the header is parsed and re-emitted, so a full library file does **not** round-trip yet — `nord verify` on one reports the truncation. |
 | backup bundle (ZIP) | ✅ | — | Partial; behind the `bundle` feature. |
 
@@ -87,8 +88,8 @@ The goal now is to finish reverse engineering ne5 files, add support for more mo
 ## Current State
 
 Messy and incomplete but solid for reading and writing electro 5 files due to lossless round trips and large test corpus.
-Nord Electro 5 Program and Song files are nearly 100% solved for the file versions I've encountered, and the library safely errors when
-encountering unexpected files or versions. Settings, bundles, backups, live, piano, and sample files are still incomplete.
+Nord Electro 5 Program, Song, Live and Settings files are nearly 100% solved for the file versions I've encountered, and the library safely errors when
+encountering unexpected files or versions. Bundles, backups, piano, and sample files are still incomplete.
 
 Expect refactoring, API changes, and other misc changes until a stable version is released. I would also like to support
 more nord models, but will not work on those until I'm 100% satisfied with the Electro 5 support.

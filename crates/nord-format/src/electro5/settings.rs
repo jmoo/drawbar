@@ -14,7 +14,9 @@ pub use panel::{
 
 use crate::common;
 use crate::crc::{CrcReader, CrcWriter};
+use crate::electro5::program;
 use crate::error::{Error, ParseError};
+use crate::panel::{FieldError, Panel};
 use crate::types::RangedU16Pair;
 use binrw::{binrw, BinRead, BinWriterExt};
 use panel::BODY_LEN;
@@ -58,6 +60,33 @@ pub struct Schema {
     #[br(try_calc = Selection::try_from(body))]
     #[bw(ignore)]
     pub selection: Selection,
+}
+
+impl Schema {
+    /// Every settable field, menu panel then selection, in declaration order.
+    pub fn fields(&self) -> Vec<program::Field> {
+        let mut out = program::describe("panel", &self.panel);
+        out.extend(program::describe("selection", &self.selection));
+        out
+    }
+
+    /// Set one field, addressed as `panel.field` or `selection.field`.
+    pub fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError> {
+        let (member, field) = path
+            .split_once('.')
+            .ok_or_else(|| FieldError::UnknownField {
+                panel: "settings",
+                name: path.to_string(),
+            })?;
+        match member {
+            "panel" => self.panel.set_field(field, value),
+            "selection" => self.selection.set_field(field, value),
+            other => Err(FieldError::UnknownField {
+                panel: "settings",
+                name: other.to_string(),
+            }),
+        }
+    }
 }
 
 /// Electro 5 global settings (`ne5s`): the System, MIDI and Sound menus.
@@ -176,6 +205,38 @@ mod tests {
         assert_eq!(back.schema.panel.b3_tonewheel_mode, TonewheelMode::Vintage3);
         assert!(back.schema.selection.live_mode);
         assert_eq!(back.schema.selection.program.inner(), (4, 2));
+    }
+
+    /// Fields are addressed the way `--set` spells them, and both members answer.
+    #[test]
+    fn fields_are_set_through_schema_paths() {
+        let mut settings = Settings::new();
+        settings
+            .schema
+            .set_field("panel.global_transpose", "+3")
+            .unwrap();
+        settings
+            .schema
+            .set_field("selection.live_mode", "on")
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        let back = Settings::read_from(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(back.schema.panel.global_transpose.inner(), 3);
+        assert!(back.schema.selection.live_mode);
+
+        let paths: Vec<String> = settings
+            .schema
+            .fields()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert!(paths.contains(&"panel.global_transpose".to_string()));
+        assert!(paths.contains(&"selection.program".to_string()));
+
+        assert!(settings.schema.set_field("panel.no_such", "1").is_err());
+        assert!(settings.schema.set_field("global_transpose", "1").is_err());
     }
 
     /// An unknown schema version is refused at read rather than decoded on a guess: a

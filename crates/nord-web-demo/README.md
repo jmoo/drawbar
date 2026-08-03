@@ -4,9 +4,10 @@ A browser page that drives [`nord-usb`](../nord-usb)'s WebUSB backend against a 
 instrument. It exists to answer one question: **does the WebUSB transport work on
 hardware?** Nothing in it is a product.
 
-> [!CAUTION]
-> The WebUSB transport has never been run against an instrument. This page is the
-> first attempt.
+> [!NOTE]
+> This page has verified the read-only path on hardware (Chrome on macOS:
+> inventory and object info). Writes and multi-chunk bulk reads remain
+> unexercised over WebUSB.
 
 **Read-only by construction.** The page runs `op::inventory` and, if you name a slot,
 `op::info`. It never escalates a session to `ReadWrite`, so no delete/move/rename/write
