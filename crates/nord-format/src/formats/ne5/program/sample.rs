@@ -1,6 +1,6 @@
 //! The sample panel.
 
-use crate::electro5::Level;
+use crate::formats::ne5::Level;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 

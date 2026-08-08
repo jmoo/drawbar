@@ -68,7 +68,7 @@ impl Service {
 ///
 /// The response is always the request `+1`, so only the request code is named. Codes are
 /// what the device actually sent — not guesses. Most requests happen to be even;
-/// [`SELECT`] is the counter-example, so do not treat parity as meaning anything.
+/// [`cmd::SELECT`] is the counter-example, so do not treat parity as meaning anything.
 pub mod cmd {
     /// Open the transaction (the `O22 I26` that starts every operation).
     pub const SESSION_OPEN: u32 = 0x04;
@@ -117,8 +117,8 @@ pub mod cmd {
 /// and the progress strings NSM paints on the **instrument's own display** during a
 /// transfer.
 ///
-/// The progress messages ([`label`], [`percent`]) are **fire-and-forget** — the device
-/// never replies. They must be sent with [`crate::Session::notify`], never `request`,
+/// The progress messages ([`ui::label`], [`ui::percent`]) are **fire-and-forget** — the
+/// device never replies. They must be sent with `Session::notify`, never `request`,
 /// which would block forever waiting for a response that never comes.
 pub mod ui {
     use super::{Message, Service};

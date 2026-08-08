@@ -1,6 +1,10 @@
-//! The global settings panel, `0x2c..=0x4d`.
+//! The Electro 5 global settings format (`.ne5s`).
 //!
-//! 34 bytes holding the instrument's System, MIDI and Sound menus. Fields run from bit 38
+//! Reads top-down: the format's constants, the read that pairs a header with
+//! [`Settings`], then the body itself — the 34 bytes after the header, one flat
+//! `#[bitbody]`. A file is a `Cbin<Settings>`, which derefs to the body.
+//!
+//! The body holds the instrument's System, MIDI and Sound menus. Fields run from bit 38
 //! to bit 141 in no particular menu order — the MIDI channels sit between two System
 //! settings — so the declaration below is grouped the way the instrument's menus are and
 //! the placements do the reordering.
@@ -11,7 +15,7 @@
 //!
 //! Bits 0..=15 are the schema version echoed into the body, which every `ne5` format
 //! carries at `0x2c` because the container header is not transmitted over USB — see
-//! [`crate::electro5::song`]. `ne5s` is version 0, so they read zero.
+//! [`crate::formats::ne5::song`]. `ne5s` is version 0, so they read zero.
 //!
 //! Bits 16..=37 are the `startup_*` settings below — the selections the instrument
 //! restores at power-up. **Bit 18 is the only bit below the menu settings that no
@@ -22,16 +26,50 @@
 //! control* on the panel and re-reading the object moves no bit of the body, so neither
 //! is decoded.
 
-use crate::common::components::sparse_enum;
-use crate::electro5::{program, song};
-use crate::error::ParseError;
+use crate::cbin::{self, Cbin, Header};
+use crate::components::sparse_enum;
+use crate::error::{Error, ParseError};
+use crate::formats::ne5::{program, song};
 use crate::types::RangedI8;
 use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Debug, Display, Formatter};
+use std::io::{Read, Seek};
 
+pub const FORMAT: &str = "ne5s";
+/// Schema versions validated against the corpus. Every corpus settings file reports 0.
+pub const KNOWN_VERSIONS: &[u32] = &[0];
 /// Length of the settings body block, `0x2c..=0x4d`.
 pub const BODY_LEN: usize = 0x4e - 0x2c;
+/// Type-1 file length: 44-byte CBIN header + 34-byte body.
+pub const FILE_LEN: usize = 0x2c + BODY_LEN;
+
+/// A default settings file.
+///
+/// There is no slot to speak of: the instrument holds exactly one of these, and every
+/// specimen addresses it to bank 0 slot 0.
+pub fn new() -> Cbin<Settings> {
+    Cbin {
+        header: Header::new(FORMAT, (0, 0), 0),
+        body: Settings::default(),
+    }
+}
+
+pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Settings>, Error> {
+    let file: Cbin<Settings> = cbin::read(reader, FORMAT)?;
+    program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
+    program::unset_aux(FORMAT, &file.header)?;
+    // The instrument holds exactly one settings file, so the location field has
+    // nothing to address; every specimen holds bank 0 slot 0.
+    let (bank, slot) = file.header.slot();
+    if (bank, slot) != (0, 0) {
+        return Err(ParseError::AssertFail(format!(
+            "{FORMAT}: location is {bank} {slot}, and settings live at 0 0"
+        ))
+        .into());
+    }
+    Ok(file)
+}
 
 /// Half-step global transposition, `-6..=6`, stored biased by 6.
 pub type GlobalTranspose = RangedI8<6, -6, 6>;
@@ -136,7 +174,7 @@ pub struct Settings {
     // session differs here and nowhere else.
     //
     // Both locations are `bank * 50 + slot`, zero-based — the packing
-    // [`crate::electro5::song`] uses for its program references.
+    // [`crate::formats::ne5::song`] uses for its program references.
     //
     // `startup_live_slot` survives leaving Live mode and `startup_program` survives
     // entering it, so each holds the last selection of its kind rather than the
@@ -213,9 +251,9 @@ impl Settings {
     /// order — which is neither declaration order nor the order they sit in the file.
     ///
     /// ⚠️ These renderings are for reading, not for feeding back: `Display` is the panel's
-    /// wording, while [`crate::panel::Panel::set_field`] parses a field's `Debug`. A test
-    /// holds the list to the panel's own field names, so a field added to
-    /// [`Settings`] and not placed in a menu fails there.
+    /// wording, while [`Settings::set_field`] parses a field's `Debug`. A test holds the
+    /// list to the panel's own field names, so a field added to [`Settings`] and not
+    /// placed in a menu fails there.
     pub fn by_menu(&self) -> Vec<(Menu, Vec<Setting>)> {
         let at = |name, value: String| Setting { name, value };
         vec![
@@ -581,6 +619,7 @@ mod tests {
     use super::*;
     use crate::bits::Packed;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::io::Cursor;
 
     /// Body-relative index of the byte at absolute Electro 5 file offset `abs`.
     const fn body(abs: usize) -> usize {
@@ -594,6 +633,53 @@ mod tests {
             raw[body(at)] = b;
         }
         Settings::try_from(raw).expect("every settings field decodes totally")
+    }
+
+    #[test]
+    fn settings_round_trip_at_the_declared_length() {
+        let settings = new();
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(bytes.len(), FILE_LEN);
+        assert_eq!(&bytes[0x08..0x0c], FORMAT.as_bytes());
+
+        let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
+        let mut again = Vec::new();
+        back.write_to(&mut Cursor::new(&mut again)).unwrap();
+        assert_eq!(bytes, again);
+    }
+
+    /// There is one settings file per instrument, so a file claiming a slot is not
+    /// one of them.
+    #[test]
+    fn a_settings_file_addressed_to_a_slot_is_refused() {
+        let mut settings = new();
+        settings.header.set_slot((1, 0));
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+
+        let err = read_from(&mut Cursor::new(&bytes))
+            .expect_err("a located settings file must not decode");
+        assert!(
+            matches!(err, Error::Parse(ParseError::AssertFail(_))),
+            "refused for the wrong reason: {err}",
+        );
+    }
+
+    #[test]
+    fn a_settings_field_set_by_name_survives_a_round_trip() {
+        let mut settings = new();
+        settings.set_field("global_transpose", "-3").unwrap();
+
+        let mut bytes = Vec::new();
+        settings.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
+        let listed = back
+            .fields()
+            .into_iter()
+            .find(|f| f.path == "global_transpose")
+            .expect("declared");
+        assert_eq!(listed.display, "-3");
     }
 
     /// Every declared menu field belongs to exactly one menu, and every menu names

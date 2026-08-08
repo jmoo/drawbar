@@ -11,9 +11,9 @@
 use std::path::Path;
 
 use nord_format::cbin::Cbin;
-use nord_format::electro5;
-use nord_format::electro5::program::Field;
-use nord_format::panel::FieldError;
+use nord_format::fields::FieldError;
+use nord_format::formats::ne5;
+use nord_format::formats::ne5::program::Field;
 use nord_format::{Entity, Live, Program, Settings};
 use nord_usb::ObjectClass;
 
@@ -28,7 +28,7 @@ trait Editable {
     fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError>;
 }
 
-impl Editable for Cbin<electro5::Program> {
+impl Editable for Cbin<ne5::Program> {
     fn fields(&self) -> Vec<Field> {
         self.body.fields()
     }
@@ -37,7 +37,7 @@ impl Editable for Cbin<electro5::Program> {
     }
 }
 
-impl Editable for Cbin<electro5::Settings> {
+impl Editable for Cbin<ne5::Settings> {
     fn fields(&self) -> Vec<Field> {
         self.body.fields()
     }
@@ -124,13 +124,13 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
 /// target-less `-o` starts from.
 fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
     let entity = match class {
-        ObjectClass::Program => Entity::Program(Program::Electro5(electro5::program::new(
+        ObjectClass::Program => Entity::Program(Program::Electro5(ne5::program::new(
             (0, 0).try_into().map_err(|e| format!("{e}"))?,
         ))),
-        ObjectClass::Live => Entity::Live(Live::Electro5(electro5::live::new(
+        ObjectClass::Live => Entity::Live(Live::Electro5(ne5::live::new(
             (0, 0).try_into().map_err(|e| format!("{e}"))?,
         ))),
-        ObjectClass::Settings => Entity::Settings(Settings::Electro5(electro5::settings::new())),
+        ObjectClass::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
         other => return Err(format!("edit does not exist for {}", other.label())),
     };
     nord_format::to_bytes(&entity).map_err(|e| e.to_string())
@@ -221,11 +221,7 @@ fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
 /// Echo every field whose value moved, before and after.
 ///
 /// Display lives on the value, so this prints exactly what `nord inspect` would.
-fn report_changes(
-    ui: &Ui,
-    before: &[electro5::program::Field],
-    after: &[electro5::program::Field],
-) -> usize {
+fn report_changes(ui: &Ui, before: &[ne5::program::Field], after: &[ne5::program::Field]) -> usize {
     let mut changed = 0;
     for (b, a) in before.iter().zip(after) {
         if b.display == a.display {
@@ -319,19 +315,17 @@ mod tests {
     /// to one that has no `edit` at all.
     #[test]
     fn a_mismatched_target_steers_to_the_noun_that_edits_it() {
-        let live = Entity::Live(Live::Electro5(electro5::live::new(
-            (0, 0).try_into().unwrap(),
-        )));
+        let live = Entity::Live(Live::Electro5(ne5::live::new((0, 0).try_into().unwrap())));
         let err = mismatch(&live, ObjectClass::Program);
         assert!(err.contains("nord live edit"), "{err}");
 
-        let program = Entity::Program(Program::Electro5(electro5::program::new(
+        let program = Entity::Program(Program::Electro5(ne5::program::new(
             (0, 0).try_into().unwrap(),
         )));
         let err = mismatch(&program, ObjectClass::Live);
         assert!(err.contains("nord program edit"), "{err}");
 
-        let settings = Entity::Settings(Settings::Electro5(electro5::settings::new()));
+        let settings = Entity::Settings(Settings::Electro5(ne5::settings::new()));
         let err = mismatch(&settings, ObjectClass::Program);
         assert!(err.contains("nord settings edit"), "{err}");
 

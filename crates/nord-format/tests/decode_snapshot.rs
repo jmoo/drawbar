@@ -25,9 +25,10 @@
 //! ```
 
 use nord_format::cbin::Cbin;
-use nord_format::electro5::program::OrganPanel;
-use nord_format::electro5::{OrganModel, Program};
-use nord_format::{electro5, Entity};
+use nord_format::formats::ne5;
+use nord_format::formats::ne5::program::OrganPanel;
+use nord_format::formats::ne5::{OrganModel, Program};
+use nord_format::Entity;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -93,7 +94,7 @@ impl Row {
 /// One `#[bitbody]` registry's fields, in declaration order, keyed by `prefix`
 /// plus the field's own path (which a nested body has already qualified with its
 /// own name).
-fn packed(prefix: &str, values: Vec<nord_format::panel::FieldValue>) -> Vec<Row> {
+fn packed(prefix: &str, values: Vec<nord_format::fields::FieldValue>) -> Vec<Row> {
     values
         .into_iter()
         .map(|f| {
@@ -423,7 +424,7 @@ fn all_settings(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn read_settings(path: &Path) -> Cbin<electro5::Settings> {
+fn read_settings(path: &Path) -> Cbin<ne5::Settings> {
     match nord_format::from_path(path)
         .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()))
     {

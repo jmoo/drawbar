@@ -4,9 +4,10 @@
 //! has to work.
 
 use nord_format::cbin::Cbin;
-use nord_format::common::sample::{stroke, Sample};
-use nord_format::electro5::{Instrument, OrganModel};
-use nord_format::{electro5, Entity, Live, Program, Settings, Song};
+use nord_format::formats::ne5;
+use nord_format::formats::ne5::{Instrument, OrganModel};
+use nord_format::formats::nsmp::{stroke, Sample};
+use nord_format::{Entity, Live, Program, Settings, Song};
 
 use crate::note;
 use crate::ui::Ui;
@@ -88,7 +89,7 @@ fn drawbars(ui: &Ui, positions: &[u8]) -> String {
 /// The live buffer is the program body under another tag, so it is the same panel and
 /// gets the same rendering; only the `kind` line and the slot space differ. `at` is the
 /// header's own `(bank, slot)`, whichever space the caller reads it in.
-fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &electro5::Program) {
+fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
     let split = if p.center_panel.split {
         format!("yes @ {:?}", p.center_panel.split_point)
     } else {

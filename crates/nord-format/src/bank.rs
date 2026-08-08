@@ -116,7 +116,7 @@ mod tests {
         const SLOT_COUNT: u16 = 2;
 
         type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
-        type Bank = crate::common::bank::Bank<TestItem, Location>;
+        type Bank = crate::bank::Bank<TestItem, Location>;
 
         #[derive(Debug)]
         struct TestItem {

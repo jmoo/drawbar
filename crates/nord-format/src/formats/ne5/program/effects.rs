@@ -1,8 +1,8 @@
 //! The effects panel — the four effect slots, the reverb, the rotary and the EQ.
 
 use crate::bits::Packed;
-use crate::common::components::sparse_enum;
-use crate::electro5::Level;
+use crate::components::sparse_enum;
+use crate::formats::ne5::Level;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 

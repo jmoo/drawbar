@@ -50,7 +50,7 @@ impl Default for Piano {
 
 impl Debug for Piano {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("common::Piano")
+        f.debug_struct("npno::Piano")
             .field("header", &self.file.header)
             .field("body_len", &self.file.body.0.len())
             .finish()

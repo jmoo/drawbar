@@ -229,7 +229,7 @@ impl FieldError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::electro5::{Level, Transpose};
+    use crate::formats::ne5::{Level, Transpose};
 
     #[test]
     fn a_value_is_parsed_out_of_the_way_it_prints() {

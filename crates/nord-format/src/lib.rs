@@ -1,17 +1,18 @@
+pub mod bank;
 pub mod bits;
 pub mod cbin;
-pub mod common;
+pub mod components;
 pub mod crc;
-pub mod electro5;
 pub mod error;
+pub mod fields;
+pub mod formats;
 pub mod layout;
-pub mod panel;
 pub mod types;
 pub mod util;
 
 use crate::cbin::Cbin;
-use crate::common::sample::Sample;
-use crate::common::{piano, sample};
+use crate::formats::nsmp::Sample;
+use crate::formats::{ne5, npno, nsmp};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
@@ -22,29 +23,29 @@ use crate::error::{Error, ParseError};
 #[cfg(feature = "bundle")]
 #[derive(Debug)]
 pub enum Bundle {
-    Electro5(electro5::Bundle),
+    Electro5(ne5::Bundle),
 }
 
 #[derive(Debug)]
 pub enum Program {
-    Electro5(Cbin<electro5::Program>),
+    Electro5(Cbin<ne5::Program>),
 }
 
 /// The live buffer — the panel as it stands, not a saved program. Same body as
 /// [`Program`], under its own format tag.
 #[derive(Debug)]
 pub enum Live {
-    Electro5(Cbin<electro5::Program>),
+    Electro5(Cbin<ne5::Program>),
 }
 
 #[derive(Debug)]
 pub enum Song {
-    Electro5(Cbin<electro5::Song>),
+    Electro5(Cbin<ne5::Song>),
 }
 
 #[derive(Debug)]
 pub enum Settings {
-    Electro5(Cbin<electro5::Settings>),
+    Electro5(Cbin<ne5::Settings>),
 }
 
 /// One decoded file.
@@ -58,7 +59,7 @@ pub enum Entity {
     Song(Song),
     Program(Program),
     Live(Live),
-    Piano(piano::Piano),
+    Piano(npno::Piano),
     Settings(Settings),
     Sample(Cbin<Sample>),
     #[cfg(feature = "bundle")]
@@ -70,27 +71,23 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
 
     match header.file_type {
         #[cfg(feature = "bundle")]
-        FileType::Zip => Ok(Entity::Bundle(Bundle::Electro5(
-            electro5::Bundle::read_from(reader)?,
-        ))),
+        FileType::Zip => Ok(Entity::Bundle(Bundle::Electro5(ne5::Bundle::read_from(
+            reader,
+        )?))),
         #[cfg(not(feature = "bundle"))]
         FileType::Zip => {
             Err(ParseError::UnknownFileType("zip (bundle feature disabled)".to_string()).into())
         }
         FileType::Cbin => match header.format.as_str() {
-            sample::FORMAT => Ok(Entity::Sample(sample::read_from(reader)?)),
-            piano::FORMAT => Ok(Entity::Piano(piano::Piano::read_from(reader)?)),
-            electro5::song::FORMAT => Ok(Entity::Song(Song::Electro5(electro5::song::read_from(
-                reader,
-            )?))),
-            electro5::program::FORMAT => Ok(Entity::Program(Program::Electro5(
-                electro5::program::read_from(reader)?,
+            nsmp::FORMAT => Ok(Entity::Sample(nsmp::read_from(reader)?)),
+            npno::FORMAT => Ok(Entity::Piano(npno::Piano::read_from(reader)?)),
+            ne5::song::FORMAT => Ok(Entity::Song(Song::Electro5(ne5::song::read_from(reader)?))),
+            ne5::program::FORMAT => Ok(Entity::Program(Program::Electro5(
+                ne5::program::read_from(reader)?,
             ))),
-            electro5::live::FORMAT => Ok(Entity::Live(Live::Electro5(electro5::live::read_from(
-                reader,
-            )?))),
-            electro5::settings::FORMAT => Ok(Entity::Settings(Settings::Electro5(
-                electro5::settings::read_from(reader)?,
+            ne5::live::FORMAT => Ok(Entity::Live(Live::Electro5(ne5::live::read_from(reader)?))),
+            ne5::settings::FORMAT => Ok(Entity::Settings(Settings::Electro5(
+                ne5::settings::read_from(reader)?,
             ))),
             e => Err(ParseError::UnknownFormat(e.to_string()).into()),
         },
@@ -112,7 +109,7 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
 /// formats declare their body length on their [`cbin::Body`] impl, and the container
 /// refuses to emit a wrong-sized file.
 ///
-/// Bundles are unsupported: [`electro5::Bundle`] is a ZIP walk over other entities,
+/// Bundles are unsupported: [`ne5::Bundle`] is a ZIP walk over other entities,
 /// not a re-emittable structure.
 pub fn to_bytes(entity: &Entity) -> Result<Vec<u8>, Error> {
     use std::io::Cursor;

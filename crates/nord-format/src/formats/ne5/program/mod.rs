@@ -6,7 +6,7 @@
 //! in its own module, placed here by byte range; the registry paths
 //! (`center_panel.transpose`) follow the field names.
 //!
-//! The live buffer ([`crate::electro5::live`]) is this same body under the tag
+//! The live buffer ([`crate::formats::ne5::live`]) is this same body under the tag
 //! `ne5l`, addressed in three slots instead of eight banks of fifty; the two
 //! modules share [`Program`] and differ only in tag and slot space.
 
@@ -22,10 +22,10 @@ pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel
 pub use piano::{PianoCategory, PianoPanel};
 pub use sample::SamplePanel;
 
-pub use crate::panel::Field;
+pub use crate::fields::Field;
 
+use crate::bank;
 use crate::cbin::{self, Cbin, Header};
-use crate::common::bank;
 use crate::error::{Error, ParseError};
 use crate::types::RangedU16Pair;
 
@@ -131,7 +131,7 @@ pub(crate) fn slot<L: bank::Location>(header: &Header) -> Result<L, Error> {
 /// The program slot the file claims.
 ///
 /// ⚠️ A live slot is the same body under another tag, so this reads a `ne5l` file's
-/// location in the *program* slot space. [`crate::electro5::live::location`] is the
+/// location in the *program* slot space. [`crate::formats::ne5::live::location`] is the
 /// one that answers for a live buffer.
 pub fn location(file: &Cbin<Program>) -> Result<Location, Error> {
     slot(&file.header)

@@ -1,6 +1,6 @@
 //! The piano panel.
 
-use crate::common::components::sparse_enum;
+use crate::components::sparse_enum;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 

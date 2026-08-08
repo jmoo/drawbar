@@ -1,8 +1,8 @@
 use crate::cbin::Cbin;
-use crate::common::piano::Piano;
-use crate::common::sample::Sample;
-use crate::electro5::{program, song};
 use crate::error::Error;
+use crate::formats::ne5::{program, song};
+use crate::formats::npno::Piano;
+use crate::formats::nsmp::Sample;
 use crate::{from_stream, Entity, Program, Song};
 use std::io::{Read, Seek};
 

@@ -1,8 +1,8 @@
 //! The center panel — part selection, split, transpose, gain, and the organ selector.
 
-use crate::common::components::sparse_enum;
-use crate::common::PartMix;
-use crate::electro5::{Instrument, Level, OctaveShift, SplitPoint, Transpose};
+use crate::components::sparse_enum;
+use crate::components::PartMix;
+use crate::formats::ne5::{Instrument, Level, OctaveShift, SplitPoint, Transpose};
 use nord_bits_derive::bitbody;
 
 // 0x2e..0x34 — the center panel.
@@ -80,9 +80,10 @@ sparse_enum!(
 
 impl OrganType {
     /// Which model's storage slots this selection reads from. b3 and b3+bass share
-    /// [`OrganModel::B3`]; `None` for an unknown selection.
-    pub fn storage(&self) -> Option<crate::electro5::program::OrganModel> {
-        use crate::electro5::program::OrganModel;
+    /// [`OrganModel::B3`](crate::formats::ne5::program::OrganModel::B3); `None` for an
+    /// unknown selection.
+    pub fn storage(&self) -> Option<crate::formats::ne5::program::OrganModel> {
+        use crate::formats::ne5::program::OrganModel;
         match self {
             OrganType::B3 | OrganType::B3Bass => Some(OrganModel::B3),
             OrganType::Pipe => Some(OrganModel::Pipe),
@@ -99,7 +100,7 @@ impl OrganType {
     /// drawbars 1-2 do anything and they live outside the nine-nibble block, and preset 2
     /// is an ordinary B3. Reading preset 1's nine nibbles in that mode shows stale
     /// values —
-    /// [`OrganPanel::b3_bass_drawbars`](crate::electro5::program::OrganPanel::b3_bass_drawbars)
+    /// [`OrganPanel::b3_bass_drawbars`](crate::formats::ne5::program::OrganPanel::b3_bass_drawbars)
     /// is the only correct source for bars 1-2.
     pub fn is_b3_bass(&self) -> bool {
         matches!(self, OrganType::B3Bass)

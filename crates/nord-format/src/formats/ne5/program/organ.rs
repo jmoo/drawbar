@@ -9,7 +9,7 @@
 //! expressible as a placement, so it lives in an accessor.
 
 use crate::bits::Packed;
-use crate::common::{PercSpeed, VibChorus};
+use crate::components::{PercSpeed, VibChorus};
 use crate::error::ParseError;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;

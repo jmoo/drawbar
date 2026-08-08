@@ -10,15 +10,15 @@ pub use program::{
 };
 #[cfg(feature = "bundle")]
 pub mod bundle;
-use crate::common;
+use crate::components;
 #[cfg(feature = "bundle")]
 pub use bundle::Bundle;
 
-pub type OctaveShift = common::OctaveShift<7, -6, 6>;
-pub type Transpose = common::Transpose<6, -6, 6>;
-pub type SplitPoint = common::SplitPoint73;
-pub type PartMix = common::PartMix;
-pub use common::{Level, PercSpeed, VibChorus};
+pub type OctaveShift = components::OctaveShift<7, -6, 6>;
+pub type Transpose = components::Transpose<6, -6, 6>;
+pub type SplitPoint = components::SplitPoint73;
+pub type PartMix = components::PartMix;
+pub use components::{Level, PercSpeed, VibChorus};
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum Instrument {

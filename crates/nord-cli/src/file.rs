@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use nord_format::cbin::{Generation, Header};
-use nord_format::{common, electro5, Entity, Live, Program};
+use nord_format::formats::{ne5, npno, nsmp};
+use nord_format::{Entity, Live, Program};
 use nord_usb::ObjectClass;
 
 use crate::slot::shown;
@@ -16,12 +17,12 @@ use crate::ui::Ui;
 /// The format tag a class's files carry, or `None` for a class with no known tag.
 pub(crate) fn tag(class: ObjectClass) -> Option<&'static str> {
     match class {
-        ObjectClass::Piano => Some(common::piano::FORMAT),
-        ObjectClass::Sample => Some(common::sample::FORMAT),
-        ObjectClass::Program => Some(electro5::program::FORMAT),
-        ObjectClass::SetList => Some(electro5::song::FORMAT),
-        ObjectClass::Live => Some(electro5::live::FORMAT),
-        ObjectClass::Settings => Some(electro5::settings::FORMAT),
+        ObjectClass::Piano => Some(npno::FORMAT),
+        ObjectClass::Sample => Some(nsmp::FORMAT),
+        ObjectClass::Program => Some(ne5::program::FORMAT),
+        ObjectClass::SetList => Some(ne5::song::FORMAT),
+        ObjectClass::Live => Some(ne5::live::FORMAT),
+        ObjectClass::Settings => Some(ne5::settings::FORMAT),
         ObjectClass::Unknown(_) => None,
     }
 }
@@ -210,12 +211,12 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
 /// The format tag a decoded entity would carry on disk.
 pub(crate) fn entity_tag(entity: &Entity) -> &'static str {
     match entity {
-        Entity::Program(Program::Electro5(_)) => electro5::program::FORMAT,
-        Entity::Live(Live::Electro5(_)) => electro5::live::FORMAT,
-        Entity::Song(nord_format::Song::Electro5(_)) => electro5::song::FORMAT,
-        Entity::Settings(nord_format::Settings::Electro5(_)) => electro5::settings::FORMAT,
-        Entity::Piano(_) => common::piano::FORMAT,
-        Entity::Sample(_) => common::sample::FORMAT,
+        Entity::Program(Program::Electro5(_)) => ne5::program::FORMAT,
+        Entity::Live(Live::Electro5(_)) => ne5::live::FORMAT,
+        Entity::Song(nord_format::Song::Electro5(_)) => ne5::song::FORMAT,
+        Entity::Settings(nord_format::Settings::Electro5(_)) => ne5::settings::FORMAT,
+        Entity::Piano(_) => npno::FORMAT,
+        Entity::Sample(_) => nsmp::FORMAT,
         Entity::Bundle(_) => "zip",
     }
 }
@@ -244,7 +245,7 @@ mod tests {
     /// has to follow the generation or it prints panel data as a checksum.
     #[test]
     fn a_type_0_file_reports_its_trailing_crc16() {
-        let mut program = electro5::program::new((3, 7).try_into().unwrap());
+        let mut program = ne5::program::new((3, 7).try_into().unwrap());
         program.header.generation = Generation::V0;
         let mut bytes = Vec::new();
         program

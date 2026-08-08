@@ -1,7 +1,7 @@
 //! Sample instruments (`.nsmp`) — the Nord Sample Library format.
 //!
-//! Shared across the Nord line rather than specific to one model, which is why this sits
-//! in [`crate::common`]. A file is the CBIN header followed by a chain of tagged
+//! Shared across the Nord line rather than specific to one model, so it carries its own
+//! tag rather than a model's. A file is the CBIN header followed by a chain of tagged
 //! [`section`]s: an `hdr` carrying the name, a `cat` of category strings, a `map`
 //! ending in the [`zone`] table, one [`stroke`] per zone, and a trailing `sty`.
 //!

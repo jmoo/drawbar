@@ -43,7 +43,7 @@
 //! `center_panel.transpose`. A leaf registers under its own name alone.
 //!
 //! Only usable inside `nord-format`: generated code names `crate::bits`,
-//! `crate::cbin`, `crate::error`, `crate::layout` and `crate::panel`.
+//! `crate::cbin`, `crate::error`, `crate::layout` and `crate::fields`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -350,7 +350,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         let width = hi - lo + 1;
 
         values.push(quote! {
-            out.push(crate::panel::FieldValue {
+            out.push(crate::fields::FieldValue {
                 name: #path.to_string(),
                 placement: #placement,
                 raw: crate::bits::Field::<u64, #lo, #hi>::read(&self.raw),
@@ -359,18 +359,18 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
             });
         });
         specs.push(quote! {
-            out.push(crate::panel::FieldSpec {
+            out.push(crate::fields::FieldSpec {
                 name: #path.to_string(),
                 placement: #placement,
                 width: #width,
-                legal: || crate::panel::legal_values::<#ty>(#width),
+                legal: || crate::fields::legal_values::<#ty>(#width),
             });
         });
         // The parse is the type's, so a value it cannot hold fails here rather
         // than being clamped into the slot.
         setters.push(quote! {
             #path => {
-                self.#ident = crate::panel::parse_field::<#ty>(#width, value)
+                self.#ident = crate::fields::parse_field::<#ty>(#width, value)
                     .map_err(|e| e.at(#path))?;
                 return Ok(());
             }
@@ -458,26 +458,26 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
             /// declaration order — nested bodies inline where their field sits.
             /// Describes the same fields as [`Self::field_specs`], so callers may
             /// zip the two positionally.
-            pub fn field_values(&self) -> ::std::vec::Vec<crate::panel::FieldValue> {
+            pub fn field_values(&self) -> ::std::vec::Vec<crate::fields::FieldValue> {
                 let mut out = ::std::vec::Vec::new();
                 #(#values)*
                 out
             }
 
-            pub fn field_specs() -> ::std::vec::Vec<crate::panel::FieldSpec> {
+            pub fn field_specs() -> ::std::vec::Vec<crate::fields::FieldSpec> {
                 let mut out = ::std::vec::Vec::new();
                 #(#specs)*
                 out
             }
 
             /// Every settable field, described under its full path.
-            pub fn fields(&self) -> ::std::vec::Vec<crate::panel::Field> {
+            pub fn fields(&self) -> ::std::vec::Vec<crate::fields::Field> {
                 Self::field_specs()
                     .into_iter()
                     .zip(self.field_values())
-                    .map(|(spec, value)| crate::panel::Field {
+                    .map(|(spec, value)| crate::fields::Field {
                         path: spec.name.clone(),
-                        value: crate::panel::settable_form(spec.width, &value.value, value.bits),
+                        value: crate::fields::settable_form(spec.width, &value.value, value.bits),
                         display: value.value,
                         spec,
                     })
@@ -489,7 +489,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
                 &mut self,
                 path: &str,
                 value: &str,
-            ) -> ::core::result::Result<(), crate::panel::FieldError> {
+            ) -> ::core::result::Result<(), crate::fields::FieldError> {
                 match path {
                     #(#setters)*
                     _ => {}
@@ -500,7 +500,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
                         _ => {}
                     }
                 }
-                Err(crate::panel::FieldError::UnknownField {
+                Err(crate::fields::FieldError::UnknownField {
                     panel: stringify!(#name),
                     name: path.to_string(),
                 })

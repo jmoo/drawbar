@@ -5,10 +5,10 @@
 
 use std::io::{Read, Seek};
 
+use crate::bank;
 use crate::cbin::{self, Cbin, Header};
-use crate::common::bank;
-use crate::electro5::program;
 use crate::error::Error;
+use crate::formats::ne5::program;
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5t";
@@ -116,7 +116,7 @@ impl bank::Item<Location> for Cbin<Song> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::bank::Item;
+    use crate::bank::Item;
     use crate::error::Error;
     use std::io::Cursor;
 

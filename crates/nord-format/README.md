@@ -33,13 +33,13 @@ O(1) memory, mapped body or not.
 
 ```rust
 use nord_format::{from_path, Entity, Program};
-use nord_format::common::bank::Item; // for `.location()`
-use nord_format::electro5::OrganModel;
+use nord_format::bank::Item; // for `.location()`
+use nord_format::formats::ne5::OrganModel;
 
 let entity = from_path("patch.ne5p")?;
 
 if let Entity::Program(Program::Electro5(p)) = entity {
-    // `p` is a `Cbin<electro5::Program>`: the CBIN header plus the decoded body,
+    // `p` is a `Cbin<ne5::Program>`: the CBIN header plus the decoded body,
     // and it derefs to the body, so the panels read as fields.
     println!("location: {:?}", p.location());
     println!(
@@ -54,9 +54,12 @@ if let Entity::Program(Program::Electro5(p)) = entity {
 }
 ```
 
-`from_path` / `from_stream` sniff the container and return an [`Entity`]; the
-`electro5` module holds the concrete `Program`/`Song`/`Settings` layouts and the
-`OrganModel` / `VibChorus` / `PercSpeed` decode types.
+`from_path` / `from_stream` sniff the container and return an [`Entity`]. Each
+format lives under `formats::`, named for the four-character CBIN tag it carries —
+or, where a model family shares a prefix across several tags, for that prefix. So
+`formats::ne5` holds the concrete `Program`/`Song`/`Settings` layouts and the
+`OrganModel` / `VibChorus` / `PercSpeed` decode types, while `formats::nsmp` and
+`formats::npno` are single formats shared across the line.
 
 ## Lossless round-trip is the core invariant
 

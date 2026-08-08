@@ -15,15 +15,16 @@
 //! (`datatest-stable` / `libtest-mimic`) so each specimen is its own reported
 //! test case — see `Projects/Nord Utils.md`.
 
+use nord_format::bank::Item;
 use nord_format::cbin::Cbin;
-use nord_format::common::bank::Item;
-use nord_format::common::sample::Sample;
-use nord_format::electro5::settings::LiveSlot;
-use nord_format::electro5::{
+use nord_format::formats::ne5;
+use nord_format::formats::ne5::settings::LiveSlot;
+use nord_format::formats::ne5::{
     EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Instrument, PianoCategory, Routing,
     SplitPoint,
 };
-use nord_format::{electro5, Entity};
+use nord_format::formats::nsmp::Sample;
+use nord_format::Entity;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -49,7 +50,7 @@ fn test_ne5_read_song_macro() {
 
     match song {
         Entity::Song(nord_format::Song::Electro5(song)) => {
-            let song: Cbin<electro5::Song> = song;
+            let song: Cbin<ne5::Song> = song;
             let coords = song.location();
 
             assert_eq!(coords, (0, 2));
@@ -58,7 +59,7 @@ fn test_ne5_read_song_macro() {
             assert_eq!(song.get(2), (0, 2));
             assert_eq!(song.get(3), (5, 8));
         }
-        _ => panic!("expected electro5 song"),
+        _ => panic!("expected ne5 song"),
     }
 }
 
@@ -70,12 +71,12 @@ fn test_ne5_read_song_bank() {
 
     match song {
         Entity::Song(nord_format::Song::Electro5(song)) => {
-            let song: Cbin<electro5::Song> = song;
+            let song: Cbin<ne5::Song> = song;
             let coords = song.location();
 
             assert_eq!(coords, (0, 2));
         }
-        _ => panic!("expected electro5 song"),
+        _ => panic!("expected ne5 song"),
     }
 }
 
@@ -92,7 +93,7 @@ fn test_ne5_read_song_programs() {
             assert_eq!(song.get(2), (0, 2));
             assert_eq!(song.get(3), (5, 8));
         }
-        _ => panic!("expected electro5 song"),
+        _ => panic!("expected ne5 song"),
     }
 }
 
@@ -111,7 +112,7 @@ fn test_ne5_write_song() {
 
             assert_eq!(contents.as_slice(), output.as_slice());
         }
-        _ => panic!("expected electro5 song"),
+        _ => panic!("expected ne5 song"),
     }
 }
 
@@ -123,7 +124,7 @@ fn test_ne5_read_program() {
 
     match program {
         Entity::Program(nord_format::Program::Electro5(program)) => {
-            let program: Cbin<electro5::Program> = program;
+            let program: Cbin<ne5::Program> = program;
             let coords = program.location();
 
             assert_eq!(coords, (7, 3));
@@ -140,7 +141,7 @@ fn test_ne5_read_program() {
             assert_eq!(program.center_panel.transpose, 1);
             assert!(!program.center_panel.transpose_enabled);
         }
-        _ => panic!("expected electro5 program"),
+        _ => panic!("expected ne5 program"),
     }
 }
 
@@ -161,7 +162,7 @@ fn test_ne5_read_write_program() {
 
             assert_eq!(read_contents.as_slice(), write_contents.as_slice());
         }
-        _ => panic!("expected electro5 program"),
+        _ => panic!("expected ne5 program"),
     }
 }
 
@@ -173,9 +174,9 @@ fn test_ne5_read_settings() {
 
     match program {
         Entity::Settings(nord_format::Settings::Electro5(settings)) => {
-            let _settings: Cbin<electro5::Settings> = settings;
+            let _settings: Cbin<ne5::Settings> = settings;
         }
-        _ => panic!("expected electro5 settings"),
+        _ => panic!("expected ne5 settings"),
     }
 }
 
@@ -194,7 +195,7 @@ fn test_ne5_write_settings() {
 
             assert_eq!(contents.as_slice(), output.as_slice());
         }
-        _ => panic!("expected electro5 settings"),
+        _ => panic!("expected ne5 settings"),
     }
 }
 
@@ -431,7 +432,7 @@ fn ne5s_files(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-fn read_settings(path: &std::path::Path) -> Cbin<electro5::Settings> {
+fn read_settings(path: &std::path::Path) -> Cbin<ne5::Settings> {
     match nord_format::from_path(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())) {
         Entity::Settings(nord_format::Settings::Electro5(s)) => s,
         other => panic!("{} is not Electro 5 settings: {other:?}", path.display()),
@@ -864,7 +865,7 @@ fn test_ne5_program_read_write_center_panel() {
                         );
                     }
                 }
-                _ => panic!("expected electro5 song in file {}", path),
+                _ => panic!("expected ne5 song in file {}", path),
             }
         } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
@@ -917,7 +918,7 @@ fn test_ne5_program_read_write_gain() {
                         path
                     );
                 }
-                _ => panic!("expected electro5 song in file {}", path),
+                _ => panic!("expected ne5 song in file {}", path),
             }
         } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
@@ -1143,7 +1144,7 @@ fn test_ne5_program_read_write_fx() {
                         path
                     );
                 }
-                _ => panic!("expected electro5 song in file {}", path),
+                _ => panic!("expected ne5 song in file {}", path),
             }
         } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
@@ -1195,7 +1196,7 @@ fn test_ne5_program_read_write_equalizer() {
                         path
                     );
                 }
-                _ => panic!("expected electro5 song in file {}", path),
+                _ => panic!("expected ne5 song in file {}", path),
             }
         } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
@@ -1251,7 +1252,7 @@ fn test_ne5_program_read_sample() {
                         path
                     );
                 }
-                _ => panic!("expected electro5 song in file {}", path),
+                _ => panic!("expected ne5 song in file {}", path),
             }
         } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
@@ -1261,7 +1262,7 @@ fn test_ne5_program_read_sample() {
 
 #[test]
 fn test_ne5_program_read_write_organ() {
-    use nord_format::electro5::{OrganModel, PercSpeed, VibChorus};
+    use nord_format::formats::ne5::{OrganModel, PercSpeed, VibChorus};
 
     let test_files = corpus_dir().join("programs/organ");
 
@@ -1391,7 +1392,7 @@ fn test_ne5_program_read_write_organ() {
         let contents = read(&path).unwrap();
         let program = match nord_format::from_path(&path).unwrap() {
             Entity::Program(nord_format::Program::Electro5(p)) => p,
-            _ => panic!("expected electro5 program in file {name}"),
+            _ => panic!("expected ne5 program in file {name}"),
         };
         let organ = &program.organ_panel;
 
@@ -1461,7 +1462,7 @@ fn test_ne5_program_read_write_organ() {
 /// bit layout, this pins it to specimens captured off the instrument.
 #[test]
 fn test_ne5_b3_bass_drawbars_match_filenames() {
-    use nord_format::electro5::program::OrganModel;
+    use nord_format::formats::ne5::program::OrganModel;
 
     let dir = corpus_dir().join("programs/organ");
     let mut checked = 0;
@@ -1495,7 +1496,7 @@ fn test_ne5_b3_bass_drawbars_match_filenames() {
 
         let program = match nord_format::from_path(&path).expect("parse") {
             nord_format::Entity::Program(nord_format::Program::Electro5(p)) => p,
-            other => panic!("{name}: expected an electro5 program, got {other:?}"),
+            other => panic!("{name}: expected an ne5 program, got {other:?}"),
         };
         let got = program.organ_panel.b3_bass_drawbars();
         let want = [bars.as_bytes()[0] - b'0', bars.as_bytes()[1] - b'0'];
@@ -1668,14 +1669,14 @@ fn ne5l_files() -> Vec<PathBuf> {
 /// Read a program and assert it still round-trips byte-exact. The id fields are
 /// read-only views over a verbatim `settings` word, so decoding more of it must
 /// never cost the round-trip.
-fn read_program_checked(path: &std::path::Path) -> Cbin<electro5::Program> {
+fn read_program_checked(path: &std::path::Path) -> Cbin<ne5::Program> {
     let name = path.display().to_string();
     let contents = read(path).unwrap();
 
     let Entity::Program(nord_format::Program::Electro5(program)) =
         nord_format::from_path(name.as_str()).unwrap()
     else {
-        panic!("expected an electro5 program in {name}")
+        panic!("expected an ne5 program in {name}")
     };
 
     let mut output: Vec<u8> = Vec::new();
@@ -1991,8 +1992,8 @@ fn test_ne5_a_mutation_in_every_panel_reaches_the_bytes() {
     type Case = (
         &'static str,
         std::ops::RangeInclusive<usize>,
-        fn(&mut Cbin<electro5::Program>),
-        fn(&Cbin<electro5::Program>),
+        fn(&mut Cbin<ne5::Program>),
+        fn(&Cbin<ne5::Program>),
     );
 
     let cases: Vec<Case> = vec![
@@ -2076,7 +2077,7 @@ fn test_ne5_a_mutation_in_every_panel_reaches_the_bytes() {
             let Entity::Program(nord_format::Program::Electro5(reread)) =
                 nord_format::from_stream(&mut Cursor::new(&mut mutated)).unwrap()
             else {
-                panic!("expected an electro5 program in {name}")
+                panic!("expected an ne5 program in {name}")
             };
             check(&reread);
         }
@@ -2086,7 +2087,7 @@ fn test_ne5_a_mutation_in_every_panel_reaches_the_bytes() {
 /// Reading nine drawbar nibbles and writing them back is a no-op.
 #[test]
 fn test_ne5_organ_drawbars_survive_a_rewrite() {
-    use electro5::OrganModel::*;
+    use ne5::OrganModel::*;
 
     for path in ne5p_files(&corpus_dir().join("programs")) {
         let name = path.display().to_string();
@@ -2203,7 +2204,7 @@ fn test_ne5_live_re_encodes_to_the_same_bytes() {
         let Entity::Live(nord_format::Live::Electro5(live)) =
             nord_format::from_path(&path).unwrap()
         else {
-            panic!("expected an electro5 live slot in {name}")
+            panic!("expected an ne5 live slot in {name}")
         };
 
         let mut rewritten: Vec<u8> = Vec::new();
@@ -2226,7 +2227,7 @@ fn test_ne5_live_occupies_three_slots_of_one_bank() {
         let Entity::Live(nord_format::Live::Electro5(live)) =
             nord_format::from_path(&path).unwrap()
         else {
-            panic!("expected an electro5 live slot in {name}")
+            panic!("expected an ne5 live slot in {name}")
         };
         let at = live.location();
         assert_eq!(at.x(), 0, "live slot outside bank 0 in {name}");
@@ -2254,14 +2255,14 @@ fn test_ne5_a_live_body_decodes_as_a_program() {
         let Entity::Live(nord_format::Live::Electro5(live)) =
             nord_format::from_path(&path).unwrap()
         else {
-            panic!("expected an electro5 live slot in {name}")
+            panic!("expected an ne5 live slot in {name}")
         };
 
         // The tag is the whole difference. On a type-1 file the crc32 covers the body
         // and never sees the header, so the retag alone leaves a valid file; a type-0
         // file's trailing crc16 covers the header too, so it gets restamped.
         let mut bytes = read(&path).unwrap();
-        bytes[0x08..0x0c].copy_from_slice(electro5::program::FORMAT.as_bytes());
+        bytes[0x08..0x0c].copy_from_slice(ne5::program::FORMAT.as_bytes());
         if bytes[0x04] == 0 {
             let at = bytes.len() - 2;
             let crc = nord_format::crc::crc16(&bytes[..at]);
@@ -2274,7 +2275,7 @@ fn test_ne5_a_live_body_decodes_as_a_program() {
             panic!("a retagged live slot did not decode as a program: {name}")
         };
 
-        let named = |fields: Vec<electro5::program::Field>| -> Vec<(String, String)> {
+        let named = |fields: Vec<ne5::program::Field>| -> Vec<(String, String)> {
             fields.into_iter().map(|f| (f.path, f.display)).collect()
         };
         let fields = named(live.fields());
@@ -2325,7 +2326,7 @@ fn test_nsmp_round_trip() {
         let sample = read_sample(&path);
         assert_eq!(
             &sample.header.tag,
-            nord_format::common::sample::FORMAT.as_bytes()
+            nord_format::formats::nsmp::FORMAT.as_bytes()
         );
         assert_eq!(
             sample.to_bytes().unwrap(),
@@ -2367,7 +2368,7 @@ fn test_nsmp_strokes_decompose() {
 /// note really is stored, and a reader must take it as read rather than recompute it.
 #[test]
 fn test_nsmp_zone_ranges_are_the_editors_default_unless_overridden() {
-    use nord_format::common::sample::zone;
+    use nord_format::formats::nsmp::zone;
 
     /// Specimens whose upper key was deliberately moved off the default.
     const OVERRIDDEN: &[&str] = &["D7-upperkey"];

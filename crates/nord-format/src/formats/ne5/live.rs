@@ -8,8 +8,8 @@
 use std::io::{Read, Seek};
 
 use crate::cbin::{self, Cbin, Header};
-use crate::electro5::program::{self, Program};
 use crate::error::Error;
+use crate::formats::ne5::program::{self, Program};
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5l";

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 use nord_format::cbin::Cbin;
-use nord_format::common::sample::Sample;
+use nord_format::formats::nsmp::Sample;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -170,7 +170,7 @@ fn list_fields(ui: &Ui, sample: &Cbin<Sample>) -> Result<(), String> {
     ui.out(format!("{:<20} {:<16} {}", "path", "value", "accepts"));
     for (path, value) in snapshot(sample)? {
         let accepts = if path == "name" {
-            format!("up to {} bytes", nord_format::common::sample::MAX_NAME_LEN)
+            format!("up to {} bytes", nord_format::formats::nsmp::MAX_NAME_LEN)
         } else {
             "a note name (C4, F#3) or 0-127".to_string()
         };

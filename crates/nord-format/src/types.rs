@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Formatter};
 
+use crate::bank::Location;
 use crate::bits::{bits_for, Packed};
-use crate::common::bank::Location;
 use crate::error::ParseError;
 
 /// An i8 value that is bounded by MIN and MAX and can be converted to a u8 by adding OFFSET.
