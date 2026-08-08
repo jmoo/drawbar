@@ -557,7 +557,7 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 format!("piano (npno) {} header/reference only", ui.dash()),
             ));
         }
-        Entity::Sample(s) => sample(ui, s),
+        Entity::Sample(nord_format::Sample::V2(s)) => sample(ui, s),
         Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
             if let Some(name) = b.name() {
@@ -576,5 +576,174 @@ pub fn print(ui: &Ui, entity: &Entity) {
             }
             let _ = (b.programs(), b.songs()); // decoded; shown via --raw
         }
+        Entity::Program(Program::Stage2(p)) => ns2_globals(ui, "Stage 2 program (ns2p)", p),
+        Entity::Live(Live::Stage2(p)) => ns2_globals(ui, "Stage 2 live slot (ns2l)", p),
+        Entity::Program(Program::Stage3(p)) => ns3_globals(ui, "Stage 3 program (ns3f)", p),
+        Entity::Live(Live::Stage3(p)) => ns3_globals(ui, "Stage 3 live slot (ns3l)", p),
+        Entity::Bundle(nord_format::Bundle::Drum2Bank(b)) => {
+            ui.out(field(ui, 2, "type", "Drum 2 bank (zip)"));
+            ui.out(field(ui, 2, "programs", b.programs.len().to_string()));
+        }
+        Entity::Bundle(nord_format::Bundle::Drum3KitBank(b)) => {
+            ui.out(field(ui, 2, "type", "Drum 3P kit bank (zip)"));
+            ui.out(field(ui, 2, "kits", b.kits.len().to_string()));
+        }
+        other => raw_summary(ui, other),
+    }
+}
+
+/// The Stage 2 program-wide globals — the decoded slice of a mostly-raw body.
+fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>) {
+    use nord_format::formats::ns2::program;
+
+    ui.out(field(ui, 2, "type", kind));
+    let (bank, slot) = p.header.slot();
+    ui.out(field(ui, 2, "location", location(bank, slot)));
+    ui.out(field(
+        ui,
+        2,
+        "category",
+        format!("{:?}", program::category(&p.header)),
+    ));
+    ui.out(field(ui, 2, "version", p.header.version.to_string()));
+
+    section(ui, "Globals");
+    ui.out(field(
+        ui,
+        4,
+        "transpose",
+        transpose(p.transpose_enabled, p.transpose),
+    ));
+    let split = if p.split_three_zones {
+        format!("{:?} / {:?}", p.split_low_note, p.split_high_note)
+    } else if p.split_two_zones {
+        format!("{:?}", p.split_low_note)
+    } else {
+        "off".to_string()
+    };
+    ui.out(field(ui, 4, "split", split));
+    ui.out(field(
+        ui,
+        4,
+        "clock",
+        format!("{} bpm", p.master_clock.bpm()),
+    ));
+    ui.out(field(ui, 4, "dual kb", yn(p.dual_keyboard)));
+    ui.out(field(ui, 4, "note", ui.dim("slots and effects unmapped")));
+}
+
+/// The Stage 3 program-wide globals.
+fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>) {
+    use nord_format::formats::ns3::program;
+
+    ui.out(field(ui, 2, "type", kind));
+    let (bank, slot) = p.header.slot();
+    ui.out(field(ui, 2, "location", location(bank, slot)));
+    ui.out(field(
+        ui,
+        2,
+        "category",
+        format!("{:?}", program::category(&p.header)),
+    ));
+    ui.out(field(ui, 2, "version", {
+        let v = p.header.version;
+        format!("{}.{:02}", v / 100, v % 100)
+    }));
+
+    section(ui, "Globals");
+    ui.out(field(ui, 4, "panels", format!("{:?}", p.panel_enable)));
+    ui.out(field(
+        ui,
+        4,
+        "transpose",
+        transpose(p.transpose_enabled, p.transpose),
+    ));
+    let split = if p.split_enabled {
+        let mut zones = Vec::new();
+        for (on, note, width) in [
+            (p.split_low_enabled, p.split_low_note, p.split_low_width),
+            (p.split_mid_enabled, p.split_mid_note, p.split_mid_width),
+            (p.split_high_enabled, p.split_high_note, p.split_high_width),
+        ] {
+            if on {
+                // `width` Displays as its semitone label (1/6/12), not the
+                // variant name.
+                zones.push(format!("{note:?} (width {width})"));
+            }
+        }
+        zones.join(" / ")
+    } else {
+        "off".to_string()
+    };
+    ui.out(field(ui, 4, "split", split));
+    ui.out(field(
+        ui,
+        4,
+        "clock",
+        format!("{} bpm", p.master_clock.bpm()),
+    ));
+    let dual = if p.dual_keyboard {
+        format!("on ({:?})", p.dual_keyboard_style)
+    } else {
+        "off".to_string()
+    };
+    ui.out(field(ui, 4, "dual kb", dual));
+    ui.out(field(ui, 4, "note", ui.dim("panels and effects unmapped")));
+}
+
+/// `off (stored -2)` vs `+3` — the enable bit means touched-at-least-once, so the
+/// stored value is shown either way. An out-of-table pattern (an untouched live
+/// buffer) reads as plain `off`.
+fn transpose(enabled: bool, t: nord_format::components::StageTranspose) -> String {
+    match (enabled, t.semitones()) {
+        (true, Some(s)) => format!("{s:+}"),
+        (true, None) => format!("unknown ({})", t.raw()),
+        (false, Some(0)) | (false, None) => "off".to_string(),
+        (false, Some(s)) => format!("off (stored {s:+})"),
+    }
+}
+
+/// Everything without a decoded body: identity, then the container's facts.
+fn raw_summary(ui: &Ui, entity: &Entity) {
+    let id = entity.identity();
+    // The three-character tags carry a trailing NUL; it is data, not display.
+    let tag = id.format.trim_end_matches('\0');
+    ui.out(field(ui, 2, "type", format!("{} ({tag})", id.kind)));
+
+    if let Some(f) = entity.raw() {
+        let header = &f.header;
+        // A location word with its high bits set is not a bank/slot pair; show it
+        // the way a hex dump would rather than as an absurd bank number.
+        if header.location & 0xff00_ff00 == 0 {
+            let (bank, slot) = header.slot();
+            ui.out(field(ui, 2, "location", location(bank, slot)));
+        } else {
+            ui.out(field(
+                ui,
+                2,
+                "location",
+                format!("{:#010x}", header.location),
+            ));
+        }
+        ui.out(field(ui, 2, "version", header.version.to_string()));
+        ui.out(field(ui, 2, "body", format!("{} bytes", f.body.0.len())));
+        ui.out(field(
+            ui,
+            2,
+            "note",
+            ui.dim("body unmapped; container verified"),
+        ));
+        return;
+    }
+
+    match entity {
+        Entity::Sysex(s) => {
+            ui.out(field(ui, 2, "family", format!("{:?}", s.family())));
+            ui.out(field(ui, 2, "messages", s.messages().count().to_string()));
+            ui.out(field(ui, 2, "bytes", s.data.len().to_string()));
+        }
+        Entity::Midi(m) => ui.out(field(ui, 2, "bytes", m.data.len().to_string())),
+        Entity::Cne3(c) => ui.out(field(ui, 2, "bytes", c.data.len().to_string())),
+        _ => {}
     }
 }

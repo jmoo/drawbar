@@ -18,9 +18,14 @@ transport stack.
 | `ne5t` song / set | ✅ | ✅ | ✅ (four program slots) |
 | `ne5l` live slot | ✅ | ✅ | Same as `ne5p` — the live buffer is the program body under another tag (confirmed on hardware), so it shares the program body type in the three live slots. |
 | `ne5s` settings | ✅ | ✅ | System / MIDI / Sound menus plus the `startup_*` state the instrument restores at power-up ✅ — 32 of the 34 catalogued settings are pinned by a change-one-setting hardware sweep; memory protect and local control move no bit of the body and stay undecoded. |
-| `nsmp` sample | ✅ | ✅ | Name, categories, keyboard zones and per-zone strokes (root key, top note) — the audio stays encoded and is carried verbatim, so instruments can be renamed, retuned and remapped but not synthesised. |
+| `nsmp` sample | ✅ | ✅ | Name, categories, keyboard zones and per-zone strokes (root key, top note) — the audio stays encoded and is carried verbatim, so instruments can be renamed, retuned and remapped but not synthesised. The nsmp3/nsmp4 generations share the tag; they parse and round-trip with the body verbatim (the version word says which schema a file holds). |
 | `npno` piano | ✅ (container) | ✅ | Body unmapped; carried verbatim, so the file round-trips byte-exact and the checksum is verified. |
-| backup bundle (ZIP) | ✅ | — | Partial; behind the `bundle` feature. |
+| `ns3f`/`ns3l` Stage 3 program | ✅ | ✅ | Program-wide globals (panels, splits, transpose, master clock, dual keyboard, category) — panel blocks and effects unmapped. Offsets from the community byte maps below; not confirmed on hardware. |
+| `ns2p`/`ns2l` Stage 2 program | ✅ | ✅ | Same globals slice as the Stage 3. |
+| every other corpus format | ✅ (container) | ✅ | Container-verified stubs, one module per tag with its observed body length: Electro 3/4/6/7, Piano 1–5, Grand, Stage Classic/EX, Stage 2/3/4 satellites (songs, synths, settings, the Stage 4 piano/organ presets), Wave 1/2, C2/C2D, `no3`, Lead 4/A1, Drum 2/3P — 60+ CBIN tags in all. |
+| Lead 1/2/2X/3 SysEx and MIDI banks | ✅ | ✅ | Carried verbatim; the two SysEx envelope families (`F0 33 · 04` vs `F0 33 · 09`) classify the model line. |
+| `.cn3` Electro 2 library | ✅ | ✅ | `CNE3` magic, not CBIN; verbatim. |
+| backup bundle (ZIP) | ✅ | — | Partial; behind the `bundle` feature. Drum 2 banks / Drum 3P kit banks walk to their CBIN members. |
 
 Everything that parses **round-trips byte-for-byte**, verified against a
 change-one-knob specimen corpus. **Both `CBIN` container generations are read and
@@ -78,14 +83,18 @@ refinement — never a risk to the write path.
 ## Tests
 
 Unit tests live inline (`#[cfg(test)] mod tests`) and run on a plain
-`cargo test`. The **corpus integration suite** (`tests/ne5.rs`) is gated behind
-the `corpus` feature because it needs the specimen corpus, which lives in a
-separate private repo (`jmoo/nord-corpus`)
+`cargo test`, as does `tests/dispatch.rs`, which synthesizes a file for every
+registered tag and checks dispatch + round-trip for both header generations.
+The **corpus integration suites** (`tests/ne5.rs` for Electro 5 depth,
+`tests/corpus.rs` for the all-model sweep) are gated behind the `corpus` feature
+because they need the specimen corpus, which lives in a separate private repo
+(`jmoo/nord-corpus`)
 
 ```sh
-cargo test -p nord-format                       # minimal suite (inline unit tests)
+cargo test -p nord-format                       # minimal suite (unit + dispatch)
 
-# Full corpus sweep — point NORD_CORPUS_DIR at a nord-corpus/ne5 checkout:
+# Full corpus sweep — point at a nord-corpus checkout:
+NORD_CORPUS_ROOT=/path/to/nord-corpus \
 NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
   cargo test -p nord-format --features corpus
 
@@ -107,8 +116,13 @@ encountering unexpected files or versions. Sample instruments read, write and ed
 (metadata only — the audio codec is not decoded); piano files round-trip verbatim but
 their body is unmapped; bundles and backups are still incomplete.
 
-Expect refactoring, API changes, and other misc changes until a stable version is released. I would also like to support
-more nord models, but will not work on those until I'm 100% satisfied with the Electro 5 support.
+Every other model in the corpus now parses and round-trips at the container
+level — 10,000+ specimens across 70 formats in the sweep — with typed stubs
+waiting for their bodies to be mapped, and the Stage 2/3 programs decode their
+program-wide globals. Deeper decode work happens per model from here; the
+Electro 5 remains the only fully-solved body.
+
+Expect refactoring, API changes, and other misc changes until a stable version is released.
 
 ## Prior art
 

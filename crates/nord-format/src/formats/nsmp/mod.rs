@@ -21,12 +21,45 @@ pub use section::Section;
 pub use stroke::Stroke;
 pub use zone::Zone;
 
-use crate::cbin::{self, BodyReader, BodyWriter, Cbin, Header};
+use crate::cbin::{self, BodyReader, BodyWriter, Cbin, Header, RawBody};
 use crate::error::{Error, ParseError};
 use std::fmt;
 use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "nsmp";
+
+/// The content version at which the schema leaves v2. All three generations
+/// share the `nsmp` tag; the u32 at `0x14` is the generation marker, running
+/// `format × 100 + revision` — `.nsmp3` content stores 300 and up, `.nsmp4`
+/// 400 and up, and their bodies decode a different schema than v2's.
+pub const RAW_FROM_VERSION: u32 = 300;
+
+/// A body decoded by generation: v2 in full, the later schemas kept verbatim.
+///
+/// ⚠️ The v2 pool also holds versions that are not `2xx` (8, 100, 140 … —
+/// unexplained), so the gate is "at least 300", not "exactly 2xx".
+#[derive(Debug)]
+pub enum AnyBody {
+    V2(Sample),
+    Raw(RawBody),
+}
+
+impl cbin::Body for AnyBody {
+    fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, header: &Header) -> Result<Self, Error> {
+        if header.version >= RAW_FROM_VERSION {
+            Ok(AnyBody::Raw(<RawBody as cbin::Body>::read(r, header)?))
+        } else {
+            Ok(AnyBody::V2(<Sample as cbin::Body>::read(r, header)?))
+        }
+    }
+
+    fn write<W: Write + Seek>(&self, w: &mut BodyWriter<'_, W>) -> Result<(), Error> {
+        match self {
+            AnyBody::V2(s) => <Sample as cbin::Body>::write(s, w),
+            AnyBody::Raw(r) => <RawBody as cbin::Body>::write(r, w),
+        }
+    }
+}
 
 /// Offset of the instrument name within the `hdr` payload.
 const NAME_AT: usize = 12;

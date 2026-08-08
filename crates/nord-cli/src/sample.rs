@@ -59,8 +59,17 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
 
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
-    let Entity::Sample(sample) = &mut entity else {
+    let Entity::Sample(any) = &mut entity else {
         return Err("sample edit only understands sample instruments (.nsmp)".into());
+    };
+    let sample = match any {
+        nord_format::Sample::V2(sample) => sample,
+        // Editing needs the section accessors, and only the v2 schema has them.
+        nord_format::Sample::Raw(_) => {
+            return Err(
+                "this instrument is nsmp3/nsmp4 content; only v2 (.nsmp) can be edited".into(),
+            )
+        }
     };
 
     if args.fields {

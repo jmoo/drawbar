@@ -245,6 +245,92 @@ pub enum VibChorus {
     C3,
 }
 
+/// A Stage program's transpose slot: stored `0..=12`, biased by 6, reading
+/// `-6..=+6` semitones.
+///
+/// ⚠️ Not a [`RangedI8`](crate::types::RangedI8): the Stage 2 EX factory live
+/// buffers hold 15 in this slot — an untouched buffer stores an out-of-table
+/// pattern — so the unknown patterns are preserved rather than refused.
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StageTranspose {
+    raw: u8,
+}
+
+impl StageTranspose {
+    /// The stored 4-bit pattern.
+    pub fn raw(&self) -> u8 {
+        self.raw
+    }
+
+    /// The semitone reading, or `None` for a pattern past the panel's `+6`.
+    pub fn semitones(&self) -> Option<i8> {
+        (self.raw <= 12).then(|| self.raw as i8 - 6)
+    }
+}
+
+impl Packed for StageTranspose {
+    const MAX_BITS: u32 = 4;
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        Ok(StageTranspose { raw: bits as u8 })
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.raw as u64
+    }
+}
+
+impl Debug for StageTranspose {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.semitones() {
+            Some(s) => write!(f, "{s}"),
+            None => write!(f, "unknown ({})", self.raw),
+        }
+    }
+}
+
+/// The master clock rate the Stage 2 and 3 store in a program: `stored + 30` BPM.
+///
+/// Inferred from the Nord User Forum's ns3-program-viewer documentation
+/// (github.com/Chris55/ns3-program-viewer); not confirmed on hardware.
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MasterTempo {
+    inner: u8,
+}
+
+impl MasterTempo {
+    /// The stored byte.
+    pub fn as_u8(&self) -> u8 {
+        self.inner
+    }
+
+    /// The panel's BPM reading.
+    pub fn bpm(&self) -> u16 {
+        self.inner as u16 + 30
+    }
+}
+
+impl Packed for MasterTempo {
+    const MAX_BITS: u32 = 8;
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        Ok(MasterTempo { inner: bits as u8 })
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.inner as u64
+    }
+}
+
+impl Debug for MasterTempo {
+    /// The BPM reading — the stored byte is recoverable as `bpm - 30`.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.bpm())
+    }
+}
+
 /// Declare a sparse enumeration: known values, plus `Unknown` for the rest of the slot.
 ///
 /// The slot is wider than the set of values we have names for, so anything unrecognized
@@ -332,6 +418,68 @@ macro_rules! sparse_enum {
 }
 
 pub(crate) use sparse_enum;
+
+sparse_enum!(
+    /// A Stage split boundary, one of the ten notes the panel offers.
+    ///
+    /// The Stage 2 and 3 store the same ten-note table. Inferred from the Nord User
+    /// Forum's ns3-program-viewer documentation (github.com/Chris55/ns3-program-viewer);
+    /// not confirmed on hardware.
+    SplitNote, 4, {
+        0 => F2, "F2";
+        1 => C3, "C3";
+        2 => F3, "F3";
+        3 => C4, "C4";
+        4 => F4, "F4";
+        5 => C5, "C5";
+        6 => F5, "F5";
+        7 => C6, "C6";
+        8 => F6, "F6";
+        9 => C7, "C7";
+    }
+);
+
+sparse_enum!(
+    /// A Stage 3 split crossfade width, in semitones.
+    ///
+    /// Inferred from the ns3-program-viewer documentation; not confirmed on hardware.
+    SplitWidth, 2, {
+        0 => One, "1";
+        1 => Six, "6";
+        2 => Twelve, "12";
+    }
+);
+
+sparse_enum!(
+    /// The program category byte the Stage 2 and 3 keep in the header's `aux` word.
+    ///
+    /// Inferred from the ns3-program-viewer documentation; not confirmed on hardware.
+    /// The gaps are real: no name is known for the values between these.
+    ProgramCategory, 8, {
+        0x00 => Acoustic, "Acoustic";
+        0x01 => Bass, "Bass";
+        0x02 => Wind, "Wind";
+        0x04 => Fantasy, "Fantasy";
+        0x05 => Fx, "FX";
+        0x06 => Lead, "Lead";
+        0x07 => Organ, "Organ";
+        0x08 => Pad, "Pad";
+        0x0a => Pluck, "Pluck";
+        0x0b => String, "String";
+        0x0c => Synth, "Synth";
+        0x0d => Vocal, "Vocal";
+        0x0e => User, "User";
+        0x11 => None_, "None";
+        0x15 => Grand, "Grand";
+        0x16 => Upright, "Upright";
+        0x17 => EPiano1, "EPiano1";
+        0x18 => EPiano2, "EPiano2";
+        0x1b => Clavinet, "Clavinet";
+        0x1c => Harpsi, "Harpsi";
+        0x1e => Arpeggio, "Arpeggio";
+        0xff => Undefined, "Undefined";
+    }
+);
 
 #[cfg(test)]
 mod tests {

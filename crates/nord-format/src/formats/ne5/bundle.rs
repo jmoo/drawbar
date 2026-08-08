@@ -57,7 +57,7 @@ impl Bundle {
                     Entity::Piano(piano) => {
                         bundle.pianos.push(piano);
                     }
-                    Entity::Sample(sample) => {
+                    Entity::Sample(crate::Sample::V2(sample)) => {
                         bundle.samples.push(sample);
                     }
                     other => bundle

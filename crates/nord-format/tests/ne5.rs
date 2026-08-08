@@ -2311,7 +2311,7 @@ fn sample_specimens() -> Vec<(PathBuf, String)> {
 
 fn read_sample(path: &PathBuf) -> Cbin<Sample> {
     match nord_format::from_path(path).unwrap() {
-        Entity::Sample(s) => s,
+        Entity::Sample(nord_format::Sample::V2(s)) => s,
         other => panic!("{} decoded as {other:?}", path.display()),
     }
 }

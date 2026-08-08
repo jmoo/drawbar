@@ -210,15 +210,7 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
 
 /// The format tag a decoded entity would carry on disk.
 pub(crate) fn entity_tag(entity: &Entity) -> &'static str {
-    match entity {
-        Entity::Program(Program::Electro5(_)) => ne5::program::FORMAT,
-        Entity::Live(Live::Electro5(_)) => ne5::live::FORMAT,
-        Entity::Song(nord_format::Song::Electro5(_)) => ne5::song::FORMAT,
-        Entity::Settings(nord_format::Settings::Electro5(_)) => ne5::settings::FORMAT,
-        Entity::Piano(_) => npno::FORMAT,
-        Entity::Sample(_) => nsmp::FORMAT,
-        Entity::Bundle(_) => "zip",
-    }
+    entity.identity().format
 }
 
 #[cfg(test)]
