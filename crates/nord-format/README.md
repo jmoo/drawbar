@@ -2,26 +2,32 @@
 
 Parse and write **Clavia / Nord** keyboard binary file formats from Rust.
 
-This is the pure format-logic crate of the Nord toolkit: the `CBIN` container,
-the CRC-32 (ISO-HDLC) range checksum, and per-model entity layouts. It depends
-only on [`binrw`] (plus `zip` behind the `bundle` feature for backup bundles) and
-does no USB, OS, or I/O beyond `Read`/`Seek`/`Write` — so it's trivially testable
-against a specimen corpus and reusable by higher layers (a device/USB crate, a
-CLI) without dragging in a transport stack.
+This is the pure format-logic crate of the Nord toolkit: the `CBIN` container
+(both header generations, each with its checksum), and per-model entity layouts
+declared once with `#[bitbody]`. It depends only on [`crcxx`] (plus `zip` behind
+the `bundle` feature for backup bundles) and does no USB, OS, or I/O beyond
+`Read`/`Seek`/`Write` — so it's trivially testable against a specimen corpus and
+reusable by higher layers (a device/USB crate, a CLI) without dragging in a
+transport stack.
 
 ## What it handles
 
 | Format | Parse | Write (byte-exact) | Semantic decode |
 |---|:--:|:--:|---|
-| `ne5p` program | ✅ | ✅ | Center / piano / sample / FX / EQ panels ✅. **Organ**: drawbars, preset, vibrato/chorus (all models) and B3 percussion ✅ — B3-bass & Farfisa drawbar *display* transforms still pending. |
+| `ne5p` program | ✅ | ✅ | Center / piano / sample / FX / EQ panels ✅. **Organ**: drawbars, presets, vibrato/chorus, B3 percussion, and the B3-bass / Farfisa forms ✅ — three organ-block bits remain unexplained. |
 | `ne5t` song / set | ✅ | ✅ | ✅ (four program slots) |
-| `ne5l` live slot | ✅ | ✅ | Same as `ne5p` — the live buffer is the program body under another tag (confirmed on hardware), so it shares the program schema in the three live slots. |
-| `ne5s` settings | ✅ | ✅ | System / MIDI / Sound menus plus the power-up selection ✅ — 32 of the 34 catalogued settings are pinned by a change-one-setting hardware sweep; memory protect and local control move no bit of the body and stay undecoded. |
-| `npno` piano / `nsmp` sample | ✅ (header) | ⬜ header only | Only the header is parsed and re-emitted, so a full library file does **not** round-trip yet — `nord verify` on one reports the truncation. |
+| `ne5l` live slot | ✅ | ✅ | Same as `ne5p` — the live buffer is the program body under another tag (confirmed on hardware), so it shares the program body type in the three live slots. |
+| `ne5s` settings | ✅ | ✅ | System / MIDI / Sound menus plus the `startup_*` state the instrument restores at power-up ✅ — 32 of the 34 catalogued settings are pinned by a change-one-setting hardware sweep; memory protect and local control move no bit of the body and stay undecoded. |
+| `nsmp` sample | ✅ | ✅ | Name, categories, keyboard zones and per-zone strokes (root key, top note) — the audio stays encoded and is carried verbatim, so instruments can be renamed, retuned and remapped but not synthesised. |
+| `npno` piano | ✅ (container) | ✅ | Body unmapped; carried verbatim, so the file round-trips byte-exact and the checksum is verified. |
 | backup bundle (ZIP) | ✅ | — | Partial; behind the `bundle` feature. |
 
 Everything that parses **round-trips byte-for-byte**, verified against a
-change-one-knob specimen corpus.
+change-one-knob specimen corpus. **Both `CBIN` container generations are read and
+written** — type-1 (crc32 over the body) and the older type-0 (trailing crc16 over
+the whole file), so factory files round-trip too — and `inspect` reports container
+facts (tag, generation, version, length, checksum verdict) for *any* CBIN file in
+O(1) memory, mapped body or not.
 
 ## Usage
 
@@ -33,13 +39,18 @@ use nord_format::electro5::OrganModel;
 let entity = from_path("patch.ne5p")?;
 
 if let Entity::Program(Program::Electro5(p)) = entity {
+    // `p` is a `Cbin<electro5::Program>`: the CBIN header plus the decoded body,
+    // and it derefs to the body, so the panels read as fields.
     println!("location: {:?}", p.location());
-    println!("lower/upper: {:?} / {:?}", p.lower_part(), p.upper_part());
+    println!(
+        "lower/upper: {:?} / {:?}",
+        p.center_panel.lower_part, p.center_panel.upper_part
+    );
 
     // Organ state is decoded per model + selected preset:
-    let preset = p.organ().preset(OrganModel::B3);
-    println!("B3 drawbars: {:?}", p.organ().drawbars(OrganModel::B3, preset));
-    println!("B3 vibrato:  {:?}", p.organ().vib_type(OrganModel::B3));
+    let preset = p.organ_panel.preset(OrganModel::B3);
+    println!("B3 drawbars: {:?}", p.organ_panel.drawbars(OrganModel::B3, preset));
+    println!("B3 vibrato:  {:?}", p.organ_panel.vib_type(OrganModel::B3));
 }
 ```
 
@@ -87,9 +98,11 @@ The goal now is to finish reverse engineering ne5 files, add support for more mo
 
 ## Current State
 
-Messy and incomplete but solid for reading and writing electro 5 files due to lossless round trips and large test corpus.
+Incomplete but solid for reading and writing electro 5 files due to lossless round trips and large test corpus.
 Nord Electro 5 Program, Song, Live and Settings files are nearly 100% solved for the file versions I've encountered, and the library safely errors when
-encountering unexpected files or versions. Bundles, backups, piano, and sample files are still incomplete.
+encountering unexpected files or versions. Sample instruments read, write and edit
+(metadata only — the audio codec is not decoded); piano files round-trip verbatim but
+their body is unmapped; bundles and backups are still incomplete.
 
 Expect refactoring, API changes, and other misc changes until a stable version is released. I would also like to support
 more nord models, but will not work on those until I'm 100% satisfied with the Electro 5 support.
@@ -113,5 +126,5 @@ and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
 hardware these formats come from. All reverse engineering is of files produced by
 hardware the author owns, for interoperability.
 
-[`binrw`]: https://docs.rs/binrw
+[`crcxx`]: https://docs.rs/crcxx
 [`Entity`]: https://docs.rs/nord-format

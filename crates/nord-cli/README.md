@@ -130,7 +130,7 @@ already on disk can be read with no instrument attached:
 ```sh
 nord program get patch.ne5p             # the same summary the slot form prints
 nord program get patch.ne5p --body -o patch.body   # strip the CBIN header
-nord program info patch.ne5p            # the header: format tag, version, crc32
+nord program info patch.ne5p            # the header: format tag, version, checksum
 nord program deps patch.ne5p            # stored library ids
 ```
 
@@ -149,12 +149,12 @@ the write path end to end:
 $ nord verify song.ne5t settings.ne5s grand.npno
 ok     song.ne5t (62 bytes)
 ok     settings.ne5s (78 bytes)
-DIFFER grand.npno (in 209564996 bytes, out 20; first difference at the end (length differs))
-error: 1 of 3 file(s) did not round-trip
+ok     grand.npno (209564996 bytes)
 ```
 
-(A `DIFFER` on a piano is expected for now — only its header is parsed and
-re-emitted; see the `nord-format` format table. Samples round-trip.)
+Every format round-trips, pianos and samples included — a piano's body is not
+decoded, but it is carried verbatim and its checksum verified, so `verify` holds
+it to the same byte-identical bar.
 
 ## Working with an instrument
 
