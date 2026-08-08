@@ -251,10 +251,10 @@ fn read_program_reproduces_nsm_and_rebuilds_the_file() {
     );
 
     // And it survives a trip back out to the wire body.
-    let (format, loc, body) = envelope::unwrap(&file).unwrap();
-    assert_eq!(format, "ne5p");
-    assert_eq!(loc, at);
-    assert_eq!(body.len(), 121);
+    let back = envelope::unwrap(&file).unwrap();
+    assert_eq!(envelope::tag(&back.header), "ne5p");
+    assert_eq!(envelope::location(&back.header), at);
+    assert_eq!(back.body.0.len(), 121);
 
     assert!(t.is_exhausted(), "did not consume the whole exchange");
 }

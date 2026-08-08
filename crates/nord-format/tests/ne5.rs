@@ -15,6 +15,7 @@
 //! (`datatest-stable` / `libtest-mimic`) so each specimen is its own reported
 //! test case — see `Projects/Nord Utils.md`.
 
+use nord_format::cbin::Cbin;
 use nord_format::common::bank::Item;
 use nord_format::common::sample::Sample;
 use nord_format::electro5::settings::LiveSlot;
@@ -28,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::read;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Root of the Electro 5 specimen corpus, taken from `NORD_CORPUS_DIR` (point it
@@ -48,7 +49,7 @@ fn test_ne5_read_song_macro() {
 
     match song {
         Entity::Song(nord_format::Song::Electro5(song)) => {
-            let song = song as electro5::Song;
+            let song: Cbin<electro5::Song> = song;
             let coords = song.location();
 
             assert_eq!(coords, (0, 2));
@@ -69,7 +70,7 @@ fn test_ne5_read_song_bank() {
 
     match song {
         Entity::Song(nord_format::Song::Electro5(song)) => {
-            let song = song as electro5::Song;
+            let song: Cbin<electro5::Song> = song;
             let coords = song.location();
 
             assert_eq!(coords, (0, 2));
@@ -122,22 +123,22 @@ fn test_ne5_read_program() {
 
     match program {
         Entity::Program(nord_format::Program::Electro5(program)) => {
-            let program = program as electro5::Program;
+            let program: Cbin<electro5::Program> = program;
             let coords = program.location();
 
             assert_eq!(coords, (7, 3));
-            assert_eq!(program.schema.center_panel.lower_part, Instrument::Organ);
-            assert_eq!(program.schema.center_panel.upper_part, Instrument::Piano);
-            assert_eq!(program.schema.center_panel.lower_octave_shift, 1);
-            assert_eq!(program.schema.center_panel.upper_octave_shift, 0);
-            assert!(!program.schema.center_panel.lower_sustain);
-            assert!(!program.schema.center_panel.upper_sustain);
-            assert!(!program.schema.center_panel.lower_control);
-            assert!(!program.schema.center_panel.upper_control);
-            assert!(!program.schema.center_panel.split);
-            assert_eq!(program.schema.center_panel.split_point, SplitPoint::F4);
-            assert_eq!(program.schema.center_panel.transpose, 1);
-            assert!(!program.schema.center_panel.transpose_enabled);
+            assert_eq!(program.center_panel.lower_part, Instrument::Organ);
+            assert_eq!(program.center_panel.upper_part, Instrument::Piano);
+            assert_eq!(program.center_panel.lower_octave_shift, 1);
+            assert_eq!(program.center_panel.upper_octave_shift, 0);
+            assert!(!program.center_panel.lower_sustain);
+            assert!(!program.center_panel.upper_sustain);
+            assert!(!program.center_panel.lower_control);
+            assert!(!program.center_panel.upper_control);
+            assert!(!program.center_panel.split);
+            assert_eq!(program.center_panel.split_point, SplitPoint::F4);
+            assert_eq!(program.center_panel.transpose, 1);
+            assert!(!program.center_panel.transpose_enabled);
         }
         _ => panic!("expected electro5 program"),
     }
@@ -172,7 +173,7 @@ fn test_ne5_read_settings() {
 
     match program {
         Entity::Settings(nord_format::Settings::Electro5(settings)) => {
-            let _settings = settings as electro5::Settings;
+            let _settings: Cbin<electro5::Settings> = settings;
         }
         _ => panic!("expected electro5 settings"),
     }
@@ -430,7 +431,7 @@ fn ne5s_files(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-fn read_settings(path: &std::path::Path) -> electro5::Settings {
+fn read_settings(path: &std::path::Path) -> Cbin<electro5::Settings> {
     match nord_format::from_path(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())) {
         Entity::Settings(nord_format::Settings::Electro5(s)) => s,
         other => panic!("{} is not Electro 5 settings: {other:?}", path.display()),
@@ -479,8 +480,6 @@ fn test_ne5_settings_re_encode_to_the_same_bytes() {
 /// Each sweep specimen decodes to the setting its filename names.
 #[test]
 fn test_ne5_settings_decode_to_their_filenames() {
-    use nord_format::panel::Panel;
-
     let dir = corpus_dir().join("settings");
     let oracle: BTreeMap<String, (&str, &str)> = SETTINGS_ORACLE
         .iter()
@@ -527,7 +526,7 @@ fn test_ne5_settings_decode_to_their_filenames() {
             .get(&key)
             .unwrap_or_else(|| panic!("{name} has no expected value — add it to the oracle"));
 
-        let values = read_settings(&path).schema.panel.field_values();
+        let values = read_settings(&path).field_values();
         let got = values
             .iter()
             .find(|v| v.name == *field)
@@ -577,13 +576,25 @@ fn test_ne5_settings_selection_decodes_to_their_filenames() {
 
     let dir = corpus_dir().join("settings");
     for &(name, live_mode, live_slot, program) in SELECTION_ORACLE {
-        let selection = read_settings(&dir.join(format!("{name}.ne5s")))
-            .schema
-            .selection;
-        assert_eq!(selection.live_mode, live_mode, "live_mode in {name}");
-        assert_eq!(selection.live_slot, live_slot, "live_slot in {name}");
-        assert_eq!(selection.program.inner(), program, "program in {name}");
-        assert!(!selection.set_list_mode, "set_list_mode in {name}");
+        let settings = read_settings(&dir.join(format!("{name}.ne5s")));
+        let body = &settings.body;
+        assert_eq!(
+            body.startup_live_mode, live_mode,
+            "startup_live_mode in {name}"
+        );
+        assert_eq!(
+            body.startup_live_slot, live_slot,
+            "startup_live_slot in {name}"
+        );
+        assert_eq!(
+            body.startup_program.inner(),
+            program,
+            "startup_program in {name}"
+        );
+        assert!(
+            !body.startup_set_list_mode,
+            "startup_set_list_mode in {name}"
+        );
     }
 
     // Every pedal specimen was captured in the state `reboot-live-3` left behind, so a
@@ -611,20 +622,18 @@ fn test_ne5_settings_selection_decodes_to_their_filenames() {
 fn test_ne5_settings_set_list_song_decodes() {
     let root = corpus_dir();
     // Captured before the sweep, in set list mode.
-    let early = read_settings(&root.join("settings.ne5s")).schema.selection;
-    assert!(early.set_list_mode);
-    assert_eq!(early.song.inner(), (0, 1));
-    assert_eq!(early.program.inner(), (4, 21));
+    let early = read_settings(&root.join("settings.ne5s"));
+    assert!(early.startup_set_list_mode);
+    assert_eq!(early.startup_song.inner(), (0, 1));
+    assert_eq!(early.startup_program.inner(), (4, 21));
 
     // The full backup. Its archive holds exactly two set lists, 1 and 3, and this is the
     // only specimen pointing outside the first.
     let backup = read_settings(
         &root.join("usb/backup/full_backup/contents/Settings/Settings/Settings.ne5s"),
-    )
-    .schema
-    .selection;
-    assert!(!backup.set_list_mode);
-    assert_eq!(backup.song.inner(), (2, 3));
+    );
+    assert!(!backup.startup_set_list_mode);
+    assert_eq!(backup.startup_song.inner(), (2, 3));
 }
 
 /// No settings file decodes to a value with no name.
@@ -633,20 +642,13 @@ fn test_ne5_settings_set_list_song_decodes() {
 /// is preserved rather than refused — this is where it gets noticed.
 #[test]
 fn test_ne5_no_corpus_settings_hold_an_unrecognized_value() {
-    use nord_format::panel::Panel;
-
     let mut unknowns: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
 
     for path in ne5s_files(&corpus_dir()) {
-        let schema = read_settings(&path).schema;
-        // Both panels over the body — the selection's `live_slot` can hold an
-        // unrecognized value too.
-        let values = schema
-            .panel
-            .field_values()
-            .into_iter()
-            .chain(schema.selection.field_values());
-        for value in values {
+        let settings = read_settings(&path);
+        // The flat body registers the startup settings too — `startup_live_slot`
+        // can hold an unrecognized value like any other field.
+        for value in settings.field_values() {
             if value.value.starts_with("unknown") {
                 unknowns
                     .entry(value.name.to_string())
@@ -752,18 +754,18 @@ fn test_ne5_program_read_write_center_panel() {
 
                     if let Some(lower_instrument) = lower_instrument {
                         assert_eq!(
-                            program.schema.center_panel.lower_part, lower_instrument,
+                            program.center_panel.lower_part, lower_instrument,
                             "lower instrument mismatch in file {}",
                             path
                         );
                         assert!(
-                            program.schema.center_panel.lower_enabled,
+                            program.center_panel.lower_enabled,
                             "lower part enabled mismatch in file {}",
                             path
                         );
                     } else {
                         assert!(
-                            !program.schema.center_panel.lower_enabled,
+                            !program.center_panel.lower_enabled,
                             "lower part enabled mismatch in file {}",
                             path
                         );
@@ -771,18 +773,18 @@ fn test_ne5_program_read_write_center_panel() {
 
                     if let Some(upper_instrument) = upper_instrument {
                         assert_eq!(
-                            program.schema.center_panel.upper_part, upper_instrument,
+                            program.center_panel.upper_part, upper_instrument,
                             "upper instrument mismatch in file {}",
                             path
                         );
                         assert!(
-                            program.schema.center_panel.upper_enabled,
+                            program.center_panel.upper_enabled,
                             "upper part enabled mismatch in file {}",
                             path
                         );
                     } else {
                         assert!(
-                            !program.schema.center_panel.upper_enabled,
+                            !program.center_panel.upper_enabled,
                             "upper part enabled mismatch in file {}",
                             path
                         );
@@ -795,67 +797,67 @@ fn test_ne5_program_read_write_center_panel() {
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.lower_octave_shift, lower_octave_shift,
+                        program.center_panel.lower_octave_shift, lower_octave_shift,
                         "lower octave shift mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.upper_octave_shift, upper_octave_shift,
+                        program.center_panel.upper_octave_shift, upper_octave_shift,
                         "upper octave shift mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.lower_sustain, lower_sustain,
+                        program.center_panel.lower_sustain, lower_sustain,
                         "lower sustain mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.upper_sustain, upper_sustain,
+                        program.center_panel.upper_sustain, upper_sustain,
                         "upper sustain mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.lower_control, lower_control,
+                        program.center_panel.lower_control, lower_control,
                         "lower control mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.upper_control, upper_control,
+                        program.center_panel.upper_control, upper_control,
                         "upper control mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.split,
+                        program.center_panel.split,
                         split != 0,
                         "split enabled mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.transpose_enabled, transpose_enabled,
+                        program.center_panel.transpose_enabled, transpose_enabled,
                         "transpose enabled mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.part_mix.lower().round(),
+                        program.center_panel.part_mix.lower().round(),
                         part_mix.0.round(),
                         "lower part mix mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.part_mix.upper().round(),
+                        program.center_panel.part_mix.upper().round(),
                         part_mix.1.round(),
                         "upper part mix mismatch in file {}",
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.transpose, transpose,
+                        program.center_panel.transpose, transpose,
                         "transpose mismatch in file {}",
                         path
                     );
 
                     if split != 0 {
                         assert_eq!(
-                            program.schema.center_panel.split_point as u8,
+                            program.center_panel.split_point as u8,
                             split - 1,
                             "split point mismatch in file {}",
                             path
@@ -864,7 +866,7 @@ fn test_ne5_program_read_write_center_panel() {
                 }
                 _ => panic!("expected electro5 song in file {}", path),
             }
-        } else if !path.contains("README.md") {
+        } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
         }
     }
@@ -909,7 +911,7 @@ fn test_ne5_program_read_write_gain() {
                         path
                     );
                     assert_eq!(
-                        program.schema.center_panel.gain,
+                        program.center_panel.gain,
                         ((gain / 10_f32) * 127_f32).round() as u8,
                         "gain mismatch in file {}",
                         path
@@ -917,7 +919,7 @@ fn test_ne5_program_read_write_gain() {
                 }
                 _ => panic!("expected electro5 song in file {}", path),
             }
-        } else if !path.contains("README.md") {
+        } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
         }
     }
@@ -965,26 +967,26 @@ fn test_ne5_program_read_write_fx() {
                     match fx {
                         1 => {
                             assert_eq!(
-                                program.schema.effects_panel.fx1,
+                                program.effects_panel.fx1,
                                 Routing::from_panel(part_select)
                                     .unwrap_or_else(|| panic!("bad part select in {path}")),
                                 "fx1 part select mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx1_control,
+                                program.effects_panel.fx1_control,
                                 switch_enabled != 0,
                                 "fx1 control mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx1_rate,
+                                program.effects_panel.fx1_rate,
                                 ((fx_value / 10_f32) * 127_f32).floor() as u8,
                                 "fx1 rate mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx1_type,
+                                program.effects_panel.fx1_type,
                                 match fx_type {
                                     0 => Fx1Type::Pan1,
                                     1 => Fx1Type::Pan2,
@@ -1002,26 +1004,26 @@ fn test_ne5_program_read_write_fx() {
                         }
                         2 => {
                             assert_eq!(
-                                program.schema.effects_panel.fx2,
+                                program.effects_panel.fx2,
                                 Routing::from_panel(part_select)
                                     .unwrap_or_else(|| panic!("bad part select in {path}")),
                                 "fx2 part select mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx2_deep,
+                                program.effects_panel.fx2_deep,
                                 switch_enabled != 0,
                                 "fx2 deep mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx2_rate,
+                                program.effects_panel.fx2_rate,
                                 fx_value.floor() as u8,
                                 "fx2 rate mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx2_type,
+                                program.effects_panel.fx2_type,
                                 match fx_type {
                                     0 => Fx2Type::Flanger,
                                     1 => Fx2Type::Chorus1,
@@ -1037,26 +1039,26 @@ fn test_ne5_program_read_write_fx() {
                         }
                         3 => {
                             assert_eq!(
-                                program.schema.effects_panel.fx3,
+                                program.effects_panel.fx3,
                                 Routing::from_panel(part_select)
                                     .unwrap_or_else(|| panic!("bad part select in {path}")),
                                 "fx3 part select mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx3_compression.as_u8() as f32,
+                                program.effects_panel.fx3_compression.as_u8() as f32,
                                 fx_value,
                                 "fx3 compression mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx3_compression.as_u8() > 0,
+                                program.effects_panel.fx3_compression.as_u8() > 0,
                                 switch_enabled != 0,
                                 "fx3 drive on mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx3_type,
+                                program.effects_panel.fx3_type,
                                 match fx_type {
                                     0 => Fx3Type::None_,
                                     1 => Fx3Type::Twin,
@@ -1072,51 +1074,51 @@ fn test_ne5_program_read_write_fx() {
                         }
                         4 => {
                             assert_eq!(
-                                program.schema.effects_panel.fx4,
+                                program.effects_panel.fx4,
                                 Routing::from_panel(part_select)
                                     .unwrap_or_else(|| panic!("bad part select in {path}")),
                                 "fx4 part select mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx4_ping_pong,
+                                program.effects_panel.fx4_ping_pong,
                                 switch_enabled != 0,
                                 "fx4 ping pong mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx4_moisture.as_u8() as f32,
+                                program.effects_panel.fx4_moisture.as_u8() as f32,
                                 ((fx_value / 10_f32) * 127_f32).floor(),
                                 "fx4 moisture mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx4_tempo.as_u8() as f32,
+                                program.effects_panel.fx4_tempo.as_u8() as f32,
                                 fx_value2.unwrap().floor(),
                                 "fx4 tempo mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx4_feedback, fx_type,
+                                program.effects_panel.fx4_feedback, fx_type,
                                 "fx4 type mismatch in file {}",
                                 path
                             );
                         }
                         5 => {
                             assert_eq!(
-                                program.schema.effects_panel.fx5,
+                                program.effects_panel.fx5,
                                 part_select == 1,
                                 "fx5 part select mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx5_moisture.as_u8() as f32,
+                                program.effects_panel.fx5_moisture.as_u8() as f32,
                                 fx_value,
                                 "fx5 moisture mismatch in file {}",
                                 path
                             );
                             assert_eq!(
-                                program.schema.effects_panel.fx5_type,
+                                program.effects_panel.fx5_type,
                                 match fx_type {
                                     0 => Fx5Type::Stage,
                                     1 => Fx5Type::HallSoft,
@@ -1143,7 +1145,7 @@ fn test_ne5_program_read_write_fx() {
                 }
                 _ => panic!("expected electro5 song in file {}", path),
             }
-        } else if !path.contains("README.md") {
+        } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
         }
     }
@@ -1195,7 +1197,7 @@ fn test_ne5_program_read_write_equalizer() {
                 }
                 _ => panic!("expected electro5 song in file {}", path),
             }
-        } else if !path.contains("README.md") {
+        } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
         }
     }
@@ -1251,7 +1253,7 @@ fn test_ne5_program_read_sample() {
                 }
                 _ => panic!("expected electro5 song in file {}", path),
             }
-        } else if !path.contains("README.md") {
+        } else if !path.contains("README.md") && !path.ends_with(".oracle.json") {
             panic!("invalid file name: {}", path)
         }
     }
@@ -1339,7 +1341,7 @@ fn test_ne5_program_read_write_organ() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == "README.md" || name.contains(".skip.") {
+        if name == "README.md" || name.contains(".skip.") || name.ends_with(".oracle.json") {
             continue;
         }
         let path = entry.path();
@@ -1391,7 +1393,7 @@ fn test_ne5_program_read_write_organ() {
             Entity::Program(nord_format::Program::Electro5(p)) => p,
             _ => panic!("expected electro5 program in file {name}"),
         };
-        let organ = &program.schema.organ_panel;
+        let organ = &program.organ_panel;
 
         // Preset selection decodes to the value encoded in the filename.
         assert_eq!(organ.preset(model), preset, "preset mismatch in {name}");
@@ -1495,13 +1497,13 @@ fn test_ne5_b3_bass_drawbars_match_filenames() {
             nord_format::Entity::Program(nord_format::Program::Electro5(p)) => p,
             other => panic!("{name}: expected an electro5 program, got {other:?}"),
         };
-        let got = program.schema.organ_panel.b3_bass_drawbars();
+        let got = program.organ_panel.b3_bass_drawbars();
         let want = [bars.as_bytes()[0] - b'0', bars.as_bytes()[1] - b'0'];
         assert_eq!(got, want, "bass drawbars in {name}");
 
         // The main block's first two nibbles are stale in this mode and must not be
         // mistaken for the bass values — assert we are genuinely reading elsewhere.
-        let main = program.schema.organ_panel.drawbars(OrganModel::B3, 1);
+        let main = program.organ_panel.drawbars(OrganModel::B3, 1);
         if want != [0, 0] && (main[0], main[1]) == (want[0], want[1]) {
             panic!("{name}: bass values also appear in the main block — offsets may be wrong");
         }
@@ -1666,7 +1668,7 @@ fn ne5l_files() -> Vec<PathBuf> {
 /// Read a program and assert it still round-trips byte-exact. The id fields are
 /// read-only views over a verbatim `settings` word, so decoding more of it must
 /// never cost the round-trip.
-fn read_program_checked(path: &std::path::Path) -> electro5::Program {
+fn read_program_checked(path: &std::path::Path) -> Cbin<electro5::Program> {
     let name = path.display().to_string();
     let contents = read(path).unwrap();
 
@@ -1744,7 +1746,7 @@ fn test_ne5_program_piano_id() {
         let touch = u8::from_str(&matches[4]).unwrap();
         let category = category_of(u8::from_str(&matches[5]).unwrap());
 
-        let piano = &read_program_checked(&path).schema.piano_panel;
+        let piano = &read_program_checked(&path).piano_panel;
 
         assert_eq!(piano.category, category, "category in {name}");
         assert_eq!(piano.acoustics, acoustics, "acoustics in {name}");
@@ -1815,7 +1817,7 @@ fn test_ne5_program_sample_id() {
         let number = panel_number(&matches[4]) - 1;
         let decay_release = u8::from_str(&matches[7]).unwrap();
 
-        let sample = &read_program_checked(&path).schema.sample_panel;
+        let sample = &read_program_checked(&path).sample_panel;
 
         assert_eq!(sample.dynamics, dynamics, "dynamics in {name}");
         assert_eq!(sample.filter, filter, "filter in {name}");
@@ -1886,8 +1888,8 @@ fn test_ne5_backup_dependency_ids() {
 
     for path in ne5p_files(&backup.join("contents/Program")) {
         let name = path.display().to_string();
-        let schema = read_program_checked(&path).schema;
-        let (piano, sample) = (&schema.piano_panel, &schema.sample_panel);
+        let program = read_program_checked(&path);
+        let (piano, sample) = (&program.piano_panel, &program.sample_panel);
 
         if piano.id != 0 {
             let slot = (piano.category, piano.piano_model.as_u8());
@@ -1989,60 +1991,60 @@ fn test_ne5_a_mutation_in_every_panel_reaches_the_bytes() {
     type Case = (
         &'static str,
         std::ops::RangeInclusive<usize>,
-        fn(&mut electro5::Program),
-        fn(&electro5::Program),
+        fn(&mut Cbin<electro5::Program>),
+        fn(&Cbin<electro5::Program>),
     );
 
     let cases: Vec<Case> = vec![
         (
             "center_panel.gain",
             0x2e..=0x34,
-            |p| p.schema.center_panel.gain = 96u8.try_into().unwrap(),
-            |p| assert_eq!(p.schema.center_panel.gain, 96),
+            |p| p.center_panel.gain = 96u8.try_into().unwrap(),
+            |p| assert_eq!(p.center_panel.gain, 96),
         ),
         (
             "piano_panel.touch",
             0x3a..=0x41,
-            |p| p.schema.piano_panel.touch = 3u8.try_into().unwrap(),
-            |p| assert_eq!(p.schema.piano_panel.touch, 3),
+            |p| p.piano_panel.touch = 3u8.try_into().unwrap(),
+            |p| assert_eq!(p.piano_panel.touch, 3),
         ),
         (
             "sample_panel.number",
             0x46..=0x4d,
-            |p| p.schema.sample_panel.number = 211,
-            |p| assert_eq!(p.schema.sample_panel.number, 211),
+            |p| p.sample_panel.number = 211,
+            |p| assert_eq!(p.sample_panel.number, 211),
         ),
         (
             "organ_panel.b3_perc_third",
             0x4e..=0x92,
-            |p| p.schema.organ_panel.set_b3_perc_third(true),
-            |p| assert!(p.schema.organ_panel.b3_perc_third()),
+            |p| p.organ_panel.set_b3_perc_third(true),
+            |p| assert!(p.organ_panel.b3_perc_third()),
         ),
         (
             "effects_panel.fx3_compression",
             0x93..=0x9f,
-            |p| p.schema.effects_panel.fx3_compression = 101u8.try_into().unwrap(),
-            |p| assert_eq!(p.schema.effects_panel.fx3_compression, 101),
+            |p| p.effects_panel.fx3_compression = 101u8.try_into().unwrap(),
+            |p| assert_eq!(p.effects_panel.fx3_compression, 101),
         ),
         (
             // Three bits in 0x9a, four in 0x9b.
             "effects_panel.equalizer_freq_gain",
             0x93..=0x9f,
-            |p| p.schema.effects_panel.equalizer_freq_gain = 0x55u8.try_into().unwrap(),
-            |p| assert_eq!(p.schema.effects_panel.equalizer_freq_gain, 0x55),
+            |p| p.effects_panel.equalizer_freq_gain = 0x55u8.try_into().unwrap(),
+            |p| assert_eq!(p.effects_panel.equalizer_freq_gain, 0x55),
         ),
         (
             // Five bits in 0x9e, two in 0x9f.
             "effects_panel.fx5_moisture",
             0x93..=0x9f,
-            |p| p.schema.effects_panel.fx5_moisture = 0x2au8.try_into().unwrap(),
-            |p| assert_eq!(p.schema.effects_panel.fx5_moisture, 0x2a),
+            |p| p.effects_panel.fx5_moisture = 0x2au8.try_into().unwrap(),
+            |p| assert_eq!(p.effects_panel.fx5_moisture, 0x2a),
         ),
         (
             "effects_panel.equalizer_part",
             0xa1..=0xa4,
-            |p| p.schema.effects_panel.equalizer_part = EqualizerPart::Both,
-            |p| assert_eq!(p.schema.effects_panel.equalizer_part, EqualizerPart::Both),
+            |p| p.effects_panel.equalizer_part = EqualizerPart::Both,
+            |p| assert_eq!(p.effects_panel.equalizer_part, EqualizerPart::Both),
         ),
     ];
 
@@ -2091,7 +2093,7 @@ fn test_ne5_organ_drawbars_survive_a_rewrite() {
         let original = read(&path).unwrap();
         let mut program = read_program_checked(&path);
 
-        let organ = &mut program.schema.organ_panel;
+        let organ = &mut program.organ_panel;
         for model in [B3, Vox, Farfisa, Pipe] {
             for preset in [1u8, 2] {
                 let bars = organ.drawbars(model, preset);
@@ -2136,11 +2138,7 @@ fn test_ne5_no_corpus_program_holds_an_unrecognized_value() {
         else {
             continue;
         };
-        let (c, pi, fx) = (
-            &p.schema.center_panel,
-            &p.schema.piano_panel,
-            &p.schema.effects_panel,
-        );
+        let (c, pi, fx) = (&p.center_panel, &p.piano_panel, &p.effects_panel);
 
         let mut check = |field: &'static str, unknown: bool, raw: u64| {
             if unknown {
@@ -2245,7 +2243,7 @@ fn test_ne5_live_occupies_three_slots_of_one_bank() {
 /// A live specimen with its tag swapped is a valid program, down to the last field.
 ///
 /// Confirmed on hardware: the same panel state read as a live slot and as a program gives
-/// byte-identical bodies. One `Schema` serves both, so the field values cannot disagree —
+/// byte-identical bodies. One body serves both, so the field values cannot disagree —
 /// what this pins on real specimens is that everything around them agrees too: the slot
 /// falls in the program space, the version is one programs accept, and the body checksum
 /// still holds.
@@ -2259,10 +2257,16 @@ fn test_ne5_a_live_body_decodes_as_a_program() {
             panic!("expected an electro5 live slot in {name}")
         };
 
-        // The tag is the whole difference: the CRC covers `0x2c..` and never sees the
-        // header, so retagging in place leaves a valid file.
+        // The tag is the whole difference. On a type-1 file the crc32 covers the body
+        // and never sees the header, so the retag alone leaves a valid file; a type-0
+        // file's trailing crc16 covers the header too, so it gets restamped.
         let mut bytes = read(&path).unwrap();
         bytes[0x08..0x0c].copy_from_slice(electro5::program::FORMAT.as_bytes());
+        if bytes[0x04] == 0 {
+            let at = bytes.len() - 2;
+            let crc = nord_format::crc::crc16(&bytes[..at]);
+            bytes[at..].copy_from_slice(&crc.to_le_bytes());
+        }
 
         let Entity::Program(nord_format::Program::Electro5(program)) =
             nord_format::from_stream(&mut Cursor::new(&bytes)).unwrap()
@@ -2273,11 +2277,11 @@ fn test_ne5_a_live_body_decodes_as_a_program() {
         let named = |fields: Vec<electro5::program::Field>| -> Vec<(String, String)> {
             fields.into_iter().map(|f| (f.path, f.display)).collect()
         };
-        let fields = named(live.schema.fields());
+        let fields = named(live.fields());
         assert!(!fields.is_empty(), "no fields to compare");
         assert_eq!(
             fields,
-            named(program.schema.fields()),
+            named(program.fields()),
             "live and program decodes disagree on {name}",
         );
     }
@@ -2304,7 +2308,7 @@ fn sample_specimens() -> Vec<(PathBuf, String)> {
     out
 }
 
-fn read_sample(path: &PathBuf) -> Sample {
+fn read_sample(path: &PathBuf) -> Cbin<Sample> {
     match nord_format::from_path(path).unwrap() {
         Entity::Sample(s) => s,
         other => panic!("{} decoded as {other:?}", path.display()),
@@ -2319,9 +2323,12 @@ fn read_sample(path: &PathBuf) -> Sample {
 fn test_nsmp_round_trip() {
     for (path, stem) in sample_specimens() {
         let sample = read_sample(&path);
-        assert_eq!(sample.header.format, nord_format::common::sample::FORMAT);
         assert_eq!(
-            sample.to_bytes(),
+            &sample.header.tag,
+            nord_format::common::sample::FORMAT.as_bytes()
+        );
+        assert_eq!(
+            sample.to_bytes().unwrap(),
             read(&path).unwrap(),
             "{stem} did not round-trip byte-exactly"
         );
@@ -2448,7 +2455,7 @@ fn test_nsmp_edits_reproduce_the_editors_own_output() {
     sample.set_zone_top_note(1, 60).unwrap();
 
     assert_eq!(
-        sample.to_bytes(),
+        sample.to_bytes().unwrap(),
         read(dir.join("D7-upperkey.nsmp")).unwrap(),
         "rename + remap did not reproduce the editor's own file"
     );
@@ -2462,7 +2469,7 @@ fn test_nsmp_retune_touches_one_byte() {
     let mut sample = read_sample(&dir.join("D1-one-zone.nsmp"));
 
     sample.set_root_key(0, 48).unwrap();
-    let after = sample.to_bytes();
+    let after = sample.to_bytes().unwrap();
 
     let differing: Vec<usize> = (0..before.len())
         .filter(|&i| before[i] != after[i])
@@ -2493,4 +2500,83 @@ fn test_nsmp_bad_checksum_is_refused() {
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
     assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// The type-0 container (`CBIN` header type 0)
+// ---------------------------------------------------------------------------
+
+/// Every file under a directory tree whose first four bytes are `CBIN`.
+fn cbin_files(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if fs::read(&path).is_ok_and(|b| b.starts_with(b"CBIN")) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Parse → write reproduces every factory program byte-exactly.
+///
+/// The factory banks are type-0 containers — 147 bytes against the differential
+/// specimens' 165 — so this sweep is what proves the v0 header layout and the
+/// trailing crc16 against Clavia's own files, not just our synthesized ones.
+#[test]
+fn test_ne5_factory_programs_round_trip() {
+    let paths = cbin_files(&corpus_dir().join("factory"));
+    assert!(
+        paths.len() > 100,
+        "found only {} factory files — is the corpus present?",
+        paths.len()
+    );
+
+    let mut type0 = 0usize;
+    for path in &paths {
+        let bytes = read(path).unwrap();
+        let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let out =
+            nord_format::to_bytes(&entity).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(
+            out,
+            bytes,
+            "{} did not round-trip byte-exactly",
+            path.display()
+        );
+        if bytes[0x04] == 0 {
+            type0 += 1;
+        }
+    }
+    assert!(
+        type0 > 100,
+        "only {type0} type-0 files in the factory sweep — the axis this test exists for"
+    );
+}
+
+/// `cbin::inspect` verifies the container of every CBIN file the ne5 tree ships —
+/// both generations, program-sized and library-sized, decoded formats and not.
+#[test]
+fn test_inspect_verifies_every_cbin_container() {
+    let paths = cbin_files(&corpus_dir());
+    assert!(paths.len() > 200, "found only {} CBIN files", paths.len());
+
+    for path in &paths {
+        let mut f = std::fs::File::open(path).unwrap();
+        let info = nord_format::cbin::inspect(&mut f)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(
+            info.checksum_ok,
+            "{}: checksum mismatch ({:?})",
+            path.display(),
+            info.header,
+        );
+    }
 }

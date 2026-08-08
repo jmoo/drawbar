@@ -10,9 +10,9 @@
 
 use std::path::Path;
 
-use nord_format::common::bank;
+use nord_format::cbin::Cbin;
 use nord_format::electro5;
-use nord_format::electro5::program::{Field, Schema};
+use nord_format::electro5::program::Field;
 use nord_format::panel::FieldError;
 use nord_format::{Entity, Live, Program, Settings};
 use nord_usb::ObjectClass;
@@ -21,28 +21,28 @@ use crate::slot::Target;
 use crate::ui::Ui;
 use crate::EditArgs;
 
-/// The schema shapes `edit` drives: the program body in either slot space, and the
-/// settings singleton. One vocabulary — `--set member.field=value` — over each.
+/// The files `edit` drives: the program body in either slot space, and the settings
+/// singleton. One vocabulary — `--set path=value` — over each.
 trait Editable {
     fn fields(&self) -> Vec<Field>;
     fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError>;
 }
 
-impl<L: bank::Location> Editable for Schema<L> {
+impl Editable for Cbin<electro5::Program> {
     fn fields(&self) -> Vec<Field> {
-        Schema::fields(self)
+        self.body.fields()
     }
     fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError> {
-        Schema::set_field(self, path, value)
+        self.body.set_field(path, value)
     }
 }
 
-impl Editable for electro5::settings::Schema {
+impl Editable for Cbin<electro5::Settings> {
     fn fields(&self) -> Vec<Field> {
-        electro5::settings::Schema::fields(self)
+        self.body.fields()
     }
     fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError> {
-        electro5::settings::Schema::set_field(self, path, value)
+        self.body.set_field(path, value)
     }
 }
 
@@ -65,13 +65,9 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
     let staged = match (&mut entity, class) {
-        (Entity::Program(Program::Electro5(p)), ObjectClass::Program) => {
-            stage(ui, &args, &mut p.schema)?
-        }
-        (Entity::Live(Live::Electro5(l)), ObjectClass::Live) => stage(ui, &args, &mut l.schema)?,
-        (Entity::Settings(Settings::Electro5(s)), ObjectClass::Settings) => {
-            stage(ui, &args, &mut s.schema)?
-        }
+        (Entity::Program(Program::Electro5(p)), ObjectClass::Program) => stage(ui, &args, p)?,
+        (Entity::Live(Live::Electro5(l)), ObjectClass::Live) => stage(ui, &args, l)?,
+        (Entity::Settings(Settings::Electro5(s)), ObjectClass::Settings) => stage(ui, &args, s)?,
         _ => return Err(mismatch(&entity, class)),
     };
     // `--fields` has listed them and is done.
@@ -128,13 +124,13 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
 /// target-less `-o` starts from.
 fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
     let entity = match class {
-        ObjectClass::Program => Entity::Program(Program::Electro5(electro5::Program::new(
+        ObjectClass::Program => Entity::Program(Program::Electro5(electro5::program::new(
             (0, 0).try_into().map_err(|e| format!("{e}"))?,
         ))),
-        ObjectClass::Live => Entity::Live(Live::Electro5(electro5::Live::new(
+        ObjectClass::Live => Entity::Live(Live::Electro5(electro5::live::new(
             (0, 0).try_into().map_err(|e| format!("{e}"))?,
         ))),
-        ObjectClass::Settings => Entity::Settings(Settings::Electro5(electro5::Settings::new())),
+        ObjectClass::Settings => Entity::Settings(Settings::Electro5(electro5::settings::new())),
         other => return Err(format!("edit does not exist for {}", other.label())),
     };
     nord_format::to_bytes(&entity).map_err(|e| e.to_string())
@@ -165,9 +161,9 @@ fn steer(tag: &str) -> &'static str {
 
 /// List the fields (`--fields`, `None`) or apply every `--set`, returning how many
 /// fields moved.
-fn stage(ui: &Ui, args: &EditArgs, schema: &mut impl Editable) -> Result<Option<usize>, String> {
+fn stage(ui: &Ui, args: &EditArgs, file: &mut impl Editable) -> Result<Option<usize>, String> {
     if args.fields {
-        list_fields(ui, schema);
+        list_fields(ui, file);
         return Ok(None);
     }
     if args.set.is_empty() {
@@ -176,18 +172,17 @@ fn stage(ui: &Ui, args: &EditArgs, schema: &mut impl Editable) -> Result<Option<
 
     // Every change lands before anything is written, so a bad path or an out-of-range
     // value cannot leave a half-edited program behind.
-    let before = schema.fields();
+    let before = file.fields();
     for assignment in &args.set {
         let (path, value) = assignment
             .split_once('=')
             .ok_or_else(|| format!("expected PATH=VALUE, got {assignment:?}"))?;
-        schema
-            .set_field(path.trim(), value)
+        file.set_field(path.trim(), value)
             .map_err(|e| e.to_string())?;
     }
     warn_on_sticky_pairs(ui, &args.set);
 
-    let after = schema.fields();
+    let after = file.fields();
     Ok(Some(report_changes(ui, &before, &after)))
 }
 
@@ -247,6 +242,22 @@ fn report_changes(
     changed
 }
 
+/// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
+/// are not a CBIN file.
+///
+/// The two generations put it in different places, and a type-0 file's `0x18` is body
+/// data — annotating it as the type-1 crc32 would label a real edit as bookkeeping.
+fn checksum_bytes(file: &[u8]) -> Option<(std::ops::Range<usize>, &'static str)> {
+    if file.len() < 8 || &file[0..4] != nord_format::cbin::MAGIC {
+        return None;
+    }
+    match u32::from_le_bytes(file[4..8].try_into().unwrap()) {
+        0 => Some((file.len() - 2..file.len(), "  (file crc16)")),
+        1 => Some((0x18..0x1c, "  (body crc32)")),
+        _ => None,
+    }
+}
+
 /// The bytes that moved.
 ///
 /// The CRC moves with any body change; the row is annotated so it does not read as a
@@ -260,27 +271,27 @@ pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
         ));
         return;
     }
+    let checksum = checksum_bytes(after);
     for (i, (b, a)) in before.iter().zip(after).enumerate() {
         if b == a {
             continue;
         }
-        // The CBIN body checksum, stamped by `nord-format` during encode rather than
-        // set by anyone.
-        let note = if (0x18..0x1c).contains(&i) {
-            "  (body crc32)"
-        } else {
-            ""
+        // The CBIN checksum, stamped by `nord-format` during encode rather than set by
+        // anyone.
+        let note = match &checksum {
+            Some((at, label)) if at.contains(&i) => *label,
+            _ => "",
         };
         ui.out(ui.dim(format!("  byte {i:#06x}  {b:#04x} -> {a:#04x}{note}")));
     }
 }
 
-fn list_fields(ui: &Ui, schema: &impl Editable) {
+fn list_fields(ui: &Ui, file: &impl Editable) {
     ui.out(format!(
         "{:<40} {:<12} {:<28} {}",
         "path", "bits", "value", "accepts"
     ));
-    for f in schema.fields() {
+    for f in file.fields() {
         // A field too wide to enumerate lists no values; its stored bits are the
         // spelling, and the current one is already in the value column.
         let accepts = match (f.spec.legal)() {
@@ -308,19 +319,19 @@ mod tests {
     /// to one that has no `edit` at all.
     #[test]
     fn a_mismatched_target_steers_to_the_noun_that_edits_it() {
-        let live = Entity::Live(Live::Electro5(electro5::Live::new(
+        let live = Entity::Live(Live::Electro5(electro5::live::new(
             (0, 0).try_into().unwrap(),
         )));
         let err = mismatch(&live, ObjectClass::Program);
         assert!(err.contains("nord live edit"), "{err}");
 
-        let program = Entity::Program(Program::Electro5(electro5::Program::new(
+        let program = Entity::Program(Program::Electro5(electro5::program::new(
             (0, 0).try_into().unwrap(),
         )));
         let err = mismatch(&program, ObjectClass::Live);
         assert!(err.contains("nord program edit"), "{err}");
 
-        let settings = Entity::Settings(Settings::Electro5(electro5::Settings::new()));
+        let settings = Entity::Settings(Settings::Electro5(electro5::settings::new()));
         let err = mismatch(&settings, ObjectClass::Program);
         assert!(err.contains("nord settings edit"), "{err}");
 

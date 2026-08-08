@@ -1,34 +1,49 @@
-//! `#[bitpanel]` — declare a bit-packed panel as an ordinary Rust struct.
+//! `#[bitbody]` — a bit-mapped structure declared once, composable recursively.
 //!
 //! ```ignore
-//! /// The attribute's argument is the panel's length in bytes.
-//! #[bitpanel(7)]
+//! /// The attribute's argument is the structure's length in bytes.
+//! #[bitbody(121)]
+//! pub struct Program {
+//!     #[bits(0..=15)]
+//!     program_version: u16,
+//!     #[at(0x02..0x09)]
+//!     pub center_panel: CenterPanel,   // itself a #[bitbody(7)]
+//! }
+//!
+//! #[bitbody(7)]
 //! #[derive(Default)]
 //! pub struct CenterPanel {
 //!     #[bits(0..=2)]
-//!     pub left_part: Instrument,
-//!     #[bits(35..=41)]
-//!     pub gain: Level,
-//!     /// Contiguous over the bytes, whatever it looks like in a hex dump.
-//!     #[bits(61..=67)]
-//!     pub equalizer_freq_gain: Level,
+//!     pub lower_part: Instrument,
 //! }
 //! ```
 //!
-//! Bits are numbered MSB-first from byte 0 of the panel, as `nord-format`'s `bits` module
-//! describes. Generates both directions of the conversion between the panel and its
-//! `[u8; N]`, a `Debug` over the decoded fields, and a `Panel` impl that lists them,
-//! describes them, and sets them by name. Bits no field claims are preserved, and are
-//! reported in the panel's generated doc; two ranges may not overlap.
+//! Two placements, one bit space:
 //!
-//! `Panel::field_values` and `Panel::field_specs` are emitted in declaration order and
-//! describe the same fields, so callers may zip them positionally.
+//! - `#[bits(LO..=HI)]` — a leaf value at an inclusive bit range, MSB-first from
+//!   byte 0, as `nord-format`'s `bits` module describes. The type carries its own
+//!   range (`Packed`), so a value wider than its slot fails to compile. A
+//!   multi-byte integer leaf is big-endian by construction.
+//! - `#[at(LO..HI)]` — a nested `#[bitbody]` at a half-open byte range, placed
+//!   via the `TryFrom<[u8; N]>` / `From<&T> -> [u8; N]` pair every bitbody
+//!   generates. Nesting is how a large format keeps its real logical layout —
+//!   the Electro 5 program *is* five panels — without a second macro for the
+//!   inner level.
 //!
-//! Encoding is total. Every field's type has to carry its own range, so the fit is proven
-//! at compile time: a raw `u8` in a 7-bit slot fails to compile.
+//! Bits no field claims are preserved verbatim through a re-encode and reported
+//! in the generated doc; ranges may not overlap, whichever kind claimed them.
 //!
-//! Only usable inside `nord-format`: generated code names `crate::bits`, `crate::error`
-//! and `crate::panel`.
+//! Generates: the `[u8; LEN]` conversions both ways, the `cbin::Body` impl, a
+//! `Debug` over the decoded fields, a `layout::BodyLayout` impl publishing every
+//! placement as data (nested bodies chain to their own layouts), and — for `pub`
+//! fields — the registry: `fields()`, `set_field()`, `field_values()`,
+//! `field_specs()`. Private fields decode and encode but stay unregistered.
+//!
+//! **Paths.** A nested field registers its children under its own name:
+//! `center_panel.transpose`. A leaf registers under its own name alone.
+//!
+//! Only usable inside `nord-format`: generated code names `crate::bits`,
+//! `crate::cbin`, `crate::error`, `crate::layout` and `crate::panel`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -36,7 +51,7 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprRange, Ident, ItemStruct, Lit, LitInt, RangeLimits};
 
-/// One field's `LO..=HI` placement, MSB-first from byte 0 of the panel.
+/// A leaf's `LO..=HI` bit placement.
 struct Bits {
     lo: u32,
     hi: u32,
@@ -46,9 +61,8 @@ impl syn::parse::Parse for Bits {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let range: ExprRange = input.parse()?;
         if !input.is_empty() {
-            return Err(input.error("a field has one `LO..=HI` placement"));
+            return Err(input.error("a leaf has one `LO..=HI` placement"));
         }
-
         if !matches!(range.limits, RangeLimits::Closed(_)) {
             return Err(syn::Error::new_spanned(
                 &range,
@@ -58,15 +72,43 @@ impl syn::parse::Parse for Bits {
 
         let lo = literal(range.start.as_deref(), &range, "low bit")?;
         let hi = literal(range.end.as_deref(), &range, "high bit")?;
-
         if hi < lo {
             return Err(syn::Error::new_spanned(
                 &range,
                 format!("bit range ends before it starts: `{lo}..={hi}`"),
             ));
         }
-
         Ok(Bits { lo, hi })
+    }
+}
+
+/// A nested body's `LO..HI` byte placement.
+struct At {
+    start: u32,
+    end: u32,
+}
+
+impl syn::parse::Parse for At {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let range: ExprRange = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error("a nested body has one `LO..HI` placement"));
+        }
+        if !matches!(range.limits, RangeLimits::HalfOpen(_)) {
+            return Err(syn::Error::new_spanned(
+                &range,
+                "byte ranges are half-open, like slice indexes: write `0x02..0x09`",
+            ));
+        }
+        let start = literal(range.start.as_deref(), &range, "start byte")?;
+        let end = literal(range.end.as_deref(), &range, "end byte")?;
+        if end <= start {
+            return Err(syn::Error::new_spanned(
+                &range,
+                format!("byte range is empty: `{start:#04x}..{end:#04x}`"),
+            ));
+        }
+        Ok(At { start, end })
     }
 }
 
@@ -81,7 +123,7 @@ fn literal(expr: Option<&Expr>, at: &ExprRange, what: &str) -> syn::Result<u32> 
         },
         _ => Err(syn::Error::new_spanned(
             at,
-            format!("{what} is missing: a bit range needs both ends"),
+            format!("{what} is missing: a range needs both ends"),
         )),
     }
 }
@@ -124,7 +166,7 @@ fn unclaimed(claimed: &[(u32, u32)], bits: u32) -> Vec<(u32, u32)> {
 }
 
 #[proc_macro_attribute]
-pub fn bitpanel(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn bitbody(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand(attr.into(), item.into()) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
@@ -135,65 +177,85 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let len: LitInt = syn::parse2(attr.clone()).map_err(|_| {
         syn::Error::new(
             attr.span(),
-            "expected the panel's length in bytes — e.g. `#[bitpanel(7)]`",
+            "expected the body's length in bytes — e.g. `#[bitbody(121)]`",
         )
     })?;
     let bytes: usize = len.base10_parse()?;
     if bytes == 0 {
-        return Err(syn::Error::new_spanned(&len, "a panel needs a byte"));
+        return Err(syn::Error::new_spanned(&len, "a body needs a byte"));
     }
     let span_bits = (bytes * 8) as u32;
 
-    let panel: ItemStruct = syn::parse2(item)?;
-    let name = &panel.ident;
-    let vis = &panel.vis;
-    let attrs = &panel.attrs;
+    let body: ItemStruct = syn::parse2(item)?;
+    let name = &body.ident;
+    let vis = &body.vis;
+    let attrs = &body.attrs;
 
-    let syn::Fields::Named(named) = &panel.fields else {
+    let syn::Fields::Named(named) = &body.fields else {
         return Err(syn::Error::new_spanned(
-            &panel,
-            "a panel must be a struct with named fields",
+            &body,
+            "a body must be a struct with named fields",
         ));
     };
 
     let mut claimed: Vec<(u32, u32, &Ident)> = Vec::new();
 
+    let mut fields = Vec::new();
     let mut decode = Vec::new();
     let mut encode = Vec::new();
     let mut debug = Vec::new();
-    let mut fields = Vec::new();
     let mut values = Vec::new();
     let mut specs = Vec::new();
     let mut setters = Vec::new();
+    let mut routes = Vec::new();
+    let mut layout = Vec::new();
 
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named fields");
         let ty = &field.ty;
+        let ty_str = quote!(#ty).to_string().replace(' ', "");
+        let public = matches!(field.vis, syn::Visibility::Public(_));
 
-        let attr = field
-            .attrs
-            .iter()
-            .find(|a| a.path().is_ident("bits"))
-            .ok_or_else(|| {
-                syn::Error::new_spanned(
+        let bits_attr = field.attrs.iter().find(|a| a.path().is_ident("bits"));
+        let at_attr = field.attrs.iter().find(|a| a.path().is_ident("at"));
+
+        // The bit span this field claims, and the placement doc, either way.
+        let (lo, hi) = match (&bits_attr, &at_attr) {
+            (Some(attr), None) => {
+                let Bits { lo, hi } = attr.parse_args()?;
+                (lo, hi)
+            }
+            (None, Some(attr)) => {
+                let At { start, end } = attr.parse_args()?;
+                (start * 8, end * 8 - 1)
+            }
+            (Some(_), Some(and)) => {
+                return Err(syn::Error::new_spanned(
+                    and,
+                    "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body",
+                ));
+            }
+            (None, None) => {
+                return Err(syn::Error::new_spanned(
                     field,
-                    "every field of a panel needs a `#[bits(LO..=HI)]` placement",
-                )
-            })?;
-        let Bits { lo, hi } = attr.parse_args()?;
+                    "every field needs a placement: `#[bits(LO..=HI)]` for a leaf, \
+                     `#[at(LO..HI)]` for a nested body",
+                ));
+            }
+        };
 
         if hi >= span_bits {
             return Err(syn::Error::new_spanned(
-                attr,
+                field,
                 format!(
-                    "bit {hi} is past the end of a {bytes}-byte panel, whose last bit is {}",
+                    "bit {hi} is past the end of a {bytes}-byte body, whose last bit is {}",
                     span_bits - 1,
                 ),
             ));
         }
         if let Some(&(olo, ohi, other)) = claimed.iter().find(|&&(l, h, _)| lo <= h && l <= hi) {
             return Err(syn::Error::new_spanned(
-                attr,
+                field,
                 format!("bits {lo}..={hi} overlap `{other}`, at {olo}..={ohi}"),
             ));
         }
@@ -203,9 +265,13 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         let kept: Vec<_> = field
             .attrs
             .iter()
-            .filter(|a| !a.path().is_ident("bits"))
+            .filter(|a| !a.path().is_ident("bits") && !a.path().is_ident("at"))
             .collect();
-        let placement_doc = breakdown(lo, hi);
+        let placement_doc = if at_attr.is_some() {
+            format!("Bytes {:#04x}..{:#04x}.", lo / 8, (hi + 1) / 8)
+        } else {
+            breakdown(lo, hi)
+        };
         let field_vis = &field.vis;
         fields.push(quote! {
             #(#kept)*
@@ -213,44 +279,102 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
             #[doc = #placement_doc]
             #field_vis #ident: #ty
         });
+        debug.push(quote! { .field(stringify!(#ident), &self.#ident) });
 
+        if at_attr.is_some() {
+            // ── a nested body, placed by its own [u8; N] conversions ──
+            let (start, end) = ((lo / 8) as usize, ((hi + 1) / 8) as usize);
+            let n = end - start;
+            decode.push(quote! {
+                #ident: <#ty as ::core::convert::TryFrom<[u8; #n]>>::try_from({
+                    let mut b = [0u8; #n];
+                    b.copy_from_slice(&raw[#start..#end]);
+                    b
+                })?
+            });
+            encode.push(quote! {
+                raw[#start..#end].copy_from_slice(&<[u8; #n]>::from(&p.#ident));
+            });
+            layout.push(quote! {
+                crate::layout::LayoutField {
+                    path: stringify!(#ident),
+                    ty: #ty_str,
+                    lo: #lo,
+                    hi: #hi,
+                    nested: ::core::option::Option::Some(
+                        <#ty as crate::layout::BodyLayout>::layout,
+                    ),
+                }
+            });
+            if public {
+                let prefix = format!("{ident}.");
+                values.push(quote! {
+                    out.extend(self.#ident.field_values().into_iter().map(|mut v| {
+                        v.name.insert_str(0, #prefix);
+                        v
+                    }));
+                });
+                specs.push(quote! {
+                    out.extend(<#ty>::field_specs().into_iter().map(|mut s| {
+                        s.name.insert_str(0, #prefix);
+                        s
+                    }));
+                });
+                routes.push(quote! {
+                    stringify!(#ident) => return self.#ident.set_field(rest, value),
+                });
+            }
+            continue;
+        }
+
+        // ── a leaf ──
         let f = quote! { crate::bits::Field::<#ty, #lo, #hi> };
         decode.push(quote! { #ident: #f::get(&raw)? });
         encode.push(quote! { #f::set(&mut raw, p.#ident); });
 
-        // The field's bits with no type applied — see `crate::panel::FieldValue`.
+        let path = ident.to_string();
+        layout.push(quote! {
+            crate::layout::LayoutField {
+                path: #path,
+                ty: #ty_str,
+                lo: #lo,
+                hi: #hi,
+                nested: ::core::option::Option::None,
+            }
+        });
+
+        if !public {
+            continue;
+        }
         let placement = format!("{lo}..={hi}");
+        let width = hi - lo + 1;
+
         values.push(quote! {
-            crate::panel::FieldValue {
-                name: stringify!(#ident),
+            out.push(crate::panel::FieldValue {
+                name: #path.to_string(),
                 placement: #placement,
                 raw: crate::bits::Field::<u64, #lo, #hi>::read(&self.raw),
                 bits: <#ty as crate::bits::Packed>::to_bits(&self.#ident),
                 value: ::std::format!("{:?}", &self.#ident),
-            }
+            });
         });
-
-        let width = hi - lo + 1;
         specs.push(quote! {
-            crate::panel::FieldSpec {
-                name: stringify!(#ident),
+            out.push(crate::panel::FieldSpec {
+                name: #path.to_string(),
                 placement: #placement,
                 width: #width,
                 legal: || crate::panel::legal_values::<#ty>(#width),
-            }
+            });
         });
-
-        // The parse is the type's, so a value it cannot hold fails here rather than
-        // being clamped into the slot.
+        // The parse is the type's, so a value it cannot hold fails here rather
+        // than being clamped into the slot.
         setters.push(quote! {
-            stringify!(#ident) => {
+            #path => {
                 self.#ident = crate::panel::parse_field::<#ty>(#width, value)
-                    .map_err(|e| e.at(stringify!(#ident)))?;
-                Ok(())
+                    .map_err(|e| e.at(#path))?;
+                return Ok(());
             }
         });
-
-        debug.push(quote! { .field(stringify!(#ident), &self.#ident) });
     }
 
     let gaps = unclaimed(
@@ -258,7 +382,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         span_bits,
     );
     let gap_doc = if gaps.is_empty() {
-        format!("Every one of the panel's {span_bits} bits is named.")
+        format!("Every one of the body's {span_bits} bits is named.")
     } else {
         format!(
             "Unclaimed bits, kept verbatim through a re-encode: {}.",
@@ -278,7 +402,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         #[doc = ""]
         #[doc = #gap_doc]
         #vis struct #name {
-            /// The bytes this panel was decoded from, so bits no field claims survive a
+            /// The bytes this body was decoded from, so bits no field claims survive a
             /// re-encode. Named fields take precedence on write.
             raw: [u8; #bytes],
             #(#fields,)*
@@ -300,29 +424,86 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl crate::panel::Panel for #name {
-            const NAME: &'static str = stringify!(#name);
+        impl crate::cbin::Body for #name {
+            const LEN: ::core::option::Option<u64> =
+                ::core::option::Option::Some(#bytes as u64);
 
-            fn field_values(&self) -> ::std::vec::Vec<crate::panel::FieldValue> {
-                ::std::vec![#(#values,)*]
+            fn read<R: ::std::io::Read + ::std::io::Seek>(
+                r: &mut crate::cbin::BodyReader<'_, R>,
+                _: &crate::cbin::Header,
+            ) -> ::core::result::Result<Self, crate::error::Error> {
+                let mut raw = [0u8; #bytes];
+                ::std::io::Read::read_exact(r, &mut raw)?;
+                Ok(::core::convert::TryFrom::try_from(raw)?)
             }
 
-            fn field_specs() -> ::std::vec::Vec<crate::panel::FieldSpec> {
-                ::std::vec![#(#specs,)*]
+            fn write<W: ::std::io::Write + ::std::io::Seek>(
+                &self,
+                w: &mut crate::cbin::BodyWriter<'_, W>,
+            ) -> ::core::result::Result<(), crate::error::Error> {
+                ::std::io::Write::write_all(w, &<[u8; #bytes]>::from(self))?;
+                Ok(())
+            }
+        }
+
+        impl crate::layout::BodyLayout for #name {
+            fn layout() -> &'static [crate::layout::LayoutField] {
+                const FIELDS: &[crate::layout::LayoutField] = &[#(#layout,)*];
+                FIELDS
+            }
+        }
+
+        impl #name {
+            /// Every registered field's current value, under its full path, in
+            /// declaration order — nested bodies inline where their field sits.
+            /// Describes the same fields as [`Self::field_specs`], so callers may
+            /// zip the two positionally.
+            pub fn field_values(&self) -> ::std::vec::Vec<crate::panel::FieldValue> {
+                let mut out = ::std::vec::Vec::new();
+                #(#values)*
+                out
             }
 
-            fn set_field(
+            pub fn field_specs() -> ::std::vec::Vec<crate::panel::FieldSpec> {
+                let mut out = ::std::vec::Vec::new();
+                #(#specs)*
+                out
+            }
+
+            /// Every settable field, described under its full path.
+            pub fn fields(&self) -> ::std::vec::Vec<crate::panel::Field> {
+                Self::field_specs()
+                    .into_iter()
+                    .zip(self.field_values())
+                    .map(|(spec, value)| crate::panel::Field {
+                        path: spec.name.clone(),
+                        value: crate::panel::settable_form(spec.width, &value.value, value.bits),
+                        display: value.value,
+                        spec,
+                    })
+                    .collect()
+            }
+
+            /// Set one field by its full path.
+            pub fn set_field(
                 &mut self,
-                name: &str,
+                path: &str,
                 value: &str,
             ) -> ::core::result::Result<(), crate::panel::FieldError> {
-                match name {
+                match path {
                     #(#setters)*
-                    other => Err(crate::panel::FieldError::UnknownField {
-                        panel: <Self as crate::panel::Panel>::NAME,
-                        name: other.to_string(),
-                    }),
+                    _ => {}
                 }
+                if let ::core::option::Option::Some((head, rest)) = path.split_once('.') {
+                    match head {
+                        #(#routes)*
+                        _ => {}
+                    }
+                }
+                Err(crate::panel::FieldError::UnknownField {
+                    panel: stringify!(#name),
+                    name: path.to_string(),
+                })
             }
         }
 

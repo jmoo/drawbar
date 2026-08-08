@@ -196,8 +196,8 @@ enum LiveAction {
 enum SettingsAction {
     /// Change fields inside the global settings, in a `.ne5s` file.
     ///
-    /// Fields are `panel.*` (the menu settings) and `selection.*` (the restored panel
-    /// state); `--fields` lists them. A slot target is read off the instrument but
+    /// Fields are the menu settings plus the `startup_*` state the instrument restores
+    /// at power-up; `--fields` lists them. A slot target is read off the instrument but
     /// never written back — the edit needs `-o`.
     Edit(EditArgs),
 }

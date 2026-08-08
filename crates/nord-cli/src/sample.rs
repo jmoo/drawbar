@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use nord_format::cbin::Cbin;
 use nord_format::common::sample::Sample;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
@@ -124,7 +125,7 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
 }
 
 /// Every settable field with its display value, in path order.
-fn snapshot(sample: &Sample) -> Result<Vec<(String, String)>, String> {
+fn snapshot(sample: &Cbin<Sample>) -> Result<Vec<(String, String)>, String> {
     let mut out = vec![(
         "name".to_string(),
         sample.name().map_err(|e| e.to_string())?,
@@ -139,7 +140,7 @@ fn snapshot(sample: &Sample) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-fn apply(sample: &mut Sample, path: &str, value: &str) -> Result<(), String> {
+fn apply(sample: &mut Cbin<Sample>, path: &str, value: &str) -> Result<(), String> {
     if path == "name" {
         return sample.set_name(value).map_err(|e| e.to_string());
     }
@@ -165,7 +166,7 @@ fn apply(sample: &mut Sample, path: &str, value: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn list_fields(ui: &Ui, sample: &Sample) -> Result<(), String> {
+fn list_fields(ui: &Ui, sample: &Cbin<Sample>) -> Result<(), String> {
     ui.out(format!("{:<20} {:<16} {}", "path", "value", "accepts"));
     for (path, value) in snapshot(sample)? {
         let accepts = if path == "name" {

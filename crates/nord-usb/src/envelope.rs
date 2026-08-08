@@ -1,9 +1,11 @@
 //! Converting between the wire's entity **body** and an on-disk `CBIN` file.
 //!
 //! The device transfers only the body — 121 bytes for an Electro 5 program — while a
-//! `.ne5p` on disk is that body behind a 44-byte `CBIN` header. The header is fully
-//! determined by the body plus the slot it came from, so a read can be turned into a
-//! byte-exact file and a file can be stripped back down for a write.
+//! `.ne5p` on disk is that body behind a `CBIN` header. The header is fully determined
+//! by the body plus the slot it came from, so a read can be turned into a byte-exact
+//! file and a file can be stripped back down for a write. The header codec and the
+//! checksum live in `nord_format::cbin`; this module only pairs a wire body with the
+//! header the device implies.
 //!
 //! **Verified**: rebuilding the header from `(body, bank, slot, version)` reproduces all
 //! 41 program specimens in the corpus byte-for-byte.
@@ -12,39 +14,36 @@
 //! at `0x14` differs per format tag (`ne5p` is 4, `ne5t` is 0 or 1), so it has to be
 //! supplied by the caller from the device's own `0x1e` object-info response. Substituting
 //! a constant reproduces programs correctly and silently corrupts every other class.
-//!
-//! This mirrors the layout `nord_format::common::header` parses — a second statement of
-//! the same bytes, kept honest by the specimen tests here and by the CLI, which parses
-//! every wrapped read back through `nord-format` before summarising it.
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
+use nord_format::cbin::{self, Cbin, Header, RawBody};
+use std::io::Cursor;
 
-/// Bytes of `CBIN` header ahead of the body.
-pub const HEADER_LEN: usize = 44;
+/// CRC-32/ISO-HDLC over a wire body — the same checksum the type-1 container
+/// carries, for comparing against the device's own `0x1e` report.
+pub fn crc32(data: &[u8]) -> u32 {
+    nord_format::crc::crc32(data)
+}
 
-const MAGIC: &[u8; 4] = b"CBIN";
-/// Offset of the CRC-32 within the header. The checksum covers the whole body.
-const CRC_OFFSET: usize = 0x18;
-/// Header type seen on every Electro 5 specimen (type-1, i.e. with CRC).
-const HEADER_TYPE: u32 = 1;
-/// Offset of the schema version within the header.
-const VERSION_OFFSET: usize = 0x14;
+/// A wire slot as the header's `(bank, slot)` pair. Zero-indexed on both sides — one
+/// below the display.
+fn slot(at: Location) -> (u16, u16) {
+    (at.bank as u16, at.slot as u16)
+}
 
-/// CRC-32/ISO-HDLC, the same checksum `nord-format` verifies in the file header.
-pub(crate) fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
+/// The slot a header addresses, as the wire spells it.
+pub fn location(header: &Header) -> Location {
+    let (bank, slot) = header.slot();
+    Location {
+        bank: bank as u32,
+        slot: slot as u32,
     }
-    !crc
+}
+
+/// The header's format tag as text.
+pub fn tag(header: &Header) -> String {
+    String::from_utf8_lossy(&header.tag).into_owned()
 }
 
 /// Wrap a wire body in a `CBIN` header, producing the bytes of a `.ne5p`-style file.
@@ -53,58 +52,35 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
 /// slot — both come from `0x1e` object info. `version` is per format tag, so passing a
 /// program's 4 for a set list writes a header `nord-format` will refuse to read.
 pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec<u8>> {
-    let tag = format.as_bytes();
-    if tag.len() != 4 {
+    if format.len() != 4 {
         return Err(Error::Envelope(format!(
             "format tag {format:?} is not 4 characters"
         )));
     }
 
-    let mut out = vec![0u8; HEADER_LEN + body.len()];
-    out[0..4].copy_from_slice(MAGIC);
-    out[4..8].copy_from_slice(&HEADER_TYPE.to_le_bytes());
-    out[8..12].copy_from_slice(tag);
-    // Location is two little-endian u16s, zero-indexed — the same numbering the wire
-    // uses, and one below what the instrument displays.
-    out[12..14].copy_from_slice(&(at.bank as u16).to_le_bytes());
-    out[14..16].copy_from_slice(&(at.slot as u16).to_le_bytes());
-    out[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
-    out[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
-    out[HEADER_LEN..].copy_from_slice(body);
-
-    let checksum = crc32(&out[HEADER_LEN..]);
-    out[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
-    Ok(out)
+    let file = Cbin {
+        header: Header::new(format, slot(at), version),
+        body: RawBody(body.to_vec()),
+    };
+    let mut out = Cursor::new(Vec::new());
+    file.write_to(&mut out)
+        .map_err(|e| Error::Envelope(e.to_string()))?;
+    Ok(out.into_inner())
 }
 
-/// The inverse: take file bytes and hand back the body the wire wants, plus the
-/// format tag and the slot the file claims to belong to.
-pub fn unwrap(file: &[u8]) -> Result<(String, Location, &[u8])> {
-    if file.len() <= HEADER_LEN {
-        return Err(Error::Truncated {
-            got: file.len(),
-            need: HEADER_LEN + 1,
-        });
+/// The inverse: take file bytes and hand back the container — the header the device
+/// implies, and the body the wire wants. The checksum is verified on the way.
+pub fn unwrap(file: &[u8]) -> Result<Cbin<RawBody>> {
+    let read =
+        cbin::read_raw(&mut Cursor::new(file)).map_err(|e| Error::Envelope(e.to_string()))?;
+    // The container is content with a header and nothing after it; the wire is not —
+    // the body is the whole payload of a write.
+    if read.body.0.is_empty() {
+        return Err(Error::Envelope(
+            "the file is a bare CBIN header with no body to send".into(),
+        ));
     }
-    if &file[0..4] != MAGIC {
-        return Err(Error::Envelope("not a CBIN file (bad magic)".into()));
-    }
-
-    let body = &file[HEADER_LEN..];
-    let stored = u32::from_le_bytes(file[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
-    let actual = crc32(body);
-    if stored != actual {
-        return Err(Error::Envelope(format!(
-            "file checksum mismatch: header says {stored:08x}, body computes {actual:08x}"
-        )));
-    }
-
-    let format = String::from_utf8_lossy(&file[8..12]).into_owned();
-    let at = Location {
-        bank: u16::from_le_bytes(file[12..14].try_into().unwrap()) as u32,
-        slot: u16::from_le_bytes(file[14..16].try_into().unwrap()) as u32,
-    };
-    Ok((format, at, body))
+    Ok(read)
 }
 
 #[cfg(test)]
@@ -150,10 +126,26 @@ mod tests {
     fn unwrap_is_the_inverse() {
         let body = hex(BODY);
         let file = wrap("ne5p", Location::from_user(8, 14), 4, &body).unwrap();
-        let (format, at, got) = unwrap(&file).unwrap();
-        assert_eq!(format, "ne5p");
-        assert_eq!(at, Location::from_user(8, 14));
-        assert_eq!(got, &body[..]);
+        let got = unwrap(&file).unwrap();
+        assert_eq!(tag(&got.header), "ne5p");
+        assert_eq!(location(&got.header), Location::from_user(8, 14));
+        assert_eq!(got.header.version, 4);
+        assert_eq!(got.body.0, body);
+    }
+
+    /// A well-formed header with nothing behind it passes every container check, and
+    /// still has nothing to transfer.
+    #[test]
+    fn unwrap_rejects_a_headers_worth_of_file() {
+        let file = Cbin {
+            header: Header::new("ne5p", (0, 0), 4),
+            body: RawBody(Vec::new()),
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        file.write_to(&mut bytes).unwrap();
+        let bytes = bytes.into_inner();
+        assert!(cbin::read_raw(&mut Cursor::new(&bytes)).is_ok());
+        assert!(unwrap(&bytes).is_err(), "an empty body has nothing to send");
     }
 
     #[test]

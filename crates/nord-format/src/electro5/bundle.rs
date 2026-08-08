@@ -1,4 +1,4 @@
-use crate::common::bank::Item;
+use crate::cbin::Cbin;
 use crate::common::piano::Piano;
 use crate::common::sample::Sample;
 use crate::electro5::{program, song};
@@ -11,7 +11,7 @@ pub struct Bundle {
     programs: program::Bank,
     songs: song::Bank,
     pianos: Vec<Piano>,
-    samples: Vec<Sample>,
+    samples: Vec<Cbin<Sample>>,
     /// Entries the walk could not place: `(archive member name, why)`. Kept on the
     /// bundle rather than printed — a library owns no terminal — so a caller can decide
     /// whether a partial read is acceptable.
@@ -46,13 +46,13 @@ impl Bundle {
 
             match from_stream(&mut cursor) {
                 Ok(entity) => match entity {
-                    Entity::Program(Program::Electro5(mut program)) => {
-                        program.set_name(name.clone());
-                        bundle.programs.replace(program);
+                    // The archive member's name is the only name a bundle has for an
+                    // entry: the file inside it stores none.
+                    Entity::Program(Program::Electro5(program)) => {
+                        bundle.programs.replace(Some(name.clone()), program);
                     }
-                    Entity::Song(Song::Electro5(mut song)) => {
-                        song.set_name(name.clone());
-                        bundle.songs.replace(song);
+                    Entity::Song(Song::Electro5(song)) => {
+                        bundle.songs.replace(Some(name.clone()), song);
                     }
                     Entity::Piano(piano) => {
                         bundle.pianos.push(piano);
@@ -91,7 +91,7 @@ impl Bundle {
         &self.pianos
     }
 
-    pub fn samples(&self) -> &[Sample] {
+    pub fn samples(&self) -> &[Cbin<Sample>] {
         &self.samples
     }
 

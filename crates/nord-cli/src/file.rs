@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nord_format::cbin::{Generation, Header};
 use nord_format::{common, electro5, Entity, Live, Program};
 use nord_usb::ObjectClass;
 
@@ -55,12 +56,23 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     }
 }
 
-/// The header fields `envelope::unwrap` does not hand back: the schema version at 0x14
-/// and the stored CRC-32 at 0x18. `unwrap` has already checked the length and checksum.
-fn version_and_crc(file: &[u8]) -> (u32, u32) {
-    let version = u32::from_le_bytes(file[0x14..0x18].try_into().unwrap());
-    let crc = u32::from_le_bytes(file[0x18..0x1c].try_into().unwrap());
-    (version, crc)
+/// The stored checksum, with the label its generation spells it under.
+///
+/// The one header fact the parsed [`Header`] does not carry: a type-1 file holds a
+/// crc32 over the body at 0x18, a type-0 file a crc16 over the whole file in its last
+/// two bytes, so the value is read from the bytes either way. `unwrap` verified it, so
+/// this reports what it checked.
+fn crc(header: &Header, bytes: &[u8]) -> (&'static str, String) {
+    match header.generation {
+        Generation::V0 => {
+            let crc = u16::from_le_bytes(bytes[bytes.len() - 2..].try_into().unwrap());
+            ("crc16:", format!("{crc:#06x}"))
+        }
+        Generation::V1 => {
+            let crc = u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap());
+            ("crc32:", format!("{crc:#010x}"))
+        }
+    }
 }
 
 /// `get` on a file: print the summary, or with `--body` extract the wire body.
@@ -72,12 +84,13 @@ pub fn get(
     body: bool,
 ) -> Result<(), String> {
     let file = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let (format, _, wire_body) =
-        nord_usb::envelope::unwrap(&file).map_err(|e| format!("{}: {e}", path.display()))?;
+    let read = nord_usb::envelope::unwrap(&file).map_err(|e| format!("{}: {e}", path.display()))?;
+    let format = nord_usb::envelope::tag(&read.header);
     check(path, &format, class)?;
 
     match (body, out) {
         (true, Some(out)) => {
+            let wire_body = &read.body.0;
             std::fs::write(&out, wire_body).map_err(|e| format!("{}: {e}", out.display()))?;
             ui.note(format!(
                 "unwrapped the {format} body of {} -> {} ({} bytes)",
@@ -104,10 +117,12 @@ pub fn get(
 /// `info` on a file: the CBIN header, which is exactly what the wire never transmits.
 pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let file = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let (format, at, body) =
-        nord_usb::envelope::unwrap(&file).map_err(|e| format!("{}: {e}", path.display()))?;
+    let read = nord_usb::envelope::unwrap(&file).map_err(|e| format!("{}: {e}", path.display()))?;
+    let format = nord_usb::envelope::tag(&read.header);
     check(path, &format, class)?;
-    let (version, crc) = version_and_crc(&file);
+    let at = nord_usb::envelope::location(&read.header);
+    let body_len = read.body.0.len() as u32;
+    let (crc_label, crc_value) = crc(&read.header, &file);
 
     let row = |label: &str, value: String| {
         ui.out(format!("  {}{value}", ui.dim(format!("{label:<11}"))));
@@ -131,19 +146,19 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     }
     row("name:", format!("none {}", ui.dim("(files store no name)")));
     row("format:", format);
-    row("version:", version.to_string());
+    row("version:", read.header.version.to_string());
     row(
         "body:",
         format!(
             "{} bytes{}",
-            crate::device::grouped(body.len() as u32),
-            match crate::device::human_size(body.len() as u32) {
+            crate::device::grouped(body_len),
+            match crate::device::human_size(body_len) {
                 Some(h) => format!("  {}", ui.dim(format!("({h})"))),
                 None => String::new(),
             }
         ),
     );
-    row("crc32:", format!("{crc:#010x}"));
+    row(crc_label, crc_value);
     Ok(())
 }
 
@@ -157,12 +172,10 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     check(path, format, class)?;
 
     // The two bodies are byte-identical but sit in different slot spaces, so the ids
-    // are pulled out per variant rather than through one schema reference.
+    // are pulled out per variant rather than through one reference to the body.
     let (piano, sample) = match &entity {
-        Entity::Program(Program::Electro5(p)) => {
-            (p.schema.piano_panel.id, p.schema.sample_panel.id)
-        }
-        Entity::Live(Live::Electro5(l)) => (l.schema.piano_panel.id, l.schema.sample_panel.id),
+        Entity::Program(Program::Electro5(p)) => (p.piano_panel.id, p.sample_panel.id),
+        Entity::Live(Live::Electro5(l)) => (l.piano_panel.id, l.sample_panel.id),
         Entity::Song(_) => {
             return Err("a set list names program slots, not library objects; \
                  `nord setlist deps BANK:SLOT` asks the instrument, which resolves them"
@@ -212,17 +225,40 @@ mod tests {
     use super::*;
     use nord_usb::wire::Location;
 
-    /// A wrapped file must give back the version `wrap` stamped into it, and a CRC that
-    /// tracks the body — which pins both reads to the right header offsets.
+    /// The header a wrapped file gives back carries the version `wrap` stamped into it,
+    /// and its CRC tracks the body — which pins both reads to the right header offsets.
     #[test]
     fn the_header_fields_come_back_out_of_a_wrapped_file() {
         let at = Location::from_user(7, 4);
         let a = nord_usb::envelope::wrap("ne5p", at, 4, &[0u8; 8]).unwrap();
         let b = nord_usb::envelope::wrap("ne5p", at, 4, &[1u8; 8]).unwrap();
         let c = nord_usb::envelope::wrap("ne5t", at, 1, &[0u8; 8]).unwrap();
-        assert_eq!(version_and_crc(&a).0, 4);
-        assert_eq!(version_and_crc(&c).0, 1);
-        assert_ne!(version_and_crc(&a).1, version_and_crc(&b).1);
+        let header = |file: &[u8]| nord_usb::envelope::unwrap(file).unwrap().header;
+        assert_eq!(header(&a).version, 4);
+        assert_eq!(header(&c).version, 1);
+        assert_eq!(crc(&header(&a), &a).0, "crc32:");
+        assert_ne!(crc(&header(&a), &a).1, crc(&header(&b), &b).1);
+    }
+
+    /// A type-0 file has body bytes where the type-1 crc32 sits, so the checksum row
+    /// has to follow the generation or it prints panel data as a checksum.
+    #[test]
+    fn a_type_0_file_reports_its_trailing_crc16() {
+        let mut program = electro5::program::new((3, 7).try_into().unwrap());
+        program.header.generation = Generation::V0;
+        let mut bytes = Vec::new();
+        program
+            .write_to(&mut std::io::Cursor::new(&mut bytes))
+            .unwrap();
+
+        let header = nord_usb::envelope::unwrap(&bytes).unwrap().header;
+        assert_eq!(header.version, 4);
+        let (label, value) = crc(&header, &bytes);
+        assert_eq!(label, "crc16:");
+        let stored = u16::from_le_bytes(bytes[bytes.len() - 2..].try_into().unwrap());
+        assert_eq!(value, format!("{stored:#06x}"));
+        // 0x18 is the body's first byte here — the version echo, not a checksum.
+        assert_eq!(u16::from_be_bytes([bytes[0x18], bytes[0x19]]), 4);
     }
 
     /// The mismatch error must steer to the noun that does read the file.

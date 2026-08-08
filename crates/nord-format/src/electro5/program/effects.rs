@@ -4,13 +4,13 @@ use crate::bits::Packed;
 use crate::common::components::sparse_enum;
 use crate::electro5::Level;
 use crate::types::RangedU8;
-use nord_bits_derive::bitpanel;
+use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Display, Formatter};
 
 // 0x93..0xa4 — the effects panel.
 
-#[bitpanel(18)]
+#[bitbody(18)]
 #[derive(Default)]
 pub struct EffectsPanel {
     #[bits(0..=1)]

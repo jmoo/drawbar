@@ -3,11 +3,10 @@
 //! Everything here is *data*, so it goes to stdout: `nord inspect x.ne5p | grep transpose`
 //! has to work.
 
-use nord_format::common::bank::{Item, Location};
+use nord_format::cbin::Cbin;
 use nord_format::common::sample::{stroke, Sample};
-use nord_format::electro5::program::Schema;
 use nord_format::electro5::{Instrument, OrganModel};
-use nord_format::{Entity, Live, Program, Settings, Song};
+use nord_format::{electro5, Entity, Live, Program, Settings, Song};
 
 use crate::note;
 use crate::ui::Ui;
@@ -87,15 +86,16 @@ fn drawbars(ui: &Ui, positions: &[u8]) -> String {
 /// The panel printout, shared by `.ne5p` programs and `.ne5l` live slots.
 ///
 /// The live buffer is the program body under another tag, so it is the same panel and
-/// gets the same rendering; only the `kind` line and the slot space differ.
-fn panels<L: Location>(ui: &Ui, kind: &str, at: L, p: &Schema<L>) {
+/// gets the same rendering; only the `kind` line and the slot space differ. `at` is the
+/// header's own `(bank, slot)`, whichever space the caller reads it in.
+fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &electro5::Program) {
     let split = if p.center_panel.split {
         format!("yes @ {:?}", p.center_panel.split_point)
     } else {
         "no".to_string()
     };
     ui.out(field(ui, 2, "type", kind));
-    ui.out(field(ui, 2, "location", location(at.x(), at.y())));
+    ui.out(field(ui, 2, "location", location(at.0, at.1)));
 
     section(ui, "Keyboard");
     for (name, part, octave, sustain, control) in [
@@ -408,7 +408,7 @@ fn panels<L: Location>(ui: &Ui, kind: &str, at: L, p: &Schema<L>) {
 }
 
 /// The sample-instrument printout: identity, then the zone map.
-fn sample(ui: &Ui, s: &Sample) {
+fn sample(ui: &Ui, s: &Cbin<Sample>) {
     ui.out(field(ui, 2, "type", "sample instrument (nsmp)"));
     match s.name() {
         Ok(name) => ui.out(field(ui, 2, "name", name)),
@@ -482,15 +482,15 @@ fn sample(ui: &Ui, s: &Sample) {
 pub fn print(ui: &Ui, entity: &Entity) {
     match entity {
         Entity::Program(Program::Electro5(p)) => {
-            panels(ui, "Electro 5 program (ne5p)", p.location(), &p.schema)
+            panels(ui, "Electro 5 program (ne5p)", p.header.slot(), p)
         }
         Entity::Live(Live::Electro5(p)) => {
-            panels(ui, "Electro 5 live slot (ne5l)", p.location(), &p.schema)
+            panels(ui, "Electro 5 live slot (ne5l)", p.header.slot(), p)
         }
         Entity::Song(Song::Electro5(s)) => {
-            let l = s.location();
+            let (bank, slot) = s.header.slot();
             ui.out(field(ui, 2, "type", "Electro 5 song / set (ne5t)"));
-            ui.out(field(ui, 2, "location", location(l.x(), l.y())));
+            ui.out(field(ui, 2, "location", location(bank, slot)));
             section(ui, "Programs");
             for slot in 0..4u16 {
                 let p = s.get(slot);
@@ -505,20 +505,27 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Settings(Settings::Electro5(s)) => {
             ui.out(field(ui, 2, "type", "Electro 5 settings (ne5s)"));
 
-            // Not a menu — where the instrument was when the object was written. The
-            // Live slot and the program are each retained while the other is in use, so
-            // both are shown whichever mode is active.
-            let sel = &s.schema.selection;
-            section(ui, "Selection");
+            // Not a menu — the state the instrument restores at power-up. The Live slot
+            // and the program are each retained while the other is in use, so both are
+            // shown whichever mode is active.
+            let boot = &s.body;
+            section(ui, "Startup");
             for (name, value) in [
-                ("program", location(sel.program.x(), sel.program.y())),
-                ("live mode", yn(sel.live_mode).to_string()),
-                ("live slot", sel.live_slot.to_string()),
-                ("set list mode", yn(sel.set_list_mode).to_string()),
+                (
+                    "program",
+                    location(boot.startup_program.x(), boot.startup_program.y()),
+                ),
+                ("live mode", yn(boot.startup_live_mode).to_string()),
+                ("live slot", boot.startup_live_slot.to_string()),
+                ("set list mode", yn(boot.startup_set_list_mode).to_string()),
                 // The hardware numbers set lists, not banks.
                 (
                     "set list song",
-                    format!("list {} song {}", sel.song.x() + 1, sel.song.y() + 1),
+                    format!(
+                        "list {} song {}",
+                        boot.startup_song.x() + 1,
+                        boot.startup_song.y() + 1
+                    ),
                 ),
             ] {
                 ui.out(format!(
@@ -530,7 +537,7 @@ pub fn print(ui: &Ui, entity: &Entity) {
 
             // Grouped and ordered by the instrument's own menus, which is not the order
             // the fields sit in the file.
-            for (menu, fields) in s.schema.panel.by_menu() {
+            for (menu, fields) in s.by_menu() {
                 section(ui, menu.title());
                 for f in fields {
                     ui.out(format!(

@@ -1,46 +1,44 @@
-use crate::common;
+//! Piano libraries (`.npno`).
+//!
+//! The body is not yet mapped, so a `Piano` is the container's facts plus the body
+//! kept verbatim: it round-trips byte-exactly and verifies the checksum, and that
+//! is all. ⚠️ Real libraries are tens of megabytes and this allocates the body —
+//! [`crate::cbin::inspect`] answers container questions in O(1) instead.
+//!
+//! ⚠️ The header's `location` and `aux` are unchecked here on purpose: this is a
+//! library format, where those words hold something other than a bank/slot pair, and
+//! no local specimen says what. Gating on them would refuse real files.
 
+use crate::cbin::{self, Cbin, Header, RawBody};
 use crate::error::Error;
-use crate::types::RangedU16Pair;
-use binrw::{binrw, BinRead, BinWriterExt};
 use std::fmt;
 use std::fmt::Debug;
 use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "npno";
-pub const BANK_COUNT: u16 = 8;
-pub const SLOT_COUNT: u16 = 50;
-
-pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
-pub type Header = common::Header<Location>;
-
-#[binrw]
-#[brw(assert(header.preamble.format == FORMAT))]
-struct Schema {
-    header: Header,
-}
 
 pub struct Piano {
-    schema: Schema,
+    pub file: Cbin<RawBody>,
 }
 
 impl Piano {
     pub fn new() -> Piano {
         Piano {
-            schema: Schema {
-                header: Header::new(0, FORMAT, (0, 0).try_into().unwrap()),
+            file: Cbin {
+                header: Header::new(FORMAT, (0, 0), 0),
+                body: RawBody(Vec::new()),
             },
         }
     }
 
     pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Piano, Error> {
-        let schema = Schema::read_be(reader)?;
-        Ok(Piano { schema })
+        Ok(Piano {
+            file: cbin::read(reader, FORMAT)?,
+        })
     }
 
     pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
-        writer.write_be(&self.schema)?;
-        Ok(())
+        self.file.write_to(writer)
     }
 }
 
@@ -53,7 +51,8 @@ impl Default for Piano {
 impl Debug for Piano {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("common::Piano")
-            .field("schema", &self.schema.header.preamble.format)
+            .field("header", &self.file.header)
+            .field("body_len", &self.file.body.0.len())
             .finish()
     }
 }

@@ -3,11 +3,11 @@
 use crate::common::components::sparse_enum;
 use crate::common::PartMix;
 use crate::electro5::{Instrument, Level, OctaveShift, SplitPoint, Transpose};
-use nord_bits_derive::bitpanel;
+use nord_bits_derive::bitbody;
 
 // 0x2e..0x34 — the center panel.
 
-#[bitpanel(7)]
+#[bitbody(7)]
 #[derive(Default)]
 pub struct CenterPanel {
     #[bits(0..=2)]
@@ -108,7 +108,7 @@ impl OrganType {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{OrganModel, Program, FILE_LEN};
+    use super::super::{self as program, OrganModel, FILE_LEN};
     use super::*;
     use crate::bits::Packed;
     use crate::types::RangedU8;
@@ -126,8 +126,8 @@ mod tests {
             "127 is the largest that fits"
         );
 
-        let mut program = Program::new((0, 0).try_into().unwrap());
-        program.schema.center_panel.gain = 96u8.try_into().unwrap();
+        let mut program = program::new((0, 0).try_into().unwrap());
+        program.center_panel.gain = 96u8.try_into().unwrap();
 
         let mut bytes = Vec::new();
         program

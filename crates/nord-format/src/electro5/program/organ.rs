@@ -12,7 +12,7 @@ use crate::bits::Packed;
 use crate::common::{PercSpeed, VibChorus};
 use crate::error::ParseError;
 use crate::types::RangedU8;
-use nord_bits_derive::bitpanel;
+use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Debug, Display, Formatter};
 
@@ -32,7 +32,7 @@ pub enum OrganModel {
     Pipe,
 }
 
-#[bitpanel(69)]
+#[bitbody(69)]
 pub struct OrganPanel {
     // ── B3, 0x4e..=0x64 ────────────────────────────────────────────────────────
     /// Shared across presets.

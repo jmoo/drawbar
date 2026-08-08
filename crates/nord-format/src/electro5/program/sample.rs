@@ -2,11 +2,11 @@
 
 use crate::electro5::Level;
 use crate::types::RangedU8;
-use nord_bits_derive::bitpanel;
+use nord_bits_derive::bitbody;
 
 // 0x46..0x4d — the sample panel.
 
-#[bitpanel(8)]
+#[bitbody(8)]
 #[derive(Default)]
 pub struct SamplePanel {
     #[bits(0..=6)]

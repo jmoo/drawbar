@@ -1,146 +1,130 @@
-use binrw::{binrw, BinRead, BinWriterExt};
-use std::io::{Read, Seek, Write};
+//! The Electro 5 set list format (`.ne5t`).
+//!
+//! A file is a `Cbin<Song>`: the container header carries the slot, the schema version
+//! and the generation, and the 18-byte body carries the four programs the song plays.
 
-use crate::common;
-use crate::common::bank::Item;
-use crate::crc::{CrcReader, CrcWriter};
-use crate::error::{Error, ParseError};
+use std::io::{Read, Seek};
 
+use crate::cbin::{self, Cbin, Header};
 use crate::common::bank;
-
 use crate::electro5::program;
-
+use crate::error::Error;
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5t";
 /// Schema versions this build's field offsets have been validated against: 0 is the
 /// eight factory demo songs, 1 is everything user-written.
 pub const KNOWN_VERSIONS: &[u32] = &[0, 1];
-/// Total file length: 44-byte CBIN header + 18-byte body.
-pub const FILE_LEN: usize = 62;
+/// The body after the container header: the 8-byte program map and 10 zero bytes.
+pub const BODY_LEN: usize = 18;
+/// Type-1 file length: 44-byte CBIN header + 18-byte body.
+pub const FILE_LEN: usize = 0x2c + BODY_LEN;
 pub const PROGRAM_COUNT: usize = 4;
 pub const BANK_COUNT: u16 = 4;
 pub const SLOT_COUNT: u16 = 50;
+/// What a newly authored song is written as; a song read from a file carries whatever
+/// version that file held.
+pub const DEFAULT_VERSION: u32 = 1;
 
 pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
-pub type Header = common::Header<Location>;
-pub type Bank = bank::Bank<Song, Location>;
-pub type Song = common::song::Song<PROGRAM_COUNT, Location, program::Location>;
+pub type Bank = bank::Bank<Cbin<Song>, Location>;
 
-#[binrw]
-#[br(little, stream = r, map_stream = CrcReader::new(0x2c, 0x3d - 0x2c), assert(r.checksum() == crc32, "bad checksum: {:#x?} != {:#x?}", r.checksum(), crc32))]
-#[bw(little, stream = w, map_stream = CrcWriter::new(0x2c, 0x3d - 0x2c))]
-struct Schema {
-    pub header: Header,
-
-    pub version: u32,
-
-    #[bw(try_calc = w.checksum())]
-    crc32: u32,
-
-    // Bits 48.. carry the version again. The container header is never transmitted
-    // over USB — the device sends only this body — so the version is echoed into the
-    // payload where the wire side can see it. ⚠️ It must be the *read* version, never a
-    // constant: the eight factory demo songs are version 0, and stamping 1 here
-    // silently rewrites them.
-    #[brw(big, pad_before = 16)]
-    #[bw(calc = (
-    ((* a).as_u16() as u64) << 39
-    | ((* b).as_u16() as u64) << 30
-    | ((* c).as_u16() as u64) << 21
-    | ((* d).as_u16() as u64) << 12)
-    | ((* version as u64) << 48)
-    )]
-    map: u64,
-
-    /// These bytes are part of the crc check so they cannot be skipped with the pad_after directive
-    #[bw(calc = [0; 10])]
-    pad: [u8; 10],
-
-    #[br(try_calc = ((map >> 39 & 0b111111111) as u16).try_into())]
-    #[bw(ignore)]
-    pub a: program::Location,
-
-    #[br(try_calc = ((map >> 30 & 0b111111111) as u16).try_into())]
-    #[bw(ignore)]
-    pub b: program::Location,
-
-    #[br(try_calc = ((map >> 21 & 0b111111111) as u16).try_into())]
-    #[bw(ignore)]
-    pub c: program::Location,
-
-    #[br(try_calc = ((map >> 12 & 0b111111111) as u16).try_into())]
-    #[bw(ignore)]
-    pub d: program::Location,
+/// The 18-byte body: four 9-bit program references behind a version echo.
+///
+/// The container header is never transmitted over USB — the device sends only
+/// this body — so the version is echoed into bits the wire side can see. ⚠️ It
+/// must be the *read* version, never a constant: the eight factory demo songs
+/// are version 0, and stamping 1 here silently rewrites them.
+#[nord_bits_derive::bitbody(18)]
+pub struct Song {
+    #[bits(0..=15)]
+    version: u16,
+    #[bits(16..=24)]
+    a: program::Location,
+    #[bits(25..=33)]
+    b: program::Location,
+    #[bits(34..=42)]
+    c: program::Location,
+    #[bits(43..=51)]
+    d: program::Location,
 }
 
-impl Schema {
-    pub fn new(
-        location: Location,
-        version: u32,
-        a: program::Location,
-        b: program::Location,
-        c: program::Location,
-        d: program::Location,
-    ) -> Schema {
-        Schema {
-            header: Header::new(1, FORMAT, location),
-            version,
+impl Song {
+    /// The four programs the song plays, in panel order.
+    pub fn programs(&self) -> [program::Location; PROGRAM_COUNT] {
+        [self.a, self.b, self.c, self.d]
+    }
+
+    pub fn get(&self, slot: u16) -> program::Location {
+        self.programs()[slot as usize]
+    }
+
+    pub fn set(&mut self, slot: u16, location: program::Location) {
+        match slot {
+            0 => self.a = location,
+            1 => self.b = location,
+            2 => self.c = location,
+            3 => self.d = location,
+            _ => panic!("no slot {slot}: a song holds {PROGRAM_COUNT} programs"),
+        }
+    }
+}
+
+/// The set list slot the file claims.
+pub fn location(file: &Cbin<Song>) -> Result<Location, Error> {
+    program::slot(&file.header)
+}
+
+/// A song at `location` playing `programs`, written as schema `version`.
+///
+/// ⚠️ The version is the caller's to state: the header and the body's echo must agree,
+/// and they only do because both are set from this one argument.
+pub fn new(
+    location: Location,
+    version: u32,
+    programs: [program::Location; PROGRAM_COUNT],
+) -> Cbin<Song> {
+    let [a, b, c, d] = programs;
+    Cbin {
+        header: Header::new(FORMAT, location.inner(), version),
+        body: Song {
+            raw: [0; BODY_LEN],
+            version: version as u16,
             a,
             b,
             c,
             d,
-        }
+        },
     }
 }
 
-impl Song {
-    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Song, Error> {
-        let schema = Schema::read_be(reader)?;
+pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Song>, Error> {
+    let file: Cbin<Song> = cbin::read(reader, FORMAT)?;
+    program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
+    program::unset_aux(FORMAT, &file.header)?;
+    location(&file)?;
+    Ok(file)
+}
 
-        if !KNOWN_VERSIONS.contains(&schema.version) {
-            return Err(ParseError::UnsupportedVersion {
-                format: FORMAT,
-                version: schema.version,
-                supported: KNOWN_VERSIONS,
-            }
-            .into());
-        }
-
-        let mut song = Song::new(
-            schema.header.location,
-            [schema.a, schema.b, schema.c, schema.d],
-        );
-        song.set_version(schema.version);
-        Ok(song)
-    }
-
-    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
-        let schema = Schema::new(
-            self.location(),
-            self.version(),
-            self.programs()[0],
-            self.programs()[1],
-            self.programs()[2],
-            self.programs()[3],
-        );
-
-        writer.write_be(&schema)?;
-        Ok(())
+impl bank::Item<Location> for Cbin<Song> {
+    fn location(&self) -> Location {
+        // Validated at `read_from` and `new`, and only `Header::set_slot` writes it.
+        location(self).expect("a song's location is validated at construction")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Song;
+    use super::*;
     use crate::common::bank::Item;
     use crate::error::Error;
     use std::io::Cursor;
 
     #[test]
     fn read_write_new_song() -> Result<(), Error> {
-        let song = Song::new(
+        let song = new(
             (0, 1).try_into()?,
+            DEFAULT_VERSION,
             [
                 (1, 2).try_into()?,
                 (2, 3).try_into()?,
@@ -160,7 +144,7 @@ mod tests {
         let mut write_result = Vec::new();
         song.write_to(&mut Cursor::new(&mut write_result)).unwrap();
 
-        let result = Song::read_from(&mut Cursor::new(&mut write_result)).unwrap();
+        let result = read_from(&mut Cursor::new(&mut write_result)).unwrap();
 
         // Assert those values are the same after writing and reading
         assert_eq!(song.location(), result.location());
@@ -175,14 +159,15 @@ mod tests {
     /// A version-0 song must come back out as version 0.
     ///
     /// The eight factory demo songs are version 0 and everything user-written is
-    /// version 1. The writer used to hardcode `version: 1` and a constant `1 << 48` in
-    /// the map word, so re-emitting a factory song silently promoted it — a real
-    /// difference at offset `0x14` and again in the body, on every one of the eight.
+    /// version 1. A writer stamping a constant into the header or the map's echo
+    /// silently promotes them — a real difference at offset `0x14` and again in the
+    /// body, on every one of the eight.
     #[test]
     fn version_survives_a_round_trip() -> Result<(), Error> {
         for version in [0u32, 1] {
-            let mut song = Song::new(
+            let song = new(
                 (0, 5).try_into()?,
+                version,
                 [
                     (1, 2).try_into()?,
                     (2, 3).try_into()?,
@@ -190,7 +175,6 @@ mod tests {
                     (4, 5).try_into()?,
                 ],
             );
-            song.set_version(version);
 
             let mut bytes = Vec::new();
             song.write_to(&mut Cursor::new(&mut bytes)).unwrap();
@@ -209,8 +193,8 @@ mod tests {
                 "body version echo for v{version}",
             );
 
-            let back = Song::read_from(&mut Cursor::new(&mut bytes)).unwrap();
-            assert_eq!(back.version(), version);
+            let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
+            assert_eq!(back.header.version, version);
             assert_eq!(back.get(0), song.get(0));
         }
         Ok(())
@@ -218,8 +202,9 @@ mod tests {
 
     #[test]
     fn update_song_program() -> Result<(), Error> {
-        let mut song = Song::new(
+        let mut song = new(
             (0, 1).try_into()?,
+            DEFAULT_VERSION,
             [
                 (1, 2).try_into()?,
                 (2, 3).try_into()?,
@@ -242,7 +227,7 @@ mod tests {
         let mut write_result = Vec::new();
         song.write_to(&mut Cursor::new(&mut write_result)).unwrap();
 
-        let result = Song::read_from(&mut Cursor::new(&mut write_result)).unwrap();
+        let result = read_from(&mut Cursor::new(&mut write_result)).unwrap();
 
         // Assert those values are the same after writing and reading
         assert_eq!(song.location(), result.location());

@@ -39,16 +39,16 @@ pub enum ParseError {
         supported: &'static [u32],
     },
 
-    /// A re-encode that did not produce the length the format declares. Guards against
-    /// a writer silently emitting a truncated file.
+    /// A body whose length is not the one the format declares — a truncated or
+    /// padded file on read, a miscounting writer on write.
     #[error(
-        "{format}: re-encoded to {got} bytes but the format is {expected}; \
-             refusing to emit a truncated file"
+        "{format}: the body is {got} bytes where the format holds {expected}; \
+             refusing rather than misread fields"
     )]
-    BadEncodedLength {
-        format: &'static str,
-        got: usize,
-        expected: usize,
+    WrongBodyLength {
+        format: String,
+        got: u64,
+        expected: u64,
     },
 }
 
@@ -71,22 +71,4 @@ pub enum Error {
     #[cfg(feature = "bundle")]
     #[error(transparent)]
     Zip(#[from] zip::result::ZipError),
-}
-
-impl From<binrw::Error> for Error {
-    fn from(value: binrw::Error) -> Self {
-        match value {
-            binrw::Error::Io(e) => Error::Io(e),
-            // A `try_map`/`try_calc` that failed with one of this crate's own errors:
-            // recover the typed value instead of flattening it to a string, so a
-            // caller can still match on `OutOfBounds` etc.
-            binrw::Error::Custom { err, .. } => match err.downcast::<ParseError>() {
-                Ok(parse) => Error::Parse(*parse),
-                Err(other) => Error::Parse(ParseError::AssertFail(format!("{other:?}"))),
-            },
-            // binrw wraps nested errors in a backtrace; the cause is inside.
-            binrw::Error::Backtrace(bt) => Error::from(*bt.error),
-            e => Error::Parse(ParseError::AssertFail(e.to_string())),
-        }
-    }
 }

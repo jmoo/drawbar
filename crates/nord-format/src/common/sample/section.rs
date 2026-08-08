@@ -43,55 +43,66 @@ impl Section {
         &self.tag == tag
     }
 
-    fn read_one(bytes: &[u8], at: usize) -> Result<Section, ParseError> {
-        let head = bytes
-            .get(at..at + HEADER_LEN)
-            .ok_or_else(|| ParseError::AssertFail(format!("truncated section header at {at}")))?;
-        let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
-        let from = at + HEADER_LEN;
-        let payload = bytes.get(from..from + len).ok_or_else(|| {
-            ParseError::AssertFail(format!(
-                "section {} at {at} declares {len} bytes but only {} remain",
-                String::from_utf8_lossy(&head[..3]),
-                bytes.len().saturating_sub(from),
-            ))
-        })?;
-        Ok(Section {
-            tag: [head[0], head[1], head[2]],
-            version: head[4],
-            payload: payload.to_vec(),
-        })
-    }
-
-    pub fn write_into(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.tag);
-        out.push(0);
-        out.push(self.version);
-        out.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
-        out.extend_from_slice(&self.payload);
+    pub fn write_to(&self, w: &mut impl std::io::Write) -> Result<(), ParseError> {
+        let head = |w: &mut dyn std::io::Write| -> std::io::Result<()> {
+            w.write_all(&self.tag)?;
+            w.write_all(&[0, self.version])?;
+            w.write_all(&(self.payload.len() as u32).to_be_bytes())?;
+            w.write_all(&self.payload)
+        };
+        head(w).map_err(|e| ParseError::AssertFail(format!("writing a section: {e}")))
     }
 }
 
-/// Walks the chain from `at` to the end of `bytes`.
+/// Walks the chain from the reader's position to its end.
 ///
-/// The chain must land exactly on the end of the file. It is a strong integrity check —
+/// The chain must land exactly on the end of the body. It is a strong integrity check —
 /// a wrong length anywhere puts every later section at the wrong offset — so a short or
 /// overrunning walk is an error rather than a truncated result.
-pub fn read_chain(bytes: &[u8], at: usize) -> Result<Vec<Section>, ParseError> {
+pub fn read_chain(r: &mut impl std::io::Read) -> Result<Vec<Section>, ParseError> {
     let mut sections = Vec::new();
-    let mut pos = at;
-    while pos < bytes.len() {
-        let section = Section::read_one(bytes, pos)?;
-        pos += section.encoded_len();
-        sections.push(section);
+    let mut pos: u64 = 0;
+    loop {
+        let head = match read_head(r, pos)? {
+            Some(head) => head,
+            None => return Ok(sections),
+        };
+        let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
+        let mut payload = vec![0u8; len];
+        r.read_exact(&mut payload).map_err(|_| {
+            ParseError::AssertFail(format!(
+                "section {} at {pos} declares {len} bytes but the body ends first",
+                String::from_utf8_lossy(&head[..3]),
+            ))
+        })?;
+        pos += (HEADER_LEN + len) as u64;
+        sections.push(Section {
+            tag: [head[0], head[1], head[2]],
+            version: head[4],
+            payload,
+        });
     }
-    if pos != bytes.len() {
-        return Err(ParseError::AssertFail(format!(
-            "section chain ended at {pos}, file is {} bytes",
-            bytes.len()
-        )));
+}
+
+/// The next 9-byte section header, `None` on a clean end of the chain. Bytes that
+/// run out mid-header are a truncation, not an end.
+fn read_head(r: &mut impl std::io::Read, at: u64) -> Result<Option<[u8; 9]>, ParseError> {
+    let mut head = [0u8; HEADER_LEN];
+    let mut got = 0;
+    while got < HEADER_LEN {
+        match r.read(&mut head[got..]) {
+            Ok(0) if got == 0 => return Ok(None),
+            Ok(0) => {
+                return Err(ParseError::AssertFail(format!(
+                    "truncated section header at {at}"
+                )))
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ParseError::AssertFail(format!("reading a section: {e}"))),
+        }
     }
-    Ok(sections)
+    Ok(Some(head))
 }
 
 /// Finds the single section with `tag`.
@@ -136,7 +147,7 @@ mod tests {
         bytes.extend(section(HDR, 9, &[1, 2, 3]));
         bytes.extend(section(STK, 9, &[4; 20]));
 
-        let chain = read_chain(&bytes, 0).unwrap();
+        let chain = read_chain(&mut bytes.as_slice()).unwrap();
         assert_eq!(chain.len(), 3);
         assert_eq!(chain[0].payload.len(), 0);
         assert_eq!(chain[1].payload, vec![1, 2, 3]);
@@ -144,7 +155,7 @@ mod tests {
 
         let mut out = Vec::new();
         for s in &chain {
-            s.write_into(&mut out);
+            s.write_to(&mut out).unwrap();
         }
         assert_eq!(out, bytes);
     }
@@ -153,7 +164,7 @@ mod tests {
     fn length_is_big_endian() {
         // 0x00000102 = 258 read big-endian; little-endian would be 0x02010000.
         let bytes = section(HDR, 1, &[0; 258]);
-        let chain = read_chain(&bytes, 0).unwrap();
+        let chain = read_chain(&mut bytes.as_slice()).unwrap();
         assert_eq!(chain[0].payload.len(), 258);
     }
 
@@ -161,14 +172,14 @@ mod tests {
     fn overrunning_length_is_an_error() {
         let mut bytes = section(HDR, 1, &[7; 4]);
         bytes[8] = 200; // claim 200 payload bytes where 4 exist
-        assert!(read_chain(&bytes, 0).is_err());
+        assert!(read_chain(&mut bytes.as_slice()).is_err());
     }
 
     #[test]
     fn trailing_bytes_are_an_error() {
         let mut bytes = section(HDR, 1, &[7; 4]);
         bytes.extend_from_slice(&[0, 0, 0]); // not enough for another header
-        assert!(read_chain(&bytes, 0).is_err());
+        assert!(read_chain(&mut bytes.as_slice()).is_err());
     }
 
     #[test]
@@ -176,7 +187,7 @@ mod tests {
         let mut bytes = section(STK, 9, &[1]);
         bytes.extend(section(STK, 9, &[2]));
         bytes.extend(section(STK, 9, &[3]));
-        let chain = read_chain(&bytes, 0).unwrap();
+        let chain = read_chain(&mut bytes.as_slice()).unwrap();
         assert_eq!(chain.len(), 3);
         assert_eq!(
             chain.iter().map(|s| s.payload[0]).collect::<Vec<_>>(),

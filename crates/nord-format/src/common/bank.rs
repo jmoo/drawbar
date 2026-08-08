@@ -1,3 +1,5 @@
+//! A bank of slot-addressed items, and the names the instrument gives them.
+
 use std::collections::HashMap;
 
 use std::fmt::{Debug, Formatter};
@@ -13,14 +15,26 @@ pub trait Location:
     fn y(&self) -> u16;
 }
 
+/// An item that knows which slot it occupies.
+///
+/// The slot lives in the container header and nowhere else, so an implementation
+/// reads it back out rather than shadowing it in a field of its own.
 pub trait Item<T>: Debug
 where
     T: Location,
 {
-    fn name(&self) -> Option<String>;
-    fn set_name(&mut self, name: String);
     fn location(&self) -> T;
-    fn set_location(&mut self, location: T);
+}
+
+/// One slot's occupant.
+///
+/// The name is the bank's, not the item's: no file on disk stores a name — it lives
+/// on the instrument and arrives alongside the bytes — so it is paired with the item
+/// here rather than smuggled into the entity.
+#[derive(Debug)]
+pub struct Entry<T> {
+    pub name: Option<String>,
+    pub item: T,
 }
 
 pub struct Bank<T, L>
@@ -28,7 +42,7 @@ where
     L: Location,
     T: Item<L>,
 {
-    items: HashMap<u16, T>,
+    items: HashMap<u16, Entry<T>>,
     location_type: PhantomData<L>,
 }
 
@@ -44,11 +58,13 @@ where
         }
     }
 
-    pub fn replace(&mut self, item: T) {
-        self.items.insert(item.location().as_u16(), item);
+    /// Put `item` in the slot it claims, under `name`, displacing whatever was there.
+    pub fn replace(&mut self, name: Option<String>, item: T) {
+        self.items
+            .insert(item.location().as_u16(), Entry { name, item });
     }
 
-    pub fn get(&self, location: L) -> Option<&T> {
+    pub fn get(&self, location: L) -> Option<&Entry<T>> {
         self.items.get(&location.as_u16())
     }
 }
@@ -109,27 +125,25 @@ mod tests {
         }
 
         impl Item<Location> for TestItem {
-            fn name(&self) -> Option<String> {
-                Some("foo".to_string())
-            }
-            fn set_name(&mut self, _name: String) {}
             fn location(&self) -> Location {
                 self.location
-            }
-            fn set_location(&mut self, location: Location) {
-                self.location = location;
             }
         }
 
         let mut bank = Bank::new();
 
-        bank.replace(TestItem {
-            value: 69,
-            location: (4, 1).try_into()?,
-        });
+        bank.replace(
+            Some("foo".to_string()),
+            TestItem {
+                value: 69,
+                location: (4, 1).try_into()?,
+            },
+        );
 
         if let Some(result) = bank.get((4, 1).try_into()?) {
-            assert_eq!(result.value, 69);
+            assert_eq!(result.item.value, 69);
+            // The name came from the bank, not from the item.
+            assert_eq!(result.name.as_deref(), Some("foo"));
         } else {
             panic!("Expected to find item at (4,1) but found nothing");
         }

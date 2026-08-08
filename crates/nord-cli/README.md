@@ -119,8 +119,8 @@ block. It renders as `04.......` rather than nine positions, since the nine
 nibbles hold stale values in that mode.
 
 Songs list their four program slots; settings print the decoded System, MIDI and
-Sound menus plus the selection the instrument restores at power-up; bundles need
-the `bundle` feature (enabled here) to open.
+Sound menus plus the startup state the instrument restores at power-up; bundles
+need the `bundle` feature (enabled here) to open.
 
 ### The slot verbs on a file
 
@@ -223,10 +223,10 @@ to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
 `edit` is the only verb that changes what is *inside* an object, and it exists on
 four nouns: `nord program edit`, `nord live edit` (the live buffer is the
 program body under another tag, so the fields are identical), `nord settings
-edit` (`panel.*` for the menus, `selection.*` for the restored panel state), and
-`nord sample edit` (below). For the first three the field paths are
-`nord-format`'s own names, generated from the panel declarations, so `--fields`
-lists whatever the library currently knows:
+edit` (the menu settings, plus the `startup_*` state the instrument restores at
+power-up), and `nord sample edit` (below). For the first three the field paths
+are `nord-format`'s own names, generated from the panel declarations, so
+`--fields` lists whatever the library currently knows:
 
 ```sh
 nord program edit --fields                       # what is settable, and what it takes

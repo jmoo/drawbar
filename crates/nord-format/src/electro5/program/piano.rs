@@ -2,11 +2,11 @@
 
 use crate::common::components::sparse_enum;
 use crate::types::RangedU8;
-use nord_bits_derive::bitpanel;
+use nord_bits_derive::bitbody;
 
 // 0x3a..0x41 — the piano panel.
 
-#[bitpanel(8)]
+#[bitbody(8)]
 #[derive(Default)]
 pub struct PianoPanel {
     #[bits(0..=2)]

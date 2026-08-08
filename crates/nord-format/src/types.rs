@@ -162,25 +162,29 @@ impl<const MAX: u8> PartialEq<u8> for RangedU8<MAX> {
     }
 }
 
-/// A pair of u16 values that are guaranteed to be within a given range.
+/// A pair of u16 coordinates over an `X_COUNT` × `Y_COUNT` space.
+///
+/// Both parameters are **counts**, so the valid coordinates are `0..X_COUNT` and
+/// `0..Y_COUNT`. The pair packs into a single u16 as `x * Y_COUNT + y`, which is a
+/// bijection onto `0..X_COUNT * Y_COUNT` exactly because `Y_COUNT` is the stride.
 #[derive(Clone, Default, Copy, PartialEq, Eq, Hash)]
-pub struct RangedU16Pair<const X_MAX: u16, const Y_MAX: u16> {
+pub struct RangedU16Pair<const X_COUNT: u16, const Y_COUNT: u16> {
     inner: (u16, u16),
 }
 
-impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> RangedU16Pair<X_COUNT, Y_COUNT> {
     pub fn new(x: u16, y: u16) -> Result<Self, ParseError> {
-        if x > X_MAX {
+        if x >= X_COUNT {
             return Err(ParseError::OutOfBounds {
                 value: format!("{x}"),
-                bound: format!("0..={X_MAX}"),
+                bound: format!("0..{X_COUNT}"),
             });
         }
 
-        if y > Y_MAX {
+        if y >= Y_COUNT {
             return Err(ParseError::OutOfBounds {
                 value: format!("{y}"),
-                bound: format!("0..={Y_MAX}"),
+                bound: format!("0..{Y_COUNT}"),
             });
         }
 
@@ -188,13 +192,12 @@ impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
     }
 
     pub fn from_u16(value: u16) -> Result<Self, ParseError> {
-        match (value.checked_div(Y_MAX), value.checked_rem(Y_MAX)) {
+        match (value.checked_div(Y_COUNT), value.checked_rem(Y_COUNT)) {
             (Some(x), Some(y)) => (x, y).try_into(),
-            // `Y_MAX == 0` is the degenerate single-location type; only 0 encodes.
-            _ if value == 0 => (0, 0).try_into(),
+            // A zero `Y_COUNT` names no locations, so no value decodes into one.
             _ => Err(ParseError::OutOfBounds {
                 value: format!("{value}"),
-                bound: format!("0..={X_MAX}"),
+                bound: format!("0..{}", X_COUNT as u32 * Y_COUNT as u32),
             }),
         }
     }
@@ -204,7 +207,7 @@ impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
     }
 
     pub fn as_u16(&self) -> u16 {
-        (self.inner.0 * Y_MAX) + self.inner.1
+        (self.inner.0 * Y_COUNT) + self.inner.1
     }
 
     pub fn x(&self) -> u16 {
@@ -216,8 +219,9 @@ impl<const X_MAX: u16, const Y_MAX: u16> RangedU16Pair<X_MAX, Y_MAX> {
     }
 }
 
-impl<const X_MAX: u16, const Y_MAX: u16> Packed for RangedU16Pair<X_MAX, Y_MAX> {
-    const MAX_BITS: u32 = bits_for((X_MAX * Y_MAX + Y_MAX) as u64);
+/// The widest encoding is the last location, `X_COUNT * Y_COUNT - 1`.
+impl<const X_COUNT: u16, const Y_COUNT: u16> Packed for RangedU16Pair<X_COUNT, Y_COUNT> {
+    const MAX_BITS: u32 = bits_for((X_COUNT as u64 * Y_COUNT as u64).saturating_sub(1));
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
@@ -229,13 +233,13 @@ impl<const X_MAX: u16, const Y_MAX: u16> Packed for RangedU16Pair<X_MAX, Y_MAX> 
     }
 }
 
-impl<const X: u16, const Y: u16> Debug for RangedU16Pair<X, Y> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> Debug for RangedU16Pair<X_COUNT, Y_COUNT> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {})", self.inner.0, self.inner.1)
     }
 }
 
-impl<const X: u16, const Y: u16> Location for RangedU16Pair<X, Y> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> Location for RangedU16Pair<X_COUNT, Y_COUNT> {
     fn inner(&self) -> (u16, u16) {
         self.inner()
     }
@@ -253,7 +257,9 @@ impl<const X: u16, const Y: u16> Location for RangedU16Pair<X, Y> {
     }
 }
 
-impl<const X: u16, const Y: u16> TryFrom<(u16, u16)> for RangedU16Pair<X, Y> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> TryFrom<(u16, u16)>
+    for RangedU16Pair<X_COUNT, Y_COUNT>
+{
     type Error = ParseError;
 
     fn try_from(value: (u16, u16)) -> Result<Self, Self::Error> {
@@ -261,7 +267,7 @@ impl<const X: u16, const Y: u16> TryFrom<(u16, u16)> for RangedU16Pair<X, Y> {
     }
 }
 
-impl<const X: u16, const Y: u16> TryFrom<u16> for RangedU16Pair<X, Y> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> TryFrom<u16> for RangedU16Pair<X_COUNT, Y_COUNT> {
     type Error = ParseError;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
@@ -269,32 +275,34 @@ impl<const X: u16, const Y: u16> TryFrom<u16> for RangedU16Pair<X, Y> {
     }
 }
 
-impl<const B: u16, const S: u16> PartialEq<u16> for RangedU16Pair<B, S> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> PartialEq<u16> for RangedU16Pair<X_COUNT, Y_COUNT> {
     fn eq(&self, other: &u16) -> bool {
         self.as_u16() == *other
     }
 }
 
-impl<const B: u16, const S: u16> PartialEq<(u16, u16)> for RangedU16Pair<B, S> {
+impl<const X_COUNT: u16, const Y_COUNT: u16> PartialEq<(u16, u16)>
+    for RangedU16Pair<X_COUNT, Y_COUNT>
+{
     fn eq(&self, other: &(u16, u16)) -> bool {
         self.inner == *other
     }
 }
 
-impl<const X: u16, const Y: u16> From<RangedU16Pair<X, Y>> for u16 {
-    fn from(value: RangedU16Pair<X, Y>) -> u16 {
+impl<const X_COUNT: u16, const Y_COUNT: u16> From<RangedU16Pair<X_COUNT, Y_COUNT>> for u16 {
+    fn from(value: RangedU16Pair<X_COUNT, Y_COUNT>) -> u16 {
         value.as_u16()
     }
 }
 
-impl<const X: u16, const Y: u16> From<RangedU16Pair<X, Y>> for u32 {
-    fn from(value: RangedU16Pair<X, Y>) -> u32 {
+impl<const X_COUNT: u16, const Y_COUNT: u16> From<RangedU16Pair<X_COUNT, Y_COUNT>> for u32 {
+    fn from(value: RangedU16Pair<X_COUNT, Y_COUNT>) -> u32 {
         value.as_u16() as u32
     }
 }
 
-impl<const X: u16, const Y: u16> From<RangedU16Pair<X, Y>> for u64 {
-    fn from(value: RangedU16Pair<X, Y>) -> u64 {
+impl<const X_COUNT: u16, const Y_COUNT: u16> From<RangedU16Pair<X_COUNT, Y_COUNT>> for u64 {
+    fn from(value: RangedU16Pair<X_COUNT, Y_COUNT>) -> u64 {
         value.as_u16() as u64
     }
 }
@@ -315,9 +323,34 @@ mod tests {
         assert_eq!(ranged_tuple, (1, 2));
     }
 
+    /// Both parameters are counts: the last location of an 8×50 space is `(7, 49)`, and
+    /// a coordinate equal to its count is one past the end.
     #[test]
-    fn can_create_identity_point_in_empty_tuple_range() {
-        let ranged_tuple: RangedU16Pair<0, 0> = 0_u16.try_into().unwrap();
-        assert_eq!(ranged_tuple, (0, 0));
+    fn the_pair_parameters_are_counts_not_maxima() {
+        type Location = RangedU16Pair<8, 50>;
+
+        assert!(Location::try_from((7, 49)).is_ok());
+        assert!(Location::try_from((8, 0)).is_err());
+        assert!(Location::try_from((0, 50)).is_err());
+    }
+
+    /// Packing at the `Y_COUNT` stride is a bijection, so no two locations share a u16.
+    #[test]
+    fn packing_round_trips_without_collision() {
+        type Location = RangedU16Pair<8, 50>;
+
+        assert_eq!(Location::try_from((1, 0)).unwrap().as_u16(), 50);
+        assert_eq!(Location::from_u16(50).unwrap(), (1, 0));
+        assert_eq!(Location::try_from((7, 49)).unwrap().as_u16(), 399);
+        assert!(Location::from_u16(400).is_err());
+
+        let mut seen = std::collections::HashSet::new();
+        for x in 0..8 {
+            for y in 0..50 {
+                let packed = Location::try_from((x, y)).unwrap().as_u16();
+                assert!(seen.insert(packed), "({x}, {y}) collides at {packed}");
+                assert_eq!(Location::from_u16(packed).unwrap(), (x, y));
+            }
+        }
     }
 }

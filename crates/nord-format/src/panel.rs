@@ -1,10 +1,10 @@
-//! Field-level introspection over a bit-packed panel.
+//! Field-level introspection over a `#[bitbody]`'s fields.
 //!
-//! [`Panel`] lets a caller walk a panel's fields without naming any of them, which is
-//! what the decode snapshot needs: a new field appears in the output by being declared,
-//! not by anyone remembering to add it. [`Panel::set_field`] is the same idea in the
-//! write direction — a field becomes settable by being declared, so a CLI cannot fall
-//! behind the library.
+//! The generated registry lets a caller walk a body's fields without naming any of
+//! them, which is what the decode snapshot needs: a new field appears in the output
+//! by being declared, not by anyone remembering to add it. `set_field` is the same
+//! idea in the write direction — a field becomes settable by being declared, so a
+//! CLI cannot fall behind the library.
 //!
 //! Both halves of the snapshot's view of a [`FieldValue`] matter. `raw` is the field's
 //! bits with no type applied, so it pins the placement — move a range by one bit and it
@@ -18,9 +18,9 @@ use crate::bits::Packed;
 /// One decoded field of a panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldValue {
-    /// The field's name as declared on the panel.
-    pub name: &'static str,
-    /// Where the bits sit, as `LO..=HI` over the panel's bytes.
+    /// The field's full registry path, e.g. `center_panel.transpose`.
+    pub name: String,
+    /// Where the bits sit, as `LO..=HI` over the declaring body's bytes.
     pub placement: &'static str,
     /// The field's bits as they were *read*, shifted down to bit 0. Carries no type, so
     /// it stays comparable across a retype.
@@ -48,12 +48,12 @@ impl Display for FieldValue {
 /// What a field is, without an instance of the panel to read it from.
 #[derive(Clone)]
 pub struct FieldSpec {
-    pub name: &'static str,
+    /// The field's full registry path, e.g. `center_panel.transpose`.
+    pub name: String,
     pub placement: &'static str,
     /// Width of the field in bits.
     pub width: u32,
-    /// Every value the field's type accepts, rendered as [`Panel::set_field`] spells
-    /// them. Empty for a field too wide to enumerate — see [`ENUMERABLE_BITS`].
+    /// Every value the field's type accepts, rendered as `set_field` spells them. Empty for a field too wide to enumerate — see [`ENUMERABLE_BITS`].
     pub legal: fn() -> Vec<String>,
 }
 
@@ -106,25 +106,18 @@ impl Display for FieldError {
 
 impl std::error::Error for FieldError {}
 
-/// A panel that can list and set its own fields. Implemented by `#[bitpanel]`.
-pub trait Panel {
-    /// The panel's type name.
-    const NAME: &'static str;
-
-    /// Every declared field, in declaration order. Bits no field claims are not
-    /// reported — by construction there is no name to report them under.
-    fn field_values(&self) -> Vec<FieldValue>;
-
-    /// The same fields, in the same order, without needing an instance.
-    fn field_specs() -> Vec<FieldSpec>
-    where
-        Self: Sized;
-
-    /// Set one field from its rendered form.
-    ///
-    /// The value is parsed by the field's own type, so an out-of-range value fails here
-    /// and never reaches an encode — see [`parse_field`].
-    fn set_field(&mut self, name: &str, value: &str) -> Result<(), FieldError>;
+/// One settable field of a body, addressed the way `--set` addresses it.
+pub struct Field {
+    /// The field's full registry path, e.g. `center_panel.transpose`.
+    pub path: String,
+    pub spec: FieldSpec,
+    /// What the field currently holds, spelled the way `set_field` takes it.
+    /// Feeding this straight back is always a no-op.
+    pub value: String,
+    /// The same value as `nord inspect` renders it. Differs from `value` only for a
+    /// field too wide to have named values, where the rendering is a list and the
+    /// spelling is the stored bits.
+    pub display: String,
 }
 
 /// Every value of `T` that fits a `LO..=HI` field, in stored order, asked of the type

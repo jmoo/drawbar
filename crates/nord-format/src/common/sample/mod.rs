@@ -1,9 +1,13 @@
 //! Sample instruments (`.nsmp`) — the Nord Sample Library format.
 //!
 //! Shared across the Nord line rather than specific to one model, which is why this sits
-//! in [`crate::common`]. A file is the usual 44-byte CBIN header followed by a chain of
-//! tagged [`section`]s: an `hdr` carrying the name, a `cat` of category strings, a `map`
+//! in [`crate::common`]. A file is the CBIN header followed by a chain of tagged
+//! [`section`]s: an `hdr` carrying the name, a `cat` of category strings, a `map`
 //! ending in the [`zone`] table, one [`stroke`] per zone, and a trailing `sty`.
+//!
+//! Both container generations occur: across the corpus every v2 specimen is type 0 and
+//! every v4 is type 1, while v3 is split. The container handles the difference; the
+//! chain is the same.
 //!
 //! **The audio is encoded and stays that way.** Strokes are kept verbatim, so this reads
 //! and rewrites instruments byte-exactly and can retune, rename and remap them — but it
@@ -17,16 +21,12 @@ pub use section::Section;
 pub use stroke::Stroke;
 pub use zone::Zone;
 
-use crate::crc::crc32;
+use crate::cbin::{self, BodyReader, BodyWriter, Cbin, Header};
 use crate::error::{Error, ParseError};
 use std::fmt;
 use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "nsmp";
-
-/// The fixed CBIN header; the section chain starts here. Also the first byte the
-/// checksum covers.
-pub const BODY_AT: usize = 0x2c;
 
 /// Offset of the instrument name within the `hdr` payload.
 const NAME_AT: usize = 12;
@@ -39,123 +39,42 @@ const NAME_AT: usize = 12;
 /// field we cannot see, so refuse instead. Reading is unrestricted.
 pub const MAX_NAME_LEN: usize = 14;
 
-/// A sample instrument.
-///
-/// Sections are held in file order, including repeats — `stk` appears once per zone.
+/// A sample instrument's body: the section chain, held in file order including
+/// repeats — `stk` appears once per zone. A file is a `Cbin<Sample>`.
 pub struct Sample {
-    pub header: Header,
     pub sections: Vec<Section>,
 }
 
-/// The CBIN header of a sample instrument.
-///
-/// ⚠️ Not [`crate::common::Header`]. Where other formats keep a bank/slot pair and an
-/// `0xFFFFFFFF` trailer, a sample file carries `0xFFFFFFFF` in the location and a
-/// different constant after it — a library sample has no slot until an instrument gives
-/// it one. Both are preserved verbatim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Header {
-    /// CBIN header type. 1 on everything with a checksum.
-    pub header_type: u32,
-    pub format: String,
-    /// Where other formats hold bank and slot.
-    pub location: u32,
-    /// Where other formats hold the `0xFFFFFFFF` trailer. `0x000f0000` on every
-    /// specimen; meaning unknown.
-    pub unknown_0x10: u32,
-    /// Content version as `format * 100 + revision`, so a 2.0 instrument reads 200.
-    /// Not a schema revision, and not gated: it moves with the library's own content.
-    pub version: u32,
-    pub crc32: u32,
-}
-
-impl Header {
-    fn read(bytes: &[u8]) -> Result<Header, ParseError> {
-        if bytes.len() < BODY_AT {
-            return Err(ParseError::AssertFail(format!(
-                "{FORMAT}: {} bytes is shorter than the {BODY_AT}-byte header",
-                bytes.len()
-            )));
-        }
-        if &bytes[0..4] != b"CBIN" {
-            return Err(ParseError::UnknownFormat(
-                String::from_utf8_lossy(&bytes[0..4]).into_owned(),
-            ));
-        }
-        let format = String::from_utf8_lossy(&bytes[8..12]).into_owned();
-        if format != FORMAT {
-            return Err(ParseError::WrongFormat {
-                expected: FORMAT,
-                got: format,
-            });
-        }
-        let le = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        Ok(Header {
-            header_type: le(0x04),
-            format,
-            location: le(0x0c),
-            unknown_0x10: le(0x10),
-            version: le(0x14),
-            crc32: le(0x18),
+impl cbin::Body for Sample {
+    fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<Self, Error> {
+        Ok(Sample {
+            sections: section::read_chain(r)?,
         })
     }
 
-    fn write_into(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(b"CBIN");
-        out.extend_from_slice(&self.header_type.to_le_bytes());
-        out.extend_from_slice(self.format.as_bytes());
-        out.extend_from_slice(&self.location.to_le_bytes());
-        out.extend_from_slice(&self.unknown_0x10.to_le_bytes());
-        out.extend_from_slice(&self.version.to_le_bytes());
-        out.extend_from_slice(&self.crc32.to_le_bytes());
-        out.resize(BODY_AT, 0);
+    fn write<W: Write + Seek>(&self, w: &mut BodyWriter<'_, W>) -> Result<(), Error> {
+        for s in &self.sections {
+            s.write_to(w)?;
+        }
+        Ok(())
     }
 }
 
-impl Sample {
-    /// Reads a whole instrument, verifying its checksum.
-    ///
-    /// Unlike the fixed-length formats this does not drive the CRC through binrw's
-    /// `map_stream`: the checksummed region runs from [`BODY_AT`] to end of file, whose
-    /// length is not known until the file has been read.
-    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Sample, Error> {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
-        Sample::from_bytes(&bytes)
-    }
+/// Reads a whole instrument, verifying its checksum.
+pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error> {
+    cbin::read(reader, FORMAT)
+}
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Sample, Error> {
-        let header = Header::read(bytes)?;
-        let computed = crc32(&bytes[BODY_AT..]);
-        if computed != header.crc32 {
-            return Err(ParseError::AssertFail(format!(
-                "{FORMAT}: stored checksum {:#010x} does not match the body's {computed:#010x}",
-                header.crc32
-            ))
-            .into());
-        }
-        let sections = section::read_chain(bytes, BODY_AT)?;
-        Ok(Sample { header, sections })
-    }
+pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
+    read_from(&mut std::io::Cursor::new(bytes))
+}
 
-    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
-        writer.write_all(&self.to_bytes())?;
-        Ok(())
-    }
-
+impl Cbin<Sample> {
     /// Serialises, recomputing the checksum over the body it just produced.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut body = Vec::new();
-        for s in &self.sections {
-            s.write_into(&mut body);
-        }
-        let mut header = self.header.clone();
-        header.crc32 = crc32(&body);
-
-        let mut out = Vec::with_capacity(BODY_AT + body.len());
-        header.write_into(&mut out);
-        out.extend_from_slice(&body);
-        out
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        self.write_to(&mut out)?;
+        Ok(out.into_inner())
     }
 
     /// Instrument name, as the Nord display shows it.
@@ -180,7 +99,7 @@ impl Sample {
             }
             .into());
         }
-        let hdr = section::find_mut(&mut self.sections, section::HDR)
+        let hdr = section::find_mut(&mut self.body.sections, section::HDR)
             .ok_or_else(|| ParseError::AssertFail("no hdr section".into()))?;
         let field = hdr
             .payload
@@ -198,13 +117,13 @@ impl Sample {
 
     /// Sets one zone's top note. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        let map = section::find_mut(&mut self.sections, section::MAP)
+        let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
         zone::set_top_note(&mut map.payload, index, note)?;
         Ok(())
     }
 
-    /// One stroke per zone, in the same high-to-low order as [`Sample::zones`].
+    /// One stroke per zone, in the same high-to-low order as [`Self::zones`].
     pub fn strokes(&self) -> Result<Vec<Stroke>, Error> {
         let zones = zone::count(&self.map()?.payload)?;
         self.stroke_sections()
@@ -216,6 +135,7 @@ impl Sample {
     /// Retunes one zone by moving the note its sample plays untransposed at.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
         let section = self
+            .body
             .sections
             .iter_mut()
             .filter(|s| s.is(section::STK))
@@ -227,7 +147,7 @@ impl Sample {
 
     /// Category labels, as stored in `cat`: length-prefixed strings.
     pub fn categories(&self) -> Vec<String> {
-        let Some(cat) = section::find(&self.sections, section::CAT) else {
+        let Some(cat) = section::find(&self.body.sections, section::CAT) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -249,16 +169,16 @@ impl Sample {
     }
 
     fn stroke_sections(&self) -> impl Iterator<Item = &Section> {
-        self.sections.iter().filter(|s| s.is(section::STK))
+        self.body.sections.iter().filter(|s| s.is(section::STK))
     }
 
     fn hdr(&self) -> Result<&Section, Error> {
-        section::find(&self.sections, section::HDR)
+        section::find(&self.body.sections, section::HDR)
             .ok_or_else(|| ParseError::AssertFail("no hdr section".into()).into())
     }
 
     fn map(&self) -> Result<&Section, Error> {
-        section::find(&self.sections, section::MAP)
+        section::find(&self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
     }
 }
@@ -266,9 +186,6 @@ impl Sample {
 impl fmt::Debug for Sample {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sample")
-            .field("name", &self.name().unwrap_or_default())
-            .field("version", &self.header.version)
-            .field("zones", &self.zones().map(|z| z.len()).unwrap_or(0))
             .field("sections", &self.sections)
             .finish()
     }

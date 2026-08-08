@@ -2,115 +2,78 @@
 //!
 //! Confirmed on hardware: the live buffer is the `ne5p` program body under another tag.
 //! The same panel state read as object class 6 slot `1:1` and as program `5:40` gives
-//! byte-identical 121-byte bodies, so this module is [`program::Schema`] in the live slot
-//! space and every program field applies here unchanged.
+//! byte-identical 121-byte bodies, so this module is [`program::Program`] in the live
+//! slot space and every program field applies here unchanged.
 
-use binrw::{BinRead, BinWriterExt};
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek};
 
-use crate::common;
-use crate::common::bank;
-use crate::electro5::program;
-use crate::error::{Error, ParseError};
+use crate::cbin::{self, Cbin, Header};
+use crate::electro5::program::{self, Program};
+use crate::error::Error;
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5l";
 /// Schema versions this build's field offsets have been validated against. Every corpus
 /// live slot reports 4, as every program does.
 pub const KNOWN_VERSIONS: &[u32] = &[4];
-/// Total file length: 44-byte CBIN header + 121-byte body — the program length, because
-/// it is the program body.
+/// Type-1 file length — the program length, because it is the program body.
 pub const FILE_LEN: usize = program::FILE_LEN;
 
-/// Highest bank: the live buffer is one bank, wire-addressed `0`.
-pub const BANK_MAX: u16 = 0;
-/// Highest slot: three live slots, wire-addressed `0..=2` and shown as `1:1..1:3`.
-pub const SLOT_MAX: u16 = 2;
+/// The live buffer is one bank, wire-addressed `0`.
+pub const BANK_COUNT: u16 = 1;
+/// Three live slots, wire-addressed `0..=2` and shown as `1:1..1:3`.
+pub const SLOT_COUNT: u16 = 3;
 
-pub type Location = RangedU16Pair<BANK_MAX, SLOT_MAX>;
-pub type Header = common::Header<Location>;
-pub type Schema = program::Schema<Location>;
+pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
 
-/// One of the three live slots.
-#[derive(Debug)]
-pub struct Live {
-    pub schema: Schema,
-    name: Option<String>,
+/// The live slot the file claims — the same header word a program reads as a bank and
+/// slot, in the three-slot space instead.
+pub fn location(file: &Cbin<Program>) -> Result<Location, Error> {
+    program::slot(&file.header)
 }
 
-impl Live {
-    pub fn new(location: Location) -> Live {
-        Live {
-            name: None,
-            schema: Schema::new(FORMAT, location),
-        }
-    }
-
-    pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Live, Error> {
-        let schema = Schema::read_be(reader)?;
-        program::check_tag(FORMAT, &schema)?;
-        if !KNOWN_VERSIONS.contains(&schema.version) {
-            return Err(ParseError::UnsupportedVersion {
-                format: FORMAT,
-                version: schema.version,
-                supported: KNOWN_VERSIONS,
-            }
-            .into());
-        }
-
-        Ok(Live { name: None, schema })
-    }
-
-    pub fn write_to(&self, writer: &mut (impl Write + Seek)) -> Result<(), Error> {
-        writer.write_be(&self.schema)?;
-        Ok(())
+/// A default live buffer addressed to `location`.
+pub fn new(location: Location) -> Cbin<Program> {
+    Cbin {
+        header: Header::new(FORMAT, location.inner(), 4),
+        body: Program::default(),
     }
 }
 
-impl bank::Item<Location> for Live {
-    fn name(&self) -> Option<String> {
-        self.name.clone()
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = Some(name);
-    }
-
-    fn location(&self) -> Location {
-        self.schema.header.location
-    }
-
-    fn set_location(&mut self, location: Location) {
-        self.schema.header.location = location;
-    }
+pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
+    let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
+    program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
+    program::unset_aux(FORMAT, &file.header)?;
+    location(&file)?;
+    Ok(file)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::bank::Item;
+    use crate::error::ParseError;
     use std::io::Cursor;
 
     /// A live slot writes out at the program's length and reads back where it was.
     #[test]
     fn a_live_slot_round_trips_at_the_program_length() {
-        let live = Live::new((0, 2).try_into().unwrap());
+        let live = new((0, 2).try_into().unwrap());
         let mut bytes = Vec::new();
         live.write_to(&mut Cursor::new(&mut bytes)).unwrap();
         assert_eq!(bytes.len(), FILE_LEN);
         assert_eq!(&bytes[0x08..0x0c], FORMAT.as_bytes());
 
-        let back = Live::read_from(&mut Cursor::new(&mut bytes)).unwrap();
-        assert_eq!(back.location(), (0, 2));
+        let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
+        assert_eq!(location(&back).unwrap(), (0, 2));
     }
 
     /// There are three live slots, and the type will not name a fourth.
     #[test]
     fn the_live_slot_space_stops_at_three() {
-        for slot in 0..=SLOT_MAX {
+        for slot in 0..SLOT_COUNT {
             assert!(Location::try_from((0, slot)).is_ok(), "slot {slot}");
         }
-        assert!(Location::try_from((0, SLOT_MAX + 1)).is_err());
+        assert!(Location::try_from((0, SLOT_COUNT)).is_err());
         assert!(Location::try_from((1, 0)).is_err());
     }
 
@@ -118,11 +81,11 @@ mod tests {
     /// and a reader that ignored it would re-emit the file as the other one.
     #[test]
     fn a_program_is_not_accepted_as_a_live_slot() {
-        let program = program::Program::new((0, 1).try_into().unwrap());
+        let program = program::new((0, 1).try_into().unwrap());
         let mut bytes = Vec::new();
         program.write_to(&mut Cursor::new(&mut bytes)).unwrap();
 
-        let err = Live::read_from(&mut Cursor::new(&mut bytes))
+        let err = read_from(&mut Cursor::new(&mut bytes))
             .expect_err("a ne5p file must not read as a live slot");
         assert!(
             matches!(
@@ -136,10 +99,10 @@ mod tests {
         );
 
         let mut live = Vec::new();
-        Live::new((0, 1).try_into().unwrap())
+        new((0, 1).try_into().unwrap())
             .write_to(&mut Cursor::new(&mut live))
             .unwrap();
-        let err = program::Program::read_from(&mut Cursor::new(&mut live))
+        let err = program::read_from(&mut Cursor::new(&mut live))
             .expect_err("a ne5l file must not read as a program");
         assert!(
             matches!(
@@ -158,12 +121,12 @@ mod tests {
     #[test]
     fn a_live_body_is_a_program_body() {
         let mut live = Vec::new();
-        Live::new((0, 1).try_into().unwrap())
+        new((0, 1).try_into().unwrap())
             .write_to(&mut Cursor::new(&mut live))
             .unwrap();
 
         let mut program = Vec::new();
-        program::Program::new((0, 1).try_into().unwrap())
+        program::new((0, 1).try_into().unwrap())
             .write_to(&mut Cursor::new(&mut program))
             .unwrap();
 
