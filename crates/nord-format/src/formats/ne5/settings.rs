@@ -22,9 +22,10 @@
 //! field claims.** It is clear in every specimen. Whatever it is, it survives a re-encode
 //! untouched, as does everything past the last setting.
 //!
-//! **Two catalogued settings have no home here.** Toggling *memory protect* and *local
-//! control* on the panel and re-reading the object moves no bit of the body, so neither
-//! is decoded.
+//! **Two catalogued settings are not stored here.** Toggling *memory protect* and *local
+//! control* on the panel — the change verified on the display — and re-reading the object
+//! moves no bit of the body. Confirmed on hardware: both live outside this object, so
+//! neither is decoded.
 
 use crate::cbin::{self, Cbin, Header};
 use crate::components::sparse_enum;

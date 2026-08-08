@@ -91,7 +91,11 @@ pub struct EffectsPanel {
 pub enum Routing {
     #[default]
     Off = 0,
-    /// Unexplained: real programs hold this, and the panel cannot produce it.
+    /// Off, as older firmware spelled it. Confirmed on hardware: presents as off
+    /// (no light, no effect), and a front-panel store preserves it byte-for-byte
+    /// while the current panel's own off-writes are `0`. That it was the pre-2.04
+    /// encoding is inferred from specimens; not confirmed on hardware — every
+    /// carrier is a factory program or predates the instrument's 2.04 update.
     Unknown = 1,
     Lower = 2,
     Upper = 3,
