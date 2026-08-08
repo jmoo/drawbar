@@ -212,6 +212,136 @@ fn a_refused_hello_still_says_goodbye() {
     );
 }
 
+/// An unsolicited [`cmd::CHANGED`] notification, framed by the codec. The device
+/// queues one on its own (a front-panel STORE, observed on hardware), and the next
+/// host read receives it in place of the reply it was waiting for.
+fn changed_notification() -> Step {
+    Step {
+        direction: Direction::In,
+        bytes: nord_usb::Message::new(
+            nord_usb::Service::Program,
+            10,
+            nord_usb::wire::cmd::CHANGED,
+            Vec::new(),
+        )
+        .encode(),
+    }
+}
+
+/// A queued notification must be drained — the real reply read out from behind it —
+/// and surfaced, not mistaken for the reply. Mistaking it failed the open *and*
+/// wedged the instrument on hardware: the mismatch bailed without the drain, and the
+/// session never recovered.
+#[test]
+fn an_unsolicited_changed_notification_is_drained_not_mistaken_for_the_reply() {
+    use Direction::{In, Out};
+    let mut t = ReplayTransport::new(vec![
+        step(Out, "0000001200000006000000010000000006a1"),
+        changed_notification(),
+        step(In, "000000160000000600000001000000010000000044ec"),
+        step(Out, "000000160000000c0000000a0000000400000004a218"),
+        step(In, "0000001a0000000c0000000a00000005000000000000000467b0"),
+        step(Out, "000000120000000c0000000a000000066500"),
+        step(In, "000000160000000c0000000a00000007000000000c4e"),
+        step(Out, "0000001200000006000000010000000226e3"),
+        step(In, "0000001600000006000000010000000300000000006f"),
+    ]);
+    block_on(async {
+        let s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        assert!(
+            s.instrument_changed(),
+            "the drained notification must be surfaced, not silently skipped"
+        );
+        s.commit().await.unwrap();
+    });
+    assert!(t.is_exhausted(), "did not consume the whole exchange");
+}
+
+/// A mid-session reply answering the wrong command is a desync: nothing read after it
+/// can be paired with its request, so the transaction is over. The bail must still
+/// say GOODBYE — the HELLO is the half that wedges the instrument — and the
+/// always-commit discipline callers follow must stay off the wire afterwards, which
+/// the exhausted script asserts: any traffic from the `commit` would fail it.
+#[test]
+fn a_mid_session_unexpected_response_still_says_goodbye() {
+    use Direction::{In, Out};
+    let mut t = ReplayTransport::new(vec![
+        step(Out, "0000001200000006000000010000000006a1"),
+        step(In, "000000160000000600000001000000010000000044ec"),
+        step(Out, "000000160000000c0000000a0000000400000004a218"),
+        step(In, "0000001a0000000c0000000a00000005000000000000000467b0"),
+        // SELECT 2:12, answered with an INFO reply (0x1f) instead of its 0x30.
+        step(Out, "0000001a0000000c0000000a0000002f000000010000000b746a"),
+        Step {
+            direction: In,
+            bytes: nord_usb::Message::new(
+                nord_usb::Service::Program,
+                10,
+                0x1f,
+                0u32.to_be_bytes().to_vec(),
+            )
+            .encode(),
+        },
+        step(Out, "0000001200000006000000010000000226e3"),
+        step(In, "0000001600000006000000010000000300000000006f"),
+    ]);
+    let err = block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let err = op::select(&mut s, Location::from_user(2, 12))
+            .await
+            .expect_err("the reply answered the wrong command");
+        s.commit().await.unwrap();
+        err
+    });
+    assert!(
+        matches!(
+            err,
+            nord_usb::Error::UnexpectedResponse {
+                expected: 0x30,
+                got: 0x1f
+            }
+        ),
+        "wrong error: {err}"
+    );
+    assert!(
+        t.is_exhausted(),
+        "the bail did not send GOODBYE, leaving the device half-open"
+    );
+}
+
+/// The drain is capped: a device streaming notifications must not pin the host in the
+/// read loop forever. Past [`nord_usb::session::DRAIN_CAP`] the notification is
+/// reported as the unexpected response it is — and that bail still says GOODBYE.
+#[test]
+fn a_notification_flood_bails_rather_than_looping() {
+    use Direction::{In, Out};
+    let mut script = vec![step(Out, "0000001200000006000000010000000006a1")];
+    script.extend(vec![
+        changed_notification();
+        nord_usb::session::DRAIN_CAP + 1
+    ]);
+    script.push(step(Out, "0000001200000006000000010000000226e3"));
+    script.push(step(In, "0000001600000006000000010000000300000000006f"));
+    let mut t = ReplayTransport::new(script);
+    let err = block_on(async {
+        match Session::open(&mut t, ObjectClass::Program).await {
+            Ok(s) => {
+                s.abort();
+                panic!("a flood of notifications was reported as a successful open");
+            }
+            Err(e) => e,
+        }
+    });
+    assert!(
+        matches!(err, nord_usb::Error::UnexpectedResponse { got: 0x2c, .. }),
+        "wrong error: {err}"
+    );
+    assert!(
+        t.is_exhausted(),
+        "the flood bail did not send GOODBYE, leaving the device half-open"
+    );
+}
+
 /// `move_prog_8-13_to_7-16`: a single MOVE with two addresses in one small op.
 #[test]
 fn move_reproduces_the_capture() {

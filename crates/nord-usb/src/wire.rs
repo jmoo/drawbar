@@ -111,6 +111,13 @@ pub mod cmd {
     pub const WRITE_DATA: u32 = 0x10;
     /// List an entity's piano/sample dependencies.
     pub const DEPENDENCIES: u32 = 0x28;
+
+    /// Unsolicited device → host notification — no request pairs with it, so it
+    /// arrives in place of whatever reply the host reads for next. Observed on
+    /// hardware, queued by a front-panel STORE while a cable session was possible;
+    /// absent from the capture corpus, so NSM presumably drains it silently.
+    /// Hypothesis, not confirmed: "an object changed".
+    pub const CHANGED: u32 = 0x2c;
 }
 
 /// The UI/session service (service 6, subsystem 1): the transaction's outer handshake

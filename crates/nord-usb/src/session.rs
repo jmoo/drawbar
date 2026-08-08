@@ -31,12 +31,18 @@ pub struct ReadOnly;
 #[derive(Debug)]
 pub struct ReadWrite;
 
+/// How many queued [`cmd::CHANGED`] notifications one response read will drain before
+/// giving up. A cap, not a protocol fact: it exists so a device streaming
+/// notifications cannot pin the host in the read loop forever.
+pub const DRAIN_CAP: usize = 32;
+
 pub struct Session<'t, T: Transport, C = ReadOnly> {
     // `Option` rather than a plain `&mut` so the capability escalation can move the
     // borrow out: a type implementing `Drop` cannot be destructured.
     transport: Option<&'t mut T>,
     class: ObjectClass,
     closed: bool,
+    device_changed: bool,
     _capability: PhantomData<C>,
 }
 
@@ -51,6 +57,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             transport: Some(transport),
             class,
             closed: false,
+            device_changed: false,
             _capability: PhantomData,
         };
 
@@ -65,10 +72,9 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         // hardware.
         //
         // Errors are caught rather than propagated with `?` so the half-built session
-        // can be marked closed first — the Drop assertion is there to catch *forgotten*
-        // commits, not failed connections. And marked closed *before* the best-effort
-        // GOODBYE: that send is the transaction's one release attempt, and the caller is
-        // owed the original error, so a failure there is deliberately dropped.
+        // can be released first ([`Self::release`] marks it closed and says the
+        // best-effort GOODBYE) — the Drop assertion is there to catch *forgotten*
+        // commits, not failed connections.
         let hello = Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO, Vec::new());
         if let Err(e) = s.notify(&hello).await {
             s.closed = true; // the write itself failed: the device never saw the HELLO
@@ -77,10 +83,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         if let Err(e) = s.response_to(ui::HELLO).await {
             // The write landed, so the device may already be holding the UI session
             // even though its reply was unusable.
-            s.closed = true;
-            let _ = s
-                .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
-                .await;
+            s.release().await;
             return Err(e);
         }
 
@@ -97,10 +100,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             Ok(_) => Ok(s),
             Err(e) => {
                 // The HELLO landed, so the UI session is open and must be released.
-                s.closed = true;
-                let _ = s
-                    .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
-                    .await;
+                s.release().await;
                 Err(e)
             }
         }
@@ -112,13 +112,14 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     /// destroy patches, so callers should back up first.
     pub fn allow_destructive_writes(mut self) -> Session<'t, T, ReadWrite> {
         let transport = self.transport.take();
-        let (class, closed) = (self.class, self.closed);
+        let (class, closed, device_changed) = (self.class, self.closed, self.device_changed);
         // The husk is about to drop and no longer owns the transaction.
         self.closed = true;
         Session {
             transport,
             class,
             closed,
+            device_changed,
             _capability: PhantomData,
         }
     }
@@ -127,6 +128,17 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
 impl<T: Transport, C> Session<'_, T, C> {
     pub fn class(&self) -> ObjectClass {
         self.class
+    }
+
+    /// Whether an unsolicited [`cmd::CHANGED`] notification arrived during this
+    /// session.
+    ///
+    /// The device queues one on its own when its contents change outside the session —
+    /// a front-panel STORE, for instance — and [`Self::request`] drains it rather than
+    /// mistaking it for a reply. `true` means the instrument changed under us: state
+    /// read earlier in this session may be stale.
+    pub fn instrument_changed(&self) -> bool {
+        self.device_changed
     }
 
     /// Send one request and read its response, enforcing the framing invariants: the
@@ -145,24 +157,69 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Read the reply to `command`, enforcing the framing invariants: it must carry
     /// `command + 1` and must report success.
+    ///
+    /// Unsolicited [`cmd::CHANGED`] notifications are drained (up to [`DRAIN_CAP`])
+    /// rather than mistaken for the reply. Any other failure to produce a usable,
+    /// matching reply is a desync: nothing read after it can be paired with its
+    /// request, so the transaction is released before the error is reported.
     async fn response_to(&mut self, command: u32) -> Result<Message> {
-        let transport = self
-            .transport
-            .as_mut()
-            .ok_or_else(|| Error::Transport("session has no transport".into()))?;
+        let mut drained = 0;
+        loop {
+            let transport = self
+                .transport
+                .as_mut()
+                .ok_or_else(|| Error::Transport("session has no transport".into()))?;
 
-        let raw = transport.read(crate::transport::READ_BUFFER).await?;
-        let resp = Message::decode_response(&raw)?;
+            let raw = transport.read(crate::transport::READ_BUFFER).await;
+            let resp = match raw.and_then(|raw| Message::decode_response(&raw)) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.release().await;
+                    return Err(e);
+                }
+            };
 
-        if resp.command != command + 1 {
-            return Err(Error::UnexpectedResponse {
-                expected: command + 1,
-                got: resp.command,
-            });
+            if resp.command != command + 1 {
+                if resp.command == cmd::CHANGED && drained < DRAIN_CAP {
+                    drained += 1;
+                    self.device_changed = true;
+                    continue;
+                }
+                self.release().await;
+                return Err(Error::UnexpectedResponse {
+                    expected: command + 1,
+                    got: resp.command,
+                });
+            }
+            return match resp.status() {
+                // A refusal is not a desync: request and reply are still in step, the
+                // session stays usable, and the caller still owes it a close.
+                Some(0) | None => Ok(resp),
+                Some(code) => Err(Error::DeviceStatus(code)),
+            };
         }
-        match resp.status() {
-            Some(0) | None => Ok(resp),
-            Some(code) => Err(Error::DeviceStatus(code)),
+    }
+
+    /// Best-effort release after a bail: mark the transaction over and say GOODBYE
+    /// once. Idempotent, so a bail inside [`Self::response_to`] and the caller's own
+    /// error path can both come through here.
+    ///
+    /// ⚠️ The HELLO is the half that wedges the instrument (see [`Self::open`]), so
+    /// every bail must reach this before its error is reported. The caller is owed
+    /// the original error, and failures here are deliberately dropped; the stream may
+    /// be desynced by now, so the GOODBYE's reply is read to keep it out of the next
+    /// session's queue but not interpreted.
+    async fn release(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
+        if self.notify(&goodbye).await.is_err() {
+            return;
+        }
+        if let Some(transport) = self.transport.as_mut() {
+            let _ = transport.read(crate::transport::READ_BUFFER).await;
         }
     }
 
@@ -173,8 +230,10 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// block forever on a response that never comes.
     ///
     /// Like [`Self::request`] this does not test `closed`, and does not need to:
-    /// [`Self::commit`] and [`Self::abort`] both consume `self`, so a closed session
-    /// cannot be reached again. The flag exists only for the `Drop` assertion.
+    /// [`Self::commit`] and [`Self::abort`] both consume `self`, so a session past
+    /// its close cannot be reached again. After a mid-session bail ([`Self::release`])
+    /// the flag also marks the transaction already released, which `commit` checks
+    /// itself.
     pub(crate) async fn notify(&mut self, msg: &Message) -> Result<()> {
         let transport = self
             .transport
@@ -185,6 +244,12 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Run the closing exchanges. Always prefer this over dropping.
     pub async fn commit(mut self) -> Result<()> {
+        // Already released by a mid-session bail: the GOODBYE was said, the stream is
+        // desynced, and the closing exchanges would pair with stale replies. The bail's
+        // own error — which the caller already holds — is the report.
+        if self.closed {
+            return Ok(());
+        }
         // Marked closed before the exchanges, not after: a transaction gets one close
         // attempt, and a failed one must surface as the `Err` it is. Marking afterwards
         // means a failure drops `self` unclosed inside this call, and the `Drop`
