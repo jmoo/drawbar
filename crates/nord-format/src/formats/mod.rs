@@ -2,7 +2,7 @@
 //! where a model family shares a prefix across several tags, for that prefix; or,
 //! where the tags share no usable prefix (`nsclassic`, `np`), for the model.
 //!
-//! Most modules are [`raw`] stubs: container read and verified, body kept verbatim.
+//! Most modules are stubs: container read and verified, body kept verbatim.
 
 pub(crate) mod raw;
 

@@ -248,7 +248,7 @@ pub enum VibChorus {
 /// A Stage program's transpose slot: stored `0..=12`, biased by 6, reading
 /// `-6..=+6` semitones.
 ///
-/// ⚠️ Not a [`RangedI8`](crate::types::RangedI8): the Stage 2 EX factory live
+/// ⚠️ Not a [`RangedI8`]: the Stage 2 EX factory live
 /// buffers hold 15 in this slot — an untouched buffer stores an out-of-table
 /// pattern — so the unknown patterns are preserved rather than refused.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

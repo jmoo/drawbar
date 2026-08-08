@@ -33,6 +33,10 @@
 //! Bits no field claims are preserved verbatim through a re-encode and reported
 //! in the generated doc; ranges may not overlap, whichever kind claimed them.
 //!
+//! The struct's doc carries a bit/byte map: one markdown row per field and per
+//! unclaimed run, in offset order, so the rows tile the body. A nested body is
+//! one row linking to its own type, whose doc holds the map of its bits.
+//!
 //! Generates: the `[u8; LEN]` conversions both ways, the `cbin::Body` impl, a
 //! `Debug` over the decoded fields, a `layout::BodyLayout` impl publishing every
 //! placement as data (nested bodies chain to their own layouts), and — for `pub`
@@ -128,22 +132,101 @@ fn literal(expr: Option<&Expr>, at: &ExprRange, what: &str) -> syn::Result<u32> 
     }
 }
 
-/// `Bits 24..=27 (byte 0x03, bits 7..4).` — the range as a hex dump reads it.
-fn breakdown(lo: u32, hi: u32) -> String {
+/// Every byte the range touches, as `(byte, first_bit, last_bit)` — the bit
+/// numbers MSB-first within that byte, so they count down.
+fn bytes_touched(lo: u32, hi: u32) -> Vec<(u32, u32, u32)> {
     let mut parts = Vec::new();
     let mut at = lo;
     while at <= hi {
         let byte = at / 8;
         let last = hi.min(byte * 8 + 7);
-        let (first_bit, last_bit) = (7 - at % 8, 7 - last % 8);
-        parts.push(if first_bit == last_bit {
-            format!("byte {byte:#04x}, bit {first_bit}")
-        } else {
-            format!("byte {byte:#04x}, bits {first_bit}..{last_bit}")
-        });
+        parts.push((byte, 7 - at % 8, 7 - last % 8));
         at = last + 1;
     }
+    parts
+}
+
+/// `Bits 24..=27 (byte 0x03, bits 7..4).` — the range as a hex dump reads it.
+fn breakdown(lo: u32, hi: u32) -> String {
+    let parts: Vec<String> = bytes_touched(lo, hi)
+        .into_iter()
+        .map(|(byte, first, last)| {
+            if first == last {
+                format!("byte {byte:#04x}, bit {first}")
+            } else {
+                format!("byte {byte:#04x}, bits {first}..{last}")
+            }
+        })
+        .collect();
     format!("Bits {lo}..={hi} ({}).", parts.join("; "))
+}
+
+/// The range as a hex dump locates it, for a table cell: whole bytes as the
+/// half-open byte range `#[at]` writes, anything else byte by byte.
+fn hex_span(lo: u32, hi: u32) -> String {
+    if lo.is_multiple_of(8) && (hi + 1).is_multiple_of(8) {
+        let (start, end) = (lo / 8, (hi + 1) / 8);
+        return if end - start == 1 {
+            format!("`{start:#04x}`")
+        } else {
+            format!("`{start:#04x}..{end:#04x}`")
+        };
+    }
+    bytes_touched(lo, hi)
+        .into_iter()
+        .map(|(byte, first, last)| {
+            if first == last {
+                format!("`{byte:#04x}` bit {first}")
+            } else {
+                format!("`{byte:#04x}` bits {first}..{last}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// One row of the map: a placed field, or a run of bits no field claims.
+struct MapRow {
+    lo: u32,
+    hi: u32,
+    /// The field's name and type, as written; `None` for an unclaimed run.
+    field: Option<(String, String)>,
+}
+
+/// A plain identifier names a type in scope where the body is declared, so
+/// rustdoc resolves a link to it; a generic or a path is left as plain text.
+fn ty_cell(ty: &str) -> String {
+    let plain = !ty.is_empty()
+        && !ty.starts_with(|c: char| c.is_ascii_digit())
+        && ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain {
+        format!("[`{ty}`]")
+    } else {
+        format!("`{ty}`")
+    }
+}
+
+/// The body's bit map as a markdown table, one line per doc attribute, in
+/// offset order. The rows tile the body: every bit is in exactly one of them.
+fn map_table(mut rows: Vec<MapRow>) -> Vec<String> {
+    rows.sort_by_key(|row| row.lo);
+    let mut lines = vec![
+        "| bytes | bits | field | type |".to_string(),
+        "|---|---|---|---|".to_string(),
+    ];
+    lines.extend(rows.into_iter().map(|row| {
+        let (field, ty) = match &row.field {
+            Some((name, ty)) => (format!("`{name}`"), ty_cell(ty)),
+            None => ("—".to_string(), "*unclaimed*".to_string()),
+        };
+        format!(
+            "| {} | `{}..={}` | {field} | {ty} |",
+            hex_span(row.lo, row.hi),
+            row.lo,
+            row.hi,
+        )
+    }));
+    lines
 }
 
 /// The ranges of `0..bits` no field claims.
@@ -199,6 +282,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     };
 
     let mut claimed: Vec<(u32, u32, &Ident)> = Vec::new();
+    let mut rows: Vec<MapRow> = Vec::new();
 
     let mut fields = Vec::new();
     let mut decode = Vec::new();
@@ -260,6 +344,11 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
             ));
         }
         claimed.push((lo, hi, ident));
+        rows.push(MapRow {
+            lo,
+            hi,
+            field: Some((ident.to_string(), ty_str.clone())),
+        });
 
         // Keep everything but the placement, which has served its purpose.
         let kept: Vec<_> = field
@@ -397,10 +486,21 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         )
     };
 
+    rows.extend(gaps.iter().map(|&(lo, hi)| MapRow {
+        lo,
+        hi,
+        field: None,
+    }));
+    let map = map_table(rows);
+
     Ok(quote! {
         #(#attrs)*
         #[doc = ""]
         #[doc = #gap_doc]
+        #[doc = ""]
+        #[doc = "The body's map, in offset order:"]
+        #[doc = ""]
+        #(#[doc = #map])*
         #vis struct #name {
             /// The bytes this body was decoded from, so bits no field claims survive a
             /// re-encode. Named fields take precedence on write.
@@ -529,6 +629,38 @@ mod tests {
         assert_eq!(
             breakdown(61, 67),
             "Bits 61..=67 (byte 0x07, bits 2..0; byte 0x08, bits 7..4).",
+        );
+    }
+
+    #[test]
+    fn a_hex_span_collapses_whole_bytes() {
+        assert_eq!(hex_span(0, 15), "`0x00..0x02`");
+        assert_eq!(hex_span(24, 31), "`0x03`");
+        assert_eq!(hex_span(24, 27), "`0x03` bits 7..4");
+        assert_eq!(hex_span(23, 23), "`0x02` bit 0");
+        assert_eq!(hex_span(61, 67), "`0x07` bits 2..0; `0x08` bits 7..4");
+    }
+
+    #[test]
+    fn the_map_tiles_the_body_in_offset_order() {
+        let row = |lo, hi, field: Option<(&str, &str)>| MapRow {
+            lo,
+            hi,
+            field: field.map(|(n, t)| (n.to_string(), t.to_string())),
+        };
+        assert_eq!(
+            map_table(vec![
+                row(16, 18, Some(("level", "RangedU8<3>"))),
+                row(0, 15, Some(("word", "u16"))),
+                row(19, 23, None),
+            ]),
+            [
+                "| bytes | bits | field | type |",
+                "|---|---|---|---|",
+                "| `0x00..0x02` | `0..=15` | `word` | [`u16`] |",
+                "| `0x02` bits 7..5 | `16..=18` | `level` | `RangedU8<3>` |",
+                "| `0x02` bits 4..0 | `19..=23` | — | *unclaimed* |",
+            ],
         );
     }
 

@@ -19,8 +19,9 @@ macro_rules! raw_format {
             pub const FORMAT: &str = $tag;
 
             $(
-                /// The body length every corpus specimen holds. Observed, not
-                /// enforced — see [`crate::formats::raw`].
+                /// The body length every corpus specimen holds. Observed, never
+                /// enforced on read: a raw body cannot misread, so a file of
+                /// another length is preserved rather than refused.
                 pub const BODY_LEN: u64 = $body_len;
             )?
 
