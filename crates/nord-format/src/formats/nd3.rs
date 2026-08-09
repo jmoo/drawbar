@@ -20,6 +20,7 @@ pub mod kit_bank {
     use crate::error::Error;
     use std::io::{Read, Seek};
 
+    /// A Drum 3P kit bank: its kits, in archive order.
     #[derive(Debug)]
     pub struct KitBank {
         /// `(member name, kit)`, in archive order.

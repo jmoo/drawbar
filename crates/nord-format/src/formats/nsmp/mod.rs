@@ -103,7 +103,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
 }
 
 impl Cbin<Sample> {
-    /// Serialises, recomputing the checksum over the body it just produced.
+    /// Serializes, recomputing the checksum over the body it just produced.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut out = std::io::Cursor::new(Vec::new());
         self.write_to(&mut out)?;

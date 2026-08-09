@@ -1,9 +1,9 @@
-//! Presentation gating: colour, unicode, and which stream a line belongs on.
+//! Presentation gating: color, unicode, and which stream a line belongs on.
 //!
 //! - **Data on stdout, chatter on stderr.** `nord program get 7:4 | grep transpose` must
 //!   see the summary and nothing else, so every progress line, warning and pre-flight
 //!   description goes to stderr.
-//! - **Colour and unicode only on a TTY.** ⚠️ The cross-platform check compares the bytes
+//! - **Color and unicode only on a TTY.** ⚠️ The cross-platform check compares the bytes
 //!   a Wine-hosted `nord.exe` and the native Linux binary print for the same input, and
 //!   an escape sequence or box-drawing character that survived a pipe would put that
 //!   comparison at the mercy of Wine's console codepage.
@@ -13,10 +13,10 @@
 use std::fmt::Display;
 use std::io::{BufRead, IsTerminal, Write};
 
-/// When to emit ANSI colour.
+/// When to emit ANSI color.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ColorChoice {
-    /// Colour when stdout is a terminal and `NO_COLOR` is unset.
+    /// Color when stdout is a terminal and `NO_COLOR` is unset.
     #[default]
     Auto,
     Always,
@@ -37,7 +37,7 @@ impl Ui {
         let color = match choice {
             ColorChoice::Always => true,
             ColorChoice::Never => false,
-            // `NO_COLOR` is honoured whatever its value; the convention is that the
+            // `NO_COLOR` is honored whatever its value; the convention is that the
             // variable being present at all is the signal.
             ColorChoice::Auto => {
                 tty && std::env::var_os("NO_COLOR").is_none()
@@ -98,7 +98,7 @@ impl Ui {
 
     /// A section heading inside a summary.
     ///
-    /// Colour carries three meanings and no more: a heading, a dimmed label or inactive
+    /// Color carries three meanings and no more: a heading, a dimmed label or inactive
     /// value, and [`Ui::danger`] for something about to be destroyed.
     ///
     /// ⚠️ A heading and a danger are both red, separated only by weight. They stay
@@ -154,7 +154,7 @@ impl Ui {
             .map_err(|e| format!("reading the answer: {e}"))?;
         match answer.trim() {
             "y" | "Y" | "yes" => Ok(()),
-            _ => Err("cancelled".into()),
+            _ => Err("canceled".into()),
         }
     }
 
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn with_colour_the_reset_always_closes_the_sequence() {
+    fn with_color_the_reset_always_closes_the_sequence() {
         let ui = Ui {
             color: true,
             unicode: true,

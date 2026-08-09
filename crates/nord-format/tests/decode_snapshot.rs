@@ -2,7 +2,7 @@
 //! Per-field decode snapshots for the Electro 5 formats.
 //!
 //! ⚠️ Byte-exact round-trip cannot catch a wrong bit range: a panel keeps the bytes it
-//! was decoded from, so a field reading its neighbour's bits still writes the file back
+//! was decoded from, so a field reading its neighbor's bits still writes the file back
 //! identically. These snapshots watch the decode itself.
 //!
 //! [`fields`] pins **where every field sits and which values the corpus has ever shown
@@ -299,7 +299,7 @@ const SHOWN: usize = 10;
 ///
 /// The count is what stops a long list from hiding a change past the cut: it moves
 /// whenever the set does, even when the first `SHOWN` entries do not.
-fn summarise(seen: &BTreeSet<String>) -> String {
+fn summarize(seen: &BTreeSet<String>) -> String {
     let head: Vec<_> = seen.iter().take(SHOWN).cloned().collect();
     let more = if seen.len() > head.len() { ", …" } else { "" };
     format!("{:<4} [{}{more}]", seen.len(), head.join(", "))
@@ -355,8 +355,8 @@ fn fields() {
             out,
             "\n{key}\n  at      {}{single}\n  raw     {}\n  decoded {}\n",
             placements[key],
-            summarise(raw),
-            summarise(&values[key]),
+            summarize(raw),
+            summarize(&values[key]),
         );
     }
 
@@ -479,8 +479,8 @@ fn settings() {
             out,
             "\n{key}\n  at      {}{single}\n  raw     {}\n  decoded {}\n",
             placements[key],
-            summarise(&raws[key]),
-            summarise(&values[key]),
+            summarize(&raws[key]),
+            summarize(&values[key]),
         );
     }
 

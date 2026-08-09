@@ -32,6 +32,8 @@ pub enum OrganModel {
     Pipe,
 }
 
+/// The organ panel: drawbar and vib/perc registration for every model and
+/// both presets, stored in full so switching either is lossless.
 #[bitbody(69)]
 pub struct OrganPanel {
     // ── B3, 0x4e..=0x64 ────────────────────────────────────────────────────────
@@ -370,7 +372,7 @@ impl OrganPanel {
 ///
 /// The slot holds an index, not the value: which modes an organ offers, and in what
 /// order, differs per model. An index the model does not use decodes to `None` rather
-/// than being coerced to a neighbour, and round-trips whatever it held.
+/// than being coerced to a neighbor, and round-trips whatever it held.
 macro_rules! model_index {
     ($(#[$meta:meta])* $name:ident, $bits:expr, $of:ty, [$($variant:ident),+ $(,)?]) => {
         $(#[$meta])*
@@ -630,7 +632,7 @@ mod tests {
     }
 
     /// Every model and preset reads its own nine nibbles and writes them back where it
-    /// found them — no placement lands on a neighbour's block.
+    /// found them — no placement lands on a neighbor's block.
     #[test]
     fn every_model_and_preset_has_its_own_block() {
         for (n, (model, preset)) in [

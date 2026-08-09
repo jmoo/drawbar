@@ -170,7 +170,7 @@ async fn transfer_out<T: Transport, C>(
             need: 16,
         })?;
         // A short chunk would silently misalign every subsequent offset, so it is an
-        // error rather than something to resynchronise from.
+        // error rather than something to resynchronize from.
         if chunk.len() != want as usize {
             return Err(Error::Transport(format!(
                 "asked for {want} bytes at offset {offset} but the device sent {}",
@@ -204,7 +204,7 @@ async fn transfer_out<T: Transport, C>(
 /// must obtain deliberately.
 ///
 /// ⚠️ **The destination must be empty.** The device refuses to overwrite in place with
-/// status `4` (confirmed on hardware; NSM greys out its write button for a filled slot,
+/// status `4` (confirmed on hardware; NSM grays out its write button for a filled slot,
 /// so no capture of a replace exists). Replacing a slot is delete-then-write, and the
 /// window in between — where the only copy is in host memory — belongs to the caller.
 ///

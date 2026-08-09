@@ -133,7 +133,7 @@ The Nix build enables it via `[package.metadata.nix] testFeatures` in `Cargo.tom
 
 The wire protocol is decoded and validated. Implemented and hardware-verified on
 macOS: inventory, object info, dependencies, program read/write, the slot
-organisation set (move, delete, rename, duplicate, select), and reads of the
+organization set (move, delete, rename, duplicate, select), and reads of the
 live slots (class 6) and the settings singleton (class 7). Writes of those two
 classes are unproven — whether either survives the delete-then-write sequence is
 unconfirmed on hardware, so nothing here has attempted one.

@@ -198,7 +198,7 @@ pub struct ProgramInfo {
     /// against the device's own checksum rather than trusting the transfer.
     ///
     /// `None` for classes the device does not checksum — pianos and samples report
-    /// `0xffffffff` rather than a real value, which is normalised away here so callers
+    /// `0xffffffff` rather than a real value, which is normalized away here so callers
     /// cannot mistake it for a checksum to verify against.
     pub crc32: Option<u32>,
     /// Slot name as shown on the instrument. Stored nowhere in the file itself.
@@ -400,7 +400,7 @@ pub struct Message {
     /// Everything between the command word and the CRC. For a response this still
     /// includes the leading status word — use [`Message::status`] to read it.
     pub args: Vec<u8>,
-    /// Set by the decoder from the direction the bytes travelled. Not inferable from
+    /// Set by the decoder from the direction the bytes traveled. Not inferable from
     /// the command code — see [`Message::is_response`].
     is_response: bool,
 }
@@ -509,7 +509,7 @@ impl Message {
 /// backup capture itself, whose closing transactions open class 6 and fetch the three
 /// `ne5l` Live bodies, then open class 7 and fetch the 34-byte `ne5s` settings body —
 /// byte-identical to the files NSM extracts. The numeric codes are what the device
-/// actually sends, so an unrecognised one is preserved rather than rejected.
+/// actually sends, so an unrecognized one is preserved rather than rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectClass {
     Piano,

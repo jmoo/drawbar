@@ -38,14 +38,14 @@ and `setlist` share one verb vocabulary:
 
 ```
 get put            transfer
-move rename duplicate delete select   organisation
+move rename duplicate delete select   organization
 info deps          interrogation
 edit               content (program, live, settings, sample)
 ```
 
 `live` keeps only the read-only subset plus `edit` — the live buffer is the panel
 as it stands, so there is nothing to name, delete, or select. `settings` is a
-singleton with nothing to organise at all, so `edit` is its whole verb set.
+singleton with nothing to organize at all, so `edit` is its whole verb set.
 
 `nord raw --class N` is those same verbs with the class given as a number. It is
 how to reach a class that has no noun of its own — pianos are class 1.
@@ -57,8 +57,8 @@ show them — `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
 
 - **Data on stdout, everything else on stderr.** `nord program get 7:4 | grep
   transpose` sees the summary and nothing else.
-- **Colour and unicode only on a terminal.** `--color=auto|always|never`;
-  `NO_COLOR` in the environment forces colour off. Piped output is plain ASCII.
+- **Color and unicode only on a terminal.** `--color=auto|always|never`;
+  `NO_COLOR` in the environment forces color off. Piped output is plain ASCII.
 - **A pipe is non-interactive.** On a terminal a destructive command asks for
   confirmation; off one, a missing `--yes` is an error rather than a prompt.
 
@@ -253,7 +253,7 @@ $ nord program edit patch.ne5p --set center_panel.gain=200 --dry-run
 error: "200" is not a value of gain (accepts 0 .. 127)
 ```
 
-A stored value the library does not recognise prints as `Unknown(9)`, so that is
+A stored value the library does not recognize prints as `Unknown(9)`, so that is
 also how it is written: `--set …=Unknown(9)`. A bare `9` matches nothing.
 
 `--dry-run` reports the fields and the bytes that would change, and writes

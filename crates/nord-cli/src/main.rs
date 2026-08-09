@@ -31,7 +31,7 @@ use ui::{ColorChoice, Ui};
 #[derive(Parser)]
 #[command(name = "nord", about = "Inspect Clavia / Nord keyboard files", version)]
 struct Cli {
-    /// When to colour output. `auto` means "stdout is a terminal"; `NO_COLOR` in the
+    /// When to color output. `auto` means "stdout is a terminal"; `NO_COLOR` in the
     /// environment forces it off.
     #[arg(long, global = true, value_name = "WHEN", value_enum, default_value_t)]
     color: ColorChoice,

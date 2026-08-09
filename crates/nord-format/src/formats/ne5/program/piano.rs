@@ -6,6 +6,8 @@ use nord_bits_derive::bitbody;
 
 // 0x3a..0x41 — the piano panel.
 
+/// The piano panel: category and model slot, plus the clav and acoustic
+/// playing options.
 #[bitbody(8)]
 #[derive(Default)]
 pub struct PianoPanel {

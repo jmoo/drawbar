@@ -22,7 +22,7 @@
 //! field claims.** It is clear in every specimen. Whatever it is, it survives a re-encode
 //! untouched, as does everything past the last setting.
 //!
-//! **Two catalogued settings are not stored here.** Toggling *memory protect* and *local
+//! **Two cataloged settings are not stored here.** Toggling *memory protect* and *local
 //! control* on the panel — the change verified on the display — and re-reading the object
 //! moves no bit of the body. Confirmed on hardware: both live outside this object, so
 //! neither is decoded.
@@ -150,7 +150,7 @@ pub struct Settings {
     #[bits(106..=108)]
     pub b3_perc_volume_soft: PercVolume,
     /// The panel dials through more entries than the two the corpus names, so an
-    /// unrecognised value here is expected rather than a decode failure.
+    /// unrecognized value here is expected rather than a decode failure.
     #[bits(79..=81)]
     pub rotary_speaker_type: RotarySpeakerType,
     #[bits(94..=96)]
@@ -170,7 +170,7 @@ pub struct Settings {
     // ── Startup ────────────────────────────────────────────────────────────────
     //
     // Boot-state settings: none of these appears in a menu, and the instrument
-    // restores each at power-up. Changing any of the 34 catalogued settings leaves
+    // restores each at power-up. Changing any of the 34 cataloged settings leaves
     // every bit here alone, and a settings file written by a different capture
     // session differs here and nowhere else.
     //
@@ -768,9 +768,9 @@ mod tests {
         }
     }
 
-    /// An unnamed value says so rather than being rendered as a neighbour.
+    /// An unnamed value says so rather than being rendered as a neighbor.
     #[test]
-    fn a_menu_names_an_unrecognised_value_as_unknown() {
+    fn a_menu_names_an_unrecognized_value_as_unknown() {
         // 0b111 is not a rotary speaker type; bits 79..=81 straddle 0x35 and 0x36.
         let p = panel(&[(0x35, 0x01), (0x36, 0xc0)]);
         let shown = p
@@ -886,7 +886,7 @@ mod tests {
 
     /// Decoding never invents a value: an unnamed pattern comes back as it went in.
     #[test]
-    fn an_unrecognised_pattern_round_trips() {
+    fn an_unrecognized_pattern_round_trips() {
         // 0b111 is not a rotary speaker type; bits 79..=81 straddle 0x35 and 0x36.
         let p = panel(&[(0x35, 0x01), (0x36, 0xc0)]);
         assert!(p.rotary_speaker_type.is_unknown());

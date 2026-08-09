@@ -38,7 +38,7 @@ fn noun(format: &str) -> Option<&'static str> {
     }
 }
 
-/// Refuse a file whose format tag belongs to another class's noun: summarising a set
+/// Refuse a file whose format tag belongs to another class's noun: summarizing a set
 /// list under `nord program` would mislabel everything it prints.
 fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     match tag(class) {

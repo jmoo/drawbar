@@ -68,9 +68,9 @@ mod tests {
 
     /// The catalog check values: what each algorithm returns for `"123456789"`.
     /// Pins the parameters (poly/init/reflect/xorout) against a swap to a
-    /// neighbouring variant, which the container tests could miss.
+    /// neighboring variant, which the container tests could miss.
     #[test]
-    fn the_algorithms_are_the_catalogued_ones() {
+    fn the_algorithms_are_the_cataloged_ones() {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926, "not CRC-32/ISO-HDLC");
         assert_eq!(crc16(b"123456789"), 0x29B1, "not CRC-16/IBM-3740");
     }

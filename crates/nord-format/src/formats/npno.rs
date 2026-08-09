@@ -17,6 +17,7 @@ use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "npno";
 
+/// A piano library (`npno`): container-verified, body verbatim.
 pub struct Piano {
     pub file: Cbin<RawBody>,
 }

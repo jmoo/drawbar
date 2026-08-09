@@ -25,6 +25,7 @@ pub mod bank {
     use crate::error::Error;
     use std::io::{Read, Seek};
 
+    /// A Drum 2 bank: its programs, in archive order.
     #[derive(Debug)]
     pub struct Bank {
         /// `(member name, program)`, in archive order.

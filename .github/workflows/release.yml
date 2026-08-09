@@ -1,0 +1,43 @@
+# Publishes one crate to crates.io per tag: `<crate>-v<version>`, e.g.
+# `nord-format-v0.1.0`. Auth is crates.io Trusted Publishing (OIDC) — each
+# crate's crates.io settings must list this repo + workflow file; there is no
+# token secret to rotate. First-ever publish of a new crate can't use this
+# (Trusted Publishing is configured on an existing crate) — do it locally.
+name: release
+
+on:
+  push:
+    tags:
+      - "nord-bits-derive-v*"
+      - "nord-format-v*"
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchange with crates.io
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve crate and check tag against manifest
+        id: tag
+        run: |
+          crate="${GITHUB_REF_NAME%-v*}"
+          tag_version="${GITHUB_REF_NAME##*-v}"
+          manifest_version="$(cargo pkgid -p "$crate" | sed 's/.*[@#]//')"
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "tag says $tag_version but Cargo.toml says $manifest_version" >&2
+            exit 1
+          fi
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish -p "${{ steps.tag.outputs.crate }}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

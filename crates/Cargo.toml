@@ -11,9 +11,12 @@ resolver = "2"
 
 # Shared metadata for every crate in the monorepo. Individual crates inherit
 # these with `field.workspace = true` in their own Cargo.toml.
+# `version` is only for the unpublished crates: nord-format and nord-bits-derive
+# are on crates.io and carry their own `version`, bumped per release.
 [workspace.package]
 edition = "2021"
 license = "BSD-3-Clause"
+repository = "https://github.com/jmoo/lab"
 version = "0.1.0"
 
 # Cargo profiles only take effect at the workspace root, so anki-tool's release

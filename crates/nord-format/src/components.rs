@@ -184,6 +184,8 @@ pub enum PercSpeed {
     Both,
 }
 
+/// A keyboard split point as the 73-key models store it: one of six keys, or
+/// the whole keyboard as Upper / Lower.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum SplitPoint73 {
     #[default]

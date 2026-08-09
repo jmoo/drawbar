@@ -1,8 +1,14 @@
+//! What can go wrong: [`ParseError`] for a file that violates its format,
+//! [`Error`] folding that together with I/O (and ZIP, under `bundle`).
+
 use std::io;
 use thiserror::Error as ThisError;
 
+/// Shorthand for `Result<T, Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A file that violates its format: unknown tags or lengths, checksum
+/// mismatches, out-of-range values, unsupported schema versions.
 #[derive(ThisError, Debug)]
 #[non_exhaustive]
 pub enum ParseError {
@@ -59,6 +65,8 @@ impl From<std::convert::Infallible> for ParseError {
     }
 }
 
+/// Everything a read or write can fail with: I/O, a format violation, or
+/// (under `bundle`) a ZIP error.
 #[derive(ThisError, Debug)]
 #[non_exhaustive]
 pub enum Error {

@@ -6,6 +6,7 @@ use nord_bits_derive::bitbody;
 
 // 0x46..0x4d — the sample panel.
 
+/// The sample panel: which sample plays, its envelope, and its level.
 #[bitbody(8)]
 #[derive(Default)]
 pub struct SamplePanel {

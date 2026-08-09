@@ -37,6 +37,8 @@ pub struct Entry<T> {
     pub item: T,
 }
 
+/// Slot-addressed items of one kind, each optionally carrying the name the
+/// instrument shows for it.
 pub struct Bank<T, L>
 where
     L: Location,

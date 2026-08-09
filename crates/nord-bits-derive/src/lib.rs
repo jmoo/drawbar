@@ -1,5 +1,9 @@
 //! `#[bitbody]` — a bit-mapped structure declared once, composable recursively.
 //!
+//! > This is an unofficial, community project: **not affiliated with, endorsed
+//! > by, or supported by Clavia DMI AB**. "Nord" is Clavia's trademark, used
+//! > here only to identify the file formats the `nord-format` crate reads.
+//!
 //! ```ignore
 //! /// The attribute's argument is the structure's length in bytes.
 //! #[bitbody(121)]
@@ -248,6 +252,9 @@ fn unclaimed(claimed: &[(u32, u32)], bits: u32) -> Vec<(u32, u32)> {
     gaps
 }
 
+/// Declares a bit-mapped structure of `LEN` bytes: `#[bitbody(LEN)]`. The
+/// crate-level docs describe the two placement attributes and everything the
+/// expansion generates.
 #[proc_macro_attribute]
 pub fn bitbody(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand(attr.into(), item.into()) {

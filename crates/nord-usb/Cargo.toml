@@ -3,6 +3,7 @@ name = "nord-usb"
 description = "Clavia / Nord device transport and vendor protocol over USB"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 
 [lib]

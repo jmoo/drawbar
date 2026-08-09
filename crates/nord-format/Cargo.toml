@@ -1,9 +1,12 @@
 [package]
 name = "nord-format"
+categories = ["encoding", "parser-implementations"]
 description = "Parse and write Clavia / Nord keyboard binary file formats (Electro 5, …)"
 edition.workspace = true
+keywords = ["clavia", "electro", "nord", "parser"]
 license.workspace = true
-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
 
 [lib]
 name = "nord_format"
@@ -19,8 +22,11 @@ bundle = ["dep:zip"]
 # runs anywhere; the Nix `nord-format-corpus` check enables it. Test-only.
 corpus = []
 
+# ⚠️ Pinned `=`: `#[bitbody]`-generated code names nord-format internals, so a
+# registry build must expand exactly the derive version this source was written
+# against. When the derive changes, publish it first, then bump this pin.
 [dependencies]
-nord-bits-derive = { path = "../nord-bits-derive" }
+nord-bits-derive = { path = "../nord-bits-derive", version = "=0.1.0" }
 crcxx = "0.3.1"
 thiserror = "2"
 zip = { version = "2", optional = true, default-features = false, features = [
@@ -29,3 +35,7 @@ zip = { version = "2", optional = true, default-features = false, features = [
 
 [dev-dependencies]
 regex = "1"
+
+# `corpus` is excluded: test-only, and useless without the private specimens.
+[package.metadata.docs.rs]
+features = ["bundle"]

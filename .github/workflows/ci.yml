@@ -1,0 +1,25 @@
+# Tests only the two published crates. `corpus` stays off — those tests need
+# the private specimen corpus and are covered by the Nix checks instead.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+      - run: cargo test -p nord-bits-derive -p nord-format --features nord-format/bundle

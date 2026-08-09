@@ -1,9 +1,12 @@
 [package]
 name = "nord-bits-derive"
+categories = ["development-tools::procedural-macro-helpers"]
 description = "Declarative bit-packed panel definitions for nord-format"
 edition.workspace = true
+keywords = ["bitfield", "nord", "proc-macro"]
 license.workspace = true
-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
 
 [lib]
 proc-macro = true

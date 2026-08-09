@@ -1,9 +1,13 @@
+//! Container sniffing: classify a stream by its leading bytes, before any
+//! format-specific reader runs.
+
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::cbin;
 use crate::error::{Error, ParseError};
 use crate::formats::{cn3, midi};
 
+/// The container classes [`peek`] distinguishes.
 pub enum FileType {
     Cbin,
     /// An Electro 2 `.cn3` library — `CNE3` magic, not CBIN.
@@ -27,6 +31,7 @@ impl FileType {
     }
 }
 
+/// What [`peek`] learned from the leading bytes.
 pub struct Peek {
     /// The CBIN tag as text, NULs preserved (`nsp\0` matches the `"nsp\0"` const).
     /// `"unknown"` for every non-CBIN type.

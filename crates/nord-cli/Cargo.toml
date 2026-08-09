@@ -3,6 +3,7 @@ name = "nord-cli"
 description = "Command-line tool for inspecting Clavia / Nord keyboard files (dogfoods nord-format)"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 
 # The binary is just `nord`; the crate/package is `nord-cli`.

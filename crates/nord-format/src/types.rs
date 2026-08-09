@@ -1,3 +1,6 @@
+//! Range-checked integers for bit-packed fields — an out-of-range stored
+//! value is a decode error, never a silent wrap.
+
 use std::fmt::{Debug, Formatter};
 
 use crate::bank::Location;

@@ -7,6 +7,8 @@ use nord_bits_derive::bitbody;
 
 // 0x2e..0x34 — the center panel.
 
+/// The center panel: part selection, split, transpose, gain, and the organ
+/// selector.
 #[bitbody(7)]
 #[derive(Default)]
 pub struct CenterPanel {

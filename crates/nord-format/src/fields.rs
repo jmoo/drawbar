@@ -146,10 +146,10 @@ pub fn legal_values<T: Packed + Debug>(width: u32) -> Vec<String> {
 /// clamped.
 ///
 /// ⚠️ An unexplained value can therefore only be written by *naming* it as unexplained: a
-/// sparse enum renders an unrecognised `9` as `Unknown(9)`, so a bare `9` matches nothing
+/// sparse enum renders an unrecognized `9` as `Unknown(9)`, so a bare `9` matches nothing
 /// and `Unknown(9)` is the only spelling.
 pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, FieldError> {
-    let wanted = normalise(given);
+    let wanted = normalize(given);
     // A truth word for a `bool` field: its `Debug` is `true`/`false`, which no numeric
     // field renders, so trying the canonical spelling second cannot collide.
     let alias = match wanted.as_str() {
@@ -161,7 +161,7 @@ pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, Fiel
     if width <= ENUMERABLE_BITS {
         for bits in 0..(1u64 << width) {
             let Ok(v) = T::from_bits(bits) else { continue };
-            let rendered = normalise(&format!("{v:?}"));
+            let rendered = normalize(&format!("{v:?}"));
             if rendered == wanted || Some(rendered.as_str()) == alias {
                 return Ok(v);
             }
@@ -184,14 +184,14 @@ pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, Fiel
 
 /// Case-folded, `+`-stripped, whitespace-trimmed: `+5`, `5` and ` 5 ` are one value, and
 /// so are `Organ` and `organ`.
-fn normalise(s: &str) -> String {
+fn normalize(s: &str) -> String {
     s.trim()
         .trim_start_matches('+')
         .to_ascii_lowercase()
         .to_string()
 }
 
-/// A field's stored bits, written decimal or `0x`-prefixed. Already normalised.
+/// A field's stored bits, written decimal or `0x`-prefixed. Already normalized.
 fn stored_value(s: &str) -> Option<u64> {
     match s.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(hex, 16).ok(),

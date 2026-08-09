@@ -64,7 +64,7 @@ impl ReplayTransport {
     }
 
     /// Whether the whole script was consumed. A test that leaves steps unread has
-    /// usually stopped short of the behaviour it meant to check.
+    /// usually stopped short of the behavior it meant to check.
     pub fn is_exhausted(&self) -> bool {
         self.pos >= self.script.len()
     }

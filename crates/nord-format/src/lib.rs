@@ -1,3 +1,33 @@
+//! Parse and write Clavia / Nord keyboard binary file formats.
+//!
+//! > This is an unofficial, community project: **not affiliated with, endorsed
+//! > by, or supported by Clavia DMI AB**. "Nord" and the instrument names are
+//! > Clavia's trademarks, used here only to identify which files this crate
+//! > reads.
+//!
+//! The formats — programs, live slots, songs, settings, presets, synth
+//! patches, sample and piano libraries, across the Nord keyboard range — are
+//! reverse engineered from specimen files and hardware observation, never
+//! from Clavia's software, and are in varying states of completion: some
+//! bodies decode to named fields, others are container-verified and kept
+//! verbatim. [`formats`] is the map of what exists and how far each format's
+//! decoding goes.
+//!
+//! Completeness never gates I/O. Every supported file reads and writes
+//! whether its body decodes fully, partially, or not at all: decoded values
+//! are views over a verbatim body, bits no field claims survive untouched,
+//! and `to_bytes(from_stream(x)) == x` bit-for-bit (archives are read-only).
+//! That invariant is tested against a private corpus of more than 10,000 real
+//! files.
+//!
+//! [`from_path`] / [`from_stream`] sniff any supported file and decode it
+//! into an [`Entity`]; [`to_bytes`] is the inverse.
+//!
+//! Runtime dependencies are `crcxx` and `thiserror` (plus `zip` behind the
+//! `bundle` feature), and no I/O happens beyond `Read`/`Seek`/`Write`, so the
+//! crate runs anywhere `std` does — wasm included. Device access lives in the
+//! companion `nord-usb` crate, in the same repository.
+
 pub mod bank;
 pub mod bits;
 pub mod cbin;
@@ -22,6 +52,7 @@ use util::{peek, FileType};
 
 use crate::error::{Error, ParseError};
 
+/// A ZIP archive: an Electro 5 bundle or backup, or a Drum-family bank.
 #[cfg(feature = "bundle")]
 #[derive(Debug)]
 pub enum Bundle {
@@ -86,12 +117,16 @@ pub enum Live {
     Wave2(Cbin<RawBody>),
 }
 
+/// A stored song / set list, one variant per model that has them. Only the
+/// Electro 5 body decodes; the Stage 3 is container-verified verbatim.
 #[derive(Debug)]
 pub enum Song {
     Electro5(Cbin<ne5::Song>),
     Stage3(Cbin<RawBody>),
 }
 
+/// The instrument's global settings, one variant per model. Only the Electro 5
+/// body decodes; the rest are container-verified stubs.
 #[derive(Debug)]
 pub enum Settings {
     C2(Cbin<RawBody>),
@@ -132,6 +167,7 @@ pub enum Performance {
     LeadA1(Cbin<RawBody>),
 }
 
+/// A stored organ preset, on the models that keep them as files.
 #[derive(Debug)]
 pub enum OrganPreset {
     /// Electro 3 and 3HP (`neop`).
@@ -140,6 +176,7 @@ pub enum OrganPreset {
     Stage4(Cbin<RawBody>),
 }
 
+/// A stored piano preset, on the models that keep them as files.
 #[derive(Debug)]
 pub enum PianoPreset {
     /// Stage 4 (`ns4n`).
@@ -189,6 +226,9 @@ pub enum Entity {
     Bundle(Bundle),
 }
 
+/// Sniff `reader` and decode one supported file into an [`Entity`] — the
+/// counterpart to [`to_bytes`]. The container class comes from the leading
+/// bytes; a CBIN body is then dispatched on the format tag at offset 8.
 pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Error> {
     let header = peek(reader)?;
 
@@ -354,11 +394,12 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     }))
 }
 
+/// [`from_stream`] over a buffered read of the file at `path`.
 pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
     from_stream(&mut BufReader::new(File::open(path)?))
 }
 
-/// Serialise an [`Entity`] back to the bytes of its file — the counterpart to
+/// Serialize an [`Entity`] back to the bytes of its file — the counterpart to
 /// [`from_stream`].
 ///
 /// For every format this crate reads, `to_bytes(from_stream(x)) == x` byte-for-byte,

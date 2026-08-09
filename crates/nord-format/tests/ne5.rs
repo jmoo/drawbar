@@ -404,7 +404,7 @@ const SETTINGS_ORACLE: &[(&str, &str, &str)] = &[
 /// is the finding, so it is asserted rather than skipped: a corrected capture makes this
 /// fail, which is when the decode has something new to learn.
 ///
-/// * `mem-protect-*` and `midi-local-ctrl-mode-*` are the two catalogued settings with no
+/// * `mem-protect-*` and `midi-local-ctrl-mode-*` are the two cataloged settings with no
 ///   decoded home — toggling either moves no bit of the body.
 /// * `rotary-rotor-speed-low` is a duplicate of the `high` capture, so `low` is the one
 ///   rate value the sweep never reaches.
@@ -1531,7 +1531,7 @@ fn test_ne5_b3_bass_drawbars_match_filenames() {
 // The width and the shift are pinned from three independent angles:
 //
 //   * `programs/piano` and `programs/sample` are change-one-knob specimens, so
-//     the id must be *invariant* under every neighbouring field, and must equal
+//     the id must be *invariant* under every neighboring field, and must equal
 //     a known value. The golden ids below are not self-referential: each was
 //     read off the USB captures, where the vendor protocol transmits the same
 //     id as a plain big-endian u32 immediately followed by a length-prefixed

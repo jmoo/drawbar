@@ -1,3 +1,6 @@
+//! Nord Electro 5: program (`ne5p`), live slot (`ne5l`), song / set
+//! (`ne5t`), settings (`ne5s`), and the ZIP backup bundle.
+
 pub mod live;
 pub mod settings;
 pub use settings::Settings;
@@ -20,6 +23,7 @@ pub type SplitPoint = components::SplitPoint73;
 pub type PartMix = components::PartMix;
 pub use components::{Level, PercSpeed, VibChorus};
 
+/// The three instrument sections a part can select.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum Instrument {
     #[default]

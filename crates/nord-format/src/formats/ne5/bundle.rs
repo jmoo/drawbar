@@ -1,3 +1,5 @@
+//! The decoded contents of an Electro 5 bundle or backup archive.
+
 use crate::cbin::Cbin;
 use crate::error::Error;
 use crate::formats::ne5::{program, song};
@@ -6,6 +8,8 @@ use crate::formats::nsmp::Sample;
 use crate::{from_stream, Entity, Program, Song};
 use std::io::{Read, Seek};
 
+/// An Electro 5 bundle or backup, walked from its ZIP archive: banked
+/// programs and songs, plus the piano and sample libraries they use.
 #[derive(Debug)]
 pub struct Bundle {
     programs: program::Bank,

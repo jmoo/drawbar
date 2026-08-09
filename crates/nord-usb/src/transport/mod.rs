@@ -61,7 +61,7 @@ pub const READ_BUFFER: usize = 49152;
 /// would be a lie.
 ///
 /// **Owned buffers.** WebUSB hands back an `ArrayBuffer`; a borrowed `&[u8]` return
-/// cannot be honoured.
+/// cannot be honored.
 ///
 /// **No timeout parameter.** WebUSB has no native transfer timeout — callers wrap.
 #[allow(async_fn_in_trait)]
