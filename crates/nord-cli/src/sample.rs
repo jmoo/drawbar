@@ -64,8 +64,8 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
     };
     let sample = match any {
         nord_format::Sample::V2(sample) => sample,
-        // Editing needs the section accessors, and only the v2 schema has them.
-        nord_format::Sample::Raw(_) => {
+        // Editing needs the v2 zone/stroke accessors; the v3/v4 chain is read-only.
+        nord_format::Sample::V3(_) => {
             return Err(
                 "this instrument is nsmp3/nsmp4 content; only v2 (.nsmp) can be edited".into(),
             )

@@ -59,6 +59,11 @@ pub enum Bundle {
     Drum2Bank(nd2::bank::Bank),
     Drum3KitBank(nd3::kit_bank::KitBank),
     Electro5(ne5::Bundle),
+    /// A ZIP of CBIN files under any mix of tags — every model's bundle/backup
+    /// shape, verified against real factory restores (`.no3b`, `.nc2b`,
+    /// `.nl4b`). Members are kept container-verified and raw, under their
+    /// archive paths — which encode the slot, uninterpreted here.
+    Members(Vec<(String, Cbin<RawBody>)>),
 }
 
 /// A stored program, one variant per model. Only the Electro 5 and the two
@@ -188,8 +193,8 @@ pub enum PianoPreset {
 #[derive(Debug)]
 pub enum Sample {
     V2(Cbin<nsmp::Sample>),
-    /// The nsmp3/nsmp4 generations: schema unmapped, body verbatim.
-    Raw(Cbin<RawBody>),
+    /// The nsmp3/nsmp4 generations: section chain decoded, strokes verbatim.
+    V3(Cbin<nsmp::SampleV3>),
 }
 
 /// One decoded file.
@@ -258,7 +263,7 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
             let header = file.header;
             E::Sample(match file.body {
                 nsmp::AnyBody::V2(body) => Sample::V2(Cbin { header, body }),
-                nsmp::AnyBody::Raw(body) => Sample::Raw(Cbin { header, body }),
+                nsmp::AnyBody::V3(body) => Sample::V3(Cbin { header, body }),
             })
         }
         npno::FORMAT => E::Piano(npno::Piano::read_from(reader)?),
@@ -375,14 +380,23 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
         let names: Vec<&str> = zip.file_names().collect();
-        if names.iter().any(|n| n.ends_with("meta.xml")) {
+        // ⚠️ meta.xml alone does not say Electro 5: the whole family's backups
+        // carry one (verified against real Piano/Organ 3/C2D/Lead 4 factory
+        // restores). Only .ne5* members make it an Electro 5 bundle.
+        if names.iter().any(|n| {
+            std::path::Path::new(n)
+                .extension()
+                .is_some_and(|e| e.to_string_lossy().starts_with("ne5"))
+        }) {
             "bundle"
         } else if names.iter().all(|n| n.ends_with(".nd2p")) {
             "nd2"
         } else if names.iter().all(|n| n.ends_with(".nd3k")) {
             "nd3"
         } else {
-            return Err(ParseError::UnknownFormat("zip with unrecognized members".into()).into());
+            // Anything else — a bundle only if every member is a CBIN file,
+            // which `zip_raw_members` decides below.
+            "members"
         }
     };
     reader.seek(std::io::SeekFrom::Start(0))?;
@@ -390,6 +404,7 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     Ok(Entity::Bundle(match kind {
         "nd2" => Bundle::Drum2Bank(nd2::bank::read_from(reader)?),
         "nd3" => Bundle::Drum3KitBank(nd3::kit_bank::read_from(reader)?),
+        "members" => Bundle::Members(formats::zip_raw_members(reader)?),
         _ => Bundle::Electro5(ne5::Bundle::read_from(reader)?),
     }))
 }
@@ -397,6 +412,60 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
 /// [`from_stream`] over a buffered read of the file at `path`.
 pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
     from_stream(&mut BufReader::new(File::open(path)?))
+}
+
+#[cfg(all(test, feature = "bundle"))]
+mod bundle_tests {
+    use super::*;
+    use crate::cbin::{Cbin, Header, RawBody};
+    use std::io::{Cursor, Write};
+
+    fn member(tag: &str) -> Vec<u8> {
+        let file = Cbin {
+            header: Header::new(tag, (0, 0), 4),
+            body: RawBody(vec![0x5A; 16]),
+        };
+        let mut out = Cursor::new(Vec::new());
+        file.write_to(&mut out).unwrap();
+        out.into_inner()
+    }
+
+    fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in members {
+            zip.start_file(name.to_string(), stored).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// A ZIP of mixed CBIN members — the reported family bundle shape — reads
+    /// as [`Bundle::Members`] with paths preserved.
+    #[test]
+    fn a_zip_of_mixed_cbin_members_is_a_bundle() {
+        let a = member("ns3f");
+        let b = member("ns3y");
+        let bytes = archive(&[("Bank A/One.ns3f", &a), ("presets/Two.ns3y", &b)]);
+
+        let entity = from_stream(&mut Cursor::new(bytes)).unwrap();
+        let Entity::Bundle(Bundle::Members(members)) = entity else {
+            panic!("decoded to something other than a member bundle");
+        };
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].0, "Bank A/One.ns3f");
+        assert_eq!(&members[0].1.header.tag, b"ns3f");
+        assert_eq!(&members[1].1.header.tag, b"ns3y");
+    }
+
+    /// A ZIP holding anything that is not a CBIN file is not a bundle.
+    #[test]
+    fn a_zip_with_a_non_cbin_member_is_refused() {
+        let a = member("ns3f");
+        let bytes = archive(&[("One.ns3f", &a), ("readme.txt", b"hello")]);
+        assert!(from_stream(&mut Cursor::new(bytes)).is_err());
+    }
 }
 
 /// Serialize an [`Entity`] back to the bytes of its file — the counterpart to
@@ -498,8 +567,7 @@ impl Entity {
             | Entity::OrganPreset(OP::Electro3(f) | OP::Stage4(f))
             | Entity::PianoPreset(PianoPreset::Stage4(f))
             | Entity::PianoLibrary(f)
-            | Entity::PipeLibrary(f)
-            | Entity::Sample(Sample::Raw(f)) => Some(f),
+            | Entity::PipeLibrary(f) => Some(f),
             _ => None,
         }
     }
@@ -603,7 +671,7 @@ impl Entity {
             ),
             Entity::PipeLibrary(_) => id("C2 pipe library", npip::pipe_library::FORMAT),
             Entity::Sample(Sample::V2(_)) => id("sample instrument", nsmp::FORMAT),
-            Entity::Sample(Sample::Raw(_)) => id("sample instrument (nsmp3/nsmp4)", nsmp::FORMAT),
+            Entity::Sample(Sample::V3(_)) => id("sample instrument (nsmp3/nsmp4)", nsmp::FORMAT),
             Entity::Sysex(_) => id("SysEx dump", "syx"),
             Entity::Midi(_) => id("MIDI file", "mid"),
             Entity::Cne3(_) => id("Electro 2 library", "cn3"),
@@ -671,7 +739,7 @@ impl Entity {
                 Program::Stage3(f) => f.write_to(w),
             },
             Entity::Sample(Sample::V2(f)) => f.write_to(w),
-            Entity::Sample(Sample::Raw(f)) => f.write_to(w),
+            Entity::Sample(Sample::V3(f)) => f.write_to(w),
             Entity::Settings(s) => match s {
                 Settings::C2(f)
                 | Settings::C2D(f)

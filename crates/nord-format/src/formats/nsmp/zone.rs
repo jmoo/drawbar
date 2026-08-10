@@ -77,6 +77,96 @@ pub fn set_top_note(map: &mut [u8], index: usize, note: u8) -> Result<(), ParseE
     Ok(())
 }
 
+/// A v3/v4 keyboard zone, from the record table at the tail of the wide
+/// chain's `map` section.
+///
+/// Layouts by `map` section version — derived from the corpus, where every
+/// record names a real stroke and carries that stroke's root key at byte 0:
+///
+/// | map | record | gid at | low note | stored order |
+/// |---|---|---|---|---|
+/// | 12 | 11 B, no trailer | +5 | tiled, not stored | high → low |
+/// | 14 | 16 B, 1 B trailer | +8 | at +2 | low → high |
+/// | 21 | 16 B, 2 B trailer | +8 | at +2 | high → low |
+///
+/// A one-byte zone count sits immediately before the records, and equals the
+/// stroke count on every specimen. Inferred from specimens; not confirmed on
+/// hardware. (A `map` version 13 is reported to share the 16-byte layout, but
+/// no specimen shows it, so it is refused rather than assumed.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneV3 {
+    /// The referenced stroke's global id — the u32 its `stk` payload leads with.
+    pub stroke_gid: u32,
+    /// The stroke's root key, duplicated into the record.
+    pub root_key: u8,
+    /// Highest MIDI note this zone answers to.
+    pub top_note: u8,
+    /// Lowest note, where the layout stores one (`map` v14/v21). On v12 zones
+    /// tile: a zone's bottom is one above the next-lower zone's top.
+    pub low_note: Option<u8>,
+}
+
+/// Reads the v3/v4 zone table. `strokes` is the body's `(gid, root key)` list,
+/// used to size the table and to verify every record against the stroke it
+/// names — a misaligned read cannot pass it.
+pub fn read_v3(
+    map_version: u32,
+    map: &[u8],
+    strokes: &[(u32, u8)],
+) -> Result<Vec<ZoneV3>, ParseError> {
+    let (record_len, gid_at, trailer, has_low) = match map_version {
+        12 => (11usize, 5usize, 0usize, false),
+        14 => (16, 8, 1, true),
+        21 => (16, 8, 2, true),
+        v => {
+            return Err(ParseError::AssertFail(format!(
+                "map section version {v} has no zone layout derived from a specimen"
+            )))
+        }
+    };
+
+    let n = strokes.len();
+    let start = map
+        .len()
+        .checked_sub(trailer + n * record_len)
+        .filter(|&s| s >= 1)
+        .ok_or_else(|| {
+            ParseError::AssertFail(format!(
+                "map section is {} bytes, too short for {n} zone records",
+                map.len()
+            ))
+        })?;
+    if map[start - 1] as usize != n {
+        return Err(ParseError::AssertFail(format!(
+            "zone count {} does not match the {n} strokes",
+            map[start - 1]
+        )));
+    }
+
+    (0..n)
+        .map(|i| {
+            let r = &map[start + i * record_len..][..record_len];
+            let gid = u32::from_be_bytes(r[gid_at..gid_at + 4].try_into().unwrap());
+            let root = strokes.iter().find(|(g, _)| *g == gid).map(|(_, r)| *r);
+            match root {
+                Some(root) if root == r[0] => Ok(ZoneV3 {
+                    stroke_gid: gid,
+                    root_key: r[0],
+                    top_note: r[1],
+                    low_note: has_low.then(|| r[2]),
+                }),
+                Some(root) => Err(ParseError::AssertFail(format!(
+                    "zone {i} carries root {} but its stroke {gid} holds {root}",
+                    r[0]
+                ))),
+                None => Err(ParseError::AssertFail(format!(
+                    "zone {i} references stroke {gid}, which the body does not hold"
+                ))),
+            }
+        })
+        .collect()
+}
+
 /// The key ranges the editor lays out for a set of root keys, high to low.
 ///
 /// The top zone reaches `root + 24`; every zone below stops one short of the midpoint

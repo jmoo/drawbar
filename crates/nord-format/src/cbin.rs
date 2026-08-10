@@ -89,8 +89,14 @@ pub struct Header {
     /// u32 at `0x0c`. On slot-addressed formats the low u16 is the bank and the
     /// high u16 the slot; see [`Header::slot`].
     pub location: u32,
-    /// u32 at `0x10`. `0xFFFFFFFF` on every slot-addressed specimen; other values
-    /// on sample libraries. Meaning unknown; preserved verbatim.
+    /// u32 at `0x10`. Three shapes across the corpus: `0xFFFFFFFF` (no value —
+    /// the whole Electro 5 family, Piano 2/3, `nspg`, `nss`); a low u16 under a
+    /// zero high u16 — the **program category** id on program formats (inferred
+    /// from specimens; independent interop projects report the vendor librarian
+    /// reads it as such — Stage 2/3 names in
+    /// [`ProgramCategory`](crate::components::ProgramCategory)); or both halves
+    /// set (`ns3y`, `nsmp`, `nd2p`), where the high u16's meaning is open.
+    /// Preserved verbatim in every case; see [`Header::category`].
     pub aux: u32,
     /// u32 at `0x14`: a format's schema version (`ne5p` holds 4) or a library's
     /// content version (`nsmp` holds format×100 + revision).
@@ -113,6 +119,18 @@ impl Header {
     /// The location as the (bank, slot) pair slot-addressed formats store there.
     pub fn slot(&self) -> (u16, u16) {
         (self.location as u16, (self.location >> 16) as u16)
+    }
+
+    /// The program category id most program formats keep in `aux`: the low u16
+    /// when the high u16 is zero, `None` for `0xFFFFFFFF` (no category — the
+    /// formats whose panel has no category picker) and for the both-halves
+    /// shape the preset/library tags hold. What an id names is per model; the
+    /// Stage 2/3 names are [`ProgramCategory`](crate::components::ProgramCategory).
+    pub fn category(&self) -> Option<u16> {
+        match (self.aux >> 16, self.aux as u16) {
+            (0, id) => Some(id),
+            _ => None,
+        }
     }
 
     pub fn set_slot(&mut self, (bank, slot): (u16, u16)) {
@@ -601,6 +619,24 @@ mod tests {
     use super::*;
     use crate::crc::{crc16, crc32};
     use std::io::Cursor;
+
+    /// The three `aux` shapes: category under a zero high u16, unset, and the
+    /// both-halves preset/library shape — only the first yields a category.
+    #[test]
+    fn category_reads_only_the_program_shape() {
+        let mut h = Header::new("ne5p", (0, 0), 4);
+        assert_eq!(h.category(), None, "0xFFFFFFFF is no category");
+        h.aux = 0x0000_0017;
+        assert_eq!(h.category(), Some(0x17));
+        h.aux = 0x0000_0000;
+        assert_eq!(h.category(), Some(0), "zero is a value, not unset");
+        h.aux = 0x000a_0004; // the `ns3y` both-halves shape
+        assert_eq!(
+            h.category(),
+            None,
+            "a set high u16 is not the category shape"
+        );
+    }
 
     /// A 5-byte body under a fixed length, to exercise `B::LEN`.
     #[derive(Debug)]

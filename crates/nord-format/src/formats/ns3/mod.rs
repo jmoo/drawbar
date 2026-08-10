@@ -4,6 +4,16 @@
 //! remaining formats are container-verified stubs. ⚠️ The extension letters are
 //! traps here: `f` is the program, `s` is a *song* (a set list on the Electro 5),
 //! `y` is a synth patch (the *settings* on the Stage 2), and `t` is the settings.
+//!
+//! Community documentation reports a second checksum at file offset `0x78`
+//! ("covering synth and organ panel data"). The corpus refutes it: the word
+//! there is not any common CRC-32 over any contiguous or field-excised range,
+//! never changes between near-identical program pairs whose bodies differ (the
+//! `0x18` checksum always does), takes clustered values that many unrelated
+//! programs share, and sits beside bytes constant across every specimen — the
+//! signature of bit-packed panel parameters, which is what body offset `0x4c`
+//! holds. Programs re-saved after panel edits keep decoding, so nothing
+//! verifies it; treat the claim as mistaken until a specimen shows otherwise.
 
 use super::raw::raw_format;
 

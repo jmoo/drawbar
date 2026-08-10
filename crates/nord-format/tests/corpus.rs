@@ -135,6 +135,75 @@ fn every_specimen_parses_and_round_trips() {
     );
 }
 
+/// The header's `aux` word holds one of three shapes everywhere: `0xFFFFFFFF`
+/// (no category), a low u16 under a zero high u16 (the program category id), or
+/// — on the preset/library tags alone — both halves set. A fourth shape, or a
+/// both-halves value on a program tag, means the word carries something the
+/// container docs don't model.
+#[test]
+fn aux_matches_one_of_the_three_documented_shapes() {
+    // The tags observed holding both u16 halves. (`nd2p` does too, but lives
+    // inside `.nd2_bank` archives, which this standalone walk does not open.)
+    const BOTH_HALVES: &[&str] = &["ns3y", "nsmp"];
+
+    let mut failures: Vec<String> = Vec::new();
+    for path in specimens(&corpus_root()) {
+        let bytes = fs::read(&path).unwrap();
+        if bytes.len() < 0x18 || &bytes[..4] != b"CBIN" {
+            continue;
+        }
+        let tag = String::from_utf8_lossy(&bytes[8..12]).replace('\0', "");
+        let aux = u32::from_le_bytes(bytes[0x10..0x14].try_into().unwrap());
+        let ok = aux == 0xFFFF_FFFF || (aux >> 16) == 0 || BOTH_HALVES.contains(&tag.as_str());
+        if !ok {
+            failures.push(format!("{}: {tag} aux {aux:#010x}", path.display()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} specimens hold an undocumented aux shape:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Every nsmp3/nsmp4 specimen decodes as the wide section chain, with a name
+/// and at least one stroke — in both container generations.
+#[test]
+fn v3_samples_decode_names_and_strokes() {
+    use nord_format::Sample;
+
+    let mut seen = 0usize;
+    for path in specimens(&corpus_root()) {
+        let ext = path.extension().unwrap().to_string_lossy();
+        if ext != "nsmp3" && ext != "nsmp4" {
+            continue;
+        }
+        match nord_format::from_path(&path).unwrap() {
+            Entity::Sample(Sample::V3(s)) => {
+                let name = s.name().unwrap();
+                assert!(!name.is_empty(), "{}: empty name", path.display());
+                assert!(s.stroke_count() > 0, "{}: no strokes", path.display());
+                // One zone per stroke, every note in MIDI range, and each zone
+                // verified against its stroke by the reader itself.
+                let zones = s.zones().unwrap_or_else(|e| {
+                    panic!("{}: zones unreadable: {e}", path.display());
+                });
+                assert_eq!(zones.len(), s.stroke_count(), "{}", path.display());
+                for z in &zones {
+                    assert!(z.top_note <= 127 && z.root_key <= 127, "{}", path.display());
+                    if let Some(low) = z.low_note {
+                        assert!(low <= z.top_note, "{}: low above top", path.display());
+                    }
+                }
+            }
+            other => panic!("{}: decoded to {other:?}", path.display()),
+        }
+        seen += 1;
+    }
+    assert!(seen >= 12, "only {seen} nsmp3/nsmp4 specimens seen");
+}
+
 /// The stub modules' observed body lengths hold across every specimen.
 #[test]
 fn observed_body_lengths_match_the_documented_constants() {

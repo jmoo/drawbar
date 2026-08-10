@@ -64,9 +64,12 @@ impl Bundle {
                     Entity::Sample(crate::Sample::V2(sample)) => {
                         bundle.samples.push(sample);
                     }
-                    other => bundle
-                        .skipped
-                        .push((name, format!("no place in a bundle for {other:?}"))),
+                    // Named by identity, not Debug — a stub entity's Debug dump
+                    // is its entire body.
+                    other => bundle.skipped.push((
+                        name,
+                        format!("no place in a bundle for a {}", other.identity().kind),
+                    )),
                 },
                 Err(e) => bundle.skipped.push((name, e.to_string())),
             }

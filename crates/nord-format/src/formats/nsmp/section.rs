@@ -1,4 +1,9 @@
-//! The `NWS` section chain that makes up a sample instrument's body.
+//! The section chains that make up a sample instrument's body.
+//!
+//! Two framings, one shape. The v2 body is an `NWS` chain of 9-byte-header
+//! [`Section`]s; the v3/v4 body is an `NSMP` chain of 12-byte-header
+//! [`Section4`]s. Both are flat tag/version/length runs that must land exactly
+//! on the end of the body.
 
 use crate::error::ParseError;
 
@@ -105,6 +110,136 @@ fn read_head(r: &mut impl std::io::Read, at: u64) -> Result<Option<[u8; 9]>, Par
     Ok(Some(head))
 }
 
+/// Bytes of a v3/v4 section header: 4-byte tag, `u32` version, `u32` length —
+/// the u32s big-endian like the v2 chain's length.
+pub const HEADER4_LEN: usize = 12;
+
+/// Opens a v3/v4 body. Its payload is 4 bytes — `0002000c` on every v3
+/// specimen, `00020005` on every v4 — constant per generation and unrelated to
+/// the stroke count. Meaning open; preserved verbatim.
+pub const CONTAINER4: &[u8; 4] = b"NSMP";
+
+/// ⚠️ Three-letter tags are NUL-padded on the *left* in this chain (`\0hdr`),
+/// the opposite of the CBIN header's own three-letter tags (`nsp\0`).
+pub const HDR4: &[u8; 4] = b"\0hdr";
+pub const CAT4: &[u8; 4] = b"\0cat";
+pub const MAP4: &[u8; 4] = b"\0map";
+pub const STK4: &[u8; 4] = b"\0stk";
+pub const STY4: &[u8; 4] = b"\0sty";
+/// Trails every v3/v4 specimen, after `sty`.
+pub const META4: &[u8; 4] = b"meta";
+
+/// One section of a v3/v4 sample instrument body.
+///
+/// The `4` is the tag width. Same walk rules as [`Section`]: the length counts
+/// the payload only, and the chain must land exactly on the end of the body.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Section4 {
+    pub tag: [u8; 4],
+    /// Schema version of this section alone; sections revise independently.
+    /// The `map` version — 12/14 on v3 specimens, 21 on v4 — is what selects a
+    /// zone-record layout, not the file's content version.
+    pub version: u32,
+    pub payload: Vec<u8>,
+}
+
+impl Section4 {
+    /// Length on disk, header included.
+    pub fn encoded_len(&self) -> usize {
+        HEADER4_LEN + self.payload.len()
+    }
+
+    /// The tag without its padding NUL.
+    pub fn tag_str(&self) -> String {
+        String::from_utf8_lossy(&self.tag)
+            .trim_start_matches('\0')
+            .to_owned()
+    }
+
+    pub fn is(&self, tag: &[u8; 4]) -> bool {
+        &self.tag == tag
+    }
+
+    pub fn write_to(&self, w: &mut impl std::io::Write) -> Result<(), ParseError> {
+        let head = |w: &mut dyn std::io::Write| -> std::io::Result<()> {
+            w.write_all(&self.tag)?;
+            w.write_all(&self.version.to_be_bytes())?;
+            w.write_all(&(self.payload.len() as u32).to_be_bytes())?;
+            w.write_all(&self.payload)
+        };
+        head(w).map_err(|e| ParseError::AssertFail(format!("writing a section: {e}")))
+    }
+}
+
+/// Walks a v3/v4 chain from the reader's position to its end, under the same
+/// land-exactly rule as [`read_chain`].
+pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseError> {
+    let mut sections = Vec::new();
+    let mut pos: u64 = 0;
+    loop {
+        let mut head = [0u8; HEADER4_LEN];
+        match read_exact_or_end(r, &mut head, pos)? {
+            false => return Ok(sections),
+            true => {}
+        }
+        let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
+        let mut payload = vec![0u8; len];
+        r.read_exact(&mut payload).map_err(|_| {
+            ParseError::AssertFail(format!(
+                "section {} at {pos} declares {len} bytes but the body ends first",
+                String::from_utf8_lossy(&head[..4]),
+            ))
+        })?;
+        pos += (HEADER4_LEN + len) as u64;
+        sections.push(Section4 {
+            tag: [head[0], head[1], head[2], head[3]],
+            version: u32::from_be_bytes([head[4], head[5], head[6], head[7]]),
+            payload,
+        });
+    }
+}
+
+/// Fills `buf` from `r`, `Ok(false)` on a clean end before the first byte.
+/// Bytes that run out mid-buffer are a truncation, not an end.
+fn read_exact_or_end(
+    r: &mut impl std::io::Read,
+    buf: &mut [u8],
+    at: u64,
+) -> Result<bool, ParseError> {
+    let mut got = 0;
+    while got < buf.len() {
+        match r.read(&mut buf[got..]) {
+            Ok(0) if got == 0 => return Ok(false),
+            Ok(0) => {
+                return Err(ParseError::AssertFail(format!(
+                    "truncated section header at {at}"
+                )))
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ParseError::AssertFail(format!("reading a section: {e}"))),
+        }
+    }
+    Ok(true)
+}
+
+/// Finds the single v3/v4 section with `tag`.
+///
+/// ⚠️ The same repeat trap as [`find`]: `stk` repeats, one per stroke.
+pub fn find4<'a>(sections: &'a [Section4], tag: &[u8; 4]) -> Option<&'a Section4> {
+    sections.iter().find(|s| s.is(tag))
+}
+
+impl std::fmt::Debug for Section4 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Section4")
+            .field("tag", &self.tag_str())
+            .field("version", &self.version)
+            .field("len", &self.payload.len())
+            .finish()
+    }
+}
+
 /// Finds the single section with `tag`.
 ///
 /// ⚠️ Only for tags that appear at most once. `stk` repeats — one per zone — so it must
@@ -180,6 +315,44 @@ mod tests {
         let mut bytes = section(HDR, 1, &[7; 4]);
         bytes.extend_from_slice(&[0, 0, 0]); // not enough for another header
         assert!(read_chain(&mut bytes.as_slice()).is_err());
+    }
+
+    fn section4(tag: &[u8; 4], version: u32, payload: &[u8]) -> Vec<u8> {
+        let mut v = tag.to_vec();
+        v.extend_from_slice(&version.to_be_bytes());
+        v.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn chain4_round_trips() {
+        let mut bytes = section4(CONTAINER4, 30, &[0, 2, 0, 0x0c]);
+        bytes.extend(section4(HDR4, 10, &[1; 112]));
+        bytes.extend(section4(STK4, 11, &[4; 20]));
+
+        let chain = read_chain4(&mut bytes.as_slice()).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].payload.len(), 4);
+        assert_eq!(chain[1].version, 10);
+        assert_eq!(chain[2].tag_str(), "stk");
+
+        let mut out = Vec::new();
+        for s in &chain {
+            s.write_to(&mut out).unwrap();
+        }
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn chain4_overrun_and_truncation_are_errors() {
+        let mut bytes = section4(HDR4, 1, &[7; 4]);
+        bytes[11] = 200; // claim 200 payload bytes where 4 exist
+        assert!(read_chain4(&mut bytes.as_slice()).is_err());
+
+        let mut bytes = section4(HDR4, 1, &[7; 4]);
+        bytes.extend_from_slice(&[0; 5]); // not enough for another header
+        assert!(read_chain4(&mut bytes.as_slice()).is_err());
     }
 
     #[test]

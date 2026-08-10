@@ -84,3 +84,35 @@ pub(crate) fn zip_members(
     }
     Ok(members)
 }
+
+/// Every member of a ZIP archive as a container-verified CBIN file, tags mixed.
+///
+/// The shape independent interop projects report for every model's bundles and
+/// backups: a plain ZIP of ordinary program files, the member path encoding the
+/// slot. No such archive is in the corpus, so members stay raw rather than
+/// dispatching to their format modules. A member that is not a CBIN file fails
+/// the read — this is the arbiter of whether an unrecognised ZIP is a bundle.
+#[cfg(feature = "bundle")]
+pub(crate) fn zip_raw_members(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+) -> Result<Vec<(String, crate::cbin::Cbin<crate::cbin::RawBody>)>, Error> {
+    use std::io::Read;
+
+    let mut zip = zip::ZipArchive::new(reader)?;
+    let mut members = Vec::new();
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i)?;
+        // Real backups carry a meta.xml manifest beside the CBIN members; it
+        // describes the archive rather than being content, so it is passed
+        // over rather than failing the walk.
+        if file.is_dir() || file.name().ends_with("meta.xml") {
+            continue;
+        }
+        let name = file.name().to_string();
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        let member = crate::cbin::read_raw(&mut std::io::Cursor::new(buffer))?;
+        members.push((name, member));
+    }
+    Ok(members)
+}

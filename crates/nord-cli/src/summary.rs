@@ -408,6 +408,41 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
     }
 }
 
+/// The v3/v4 sample-instrument printout: identity and section inventory — the
+/// zone map is not decoded for this generation yet.
+fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
+    ui.out(field(ui, 2, "type", "sample instrument (nsmp3/nsmp4)"));
+    match (s.name(), s.sub_name()) {
+        (Ok(name), Ok(sub)) if !sub.is_empty() => {
+            ui.out(field(ui, 2, "name", format!("{name}_{sub}")))
+        }
+        (Ok(name), _) => ui.out(field(ui, 2, "name", name)),
+        (Err(e), _) => ui.warn(format!("name unreadable: {e}")),
+    }
+    let v = s.header.version;
+    ui.out(field(ui, 2, "version", format!("{}.{}", v / 100, v % 100)));
+    ui.out(field(ui, 2, "strokes", s.stroke_count().to_string()));
+
+    section(ui, "Zones");
+    match s.zones() {
+        Err(e) => ui.warn(format!("zone table unreadable: {e}")),
+        Ok(zones) => {
+            for z in zones {
+                let range = match z.low_note {
+                    Some(low) => format!("{}..={}", low, z.top_note),
+                    None => format!("..={}", z.top_note),
+                };
+                ui.out(field(
+                    ui,
+                    2,
+                    &range,
+                    format!("root {} (stroke {})", z.root_key, z.stroke_gid),
+                ));
+            }
+        }
+    }
+}
+
 /// The sample-instrument printout: identity, then the zone map.
 fn sample(ui: &Ui, s: &Cbin<Sample>) {
     ui.out(field(ui, 2, "type", "sample instrument (nsmp)"));
@@ -549,15 +584,29 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 }
             }
         }
-        Entity::Piano(_) => {
-            ui.out(field(
-                ui,
-                2,
-                "type",
-                format!("piano (npno) {} header/reference only", ui.dash()),
-            ));
+        Entity::Piano(p) => {
+            ui.out(field(ui, 2, "type", "piano library (npno)"));
+            match p.name() {
+                Ok((name, variant)) if variant.is_empty() => ui.out(field(ui, 2, "name", name)),
+                Ok((name, variant)) => ui.out(field(ui, 2, "name", format!("{name} ({variant})"))),
+                Err(e) => ui.warn(format!("name unreadable: {e}")),
+            }
+            // The vendor's filenames write tenths without the trailing zero:
+            // 530 is "5.3", not "5.30".
+            let v = p.file.header.version;
+            let minor = if v % 10 == 0 {
+                format!("{}", v % 100 / 10)
+            } else {
+                format!("{:02}", v % 100)
+            };
+            ui.out(field(ui, 2, "version", format!("{}.{minor}", v / 100)));
+            if let Ok(map) = p.key_map() {
+                let covered = map.iter().filter(|&&b| b != 0xFF).count();
+                ui.out(field(ui, 2, "notes", format!("{covered} covered")));
+            }
         }
         Entity::Sample(nord_format::Sample::V2(s)) => sample(ui, s),
+        Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
         Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
             if let Some(name) = b.name() {
@@ -587,6 +636,22 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Bundle(nord_format::Bundle::Drum3KitBank(b)) => {
             ui.out(field(ui, 2, "type", "Drum 3P kit bank (zip)"));
             ui.out(field(ui, 2, "kits", b.kits.len().to_string()));
+        }
+        Entity::Bundle(nord_format::Bundle::Members(members)) => {
+            ui.out(field(ui, 2, "type", "bundle (zip)"));
+            // Count members per tag so "384 ns4p, 8 ns4l" reads at a glance.
+            let mut by_tag: std::collections::BTreeMap<String, usize> = Default::default();
+            for (_, m) in members {
+                *by_tag
+                    .entry(String::from_utf8_lossy(&m.header.tag).replace('\0', ""))
+                    .or_default() += 1;
+            }
+            let counts = by_tag
+                .iter()
+                .map(|(tag, n)| format!("{n} {tag}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ui.out(field(ui, 2, "members", counts));
         }
         other => raw_summary(ui, other),
     }

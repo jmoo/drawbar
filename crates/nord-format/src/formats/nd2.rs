@@ -9,9 +9,9 @@ use super::raw::raw_format;
 raw_format!(
     /// Programs (`.nd2p`) — usually met inside a `.nd2_bank` archive.
     ///
-    /// The header's `aux` word holds a value on every specimen (`0x006d008f`),
-    /// unlike the `0xFFFFFFFF` of the slot-addressed formats. Meaning unknown;
-    /// preserved verbatim.
+    /// The header's `aux` word holds `0x006d008f` on every specimen — both u16
+    /// halves set, the preset/library shape rather than a program category.
+    /// Meaning open; preserved verbatim.
     program,
     "nd2p",
     175

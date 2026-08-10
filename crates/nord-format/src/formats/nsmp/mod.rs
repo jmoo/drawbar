@@ -20,34 +20,38 @@ pub mod zone;
 pub use section::Section;
 pub use stroke::Stroke;
 pub use zone::Zone;
+pub use zone::ZoneV3;
 
-use crate::cbin::{self, BodyReader, BodyWriter, Cbin, Header, RawBody};
+use crate::cbin::{self, BodyReader, BodyWriter, Cbin, Header};
 use crate::error::{Error, ParseError};
 use std::fmt;
 use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "nsmp";
 
-/// The content version at which the schema leaves v2. All three generations
-/// share the `nsmp` tag; the u32 at `0x14` is the generation marker, running
-/// `format × 100 + revision` — `.nsmp3` content stores 300 and up, `.nsmp4`
-/// 400 and up, and their bodies decode a different schema than v2's.
-pub const RAW_FROM_VERSION: u32 = 300;
+/// The content version at which the body leaves the `NWS` chain for the wide
+/// `NSMP` chain. All generations share the `nsmp` tag; the u32 at `0x14` is the
+/// generation marker, running `format × 100 + revision` — `.nsmp3` content
+/// stores 300 and up, `.nsmp4` 400 and up.
+pub const V3_FROM_VERSION: u32 = 300;
 
-/// A body decoded by generation: v2 in full, the later schemas kept verbatim.
+/// A body decoded by generation: v2 in full, v3/v4 as a section chain with
+/// strokes verbatim.
 ///
-/// ⚠️ The v2 pool also holds versions that are not `2xx` (8, 100, 140 … —
-/// unexplained), so the gate is "at least 300", not "exactly 2xx".
+/// ⚠️ The v2 pool also holds versions that are not `2xx` — 8 (the original
+/// Sample Library) and 200 (Sample Library 2.0; independent interop projects
+/// report the number tracks the library release, not the codec) — so the gate
+/// is "at least 300", not "exactly 2xx".
 #[derive(Debug)]
 pub enum AnyBody {
     V2(Sample),
-    Raw(RawBody),
+    V3(SampleV3),
 }
 
 impl cbin::Body for AnyBody {
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, header: &Header) -> Result<Self, Error> {
-        if header.version >= RAW_FROM_VERSION {
-            Ok(AnyBody::Raw(<RawBody as cbin::Body>::read(r, header)?))
+        if header.version >= V3_FROM_VERSION {
+            Ok(AnyBody::V3(<SampleV3 as cbin::Body>::read(r, header)?))
         } else {
             Ok(AnyBody::V2(<Sample as cbin::Body>::read(r, header)?))
         }
@@ -56,7 +60,7 @@ impl cbin::Body for AnyBody {
     fn write<W: Write + Seek>(&self, w: &mut BodyWriter<'_, W>) -> Result<(), Error> {
         match self {
             AnyBody::V2(s) => <Sample as cbin::Body>::write(s, w),
-            AnyBody::Raw(r) => <RawBody as cbin::Body>::write(r, w),
+            AnyBody::V3(s) => <SampleV3 as cbin::Body>::write(s, w),
         }
     }
 }
@@ -96,6 +100,122 @@ impl cbin::Body for Sample {
 /// Reads a whole instrument, verifying its checksum.
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error> {
     cbin::read(reader, FORMAT)
+}
+
+/// A v3/v4 body: the wide-section (`NSMP`) chain, held in file order including
+/// repeats — `stk` appears once per stroke. Sections are preserved verbatim, so
+/// a file round-trips byte-exactly; nothing edits one yet.
+///
+/// Every corpus specimen chains `NSMP`, `hdr`, `cat`, `map`, N × `stk`, `sty`,
+/// `meta`, in that order, in both container generations. Inferred from
+/// specimens; not confirmed on hardware.
+///
+/// ⚠️ The stroke payload past the id fields is the encoded audio, and it stays
+/// verbatim deliberately. The block codec independent interop projects describe
+/// (a u32 header of count/order/width fields, fixed binomial predictors, a stop
+/// sentinel) was tested against this corpus and **did not reproduce**: the
+/// layout frames a handful of strokes exactly and fails the rest, and where it
+/// frames, the predictor arithmetic diverges on real data. Do not implement
+/// audio decode from that description without new evidence — a matched
+/// WAV-in/nsmp-out differential pair is the missing oracle.
+#[derive(Debug)]
+pub struct SampleV3 {
+    pub sections: Vec<section::Section4>,
+}
+
+impl cbin::Body for SampleV3 {
+    fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<Self, Error> {
+        Ok(SampleV3 {
+            sections: section::read_chain4(r)?,
+        })
+    }
+
+    fn write<W: Write + Seek>(&self, w: &mut BodyWriter<'_, W>) -> Result<(), Error> {
+        for s in &self.sections {
+            s.write_to(w)?;
+        }
+        Ok(())
+    }
+}
+
+/// Offset of the main name within the v3/v4 `hdr` payload.
+const NAME_V3_AT: usize = 10;
+
+/// End of the main-name field: the sub-name field starts here. The two fields
+/// are what the filename convention joins — `Bass Clarinet 2` + `KG  mono` →
+/// `Bass Clarinet 2_KG  mono 3.11`. Inferred from specimens; not confirmed on
+/// hardware.
+const NAME_V3_SUB_AT: usize = 76;
+
+impl Cbin<SampleV3> {
+    fn hdr(&self) -> Result<&section::Section4, Error> {
+        section::find4(&self.body.sections, section::HDR4)
+            .ok_or_else(|| ParseError::AssertFail("no hdr section".into()).into())
+    }
+
+    fn hdr_field(&self, from: usize, to: Option<usize>) -> Result<String, Error> {
+        let hdr = self.hdr()?;
+        let field = match to {
+            Some(to) => hdr.payload.get(from..to),
+            None => hdr.payload.get(from..),
+        }
+        .ok_or_else(|| {
+            ParseError::AssertFail(format!("hdr section is {} bytes", hdr.payload.len()))
+        })?;
+        let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+        Ok(String::from_utf8_lossy(&field[..end]).into_owned())
+    }
+
+    /// The instrument's main name.
+    pub fn name(&self) -> Result<String, Error> {
+        self.hdr_field(NAME_V3_AT, Some(NAME_V3_SUB_AT))
+    }
+
+    /// The sub name — the string after the `_` in the vendor's filenames.
+    /// Empty on files that carry none.
+    pub fn sub_name(&self) -> Result<String, Error> {
+        self.hdr_field(NAME_V3_SUB_AT, None)
+    }
+
+    /// How many strokes the body carries — one `stk` section each.
+    pub fn stroke_count(&self) -> usize {
+        self.body
+            .sections
+            .iter()
+            .filter(|s| s.is(section::STK4))
+            .count()
+    }
+
+    /// Each stroke's `(global id, root key)` — the u32 its payload leads with,
+    /// and the byte at offset 5. Inferred from specimens; not confirmed on
+    /// hardware.
+    fn stroke_ids(&self) -> Result<Vec<(u32, u8)>, Error> {
+        self.body
+            .sections
+            .iter()
+            .filter(|s| s.is(section::STK4))
+            .map(|s| match (s.payload.get(0..4), s.payload.get(5)) {
+                (Some(gid), Some(&root)) => Ok((u32::from_be_bytes(gid.try_into().unwrap()), root)),
+                _ => Err(ParseError::AssertFail(format!(
+                    "stroke payload is {} bytes, too short for its id fields",
+                    s.payload.len()
+                ))
+                .into()),
+            })
+            .collect()
+    }
+
+    /// Keyboard zones, in stored order — high to low except `map` v14, which
+    /// stores low to high. Each zone is verified against the stroke it names.
+    pub fn zones(&self) -> Result<Vec<ZoneV3>, Error> {
+        let map = section::find4(&self.body.sections, section::MAP4)
+            .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
+        Ok(zone::read_v3(
+            map.version,
+            &map.payload,
+            &self.stroke_ids()?,
+        )?)
+    }
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
