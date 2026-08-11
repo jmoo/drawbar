@@ -120,6 +120,38 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DeviceAction {
+    /// Sweep the vendor control requests on endpoint 0 and print what answers. For RE.
+    ///
+    /// Endpoint 0 is outside the bulk protocol: these are reads that cannot open,
+    /// desync, or wedge a session, and an unrecognised request stalls the endpoint
+    /// rather than doing anything. Reported externally to carry the model, firmware
+    /// version, build and maximum transfer size.
+    Controls {
+        /// Lowest bRequest to try.
+        #[arg(long, default_value_t = 0)]
+        from: u8,
+
+        /// Highest bRequest to try, inclusive.
+        #[arg(long, default_value_t = 15)]
+        to: u8,
+
+        /// Bytes to ask each request for.
+        #[arg(long, default_value_t = 64)]
+        len: usize,
+
+        /// Address the interface rather than the device.
+        #[arg(long)]
+        interface: bool,
+
+        /// wValue sent with each request.
+        #[arg(long, default_value_t = 0)]
+        value: u16,
+
+        /// wIndex sent with each request. For --interface this is the interface number.
+        #[arg(long, default_value_t = 0)]
+        index: u16,
+    },
+
     /// Report what is stored on the instrument, per object class.
     ///
     /// Read-only: this sends one query per class and reads counters back. Nothing
@@ -474,6 +506,14 @@ fn main() -> ExitCode {
                 device::status(&ui, source, json)
             }
             DeviceAction::Info => device::info(&ui),
+            DeviceAction::Controls {
+                from,
+                to,
+                len,
+                interface,
+                value,
+                index,
+            } => device::controls(&ui, from, to, len, interface, value, index),
         },
         Command::Program { action } => match action {
             ProgramAction::Slot(action) => slot_action(&ui, action, ObjectClass::Program),

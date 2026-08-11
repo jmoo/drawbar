@@ -105,6 +105,25 @@ pub fn info(ui: &Ui) -> Result<(), String> {
                 "no vendor interface — this tool cannot drive it"
             }
         ));
+
+        // Endpoint 0, so this needs no transaction and still answers on an instrument
+        // that has stopped serving the bulk protocol. Claiming the interface can fail
+        // for the ordinary reason (something else holds it), which is not worth turning
+        // an identification command into an error.
+        if vendor_iface {
+            match nord_usb::transport::UsbTransport::open(d).and_then(|t| t.identity()) {
+                Ok(id) => {
+                    ui.out(format!(
+                        "  firmware:  {}.{:02}",
+                        id.firmware / 100,
+                        id.firmware % 100
+                    ));
+                    ui.out(format!("  build:     {}", id.build));
+                    ui.out(format!("  max xfer:  {} bytes", id.max_transfer));
+                }
+                Err(e) => ui.out(format!("  firmware:  {}", ui.dim(e.to_string()))),
+            }
+        }
     }
     Ok(())
 }
@@ -854,6 +873,73 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
             d.name.trim_end(),
         ));
     }
+    Ok(())
+}
+
+/// Sweep vendor control requests on endpoint 0. Reverse-engineering tool.
+///
+/// Read-only, and outside the bulk protocol: no session is opened, so nothing here can
+/// desync or wedge one. A request the device does not implement stalls the endpoint,
+/// which arrives as an error and is reported as a dash rather than as data.
+#[allow(clippy::too_many_arguments)]
+pub fn controls(
+    ui: &Ui,
+    from: u8,
+    to: u8,
+    len: usize,
+    interface: bool,
+    value: u16,
+    index: u16,
+) -> Result<(), String> {
+    let t = open_usb()?;
+    let recipient = if interface {
+        nord_usb::transport::usb::Recipient::Interface
+    } else {
+        nord_usb::transport::usb::Recipient::Device
+    };
+
+    ui.out(ui.dim(format!(
+        "{:<9} {:>5}  {}",
+        "bRequest", "bytes", "response"
+    )));
+    let mut answered = 0;
+    for request in from..=to {
+        let got = t.vendor_control_in(
+            recipient,
+            request,
+            value,
+            index,
+            len,
+            std::time::Duration::from_millis(500),
+        );
+        match got {
+            Ok(data) if data.is_empty() => {
+                answered += 1;
+                ui.out(format!("{request:#04x} ({request:>3}) {:>5}  (accepted, no data)", 0));
+            }
+            Ok(data) => {
+                answered += 1;
+                let hex: Vec<String> = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
+                let text: String = data
+                    .iter()
+                    .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                    .collect();
+                ui.out(format!(
+                    "{request:#04x} ({request:>3}) {:>5}  {}",
+                    data.len(),
+                    hex.join(" ")
+                ));
+                ui.out(format!("{:>16}  {}", "", ui.dim(text)));
+            }
+            // The overwhelmingly common case while sweeping: not implemented.
+            Err(_) => ui.out(ui.dim(format!("{request:#04x} ({request:>3})     -  —"))),
+        }
+    }
+    ui.note("");
+    ui.note(format!(
+        "{answered} of {} request(s) answered",
+        u16::from(to) - u16::from(from) + 1
+    ));
     Ok(())
 }
 

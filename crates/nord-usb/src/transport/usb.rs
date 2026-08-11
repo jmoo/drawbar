@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use nusb::transfer::{Queue, RequestBuffer};
+use nusb::transfer::{Control, ControlType, Queue, RequestBuffer};
 use nusb::{DeviceInfo, Interface};
 
 use super::{Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
@@ -14,6 +14,8 @@ use crate::deadline::with_timeout;
 use crate::error::{Error, Result};
 
 pub use super::{PRODUCT_ID_ELECTRO5, VENDOR_ID};
+// Re-exported so callers can name a control recipient without depending on `nusb`.
+pub use nusb::transfer::Recipient;
 
 /// How long a cancelled transfer is given to come back before the transport is declared
 /// out of step. Cancellation is local to the host controller, so this covers a stall,
@@ -72,6 +74,101 @@ impl UsbTransport {
             interface,
             read_queue,
         })
+    }
+}
+
+/// What the device says about itself on endpoint 0, outside the bulk protocol.
+///
+/// Read with no session open, so it answers even when the instrument is wedged — which
+/// makes it the one identification that still works when nothing else does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    /// Firmware version as the device reports it, in hundredths: `204` is 2.04. The
+    /// same value the USB descriptor carries as `bcdDevice`, which is what pins the
+    /// scaling.
+    pub firmware: u16,
+    /// Largest transfer the device will accept or produce, in bytes, framing included.
+    ///
+    /// [`crate::op`]'s read chunk is this minus the frame header and CRC — a bound
+    /// derived from captures long before the device was asked for it, and the two agree
+    /// exactly.
+    pub max_transfer: u32,
+    /// Reported at request `0x00`. Reads as a small constant; its meaning is not pinned
+    /// down, so it is carried verbatim rather than named something it might not be.
+    pub kind: u16,
+    /// Reported at request `0x05`. Plausibly a build number, unconfirmed.
+    pub build: u16,
+}
+
+impl UsbTransport {
+    /// Ask the device to identify itself over endpoint 0. Read-only.
+    ///
+    /// Opens no transaction, so unlike everything in [`crate::op`] this is safe on an
+    /// instrument in an unknown state.
+    pub fn identity(&self) -> Result<Identity> {
+        let limit = Duration::from_millis(500);
+        let word = |request: u8| -> Result<u16> {
+            let b = self.vendor_control_in(Recipient::Device, request, 0, 0, 2, limit)?;
+            if b.len() < 2 {
+                return Err(Error::Transport(format!(
+                    "vendor request {request:#04x} returned {} bytes, expected 2",
+                    b.len()
+                )));
+            }
+            Ok(u16::from_le_bytes([b[0], b[1]]))
+        };
+
+        let max = self.vendor_control_in(Recipient::Device, 0x08, 0, 0, 4, limit)?;
+        if max.len() < 4 {
+            return Err(Error::Transport(format!(
+                "vendor request 0x08 returned {} bytes, expected 4",
+                max.len()
+            )));
+        }
+
+        Ok(Identity {
+            kind: word(0x00)?,
+            firmware: word(0x04)?,
+            build: word(0x05)?,
+            max_transfer: u32::from_le_bytes([max[0], max[1], max[2], max[3]]),
+        })
+    }
+
+    /// One vendor control read on endpoint 0, outside the bulk protocol entirely.
+    ///
+    /// Separate from [`Transport`] on purpose: WebUSB can issue control transfers, but
+    /// nothing portable is built on this yet, and putting it in the trait would oblige
+    /// the replay backend to fake a channel no capture covers.
+    ///
+    /// Returns the bytes the device sent, truncated to what it actually produced — a
+    /// device that recognises the request but has less to say than `len` is normal, and
+    /// an unrecognised request stalls the endpoint, which surfaces as an error rather
+    /// than as empty data.
+    ///
+    /// The timeout is the driver's own, so this cannot hang the way a bulk read can.
+    pub fn vendor_control_in(
+        &self,
+        recipient: Recipient,
+        request: u8,
+        value: u16,
+        index: u16,
+        len: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; len];
+        let control = Control {
+            control_type: ControlType::Vendor,
+            recipient,
+            request,
+            value,
+            index,
+        };
+        let n = self
+            .interface
+            .control_in_blocking(control, &mut buf, timeout)
+            .map_err(map_err("vendor control read"))?;
+        buf.truncate(n);
+        Ok(buf)
     }
 }
 
