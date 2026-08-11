@@ -18,6 +18,7 @@
 //! explicit; `Drop` only *complains* in debug builds.
 
 use std::marker::PhantomData;
+use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::transport::Transport;
@@ -43,6 +44,10 @@ pub struct Session<'t, T: Transport, C = ReadOnly> {
     class: ObjectClass,
     closed: bool,
     device_changed: bool,
+    /// How long any single read in this session may take. `None` waits forever, which
+    /// is right for the commands NSM sends — they always answer. Set it before probing
+    /// a command that might not, so the closing exchanges cannot hang either.
+    read_limit: Option<Duration>,
     _capability: PhantomData<C>,
 }
 
@@ -58,6 +63,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             class,
             closed: false,
             device_changed: false,
+            read_limit: None,
             _capability: PhantomData,
         };
 
@@ -113,6 +119,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     pub fn allow_destructive_writes(mut self) -> Session<'t, T, ReadWrite> {
         let transport = self.transport.take();
         let (class, closed, device_changed) = (self.class, self.closed, self.device_changed);
+        let read_limit = self.read_limit;
         // The husk is about to drop and no longer owns the transaction.
         self.closed = true;
         Session {
@@ -120,6 +127,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             class,
             closed,
             device_changed,
+            read_limit,
             _capability: PhantomData,
         }
     }
@@ -139,6 +147,82 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// read earlier in this session may be stale.
     pub fn instrument_changed(&self) -> bool {
         self.device_changed
+    }
+
+    /// Bound every read in this session, closing exchanges included.
+    ///
+    /// Off by default, because the operations NSM performs always draw a reply and a
+    /// spurious timeout mid-transfer would be worse than waiting. Set it before
+    /// [`Self::probe`]: a command that answers nothing otherwise hangs the caller in
+    /// [`Self::commit`] rather than in the probe, having already passed the probe's own
+    /// timeout — which is exactly the trap that a bounded probe alone does not close.
+    pub fn set_read_limit(&mut self, limit: Duration) {
+        self.read_limit = Some(limit);
+    }
+
+    /// One frame from the device, honoring [`Self::set_read_limit`].
+    ///
+    /// `Ok(None)` means the limit passed with nothing read. The transport has already
+    /// cancelled the outstanding transfer by then, so the session is still in step.
+    async fn read_frame(&mut self) -> Result<Option<Message>> {
+        let limit = self.read_limit;
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| Error::Transport("session has no transport".into()))?;
+
+        let raw = match limit {
+            Some(limit) => match transport.read_timeout(crate::transport::READ_BUFFER, limit).await?
+            {
+                Some(raw) => raw,
+                None => return Ok(None),
+            },
+            None => transport.read(crate::transport::READ_BUFFER).await?,
+        };
+        Message::decode_response(&raw).map(Some)
+    }
+
+    /// Send an arbitrary command and return whatever comes back, enforcing nothing.
+    ///
+    /// For reverse-engineering commands that have no typed operation yet. Unlike
+    /// [`Self::request`] this accepts a reply that is not `command + 1` and a non-zero
+    /// status, because on an undocumented command both are results rather than faults —
+    /// a device that does not implement one still answers, with a status saying so.
+    /// `Ok(None)` means it said nothing within `limit`.
+    ///
+    /// Queued [`cmd::CHANGED`] notifications are drained as in [`Self::request`], so a
+    /// front-panel STORE cannot be mistaken for the probe's answer.
+    ///
+    /// # Warning
+    ///
+    /// This sends bytes no capture has ever shown the device being sent. Unknown
+    /// commands have been reported to leave instrument firmware in a state only a power
+    /// cycle clears, and a write-shaped command reaching a real object destroys it.
+    /// Probe read-shaped commands, on backed-up content, or not at all.
+    pub async fn probe(
+        &mut self,
+        service: Service,
+        subsystem: u32,
+        command: u32,
+        args: &[u8],
+        limit: Duration,
+    ) -> Result<Option<Message>> {
+        self.set_read_limit(limit);
+        let req = Message::new(service, subsystem, command, args.to_vec());
+        self.notify(&req).await?;
+
+        let mut drained = 0;
+        loop {
+            let Some(resp) = self.read_frame().await? else {
+                return Ok(None);
+            };
+            if resp.command == cmd::CHANGED && resp.command != command + 1 && drained < DRAIN_CAP {
+                drained += 1;
+                self.device_changed = true;
+                continue;
+            }
+            return Ok(Some(resp));
+        }
     }
 
     /// Send one request and read its response, enforcing the framing invariants: the
@@ -165,14 +249,17 @@ impl<T: Transport, C> Session<'_, T, C> {
     async fn response_to(&mut self, command: u32) -> Result<Message> {
         let mut drained = 0;
         loop {
-            let transport = self
-                .transport
-                .as_mut()
-                .ok_or_else(|| Error::Transport("session has no transport".into()))?;
-
-            let raw = transport.read(crate::transport::READ_BUFFER).await;
-            let resp = match raw.and_then(|raw| Message::decode_response(&raw)) {
-                Ok(resp) => resp,
+            let resp = match self.read_frame().await {
+                Ok(Some(resp)) => resp,
+                // The limit passed with no reply. Nothing can be paired with this
+                // request afterwards, so it is a desync like any other — but the
+                // transfer was cancelled, so the close still has a chance of landing.
+                Ok(None) => {
+                    self.release().await;
+                    return Err(Error::Transport(format!(
+                        "no reply to command {command:#04x} within the session's read limit"
+                    )));
+                }
                 Err(e) => {
                     self.release().await;
                     return Err(e);
@@ -218,9 +305,9 @@ impl<T: Transport, C> Session<'_, T, C> {
         if self.notify(&goodbye).await.is_err() {
             return;
         }
-        if let Some(transport) = self.transport.as_mut() {
-            let _ = transport.read(crate::transport::READ_BUFFER).await;
-        }
+        // Best effort, and bounded when the session is: this runs on the failure path,
+        // where the reason for failing may well be a device that has stopped answering.
+        let _ = self.read_frame().await;
     }
 
     /// Send a fire-and-forget message without waiting for a reply.

@@ -112,6 +112,26 @@ pub mod cmd {
     /// List an entity's piano/sample dependencies.
     pub const DEPENDENCIES: u32 = 0x28;
 
+    /// Next occupied slot at or after a position. Args: bank, slot; the reply carries
+    /// bank and the next occupied slot.
+    ///
+    /// The status describes the *position asked about* — `0` in range, `1` past the end
+    /// — so it is the end-of-walk signal rather than a fault. Occupied slots are sparse
+    /// and their indices run past the class's item count, so this is the only way to
+    /// enumerate a library: `INFO` answers one slot at a time and nothing else reports
+    /// which ones hold anything.
+    pub const NEXT_SLOT: u32 = 0x20;
+
+    /// ⚠️ **Never send this.** It puts `"Deleting..."` and a full progress bar on the
+    /// instrument's display, returns no reply at all, and leaves the session impossible
+    /// to close — the label clears only on a power cycle. Sent with no arguments it
+    /// destroyed nothing, and what it does with arguments is untested.
+    ///
+    /// Named so it is recognisable in a capture, and so nobody probes this range again
+    /// expecting an "unsupported" answer: sitting above every documented command is not
+    /// evidence that a code is unimplemented.
+    pub const DO_NOT_SEND_DELETING: u32 = 0x7e;
+
     /// Unsolicited device → host notification — no request pairs with it, so it
     /// arrives in place of whatever reply the host reads for next. Observed on
     /// hardware, queued by a front-panel STORE while a cable session was possible;

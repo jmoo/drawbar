@@ -53,6 +53,13 @@ pub fn shown(at: Location) -> String {
     format!("bank {} slot {}", at.bank + 1, at.slot + 1)
 }
 
+/// The compact `BANK:SLOT` spelling, as the address is typed on the command line.
+///
+/// For lists, where [`shown`]'s prose repeats on every row and pushes the columns apart.
+pub fn addr(at: Location) -> String {
+    format!("{}:{}", at.bank + 1, at.slot + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

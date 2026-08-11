@@ -16,7 +16,7 @@ use nord_usb::transport::Transport;
 use nord_usb::wire::{Location, ProgramInfo, Status};
 use nord_usb::{op as usb_op, ObjectClass, Session};
 
-use crate::slot::shown;
+use crate::slot::{addr, shown};
 use crate::ui::Ui;
 
 /// Where to get the exchange from.
@@ -853,6 +853,150 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
             d.id,
             d.name.trim_end(),
         ));
+    }
+    Ok(())
+}
+
+/// List every occupied slot in a class, with each object's name. Read-only.
+///
+/// One session: the cursor walk and every `info` share it, so a library of a few hundred
+/// items is a few hundred exchanges rather than a few hundred sessions.
+pub fn list(ui: &Ui, class: ObjectClass, cap: usize) -> Result<(), String> {
+    let mut t = open_usb()?;
+    let rows = nord_usb::block_on(async {
+        let mut s = Session::open(&mut t, class).await?;
+        let r = async {
+            let mut rows = Vec::new();
+            for at in usb_op::occupied_slots(&mut s, cap).await? {
+                // The cursor reports what follows a position, never whether the position
+                // itself holds anything, so the first address may be empty. An empty slot
+                // answers status 1, which is a refusal and leaves the session usable.
+                match usb_op::info(&mut s, at).await {
+                    Ok(info) => rows.push((at, info)),
+                    Err(nord_usb::Error::DeviceStatus(1)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(rows)
+        }
+        .await;
+        let closed = s.commit().await;
+        finish(r, closed)
+    })
+    .map_err(|e| e.to_string())?;
+
+    if rows.is_empty() {
+        ui.note(format!("no {} on the instrument", class.label()));
+        return Ok(());
+    }
+
+    ui.out(ui.dim(format!("{:<8} {:<6} {:>9}  name", "slot", "format", "bytes")));
+    for (at, info) in &rows {
+        ui.out(format!(
+            "{:<8} {:<6} {:>9}  {}",
+            addr(*at),
+            info.format,
+            info.body_len,
+            info.name.trim_end(),
+        ));
+    }
+    ui.note("");
+    ui.note(format!("{} {}", rows.len(), class.label()));
+    Ok(())
+}
+
+/// Send a raw command code and print the reply verbatim. Reverse-engineering tool.
+///
+/// Interprets nothing: an unknown command's status word and payload are the finding, so
+/// both are printed as they arrived. A device that ignores the command is reported as a
+/// timeout rather than hanging the caller.
+pub fn probe(
+    ui: &Ui,
+    class: ObjectClass,
+    op: u32,
+    args: &[u32],
+    wait: u64,
+    yes: bool,
+) -> Result<(), String> {
+    let mut words = Vec::with_capacity(args.len() * 4);
+    for a in args {
+        words.extend_from_slice(&a.to_be_bytes());
+    }
+
+    // Measured, not guessed: this one paints "Deleting..." on the instrument, never
+    // answers, and costs a power cycle. `--yes` is not enough of a gate for a command
+    // already known to do that.
+    if op == nord_usb::wire::cmd::DO_NOT_SEND_DELETING {
+        return Err(format!(
+            "{op:#04x} is known to hang the instrument: it shows \"Deleting...\" and \
+             never replies, and only a power cycle recovers. Refusing."
+        ));
+    }
+
+    ui.note(format!(
+        "probing command {op:#04x} on {} with {} argument word(s)",
+        class.label(),
+        args.len()
+    ));
+    if !yes {
+        return Err("refusing to probe without --yes".into());
+    }
+
+    let mut t = open_usb()?;
+    let (reply, changed) = nord_usb::block_on(async {
+        let mut s = Session::open(&mut t, class).await?;
+        let r = s
+            .probe(
+                nord_usb::Service::Program,
+                10,
+                op,
+                &words,
+                std::time::Duration::from_secs(wait),
+            )
+            .await;
+        let changed = s.instrument_changed();
+        let closed = s.commit().await;
+        finish(r, closed).map(|r| (r, changed))
+    })
+    .map_err(|e| e.to_string())?;
+
+    if changed {
+        ui.note("the instrument reported a change during this session");
+    }
+
+    let Some(reply) = reply else {
+        ui.out(format!(
+            "no reply within {wait}s — the device ignored command {op:#04x}"
+        ));
+        return Ok(());
+    };
+
+    // `command` is the device's own echo, not an assumption: an unknown code may not
+    // answer with `op + 1`, and which code it does answer with is part of the finding.
+    ui.out(format!(
+        "reply command {:#04x}{}",
+        reply.command,
+        if reply.command == op + 1 {
+            String::new()
+        } else {
+            format!(" (expected {:#04x} by the +1 rule)", op + 1)
+        }
+    ));
+    match reply.status() {
+        Some(0) => ui.out("status  0 (ok)".to_string()),
+        Some(code) => ui.out(format!("status  {code} ({code:#x}) — not success")),
+        None => ui.out("status  absent — reply too short to carry one".to_string()),
+    }
+
+    let payload = reply.payload();
+    ui.out(format!("payload {} bytes", payload.len()));
+    for (i, chunk) in payload.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .collect();
+        ui.out(format!("  {:04x}  {:<47}  {ascii}", i * 16, hex.join(" ")));
     }
     Ok(())
 }

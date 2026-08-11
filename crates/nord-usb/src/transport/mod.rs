@@ -71,6 +71,27 @@ pub trait Transport {
 
     /// Read up to `max` bytes from the IN endpoint.
     async fn read(&mut self, max: usize) -> Result<Vec<u8>>;
+
+    /// Read, giving up after `limit`. `Ok(None)` means nothing arrived in time.
+    ///
+    /// For probing commands whose existence is unknown: a device that does not
+    /// recognise one may answer with an error status, or may say nothing at all, and
+    /// [`Self::read`] would wait forever on the second case. Killing a hung process
+    /// instead leaves the transaction open, which wedges the instrument until it is
+    /// power-cycled.
+    ///
+    /// The default implementation **has no timeout** — it defers to [`Self::read`] and
+    /// can only return `Ok(Some(_))`. Honoring the limit requires cancelling a transfer
+    /// already submitted to the OS, which is backend-specific; a backend that cannot do
+    /// that must not pretend to, because abandoning a submitted read desynchronises
+    /// every later request from its response.
+    async fn read_timeout(
+        &mut self,
+        max: usize,
+        _limit: std::time::Duration,
+    ) -> Result<Option<Vec<u8>>> {
+        self.read(max).await.map(Some)
+    }
 }
 
 /// Opt-in marker for desktop callers that need to move a transport across threads.

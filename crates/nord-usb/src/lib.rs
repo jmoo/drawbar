@@ -18,6 +18,8 @@
 //! are no `Send` bounds, and why enumeration is deliberately backend-specific rather
 //! than part of the portable core.
 
+#[cfg(feature = "nusb")]
+pub mod deadline;
 pub mod envelope;
 pub mod error;
 pub mod op;

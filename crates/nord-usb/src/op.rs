@@ -275,6 +275,112 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
 ///
 /// **Read-only.** The returned [`Dependency`] ids match the ids the objects carry in
 /// their own files, which is the bridge between wire content and file bytes.
+/// The next occupied slot after `at`, or `None` once the walk runs off the end.
+///
+/// **Read-only.** Positions inside a gap are safe to pass: the device answers with the
+/// next real object rather than an error, which is what makes this an iterator over
+/// content instead of over addresses.
+pub async fn next_occupied<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    at: Location,
+) -> Result<Option<Location>> {
+    let mut args = Vec::new();
+    at.write_to(&mut args);
+    match session
+        .request(Service::Program, 10, cmd::NEXT_SLOT, &args)
+        .await
+    {
+        Ok(resp) => {
+            let p = resp.payload();
+            if p.len() < 8 {
+                return Err(Error::Truncated {
+                    got: p.len(),
+                    need: 8,
+                });
+            }
+            Ok(Some(Location {
+                bank: u32::from_be_bytes(p[0..4].try_into().unwrap()),
+                slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
+            }))
+        }
+        // Not a fault: the position asked about is past the end, which is how the walk
+        // terminates. A refusal leaves the session in step, so the caller may continue.
+        Err(Error::DeviceStatus(1)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Every occupied slot in the session's class, in address order.
+///
+/// **Read-only.** [`next_occupied`] walks *within* one bank and stops at its end, so this
+/// drives it bank by bank. Pianos span several banks and programs fill eight of them;
+/// only the sample library is flat, and walking bank 0 alone silently reports a fraction
+/// of the class.
+///
+/// Bank 0 slot 0 of each bank is tested with [`info`], because the cursor reports what
+/// comes *after* a position and can never say whether the first one holds anything.
+/// That test also ends the walk: an out-of-range bank (status `3`) means the class has no
+/// more banks, which is different from a bank that merely holds nothing (status `1`) —
+/// the sample library has addressable empty banks past its only populated one.
+///
+/// Two bounds keep a walk finite when the device does not behave as expected: `cap` on
+/// total slots, and a stop after [`EMPTY_BANKS_BEFORE_STOP`] consecutive empty banks for
+/// classes that never report out-of-range at all.
+pub async fn occupied_slots<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    cap: usize,
+) -> Result<Vec<Location>> {
+    let mut found: Vec<Location> = Vec::new();
+    let mut empty_banks = 0;
+
+    for bank in 0..MAX_BANKS {
+        if found.len() >= cap {
+            break;
+        }
+        let start = Location { bank, slot: 0 };
+        let start_holds_something = match info(session, start).await {
+            Ok(_) => true,
+            Err(Error::DeviceStatus(1)) => false,
+            Err(Error::DeviceStatus(3)) => break,
+            Err(e) => return Err(e),
+        };
+
+        let before = found.len();
+        if start_holds_something {
+            found.push(start);
+        }
+        let mut at = start;
+        while found.len() < cap {
+            match next_occupied(session, at).await? {
+                // Staying inside the bank and moving forward, or the walk is not making
+                // progress and would spin.
+                Some(next) if next.bank == bank && next.slot > at.slot => {
+                    found.push(next);
+                    at = next;
+                }
+                _ => break,
+            }
+        }
+
+        if found.len() == before {
+            empty_banks += 1;
+            if empty_banks >= EMPTY_BANKS_BEFORE_STOP {
+                break;
+            }
+        } else {
+            empty_banks = 0;
+        }
+    }
+    Ok(found)
+}
+
+/// Highest bank number a walk will try. Programs use eight; nothing observed uses more.
+const MAX_BANKS: u32 = 64;
+
+/// How many consecutive empty banks end a walk, for classes whose banks stay addressable
+/// past the last populated one instead of reporting out-of-range.
+const EMPTY_BANKS_BEFORE_STOP: u32 = 2;
+
 pub async fn dependencies<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,

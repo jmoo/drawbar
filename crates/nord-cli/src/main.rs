@@ -371,6 +371,57 @@ enum SlotAction {
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
+
+    /// List everything the instrument holds in this class. Read-only.
+    ///
+    /// Walks the device's own slot cursor, so it reports what is actually stored rather
+    /// than probing every address: occupied slots are sparse, and their indices run past
+    /// the class's item count.
+    List {
+        /// Stop after this many slots. A guard against a walk that fails to advance.
+        #[arg(long, default_value_t = 1024)]
+        cap: usize,
+    },
+
+    /// Send a raw command code and print whatever the device answers. For RE only.
+    ///
+    /// Nothing about the reply is interpreted: the status word and payload are printed
+    /// as-is, because on an unknown command an error status is the finding. A command
+    /// the device ignores is reported as a timeout rather than hanging.
+    ///
+    /// DANGER: these are bytes no capture has shown the device being sent. Unknown
+    /// commands can leave the instrument needing a power cycle, and anything
+    /// write-shaped will destroy whatever object it reaches. Read-shaped codes only,
+    /// and back up first.
+    Probe {
+        /// Command code, decimal or 0x-prefixed, e.g. 0x20.
+        #[arg(value_name = "OP", value_parser = parse_u32)]
+        op: u32,
+
+        /// Argument words, appended in order as big-endian u32s: --arg 1 --arg 0.
+        #[arg(long = "arg", value_name = "N", value_parser = parse_u32)]
+        args: Vec<u32>,
+
+        /// Seconds to wait for a reply before giving up.
+        #[arg(long, default_value_t = 5)]
+        wait: u64,
+
+        /// Required. Probing is not a read-only operation in the sense the other
+        /// read verbs are — the device's response to an unknown code is unknown.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// Accept `0x2a` as readily as `42`: command codes are quoted in hex everywhere in the
+/// protocol notes, and retyping them in decimal invites transcription errors.
+fn parse_u32(s: &str) -> Result<u32, String> {
+    let s = s.trim();
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse(),
+    }
+    .map_err(|e| format!("{s}: {e}"))
 }
 
 #[derive(Args)]
@@ -517,6 +568,13 @@ fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), St
             slot::Target::File(path) => file::deps(ui, &path, class),
             slot::Target::Slot(at) => device::deps(ui, at, class),
         },
+        SlotAction::List { cap } => device::list(ui, class, cap),
+        SlotAction::Probe {
+            op,
+            args,
+            wait,
+            yes,
+        } => device::probe(ui, class, op, &args, wait, yes),
     }
 }
 
