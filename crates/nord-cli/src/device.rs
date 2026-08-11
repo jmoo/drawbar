@@ -839,7 +839,7 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
         ui.note(format!("{} has no dependencies", shown(at)));
         return Ok(());
     }
-    ui.out(ui.dim(format!("{:<8} {:<10} name", "class", "id")));
+    ui.out(ui.dim(format!("{:<4} {:<8} {:<10} name", "flag", "class", "id")));
     for d in &deps {
         // Library objects report no slot, so most rows carry no location at all.
         let loc = match d.location.map(shown) {
@@ -847,7 +847,8 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
             None => String::new(),
         };
         ui.out(format!(
-            "{:<8} {:08x}   {}{loc}",
+            "{:<4} {:<8} {:08x}   {}{loc}",
+            d.flag,
             d.class.label(),
             d.id,
             d.name.trim_end(),
