@@ -64,13 +64,21 @@ fn formats() -> Vec<(&'static str, u64, u32)> {
         (ns3::program::FORMAT, ns3::program::BODY_LEN as u64, 304),
         (ns3::live::FORMAT, ns3::program::BODY_LEN as u64, 304),
         (ns3::song::FORMAT, ns3::song::BODY_LEN, 300),
-        (ns3::synth::FORMAT, ns3::synth::BODY_LEN, 300),
+        (ns3::synth::FORMAT, ns3::synth::BODY_LEN as u64, 300),
         (ns3::settings::FORMAT, ns3::settings::BODY_LEN, 300),
-        (ns4::program::FORMAT, ns4::program::BODY_LEN, 313),
-        (ns4::live::FORMAT, ns4::live::BODY_LEN, 313),
-        (ns4::synth::FORMAT, ns4::synth::BODY_LEN, 208),
-        (ns4::piano_preset::FORMAT, ns4::piano_preset::BODY_LEN, 203),
-        (ns4::organ_preset::FORMAT, ns4::organ_preset::BODY_LEN, 205),
+        (ns4::program::FORMAT, ns4::program::BODY_LEN as u64, 313),
+        (ns4::live::FORMAT, ns4::program::BODY_LEN as u64, 313),
+        (ns4::synth::FORMAT, ns4::synth::BODY_LEN as u64, 208),
+        (
+            ns4::piano_preset::FORMAT,
+            ns4::piano_preset::BODY_LEN as u64,
+            203,
+        ),
+        (
+            ns4::organ_preset::FORMAT,
+            ns4::organ_preset::BODY_LEN as u64,
+            205,
+        ),
         (ns4::settings::FORMAT, ns4::settings::BODY_LEN, 106),
         (
             nsclassic::program::FORMAT,
@@ -144,8 +152,8 @@ fn version_gates_cover_the_decoded_formats_only() {
     assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
 
     let bytes = synthesize(
-        ns4::program::FORMAT,
-        ns4::program::BODY_LEN,
+        ns4::settings::FORMAT,
+        ns4::settings::BODY_LEN,
         999,
         Generation::V1,
     );

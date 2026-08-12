@@ -629,6 +629,51 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Live(Live::Stage2(p)) => ns2_globals(ui, "Stage 2 live slot (ns2l)", p),
         Entity::Program(Program::Stage3(p)) => ns3_globals(ui, "Stage 3 program (ns3f)", p),
         Entity::Live(Live::Stage3(p)) => ns3_globals(ui, "Stage 3 live slot (ns3l)", p),
+        Entity::Program(Program::Stage4(p)) => ns4_globals(ui, "Stage 4 program (ns4p)", p),
+        Entity::Live(Live::Stage4(p)) => ns4_globals(ui, "Stage 4 live slot (ns4l)", p),
+        Entity::Synth(nord_format::Synth::Stage4(y)) => {
+            ns4_head(ui, "Stage 4 synth preset (ns4y)", &y.header);
+            section(ui, "Layers");
+            ui.out(field(
+                ui,
+                4,
+                "on",
+                layers(&[
+                    ("A", y.synth_a_layer_enabled),
+                    ("B", y.synth_b_layer_enabled),
+                    ("C", y.synth_c_layer_enabled),
+                ]),
+            ));
+            ns4_note(ui);
+        }
+        Entity::PianoPreset(nord_format::PianoPreset::Stage4(n)) => {
+            ns4_head(ui, "Stage 4 piano preset (ns4n)", &n.header);
+            section(ui, "Layers");
+            ui.out(field(
+                ui,
+                4,
+                "on",
+                layers(&[
+                    ("A", n.piano_a_layer_enabled),
+                    ("B", n.piano_b_layer_enabled),
+                ]),
+            ));
+            ns4_note(ui);
+        }
+        Entity::OrganPreset(nord_format::OrganPreset::Stage4(o)) => {
+            ns4_head(ui, "Stage 4 organ preset (ns4o)", &o.header);
+            section(ui, "Layers");
+            ui.out(field(
+                ui,
+                4,
+                "on",
+                layers(&[
+                    ("A", o.organ_a_layer_enabled),
+                    ("B", o.organ_b_layer_enabled),
+                ]),
+            ));
+            ns4_note(ui);
+        }
         Entity::Bundle(nord_format::Bundle::Drum2Bank(b)) => {
             ui.out(field(ui, 2, "type", "Drum 2 bank (zip)"));
             ui.out(field(ui, 2, "programs", b.programs.len().to_string()));
@@ -754,6 +799,115 @@ fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>
     };
     ui.out(field(ui, 4, "dual kb", dual));
     ui.out(field(ui, 4, "note", ui.dim("panels and effects unmapped")));
+}
+
+/// `A+B` / `A` / `—` — which of a section's layers are switched on.
+fn layers(on: &[(&str, bool)]) -> String {
+    let live: Vec<&str> = on.iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
+    if live.is_empty() {
+        "—".to_string()
+    } else {
+        live.join("+")
+    }
+}
+
+/// The container facts every Stage 4 file carries. The category is shown as its
+/// stored id: what the ids name on this model is not decoded.
+fn ns4_head(ui: &Ui, kind: &str, header: &nord_format::cbin::Header) {
+    ui.out(field(ui, 2, "type", kind));
+    let (bank, slot) = header.slot();
+    ui.out(field(ui, 2, "location", location(bank, slot)));
+    if let Some(id) = header.category() {
+        ui.out(field(ui, 2, "category", format!("id {id}")));
+    }
+    ui.out(field(ui, 2, "version", {
+        let v = header.version;
+        format!("{}.{:02}", v / 100, v % 100)
+    }));
+}
+
+fn ns4_note(ui: &Ui) {
+    ui.out(field(
+        ui,
+        4,
+        "note",
+        ui.dim("every parameter decodes; values are raw, use --raw to read them"),
+    ));
+}
+
+/// The Stage 4 program-wide globals.
+///
+/// Only the parameters that carry their own meaning are shown. The rest decode to
+/// the number the file stores, which reads as noise in a summary — `--raw` is
+/// where those belong until there is something to name them with.
+fn ns4_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns4::Program>) {
+    ns4_head(ui, kind, &p.header);
+
+    section(ui, "Globals");
+    ui.out(field(
+        ui,
+        4,
+        "sections",
+        format!(
+            "organ {}, piano {}, synth {}",
+            yn(p.organ_section_enabled),
+            yn(p.piano_section_enabled),
+            yn(p.synth_section_enabled),
+        ),
+    ));
+    ui.out(field(
+        ui,
+        4,
+        "layers",
+        format!(
+            "organ {}, piano {}, synth {}",
+            layers(&[
+                ("A", p.organ_a_layer_enabled),
+                ("B", p.organ_b_layer_enabled)
+            ]),
+            layers(&[
+                ("A", p.piano_a_layer_enabled),
+                ("B", p.piano_b_layer_enabled)
+            ]),
+            layers(&[
+                ("A", p.synth_a_layer_enabled),
+                ("B", p.synth_b_layer_enabled),
+                ("C", p.synth_c_layer_enabled),
+            ]),
+        ),
+    ));
+    let split = if p.split_enabled {
+        layers(&[
+            ("1-2", p.kb_zones_1_2_split_point_enabled),
+            ("2-3", p.kb_zones_2_3_split_point_enabled),
+            ("3-4", p.kb_zones_3_4_split_point_enabled),
+        ])
+    } else {
+        "off".to_string()
+    };
+    ui.out(field(ui, 4, "split", split));
+    ui.out(field(
+        ui,
+        4,
+        "transpose",
+        if p.program_transpose_enabled {
+            format!("on (stored {})", p.program_transpose_amount)
+        } else {
+            "off".to_string()
+        },
+    ));
+    ui.out(field(
+        ui,
+        4,
+        "global fx",
+        format!(
+            "comp {}, delay {}, reverb {}",
+            yn(p.fx_comp_global_enabled),
+            yn(p.fx_delay_global_enabled),
+            yn(p.fx_reverb_global_enabled),
+        ),
+    ));
+    ns4_note(ui);
 }
 
 /// `off (stored -2)` vs `+3` — the enable bit means touched-at-least-once, so the

@@ -165,6 +165,83 @@ impl<const MAX: u8> PartialEq<u8> for RangedU8<MAX> {
     }
 }
 
+/// An unsigned value constrained to `0..=MAX`, for a slot wider than a byte.
+///
+/// [`RangedU8`] with a wider inner type, and the same rule about `MAX`: it is the
+/// slot's bound, not the instrument's.
+#[derive(Copy, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RangedU16<const MAX: u16> {
+    inner: u16,
+}
+
+impl<const MAX: u16> RangedU16<MAX> {
+    /// The largest value this type can hold.
+    pub const MAX: u16 = MAX;
+
+    pub fn new(value: u16) -> Result<Self, ParseError> {
+        value.try_into()
+    }
+
+    pub fn as_u16(&self) -> u16 {
+        self.inner
+    }
+
+    pub fn inner(&self) -> u16 {
+        self.inner
+    }
+}
+
+impl<const MAX: u16> Packed for RangedU16<MAX> {
+    const MAX_BITS: u32 = bits_for(MAX as u64);
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        (bits as u16).try_into()
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.inner as u64
+    }
+}
+
+impl<const MAX: u16> TryFrom<u16> for RangedU16<MAX> {
+    type Error = ParseError;
+
+    fn try_from(value: u16) -> Result<Self, ParseError> {
+        if value > MAX {
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: format!("0..={MAX}"),
+            });
+        }
+        Ok(RangedU16 { inner: value })
+    }
+}
+
+impl<const MAX: u16> From<RangedU16<MAX>> for u16 {
+    fn from(value: RangedU16<MAX>) -> u16 {
+        value.inner
+    }
+}
+
+impl<const MAX: u16> Debug for RangedU16<MAX> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<const MAX: u16> std::fmt::Display for RangedU16<MAX> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<const MAX: u16> PartialEq<u16> for RangedU16<MAX> {
+    fn eq(&self, other: &u16) -> bool {
+        self.inner == *other
+    }
+}
+
 /// A pair of u16 coordinates over an `X_COUNT` × `Y_COUNT` space.
 ///
 /// Both parameters are **counts**, so the valid coordinates are `0..X_COUNT` and

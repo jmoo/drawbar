@@ -1,13 +1,29 @@
-//! The Stage 2 program body (`.ns2p`): 521 bytes, globals decoded, slots not.
+//! The Stage 2 program body (`.ns2p`, `.ns2l`): 521 bytes, every documented
+//! parameter placed.
 //!
-//! Every placement here is inferred from the Nord User Forum's ns3-program-viewer
-//! documentation (github.com/Chris55/ns3-program-viewer); not confirmed on
-//! hardware. The two slot blocks and the effects chains are documented there too
-//! but not yet decoded; their bits ride along verbatim.
+//! The program-wide globals were decoded first and by hand; everything else — the
+//! organ's B3, Vox and Farfisa drawbar banks, the piano, synth, extern and the
+//! effects chain — comes from the byte maps.
+//!
+//! ⚠️ Stage 2 files are **type-0** containers, where the Stage 3's are type-1. The
+//! byte maps number both in the type-1 layout; since type-0 differs only by
+//! omitting `0x18..0x2b`, the body is the same either way and a documented offset
+//! is `doc - 0x2c` in both.
+//!
+//! The body is 23 bytes of globals and then two [`Slot`]s — the program's two
+//! complete setups — so the slot is declared once and placed twice. Registry paths
+//! follow: `slot_a.organ_type`.
+//!
+//! Values are raw except where the documentation enumerates them; see [the module
+//! docs](super) for what that ceiling is and why.
 
+use super::slot::Slot;
 use crate::cbin::{self, Cbin, Header};
-use crate::components::{MasterTempo, ProgramCategory, SplitNote, StageTranspose};
+use crate::components::{
+    sparse_enum, MasterTempo, ProgramCategory, ReverbType, SplitNote, StageTranspose,
+};
 use crate::error::Error;
+use crate::types::RangedU8;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns2p";
@@ -21,26 +37,81 @@ pub const BODY_LEN: usize = 521;
 /// byte 0 (`0x2c` in a type-1 file), so byte 0x02 bit 5 is bit 18.
 #[nord_bits_derive::bitbody(521)]
 pub struct Program {
+    #[bits(16..=17)]
+    pub slot_selection: RangedU8<3>,
     #[bits(18..=18)]
     pub dual_keyboard: bool,
-    /// The Low split point in a three-zone split, or the only one in two zones.
     #[bits(20..=23)]
     pub split_low_note: SplitNote,
-    /// ⚠️ Never `F2` (stored 0) on the panel: the High point's table starts at C3.
     #[bits(24..=27)]
     pub split_high_note: SplitNote,
     #[bits(28..=28)]
     pub split_three_zones: bool,
     #[bits(29..=29)]
     pub split_two_zones: bool,
-    /// Touched at least once, not active: the untouched default stores 6 (= 0),
-    /// and the EX factory live buffers hold the out-of-table 15.
+    #[bits(33..=33)]
+    pub organ_pitch_stick: bool,
     #[bits(34..=34)]
     pub transpose_enabled: bool,
     #[bits(35..=38)]
     pub transpose: StageTranspose,
     #[bits(43..=50)]
     pub master_clock: MasterTempo,
+    #[bits(64..=65)]
+    pub organ_model: RangedU8<3>,
+    #[bits(72..=74)]
+    pub organ_b3_vibrato_mode: RangedU8<7>,
+    #[bits(75..=75)]
+    pub organ_b3_harmonic_third: bool,
+    #[bits(76..=76)]
+    pub organ_b3_decay_fast: bool,
+    #[bits(77..=77)]
+    pub organ_b3_volume_soft: bool,
+    #[bits(89..=90)]
+    pub organ_vox_vibrato_mode: RangedU8<3>,
+    #[bits(91..=91)]
+    pub organ_vox_vibrato_on: bool,
+    #[bits(105..=106)]
+    pub organ_farfisa_vibrato_mode: RangedU8<3>,
+    #[bits(107..=107)]
+    pub organ_farfisa_vibrato_on: bool,
+    #[bits(120..=122)]
+    pub piano_slot_detune: RangedU8<7>,
+    #[bits(136..=136)]
+    pub reverb_on: bool,
+    #[bits(137..=139)]
+    pub reverb_type: ReverbType,
+    #[bits(140..=146)]
+    pub reverb_amount: RangedU8<127>,
+    #[bits(147..=147)]
+    pub compressor_on: bool,
+    #[bits(148..=154)]
+    pub compressor_amount: RangedU8<127>,
+    #[bits(155..=155)]
+    pub rotary_speaker_on: bool,
+    #[bits(156..=157)]
+    pub rotary_speaker_source: RangedU8<3>,
+    #[bits(158..=164)]
+    pub rotary_speaker_drive: RangedU8<127>,
+    #[bits(165..=165)]
+    pub rotary_speaker_stop_mode: bool,
+    #[bits(166..=166)]
+    pub rotary_speaker_speed: bool,
+    #[bits(167..=167)]
+    pub rotary_speaker_speed_wheel: bool,
+    #[bits(168..=168)]
+    pub rotary_speaker_speed_aftertouch: bool,
+    #[bits(169..=169)]
+    pub rotary_speaker_speed_ctrl_pedal: bool,
+
+    /// Slot A — the first of the program's two complete setups.
+    #[at(23..272)]
+    pub slot_a: Slot,
+
+    /// Slot B. Same type: the two are the same layout, and neither is
+    /// a copy of the other — `slot_enabled_and_selection` says which sound.
+    #[at(272..521)]
+    pub slot_b: Slot,
 }
 
 impl Program {
@@ -69,3 +140,39 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error
     crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
     Ok(file)
 }
+
+sparse_enum!(
+    /// From the `ns2-organ-kb-zone` table in the Stage byte-map docs.
+    OrganKbZone, 3, {
+        0 => Lo, "LO";
+        1 => LoUp, "LO UP";
+        2 => Up, "UP";
+        3 => UpHi, "UP HI";
+        4 => Hi, "HI";
+        5 => LoUpHi, "LO UP HI";
+    }
+);
+
+sparse_enum!(
+    /// From the `ns2-piano-kb-zone` table in the Stage byte-map docs.
+    PianoKbZone, 3, {
+        0 => Lo, "LO";
+        1 => LoUp, "LO UP";
+        2 => Up, "UP";
+        3 => UpHi, "UP HI";
+        4 => Hi, "HI";
+        5 => LoUpHi, "LO UP HI";
+    }
+);
+
+sparse_enum!(
+    /// From the `ns2-synth-kb-zone` table in the Stage byte-map docs.
+    SynthKbZone, 3, {
+        0 => Lo, "LO";
+        1 => LoUp, "LO UP";
+        2 => Up, "UP";
+        3 => UpHi, "UP HI";
+        4 => Hi, "HI";
+        5 => LoUpHi, "LO UP HI";
+    }
+);

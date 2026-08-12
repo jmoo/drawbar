@@ -261,13 +261,19 @@ fn observed_body_lengths_match_the_documented_constants() {
         (ns3::program::FORMAT, ns3::program::BODY_LEN as u64),
         (ns3::live::FORMAT, ns3::program::BODY_LEN as u64),
         (ns3::song::FORMAT, ns3::song::BODY_LEN),
-        (ns3::synth::FORMAT, ns3::synth::BODY_LEN),
+        (ns3::synth::FORMAT, ns3::synth::BODY_LEN as u64),
         (ns3::settings::FORMAT, ns3::settings::BODY_LEN),
-        (ns4::program::FORMAT, ns4::program::BODY_LEN),
-        (ns4::live::FORMAT, ns4::live::BODY_LEN),
-        (ns4::synth::FORMAT, ns4::synth::BODY_LEN),
-        (ns4::piano_preset::FORMAT, ns4::piano_preset::BODY_LEN),
-        (ns4::organ_preset::FORMAT, ns4::organ_preset::BODY_LEN),
+        (ns4::program::FORMAT, ns4::program::BODY_LEN as u64),
+        (ns4::live::FORMAT, ns4::program::BODY_LEN as u64),
+        (ns4::synth::FORMAT, ns4::synth::BODY_LEN as u64),
+        (
+            ns4::piano_preset::FORMAT,
+            ns4::piano_preset::BODY_LEN as u64,
+        ),
+        (
+            ns4::organ_preset::FORMAT,
+            ns4::organ_preset::BODY_LEN as u64,
+        ),
         (ns4::settings::FORMAT, ns4::settings::BODY_LEN),
         (nsclassic::program::FORMAT, nsclassic::program::BODY_LEN),
         (nsclassic::synth::FORMAT, nsclassic::synth::BODY_LEN),
@@ -367,6 +373,350 @@ fn stage_globals_decode_to_panel_values() {
     assert!(
         ns3_at_default_clock * 2 > ns3_seen,
         "only {ns3_at_default_clock}/{ns3_seen} programs read the 120 bpm default"
+    );
+}
+
+/// The Stage 4 decode, whose placements came from an external offset table and
+/// no hardware. Two independent checks that the table was read into the right
+/// bit space: the body echoes the header's version byte at its own offset 3, and
+/// the selector fields — each a fixed-width slot holding a short list of panel
+/// choices — never hold a value past the end of that list. A base offset off by
+/// a byte, or bits numbered the other way round, breaks both at once.
+#[test]
+fn stage4_bodies_decode_to_panel_values() {
+    use nord_format::{Live, OrganPreset, PianoPreset, Program, Synth};
+
+    let root = corpus_root();
+    let (mut programs, mut organs, mut pianos, mut synths) = (0usize, 0usize, 0usize, 0usize);
+    let mut split_on = 0usize;
+
+    // A selector's slot is wider than the choices the panel offers, so the
+    // unused encodings are the check: they must never appear.
+    let octave_shift = |v: u8| matches!(v, 0..=2 | 14 | 15);
+
+    for path in specimens(&root) {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !matches!(ext, "ns4p" | "ns4l" | "ns4o" | "ns4n" | "ns4y") {
+            continue;
+        }
+        let entity = nord_format::from_path(&path).unwrap();
+        let where_ = path.display();
+
+        match (&entity, ext) {
+            (Entity::Program(Program::Stage4(p)), _) | (Entity::Live(Live::Stage4(p)), _) => {
+                assert_eq!(
+                    p.version_echo as u32,
+                    p.header.version & 0xff,
+                    "{where_}: the body's version echo disagrees with the header"
+                );
+                assert!(
+                    p.organ_section_enabled || p.piano_section_enabled || p.synth_section_enabled,
+                    "{where_}: no section is routed to the keyboard"
+                );
+                assert!(p.organ_a.model.as_u8() <= 5, "{where_}");
+                assert!(p.organ_b.model.as_u8() <= 5, "{where_}");
+                assert!(p.piano_a.piano_type.as_u8() <= 5, "{where_}");
+                assert!(p.piano_b.piano_type.as_u8() <= 5, "{where_}");
+                assert!(p.synth_a_voice.filter_type.as_u8() <= 5, "{where_}");
+                assert!(p.synth_a_voice.lfo_shape.as_u8() <= 4, "{where_}");
+                assert!(
+                    p.synth_a_performance.voice_priority.as_u8() <= 2,
+                    "{where_}"
+                );
+                assert!(p.organ_fx.reverb_type.as_u8() <= 11, "{where_}");
+                assert!(octave_shift(p.organ_a.octave_shift.as_u8()), "{where_}");
+                split_on += usize::from(p.split_enabled);
+                programs += 1;
+            }
+            (Entity::OrganPreset(OrganPreset::Stage4(o)), _) => {
+                assert!(o.organ_a_model.as_u8() <= 5, "{where_}");
+                assert!(o.organ_b_model.as_u8() <= 5, "{where_}");
+                assert!(o.organ_fx.reverb_type.as_u8() <= 11, "{where_}");
+                assert!(octave_shift(o.organ_a_octave_shift.as_u8()), "{where_}");
+                organs += 1;
+            }
+            (Entity::PianoPreset(PianoPreset::Stage4(n)), _) => {
+                assert!(n.piano_a_type.as_u8() <= 5, "{where_}");
+                assert!(n.piano_b_type.as_u8() <= 5, "{where_}");
+                assert!(n.piano_a_fx.reverb_type.as_u8() <= 11, "{where_}");
+                assert!(octave_shift(n.piano_a_octave_shift.as_u8()), "{where_}");
+                pianos += 1;
+            }
+            (Entity::Synth(Synth::Stage4(y)), _) => {
+                assert!(y.synth_a_voice.filter_type.as_u8() <= 5, "{where_}");
+                assert!(y.synth_b_voice.filter_type.as_u8() <= 5, "{where_}");
+                assert!(y.synth_a_voice.lfo_shape.as_u8() <= 4, "{where_}");
+                assert!(y.synth_a_voice_priority.as_u8() <= 2, "{where_}");
+                assert!(y.synth_a_fx.reverb_type.as_u8() <= 11, "{where_}");
+                assert!(octave_shift(y.synth_a_octave_shift.as_u8()), "{where_}");
+                synths += 1;
+            }
+            (other, _) => panic!("{where_}: decoded to {other:?}"),
+        }
+    }
+
+    assert!(programs > 380, "only {programs} Stage 4 programs read");
+    assert!(organs > 60, "only {organs} organ presets read");
+    assert!(pianos > 90, "only {pianos} piano presets read");
+    assert!(synths > 380, "only {synths} synth presets read");
+    // A decode where no factory program ever splits is reading the wrong bits.
+    assert!(split_on > 0, "no Stage 4 program reads a split");
+}
+
+/// Every Stage 2/3 selector the byte maps enumerate decodes to a value that table
+/// names, across every factory program of both models — **on both panels**.
+///
+/// The same check the Stage 4 gets, and it earns more here: these placements come
+/// from a source with known errors in it, and a run read one bit off lands on values
+/// the panel has no name for. `sparse_enum` keeps an unknown rather than coercing it,
+/// so this is the tripwire. Running it over Panel B is also what proves the second
+/// block is the same layout as the first.
+#[test]
+fn stage_selectors_decode_to_named_values() {
+    use nord_format::{Live, Program};
+
+    let root = corpus_root();
+    let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut ns2n, mut ns3n) = (0usize, 0usize);
+
+    let note = |field: &str, side: &str, bad: bool, seen: &mut BTreeMap<String, usize>| {
+        if bad {
+            *seen.entry(format!("{side}.{field}")).or_default() += 1;
+        }
+    };
+
+    for path in specimens(&root) {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !matches!(ext, "ns2p" | "ns2l" | "ns3f" | "ns3l") {
+            continue;
+        }
+        match &nord_format::from_path(&path).unwrap() {
+            Entity::Program(Program::Stage3(p)) | Entity::Live(Live::Stage3(p)) => {
+                ns3n += 1;
+                note(
+                    "panel_enable",
+                    "globals",
+                    p.panel_enable.is_unknown(),
+                    &mut unknown,
+                );
+                note(
+                    "split_low_note",
+                    "globals",
+                    p.split_low_note.is_unknown(),
+                    &mut unknown,
+                );
+                note(
+                    "split_mid_note",
+                    "globals",
+                    p.split_mid_note.is_unknown(),
+                    &mut unknown,
+                );
+                note(
+                    "split_high_note",
+                    "globals",
+                    p.split_high_note.is_unknown(),
+                    &mut unknown,
+                );
+                for (side, panel) in [("panel_a", &p.panel_a), ("panel_b", &p.panel_b)] {
+                    note(
+                        "piano_type",
+                        side,
+                        panel.piano_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "clavinet_model",
+                        side,
+                        panel.clavinet_model.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "piano_kb_touch",
+                        side,
+                        panel.piano_kb_touch.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "piano_timbre",
+                        side,
+                        panel.piano_timbre.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_arp_range",
+                        side,
+                        panel.synth_arp_range.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_arp_pattern",
+                        side,
+                        panel.synth_arp_pattern.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_voice",
+                        side,
+                        panel.synth_voice.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_unison",
+                        side,
+                        panel.synth_unison.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_vibrato",
+                        side,
+                        panel.synth_vibrato.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_lfo_wave",
+                        side,
+                        panel.synth_lfo_wave.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_oscillator_type",
+                        side,
+                        panel.synth_oscillator_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_oscillator_config",
+                        side,
+                        panel.synth_oscillator_config.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_filter_type",
+                        side,
+                        panel.synth_filter_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_filter_kb_track",
+                        side,
+                        panel.synth_filter_kb_track.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_filter_drive",
+                        side,
+                        panel.synth_filter_drive.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_amp_env_velocity",
+                        side,
+                        panel.synth_amp_env_velocity.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "organ_kb_zone",
+                        side,
+                        panel.organ_kb_zone.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "organ_type",
+                        side,
+                        panel.organ_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "effect_1_type",
+                        side,
+                        panel.effect_1_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "effect_2_type",
+                        side,
+                        panel.effect_2_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "amp_sim_eq_amp_type",
+                        side,
+                        panel.amp_sim_eq_amp_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "reverb_type",
+                        side,
+                        panel.reverb_type.is_unknown(),
+                        &mut unknown,
+                    );
+                }
+            }
+            Entity::Program(Program::Stage2(p)) | Entity::Live(Live::Stage2(p)) => {
+                ns2n += 1;
+                // The Stage 2 EX factory live buffers are all-ones — a slot the
+                // instrument never wrote — so every field is legitimately unknown there.
+                if <[u8; 521]>::from(&p.body).iter().all(|&b| b == 0xff) {
+                    continue;
+                }
+                note(
+                    "split_low_note",
+                    "globals",
+                    p.split_low_note.is_unknown(),
+                    &mut unknown,
+                );
+                note(
+                    "reverb_type",
+                    "globals",
+                    p.reverb_type.is_unknown(),
+                    &mut unknown,
+                );
+                for (side, slot) in [("slot_a", &p.slot_a), ("slot_b", &p.slot_b)] {
+                    note(
+                        "organ_kb_zone",
+                        side,
+                        slot.organ_kb_zone.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "piano_split_zones",
+                        side,
+                        slot.piano_split_zones.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "synth_kb_zone",
+                        side,
+                        slot.synth_kb_zone.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "effect_1_type",
+                        side,
+                        slot.effect_1_type.is_unknown(),
+                        &mut unknown,
+                    );
+                    note(
+                        "effect_2_type",
+                        side,
+                        slot.effect_2_type.is_unknown(),
+                        &mut unknown,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(ns3n > 290, "only {ns3n} Stage 3 programs read");
+    assert!(ns2n > 700, "only {ns2n} Stage 2 programs read");
+    assert!(
+        unknown.is_empty(),
+        "selectors decoded to values their table does not name: {unknown:?}"
     );
 }
 

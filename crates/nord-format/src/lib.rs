@@ -66,8 +66,11 @@ pub enum Bundle {
     Members(Vec<(String, Cbin<RawBody>)>),
 }
 
-/// A stored program, one variant per model. Only the Electro 5 and the two
+/// A stored program, one variant per model. Only the Electro 5 and the three
 /// Stages decode anything of the body; the rest are container-verified stubs.
+///
+/// Left unboxed for the reason [`Entity`] gives.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Program {
     C2(Cbin<RawBody>),
@@ -95,7 +98,7 @@ pub enum Program {
     /// Stage 2 and 2 EX.
     Stage2(Cbin<ns2::Program>),
     Stage3(Cbin<ns3::Program>),
-    Stage4(Cbin<RawBody>),
+    Stage4(Cbin<ns4::Program>),
     /// Stage Classic and Stage EX.
     StageClassic(Cbin<RawBody>),
     Wave(Cbin<RawBody>),
@@ -104,6 +107,9 @@ pub enum Program {
 
 /// The live buffer — the panel as it stands, not a saved program. Same body as
 /// [`Program`], under its own format tag.
+///
+/// Left unboxed for the reason [`Entity`] gives.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Live {
     Electro4(Cbin<RawBody>),
@@ -118,7 +124,7 @@ pub enum Live {
     Piano5(Cbin<RawBody>),
     Stage2(Cbin<ns2::Program>),
     Stage3(Cbin<ns3::Program>),
-    Stage4(Cbin<RawBody>),
+    Stage4(Cbin<ns4::Program>),
     Wave2(Cbin<RawBody>),
 }
 
@@ -156,12 +162,16 @@ pub enum Settings {
     Wave2(Cbin<RawBody>),
 }
 
-/// A synth patch, on the models that bank them separately from programs.
+/// A synth patch, on the models that bank them separately from programs. Only
+/// the Stage 4's decodes.
+///
+/// Left unboxed for the reason [`Entity`] gives.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Synth {
     Stage2(Cbin<RawBody>),
-    Stage3(Cbin<RawBody>),
-    Stage4(Cbin<RawBody>),
+    Stage3(Cbin<ns3::SynthPreset>),
+    Stage4(Cbin<ns4::synth::SynthPreset>),
     StageClassic(Cbin<RawBody>),
 }
 
@@ -173,19 +183,22 @@ pub enum Performance {
 }
 
 /// A stored organ preset, on the models that keep them as files.
+///
+/// Left unboxed for the reason [`Entity`] gives.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum OrganPreset {
     /// Electro 3 and 3HP (`neop`).
     Electro3(Cbin<RawBody>),
     /// Stage 4 (`ns4o`).
-    Stage4(Cbin<RawBody>),
+    Stage4(Cbin<ns4::organ_preset::OrganPreset>),
 }
 
 /// A stored piano preset, on the models that keep them as files.
 #[derive(Debug)]
 pub enum PianoPreset {
     /// Stage 4 (`ns4n`).
-    Stage4(Cbin<RawBody>),
+    Stage4(Cbin<ns4::piano_preset::PianoPreset>),
 }
 
 /// A sample instrument, decoded by generation: all three share the `nsmp` tag,
@@ -522,7 +535,6 @@ impl Entity {
                 | P::Piano3(f)
                 | P::Piano4(f)
                 | P::Piano5(f)
-                | P::Stage4(f)
                 | P::StageClassic(f)
                 | P::Wave(f)
                 | P::Wave2(f),
@@ -537,7 +549,6 @@ impl Entity {
                 | L::Piano3(f)
                 | L::Piano4(f)
                 | L::Piano5(f)
-                | L::Stage4(f)
                 | L::Wave2(f),
             )
             | Entity::Settings(
@@ -562,10 +573,9 @@ impl Entity {
                 | St::Wave2(f),
             )
             | Entity::Song(Song::Stage3(f))
-            | Entity::Synth(Sy::Stage2(f) | Sy::Stage3(f) | Sy::Stage4(f) | Sy::StageClassic(f))
+            | Entity::Synth(Sy::Stage2(f) | Sy::StageClassic(f))
             | Entity::Performance(Performance::Lead4(f) | Performance::LeadA1(f))
-            | Entity::OrganPreset(OP::Electro3(f) | OP::Stage4(f))
-            | Entity::PianoPreset(PianoPreset::Stage4(f))
+            | Entity::OrganPreset(OP::Electro3(f))
             | Entity::PianoLibrary(f)
             | Entity::PipeLibrary(f) => Some(f),
             _ => None,
@@ -697,18 +707,18 @@ impl Entity {
                 | Live::Piano3(f)
                 | Live::Piano4(f)
                 | Live::Piano5(f)
-                | Live::Stage4(f)
                 | Live::Wave2(f) => f.write_to(w),
                 Live::Electro5(f) => f.write_to(w),
+                Live::Stage4(f) => f.write_to(w),
                 Live::Stage2(f) => f.write_to(w),
                 Live::Stage3(f) => f.write_to(w),
             },
             Entity::Midi(f) => f.write_to(w),
             Entity::OrganPreset(OrganPreset::Electro3(f))
-            | Entity::OrganPreset(OrganPreset::Stage4(f))
-            | Entity::PianoPreset(PianoPreset::Stage4(f))
             | Entity::PianoLibrary(f)
             | Entity::PipeLibrary(f) => f.write_to(w),
+            Entity::OrganPreset(OrganPreset::Stage4(f)) => f.write_to(w),
+            Entity::PianoPreset(PianoPreset::Stage4(f)) => f.write_to(w),
             Entity::Piano(f) => f.write_to(w),
             Entity::Performance(Performance::Lead4(f))
             | Entity::Performance(Performance::LeadA1(f)) => f.write_to(w),
@@ -730,13 +740,13 @@ impl Entity {
                 | Program::Piano3(f)
                 | Program::Piano4(f)
                 | Program::Piano5(f)
-                | Program::Stage4(f)
                 | Program::StageClassic(f)
                 | Program::Wave(f)
                 | Program::Wave2(f) => f.write_to(w),
                 Program::Electro5(f) => f.write_to(w),
                 Program::Stage2(f) => f.write_to(w),
                 Program::Stage3(f) => f.write_to(w),
+                Program::Stage4(f) => f.write_to(w),
             },
             Entity::Sample(Sample::V2(f)) => f.write_to(w),
             Entity::Sample(Sample::V3(f)) => f.write_to(w),
@@ -764,10 +774,11 @@ impl Entity {
             },
             Entity::Song(Song::Electro5(f)) => f.write_to(w),
             Entity::Song(Song::Stage3(f)) => f.write_to(w),
-            Entity::Synth(Synth::Stage2(f))
-            | Entity::Synth(Synth::Stage3(f))
-            | Entity::Synth(Synth::Stage4(f))
-            | Entity::Synth(Synth::StageClassic(f)) => f.write_to(w),
+            Entity::Synth(Synth::Stage2(f)) | Entity::Synth(Synth::StageClassic(f)) => {
+                f.write_to(w)
+            }
+            Entity::Synth(Synth::Stage3(f)) => f.write_to(w),
+            Entity::Synth(Synth::Stage4(f)) => f.write_to(w),
             Entity::Sysex(f) => f.write_to(w),
             #[cfg(feature = "bundle")]
             Entity::Bundle(_) => Err(ParseError::AssertFail(

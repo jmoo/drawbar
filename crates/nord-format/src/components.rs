@@ -483,6 +483,42 @@ sparse_enum!(
     }
 );
 
+sparse_enum!(
+    /// From the `ns2-effect-1-type` table in the Stage byte-map docs.
+    Effect1Type, 3, {
+        0 => APan, "A-Pan";
+        1 => Trem, "Trem";
+        2 => Rm, "RM";
+        3 => WaWa, "WA-WA";
+        4 => AWa1, "A-WA1";
+        5 => AWa2, "A-WA2";
+    }
+);
+
+sparse_enum!(
+    /// From the `ns2-effect-2-type` table in the Stage byte-map docs.
+    Effect2Type, 3, {
+        0 => Phas1, "PHAS1";
+        1 => Phas2, "PHAS2";
+        2 => Flang, "FLANG";
+        3 => Vibe, "VIBE";
+        4 => Chor1, "CHOR1";
+        5 => Chor2, "CHOR2";
+    }
+);
+
+sparse_enum!(
+    /// From the `ns2-reverb-type` table in the Stage byte-map docs.
+    ReverbType, 3, {
+        0 => Room1, "Room 1";
+        1 => Room2, "Room 2";
+        2 => Stage1, "Stage 1";
+        3 => Stage2, "Stage 2";
+        4 => Hall1, "Hall 1";
+        5 => Hall2, "Hall 2";
+    }
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
