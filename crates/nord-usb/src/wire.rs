@@ -477,6 +477,13 @@ pub struct Dependency {
 impl Dependency {
     /// Whether this row is a dependency the object actually has.
     ///
+    /// A row addresses its object one of two ways: library content (pianos, samples)
+    /// by [`Self::id`], slot-addressed content (a set list's programs) by
+    /// [`Self::location`] — with `id` always `0`. Confirmed on hardware. Requiredness
+    /// therefore asks whether the row addresses *anything*, by either field; an
+    /// id-only filter silently classifies every set-list dependency as unassigned and
+    /// a set-list bundle walk collects nothing.
+    ///
     /// Two kinds of row are reported but are **not** dependencies, and both look like one
     /// at a glance:
     ///
@@ -484,13 +491,13 @@ impl Dependency {
     ///   device resolves the section's model index to a library object regardless, so the
     ///   row can name a piano the object's own body records as `none`.
     /// - The section *is* routed but nothing is assigned to it, giving a live flag with a
-    ///   null [`Self::id`].
+    ///   null [`Self::id`] and no location.
     ///
     /// Anything collecting an object's real requirements — a bundle walk above all —
     /// wants this rather than the raw list, or it goes looking for objects that either
     /// are not played or do not exist.
     pub fn is_required(&self) -> bool {
-        self.flag == 1 && self.id != 0
+        self.flag == 1 && (self.id != 0 || self.location.is_some())
     }
 
     /// Decode a whole [`cmd::DEPENDENCIES`] response into the list it carries.
@@ -1108,5 +1115,62 @@ mod tests {
         assert_eq!(deps[1].id, 0xf2f5_cadc);
         assert_eq!(deps[1].name, "africa_split");
         assert_eq!(deps[1].location, None);
+
+        // The piano row reads flag 0 — reported, but its section is not routed.
+        assert!(!deps[0].is_required());
+        assert!(deps[1].is_required());
+    }
+
+    /// A live flag addressing nothing — routed section, nothing assigned — is the one
+    /// row shape [`Dependency::is_required`] must reject that liveness alone accepts.
+    #[test]
+    fn a_live_row_addressing_nothing_is_not_required() {
+        let d = Dependency {
+            flag: 1,
+            class: ObjectClass::Piano,
+            id: 0,
+            name: String::new(),
+            location: None,
+        };
+        assert!(!d.is_required());
+    }
+
+    /// A set list's dependencies are programs: slot-addressed, [`Dependency::id`]
+    /// always `0`, the address in the location words. Confirmed on hardware — a real
+    /// set list read back four such rows, all live. A required-filter keyed on id
+    /// alone classifies every one as "routed but nothing assigned".
+    ///
+    /// The frame is constructed to the confirmed shape — echoed bank/slot, count,
+    /// then four 29-byte id-0 rows (empty name) with locations — not a byte capture.
+    #[test]
+    fn set_list_dependencies_are_required_by_location_not_id() {
+        let mut args = Vec::new();
+        // Status, then the echoed set-list address (panel 1:43, 0-indexed on the
+        // wire) and row count.
+        for w in [0u32, 0, 42, 4] {
+            args.extend_from_slice(&w.to_be_bytes());
+        }
+        // Slots A–D held panel 1:7, 1:3, 1:39, 1:41.
+        for slot in [6u32, 2, 38, 40] {
+            args.push(1); // flag: the slot is live
+                          // missing, class (program), id, name_len, has_location, bank, slot.
+            for w in [0u32, 4, 0, 0, 1, 0, slot] {
+                args.extend_from_slice(&w.to_be_bytes());
+            }
+        }
+        assert_eq!(args.len() - 4, 128);
+
+        let raw = Message::new(Service::Program, 10, cmd::DEPENDENCIES + 1, args).encode();
+        let deps = Dependency::decode_all(&Message::decode_response(&raw).unwrap()).unwrap();
+
+        assert_eq!(deps.len(), 4);
+        let slots: Vec<u32> = deps.iter().map(|d| d.location.unwrap().slot).collect();
+        assert_eq!(slots, [6, 2, 38, 40]);
+        for d in &deps {
+            assert_eq!(d.class, ObjectClass::Program);
+            assert_eq!(d.id, 0);
+            assert!(d.name.is_empty());
+            assert!(d.is_required(), "a slot-addressed dependency is required");
+        }
     }
 }
