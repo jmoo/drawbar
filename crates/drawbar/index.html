@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>drawbar</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, user-scalable=no"
+    />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        /* Matches the app's panel fill, so the page does not flash white while the
+           module downloads. */
+        background: #161719;
+        color: #cfd2d6;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+
+      /* eframe observes the canvas's own content box and sizes its framebuffer to
+         match, so the CSS size is what makes the app fill the window. */
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      #status {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        width: 100%;
+        text-align: center;
+        transform: translateY(-50%);
+        font-size: 0.95rem;
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="drawbar"></canvas>
+    <div id="status">loading drawbar…</div>
+    <script type="module">
+      import init, { start } from "./pkg/drawbar.js";
+
+      const status = document.getElementById("status");
+      try {
+        await init();
+        await start(document.getElementById("drawbar"));
+        status.remove();
+      } catch (e) {
+        status.textContent = `drawbar failed to start: ${e}`;
+        throw e;
+      }
+    </script>
+  </body>
+</html>

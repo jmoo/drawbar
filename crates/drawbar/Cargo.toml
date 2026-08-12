@@ -1,0 +1,65 @@
+[package]
+name = "drawbar"
+description = "egui app over nord-format and nord-usb: Nord files in the browser or on the desktop"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+# `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
+crate-type = ["cdylib", "rlib"]
+name = "drawbar"
+
+[[bin]]
+name = "drawbar"
+path = "src/main.rs"
+
+[dependencies]
+# glow (WebGL2 / OpenGL) rather than the default wgpu backend: it is the smaller
+# wasm module, and the browsers that have WebUSB all have WebGL2.
+eframe = { version = "0.32", default-features = false, features = [
+  "default_fonts",
+  "glow",
+  "persistence",
+  "wayland",
+  "x11",
+] }
+nord-format = { path = "../nord-format", features = ["bundle"] }
+rfd = "0.15"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nord-usb = { path = "../nord-usb", features = ["blocking", "nusb"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+# ⚠️ Held at the version `wasm-bindgen-cli` in nixpkgs speaks; the CLI refuses a
+# module built by any other. The pin is workspace-wide: this is the one crate that
+# holds it, and moving it means moving the CLI version with it.
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "0.4"
+# Blob/Url/HtmlAnchorElement: saving a file has no picker on the web, so the bytes
+# become a Blob behind an object URL that a synthetic anchor click downloads.
+# Usb*: enumeration lives in the page rather than in nord-usb, because
+# `requestDevice()` needs a user gesture only a page can supply.
+# UsbConnectionEvent: the browser's own "that device is gone", which is the only notice
+# a tab gets that the cable came out.
+web-sys = { version = "0.3", features = [
+  "Blob",
+  "BlobPropertyBag",
+  "Document",
+  "Element",
+  "HtmlAnchorElement",
+  "HtmlCanvasElement",
+  "Navigator",
+  "Url",
+  "Usb",
+  "UsbConnectionEvent",
+  "UsbDevice",
+  "UsbDeviceFilter",
+  "UsbDeviceRequestOptions",
+  "Window",
+] }
+nord-usb = { path = "../nord-usb", default-features = false, features = [
+  "web",
+] }

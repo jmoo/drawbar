@@ -41,11 +41,11 @@
 
           packages = {
             inherit (pkgs)
+              drawbar
               nord-bits-derive
               nord-cli
               nord-format
               nord-usb
-              nord-web-demo
               ;
           };
 

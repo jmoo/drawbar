@@ -216,6 +216,10 @@ async fn transfer_out<T: Transport, C>(
 /// from an observed capture. The path is hardware-verified for programs (a field
 /// edited in Rust, written over USB, confirmed on the panel), but only ever with
 /// those captured trailing bytes. Back up before using it.
+///
+/// ⚠️ **This does not carry the caller's name for what it writes**, and the slot ends up
+/// called whatever those trailing bytes say — see the note beside them. Follow it with
+/// [`rename`], in the same session, to put a name on the slot.
 pub async fn write_program<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -236,7 +240,13 @@ pub async fn write_program<T: Transport>(
     begin.extend_from_slice(&timestamp.to_be_bytes());
     begin.extend_from_slice(&u32::MAX.to_be_bytes());
     begin.extend_from_slice(&1u32.to_be_bytes());
-    begin.push(b'0'); // trailing flag byte, copied from the observed capture
+    // ⚠️ Inferred from the capture; not confirmed on hardware. A `1` followed by a single
+    // byte has the shape of the length-prefixed strings this wire uses everywhere else,
+    // so these last five bytes may be the **name** the slot ends up carrying — which
+    // would be `"0"` for every write this function makes. Until that is settled, a caller
+    // that needs a slot to be called something in particular follows the write with
+    // [`rename`] rather than trusting either reading.
+    begin.push(b'0');
     session
         .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
         .await?;

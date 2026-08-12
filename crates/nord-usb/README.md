@@ -104,7 +104,7 @@ pick a device and no portable signature can express that.
 Building the `web` feature needs `--cfg=web_sys_unstable_apis` (WebUSB is still
 gated in `web-sys`); `crates/.cargo/config.toml` supplies it for the wasm target,
 so wasm builds must be run from `crates/` or below.
-[`nord-web-demo`](../nord-web-demo) is a page that drives this backend on hardware.
+[`drawbar`](../drawbar) is a browser app that drives this backend on hardware.
 
 `block_on` exists for CLIs and tests that just want the answer, without pulling in
 a full async runtime.
@@ -139,7 +139,7 @@ classes are unproven — whether either survives the delete-then-write sequence 
 unconfirmed on hardware, so nothing here has attempted one.
 
 The WebUSB backend is hardware-verified for the read-only path (Chrome on macOS:
-inventory and object info, via `nord-web-demo`); its writes and multi-chunk bulk
+inventory and object info, via `drawbar`); its writes and multi-chunk bulk
 reads have not been exercised.
 
 Not implemented: bundle and backup transfer, firmware update, and the piano/sample
