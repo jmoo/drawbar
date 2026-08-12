@@ -60,6 +60,8 @@ they are not installed globally.
   and the default suite must keep passing anywhere.
 - Nix: `nix build .#<crate>` builds and tests one crate;
   `nix flake check` adds the cross-compile targets and the corpus check.
+- Format: `nix fmt` formats the whole tree; `nix flake check` fails on anything
+  it would have changed.
 
 ## Releasing
 
@@ -70,8 +72,9 @@ the other crates share the workspace version and are unpublished.
 
 ## Code style
 
-- **Format before committing**: `cargo fmt --all` for Rust; nixfmt (2-space)
-  for `.nix`; taplo conventions for `.toml`.
+- **Format before committing**: `nix fmt`. treefmt drives rustfmt for Rust,
+  nixfmt (2-space) for `.nix` and taplo for `.toml`; the versions come from the
+  flake, so a locally installed formatter is neither needed nor authoritative.
 - Nix, style-wise: alphabetize attribute-set keys; single child → dotted path
   (`a.b.c = v;`), 2+ children → nested braces. Decide per attrset literal.
 - **The round-trip invariant is load-bearing**: decoded values are views over a

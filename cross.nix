@@ -4,23 +4,25 @@
 # need to stay compiling. nixpkgs' rustc ships only the host's std plus wasm32, so
 # the toolchain comes from fenix, which can add per-target `rust-std`.
 #
-# Foreign *binaries* can't be executed here, so these are build-only checks; the
-# native build (`pkgs.<crate>`, via mkRustCrates) is what actually runs the tests.
+# Foreign *binaries* can't be executed here, so these are build-only checks, except
+# where an emulator exists (see the run checks below); the native builds in ./rust.nix
+# are what run each crate's tests.
 #
 # Darwin cross-compilation is deliberately absent: producing macOS binaries needs the
 # macOS SDK and is only sane on a macOS builder. So no single host covers all four —
 # darwin gives {darwin, wasm32, windows} and linux gives {linux, wasm32, windows},
 # and the union is the full matrix. That split is inherent, not a shortcoming here.
-{ inputs, ... }:
 {
   perSystem =
-    { pkgs, system, ... }:
+    {
+      config,
+      pkgs,
+      rust,
+      ...
+    }:
     let
       inherit (pkgs) lib;
-
-      fenixPkgs = inputs.fenix.packages.${system};
-      workspace = ../crates;
-      version = (lib.importTOML (workspace + "/Cargo.toml")).workspace.package.version;
+      inherit (rust) version;
 
       # Targets reachable by cross-compiling from *any* host. The host's own
       # platform is covered by the ordinary native build instead.
@@ -73,42 +75,66 @@
       # CARGO_TARGET_<TRIPLE>_LINKER wants the triple upper-cased with underscores.
       envTriple = triple: lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] triple);
 
+      # Where a target needs a linker or extra static libs, cargo learns about it
+      # through the environment rather than through the cc wrapper.
+      targetEnv =
+        spec:
+        lib.optionalAttrs (spec ? cc) {
+          "CARGO_TARGET_${envTriple spec.triple}_LINKER" = "${spec.cc}/bin/${spec.cc.targetPrefix}cc";
+        }
+        // lib.optionalAttrs (spec ? libs) {
+          # Put the target's static libs on rustc's search path directly. Going
+          # through buildInputs would leave it to the cc wrapper, which does not
+          # reliably reach rustc's own `-l:` requests.
+          "CARGO_TARGET_${envTriple spec.triple}_RUSTFLAGS" = lib.concatMapStringsSep " " (
+            l: "-L native=${l}/lib"
+          ) spec.libs;
+        };
+
       mkCross =
         crate: name: spec:
         let
-          toolchain = fenixPkgs.combine [
-            fenixPkgs.stable.cargo
-            fenixPkgs.stable.rustc
-            fenixPkgs.targets.${spec.triple}.stable.rust-std
-          ];
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = toolchain;
-            rustc = toolchain;
-          };
+          craneLib = rust.craneLibFor [ spec.triple ];
+
+          args =
+            rust.commonArgs
+            // {
+              pname = "${crate}-${name}";
+              CARGO_BUILD_TARGET = spec.triple;
+              cargoExtraArgs = lib.escapeShellArgs (
+                [
+                  "--locked"
+                  "-p"
+                  crate
+                ]
+                ++ spec.cargoFlags
+              );
+              doCheck = false;
+              nativeBuildInputs = lib.optional (spec ? cc) spec.cc;
+            }
+            // targetEnv spec;
         in
-        pkgs.stdenv.mkDerivation (
-          {
-            pname = "${crate}-${name}";
-            inherit version;
-            src = workspace;
+        craneLib.buildPackage (
+          args
+          // {
+            cargoArtifacts = craneLib.buildDepsOnly args;
 
-            cargoDeps = rustPlatform.importCargoLock { lockFile = workspace + "/Cargo.lock"; };
-            nativeBuildInputs = [
-              toolchain
-              rustPlatform.cargoSetupHook
-            ]
-            ++ lib.optional (spec ? cc) spec.cc;
+            # crane installs what cargo's build log calls a binary or a cdylib, and an
+            # rlib is neither: left to it, the lib-only cross builds install nothing
+            # and pass. Install by hand instead, and assert that something arrived.
+            doNotPostBuildInstallCargoBinaries = true;
 
-            buildPhase = ''
-              runHook preBuild
-              cargo build --release --offline \
-                --target ${spec.triple} -p ${crate} \
-                ${lib.escapeShellArgs spec.cargoFlags}
-              runHook postBuild
+            # ⚠️ The inherited dependency artifacts were produced from crane's dummy
+            # stand-ins for this workspace's own crates, so the target directory
+            # already holds a file under the name this build is about to write. Only
+            # workspace members land at that level — dependencies stay in `deps/` —
+            # so clearing it costs nothing and keeps the install below from passing
+            # on a stand-in.
+            preBuild = ''
+              find "target/${spec.triple}/release" -maxdepth 1 -type f -delete
             '';
 
-            installPhase = ''
-              runHook preInstall
+            installPhaseCommand = ''
               mkdir -p "$out"
               rel="target/${spec.triple}/release"
 
@@ -134,21 +160,9 @@
               echo "${crate} ${version} built for ${spec.triple}" > "$out/BUILD_INFO"
               echo "installed:" >&2
               ls -la "$out" >&2
-              runHook postInstall
             '';
 
             meta.description = "${crate} cross-compiled for ${spec.triple}";
-          }
-          // lib.optionalAttrs (spec ? cc) {
-            "CARGO_TARGET_${envTriple spec.triple}_LINKER" = "${spec.cc}/bin/${spec.cc.targetPrefix}cc";
-          }
-          // lib.optionalAttrs (spec ? libs) {
-            # Put the target's static libs on rustc's search path directly. Going
-            # through buildInputs would leave it to the cc wrapper, which does not
-            # reliably reach rustc's own `-l:` requests.
-            "CARGO_TARGET_${envTriple spec.triple}_RUSTFLAGS" = lib.concatMapStringsSep " " (
-              l: "-L native=${l}/lib"
-            ) spec.libs;
           }
         );
 
@@ -176,7 +190,7 @@
       # Linux-only: these emulators are not a sane proposition on aarch64-darwin.
       # The read-only inventory sweep, replayed. Exercises transport → wire → session
       # → op → CLI without a device, so the same proof runs on every target.
-      pocScript = ../crates/nord-usb/tests/fixtures/inventory.script;
+      pocScript = ./crates/nord-usb/tests/fixtures/inventory.script;
 
       # Execute the protocol test suite on an actual wasm VM.
       #
@@ -187,47 +201,37 @@
       wasmRuntimeTest =
         let
           triple = "wasm32-wasip1";
-          toolchain = fenixPkgs.combine [
-            fenixPkgs.stable.cargo
-            fenixPkgs.stable.rustc
-            fenixPkgs.targets.${triple}.stable.rust-std
-          ];
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = toolchain;
-            rustc = toolchain;
-          };
-        in
-        pkgs.stdenv.mkDerivation {
-          pname = "nord-usb-wasm-runtime";
-          inherit version;
-          src = workspace;
-          cargoDeps = rustPlatform.importCargoLock { lockFile = workspace + "/Cargo.lock"; };
-          nativeBuildInputs = [
-            toolchain
-            rustPlatform.cargoSetupHook
-            pkgs.wasmtime
-            # Build scripts and proc-macros still compile for the host.
-            pkgs.stdenv.cc
-          ];
-          buildPhase = ''
-            runHook preBuild
+          craneLib = rust.craneLibFor [ triple ];
+
+          args = rust.commonArgs // {
+            pname = "nord-usb-wasm-runtime";
+            CARGO_BUILD_TARGET = triple;
+            # What turns a built-only wasm target into an executed one.
+            CARGO_TARGET_WASM32_WASIP1_RUNNER = "wasmtime";
+            cargoExtraArgs = "--locked -p nord-usb --no-default-features --features replay";
+            nativeBuildInputs = [
+              pkgs.wasmtime
+              # Build scripts and proc-macros still compile for the host.
+              pkgs.stdenv.cc
+            ];
             # wasmtime wants somewhere to cache compiled modules; the sandbox has no
             # HOME, so give it one rather than letting it fail on /homeless-shelter.
-            export HOME="$TMPDIR/home"
-            mkdir -p "$HOME"
-            export CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime
-            cargo test --release --offline -p nord-usb \
-              --no-default-features --features replay --target ${triple} 2>&1 | tee test.log
-            runHook postBuild
-          '';
-          installPhase = ''
-            runHook preInstall
-            grep -q '0 failed' test.log || { echo "wasm test run reported failures"; exit 1; }
-            mkdir -p "$out"; cp test.log "$out/"
-            runHook postInstall
-          '';
-          meta.description = "nord-usb protocol suite executed on a wasm VM";
-        };
+            preCheck = ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+            '';
+          };
+        in
+        craneLib.buildPackage (
+          args
+          // {
+            cargoArtifacts = craneLib.buildDepsOnly args;
+            # A lib crate under test installs nothing; a failing test is the failure.
+            doNotPostBuildInstallCargoBinaries = true;
+            installPhaseCommand = "mkdir -p $out";
+            meta.description = "nord-usb protocol suite executed on a wasm VM";
+          }
+        );
 
       # The command tree, asserted rather than described. Every noun's verb list is
       # pinned exactly, so a rename shows up as a failing check instead of a surprise —
@@ -236,10 +240,10 @@
       # `raw` is deliberately absent from the top-level list and deliberately still
       # runs: hidden is not deprecated, it is the escape hatch class-generalisation
       # earns, and it has to stay tested to stay usable.
-      slotVerbs = "get put move rename duplicate delete select info deps";
+      slotVerbs = "get put move rename duplicate delete select info deps focus list probe";
       surface = {
         "" = "inspect verify device program setlist live settings sample help";
-        "device" = "status info help";
+        "device" = "controls status info recover geometry help";
         "live" = "get info deps edit help";
         "program" = "${slotVerbs} edit help";
         "raw" = "${slotVerbs} help";
@@ -413,18 +417,16 @@
       packages = crossed;
 
       # `nix flake check` keeps every target honest. The host's own platform is
-      # covered by the native builds, which additionally run each crate's tests.
+      # covered by the native builds in ./rust.nix, which run each crate's tests.
       checks =
         crossed
         // {
-          nord-usb-native = pkgs.nord-usb;
-          nord-format-native = pkgs.nord-format;
           nord-usb-wasm-runtime = wasmRuntimeTest;
 
           # The POC on the host's own platform, no emulator involved.
           nord-cli-native-poc = mkRunCheck {
             name = "nord-cli-native-poc";
-            pkg = pkgs.nord-cli;
+            pkg = config.packages.nord-cli;
             bin = "bin/nord";
             expectUsage = "nord";
           };

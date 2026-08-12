@@ -12,9 +12,12 @@ name = "nord_usb"
 # Features the Nix build must enable when running tests. The golden replay tests in
 # `tests/ops.rs` and `tests/status.rs` are `#![cfg(feature = "replay")]`, and `replay`
 # is deliberately not a default feature — without this they compile to nothing and the
-# build reports a pass having verified none of the wire encoding.
+# build reports a pass having verified none of the wire encoding. `deadline`'s unit
+# tests drive futures with `pollster`, which only exists under `blocking`; a whole-
+# workspace `cargo test` gets it via nord-cli's unification, a lone `-p nord-usb`
+# does not.
 [package.metadata.nix]
-testFeatures = ["replay"]
+testFeatures = ["blocking", "replay"]
 
 [features]
 default = ["nusb"]
