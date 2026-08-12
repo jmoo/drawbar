@@ -338,7 +338,12 @@ impl Cbin<Sample> {
     /// The header length depends on a stroke's *position in the file*, so the read has
     /// to happen here, before anything reorders them.
     fn strokes_in_file_order(&self) -> Result<Vec<(u32, Stroke)>, Error> {
-        let zones = zone::count(&self.map()?.payload)?;
+        // The first stroke's header is the remainder of a preamble it shares with
+        // these two, so their sizes are what fixes where its audio starts.
+        let map_len = self.map()?.payload.len();
+        let cat_len = section::find(&self.body.sections, section::CAT)
+            .map(|s| s.payload.len())
+            .ok_or_else(|| ParseError::AssertFail("no cat section".into()))?;
         self.stroke_sections()
             .enumerate()
             .map(|(i, s)| {
@@ -352,7 +357,7 @@ impl Cbin<Sample> {
                             s.payload.len()
                         ))
                     })?;
-                Ok((id, stroke::read(&s.payload, i, zones)?))
+                Ok((id, stroke::read(&s.payload, i, cat_len, map_len)?))
             })
             .collect()
     }
