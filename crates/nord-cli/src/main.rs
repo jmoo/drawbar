@@ -170,6 +170,37 @@ enum DeviceAction {
     /// Identify the attached instrument, from its USB descriptors. Read-only, and opens
     /// no transaction — the first thing to run when nothing else answers.
     Info,
+
+    /// Clear a session an interrupted run left open on the instrument.
+    ///
+    /// Two faults look like a broken instrument and each is one frame to cure: an
+    /// abandoned UI session makes every slot read as empty — a wrong answer that looks
+    /// right — and an abandoned class session makes operations fail with status 0x12.
+    /// Safe to run on a healthy instrument.
+    Recover,
+
+    /// Report the instrument's storage layout: partitions, banks and slot capacity.
+    ///
+    /// Read from the device rather than assumed, so it is correct for models this tool
+    /// has never seen. Partition indices are the object class numbers.
+    Geometry,
+
+    /// Deliberately wedge the instrument by abandoning a session. Test tool.
+    ///
+    /// Reproduces the abandoned session on purpose, so recovery can be tested against a
+    /// known wedge. Nothing stored is harmed, but every slot then reads as empty —
+    /// successfully, which is worse than an error — until `nord device recover` clears it.
+    #[cfg(feature = "wedge")]
+    #[command(hide = true)]
+    Wedge {
+        /// Object class to open the doomed session on.
+        #[arg(long, value_name = "N", default_value_t = 4)]
+        class: u32,
+
+        /// Confirm. Without this nothing is sent.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// `nord program`: every class-generic verb, plus the one that only programs have.
@@ -404,6 +435,12 @@ enum SlotAction {
         at: String,
     },
 
+    /// Report which object the panel currently has loaded in this class. Read-only.
+    ///
+    /// The read half of `select`: it answers what the player is looking at, rather than
+    /// telling the instrument what to load.
+    Focus,
+
     /// List everything the instrument holds in this class. Read-only.
     ///
     /// Walks the device's own slot cursor, so it reports what is actually stored rather
@@ -442,6 +479,22 @@ enum SlotAction {
         /// read verbs are — the device's response to an unknown code is unknown.
         #[arg(long)]
         yes: bool,
+
+        /// Send with no session around it: no HELLO, no session open, no close.
+        ///
+        /// The only way to reach a command when the session machinery itself is what
+        /// is broken — a wedged instrument refuses to open one, so every ordinary
+        /// probe fails before its command is sent.
+        #[arg(long)]
+        bare: bool,
+
+        /// Service number. 12 is the object/file service, 6 the UI session.
+        #[arg(long, default_value_t = 12)]
+        service: u32,
+
+        /// Subsystem number. 10 for service 12, 1 for service 6.
+        #[arg(long, default_value_t = 10)]
+        subsystem: u32,
     },
 }
 
@@ -506,6 +559,12 @@ fn main() -> ExitCode {
                 device::status(&ui, source, json)
             }
             DeviceAction::Info => device::info(&ui),
+            DeviceAction::Recover => device::recover(&ui),
+            DeviceAction::Geometry => device::geometry(&ui),
+            #[cfg(feature = "wedge")]
+            DeviceAction::Wedge { class, yes } => {
+                device::wedge(&ui, ObjectClass::from_raw(class), yes)
+            }
             DeviceAction::Controls {
                 from,
                 to,
@@ -608,13 +667,17 @@ fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), St
             slot::Target::File(path) => file::deps(ui, &path, class),
             slot::Target::Slot(at) => device::deps(ui, at, class),
         },
+        SlotAction::Focus => device::focus(ui, class),
         SlotAction::List { cap } => device::list(ui, class, cap),
         SlotAction::Probe {
             op,
             args,
             wait,
             yes,
-        } => device::probe(ui, class, op, &args, wait, yes),
+            bare,
+            service,
+            subsystem,
+        } => device::probe(ui, class, op, &args, wait, yes, bare, service, subsystem),
     }
 }
 

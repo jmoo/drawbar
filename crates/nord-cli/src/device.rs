@@ -226,6 +226,21 @@ fn explain(e: nord_usb::Error, at: Location) -> String {
     }
 }
 
+/// Turn a refusal from the enumeration walk into something actionable.
+///
+/// No slot to name here — the failing command is the walk itself.
+fn explain_walk(e: nord_usb::Error) -> String {
+    match e {
+        nord_usb::Error::DeviceStatus(usb_op::ENUMERATION_DISABLED) => {
+            "the instrument has disabled slot enumeration, which it does after any \
+             write since it was switched on; only a power cycle restores it, and \
+             per-slot `info` still works in the meantime"
+                .into()
+        }
+        other => other.to_string(),
+    }
+}
+
 fn open_usb() -> Result<nord_usb::transport::UsbTransport, String> {
     nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())
 }
@@ -483,6 +498,20 @@ pub fn send(
     what: &str,
 ) -> Result<(), String> {
     let mut t = open_usb()?;
+
+    // Bounds first, from the device's own geometry. Without this an impossible address
+    // is only discovered once the transfer is under way, and the report is a status code
+    // rather than a reason.
+    let bad = nord_usb::block_on(async {
+        let mut s = Session::open(&mut t, class).await?;
+        let r = usb_op::check_address(&mut s, at).await;
+        let closed = s.commit().await;
+        finish(r, closed)
+    })
+    .map_err(|e| e.to_string())?;
+    if let Some(reason) = bad {
+        return Err(format!("{}: {reason}", shown(at)));
+    }
 
     // Name what is about to be destroyed before destroying it. An empty destination is
     // not a failure: status 1 means the slot is vacant, so there is nothing to report.
@@ -854,25 +883,149 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    if deps.is_empty() {
-        ui.note(format!("{} has no dependencies", shown(at)));
-        return Ok(());
+    // The device reports a row for a section that is not routed, resolving its model
+    // index to a library object the program does not actually use — so an unfiltered
+    // list names pianos a program's own body records as `none`.
+    let (live, idle): (Vec<_>, Vec<_>) = deps.iter().partition(|d| d.flag == 1);
+    // A routed section with nothing assigned still gets a row, with a null id. It is a
+    // real fact about the program but it is not a dependency, and listing it as one
+    // invites a bundle walk to look for an object that does not exist.
+    let (live, unassigned): (Vec<_>, Vec<_>) = live.into_iter().partition(|d| d.is_required());
+
+    if live.is_empty() {
+        ui.note(format!("{} depends on nothing", shown(at)));
+    } else {
+        ui.out(ui.dim(format!("{:<8} {:<10} name", "class", "id")));
+        for d in &live {
+            // Library objects report no slot, so most rows carry no location at all.
+            let loc = match d.location.map(shown) {
+                Some(at) => format!("  {}", ui.dim(at)),
+                None => String::new(),
+            };
+            ui.out(format!(
+                "{:<8} {:08x}   {}{loc}",
+                d.class.label(),
+                d.id,
+                d.name.trim_end(),
+            ));
+        }
     }
-    ui.out(ui.dim(format!("{:<4} {:<8} {:<10} name", "flag", "class", "id")));
-    for d in &deps {
-        // Library objects report no slot, so most rows carry no location at all.
-        let loc = match d.location.map(shown) {
-            Some(at) => format!("  {}", ui.dim(at)),
-            None => String::new(),
+
+    if !unassigned.is_empty() {
+        let which: Vec<String> = unassigned
+            .iter()
+            .map(|d| d.class.label().to_string())
+            .collect();
+        ui.note("");
+        ui.note(format!("routed but nothing assigned: {}", which.join(", ")));
+    }
+
+    if !idle.is_empty() {
+        ui.note("");
+        ui.note(format!(
+            "{} further row(s) reported but not in use — the section is not routed to a \
+             keyboard part, so the instrument names an object this object does not depend on:",
+            idle.len()
+        ));
+        for d in &idle {
+            let named = if d.name.trim_end().is_empty() {
+                "(no name)".to_string()
+            } else {
+                d.name.trim_end().to_string()
+            };
+            ui.note(format!("  {} {:08x} {}", d.class.label(), d.id, named));
+        }
+    }
+    Ok(())
+}
+
+/// Release anything an interrupted run left open on the instrument.
+pub fn recover(ui: &Ui) -> Result<(), String> {
+    let mut t = open_usb()?;
+    nord_usb::block_on(usb_op::recover(&mut t)).map_err(|e| e.to_string())?;
+    ui.note("released any session the instrument was still holding");
+    ui.note("if slots were reading as empty, re-check them now");
+    Ok(())
+}
+
+/// Report the instrument's storage layout, from the device's own tables. Read-only.
+pub fn geometry(ui: &Ui) -> Result<(), String> {
+    let mut t = open_usb()?;
+    let rows = nord_usb::block_on(async {
+        // Any class opens a session; the partition table is device-wide.
+        let mut s = Session::open(&mut t, ObjectClass::Program).await?;
+        let r = async {
+            let parts = usb_op::partitions(&mut s).await?;
+            let mut rows = Vec::new();
+            for p in parts {
+                let banks = usb_op::banks(&mut s, p.index).await?;
+                rows.push((p, banks));
+            }
+            Ok(rows)
+        }
+        .await;
+        let closed = s.commit().await;
+        finish(r, closed)
+    })
+    .map_err(|e| e.to_string())?;
+
+    ui.out(ui.dim(format!(
+        "{:<4} {:<18} {:>6} {:>7}  banks",
+        "code", "partition", "banks", "slots"
+    )));
+    for (p, banks) in &rows {
+        // The sentinel is not a capacity and must not be summed into one.
+        let bounded: Vec<&nord_usb::wire::Bank> = banks.iter().filter(|b| b.is_bounded()).collect();
+        let slots = if bounded.len() == banks.len() {
+            bounded.iter().map(|b| b.slots).sum::<u32>().to_string()
+        } else {
+            "—".to_string()
         };
+        let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         ui.out(format!(
-            "{:<4} {:<8} {:08x}   {}{loc}",
-            d.flag,
-            d.class.label(),
-            d.id,
-            d.name.trim_end(),
+            "{:<4} {:<18} {:>6} {:>7}  {}",
+            p.index,
+            p.name,
+            banks.len(),
+            slots,
+            ui.dim(names.join(", ")),
         ));
     }
+    ui.note("");
+    ui.note("the partition index is the object class number; (Native) partitions are a");
+    ui.note("second view of the same library, so their capacity is a sentinel, not a size");
+    Ok(())
+}
+
+/// Deliberately abandon an open session, wedging the instrument. Test tool.
+///
+/// Behind the `wedge` feature: it breaks the attached instrument on purpose.
+///
+/// Reproduces the half-open `HELLO` on purpose: opens a transaction and drops it without
+/// the closing exchanges. The instrument then answers "empty" for every slot in every
+/// class, which survives reopening.
+///
+/// Exists so recovery can be tested against a *known* wedge rather than one arrived at by
+/// accident. Nothing stored is harmed — but until it is cleared, every reading taken from
+/// the instrument is a lie, which is worse than an error.
+#[cfg(feature = "wedge")]
+pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
+    if !yes {
+        return Err("refusing to wedge the instrument without --yes; \
+             clear it afterwards with `nord device recover`"
+            .into());
+    }
+    let mut t = open_usb()?;
+    nord_usb::block_on(async {
+        let s = Session::open(&mut t, class).await?;
+        s.abort();
+        Ok::<(), nord_usb::Error>(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    ui.note("session abandoned with no GOODBYE — the instrument is now wedged");
+    ui.note("every slot will read as empty, and read *successfully*, until you run");
+    ui.note("`nord device recover`");
     Ok(())
 }
 
@@ -898,10 +1051,7 @@ pub fn controls(
         nord_usb::transport::usb::Recipient::Device
     };
 
-    ui.out(ui.dim(format!(
-        "{:<9} {:>5}  {}",
-        "bRequest", "bytes", "response"
-    )));
+    ui.out(ui.dim(format!("{:<9} {:>5}  {}", "bRequest", "bytes", "response")));
     let mut answered = 0;
     for request in from..=to {
         let got = t.vendor_control_in(
@@ -915,14 +1065,23 @@ pub fn controls(
         match got {
             Ok(data) if data.is_empty() => {
                 answered += 1;
-                ui.out(format!("{request:#04x} ({request:>3}) {:>5}  (accepted, no data)", 0));
+                ui.out(format!(
+                    "{request:#04x} ({request:>3}) {:>5}  (accepted, no data)",
+                    0
+                ));
             }
             Ok(data) => {
                 answered += 1;
                 let hex: Vec<String> = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
                 let text: String = data
                     .iter()
-                    .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                    .map(|&b| {
+                        if (0x20..0x7f).contains(&b) {
+                            b as char
+                        } else {
+                            '.'
+                        }
+                    })
                     .collect();
                 ui.out(format!(
                     "{request:#04x} ({request:>3}) {:>5}  {}",
@@ -940,6 +1099,34 @@ pub fn controls(
         "{answered} of {} request(s) answered",
         u16::from(to) - u16::from(from) + 1
     ));
+    Ok(())
+}
+
+/// Report which object the panel has loaded in this class. Read-only.
+pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
+    let mut t = open_usb()?;
+    let (at, info) = nord_usb::block_on(async {
+        let mut s = Session::open(&mut t, class).await?;
+        let r = async {
+            let at = usb_op::focus(&mut s).await?;
+            // An empty focused slot is possible and is not an error to report as one.
+            let info = match usb_op::info(&mut s, at).await {
+                Ok(i) => Some(i),
+                Err(nord_usb::Error::DeviceStatus(1)) => None,
+                Err(e) => return Err(e),
+            };
+            Ok((at, info))
+        }
+        .await;
+        let closed = s.commit().await;
+        finish(r, closed)
+    })
+    .map_err(|e| e.to_string())?;
+
+    match info {
+        Some(info) => ui.out(format!("{}  {:?}", addr(at), info.name)),
+        None => ui.out(format!("{}  (empty)", addr(at))),
+    }
     Ok(())
 }
 
@@ -969,14 +1156,17 @@ pub fn list(ui: &Ui, class: ObjectClass, cap: usize) -> Result<(), String> {
         let closed = s.commit().await;
         finish(r, closed)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(explain_walk)?;
 
     if rows.is_empty() {
         ui.note(format!("no {} on the instrument", class.label()));
         return Ok(());
     }
 
-    ui.out(ui.dim(format!("{:<8} {:<6} {:>9}  name", "slot", "format", "bytes")));
+    ui.out(ui.dim(format!(
+        "{:<8} {:<6} {:>9}  name",
+        "slot", "format", "bytes"
+    )));
     for (at, info) in &rows {
         ui.out(format!(
             "{:<8} {:<6} {:>9}  {}",
@@ -996,6 +1186,7 @@ pub fn list(ui: &Ui, class: ObjectClass, cap: usize) -> Result<(), String> {
 /// Interprets nothing: an unknown command's status word and payload are the finding, so
 /// both are printed as they arrived. A device that ignores the command is reported as a
 /// timeout rather than hanging the caller.
+#[allow(clippy::too_many_arguments)]
 pub fn probe(
     ui: &Ui,
     class: ObjectClass,
@@ -1003,6 +1194,9 @@ pub fn probe(
     args: &[u32],
     wait: u64,
     yes: bool,
+    bare: bool,
+    service: u32,
+    subsystem: u32,
 ) -> Result<(), String> {
     let mut words = Vec::with_capacity(args.len() * 4);
     for a in args {
@@ -1028,8 +1222,37 @@ pub fn probe(
         return Err("refusing to probe without --yes".into());
     }
 
+    let svc = nord_usb::Service::from_raw(service);
     let mut t = open_usb()?;
-    let (reply, changed) = nord_usb::block_on(async {
+
+    // No session: write the frame, read whatever comes back. For recovering from a state
+    // where the session machinery itself is what refuses, so wrapping this in a session
+    // would fail before the command was ever sent.
+    if bare {
+        let reply = nord_usb::block_on(async {
+            let req = nord_usb::Message::new(svc, subsystem, op, words.clone());
+            t.write(&req.encode()).await?;
+            match t
+                .read_timeout(
+                    nord_usb::transport::READ_BUFFER,
+                    std::time::Duration::from_secs(wait),
+                )
+                .await?
+            {
+                Some(raw) => nord_usb::Message::decode_response(&raw).map(Some),
+                None => Ok(None),
+            }
+        })
+        .map_err(|e: nord_usb::Error| e.to_string())?;
+
+        match reply {
+            Some(reply) => report_reply(ui, &reply, op),
+            None => ui.out(format!("no reply within {wait}s")),
+        }
+        return Ok(());
+    }
+
+    let (reply, changed, close_failed) = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = s
             .probe(
@@ -1042,12 +1265,19 @@ pub fn probe(
             .await;
         let changed = s.instrument_changed();
         let closed = s.commit().await;
-        finish(r, closed).map(|r| (r, changed))
+        // Deliberately not `finish`: a probed command may well invalidate the session,
+        // and losing what it answered because the close then failed throws away the
+        // finding this whole command exists to collect. The close's failure is reported
+        // alongside rather than instead.
+        r.map(|reply| (reply, changed, closed.err()))
     })
     .map_err(|e| e.to_string())?;
 
     if changed {
         ui.note("the instrument reported a change during this session");
+    }
+    if let Some(e) = close_failed {
+        ui.note(format!("the session would not close afterwards: {e}"));
     }
 
     let Some(reply) = reply else {
@@ -1057,6 +1287,16 @@ pub fn probe(
         return Ok(());
     };
 
+    report_reply(ui, &reply, op);
+    Ok(())
+}
+
+/// Print a probed reply verbatim: echoed command, status, and a hex/ASCII payload dump.
+///
+/// Interprets nothing. On an unknown command the status is the finding, and the payload
+/// of a non-zero status is uninitialised device memory rather than data — so it is shown
+/// as bytes and never decoded.
+fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
     // `command` is the device's own echo, not an assumption: an unknown code may not
     // answer with `op + 1`, and which code it does answer with is part of the finding.
     ui.out(format!(
@@ -1080,11 +1320,16 @@ pub fn probe(
         let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         ui.out(format!("  {:04x}  {:<47}  {ascii}", i * 16, hex.join(" ")));
     }
-    Ok(())
 }
 
 /// Report everything the instrument knows about one slot. Read-only.

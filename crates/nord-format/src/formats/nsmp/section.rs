@@ -178,9 +178,8 @@ pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseErr
     let mut pos: u64 = 0;
     loop {
         let mut head = [0u8; HEADER4_LEN];
-        match read_exact_or_end(r, &mut head, pos)? {
-            false => return Ok(sections),
-            true => {}
+        if !read_exact_or_end(r, &mut head, pos)? {
+            return Ok(sections);
         }
         let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
         let mut payload = vec![0u8; len];

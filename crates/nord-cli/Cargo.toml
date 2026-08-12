@@ -11,6 +11,14 @@ version.workspace = true
 name = "nord"
 path = "src/main.rs"
 
+[features]
+# `nord device wedge`, which deliberately puts the instrument into its known-bad state so
+# that recovery can be tested against a *known* wedge rather than an accidental one. Off
+# by default: it breaks the attached instrument on purpose, and that does not belong in a
+# binary someone might reach for casually. `nord device recover` is the cure and always
+# ships.
+wedge = []
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 # Line editing for `--sweep`, which prefills each prompt with the previous answer — the

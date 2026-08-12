@@ -186,6 +186,19 @@ impl Transport for UsbTransport {
         Ok(completion.data)
     }
 
+    async fn write_timeout(&mut self, buf: &[u8], limit: Duration) -> Result<bool> {
+        // `bulk_out` owns its transfer, so there is no queue to cancel: dropping the
+        // future is the cancellation, and nothing later reads from this endpoint in a way
+        // an abandoned OUT could desynchronise.
+        match with_timeout(self.interface.bulk_out(EP_OUT, buf.to_vec()), limit).await {
+            Some(completion) => {
+                completion.status.map_err(map_err("bulk write"))?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     async fn read_timeout(&mut self, max: usize, limit: Duration) -> Result<Option<Vec<u8>>> {
         self.read_queue.submit(RequestBuffer::new(max));
 

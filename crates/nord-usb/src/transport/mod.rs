@@ -92,6 +92,21 @@ pub trait Transport {
     ) -> Result<Option<Vec<u8>>> {
         self.read(max).await.map(Some)
     }
+
+    /// Write, giving up after `limit`. `Ok(false)` means the device never accepted it.
+    ///
+    /// The other half of [`Self::read_timeout`], and not a symmetry for its own sake: a
+    /// device can stop accepting writes without stopping altogether. Sending it a frame
+    /// it cannot handle has been observed to stall the bulk endpoints while the
+    /// instrument otherwise plays normally and still answers on endpoint 0 — and in that
+    /// state [`Self::write`] blocks forever, so a read timeout is never reached and the
+    /// caller hangs with no way to report why.
+    ///
+    /// Default is no timeout, for the same reason as [`Self::read_timeout`]: honoring one
+    /// means cancelling a submitted transfer, which only a backend can do.
+    async fn write_timeout(&mut self, buf: &[u8], _limit: std::time::Duration) -> Result<bool> {
+        self.write(buf).await.map(|()| true)
+    }
 }
 
 /// Opt-in marker for desktop callers that need to move a transport across threads.

@@ -20,7 +20,10 @@ use crate::error::{Error, Result};
 use crate::session::ReadWrite;
 use crate::session::Session;
 use crate::transport::Transport;
-use crate::wire::{cmd, ui, Dependency, Location, ObjectClass, ProgramInfo, Service, Status};
+use crate::wire::{
+    cmd, ui, Bank, Dependency, Location, Message, ObjectClass, Partition, ProgramInfo, Service,
+    Status,
+};
 
 /// Query the inventory for the class the session was opened with.
 ///
@@ -275,11 +278,132 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
 ///
 /// **Read-only.** The returned [`Dependency`] ids match the ids the objects carry in
 /// their own files, which is the bridge between wire content and file bytes.
+/// Release anything the instrument is still holding from an abandoned session.
+///
+/// **Operator-driven, and deliberately not automatic.** Two faults hide behind "the
+/// instrument is broken", and each is one frame to cure:
+///
+/// - An abandoned **UI** session (`HELLO` with no `GOODBYE`) makes the device answer
+///   every slot in every class as **empty** — a wrong answer that looks like a right one.
+///   Nothing detects it, because nothing fails. A bare `GOODBYE` clears it.
+/// - An abandoned **class** session makes it refuse operations with status `0x12`.
+///   A bare `SESSION_CLOSE` clears that, and [`Session::open`] already does it.
+///
+/// Both are sent **bare** — no session wrapped around them — because the session
+/// machinery is exactly what is broken. Both are best-effort: sending them to a healthy
+/// instrument is harmless, so this needs no diagnosis first.
+///
+/// This is not folded into [`Session::open`] on purpose. NSM sends no such frame, the
+/// golden replays pin our exchanges against real captures, and quietly diverging from
+/// that ground truth to paper over an operator-caused fault would cost more than it saves.
+pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
+    let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
+    transport.write(&goodbye.encode()).await?;
+    let _ = transport.read(crate::transport::READ_BUFFER).await?;
+
+    let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
+    transport.write(&close.encode()).await?;
+    let _ = transport.read(crate::transport::READ_BUFFER).await?;
+    Ok(())
+}
+
+/// Every storage partition the device reports. **Read-only.**
+///
+/// The index of each entry is its object class code, so this is also the authoritative
+/// answer to "what classes does this instrument have" — including the `(Native)` library
+/// views that have no [`ObjectClass`] name.
+pub async fn partitions<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+) -> Result<Vec<Partition>> {
+    let resp = session
+        .request(Service::Program, 10, cmd::PARTITIONS, &[])
+        .await?;
+    Partition::decode_all(&resp)
+}
+
+/// One partition's banks and their slot capacities. **Read-only.**
+pub async fn banks<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    partition: u32,
+) -> Result<Vec<Bank>> {
+    let resp = session
+        .request(Service::Program, 10, cmd::BANKS, &partition.to_be_bytes())
+        .await?;
+    Bank::decode_all(&resp)
+}
+
+/// Whether an address exists on this instrument, per the device's own geometry.
+///
+/// **Read-only**, and the point is that it answers *before* anything is attempted: a write
+/// to a bad address otherwise fails only once the transfer is under way, and a write to an
+/// occupied one is refused with status `0x4` after the caller has committed to it.
+///
+/// `Ok(None)` means the address is fine. `Ok(Some(reason))` explains why it is not, in
+/// terms of the bank names the instrument itself uses — which for pianos are categories,
+/// so "no bank 7 (this class has 6: Grand, Upright, …)" is a far better error than a
+/// status code.
+pub async fn check_address<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    at: Location,
+) -> Result<Option<String>> {
+    let banks = banks(session, session.class().to_raw()).await?;
+    let Some(bank) = banks.get(at.bank as usize) else {
+        let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
+        return Ok(Some(format!(
+            "bank {} does not exist; this class has {} ({})",
+            at.bank + 1,
+            banks.len(),
+            names.join(", ")
+        )));
+    };
+    // The `(Native)` partitions report a sentinel rather than a capacity, so there is
+    // nothing to check against there.
+    if bank.is_bounded() && at.slot >= bank.slots {
+        return Ok(Some(format!(
+            "\"{}\" holds {} slots, so slot {} is out of range",
+            bank.name,
+            bank.slots,
+            at.slot + 1
+        )));
+    }
+    Ok(None)
+}
+
+/// The object the panel currently has loaded, for the session's class. **Read-only.**
+///
+/// The read half of [`select`]: together they make the player's own position addressable.
+pub async fn focus<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Location> {
+    let resp = session
+        .request(Service::Program, 10, cmd::FOCUS, &[])
+        .await?;
+    let p = resp.payload();
+    if p.len() < 8 {
+        return Err(Error::Truncated {
+            got: p.len(),
+            need: 8,
+        });
+    }
+    Ok(Location {
+        bank: u32::from_be_bytes(p[0..4].try_into().unwrap()),
+        slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
+    })
+}
+
+/// Device status meaning "enumeration is disabled".
+///
+/// The instrument turns [`cmd::NEXT_SLOT`] off after any write since power-up and only a
+/// power cycle turns it back on; point commands are unaffected. Surfaced as
+/// [`Error::DeviceStatus`] rather than swallowed, because a caller that retries or
+/// falls back silently would hide that its inventory can no longer be enumerated.
+pub const ENUMERATION_DISABLED: u32 = 0x11;
+
 /// The next occupied slot after `at`, or `None` once the walk runs off the end.
 ///
 /// **Read-only.** Positions inside a gap are safe to pass: the device answers with the
 /// next real object rather than an error, which is what makes this an iterator over
 /// content instead of over addresses.
+///
+/// Refuses with [`ENUMERATION_DISABLED`] once any write has happened this power cycle.
 pub async fn next_occupied<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
@@ -326,6 +450,10 @@ pub async fn next_occupied<T: Transport, C>(
 /// Two bounds keep a walk finite when the device does not behave as expected: `cap` on
 /// total slots, and a stop after [`EMPTY_BANKS_BEFORE_STOP`] consecutive empty banks for
 /// classes that never report out-of-range at all.
+///
+/// A refusal mid-walk — [`ENUMERATION_DISABLED`] above all — propagates as its error
+/// rather than truncating the list: a partial inventory that looks complete is the one
+/// result worse than none.
 pub async fn occupied_slots<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     cap: usize,
@@ -380,6 +508,22 @@ const MAX_BANKS: u32 = 64;
 /// How many consecutive empty banks end a walk, for classes whose banks stay addressable
 /// past the last populated one instead of reporting out-of-range.
 const EMPTY_BANKS_BEFORE_STOP: u32 = 2;
+
+/// The library objects an entity actually needs. **Read-only.**
+///
+/// [`dependencies`] returns what the device reports, which includes rows that are not
+/// dependencies at all — see [`Dependency::is_required`]. This is the one to build on;
+/// reach for the unfiltered list only when the extra rows are themselves the subject.
+pub async fn required_dependencies<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    at: Location,
+) -> Result<Vec<Dependency>> {
+    Ok(dependencies(session, at)
+        .await?
+        .into_iter()
+        .filter(Dependency::is_required)
+        .collect())
+}
 
 pub async fn dependencies<T: Transport, C>(
     session: &mut Session<'_, T, C>,
