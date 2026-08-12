@@ -209,14 +209,15 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
         ),
     ));
 
-    // Effects. Values are printed as stored (0..127); the panel shows most of
-    // them on a 0..10 scale, and the two do not map linearly for delay tempo,
-    // so rescaling here would invent precision the file does not carry.
+    // Effects. Each value prints itself: a `Level` carries the panel's 0..10 reading,
+    // and the fields that are not on that scale — the fx rates in hertz, the delay time
+    // in milliseconds, the equalizer's bipolar decibels — carry their own. Deciding it
+    // here is what let fx1's rate print a 0..10 reading it does not have.
     let fx = &p.effects_panel;
     section(ui, "Effects");
     ui.out(format!(
         "    {}",
-        ui.dim("stored value, with the panel's 0-10 reading where it applies")
+        ui.dim("stored value, with the panel's reading where the scale is known")
     ));
     // An off effect is printed dimmed rather than skipped.
     let off = |name: &str, value: &dyn std::fmt::Display| {
@@ -240,7 +241,7 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
             "fx2",
             fx.fx2_type,
             ui.dim("rate"),
-            fx.fx2_rate.as_u8(),
+            fx.fx2_rate,
             ui.dim("deep"),
             yn(fx.fx2_deep),
         )),
@@ -263,7 +264,7 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
             ui.dim("feedback"),
             fx.fx4_feedback.as_u8(),
             ui.dim("tempo"),
-            fx.fx4_tempo.as_u8(),
+            fx.fx4_tempo,
             ui.dim("wet"),
             fx.fx4_moisture,
             ui.dim("ping-pong"),
@@ -294,13 +295,13 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
             "    {:<FX_WIDTH$}{part:<11}  {} {}  {} {}  {} {}  {} {}",
             "eq",
             ui.dim("bass"),
-            fx.equalizer_bass.as_u8(),
+            fx.equalizer_bass,
             ui.dim("freq"),
-            fx.equalizer_freq.as_u8(),
+            fx.equalizer_freq,
             ui.dim("gain"),
-            fx.equalizer_freq_gain.as_u8(),
+            fx.equalizer_freq_gain,
             ui.dim("treble"),
-            fx.equalizer_treble.as_u8(),
+            fx.equalizer_treble,
         ));
     } else {
         off("eq", &"off");
@@ -309,7 +310,7 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
         "    {:<FX_WIDTH$}{} {}  {} {}",
         "rotary",
         ui.dim("speed"),
-        if fx.rotary_speed { "fast" } else { "slow" },
+        fx.rotary_speed,
         ui.dim("stop"),
         if fx.rotary_stop { "on" } else { "off" },
     ));

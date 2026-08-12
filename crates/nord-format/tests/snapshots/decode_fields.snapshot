@@ -421,7 +421,7 @@ EffectsPanel.rotary_stop
 EffectsPanel.rotary_speed
   at      99..=99
   raw     2    [0, 1]
-  decoded 2    [false, true]
+  decoded 2    [Fast, Slow]
 
 EffectsPanel.fx1_control
   at      115..=115

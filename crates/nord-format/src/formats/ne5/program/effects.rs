@@ -2,6 +2,7 @@
 
 use crate::bits::Packed;
 use crate::components::sparse_enum;
+use crate::components::{EqBand, Frequency, Rate, RotorSpeed, Time};
 use crate::formats::ne5::Level;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
@@ -19,21 +20,24 @@ pub struct EffectsPanel {
     pub fx1: Routing,
     #[bits(2..=5)]
     pub fx1_type: Fx1Type,
+    /// The effect's rate, in hertz. ⚠️ Not a [`Level`]: the panel does not read this on
+    /// its 0..10 scale, which is why it is a [`Rate`].
     #[bits(6..=12)]
-    pub fx1_rate: Level,
+    pub fx1_rate: Rate,
     #[bits(13..=14)]
     pub fx2: Routing,
     #[bits(15..=18)]
     pub fx2_type: Fx2Type,
     #[bits(19..=25)]
-    pub fx2_rate: Level,
+    pub fx2_rate: Rate,
     #[bits(26..=27)]
     pub fx4: Routing,
     #[bits(28..=29)]
     pub fx4_feedback: RangedU8<3>,
-    /// 0..127, 750ms..20ms.
+    /// Delay time. ⚠️ Runs **backwards**: the panel reads 750 ms at 0 and 20 ms at 127,
+    /// so this is not on the 0..10 scale and not monotonic with it either.
     #[bits(30..=36)]
-    pub fx4_tempo: Level,
+    pub fx4_tempo: Time,
     /// Delay wet/dry.
     #[bits(37..=43)]
     pub fx4_moisture: Level,
@@ -46,14 +50,17 @@ pub struct EffectsPanel {
     /// bit above.
     #[bits(117..=118)]
     pub equalizer_part: EqualizerPart,
+    /// The sweepable mid frequency, in hertz.
     #[bits(47..=53)]
-    pub equalizer_freq: Level,
+    pub equalizer_freq: Frequency,
     #[bits(54..=60)]
-    pub equalizer_treble: Level,
+    pub equalizer_treble: EqBand,
+    /// The mid band's boost/cut. ⚠️ Bipolar — its musical zero is the centre of the
+    /// slot, so the 0..10 reading a [`Level`] prints would show a cut as a small boost.
     #[bits(61..=67)]
-    pub equalizer_freq_gain: Level,
+    pub equalizer_freq_gain: EqBand,
     #[bits(68..=74)]
-    pub equalizer_bass: Level,
+    pub equalizer_bass: EqBand,
     #[bits(75..=76)]
     pub fx3: Routing,
     #[bits(77..=79)]
@@ -68,9 +75,8 @@ pub struct EffectsPanel {
     pub fx5_moisture: Level,
     #[bits(98..=98)]
     pub rotary_stop: bool,
-    /// `false` slow, `true` fast.
     #[bits(99..=99)]
-    pub rotary_speed: bool,
+    pub rotary_speed: RotorSpeed,
     /// fx1 control pedal.
     #[bits(115..=115)]
     pub fx1_control: bool,
@@ -132,6 +138,7 @@ impl Routing {
 
 impl Packed for Routing {
     const MAX_BITS: u32 = 2;
+    const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
     type Error = std::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {

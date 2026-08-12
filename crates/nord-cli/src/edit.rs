@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use nord_format::cbin::Cbin;
-use nord_format::fields::FieldError;
+use nord_format::fields::{ControlKind, FieldError, Unit};
 use nord_format::formats::ne5;
 use nord_format::formats::ne5::program::Field;
 use nord_format::{Entity, Live, Program, Settings};
@@ -282,10 +282,42 @@ pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
     }
 }
 
+/// The panel control a field is, in the short form the listing has room for.
+///
+/// This is the field registry answering "what kind of thing is this" — the question a
+/// caller building an interface has to answer before it can pick a widget, and the one
+/// it previously had to answer from a table of field names of its own.
+fn control(kind: ControlKind) -> String {
+    let unit = |u: Unit| match u {
+        Unit::Panel10 => "0-10",
+        Unit::Decibels => "dB",
+        Unit::Milliseconds => "ms",
+        Unit::Hertz => "Hz",
+        Unit::Bpm => "bpm",
+        Unit::ClockDivision => "clock",
+        Unit::Semitones => "semi",
+        Unit::Octaves => "oct",
+        Unit::Pan => "pan",
+        Unit::None => "",
+    };
+    match kind {
+        ControlKind::Toggle => "toggle".to_string(),
+        ControlKind::Selector => "selector".to_string(),
+        ControlKind::Knob(u) => format!("knob {}", unit(u)),
+        ControlKind::Bipolar(u) => format!("bipolar {}", unit(u)),
+        ControlKind::Shift(u) => format!("shift {}", unit(u)),
+        ControlKind::Drawbar => "drawbar".to_string(),
+        ControlKind::Morph => "morph".to_string(),
+        ControlKind::Pattern => "pattern".to_string(),
+        ControlKind::Reference => "library ref".to_string(),
+        ControlKind::Number => "number".to_string(),
+    }
+}
+
 fn list_fields(ui: &Ui, file: &impl Editable) {
     ui.out(format!(
-        "{:<40} {:<12} {:<28} {}",
-        "path", "bits", "value", "accepts"
+        "{:<40} {:<12} {:<14} {:<28} {}",
+        "path", "bits", "control", "value", "accepts"
     ));
     for f in file.fields() {
         // A field too wide to enumerate lists no values; its stored bits are the
@@ -301,8 +333,10 @@ fn list_fields(ui: &Ui, file: &impl Editable) {
             format!("{} {}", f.value, ui.dim(&f.display))
         };
         ui.out(format!(
-            "{:<40} {:<12} {value:<28} {accepts}",
-            f.path, f.spec.placement,
+            "{:<40} {:<12} {:<14} {value:<28} {accepts}",
+            f.path,
+            f.spec.placement,
+            ui.dim(control(f.spec.control)),
         ));
     }
 }

@@ -9,6 +9,8 @@
 use std::convert::Infallible;
 use std::marker::PhantomData;
 
+use crate::fields::ControlKind;
+
 /// A value that can live inside a packed bit field.
 ///
 /// Implementors own their encoding and validation and know nothing about which panel or
@@ -17,6 +19,14 @@ pub trait Packed: Sized {
     /// Bits the widest value of this type occupies. Used to check statically that it
     /// fits its slot.
     const MAX_BITS: u32;
+
+    /// Which panel control this value is, for a caller building an interface over the
+    /// field registry.
+    ///
+    /// Defaults to [`ControlKind::Number`] — an integer nothing has been claimed about.
+    /// A type that knows better says so, and a field gets the answer by choosing that
+    /// type rather than by being annotated at its placement.
+    const CONTROL: ControlKind = ControlKind::Number;
 
     /// Why a bit pattern is not a valid value. [`Infallible`] when every pattern is.
     type Error;
@@ -35,6 +45,7 @@ pub const fn bits_for(max: u64) -> u32 {
 
 impl Packed for bool {
     const MAX_BITS: u32 = 1;
+    const CONTROL: ControlKind = ControlKind::Toggle;
     type Error = Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Infallible> {

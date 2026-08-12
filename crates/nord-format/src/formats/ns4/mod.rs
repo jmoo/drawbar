@@ -9,12 +9,23 @@
 //! # What decodes
 //!
 //! Every parameter placement in the program body and the three preset bodies.
-//! Values are **raw** — the
-//! integer the file stores, range-checked to its slot and no further. Nothing
-//! here interprets one: a filter type is a number, not a name, and a two-way
-//! selector is the stored bit under a name that says which two (see
-//! `fx_delay_normal_analog`) rather than a `bool` asserting a polarity nothing
-//! has confirmed. Bits no parameter claims ride through a re-encode verbatim.
+//! Bits no parameter claims ride through a re-encode verbatim.
+//!
+//! **A field's type says what kind of control it is, and stops there.** A knob is a
+//! `Level` or a `Time`, so a caller knows to draw a dial and which unit to label it
+//! in; a fixed list is a [`Selector`](crate::components::Selector), so a caller knows
+//! to draw positions rather than a range. What none of them do is *name* a position:
+//! no specimen says which index is `LP24`, so a filter type stays a number under a
+//! type that says it is a selector. Give a field a
+//! [`sparse_enum!`](crate::components::sparse_enum) the moment its table is known —
+//! that is strictly better — but never before.
+//!
+//! The three exceptions all rest on the corpus rather than on a guess, and each says so
+//! at its own definition: the octave shift reads as two's complement
+//! ([`OctaveShiftNibble`](crate::components::OctaveShiftNibble)), the keyboard zone holds
+//! the Stage 3's table ([`KbZone4`](crate::components::KbZone4)), and the arpeggiator's
+//! three `u32` rows read as sixteen two-bit steps
+//! ([`ArpPattern`](crate::components::ArpPattern)).
 //!
 //! The settings (`.ns4t`) are a container-verified stub.
 //!

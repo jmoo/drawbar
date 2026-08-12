@@ -518,6 +518,7 @@ impl MidiChannel {
 
 impl crate::bits::Packed for MidiChannel {
     const MAX_BITS: u32 = 5;
+    const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
     type Error = std::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
@@ -586,6 +587,8 @@ impl Default for CtrlPedalGain {
 
 impl crate::bits::Packed for CtrlPedalGain {
     const MAX_BITS: u32 = 4;
+    const CONTROL: crate::fields::ControlKind =
+        crate::fields::ControlKind::Knob(crate::fields::Unit::None);
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {

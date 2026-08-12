@@ -391,8 +391,10 @@ fn stage4_bodies_decode_to_panel_values() {
     let mut split_on = 0usize;
 
     // A selector's slot is wider than the choices the panel offers, so the
-    // unused encodings are the check: they must never appear.
-    let octave_shift = |v: u8| matches!(v, 0..=2 | 14 | 15);
+    // unused encodings are the check: they must never appear. The octave shift
+    // reads through `OctaveShiftNibble`, so the two's-complement wrap that puts
+    // -1 at a stored 15 is the type's business rather than this test's.
+    let octave_shift = |v: i8| (-2..=2).contains(&v);
 
     for path in specimens(&root) {
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
@@ -415,42 +417,39 @@ fn stage4_bodies_decode_to_panel_values() {
                     p.organ_section_enabled || p.piano_section_enabled || p.synth_section_enabled,
                     "{where_}: no section is routed to the keyboard"
                 );
-                assert!(p.organ_a.model.as_u8() <= 5, "{where_}");
-                assert!(p.organ_b.model.as_u8() <= 5, "{where_}");
-                assert!(p.piano_a.piano_type.as_u8() <= 5, "{where_}");
-                assert!(p.piano_b.piano_type.as_u8() <= 5, "{where_}");
-                assert!(p.synth_a_voice.filter_type.as_u8() <= 5, "{where_}");
-                assert!(p.synth_a_voice.lfo_shape.as_u8() <= 4, "{where_}");
-                assert!(
-                    p.synth_a_performance.voice_priority.as_u8() <= 2,
-                    "{where_}"
-                );
-                assert!(p.organ_fx.reverb_type.as_u8() <= 11, "{where_}");
-                assert!(octave_shift(p.organ_a.octave_shift.as_u8()), "{where_}");
+                assert!(p.organ_a.model.raw() <= 5, "{where_}");
+                assert!(p.organ_b.model.raw() <= 5, "{where_}");
+                assert!(p.piano_a.piano_type.raw() <= 5, "{where_}");
+                assert!(p.piano_b.piano_type.raw() <= 5, "{where_}");
+                assert!(p.synth_a_voice.filter_type.raw() <= 5, "{where_}");
+                assert!(p.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
+                assert!(p.synth_a_performance.voice_priority.raw() <= 2, "{where_}");
+                assert!(p.organ_fx.reverb_type.raw() <= 11, "{where_}");
+                assert!(octave_shift(p.organ_a.octave_shift.octaves()), "{where_}");
                 split_on += usize::from(p.split_enabled);
                 programs += 1;
             }
             (Entity::OrganPreset(OrganPreset::Stage4(o)), _) => {
-                assert!(o.organ_a_model.as_u8() <= 5, "{where_}");
-                assert!(o.organ_b_model.as_u8() <= 5, "{where_}");
-                assert!(o.organ_fx.reverb_type.as_u8() <= 11, "{where_}");
-                assert!(octave_shift(o.organ_a_octave_shift.as_u8()), "{where_}");
+                assert!(o.organ_a_model.raw() <= 5, "{where_}");
+                assert!(o.organ_b_model.raw() <= 5, "{where_}");
+                assert!(o.organ_fx.reverb_type.raw() <= 11, "{where_}");
+                assert!(octave_shift(o.organ_a_octave_shift.octaves()), "{where_}");
                 organs += 1;
             }
             (Entity::PianoPreset(PianoPreset::Stage4(n)), _) => {
-                assert!(n.piano_a_type.as_u8() <= 5, "{where_}");
-                assert!(n.piano_b_type.as_u8() <= 5, "{where_}");
-                assert!(n.piano_a_fx.reverb_type.as_u8() <= 11, "{where_}");
-                assert!(octave_shift(n.piano_a_octave_shift.as_u8()), "{where_}");
+                assert!(n.piano_a_type.raw() <= 5, "{where_}");
+                assert!(n.piano_b_type.raw() <= 5, "{where_}");
+                assert!(n.piano_a_fx.reverb_type.raw() <= 11, "{where_}");
+                assert!(octave_shift(n.piano_a_octave_shift.octaves()), "{where_}");
                 pianos += 1;
             }
             (Entity::Synth(Synth::Stage4(y)), _) => {
-                assert!(y.synth_a_voice.filter_type.as_u8() <= 5, "{where_}");
-                assert!(y.synth_b_voice.filter_type.as_u8() <= 5, "{where_}");
-                assert!(y.synth_a_voice.lfo_shape.as_u8() <= 4, "{where_}");
-                assert!(y.synth_a_voice_priority.as_u8() <= 2, "{where_}");
-                assert!(y.synth_a_fx.reverb_type.as_u8() <= 11, "{where_}");
-                assert!(octave_shift(y.synth_a_octave_shift.as_u8()), "{where_}");
+                assert!(y.synth_a_voice.filter_type.raw() <= 5, "{where_}");
+                assert!(y.synth_b_voice.filter_type.raw() <= 5, "{where_}");
+                assert!(y.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
+                assert!(y.synth_a_voice_priority.raw() <= 2, "{where_}");
+                assert!(y.synth_a_fx.reverb_type.raw() <= 11, "{where_}");
+                assert!(octave_shift(y.synth_a_octave_shift.octaves()), "{where_}");
                 synths += 1;
             }
             (other, _) => panic!("{where_}: decoded to {other:?}"),

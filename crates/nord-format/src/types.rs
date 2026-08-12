@@ -6,6 +6,7 @@ use std::fmt::{Debug, Formatter};
 use crate::bank::Location;
 use crate::bits::{bits_for, Packed};
 use crate::error::ParseError;
+use crate::fields::{ControlKind, Unit};
 
 /// An i8 value that is bounded by MIN and MAX and can be converted to a u8 by adding OFFSET.
 #[derive(Copy, Default, Clone, PartialEq, Eq, Hash)]
@@ -26,6 +27,10 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> RangedI8<OFFSET, MIN, MAX> 
 /// Stored biased by `OFFSET`, so the widest encoding is `MAX + OFFSET`.
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Packed for RangedI8<OFFSET, MIN, MAX> {
     const MAX_BITS: u32 = bits_for((MAX as i16 + OFFSET as i16) as u64);
+    /// A signed shift. ⚠️ The unit is the model's — octaves for an octave shift,
+    /// semitones for a transpose — and the alias does not carry it, so the kind says
+    /// only that the control is signed.
+    const CONTROL: ControlKind = ControlKind::Shift(Unit::None);
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {

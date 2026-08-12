@@ -53,6 +53,7 @@ impl Instrument {
 impl crate::bits::Packed for Instrument {
     // Three variants, so two bits — even though the panel's slot is three bits wide.
     const MAX_BITS: u32 = 2;
+    const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
     type Error = crate::error::ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {

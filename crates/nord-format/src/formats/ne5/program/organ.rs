@@ -401,6 +401,7 @@ macro_rules! model_index {
 
         impl Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
             type Error = ::core::convert::Infallible;
 
             fn from_bits(bits: u64) -> Result<Self, Self::Error> {
@@ -487,6 +488,7 @@ impl Drawbars {
 
 impl Packed for Drawbars {
     const MAX_BITS: u32 = 4 * Drawbars::BARS as u32;
+    const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Drawbar;
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {

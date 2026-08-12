@@ -17,10 +17,10 @@
 use super::panel::Panel;
 use crate::cbin::{self, Cbin, Header};
 use crate::components::{
-    sparse_enum, MasterTempo, ProgramCategory, SplitNote, SplitWidth, StageTranspose,
+    sparse_enum, Level, MasterTempo, ProgramCategory, Selector, SplitNote, SplitWidth,
+    StageTranspose, SwitchMorph,
 };
 use crate::error::Error;
-use crate::types::RangedU8;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns3f";
@@ -28,6 +28,17 @@ pub const FORMAT: &str = "ns3f";
 /// program v3.00 (OS v0.92) through v3.04 (OS v2.10 and later), stored ×100.
 pub const KNOWN_VERSIONS: &[u32] = &[300, 301, 302, 303, 304];
 pub const BODY_LEN: usize = 548;
+
+/// The Stage 3's octave shift: a nibble biased by 6.
+///
+/// **Corpus:** over the factory banks the slot holds 3..=9 with a decisive mode at 6,
+/// which is where an untransposed program has to sit. The bias differs per model — the
+/// Stage 2 centres on 7 and the Stage 4 stores two's complement — so each names its own.
+/// Inferred from specimens; not confirmed on hardware.
+///
+/// Total over the nibble: the widest encoding is `9 + 6 = 15`, so no stored pattern is
+/// refused.
+pub type OctaveShift = crate::components::OctaveShift<6, -6, 9>;
 
 sparse_enum!(
     /// Which panels the program enables.
@@ -91,11 +102,11 @@ pub struct Program {
     #[bits(72..=72)]
     pub rotary_speaker_stop_mode: bool,
     #[bits(73..=75)]
-    pub rotary_speaker_speed_wheel: RangedU8<7>,
+    pub rotary_speaker_speed_wheel: SwitchMorph,
     #[bits(76..=78)]
-    pub rotary_speaker_speed_aftertouch: RangedU8<7>,
+    pub rotary_speaker_speed_aftertouch: SwitchMorph,
     #[bits(79..=81)]
-    pub rotary_speaker_speed_ctrl_pedal: RangedU8<7>,
+    pub rotary_speaker_speed_ctrl_pedal: SwitchMorph,
     #[bits(96..=96)]
     pub transpose_enabled: bool,
     #[bits(97..=100)]
@@ -103,13 +114,13 @@ pub struct Program {
     #[bits(101..=108)]
     pub master_clock: MasterTempo,
     #[bits(109..=115)]
-    pub rotary_speaker_drive: RangedU8<127>,
+    pub rotary_speaker_drive: Level,
     #[bits(116..=116)]
     pub dual_keyboard: bool,
     #[bits(118..=119)]
     pub dual_keyboard_style: DualKeyboardStyle,
     #[bits(120..=123)]
-    pub synth_pitch_stick_range: RangedU8<15>,
+    pub synth_pitch_stick_range: Selector<4>,
 
     /// Panel A — the first of the program's two complete setups.
     #[at(22..285)]

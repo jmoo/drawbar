@@ -337,6 +337,18 @@ fn summarize(seen: &BTreeSet<String>) -> String {
     format!("{:<4} [{}{more}]", seen.len(), head.join(", "))
 }
 
+/// Whether a field's decoded column would only restate its raw one.
+///
+/// A `bool` renders `0`/`1` as `false`/`true`, which is a second spelling of the same
+/// fact on every flag in the body — and the Stage bodies are a third flags by count. The
+/// decoded column is for where a *type* says something, so this keeps it for those.
+fn decode_adds_nothing(raw: &BTreeSet<String>, decoded: &BTreeSet<String>) -> bool {
+    raw == decoded
+        || decoded
+            .iter()
+            .all(|v| v == "false" || v == "true" || v == "—")
+}
+
 #[test]
 fn fields() {
     let root = corpus_dir();
@@ -417,8 +429,10 @@ fn stage4_fields() {
          # not reached before. UNVARYING marks a field the corpus cannot check — on a\n\
          # factory bank that is most of the morph targets.\n\
          #\n\
-         # One line per field, and no decoded column: nothing here is interpreted, so\n\
-         # the decoded value restates the raw one and only the placement can be wrong.\n",
+         # `raw` pins the placement; `decoded` pins the interpretation, and the two fail\n\
+         # in different places. A field whose type makes no claim renders the raw value\n\
+         # back, so the columns agree until a type says something — which is exactly\n\
+         # when a reader wants to look.\n",
     );
 
     for (model, ext, label) in [
@@ -432,6 +446,7 @@ fn stage4_fields() {
         let mut order = Vec::new();
         let mut placements: BTreeMap<String, String> = BTreeMap::new();
         let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
         for path in &files {
             let entity = nord_format::from_path(path).unwrap();
@@ -456,28 +471,37 @@ fn stage4_fields() {
                     Some(known) => assert_eq!(known, &row.placement, "{}", row.key),
                 }
                 let raw = row.raw_str();
-                raws.entry(row.key).or_default().insert(raw);
+                raws.entry(row.key.clone()).or_default().insert(raw);
+                values.entry(row.key).or_default().insert(row.value);
             }
         }
 
-        let flat = order.iter().filter(|k| raws[*k].len() == 1).count();
+        let unvarying = |k: &String| raws[k].len() == 1 && values[k].len() == 1;
+        let flat = order.iter().filter(|k| unvarying(k)).count();
         let _ = write!(
             out,
             "\n\n### {label} — {} fields, {flat} unvarying\n\n",
             order.len()
         );
         for key in &order {
-            let single = if raws[key].len() == 1 {
-                "UNVARYING"
-            } else {
-                ""
-            };
+            let single = if unvarying(key) { "UNVARYING" } else { "" };
             let _ = writeln!(
                 out,
-                "{key:<44} {:<13} {single:<9} {}",
+                "{key:<44} {:<13} {single:<9} raw {}",
                 placements[key],
                 summarize(&raws[key]),
             );
+            // Only when the type says something the raw column does not already say.
+            if !decode_adds_nothing(&raws[key], &values[key]) {
+                let _ = writeln!(
+                    out,
+                    "{:<44} {:<13} {:<9} dec {}",
+                    "",
+                    "",
+                    "",
+                    summarize(&values[key])
+                );
+            }
         }
         println!("{label}: {} specimens, {} fields", files.len(), order.len());
     }
@@ -492,9 +516,12 @@ fn stage4_fields() {
 fn stage23_fields() {
     let mut out = String::new();
     out.push_str(
-        "# Per-field decode over every Stage 2 / Stage 3 program in the corpus. One\n\
-         # line per field: where it sits, and every raw value the corpus has been seen\n\
-         # to put there. UNVARYING marks a field the corpus cannot check.\n",
+        "# Per-field decode over every Stage 2 / Stage 3 program in the corpus: where\n\
+         # each field sits, and every value the corpus has been seen to put there.\n\
+         # UNVARYING marks a field the corpus cannot check.\n\
+         #\n\
+         # `raw` pins the placement; `dec` pins the interpretation, and shows only where\n\
+         # the field's type says something the raw value does not already say.\n",
     );
 
     for (model, ext, label) in [
@@ -508,6 +535,7 @@ fn stage23_fields() {
         let mut order = Vec::new();
         let mut placements: BTreeMap<String, String> = BTreeMap::new();
         let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
         for path in &files {
             let entity = nord_format::from_path(path).unwrap();
@@ -528,28 +556,36 @@ fn stage23_fields() {
                     Some(known) => assert_eq!(known, &row.placement, "{}", row.key),
                 }
                 let raw = row.raw_str();
-                raws.entry(row.key).or_default().insert(raw);
+                raws.entry(row.key.clone()).or_default().insert(raw);
+                values.entry(row.key).or_default().insert(row.value);
             }
         }
 
-        let flat = order.iter().filter(|k| raws[*k].len() == 1).count();
+        let unvarying = |k: &String| raws[k].len() == 1 && values[k].len() == 1;
+        let flat = order.iter().filter(|k| unvarying(k)).count();
         let _ = write!(
             out,
             "\n\n### {label} — {} fields, {flat} unvarying\n\n",
             order.len()
         );
         for key in &order {
-            let single = if raws[key].len() == 1 {
-                "UNVARYING"
-            } else {
-                ""
-            };
+            let single = if unvarying(key) { "UNVARYING" } else { "" };
             let _ = writeln!(
                 out,
-                "{key:<48} {:<13} {single:<9} {}",
+                "{key:<48} {:<13} {single:<9} raw {}",
                 placements[key],
                 summarize(&raws[key]),
             );
+            if !decode_adds_nothing(&raws[key], &values[key]) {
+                let _ = writeln!(
+                    out,
+                    "{:<48} {:<13} {:<9} dec {}",
+                    "",
+                    "",
+                    "",
+                    summarize(&values[key])
+                );
+            }
         }
         println!("{label}: {} specimens, {} fields", files.len(), order.len());
     }

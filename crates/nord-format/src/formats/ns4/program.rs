@@ -9,6 +9,7 @@ use super::piano_layers::PianoLayer;
 use super::synth_performance::SynthPerformance;
 use super::synth_voice::SynthVoice;
 use crate::cbin::{self, Cbin};
+use crate::components::{Level, MorphTarget, Pan, RotorSpeed, Selector};
 use crate::error::Error;
 use crate::types::RangedU8;
 use std::io::{Read, Seek};
@@ -34,17 +35,17 @@ pub struct Program {
     #[bits(43..=43)]
     pub kb_zones_3_4_split_point_enabled: bool,
     #[bits(44..=47)]
-    pub kb_zones_1_2_split_point: RangedU8<15>,
+    pub kb_zones_1_2_split_point: Selector<4>,
     #[bits(48..=51)]
-    pub kb_zones_2_3_split_point: RangedU8<15>,
+    pub kb_zones_2_3_split_point: Selector<4>,
     #[bits(52..=55)]
-    pub kb_zones_3_4_split_point: RangedU8<15>,
+    pub kb_zones_3_4_split_point: Selector<4>,
     #[bits(56..=57)]
-    pub kb_zones_1_2_split_point_xfade: RangedU8<3>,
+    pub kb_zones_1_2_split_point_xfade: Selector<2>,
     #[bits(58..=59)]
-    pub kb_zones_2_3_split_point_xfade: RangedU8<3>,
+    pub kb_zones_2_3_split_point_xfade: Selector<2>,
     #[bits(60..=61)]
-    pub kb_zones_3_4_split_point_xfade: RangedU8<3>,
+    pub kb_zones_3_4_split_point_xfade: Selector<2>,
     #[bits(62..=62)]
     pub program_transpose_enabled: bool,
     #[bits(63..=66)]
@@ -80,35 +81,35 @@ pub struct Program {
     #[bits(405..=405)]
     pub organ_a_layer_enabled_scene_2: bool,
     #[bits(406..=412)]
-    pub organ_a_volume: RangedU8<127>,
+    pub organ_a_volume: Level,
     #[bits(413..=420)]
-    pub organ_a_volume_wheel: u8,
+    pub organ_a_volume_wheel: MorphTarget,
     #[bits(421..=428)]
-    pub organ_a_volume_aftertouch: u8,
+    pub organ_a_volume_aftertouch: MorphTarget,
     #[bits(429..=436)]
-    pub organ_a_volume_ctrl_pedal: u8,
+    pub organ_a_volume_ctrl_pedal: MorphTarget,
     #[bits(437..=443)]
-    pub organ_b_volume: RangedU8<127>,
+    pub organ_b_volume: Level,
     #[bits(444..=451)]
-    pub organ_b_volume_wheel: u8,
+    pub organ_b_volume_wheel: MorphTarget,
     #[bits(452..=459)]
-    pub organ_b_volume_aftertouch: u8,
+    pub organ_b_volume_aftertouch: MorphTarget,
     #[bits(460..=467)]
-    pub organ_b_volume_ctrl_pedal: u8,
+    pub organ_b_volume_ctrl_pedal: MorphTarget,
     #[bits(468..=468)]
     pub organ_pitch_stick_enabled: bool,
     #[bits(472..=472)]
     pub organ_rotary_speaker_enabled: bool,
     #[bits(484..=490)]
-    pub rotary_speaker_drive: RangedU8<127>,
+    pub rotary_speaker_drive: Level,
     #[bits(508..=510)]
-    pub rotary_speaker_stop_position: RangedU8<7>,
+    pub rotary_speaker_stop_position: Selector<3>,
     #[bits(514..=514)]
     pub rotary_speaker_stop_enabled: bool,
     #[bits(515..=515)]
-    pub rotary_speaker_slow_fast: bool,
+    pub rotary_speaker_slow_fast: RotorSpeed,
     #[bits(522..=528)]
-    pub organ_vib_chorus_type: RangedU8<127>,
+    pub organ_vib_chorus_type: Level,
     #[bits(1481..=1481)]
     pub piano_b_layer_enabled: bool,
     #[bits(1482..=1482)]
@@ -118,21 +119,21 @@ pub struct Program {
     #[bits(1485..=1485)]
     pub piano_a_layer_enabled_scene_2: bool,
     #[bits(1486..=1492)]
-    pub piano_a_volume: RangedU8<127>,
+    pub piano_a_volume: Level,
     #[bits(1493..=1500)]
-    pub piano_a_volume_wheel: u8,
+    pub piano_a_volume_wheel: MorphTarget,
     #[bits(1501..=1508)]
-    pub piano_a_volume_aftertouch: u8,
+    pub piano_a_volume_aftertouch: MorphTarget,
     #[bits(1509..=1516)]
-    pub piano_a_volume_ctrl_pedal: u8,
+    pub piano_a_volume_ctrl_pedal: MorphTarget,
     #[bits(1517..=1523)]
-    pub piano_b_volume: RangedU8<127>,
+    pub piano_b_volume: Level,
     #[bits(1524..=1531)]
-    pub piano_b_volume_wheel: u8,
+    pub piano_b_volume_wheel: MorphTarget,
     #[bits(1532..=1539)]
-    pub piano_b_volume_aftertouch: u8,
+    pub piano_b_volume_aftertouch: MorphTarget,
     #[bits(1540..=1547)]
-    pub piano_b_volume_ctrl_pedal: u8,
+    pub piano_b_volume_ctrl_pedal: MorphTarget,
     #[bits(2658..=2658)]
     pub synth_c_layer_enabled: bool,
     #[bits(2659..=2659)]
@@ -146,35 +147,35 @@ pub struct Program {
     #[bits(2665..=2665)]
     pub synth_a_layer_enabled_scene_2: bool,
     #[bits(2666..=2672)]
-    pub synth_a_volume: RangedU8<127>,
+    pub synth_a_volume: Level,
     #[bits(2673..=2680)]
-    pub synth_a_volume_wheel: u8,
+    pub synth_a_volume_wheel: MorphTarget,
     #[bits(2681..=2688)]
-    pub synth_a_volume_aftertouch: u8,
+    pub synth_a_volume_aftertouch: MorphTarget,
     #[bits(2689..=2696)]
-    pub synth_a_volume_ctrl_pedal: u8,
+    pub synth_a_volume_ctrl_pedal: MorphTarget,
     #[bits(2697..=2703)]
-    pub synth_b_volume: RangedU8<127>,
+    pub synth_b_volume: Level,
     #[bits(2704..=2711)]
-    pub synth_b_volume_wheel: u8,
+    pub synth_b_volume_wheel: MorphTarget,
     #[bits(2712..=2719)]
-    pub synth_b_volume_aftertouch: u8,
+    pub synth_b_volume_aftertouch: MorphTarget,
     #[bits(2720..=2727)]
-    pub synth_b_volume_ctrl_pedal: u8,
+    pub synth_b_volume_ctrl_pedal: MorphTarget,
     #[bits(2728..=2734)]
-    pub synth_c_volume: RangedU8<127>,
+    pub synth_c_volume: Level,
     #[bits(2735..=2742)]
-    pub synth_c_volume_wheel: u8,
+    pub synth_c_volume_wheel: MorphTarget,
     #[bits(2743..=2750)]
-    pub synth_c_volume_aftertouch: u8,
+    pub synth_c_volume_aftertouch: MorphTarget,
     #[bits(2751..=2758)]
-    pub synth_c_volume_ctrl_pedal: u8,
+    pub synth_c_volume_ctrl_pedal: MorphTarget,
     #[bits(2759..=2764)]
-    pub synth_a_pan: RangedU8<63>,
+    pub synth_a_pan: Pan,
     #[bits(2790..=2795)]
-    pub synth_b_pan: RangedU8<63>,
+    pub synth_b_pan: Pan,
     #[bits(2821..=2826)]
-    pub synth_c_pan: RangedU8<63>,
+    pub synth_c_pan: Pan,
     #[bits(2853..=2853)]
     pub synth_arp_group_enabled: bool,
     #[bits(2855..=2855)]

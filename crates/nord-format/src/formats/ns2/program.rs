@@ -20,10 +20,10 @@
 use super::slot::Slot;
 use crate::cbin::{self, Cbin, Header};
 use crate::components::{
-    sparse_enum, MasterTempo, ProgramCategory, ReverbType, SplitNote, StageTranspose,
+    sparse_enum, Level, MasterTempo, ProgramCategory, ReverbType, RotorSpeed, Selector, SplitNote,
+    StageTranspose,
 };
 use crate::error::Error;
-use crate::types::RangedU8;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns2p";
@@ -38,7 +38,7 @@ pub const BODY_LEN: usize = 521;
 #[nord_bits_derive::bitbody(521)]
 pub struct Program {
     #[bits(16..=17)]
-    pub slot_selection: RangedU8<3>,
+    pub slot_selection: Selector<2>,
     #[bits(18..=18)]
     pub dual_keyboard: bool,
     #[bits(20..=23)]
@@ -58,9 +58,9 @@ pub struct Program {
     #[bits(43..=50)]
     pub master_clock: MasterTempo,
     #[bits(64..=65)]
-    pub organ_model: RangedU8<3>,
+    pub organ_model: Selector<2>,
     #[bits(72..=74)]
-    pub organ_b3_vibrato_mode: RangedU8<7>,
+    pub organ_b3_vibrato_mode: Selector<3>,
     #[bits(75..=75)]
     pub organ_b3_harmonic_third: bool,
     #[bits(76..=76)]
@@ -68,35 +68,35 @@ pub struct Program {
     #[bits(77..=77)]
     pub organ_b3_volume_soft: bool,
     #[bits(89..=90)]
-    pub organ_vox_vibrato_mode: RangedU8<3>,
+    pub organ_vox_vibrato_mode: Selector<2>,
     #[bits(91..=91)]
     pub organ_vox_vibrato_on: bool,
     #[bits(105..=106)]
-    pub organ_farfisa_vibrato_mode: RangedU8<3>,
+    pub organ_farfisa_vibrato_mode: Selector<2>,
     #[bits(107..=107)]
     pub organ_farfisa_vibrato_on: bool,
     #[bits(120..=122)]
-    pub piano_slot_detune: RangedU8<7>,
+    pub piano_slot_detune: Selector<3>,
     #[bits(136..=136)]
     pub reverb_on: bool,
     #[bits(137..=139)]
     pub reverb_type: ReverbType,
     #[bits(140..=146)]
-    pub reverb_amount: RangedU8<127>,
+    pub reverb_amount: Level,
     #[bits(147..=147)]
     pub compressor_on: bool,
     #[bits(148..=154)]
-    pub compressor_amount: RangedU8<127>,
+    pub compressor_amount: Level,
     #[bits(155..=155)]
     pub rotary_speaker_on: bool,
     #[bits(156..=157)]
-    pub rotary_speaker_source: RangedU8<3>,
+    pub rotary_speaker_source: Selector<2>,
     #[bits(158..=164)]
-    pub rotary_speaker_drive: RangedU8<127>,
+    pub rotary_speaker_drive: Level,
     #[bits(165..=165)]
     pub rotary_speaker_stop_mode: bool,
     #[bits(166..=166)]
-    pub rotary_speaker_speed: bool,
+    pub rotary_speaker_speed: RotorSpeed,
     #[bits(167..=167)]
     pub rotary_speaker_speed_wheel: bool,
     #[bits(168..=168)]
@@ -140,6 +140,17 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error
     crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
     Ok(file)
 }
+
+/// The Stage 2's octave shift: a nibble biased by 7.
+///
+/// **Corpus:** over the factory banks the slot holds 5..=10 with a decisive mode at 7,
+/// which is where an untransposed program has to sit. The Stage 3 centres on 6 and the
+/// Stage 4 stores two's complement, so each model names its own. Inferred from specimens;
+/// not confirmed on hardware.
+///
+/// Total over the nibble: the widest encoding is `8 + 7 = 15`, so no stored pattern is
+/// refused.
+pub type OctaveShift = crate::components::OctaveShift<7, -7, 8>;
 
 sparse_enum!(
     /// From the `ns2-organ-kb-zone` table in the Stage byte-map docs.

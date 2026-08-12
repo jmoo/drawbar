@@ -460,6 +460,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
                 placement: #placement,
                 width: #width,
                 legal: || crate::fields::legal_values::<#ty>(#width),
+                control: <#ty as crate::bits::Packed>::CONTROL,
             });
         });
         // The parse is the type's, so a value it cannot hold fails here rather

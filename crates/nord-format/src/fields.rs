@@ -55,6 +55,81 @@ pub struct FieldSpec {
     pub width: u32,
     /// Every value the field's type accepts, rendered as `set_field` spells them. Empty for a field too wide to enumerate — see [`ENUMERABLE_BITS`].
     pub legal: fn() -> Vec<String>,
+    /// Which panel control this field is, from its type's
+    /// [`CONTROL`](crate::bits::Packed::CONTROL).
+    pub control: ControlKind,
+}
+
+/// What the panel puts under a reader's finger.
+///
+/// The registry already says where a field sits and which values it takes; this says what
+/// *kind* of thing it is, so a caller can choose a widget without a table of field names
+/// beside it. It comes from the field's type, so a field gets it right by being declared
+/// with the type that matches the control — a `bool` is a button, a [`Level`] is a knob.
+///
+/// [`Level`]: crate::components::Level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlKind {
+    /// A two-state button. Its two states may have names — see the field's `legal` values.
+    Toggle,
+    /// A selector over a fixed set of named values.
+    Selector,
+    /// A continuous knob or slider, reading in `unit`.
+    Knob(Unit),
+    /// A knob whose musical zero is its centre, reading in `unit` either side.
+    Bipolar(Unit),
+    /// A drawbar, `0..=8`, drawn as a bar rather than a number.
+    Drawbar,
+    /// The value a performance control morphs its parent parameter *to*. Belongs on that
+    /// parent's control, not on one of its own.
+    Morph,
+    /// A per-step pattern grid.
+    Pattern,
+    /// An opaque id into one of the instrument's libraries.
+    Reference,
+    /// A signed shift, reading in `unit`.
+    Shift(Unit),
+    /// An integer nothing has been claimed about — the default, and a standing invitation
+    /// to give the field a type that says more.
+    Number,
+}
+
+/// What a control's reading is *in*.
+///
+/// ⚠️ Naming a unit is not a promise that the stored value converts to it. Several Nord
+/// knobs read in milliseconds or hertz over a curve no manual publishes; the unit says
+/// what the panel shows, and the type's own `Display` prints a converted reading only
+/// where the transform is known. See [`Unit::describes_a_known_transform`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Unit {
+    /// The panel's own `0..10`, which most Nord knobs read in.
+    Panel10,
+    Decibels,
+    Milliseconds,
+    Hertz,
+    /// Beats per minute, quarter-note.
+    Bpm,
+    /// A subdivision of the master clock — `1/8`, `1/4 T`.
+    ClockDivision,
+    Semitones,
+    Octaves,
+    /// A stereo position, left through centre to right.
+    Pan,
+    /// No unit: a count, an index, or a raw byte.
+    None,
+}
+
+impl Unit {
+    /// Whether a value in this unit can be *computed* from the stored one.
+    ///
+    /// False for the units where the panel's curve is not published — a caller that wants
+    /// to label an axis may still use the unit, but must print the stored value.
+    pub fn describes_a_known_transform(&self) -> bool {
+        matches!(
+            self,
+            Unit::Panel10 | Unit::Decibels | Unit::Semitones | Unit::Octaves | Unit::Pan
+        )
+    }
 }
 
 /// The widest field whose legal values are enumerated. Above it a field is spelled by its

@@ -5,8 +5,8 @@
 
 use super::fx::FxChain;
 use crate::cbin::{self, Cbin};
+use crate::components::{KbZone4, Level, LibraryRef, MorphTarget, OctaveShiftNibble, Selector};
 use crate::error::Error;
-use crate::types::RangedU8;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns4n";
@@ -25,35 +25,35 @@ pub struct PianoPreset {
     #[bits(45..=45)]
     pub piano_a_layer_enabled_scene_2: bool,
     #[bits(46..=52)]
-    pub piano_a_volume: RangedU8<127>,
+    pub piano_a_volume: Level,
     #[bits(53..=60)]
-    pub piano_a_volume_wheel: u8,
+    pub piano_a_volume_wheel: MorphTarget,
     #[bits(61..=68)]
-    pub piano_a_volume_aftertouch: u8,
+    pub piano_a_volume_aftertouch: MorphTarget,
     #[bits(69..=76)]
-    pub piano_a_volume_ctrl_pedal: u8,
+    pub piano_a_volume_ctrl_pedal: MorphTarget,
     #[bits(77..=83)]
-    pub piano_b_volume: RangedU8<127>,
+    pub piano_b_volume: Level,
     #[bits(84..=91)]
-    pub piano_b_volume_wheel: u8,
+    pub piano_b_volume_wheel: MorphTarget,
     #[bits(92..=99)]
-    pub piano_b_volume_aftertouch: u8,
+    pub piano_b_volume_aftertouch: MorphTarget,
     #[bits(100..=107)]
-    pub piano_b_volume_ctrl_pedal: u8,
+    pub piano_b_volume_ctrl_pedal: MorphTarget,
     #[bits(148..=151)]
-    pub piano_a_octave_shift: RangedU8<15>,
+    pub piano_a_octave_shift: OctaveShiftNibble,
     #[bits(152..=152)]
     pub piano_a_pitch_stick_enabled: bool,
     #[bits(153..=153)]
     pub piano_a_sustain_pedal_enabled: bool,
     #[bits(154..=156)]
-    pub piano_a_type: RangedU8<7>,
+    pub piano_a_type: Selector<3>,
     #[bits(157..=161)]
-    pub piano_a_model_slot: RangedU8<31>,
+    pub piano_a_model_slot: Selector<5>,
     #[bits(162..=163)]
-    pub piano_a_model_variation: RangedU8<3>,
+    pub piano_a_model_variation: Selector<2>,
     #[bits(164..=195)]
-    pub piano_a_model_id: u32,
+    pub piano_a_model_id: LibraryRef,
     #[bits(196..=196)]
     pub piano_a_soft_rel_enabled: bool,
     #[bits(197..=197)]
@@ -61,29 +61,29 @@ pub struct PianoPreset {
     #[bits(198..=198)]
     pub piano_a_pedal_noise_enabled: bool,
     #[bits(199..=200)]
-    pub piano_a_touch: RangedU8<3>,
+    pub piano_a_touch: Selector<2>,
     #[bits(201..=202)]
-    pub piano_a_unison_level: RangedU8<3>,
+    pub piano_a_unison_level: Selector<2>,
     #[bits(203..=204)]
-    pub piano_a_dyn_comp: RangedU8<3>,
+    pub piano_a_dyn_comp: Selector<2>,
     #[bits(206..=208)]
-    pub piano_a_timbre: RangedU8<7>,
+    pub piano_a_timbre: Selector<3>,
     #[bits(240..=243)]
-    pub piano_b_kb_zones: RangedU8<15>,
+    pub piano_b_kb_zones: KbZone4,
     #[bits(244..=247)]
-    pub piano_b_octave_shift: RangedU8<15>,
+    pub piano_b_octave_shift: OctaveShiftNibble,
     #[bits(248..=248)]
     pub piano_b_pitch_stick_enabled: bool,
     #[bits(249..=249)]
     pub piano_b_sustain_pedal_enabled: bool,
     #[bits(250..=252)]
-    pub piano_b_type: RangedU8<7>,
+    pub piano_b_type: Selector<3>,
     #[bits(253..=257)]
-    pub piano_b_model_slot: RangedU8<31>,
+    pub piano_b_model_slot: Selector<5>,
     #[bits(258..=259)]
-    pub piano_b_model_variation: RangedU8<3>,
+    pub piano_b_model_variation: Selector<2>,
     #[bits(260..=291)]
-    pub piano_b_model_id: u32,
+    pub piano_b_model_id: LibraryRef,
     #[bits(292..=292)]
     pub piano_b_soft_rel_enabled: bool,
     #[bits(293..=293)]
@@ -91,13 +91,13 @@ pub struct PianoPreset {
     #[bits(294..=294)]
     pub piano_b_pedal_noise_enabled: bool,
     #[bits(295..=296)]
-    pub piano_b_touch: RangedU8<3>,
+    pub piano_b_touch: Selector<2>,
     #[bits(297..=298)]
-    pub piano_b_unison_level: RangedU8<3>,
+    pub piano_b_unison_level: Selector<2>,
     #[bits(299..=300)]
-    pub piano_b_dyn_comp: RangedU8<3>,
+    pub piano_b_dyn_comp: Selector<2>,
     #[bits(302..=304)]
-    pub piano_b_timbre: RangedU8<7>,
+    pub piano_b_timbre: Selector<3>,
 
     /// The piano a section's effects chain.
     #[at(42..94)]

@@ -86,7 +86,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -174,7 +174,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -262,7 +262,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -350,7 +350,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -438,7 +438,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -526,7 +526,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -614,7 +614,7 @@ EffectsPanel.fx5                   87..=87                raw 0            false
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
 
@@ -702,6 +702,6 @@ EffectsPanel.fx5                   87..=87                raw 1            true
 EffectsPanel.fx5_type              88..=90                raw 0            Room
 EffectsPanel.fx5_moisture          91..=97                raw 64           64
 EffectsPanel.rotary_stop           98..=98                raw 0            false
-EffectsPanel.rotary_speed          99..=99                raw 0            false
+EffectsPanel.rotary_speed          99..=99                raw 0            Slow
 EffectsPanel.fx1_control           115..=115              raw 0            false
 EffectsPanel.fx2_deep              116..=116              raw 0            false
