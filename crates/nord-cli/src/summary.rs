@@ -497,20 +497,32 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
                 note::name(stroke.root_key),
                 stroke.root_key,
                 ui.dim("packets"),
-                stroke.packets,
+                match stroke.packets {
+                    Some(n) => n.to_string(),
+                    None => "?".into(),
+                },
             ),
         ));
     }
-    let packets: usize = strokes.iter().map(|s| s.packets).sum();
+    // A total over a partly-unknown set would read as a measurement, so say which
+    // part is missing instead. Only the first stroke of a many-zone instrument can
+    // be unknown, so this is at most one line of caveat.
+    let counted: usize = strokes.iter().filter_map(|s| s.packets).sum();
+    let unknown = strokes.iter().filter(|s| s.packets.is_none()).count();
     ui.out(field(
         ui,
         4,
         "audio",
         format!(
-            "{} {packets}  {} {}",
+            "{} {counted}{}  {} {}",
             ui.dim("packets"),
+            if unknown > 0 {
+                format!(" (+{unknown} stroke(s) whose header length is unknown)")
+            } else {
+                String::new()
+            },
             ui.dim("encoded bytes"),
-            packets * stroke::PACKET_LEN,
+            counted * stroke::PACKET_LEN,
         ),
     ));
 }

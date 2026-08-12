@@ -12,9 +12,16 @@ pub const RECORDS_AT: usize = COUNT_AT + 1;
 /// Bytes per zone record.
 pub const RECORD_LEN: usize = 15;
 
-/// Within a record: a 1-based index that counts *down* — the first record in a
-/// three-zone instrument holds 3, the last holds 1.
-const REVERSE_INDEX: usize = 2;
+/// Within a record: which stroke plays this zone, by the global id the stroke carries
+/// in its own first four bytes.
+///
+/// ⚠️ **Not a positional index.** Instruments the editor builds in one pass number
+/// their strokes `n…1` in file order, so this byte reads as a countdown and pairing
+/// zones with strokes by position appears to work. It is a coincidence of how those
+/// files were made: the vendor library ships ids like `13 12 6 9 5 25`, in an order
+/// that matches nothing, and pairing by position there hands every zone the wrong
+/// sample. Same idea as the v3/v4 table, one generation earlier — see [`ZoneV3`].
+const STROKE_ID: usize = 2;
 
 /// Within a record: the highest MIDI note this zone answers to.
 const TOP_NOTE: usize = 9;
@@ -28,9 +35,8 @@ const TOP_NOTE: usize = 9;
 pub struct Zone {
     /// Highest MIDI note this zone answers to.
     pub top_note: u8,
-    /// The stored countdown, `zone_count - index`. Kept so a rewritten table can be
-    /// compared byte-for-byte against the editor's own output.
-    pub reverse_index: u8,
+    /// The stroke that plays this zone, by global id — see [`STROKE_ID`].
+    pub stroke_id: u8,
 }
 
 pub fn count(map: &[u8]) -> Result<usize, ParseError> {
@@ -56,7 +62,7 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
             let r = &map[RECORDS_AT + i * RECORD_LEN..][..RECORD_LEN];
             Zone {
                 top_note: r[TOP_NOTE],
-                reverse_index: r[REVERSE_INDEX],
+                stroke_id: r[STROKE_ID],
             }
         })
         .collect())
@@ -194,12 +200,18 @@ pub fn derive_top_notes(roots_high_to_low: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// A table whose stroke ids run `n…1`, which is what the editor emits when it
+    /// builds an instrument in one pass.
     fn table(tops: &[u8]) -> Vec<u8> {
+        table_with_ids(tops, &(1..=tops.len() as u8).rev().collect::<Vec<_>>())
+    }
+
+    fn table_with_ids(tops: &[u8], ids: &[u8]) -> Vec<u8> {
         let mut m = vec![0u8; RECORDS_AT + tops.len() * RECORD_LEN];
         m[COUNT_AT] = tops.len() as u8;
-        for (i, &t) in tops.iter().enumerate() {
+        for (i, (&t, &id)) in tops.iter().zip(ids).enumerate() {
             let r = RECORDS_AT + i * RECORD_LEN;
-            m[r + REVERSE_INDEX] = (tops.len() - i) as u8;
+            m[r + STROKE_ID] = id;
             m[r + TOP_NOTE] = t;
         }
         m
@@ -211,9 +223,24 @@ mod tests {
         assert_eq!(zones.len(), 3);
         assert_eq!(zones[0].top_note, 96);
         assert_eq!(zones[2].top_note, 53);
-        // The countdown, not the position.
-        assert_eq!(zones[0].reverse_index, 3);
-        assert_eq!(zones[2].reverse_index, 1);
+        assert_eq!(zones[0].stroke_id, 3);
+        assert_eq!(zones[2].stroke_id, 1);
+    }
+
+    /// The vendor library's own ids: unordered, not a countdown, and nowhere near the
+    /// zone count. A reader treating the byte as a position would accept these and
+    /// silently pair every zone with the wrong stroke.
+    #[test]
+    fn stroke_ids_need_not_be_a_countdown() {
+        let zones = read(&table_with_ids(
+            &[108, 90, 77, 66, 60, 53],
+            &[13, 12, 6, 9, 5, 25],
+        ))
+        .unwrap();
+        assert_eq!(
+            zones.iter().map(|z| z.stroke_id).collect::<Vec<_>>(),
+            [13, 12, 6, 9, 5, 25]
+        );
     }
 
     #[test]

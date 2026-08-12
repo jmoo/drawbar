@@ -35,6 +35,14 @@ pub const FORMAT: &str = "nsmp";
 /// stores 300 and up, `.nsmp4` 400 and up.
 pub const V3_FROM_VERSION: u32 = 300;
 
+/// Content version of the first Sample Library whose v2 layout this reader decodes.
+///
+/// The number tracks the *library release*, not the codec, so the versions below this
+/// are older libraries rather than older codecs — 8 above all, plus a 4/5/100/140/150
+/// tail we hold no specimen of. They are still `NWS`-chain files; only what sits
+/// inside the sections differs.
+pub const LIBRARY_2_VERSION: u32 = 200;
+
 /// A body decoded by generation: v2 in full, v3/v4 as a section chain with
 /// strokes verbatim.
 ///
@@ -263,8 +271,29 @@ impl Cbin<Sample> {
         Ok(())
     }
 
+    /// Refuses the pre-2.0 library layout by name rather than by symptom.
+    ///
+    /// Version 8 is the original Sample Library, and its `map` section does not follow
+    /// `801 + 15·(zones−1)` — the two specimens hold ten zones in 906 bytes and one in
+    /// 798, against 936 and 801. The zone table is somewhere else, or shaped
+    /// differently; either way the 2.0 reader walks off into the wrong bytes and
+    /// reports a length complaint that says nothing about the real cause. The section
+    /// chain, name and checksum are unaffected and still read.
+    fn require_known_layout(&self) -> Result<(), Error> {
+        if self.header.version < LIBRARY_2_VERSION {
+            return Err(ParseError::AssertFail(format!(
+                "content version {} predates Sample Library 2.0 and lays out its zone \
+                 table differently; only the section chain and name are decoded",
+                self.header.version
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     /// Keyboard zones, high to low.
     pub fn zones(&self) -> Result<Vec<Zone>, Error> {
+        self.require_known_layout()?;
         Ok(zone::read(&self.map()?.payload)?)
     }
 
@@ -276,24 +305,85 @@ impl Cbin<Sample> {
         Ok(())
     }
 
-    /// One stroke per zone, in the same high-to-low order as [`Self::zones`].
+    /// One stroke per zone, **in [`Self::zones`] order** — which is not file order.
+    ///
+    /// Each zone names its stroke by id, and only instruments built in a single editor
+    /// pass have those ids running parallel to the sections. Zipping this against
+    /// `zones()` is therefore safe; indexing it as "the nth `stk` section" is not.
     pub fn strokes(&self) -> Result<Vec<Stroke>, Error> {
+        self.require_known_layout()?;
+        let zones = self.zones()?;
+        let by_id = self.strokes_in_file_order()?;
+        zones
+            .iter()
+            .map(|z| {
+                by_id
+                    .iter()
+                    .find(|(id, _)| *id == u32::from(z.stroke_id))
+                    .map(|(_, s)| *s)
+                    .ok_or_else(|| {
+                        ParseError::AssertFail(format!(
+                            "zone reaching up to note {} names stroke {}, which the file \
+                             does not contain",
+                            z.top_note, z.stroke_id
+                        ))
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// Every stroke with the global id it carries, in the order the sections appear.
+    ///
+    /// The header length depends on a stroke's *position in the file*, so the read has
+    /// to happen here, before anything reorders them.
+    fn strokes_in_file_order(&self) -> Result<Vec<(u32, Stroke)>, Error> {
         let zones = zone::count(&self.map()?.payload)?;
         self.stroke_sections()
             .enumerate()
-            .map(|(i, s)| Ok(stroke::read(&s.payload, i, zones)?))
+            .map(|(i, s)| {
+                let id = s
+                    .payload
+                    .get(0..4)
+                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                    .ok_or_else(|| {
+                        ParseError::AssertFail(format!(
+                            "stroke {i} is {} bytes, too short for its id",
+                            s.payload.len()
+                        ))
+                    })?;
+                Ok((id, stroke::read(&s.payload, i, zones)?))
+            })
             .collect()
     }
 
     /// Retunes one zone by moving the note its sample plays untransposed at.
+    ///
+    /// `index` is into [`Self::zones`], matching [`Self::set_zone_top_note`] — so the
+    /// stroke it reaches is the one that zone names, not the nth section. The two are
+    /// the same file order only for instruments the editor built in a single pass.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        let zones = self.zones()?;
+        let zone = zones
+            .get(index)
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
+        let wanted = u32::from(zone.stroke_id);
         let section = self
             .body
             .sections
             .iter_mut()
             .filter(|s| s.is(section::STK))
-            .nth(index)
-            .ok_or_else(|| ParseError::AssertFail(format!("no stroke {index}")))?;
+            .find(|s| {
+                s.payload
+                    .get(0..4)
+                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                    == Some(wanted)
+            })
+            .ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "zone {index} names stroke {wanted}, which the file does not contain"
+                ))
+            })?;
         stroke::set_root_key(&mut section.payload, note)?;
         Ok(())
     }
