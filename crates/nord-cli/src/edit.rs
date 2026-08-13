@@ -283,10 +283,6 @@ pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
 }
 
 /// The panel control a field is, in the short form the listing has room for.
-///
-/// This is the field registry answering "what kind of thing is this" — the question a
-/// caller building an interface has to answer before it can pick a widget, and the one
-/// it previously had to answer from a table of field names of its own.
 fn control(kind: ControlKind) -> String {
     let unit = |u: Unit| match u {
         Unit::Panel10 => "0-10",

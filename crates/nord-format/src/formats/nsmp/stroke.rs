@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn lengths_from_the_corpus_decompose_exactly() {
         // (index, zones, total length, packets) taken off real instruments — ours at
-        // the top, then the vendor files that used to be unreadable.
+        // the top, then vendor library files.
         for (index, zones, cat, len, packets) in [
             (0, 1, OUR_CAT, 1689, 4), // single zone
             (0, 2, OUR_CAT, 1674, 4), // same audio, one more zone

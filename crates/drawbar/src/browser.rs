@@ -558,12 +558,7 @@ impl Browser {
     }
 
     /// Draw the places a sound can live and collect what the user asked for.
-    ///
-    /// The instrument gets a column once there is an instrument. Attached, the two sit
-    /// adjacent — a drag between them is then a short horizontal move, and a long device
-    /// tree cannot push the local list off-screen. Unattached, the column would be half
-    /// the sidebar saying nothing, so the list takes the whole width and the way to an
-    /// instrument is a button beside the ones that open files.
+    /// The instrument gets a column once there is an instrument.
     pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, device: &Device) -> Vec<Act> {
         let mut acts = Vec::new();
         self.dialog(ui.ctx(), &mut acts);
@@ -700,8 +695,6 @@ impl Browser {
         let connecting = matches!(device.state.connection, Connection::Connecting);
         let head = self.heading(ui, "This computer", |ui| {
             open_files = ui.small_button("Open…").clicked();
-            // A family, then a kind inside it: one flat list of every format's every
-            // object is a wall of words in which "Program" appears four times.
             ui.menu_button("New", |ui| {
                 for family in &Fresh::FAMILIES {
                     ui.menu_button(family.label, |ui| {
@@ -772,8 +765,6 @@ impl Browser {
                             .italics(),
                     );
                 }
-                // Folders first, then whatever is in no folder: a group has to be
-                // findable without scrolling past the loose list to reach it.
                 for id in self.folder_ids() {
                     self.folder_rows(ui, id, workspace, device, acts);
                 }
@@ -826,8 +817,6 @@ impl Browser {
             .map(|entity| entity.id)
             .collect();
 
-        // While the name is being typed the heading is the editor, and what is in the
-        // folder is drawn under it rather than hidden for the length of the gesture.
         if self.rename.as_ref().is_some_and(|r| r.what == item) {
             if let Some(name) = self.rename_row(ui, &name) {
                 acts.push(Act::RenameFolder { id, name });
@@ -996,9 +985,6 @@ impl Browser {
     }
 
     /// Where an asset can be put, for the operators who would rather pick than drag.
-    ///
-    /// A submenu rather than a modal: the folders are a short list and the answer is one
-    /// of them, so there is nothing to type and nothing to confirm.
     fn filing_menu(&self, ui: &mut egui::Ui, id: u64, filed: Option<u64>, acts: &mut Vec<Act>) {
         if self.folders.all().is_empty() {
             return;
@@ -1079,9 +1065,6 @@ impl Browser {
                 ui.label(egui::RichText::new(firmware).small().weak())
                     .on_hover_text("the firmware version the instrument reports");
             }
-            // One button for the whole column. A walk reads a class's counters, its
-            // banks and the slot the panel is on all at the head of its own session, so
-            // there is nothing a per-folder button could ask for that this does not.
             sync = ui
                 .add_enabled(!reading, egui::Button::new("Sync").small())
                 .on_hover_text("read the whole instrument again")
@@ -1139,8 +1122,6 @@ impl Browser {
                             Some(value) => {
                                 ui.label(egui::RichText::new(value).small().monospace());
                             }
-                            // Named rather than dropped: an absent line reads as a fact
-                            // nobody thought to show.
                             None => {
                                 ui.label(
                                     egui::RichText::new("not asked for on this build")
@@ -1191,9 +1172,6 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         let progress = device.state.scan.progress(class);
-        // The heading carries how full the folder is, so the column reads as an index of
-        // the instrument rather than as six words that all have to be opened to mean
-        // anything.
         let title = match progress {
             Some(p) if p.running => match p.total {
                 Some(total) => format!("{}  ·  reading {} of {total}", folder(class), p.done + 1),
@@ -1231,9 +1209,7 @@ impl Browser {
             if banks.is_empty() {
                 ui.label(egui::RichText::new("nothing read yet").small().weak());
             }
-            // A class that divides into one bank is a numbering with nothing to number,
-            // and a heading over the whole of it is a line to click through for nothing.
-            // The live buffer and the settings singleton are both this.
+            // The live buffer and the settings singleton divide into one bank.
             let cut = banks.len() > 1;
             for bank in banks {
                 self.bank(ui, device, class, bank, cut, viewed, acts);
@@ -1311,9 +1287,7 @@ impl Browser {
         let jumping = self
             .jump
             .is_some_and(|(held, at)| held == class && at.bank + 1 == bank);
-        // Open where the panel is, closed everywhere else: an operator arrives at this
-        // column knowing what the instrument is playing and nothing else, and eight
-        // banks of fifty in one run is a list nobody can navigate.
+        // Open where the panel is, closed everywhere else.
         let heading = egui::CollapsingHeader::new(title);
         let heading = match jumping {
             true => heading.open(Some(true)),
@@ -1642,8 +1616,6 @@ impl Browser {
                     warnings.push(warning);
                 }
             }
-            // Naming the occupant is the whole point of asking: a batch is where an
-            // operator stops reading each destination for themselves.
             lines.push(match device.state.slot(class, at).flatten() {
                 Some(info) => format!(
                     "“{}” replaces “{}” in {where_}",
@@ -1656,8 +1628,7 @@ impl Browser {
         if lines.is_empty() {
             return;
         }
-        // The warnings first: they are the reason to say no, and a list of destinations
-        // is what the eye slides down.
+        // The warnings first: they are the reason to say no.
         let mut note = warnings;
         if !note.is_empty() {
             note.push(String::new());
@@ -1764,8 +1735,7 @@ fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     let mut x = rect.left() + 4.0;
     let gutter = egui::pos2(x + 3.5, rect.center().y);
     // One gutter, two marks that never meet: only a local asset is dirty, and only a slot
-    // is loaded on the panel. A ring rather than a second disc, because two dots that
-    // differ in nothing but colour read as the same mark.
+    // is loaded on the panel.
     if cells.dirty {
         painter.circle_filled(gutter, 3.5, crate::app::warn(ui.visuals()));
     } else if cells.loaded {

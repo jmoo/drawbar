@@ -10,10 +10,6 @@
 //! ```sh
 //! NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 cargo test -p nord-format --features corpus
 //! ```
-//!
-//! TODO: migrate these hand-rolled `read_dir` loops to a data-driven harness
-//! (`datatest-stable` / `libtest-mimic`) so each specimen is its own reported
-//! test case — see `Projects/Nord Utils.md`.
 
 use nord_format::bank::Item;
 use nord_format::cbin::Cbin;

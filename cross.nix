@@ -62,7 +62,7 @@
           darwin-x86_64.cargoFlags = [ ];
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          # aarch64 Linux — meerkat (Asahi) runs this.
+          # aarch64 Linux.
           linux-aarch64 = {
             triple = "aarch64-unknown-linux-gnu";
             cargoFlags = [ ];
@@ -444,7 +444,7 @@
           };
         }
         // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
-          # aarch64 Linux is what meerkat runs; qemu-user covers it from here.
+          # aarch64 Linux; qemu-user covers it from here.
           nord-cli-linux-aarch64-poc = mkRunCheck {
             name = "nord-cli-linux-aarch64-poc";
             pkg = crossed.nord-cli-linux-aarch64;
