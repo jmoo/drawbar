@@ -25,6 +25,12 @@ pub const FORMAT: &str = "ns3y";
 pub const KNOWN_VERSIONS: &[u32] = &[300];
 pub const BODY_LEN: usize = 58;
 
+/// The 58-byte preset body: the program's synth block under its own tag.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placement located in the corpus (see the [module
+/// docs](self)); inferred from specimens, not confirmed on hardware.
 #[nord_bits_derive::bitbody(58)]
 pub struct SynthPreset {
     #[bits(40..=40)]

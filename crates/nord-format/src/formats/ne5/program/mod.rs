@@ -49,6 +49,11 @@ pub type Bank = bank::Bank<Cbin<Program>, Location>;
 
 /// The 121-byte panel body: five panels behind a version echo. The pads between
 /// the panels are unclaimed bits, kept verbatim.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`] and the aux word, validates the slot, and range-checks
+/// every field. Placements are pinned by a change-one-knob specimen corpus
+/// written by the instrument; each panel marks what is confirmed on hardware.
 #[nord_bits_derive::bitbody(121)]
 pub struct Program {
     /// Every specimen echoes the header's schema version.

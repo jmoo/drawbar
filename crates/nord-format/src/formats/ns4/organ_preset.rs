@@ -17,6 +17,12 @@ pub const FORMAT: &str = "ns4o";
 pub const KNOWN_VERSIONS: &[u32] = &[201, 202, 203, 204, 205];
 pub const BODY_LEN: usize = 139;
 
+/// The 139-byte preset body: one organ section as a program stores it.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placements derived from ns4decode's published tables;
+/// values raw. Not confirmed on hardware.
 #[nord_bits_derive::bitbody(139)]
 pub struct OrganPreset {
     #[bits(41..=41)]

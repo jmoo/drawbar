@@ -19,6 +19,12 @@ pub const FORMAT: &str = "ns4y";
 pub const KNOWN_VERSIONS: &[u32] = &[203, 204, 205, 206, 207, 208];
 pub const BODY_LEN: usize = 497;
 
+/// The 497-byte preset body: one synth section as a program stores it.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placements derived from ns4decode's published tables;
+/// values raw. Not confirmed on hardware.
 #[nord_bits_derive::bitbody(497)]
 pub struct SynthPreset {
     #[bits(42..=42)]

@@ -62,6 +62,12 @@ sparse_enum!(
 /// The program-wide globals at the head of the body. Bits are MSB-first from body
 /// byte 0 (`0x2c` in a type-1 file), so byte 0x05 bit 7 is bit 40.
 ///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placements from the community byte maps; values raw except
+/// where those maps enumerate them. Inferred from specimens; not confirmed on
+/// hardware.
+///
 /// ⚠️ The three split notes can be stored out of order — the panel reorders them on
 /// display (documented with specimens in the ns3-program-viewer sources). The
 /// decode reports what is stored.

@@ -35,6 +35,12 @@ pub const BODY_LEN: usize = 521;
 
 /// The program-wide globals at the head of the body. Bits are MSB-first from body
 /// byte 0 (`0x2c` in a type-1 file), so byte 0x02 bit 5 is bit 18.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placements from the community byte maps; values raw except
+/// where those maps enumerate them. Inferred from specimens; not confirmed on
+/// hardware.
 #[nord_bits_derive::bitbody(521)]
 pub struct Program {
     #[bits(16..=17)]

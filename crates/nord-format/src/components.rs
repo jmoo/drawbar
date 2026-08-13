@@ -593,7 +593,7 @@ impl PartialEq<i8> for OctaveShiftNibble {
 
 /// A selector whose positions are known to be a fixed set, but whose table is not.
 ///
-/// The honest middle between an integer and a [`sparse_enum!`]. A caller building an
+/// The honest middle between an integer and a `sparse_enum!`. A caller building an
 /// interface needs to know a field is a *selector* — a discrete list, drawn as a row of
 /// positions rather than a knob — before it needs to know what each position is called,
 /// and on the Stage 4 that is exactly the state of things: the placements came from an

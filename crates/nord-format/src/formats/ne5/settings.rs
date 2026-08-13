@@ -84,6 +84,10 @@ pub type FineTune = RangedI8<50, -50, 50>;
 /// The 34-byte settings body: the System, MIDI and Sound menus, interleaved in one
 /// bit space with the `startup_*` settings the instrument restores at power-up.
 /// Flat, because the two share bytes.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`] and the aux word, and refuses any slot but `0:0`. Every
+/// placement is confirmed on hardware by a change-one-setting sweep.
 #[bitbody(34)]
 pub struct Settings {
     // ── System ─────────────────────────────────────────────────────────────────

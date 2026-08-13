@@ -11,6 +11,9 @@
 macro_rules! raw_format {
     ($(#[$meta:meta])* $name:ident, $tag:literal $(, $body_len:literal)?) => {
         $(#[$meta])*
+        #[doc = ""]
+        #[doc = "Container-verified stub: reads and writes byte-exactly, header \
+                 parsed and checksum verified, body kept verbatim and undecoded."]
         pub mod $name {
             use crate::cbin::{self, Cbin, RawBody};
             use crate::error::Error;

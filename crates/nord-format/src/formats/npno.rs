@@ -45,6 +45,11 @@ const NAME_END: usize = 0x40;
 const KEY_MAP_AT: usize = 0x8c;
 
 /// A piano library (`npno`): the CNSP prefix read in place, body verbatim.
+///
+/// Reads and writes byte-exactly, checksum verified. Only the prefix decodes —
+/// name and key map, per the layout in the [module docs](self); the stroke
+/// directory and audio stay verbatim. Prefix inferred from specimens; not
+/// confirmed on hardware.
 pub struct Piano {
     pub file: Cbin<RawBody>,
 }

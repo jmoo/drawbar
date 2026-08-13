@@ -35,7 +35,7 @@ const TOP_NOTE: usize = 9;
 pub struct Zone {
     /// Highest MIDI note this zone answers to.
     pub top_note: u8,
-    /// The stroke that plays this zone, by global id — see [`STROKE_ID`].
+    /// The stroke that plays this zone, by global id — see `STROKE_ID`.
     pub stroke_id: u8,
 }
 

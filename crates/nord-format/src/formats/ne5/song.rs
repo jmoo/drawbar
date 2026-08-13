@@ -31,6 +31,9 @@ pub type Bank = bank::Bank<Cbin<Song>, Location>;
 
 /// The 18-byte body: four 9-bit program references behind a version echo.
 ///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`] and the aux word, and validates the slot.
+///
 /// The container header is never transmitted over USB — the device sends only
 /// this body — so the version is echoed into bits the wire side can see. ⚠️ It
 /// must be the *read* version, never a constant: the eight factory demo songs

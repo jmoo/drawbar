@@ -14,6 +14,12 @@ pub const FORMAT: &str = "ns4n";
 pub const KNOWN_VERSIONS: &[u32] = &[201, 202, 203];
 pub const BODY_LEN: usize = 151;
 
+/// The 151-byte preset body: one piano section as a program stores it.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placements derived from ns4decode's published tables;
+/// values raw. Not confirmed on hardware.
 #[nord_bits_derive::bitbody(151)]
 pub struct PianoPreset {
     #[bits(41..=41)]

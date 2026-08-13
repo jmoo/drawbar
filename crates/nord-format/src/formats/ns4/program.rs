@@ -22,6 +22,12 @@ pub const FORMAT: &str = "ns4p";
 pub const KNOWN_VERSIONS: &[u32] = &[304, 305, 306, 307, 308, 309, 310, 311, 312, 313];
 pub const BODY_LEN: usize = 824;
 
+/// The 824-byte program body: all three sections and the globals that route them.
+///
+/// Reads and writes byte-exactly. A read verifies the container checksum, gates
+/// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
+/// re-encode verbatim. Placements derived from ns4decode's published tables;
+/// values raw. Not confirmed on hardware.
 #[nord_bits_derive::bitbody(824)]
 pub struct Program {
     #[bits(24..=31)]

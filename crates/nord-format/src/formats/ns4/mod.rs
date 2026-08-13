@@ -17,7 +17,7 @@
 //! to draw positions rather than a range. What none of them do is *name* a position:
 //! no specimen says which index is `LP24`, so a filter type stays a number under a
 //! type that says it is a selector. Give a field a
-//! [`sparse_enum!`](crate::components::sparse_enum) the moment its table is known —
+//! `sparse_enum!` the moment its table is known —
 //! that is strictly better — but never before.
 //!
 //! The three exceptions all rest on the corpus rather than on a guess, and each says so

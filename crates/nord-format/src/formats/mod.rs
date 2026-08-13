@@ -2,7 +2,32 @@
 //! where a model family shares a prefix across several tags, for that prefix; or,
 //! where the tags share no usable prefix (`nsclassic`, `np`), for the model.
 //!
-//! Most modules are stubs: container read and verified, body kept verbatim.
+//! # How far each format goes
+//!
+//! Every format reads and writes byte-exactly — `to_bytes(from_stream(x)) == x` —
+//! and a read verifies its container: CBIN header and checksum for the CBIN
+//! formats, the envelope for the SysEx/MIDI carriers. What differs is how much of
+//! the body decodes, in three tiers:
+//!
+//! - **Decoded** — the body is a bit-mapped struct of named fields. The struct's
+//!   own doc carries its byte map, a read gates on the schema versions the
+//!   offsets are validated against and range-checks every field, and bits no
+//!   field claims survive a re-encode verbatim. These are the Electro 5 program,
+//!   live slot, song and settings ([`ne5`]); the Stage 2, 3 and 4 programs and
+//!   live slots ([`ns2`], [`ns3`], [`ns4`]); the Stage 3 synth preset; and the
+//!   Stage 4 synth, piano and organ presets.
+//! - **Structurally decoded** — the body's framing decodes and is editable, but
+//!   the payloads stay verbatim: sample instruments ([`nsmp`] — section chain,
+//!   zones and stroke metadata, never the audio) and piano libraries ([`npno`] —
+//!   the CNSP prefix over a verbatim body).
+//! - **Container-verified stubs** — everything else: body kept verbatim, waiting
+//!   to be reverse-engineered. Each stub module's doc records what is known of it.
+//!
+//! Provenance is marked where each fact is stated, in three phrases: *confirmed
+//! on hardware*, *inferred from specimens*, *unexplained*. Broadly, the Electro 5
+//! bodies are pinned by change-one-setting hardware sweeps; the Stage bodies come
+//! from community byte maps and corpus measurement, not confirmed on hardware —
+//! each module says which.
 
 pub(crate) mod raw;
 

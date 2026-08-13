@@ -86,6 +86,9 @@ pub const MAX_NAME_LEN: usize = 14;
 
 /// A sample instrument's body: the section chain, held in file order including
 /// repeats — `stk` appears once per zone. A file is a `Cbin<Sample>`.
+///
+/// Reads and writes byte-exactly, checksum verified. The name, categories, zones
+/// and stroke metadata decode and are editable; the audio stays verbatim.
 pub struct Sample {
     pub sections: Vec<Section>,
 }
