@@ -37,7 +37,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Root of the Electro 5 specimen corpus — see `tests/ne5.rs`.
+/// Root of the Electro 5 specimen corpus.
 fn corpus_dir() -> PathBuf {
     std::env::var_os("NORD_CORPUS_DIR")
         .map(PathBuf::from)
