@@ -39,7 +39,13 @@ let
       filter =
         path: type:
         !hasInfix "/nord-cli/checks" path
-        && (crane.filterCargoSources path type || hasSuffix ".script" path || hasSuffix ".snapshot" path);
+        && (
+          crane.filterCargoSources path type
+          || hasSuffix ".script" path
+          || hasSuffix ".snapshot" path
+          # The committed synthetic specimens, whatever their extensions.
+          || hasInfix "/tests/fixtures/" path
+        );
     };
 
     strictDeps = true;
