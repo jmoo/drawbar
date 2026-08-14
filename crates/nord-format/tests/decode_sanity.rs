@@ -363,6 +363,7 @@ fn v3_samples_decode_names_and_strokes() {
 
     let root = corpus_root();
     let mut seen = 0usize;
+    let mut unpaired: Vec<String> = Vec::new();
     for ext in ["nsmp3", "nsmp4"] {
         for path in files_with(&root, ext) {
             match nord_format::from_path(&path).unwrap() {
@@ -372,14 +373,23 @@ fn v3_samples_decode_names_and_strokes() {
                     assert!(s.stroke_count() > 0, "{}: no strokes", path.display());
                     // One zone per stroke, every note in MIDI range, and each zone
                     // verified against its stroke by the reader itself.
-                    let zones = s.zones().unwrap_or_else(|e| {
-                        panic!("{}: zones unreadable: {e}", path.display());
-                    });
-                    assert_eq!(zones.len(), s.stroke_count(), "{}", path.display());
-                    for z in &zones {
-                        assert!(z.top_note <= 127 && z.root_key <= 127, "{}", path.display());
-                        if let Some(low) = z.low_note {
-                            assert!(low <= z.top_note, "{}: low above top", path.display());
+                    match s.zones() {
+                        Err(e) => {
+                            unpaired.push(format!("{}: {e}", path.display()));
+                            continue;
+                        }
+                        Ok(zones) => {
+                            assert_eq!(zones.len(), s.stroke_count(), "{}", path.display());
+                            for z in &zones {
+                                assert!(
+                                    z.top_note <= 127 && z.root_key <= 127,
+                                    "{}",
+                                    path.display()
+                                );
+                                if let Some(low) = z.low_note {
+                                    assert!(low <= z.top_note, "{}: low above top", path.display());
+                                }
+                            }
                         }
                     }
                 }
@@ -389,6 +399,12 @@ fn v3_samples_decode_names_and_strokes() {
         }
     }
     assert!(seen >= 12, "only {seen} nsmp3/nsmp4 specimens seen");
+    assert!(
+        unpaired.is_empty(),
+        "{} specimens whose zone map does not pair with their strokes:\n{}",
+        unpaired.len(),
+        unpaired.join("\n")
+    );
 }
 
 /// The drum banks: every member of every bank parses and the counts match the
