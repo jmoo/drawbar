@@ -56,9 +56,12 @@ they are not installed globally.
 
 - Test: `cargo test --workspace` (from `crates/`). CI runs
   `cargo test -p nord-bits-derive -p nord-format --features nord-format/bundle`.
-- Corpus tests: `--features corpus` with `NORD_CORPUS_DIR` pointing at a
-  `nord-corpus/ne5` checkout; without the private corpus they don't compile in,
-  and the default suite must keep passing anywhere.
+- Corpus tests: `--features corpus` with `NORD_CORPUS_ROOT` pointing at a
+  `nord-corpus` checkout (`NORD_CORPUS_DIR` is its `ne5/` tree, for the decode
+  snapshot); without the private corpus they don't compile in, and the default
+  suite must keep passing anywhere. `tests/corpus` generates one test per
+  specimen — a specimen joins the sweep by existing, and its
+  `<file>.oracle.json` sidecar is asserted where the corpus ships one.
 - Nix: `nix build .#<crate>` builds and tests one crate, `.#nord.all` every
   crate and cross target. Everything lives flat under the `nord` attribute;
   `packages` exposes the crates and cross builds. `nix flake check` verifies
