@@ -3,18 +3,7 @@
 An [egui](https://github.com/emilk/egui) app over
 [`nord-format`](../nord-format) and [`nord-usb`](../nord-usb) — everything
 [`nord-cli`](../nord-cli) can do that is worth a window, reachable from a browser
-tab or a desktop one. Same job as the CLI: **dogfood the libraries**, not ship a
-product. The engineer's verbs stay in the CLI.
-
-It is named for the nine-drawbar organ register widget in its editor.
-
-> [!CAUTION]
-> # ⚠️ 🧱 USE AT YOUR OWN RISK — THIS TOOL CAN BRICK YOUR DEVICE 🧱 ⚠️
->
-> Until this project reaches 1.0, **do not use this tool to speak to a real Nord
-> device** unless you are using it to actively develop these libraries.
->
-> **I am not responsible for what you do with this tool.**
+tab or a desktop one.
 
 ## What this build does
 
@@ -279,11 +268,6 @@ WebUSB both fail there.
 > `target/wasm32-unknown-unknown/*/drawbar.wasm`. Cargo warns about the collision
 > and does not define which one survives; when it is the binary's stub `main`,
 > `wasm-bindgen` emits a package that exports nothing.
-
-⚠️ **`wasm-bindgen-cli` and the `wasm-bindgen` crate must be the same version.**
-The CLI refuses a module built by any other one. nixpkgs currently ships
-**0.2.121**, which is what this crate pins and therefore what the whole
-workspace lock holds:
 
 ```sh
 grep -A2 'name = "wasm-bindgen"' Cargo.lock

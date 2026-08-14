@@ -11,6 +11,13 @@ version = "0.1.0"
 [lib]
 name = "nord_format"
 
+# Features the Nix build must enable when running tests. `bundle` gates the ZIP
+# backup-bundle tests and the corpus sweep's drum-bank walk; without it both
+# compile out and the run passes having read no archive at all. It is what CI
+# tests with too.
+[package.metadata.nix]
+testFeatures = ["bundle"]
+
 [features]
 default = []
 # ZIP-based backup bundles pull in the `zip` stack; opt in with `--features

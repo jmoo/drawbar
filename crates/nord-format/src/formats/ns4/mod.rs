@@ -44,7 +44,7 @@
 //!
 //! Every placement is derived from the offset tables published by
 //! [ns4decode](https://ns4decode.netlify.app) (MIT, © 2024 Randy), a Stage 4
-//! file viewer, and not confirmed on hardware — no Stage 4 is in reach. Its
+//! file viewer, and not confirmed on hardware. Its
 //! notation is 1-based file bytes with bits numbered 1..=8 MSB-first, which our
 //! bit numbering matches once the 44-byte container header comes off.
 //!

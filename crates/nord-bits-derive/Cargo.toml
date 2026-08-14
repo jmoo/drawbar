@@ -11,8 +11,6 @@ version = "0.1.0"
 [lib]
 proc-macro = true
 
-# All three are already in the workspace lockfile via `binrw_derive`, so this
-# crate adds no new transitive dependency — only a compile-time one.
 [dependencies]
 proc-macro2 = "1"
 quote = "1"

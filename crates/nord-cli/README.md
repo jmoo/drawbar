@@ -1,21 +1,8 @@
 # nord-cli
 
 A command-line tool (`nord`) over [`nord-format`](../nord-format) and
-[`nord-usb`](../nord-usb). Its job is to **dogfood the libraries** — read Nord
-files, check they round-trip, and drive an attached instrument — not to be a
-product (this will change once the libraries have stabilized). 
-Anything the libraries can do should be reachable from here, which is
-how API friction gets found.
+[`nord-usb`](../nord-usb). 
 
-Expect large changes to this tool over time while I develop the libraries.
-
-> [!CAUTION]
-> # ⚠️ 🧱 USE AT YOUR OWN RISK — THIS TOOL CAN BRICK YOUR DEVICE 🧱 ⚠️
->
-> Until this project reaches 1.0, **do not use this tool to speak to a real Nord
-> device** unless you are using it to actively develop these libraries.
->
-> **I am not responsible for what you do with this tool.**
 
 ## Commands
 
@@ -291,16 +278,6 @@ nord sample edit inst.nsmp --fields
 nord sample edit inst.nsmp --set name="My Piano" --set zone2.top_note=C4 -o out.nsmp
 nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
 ```
-
-## Status
-
-This is a mostly LLM generated tool to validate the mostly handwritten nord-format
-crate. It is also used to test the nord-usb crate. Once nord-format and nord-usb
-are stable, I will re-write this to be a nice easy to use cli for interacting with
-your nord devices and files.
-
-> [!CAUTION]
-> ## 🚫 DO NOT USE THIS FOR NON-DEVELOPMENT PURPOSES 🚫
 
 ## Build & run
 

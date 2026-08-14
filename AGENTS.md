@@ -3,7 +3,8 @@
 Rust tools for reading, editing, and moving programs on Clavia Nord
 instruments: reverse-engineered file formats (`nord-format`), the USB vendor
 protocol (`nord-usb`), a CLI (`nord-cli`), the bitfield derive backing them
-(`nord-bits-derive`), and a WebUSB demo (`nord-web-demo`).
+(`nord-bits-derive`), and an egui app for the desktop and the browser
+(`drawbar`).
 
 > **This is a public, open-source repo.** Keep personal information, secrets,
 > and Claude's persistent memory out of it. Private notes, RFCs, and the
@@ -58,8 +59,16 @@ they are not installed globally.
 - Corpus tests: `--features corpus` with `NORD_CORPUS_DIR` pointing at a
   `nord-corpus/ne5` checkout; without the private corpus they don't compile in,
   and the default suite must keep passing anywhere.
-- Nix: `nix build .#<crate>` builds and tests one crate;
-  `nix flake check` adds the cross-compile targets and the corpus check.
+- Nix: `nix build .#<crate>` builds and tests one crate, `.#nord.all` every
+  crate and cross target. Everything lives flat under the `nord` attribute;
+  `packages` exposes the crates and cross builds. `nix flake check` verifies
+  formatting and that every output evaluates.
+- Corpus in Nix: `nix build .#nord.all-corpus` runs every crate's suite against
+  the pinned corpus (`.#nord.<crate>-corpus` for one of them).
+  `.#nord.all-corpus-full` swaps in the R2 tier, which needs a store seeded by
+  `corpus nix-add` or R2 credentials in the builder; `.#nord.corpus` and
+  `.#nord.corpus-full` are the assemblies themselves. The corpus repo is
+  private, so evaluating any corpus attr needs read access to it.
 - Format: `nix fmt` formats the whole tree; `nix flake check` fails on anything
   it would have changed.
 
@@ -73,8 +82,9 @@ the other crates share the workspace version and are unpublished.
 ## Code style
 
 - **Format before committing**: `nix fmt`. treefmt drives rustfmt for Rust,
-  nixfmt (2-space) for `.nix` and taplo for `.toml`; the versions come from the
-  flake, so a locally installed formatter is neither needed nor authoritative.
+  nixfmt (2-space) for `.nix`, taplo for `.toml` and shfmt for shell; the
+  versions come from the flake, so a locally installed formatter is neither
+  needed nor authoritative.
 - Nix, style-wise: alphabetize attribute-set keys; single child → dotted path
   (`a.b.c = v;`), 2+ children → nested braces. Decide per attrset literal.
 - **The round-trip invariant is load-bearing**: decoded values are views over a

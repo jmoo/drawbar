@@ -2,7 +2,7 @@
 
 Parse and write **Clavia / Nord** keyboard binary file formats from Rust.
 
-This is the pure format-logic crate of the Nord toolkit: the `CBIN` container
+This is the pure format-logic crate of the drawbar toolkit: the `CBIN` container
 (both header generations, each with its checksum), and per-model entity layouts
 declared once with `#[bitbody]`. It depends only on [`crcxx`] (plus `zip` behind
 the `bundle` feature for backup bundles) and does no USB, OS, or I/O beyond
@@ -105,36 +105,6 @@ NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
 # With nix
 nix build .#checks.<system>.nord-format-corpus
 ```
-
-## Where this fits
-
-This project started in 2023 as my personal 'learn rust' project. The goal was to be able to read/write clavia files for my electro 5. After I got most of the ne5 formats RE'd, I got a new job that was pretty demanding and I didn't have much free time to continue.
-
-The goal now is to finish reverse engineering ne5 files, add support for more models, and to reverse engineer the USB protocol. The end game is to have a portable toolkit that could be the foundation of an open source nord manager alternative with linux support.
-
-## Current State
-
-Incomplete but solid for reading and writing electro 5 files due to lossless round trips and large test corpus.
-The library safely errors when encountering unexpected files or versions. The
-per-format state of decoding lives in the [`formats`] rustdoc rather than here.
-
-Expect refactoring, API changes, and other misc changes until a stable version is released.
-
-## Prior art
-
- Shout out to @Chris55. I wish I had discovered his work before I started. It would have made some of the initial reverse engineering easier. Once I finish decoding the ne5, I plan to contribute the ICD back to these projects.
-
-- **[`Chris55/ns3-program-viewer`](https://github.com/Chris55/ns3-program-viewer)**
-  — a read-only web viewer for Nord Stage 2 / 2EX / 3 programs.
-- **[`Chris55/nord-documentation`](https://github.com/Chris55/nord-documentation)**
-  ([rendered](https://chris55.github.io/nord-documentation/)) — community byte-map
-  docs for Nord Stage 2/3 and Lead A1, built with the same hex-diff method.
-- **[`ns4decode`](https://ns4decode.netlify.app)** (MIT, © 2024 Randy) — a Stage 4
-  program and preset viewer in Python, which publishes complete offset tables for
-  the `ns4p` body. The Stage 4 placements here are derived from those tables; the
-  value tables it also publishes are not used.
-
-Why maintain a separate project? Primarily because this is a rust learning project for me and I've written enough js in my life to not really want to write it in my free time. Also, the goal of this project are r/w + usb, not just read.
 
 ## Disclaimer
 
