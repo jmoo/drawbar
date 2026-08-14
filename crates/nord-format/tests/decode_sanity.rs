@@ -631,6 +631,47 @@ fn ne5_a_live_body_decodes_as_a_program() {
     }
 }
 
+/// Reading nine drawbar nibbles and writing them back is a no-op, on every
+/// program the corpus holds. The organ accessors sit outside the field
+/// registry, so the fixture suite's registry sweep cannot cover them — this is
+/// their read/write inverse proof, against real data.
+#[test]
+fn ne5_organ_drawbars_survive_a_rewrite() {
+    use nord_format::formats::ne5::OrganModel::*;
+
+    let mut checked = 0usize;
+    for path in files_with(&corpus_root().join("ne5/programs"), "ne5p") {
+        let name = path.display().to_string();
+        let original = read(&path).unwrap();
+        let Entity::Program(nord_format::Program::Electro5(mut program)) =
+            nord_format::from_stream(&mut Cursor::new(&original)).unwrap()
+        else {
+            panic!("expected an ne5 program in {name}")
+        };
+
+        let organ = &mut program.organ_panel;
+        for model in [B3, Vox, Farfisa, Pipe] {
+            for preset in [1u8, 2] {
+                let bars = organ.drawbars(model, preset);
+                if bars.iter().any(|&b| b > 8) {
+                    continue;
+                }
+                organ.set_drawbars(model, preset, bars).unwrap();
+            }
+        }
+
+        let mut rewritten: Vec<u8> = Vec::new();
+        program.write_to(&mut Cursor::new(&mut rewritten)).unwrap();
+        assert_eq!(
+            original.as_slice(),
+            rewritten.as_slice(),
+            "rewriting the drawbars changed {name}",
+        );
+        checked += 1;
+    }
+    assert!(checked > 200, "only {checked} programs rewritten");
+}
+
 // ---------------------------------------------------------------------------
 // Sample instruments (`.nsmp`): behavior pins against the editor's own files
 // ---------------------------------------------------------------------------
