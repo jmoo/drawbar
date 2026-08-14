@@ -19,6 +19,19 @@ and protocols. Byte mapping tables are generated from code and can be browsed vi
 | 🔌 | [nord-usb](crates/nord-usb/README.md) | Clavia / Nord USB protocol implementation in rust |
 | 🎚️ | [drawbar](crates/drawbar/README.md) | Cross platform gui app for Clavia / Nord keyboards — view, edit, transfers, and more —  for windows, macos, linux, and web |
 
+## Try it out!
+
+```
+# Run nord-cli 
+nix run .#nord-cli -- program get 1:1
+
+# Run the desktop app
+nix run .#drawbar
+
+# Run drawbar in the browser
+nix run .#drawbar-web
+```
+
 ## Status
 
 This is still alpha software and should be used with caution. Drawbar is a blackbox reverse engineering effort -- 

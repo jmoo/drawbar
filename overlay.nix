@@ -486,6 +486,38 @@ in
       # consumer enumerating them cannot write the list down.
       crossPackages = crossed;
 
+      # `nix run .#drawbar-web`: serve the browser bundle on loopback and open it.
+      drawbar-web-launch = final.writeShellApplication {
+        name = "drawbar-web";
+        runtimeInputs = [ final.miniserve ];
+        text = ''
+          port="''${DRAWBAR_PORT:-8080}"
+          url="http://127.0.0.1:$port/"
+
+          miniserve --index index.html --interfaces 127.0.0.1 --port "$port" \
+            ${final.nord.drawbar-web} &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 40); do
+            if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+
+          if command -v open >/dev/null 2>&1; then
+            open "$url"
+          elif command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "$url"
+          else
+            echo "no opener found — open $url yourself" >&2
+          fi
+
+          wait "$server"
+        '';
+      };
+
       inherit edition;
       inherit (final) rustfmt;
     };
