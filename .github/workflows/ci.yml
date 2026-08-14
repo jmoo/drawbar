@@ -1,5 +1,7 @@
-# Tests only the two published crates. `corpus` stays off — those tests need
-# the private specimen corpus and are covered by the Nix checks instead.
+# Tests every crate but drawbar, whose GUI stack is covered by the Nix builds
+# instead. `corpus` stays off — those tests need the private specimen corpus —
+# and the feature list mirrors each crate's `[package.metadata.nix]
+# testFeatures`, so this runs the same suites the Nix build does.
 name: ci
 
 on:
@@ -22,4 +24,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates
-      - run: cargo test -p nord-bits-derive -p nord-format --features nord-format/bundle
+      - run: >
+          cargo test -p nord-bits-derive -p nord-format -p nord-usb -p nord-cli
+          --features nord-format/bundle,nord-usb/replay,nord-usb/blocking

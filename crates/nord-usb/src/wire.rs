@@ -323,12 +323,6 @@ impl ProgramInfo {
     }
 }
 
-/// One entry from a [`cmd::DEPENDENCIES`] response: a piano or sample that a program
-/// (or a program that a set list) references.
-///
-/// The library `id` is the same id the object carries in its own file — a
-/// `PianoPanel`'s piano id, a sample's sample id — so this is the bridge between the
-/// content on the wire and the bytes on disk.
 /// Fixed-size field block trailing each partition record.
 const PARTITION_FIELDS: usize = 29;
 
@@ -453,6 +447,12 @@ impl Bank {
     }
 }
 
+/// One entry from a [`cmd::DEPENDENCIES`] response: a piano or sample that a program
+/// (or a program that a set list) references.
+///
+/// The library `id` is the same id the object carries in its own file — a
+/// `PianoPanel`'s piano id, a sample's sample id — so this is the bridge between the
+/// content on the wire and the bytes on disk.
 pub struct Dependency {
     /// Whether this reference is **live**: `1` when the section owning it (piano or
     /// sample) is routed to a keyboard part in that program, `0` otherwise.

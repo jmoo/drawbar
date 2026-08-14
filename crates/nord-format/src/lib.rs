@@ -393,6 +393,11 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
         let names: Vec<&str> = zip.file_names().collect();
+        // An archive with nothing in it would satisfy the all-members checks below
+        // vacuously and read as a drum bank holding no programs.
+        if names.is_empty() {
+            return Err(ParseError::AssertFail("the archive holds no members".into()).into());
+        }
         // ⚠️ meta.xml alone does not say Electro 5: the whole family's backups
         // carry one (verified against real Piano/Organ 3/C2D/Lead 4 factory
         // restores). Only .ne5* members make it an Electro 5 bundle.
@@ -470,6 +475,14 @@ mod bundle_tests {
         assert_eq!(members[0].0, "Bank A/One.ns3f");
         assert_eq!(&members[0].1.header.tag, b"ns3f");
         assert_eq!(&members[1].1.header.tag, b"ns3y");
+    }
+
+    /// An empty archive satisfies every all-members check vacuously, so it has to be
+    /// refused up front rather than read as a drum bank holding no programs.
+    #[test]
+    fn an_empty_zip_is_refused() {
+        let bytes = archive(&[]);
+        assert!(from_stream(&mut Cursor::new(bytes)).is_err());
     }
 
     /// A ZIP holding anything that is not a CBIN file is not a bundle.

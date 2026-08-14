@@ -356,7 +356,7 @@ enum SlotAction {
         yes: bool,
     },
 
-    /// Move an object between slots. OVERWRITES the destination. Requires --yes.
+    /// Move an object between slots, SWAPPING with any occupant. Requires --yes.
     Move {
         /// Source slot, e.g. 8:13.
         #[arg(value_name = "FROM")]

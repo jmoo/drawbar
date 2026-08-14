@@ -67,7 +67,7 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
                 painter.circle_stroke(
                     lens,
                     LENS / 2.0,
-                    egui::Stroke::new(1.0, crate::app::unlit(visuals)),
+                    egui::Stroke::new(1.0_f32, crate::app::unlit(visuals)),
                 );
             }
         }

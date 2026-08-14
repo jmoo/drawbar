@@ -267,14 +267,14 @@ fn paint(
 
     // The travelled arc, over the whole sweep drawn faintly: how far round a knob is
     // reads off the lit part, the way a panel's own scale does.
-    let track = egui::Stroke::new(2.0, crate::app::unlit(visuals));
+    let track = egui::Stroke::new(2.0_f32, crate::app::unlit(visuals));
     painter.add(egui::Shape::line(
         arc(centre, radius - 1.0, 0.0, 1.0),
         track,
     ));
     let from = origin(min, max);
     if (at - from).abs() > f32::EPSILON {
-        let lit = egui::Stroke::new(2.5, crate::app::accent(visuals));
+        let lit = egui::Stroke::new(2.5_f32, crate::app::accent(visuals));
         painter.add(egui::Shape::line(arc(centre, radius - 1.0, from, at), lit));
     }
 
@@ -292,7 +292,7 @@ fn paint(
             on_dial(centre, body * 0.30, pointer),
             on_dial(centre, body * 0.86, pointer),
         ],
-        egui::Stroke::new(2.5, widget.fg_stroke.color),
+        egui::Stroke::new(2.5_f32, widget.fg_stroke.color),
     );
 }
 

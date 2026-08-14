@@ -210,7 +210,7 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// session.
     ///
     /// The device queues one on its own when its contents change outside the session —
-    /// a front-panel STORE, for instance — and [`Self::request`] drains it rather than
+    /// a front-panel STORE, for instance — and `Session::request` drains it rather than
     /// mistaking it for a reply. `true` means the instrument changed under us: state
     /// read earlier in this session may be stale.
     pub fn instrument_changed(&self) -> bool {
@@ -255,12 +255,12 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// Send an arbitrary command and return whatever comes back, enforcing nothing.
     ///
     /// For reverse-engineering commands that have no typed operation yet. Unlike
-    /// [`Self::request`] this accepts a reply that is not `command + 1` and a non-zero
+    /// `Session::request` this accepts a reply that is not `command + 1` and a non-zero
     /// status, because on an undocumented command both are results rather than faults —
     /// a device that does not implement one still answers, with a status saying so.
     /// `Ok(None)` means it said nothing within `limit`.
     ///
-    /// Queued [`cmd::CHANGED`] notifications are drained as in [`Self::request`], so a
+    /// Queued [`cmd::CHANGED`] notifications are drained as in `Session::request`, so a
     /// front-panel STORE cannot be mistaken for the probe's answer.
     ///
     /// # Warning

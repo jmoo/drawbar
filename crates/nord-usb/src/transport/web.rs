@@ -13,7 +13,7 @@
 //!
 //! A page can only obtain a device from `navigator.usb.requestDevice()`, and that call
 //! requires transient user activation — a click, in the page, that no library function
-//! can manufacture. So device *selection* belongs to the page (`crates/nord-web-demo`
+//! can manufacture. So device *selection* belongs to the page (`crates/drawbar`
 //! shows the whole ceremony) and this module starts from a [`UsbDevice`] the page
 //! already has. That is the same split [`super::usb`] documents, arrived at from the
 //! other direction: there, enumeration is host-specific; here, it is gesture-bound.

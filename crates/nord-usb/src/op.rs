@@ -220,6 +220,10 @@ async fn transfer_out<T: Transport, C>(
 /// ⚠️ **This does not carry the caller's name for what it writes**, and the slot ends up
 /// called whatever those trailing bytes say — see the note beside them. Follow it with
 /// [`rename`], in the same session, to put a name on the slot.
+///
+/// ⚠️ The body goes out in a single `WRITE_DATA` frame, unlike the read path, which
+/// chunks at `READ_CHUNK`. Verified only for program-sized bodies; how the device
+/// takes a library-sized write is untested.
 pub async fn write_program<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -284,10 +288,6 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
     Ok(())
 }
 
-/// List the piano/sample library objects an entity depends on.
-///
-/// **Read-only.** The returned [`Dependency`] ids match the ids the objects carry in
-/// their own files, which is the bridge between wire content and file bytes.
 /// Release anything the instrument is still holding from an abandoned session.
 ///
 /// **Operator-driven, and deliberately not automatic.** Two faults hide behind "the
@@ -458,7 +458,7 @@ pub async fn next_occupied<T: Transport, C>(
 /// the sample library has addressable empty banks past its only populated one.
 ///
 /// Two bounds keep a walk finite when the device does not behave as expected: `cap` on
-/// total slots, and a stop after [`EMPTY_BANKS_BEFORE_STOP`] consecutive empty banks for
+/// total slots, and a stop after `EMPTY_BANKS_BEFORE_STOP` consecutive empty banks for
 /// classes that never report out-of-range at all.
 ///
 /// A refusal mid-walk — [`ENUMERATION_DISABLED`] above all — propagates as its error
@@ -535,6 +535,11 @@ pub async fn required_dependencies<T: Transport, C>(
         .collect())
 }
 
+/// List the piano/sample library objects an entity depends on, as the device reports
+/// them — including rows that are not dependencies at all.
+///
+/// **Read-only.** The returned [`Dependency`] ids match the ids the objects carry in
+/// their own files, which is the bridge between wire content and file bytes.
 pub async fn dependencies<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,

@@ -281,7 +281,7 @@ nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
 
 ## Build & run
 
-From the lab workspace:
+From the repo root:
 
 ```sh
 nix develop

@@ -622,7 +622,7 @@ impl Browser {
 
         let visuals = ui.visuals();
         let stroke = match dragging.hovered() || dragging.dragged() {
-            true => egui::Stroke::new(2.0, visuals.selection.stroke.color),
+            true => egui::Stroke::new(2.0_f32, visuals.selection.stroke.color),
             false => visuals.widgets.noninteractive.bg_stroke,
         };
         ui.painter()
@@ -1513,7 +1513,7 @@ impl Browser {
                 ui.painter().rect_stroke(
                     response.rect,
                     3.0,
-                    egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+                    egui::Stroke::new(1.0_f32, ui.visuals().selection.stroke.color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1742,7 +1742,7 @@ fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         painter.circle_stroke(
             gutter,
             3.0,
-            egui::Stroke::new(1.5, crate::app::good(ui.visuals())),
+            egui::Stroke::new(1.5_f32, crate::app::good(ui.visuals())),
         );
     }
     x += 10.0;

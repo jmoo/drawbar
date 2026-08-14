@@ -232,12 +232,16 @@ Raw browsing by class number and the sweep-capture tool are an engineer's
 ## Build and run — native
 
 ```sh
-nix develop            # from the lab root: cargo, rustc, lld
+nix develop            # from the repo root
 cd crates
 cargo run -p drawbar
 ```
 
 ## Build and serve — web
+
+`nix build .#drawbar-web` produces the whole servable bundle — the bound wasm
+module beside `index.html` — in one step. The manual path below is the same
+build, spelled out.
 
 Everything below runs from `crates/`. The `--target wasm32-unknown-unknown`
 builds **must** be run from here or below: `crates/.cargo/config.toml` supplies
@@ -245,8 +249,8 @@ builds **must** be run from here or below: `crates/.cargo/config.toml` supplies
 and Cargo only finds that file by walking up from the working directory.
 
 ```sh
+nix develop            # from the repo root
 cd crates
-nix develop /path/to/lab
 
 cargo build -p drawbar --lib --target wasm32-unknown-unknown --release
 
@@ -269,14 +273,17 @@ WebUSB both fail there.
 > and does not define which one survives; when it is the binary's stub `main`,
 > `wasm-bindgen` emits a package that exports nothing.
 
+⚠️ `wasm-bindgen-cli` must be the exact version of the workspace's
+`wasm-bindgen` pin — the CLI refuses a module built by any other:
+
 ```sh
 grep -A2 'name = "wasm-bindgen"' Cargo.lock
 nix run nixpkgs#wasm-bindgen-cli -- --version
 ```
 
-If those ever disagree, move the pin in both `nord-web-demo/Cargo.toml` and
-`drawbar/Cargo.toml` to whatever the CLI reports and re-run `cargo build`. eframe
-resolves against the pin rather than forcing it, so the pin is the one to follow.
+If those ever disagree, move the pin in `drawbar/Cargo.toml` to whatever the CLI
+reports and re-run `cargo build`. eframe resolves against the pin rather than
+forcing it, so the pin is the one to follow.
 
 ## Browser support
 
