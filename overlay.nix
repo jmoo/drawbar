@@ -102,32 +102,31 @@ let
         });
   };
 
-  targets =
-    {
-      windows = {
-        crossPkgs = final.pkgsCross.mingwW64;
-        libs = [ final.pkgsCross.mingwW64.windows.pthreads ];
-      };
-
-      wasip1 = {
-        crossPkgs = final.pkgsCross.wasi32;
-        cargoFlags = [
-          "--no-default-features"
-          "--features"
-          "replay"
-        ];
-        testRunner = {
-          cmd = "wasmtime";
-          packages = [
-            final.lld
-            final.wasmtime
-          ];
-        };
-      };
-    }
-    // optionalAttrs final.stdenv.hostPlatform.isLinux {
-      linux-aarch64.crossPkgs = final.pkgsCross.aarch64-multiplatform;
+  targets = {
+    windows = {
+      crossPkgs = final.pkgsCross.mingwW64;
+      libs = [ final.pkgsCross.mingwW64.windows.pthreads ];
     };
+
+    wasip1 = {
+      crossPkgs = final.pkgsCross.wasi32;
+      cargoFlags = [
+        "--no-default-features"
+        "--features"
+        "replay"
+      ];
+      testRunner = {
+        cmd = "wasmtime";
+        packages = [
+          final.lld
+          final.wasmtime
+        ];
+      };
+    };
+  }
+  // optionalAttrs final.stdenv.hostPlatform.isLinux {
+    linux-aarch64.crossPkgs = final.pkgsCross.aarch64-multiplatform;
+  };
 
   emulators =
     optionalAttrs final.stdenv.hostPlatform.isLinux {
