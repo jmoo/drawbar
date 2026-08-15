@@ -241,7 +241,9 @@ impl DeviceModel {
     /// stays possible.
     pub fn offers(&self, state: &State, path: &str, value: &str) -> bool {
         unnamed(value).is_none()
-            && self.narrows(state, path).all(|to| to.iter().any(|v| v == value))
+            && self
+                .narrows(state, path)
+                .all(|to| to.iter().any(|v| v == value))
     }
 
     /// The values a picker offers: the legal set less what no panel position writes,

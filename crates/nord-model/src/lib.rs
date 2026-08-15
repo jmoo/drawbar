@@ -13,11 +13,21 @@
 //! `Field::value` uses (`B3`, `true`, `-5`). Those strings are pinned by this crate's
 //! tests against `field_specs()`, so a renamed field fails the build rather than the GUI.
 //!
+//! ```
+//! use nord_model::{electro5, State};
+//!
+//! let model = electro5::electro5();
+//! let state = State::new().with("center_panel.organ_type", "Vox");
+//! assert!(!model.live_within(&state, electro5::ORGAN_SECTION, "organ_panel.b3_vib"));
+//! ```
+//!
 //! Not affiliated with, authorized, or endorsed by Clavia DMI AB.
 
 mod engine;
 mod rules;
 mod state;
+
+pub mod electro5;
 
 pub use engine::{Applied, Control, DeviceModel, Finding, Surface};
 pub use rules::{unnamed, Cond, Path, PathPattern, Rule, Value, Vestige};
