@@ -1,0 +1,20 @@
+[package]
+name = "nord-emu"
+description = "Device-side emulator for the Clavia / Nord vendor USB protocol"
+edition.workspace = true
+license.workspace = true
+publish = false
+version.workspace = true
+
+[lib]
+name = "nord_emu"
+
+[dependencies]
+# No backend: the emulator is the device, so nothing here should pull in nusb.
+nord-usb = { path = "../nord-usb", default-features = false }
+
+[dev-dependencies]
+# `block_on` for the tests, which drive the async host API from `#[test]`.
+nord-usb = { path = "../nord-usb", default-features = false, features = [
+  "blocking",
+] }

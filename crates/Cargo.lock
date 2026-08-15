@@ -1824,6 +1824,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nord-emu"
+version = "0.1.0"
+dependencies = [
+ "nord-usb",
+]
+
+[[package]]
 name = "nord-format"
 version = "0.1.0"
 dependencies = [

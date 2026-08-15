@@ -3,6 +3,7 @@ members = [
   "drawbar",
   "nord-bits-derive",
   "nord-cli",
+  "nord-emu",
   "nord-format",
   "nord-usb",
 ]
