@@ -17,6 +17,7 @@ and protocols. Byte mapping tables are generated from code and can be browsed vi
 | 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | Declarative bit-packed panel definitions — the proc-macro behind nord-format |
 | 🛠️ | [nord-cli](crates/nord-cli/README.md) | Command-line tool for interacting with Clavia / Nord keyboards and files |
 | 🔌 | [nord-usb](crates/nord-usb/README.md) | Clavia / Nord USB protocol implementation in rust |
+| 🪄 | [nord-emu](crates/nord-emu/README.md) | Emulated Clavia / Nord instrument — the device side of the USB protocol, for testing nord-usb without hardware |
 | 🎚️ | [drawbar](crates/drawbar/README.md) | Cross platform gui app for Clavia / Nord keyboards — view, edit, transfers, and more —  for windows, macos, linux, and web |
 
 ## Try it out!
