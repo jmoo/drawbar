@@ -4,6 +4,7 @@ members = [
   "nord-bits-derive",
   "nord-cli",
   "nord-format",
+  "nord-model",
   "nord-usb",
 ]
 resolver = "2"

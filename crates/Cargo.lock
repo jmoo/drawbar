@@ -1835,6 +1835,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nord-model"
+version = "0.1.0"
+dependencies = [
+ "nord-format",
+ "serde",
+]
+
+[[package]]
 name = "nord-usb"
 version = "0.1.0"
 dependencies = [

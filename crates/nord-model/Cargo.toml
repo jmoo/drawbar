@@ -1,0 +1,21 @@
+[package]
+name = "nord-model"
+description = "What a Nord instrument's panel allows, as data over nord-format's field registry"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+name = "nord_model"
+
+[features]
+default = []
+# Export a model as data. Off by default: the schema is plain Rust data and only a
+# capture or diffing tool needs it serialized.
+serde = ["dep:serde"]
+
+[dependencies]
+nord-format = { path = "../nord-format" }
+serde = { version = "1", optional = true, features = ["derive"] }
