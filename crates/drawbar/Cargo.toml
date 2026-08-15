@@ -26,6 +26,7 @@ eframe = { version = "0.32", default-features = false, features = [
   "x11",
 ] }
 nord-format = { path = "../nord-format", features = ["bundle"] }
+nord-model = { path = "../nord-model" }
 rfd = "0.15"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

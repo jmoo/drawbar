@@ -13,12 +13,26 @@ pub struct State {
     body: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Entry {
     path: String,
     value: String,
-    legal: Vec<String>,
+    /// Asked of the field's type when wanted, not when the state is built: walking every
+    /// bit pattern a seven-bit field takes is not something a per-frame caller should pay
+    /// for to ask whether a control is live.
+    legal: Option<fn() -> Vec<String>>,
 }
+
+/// Two entries are the same when they hold the same value. What the field's type accepts
+/// is a property of the type, not of the state, and comparing the function pointers that
+/// answer it means nothing.
+impl PartialEq for Entry {
+    fn eq(&self, other: &Entry) -> bool {
+        self.path == other.path && self.value == other.value
+    }
+}
+
+impl Eq for Entry {}
 
 impl State {
     pub fn new() -> State {
@@ -33,7 +47,7 @@ impl State {
                 .map(|field| Entry {
                     path: field.path.clone(),
                     value: field.value.clone(),
-                    legal: (field.spec.legal)(),
+                    legal: Some(field.spec.legal),
                 })
                 .collect(),
             body: None,
@@ -61,7 +75,7 @@ impl State {
             None => self.entries.push(Entry {
                 path,
                 value,
-                legal: Vec::new(),
+                legal: None,
             }),
         }
     }
@@ -72,8 +86,11 @@ impl State {
 
     /// Every value the field's type accepts. Empty for a field too wide to enumerate,
     /// and for one the state was told about by hand.
-    pub fn legal(&self, path: &str) -> &[String] {
-        self.entry(path).map_or(&[], |entry| &entry.legal)
+    pub fn legal(&self, path: &str) -> Vec<String> {
+        self.entry(path)
+            .and_then(|entry| entry.legal)
+            .map(|legal| legal())
+            .unwrap_or_default()
     }
 
     pub fn paths(&self) -> impl Iterator<Item = &str> {

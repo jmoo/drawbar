@@ -806,6 +806,7 @@ dependencies = [
  "eframe",
  "js-sys",
  "nord-format",
+ "nord-model",
  "nord-usb",
  "rfd",
  "wasm-bindgen",

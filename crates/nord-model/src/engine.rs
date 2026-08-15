@@ -107,7 +107,7 @@ impl DeviceModel {
                     offerable: self.choices(
                         state,
                         &path,
-                        state.legal(&path),
+                        &state.legal(&path),
                         state.value(&path).unwrap_or_default(),
                     ),
                     path,

@@ -5,10 +5,27 @@
 //! rules here are the reading half of that: which controls the panel would be showing
 //! for the selection the file holds. They are pure functions over the field list so they
 //! can be checked without painting anything.
+//!
+//! What the *instrument* does — which controls a selection leaves live, which values it
+//! offers, which fields move together — is `nord-model`'s. What this app does with the
+//! answer — hide or grey, which section a field prints in, what a player is offered at
+//! all — is here.
+
+use std::sync::OnceLock;
 
 use nord_format::fields::Field;
+use nord_model::{electro5, DeviceModel, State};
 
-use crate::strings::{self, Section};
+use crate::strings::Section;
+
+/// The Electro 5's behavior.
+///
+/// ⚠️ The 73-key variant, because a program file does not record its keybed and nothing
+/// in a document could tell. Only the split-point rule turns on it.
+fn model() -> &'static DeviceModel {
+    static MODEL: OnceLock<DeviceModel> = OnceLock::new();
+    MODEL.get_or_init(electro5::electro5)
+}
 
 /// What a preset's drawbars are.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -60,13 +77,7 @@ impl Organ {
     /// naming no model is left to render as itself, so an organ field added to the
     /// library turns up rather than being swallowed.
     pub fn covers(&self, path: &str) -> bool {
-        let Some(leaf) = path.strip_prefix("organ_panel.") else {
-            return false;
-        };
-        self.known
-            && ["b3_", "vox_", "farfisa_", "pipe_"]
-                .iter()
-                .any(|model| leaf.starts_with(model))
+        self.known && model().gated_within(electro5::ORGAN_SECTION, path)
     }
 }
 
@@ -78,6 +89,8 @@ struct Paths {
     vib_type: Option<&'static str>,
     vib: [Option<&'static str>; 2],
     /// The instrument reads this model's drawbars as on/off tabs.
+    // TODO(rfc-0009): an instrument fact with nowhere to live in the rule schema — it
+    // changes what a control *is*, not whether it is live or what it offers.
     tabs: bool,
     /// Only the B3 has percussion.
     perc: bool,
@@ -145,6 +158,9 @@ const PIPE: Paths = Paths {
 
 const PERC_ON: [&str; 2] = ["organ_panel.b3_preset1_perc", "organ_panel.b3_preset2_perc"];
 
+/// The bass manual's two drawbars, which live outside every nine-nibble block.
+const BASS_BARS: (&str, &str) = ("organ_panel.b3_bass_bar1", "organ_panel.b3_bass_bar2");
+
 /// A field's current value, spelled the way `set_field` takes it back.
 pub fn value_of<'a>(fields: &'a [Field], path: &str) -> Option<&'a str> {
     fields
@@ -159,15 +175,13 @@ fn flag(fields: &[Field], path: &str) -> bool {
 
 /// What the organ section shows, for a body that has an organ.
 pub fn organ(fields: &[Field]) -> Option<Organ> {
-    let selected = value_of(fields, "center_panel.organ_type")?.to_string();
-    // b3+bass is a selection, not a fifth model: it reads the B3's storage, and its
-    // preset 1 is the bass manual.
-    let (paths, bass) = match selected.as_str() {
-        "B3" => (&B3, false),
-        "B3Bass" => (&B3, true),
-        "Vox" => (&VOX, false),
-        "Farfisa" => (&FARFISA, false),
-        "Pipe" => (&PIPE, false),
+    let selected = value_of(fields, electro5::ORGAN_TYPE)?.to_string();
+    // b3+bass is a selection, not a fifth model: it reads the B3's storage.
+    let paths = match selected.as_str() {
+        "B3" | "B3Bass" => &B3,
+        "Vox" => &VOX,
+        "Farfisa" => &FARFISA,
+        "Pipe" => &PIPE,
         _ => {
             return Some(Organ {
                 selected,
@@ -184,6 +198,12 @@ pub fn organ(fields: &[Field]) -> Option<Organ> {
         true => 2,
         false => 1,
     };
+    // The model gates the bass pair and preset 1's register against each other.
+    let bass = model().live_within(
+        &State::from_fields(fields),
+        electro5::ORGAN_SECTION,
+        BASS_BARS.0,
+    );
     let registrations = [1u8, 2]
         .into_iter()
         .map(|preset| {
@@ -196,7 +216,7 @@ pub fn organ(fields: &[Field]) -> Option<Organ> {
                 // leftovers. Showing those nine would assert a registration that plays
                 // nothing.
                 bars: match (bass && preset == 1, paths.tabs) {
-                    (true, _) => Bars::Bass("organ_panel.b3_bass_bar1", "organ_panel.b3_bass_bar2"),
+                    (true, _) => Bars::Bass(BASS_BARS.0, BASS_BARS.1),
                     (false, true) => Bars::Tabs(paths.presets[i]),
                     (false, false) => Bars::Nine(paths.presets[i]),
                 },
@@ -234,14 +254,15 @@ pub fn part_uses(fields: &[Field], instrument: &str) -> bool {
 /// Effects, EQ and the keyboard are always there — the physical panel always shows those
 /// knobs. An engine section is there only while a part is playing it.
 ///
-/// ⚠️ The organ case is the CLI summary's own rule: it prints the organ block only when
-/// a part is set to Organ. Piano and sample it prints unconditionally, so hiding *those*
-/// two is this app's choice rather than something the summary establishes. What makes it
-/// safe either way is that the pickers which turn an engine back on live in Keyboard &
-/// split, which never goes away.
+/// ⚠️ The organ case is the instrument's: the model gates the whole organ section on a
+/// part playing it. Piano and sample are gated on nothing, so hiding *those* two is this
+/// app's choice rather than a fact. What makes it safe either way is that the pickers
+/// which turn an engine back on live in Keyboard & split, which never goes away.
 pub fn shown(section: Section, fields: &[Field]) -> bool {
     match section {
-        Section::Organ => part_uses(fields, "Organ"),
+        Section::Organ => {
+            model().section_live(&State::from_fields(fields), electro5::ORGAN_SECTION)
+        }
         Section::Piano => part_uses(fields, "Piano"),
         Section::Sample => part_uses(fields, "Sample"),
         _ => true,
@@ -281,33 +302,13 @@ pub fn switches_first(section: Section) -> bool {
 ///
 /// A value the library could not name is never something to choose. If the file holds
 /// one it stays in the list all the same, so a change away from it can be put back.
-pub fn choices(path: &str, legal: &[String], current: &str) -> Vec<String> {
-    let mut out: Vec<String> = legal
-        .iter()
-        .filter(|value| offerable(path, value))
-        .cloned()
-        .collect();
-    if !out.iter().any(|value| value == current) {
-        out.push(current.to_string());
-    }
-    out
-}
-
-/// Whether a value is one a player would pick.
 ///
-/// ⚠️ `Routing::Unknown` is a named variant rather than an unrecognised number, but it
-/// is how older firmware spelled *off* and it presents as off — confirmed on hardware.
-/// Two entries both meaning off is a puzzle, not a choice, so only the current one is
-/// ever shown.
-fn offerable(path: &str, value: &str) -> bool {
-    if strings::unrecognised(value).is_some() {
-        return false;
-    }
-    !(value == "Unknown"
-        && matches!(
-            path,
-            "effects_panel.fx1" | "effects_panel.fx2" | "effects_panel.fx3" | "effects_panel.fx4"
-        ))
+/// ⚠️ Asked without the rest of the program, so only the rules that turn on nothing else
+/// reach the picker.
+// TODO(rfc-0009): thread the document's state through, and the part exclusion — one
+// piano engine, so both parts cannot select it — reaches the picker too.
+pub fn choices(path: &str, legal: &[String], current: &str) -> Vec<String> {
+    model().choices(&State::new(), path, legal, current)
 }
 
 /// The transpose control's state: whether the light is on, and the semitones under it.
@@ -316,8 +317,8 @@ fn offerable(path: &str, value: &str) -> bool {
 /// sets it the first time transposition is touched and never clears it — and an
 /// untouched program stores `+1` in the value rather than `0`. Confirmed on hardware.
 pub fn transpose(fields: &[Field]) -> Option<(bool, i64)> {
-    let on = flag(fields, "center_panel.transpose_enabled");
-    let semitones = value_of(fields, "center_panel.transpose")?
+    let on = flag(fields, electro5::TRANSPOSE_ENABLED);
+    let semitones = value_of(fields, electro5::TRANSPOSE)?
         .trim_start_matches('+')
         .parse()
         .ok()?;
@@ -328,11 +329,18 @@ pub fn transpose(fields: &[Field]) -> Option<(bool, i64)> {
 ///
 /// Moving the semitones turns the light on, which is what the panel's own button does —
 /// the two are one control there and are one control here.
+///
+/// ⚠️ The model's couple only ever writes the enable *on*, which is the instrument's own
+/// behavior; `on` is written as asked because the light is a control this app offers
+/// either way.
 pub fn set_transpose(on: bool, semitones: i64) -> Vec<(String, String)> {
-    vec![
-        ("center_panel.transpose_enabled".to_string(), on.to_string()),
-        ("center_panel.transpose".to_string(), semitones.to_string()),
-    ]
+    let mut sets: Vec<(String, String)> = model()
+        .coupled(electro5::TRANSPOSE)
+        .into_iter()
+        .map(|(path, _)| (path.to_string(), on.to_string()))
+        .collect();
+    sets.push((electro5::TRANSPOSE.to_string(), semitones.to_string()));
+    sets
 }
 
 #[cfg(test)]
@@ -342,6 +350,7 @@ mod tests {
     use nord_format::{Entity, Program};
 
     use crate::fields::apply;
+    use crate::strings;
 
     fn program(sets: &[(&str, &str)]) -> Vec<Field> {
         let entity = Entity::Program(Program::Electro5(ne5::program::new(
@@ -588,6 +597,9 @@ mod tests {
             ["Off", "Lower", "Upper", "Unknown"]
         );
         // The same variant name elsewhere is a real choice.
-        assert!(offerable("some_other_field", "Unknown"));
+        assert_eq!(
+            choices("some_other_field", &legal, "Off"),
+            ["Off", "Unknown", "Lower", "Upper"]
+        );
     }
 }
