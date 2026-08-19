@@ -9,6 +9,7 @@ use std::time::Duration;
 use nusb::transfer::{Control, ControlType, Queue, RequestBuffer};
 use nusb::{DeviceInfo, Interface};
 
+use super::record::Recorder;
 use super::{Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::deadline::with_timeout;
 use crate::error::{Error, Result};
@@ -36,6 +37,8 @@ pub fn list() -> Result<Vec<DeviceInfo>> {
 
 pub struct UsbTransport {
     interface: Interface,
+    /// Set to mirror every frame into a replay script. `None` is the normal case.
+    record: Option<Recorder>,
     // A persistent IN queue: submitting a fresh buffer per read is simpler to reason
     // about than juggling completions, and the protocol is strictly turn-taking.
     read_queue: Queue<RequestBuffer>,
@@ -72,8 +75,35 @@ impl UsbTransport {
         let read_queue = interface.bulk_in_queue(EP_IN);
         Ok(Self {
             interface,
+            record: None,
             read_queue,
         })
+    }
+
+    /// Mirror every frame this transport carries into a replay script at `path`.
+    ///
+    /// The script is written as it goes, so it stays useful even if the run ends badly.
+    /// Recording an operation that moves a body writes that body out in full.
+    pub fn recording_to(mut self, path: &std::path::Path) -> Result<Self> {
+        self.record = Some(Recorder::create(path)?);
+        Ok(self)
+    }
+
+    /// Label the frames that follow in the script. No-op when not recording.
+    pub fn mark(&mut self, what: &str) {
+        if let Some(r) = self.record.as_mut() {
+            r.comment(what);
+        }
+    }
+
+    /// Surface the first error the recorder hit, if it is recording. Call after the
+    /// operation completes: a failed write is deliberately not allowed to abort a live
+    /// session part-way.
+    pub fn recording_result(&mut self) -> Result<()> {
+        match self.record.as_mut() {
+            Some(r) => r.check(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -176,6 +206,9 @@ impl Transport for UsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
         completion.status.map_err(map_err("bulk write"))?;
+        if let Some(r) = self.record.as_mut() {
+            r.out(buf);
+        }
         Ok(())
     }
 
@@ -183,6 +216,9 @@ impl Transport for UsbTransport {
         self.read_queue.submit(RequestBuffer::new(max));
         let completion = self.read_queue.next_complete().await;
         completion.status.map_err(map_err("bulk read"))?;
+        if let Some(r) = self.record.as_mut() {
+            r.r#in(&completion.data);
+        }
         Ok(completion.data)
     }
 
@@ -193,6 +229,9 @@ impl Transport for UsbTransport {
         match with_timeout(self.interface.bulk_out(EP_OUT, buf.to_vec()), limit).await {
             Some(completion) => {
                 completion.status.map_err(map_err("bulk write"))?;
+                if let Some(r) = self.record.as_mut() {
+                    r.out(buf);
+                }
                 Ok(true)
             }
             None => Ok(false),
@@ -204,6 +243,9 @@ impl Transport for UsbTransport {
 
         if let Some(completion) = with_timeout(self.read_queue.next_complete(), limit).await {
             completion.status.map_err(map_err("bulk read"))?;
+            if let Some(r) = self.record.as_mut() {
+                r.r#in(&completion.data);
+            }
             return Ok(Some(completion.data));
         }
 

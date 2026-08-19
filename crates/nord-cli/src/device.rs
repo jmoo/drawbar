@@ -10,6 +10,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use nord_usb::op;
 use nord_usb::transport::Transport;
@@ -241,8 +242,20 @@ fn explain_walk(e: nord_usb::Error) -> String {
     }
 }
 
+/// Where `--record` writes, for the one transport this process opens.
+static RECORDING: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Set once, from the parsed global flag, before any command runs.
+pub fn set_recording(path: Option<PathBuf>) {
+    let _ = RECORDING.set(path);
+}
+
 fn open_usb() -> Result<nord_usb::transport::UsbTransport, String> {
-    nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())
+    let t = nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())?;
+    match RECORDING.get().and_then(Option::as_deref) {
+        Some(path) => t.recording_to(path).map_err(|e| e.to_string()),
+        None => Ok(t),
+    }
 }
 
 /// One read in its own session: the slot's metadata, then its bytes.

@@ -20,6 +20,12 @@ pub mod web;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub use web::WebUsbTransport;
 
+// Same gate as the desktop backend: it taps that transport and needs a filesystem.
+#[cfg(feature = "nusb")]
+pub mod record;
+#[cfg(feature = "nusb")]
+pub use record::Recorder;
+
 #[cfg(feature = "replay")]
 pub mod replay;
 #[cfg(feature = "replay")]

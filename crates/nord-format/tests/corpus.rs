@@ -51,6 +51,8 @@ fn wanted(path: &Path) -> bool {
             | "bin"
             | "txt"
             | "pcapng"
+            // Recorded wire exchanges, replayed by nord-usb rather than parsed.
+            | "script"
             | "nsmpproj"
             | "html"
             | "pdf"
