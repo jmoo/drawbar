@@ -46,7 +46,9 @@ fn script(name: &str) -> Vec<Step> {
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|line| {
-            let (tag, hex) = line.split_once(' ').expect("a script line is '<O|I> <hex>'");
+            let (tag, hex) = line
+                .split_once(' ')
+                .expect("a script line is '<O|I> <hex>'");
             let direction = match tag {
                 "O" => Direction::Out,
                 "I" => Direction::In,
@@ -120,7 +122,10 @@ fn program_walk_finds_every_occupied_slot() {
     let banks: Vec<u32> = found.iter().map(|l| l.bank).collect();
     assert_eq!(*banks.first().unwrap(), 0);
     assert_eq!(*banks.last().unwrap(), 7);
-    assert!(banks.windows(2).all(|w| w[0] <= w[1]), "walk went backwards");
+    assert!(
+        banks.windows(2).all(|w| w[0] <= w[1]),
+        "walk went backwards"
+    );
 }
 
 /// Four banks of 50, sparsely filled — the class where a walk meets empty banks between
