@@ -15,12 +15,14 @@ let
     hasSuffix
     importTOML
     listToAttrs
+    makeLibraryPath
     makeOverridable
     mapAttrs
     mapAttrs'
     nameValuePair
     optional
     optionalAttrs
+    optionals
     optionalString
     toUpper
     ;
@@ -89,7 +91,43 @@ let
     )
   );
 
+  # ⚠️ winit, glutin and xkbcommon reach for these with `dlopen`, so nothing in the
+  # build records a dependency on them: an unwrapped binary links and installs
+  # cleanly, then dies at startup with `NoWaylandLib`. Anything that runs the
+  # native `drawbar` — the package, the dev shell — has to put them on the loader's
+  # path itself.
+  guiLibs = optionals final.stdenv.hostPlatform.isLinux (
+    with final;
+    [
+      libGL
+      libx11
+      libxcursor
+      libxi
+      libxkbcommon
+      libxrandr
+      wayland
+    ]
+  );
+
   crates = mapAttrs (name: _: mkCrate { crate = name; }) manifests // {
+    drawbar =
+      let
+        pkg = mkCrate {
+          crate = "drawbar";
+          meta.mainProgram = "drawbar";
+        };
+      in
+      if guiLibs == [ ] then
+        pkg
+      else
+        pkg.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.makeWrapper ];
+          postInstall = ''
+            wrapProgram "$out/bin/drawbar" \
+              --prefix LD_LIBRARY_PATH : ${makeLibraryPath guiLibs}
+          '';
+        });
+
     # `nord-cli` additionally proves, before it is allowed to be a package at
     # all, that the binary it installed runs.
     nord-cli =
@@ -481,6 +519,11 @@ in
 
       # The workspace's own crates, keyed by the name cargo knows them by.
       inherit crates;
+
+      # The `dlopen`ed display and GL libraries the native `drawbar` needs on the
+      # loader's path; empty off Linux. The package wraps itself with them, the dev
+      # shell exports them, so `cargo run -p drawbar` behaves like the package.
+      inherit guiLibs;
 
       # The cross builds as a set, because their names are host-dependent and a
       # consumer enumerating them cannot write the list down.

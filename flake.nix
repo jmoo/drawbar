@@ -51,6 +51,7 @@
             devShells.default = pkgs.lib.crane.devShell {
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
               packages = [ pkgs.rust-analyzer ];
+              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             };
 
