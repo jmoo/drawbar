@@ -6,6 +6,7 @@ members = [
   "nord-emu",
   "nord-format",
   "nord-usb",
+  "nord-usbip",
 ]
 resolver = "2"
 

@@ -1,0 +1,14 @@
+[package]
+name = "nord-usbip"
+description = "USB/IP server that puts the emulated Nord instrument on a real USB stack"
+edition.workspace = true
+license.workspace = true
+publish = false
+version.workspace = true
+
+[lib]
+name = "nord_usbip"
+
+[dependencies]
+nord-emu = { path = "../nord-emu" }
+nord-usb = { path = "../nord-usb", default-features = false }

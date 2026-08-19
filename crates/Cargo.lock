@@ -1856,6 +1856,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nord-usbip"
+version = "0.1.0"
+dependencies = [
+ "nord-emu",
+ "nord-usb",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
