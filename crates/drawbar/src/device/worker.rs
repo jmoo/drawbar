@@ -1353,18 +1353,30 @@ mod wire_tests {
                 cmd::NEXT_SLOT if !self.enumerates => Some((op::ENUMERATION_DISABLED, Vec::new())),
                 cmd::NEXT_SLOT => {
                     let from = at();
-                    let next =
-                        self.filled
-                            .as_ref()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|(held, _)| {
-                                (held.bank == from.bank && held.slot > from.slot)
-                                    .then_some(held.slot)
-                            });
-                    match next.min() {
+                    // Third word is the direction; the hardware refuses its absence
+                    // (`0x11`) after a write, so the puppet insists on it too.
+                    let Some(dir) = msg.args.get(8..12) else {
+                        return Some((op::ENUMERATION_DISABLED, Vec::new()));
+                    };
+                    let backward = u32::from_be_bytes(dir.try_into().unwrap()) == 1;
+                    let in_bank = self
+                        .filled
+                        .as_ref()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(held, _)| (held.bank == from.bank).then_some(held.slot));
+                    let hit = if backward {
+                        in_bank
+                            .filter(|s| from.slot == op::SLOT_BOUNDARY || *s < from.slot)
+                            .max()
+                    } else {
+                        in_bank
+                            .filter(|s| from.slot == op::SLOT_BOUNDARY || *s > from.slot)
+                            .min()
+                    };
+                    match hit {
                         Some(slot) => Some((0, words(&[from.bank, slot]))),
-                        None => Some((1, Vec::new())),
+                        None => Some((1, words(&[from.bank, op::SLOT_BOUNDARY]))),
                     }
                 }
                 cmd::INFO => {

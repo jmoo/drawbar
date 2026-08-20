@@ -399,27 +399,36 @@ pub async fn focus<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<L
     })
 }
 
-/// Device status meaning "enumeration is disabled".
+/// Device status refusing a [`cmd::NEXT_SLOT`] request that lacks the direction word.
 ///
-/// The instrument turns [`cmd::NEXT_SLOT`] off after any write since power-up and only a
-/// power cycle turns it back on; point commands are unaffected. Surfaced as
-/// [`Error::DeviceStatus`] rather than swallowed, because a caller that retries or
-/// falls back silently would hide that its inventory can no longer be enumerated.
+/// The two-word `[bank][slot]` shape is accepted on a boot with no mutations behind it
+/// and refused with this status after any write since power-up — which looked like a
+/// power-cycle-only enumeration lockout until NSM's own sync traffic showed the
+/// three-word form answering during the "lockout". [`next_occupied`] sends the
+/// three-word form, so this status should no longer occur; it stays surfaced as
+/// [`Error::DeviceStatus`] rather than swallowed, because a walk refused for any
+/// reason must not pass off a partial list as an inventory.
 pub const ENUMERATION_DISABLED: u32 = 0x11;
+
+/// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
+/// walking forward, its last when walking backward.
+pub const SLOT_BOUNDARY: u32 = 0xffff_ffff;
 
 /// The next occupied slot after `at`, or `None` once the walk runs off the end.
 ///
 /// **Read-only.** Positions inside a gap are safe to pass: the device answers with the
 /// next real object rather than an error, which is what makes this an iterator over
-/// content instead of over addresses.
-///
-/// Refuses with [`ENUMERATION_DISABLED`] once any write has happened this power cycle.
+/// content instead of over addresses. `at.slot == SLOT_BOUNDARY` starts from before
+/// the bank's first slot.
 pub async fn next_occupied<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Option<Location>> {
     let mut args = Vec::new();
     at.write_to(&mut args);
+    // Direction: 0 walks forward. The word is required — without it the device
+    // answers only until the first write of the power cycle (ENUMERATION_DISABLED).
+    args.extend_from_slice(&0u32.to_be_bytes());
     match session
         .request(Service::Program, 10, cmd::NEXT_SLOT, &args)
         .await
@@ -447,15 +456,15 @@ pub async fn next_occupied<T: Transport, C>(
 /// Every occupied slot in the session's class, in address order.
 ///
 /// **Read-only.** [`next_occupied`] walks *within* one bank and stops at its end, so this
-/// drives it bank by bank. Pianos span several banks and programs fill eight of them;
-/// only the sample library is flat, and walking bank 0 alone silently reports a fraction
-/// of the class.
+/// drives it bank by bank, each from [`SLOT_BOUNDARY`]. Pianos span several banks and
+/// programs fill eight of them; only the sample library is flat, and walking bank 0
+/// alone silently reports a fraction of the class.
 ///
-/// Bank 0 slot 0 of each bank is tested with [`info`], because the cursor reports what
-/// comes *after* a position and can never say whether the first one holds anything.
-/// That test also ends the walk: an out-of-range bank (status `3`) means the class has no
-/// more banks, which is different from a bank that merely holds nothing (status `1`) —
-/// the sample library has addressable empty banks past its only populated one.
+/// Each bank's slot 0 is tested with [`info`] first, because the cursor cannot say
+/// whether a bank *exists*: an empty bank and a bank the class does not have answer a
+/// boundary request identically. `info` distinguishes — status `3` (out of range) means
+/// the class has no more banks and ends the walk, status `1` a bank that merely holds
+/// nothing — the sample library has addressable empty banks past its only populated one.
 ///
 /// Two bounds keep a walk finite when the device does not behave as expected: `cap` on
 /// total slots, and a stop after `EMPTY_BANKS_BEFORE_STOP` consecutive empty banks for
@@ -475,24 +484,25 @@ pub async fn occupied_slots<T: Transport, C>(
         if found.len() >= cap {
             break;
         }
-        let start = Location { bank, slot: 0 };
-        let start_holds_something = match info(session, start).await {
-            Ok(_) => true,
-            Err(Error::DeviceStatus(1)) => false,
+        match info(session, Location { bank, slot: 0 }).await {
+            Ok(_) | Err(Error::DeviceStatus(1)) => {}
             Err(Error::DeviceStatus(3)) => break,
             Err(e) => return Err(e),
-        };
+        }
 
         let before = found.len();
-        if start_holds_something {
-            found.push(start);
-        }
-        let mut at = start;
+        let mut at = Location {
+            bank,
+            slot: SLOT_BOUNDARY,
+        };
         while found.len() < cap {
             match next_occupied(session, at).await? {
                 // Staying inside the bank and moving forward, or the walk is not making
                 // progress and would spin.
-                Some(next) if next.bank == bank && next.slot > at.slot => {
+                Some(next)
+                    if next.bank == bank
+                        && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
+                {
                     found.push(next);
                     at = next;
                 }
