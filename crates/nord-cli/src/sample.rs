@@ -130,6 +130,7 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
             args.yes,
             "the edited sample",
             None,
+            None,
         ),
     }
 }

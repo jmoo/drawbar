@@ -481,6 +481,13 @@ pub fn put(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
+    // The file's own modification time, as NSM sends.
+    let stamp = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as u32);
+
     send(
         ui,
         &file,
@@ -489,6 +496,7 @@ pub fn put(
         confirmed,
         &path.display().to_string(),
         Some(&stem),
+        stamp,
     )
 }
 
@@ -526,6 +534,9 @@ pub fn send(
     // Name for the destination, for the classes whose write carries one. `None` keeps
     // whatever the slot is already called — the right default for a read-modify-write.
     name: Option<&str>,
+    // Timestamp for the write. `None` means "now", which a device that has just been
+    // power-cycled may reject as being in the future.
+    stamp: Option<u32>,
 ) -> Result<(), String> {
     let mut t = open_usb()?;
 
@@ -608,17 +619,23 @@ pub fn send(
             .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
 
+    // The timestamp the write carries. NSM sends the **file's modification time**, not
+    // the current time, and the device refuses a value it considers too far ahead —
+    // which a freshly power-cycled instrument does to any "now". Falling back to now()
+    // only when there is no file to ask.
+    let timestamp = stamp.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0)
+    });
+
     // The name the destination ends up with: what the caller asked for, else what the
     // slot is already called. Only the library classes put it on the wire.
     let write_name = name
         .map(str::to_string)
         .or_else(|| existing.as_ref().map(|i| i.name.clone()))
         .unwrap_or_default();
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
 
     let written = if fail_after_delete() {
         // The slot is deleted and the backup is in memory: exactly the state the restore
