@@ -589,6 +589,11 @@ pub fn send(
         }
         None => ui.note(format!("{} is empty; writing {what}", shown(at))),
     }
+    // What the slot will be called: the write carries the name, so say it up front —
+    // a put names the slot after the file, which is what NSM does too.
+    if let Some(name) = name.filter(|n| !n.is_empty()) {
+        ui.note(format!("the slot will be named {name:?}"));
+    }
     ui.confirm(confirmed)?;
 
     // After consent, not before: for a piano this read is minutes long, and nobody should
@@ -700,25 +705,17 @@ pub fn send(
     }
 }
 
-/// Write an entity, choosing the shape the destination class accepts.
-///
-/// Library classes take a different `BEGIN_WRITE` — it carries the object's name, and it
-/// needs a preamble the program write does not send. A program-shaped write aimed at one
-/// is refused with status `0x16`.
+/// Write an entity. One shape for every class; the name rides in `BEGIN_WRITE`, so the
+/// slot keeps it — including across a `put`, which used to leave programs named `"0"`.
 async fn write_entity<T: nord_usb::transport::Transport>(
     s: &mut Session<'_, T, nord_usb::ReadWrite>,
     at: Location,
-    class: ObjectClass,
+    _class: ObjectClass,
     file: &[u8],
     name: &str,
     timestamp: u32,
 ) -> Result<(), nord_usb::Error> {
-    match class {
-        ObjectClass::Piano | ObjectClass::Sample => {
-            usb_op::write_library(s, at, file, name, timestamp).await
-        }
-        _ => usb_op::write_program(s, at, file, timestamp).await,
-    }
+    usb_op::write(s, at, file, name, timestamp).await
 }
 
 /// Whether to skip the write and report a failure, so the restore and rescue paths can

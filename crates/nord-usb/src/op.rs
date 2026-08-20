@@ -203,85 +203,16 @@ async fn transfer_out<T: Transport, C>(
     Ok((meta, body))
 }
 
-/// Write a `.ne5p` file into a slot. Requires a [`ReadWrite`] session, which callers
-/// must obtain deliberately.
+/// Write an entity into a slot. One shape for every class.
 ///
-/// ⚠️ **The destination must be empty.** The device refuses to overwrite in place with
-/// status `4` (confirmed on hardware; NSM grays out its write button for a filled slot,
-/// so no capture of a replace exists). Replacing a slot is delete-then-write, and the
-/// window in between — where the only copy is in host memory — belongs to the caller.
+/// The object's **name** is an argument of the write: the file carries none, so
+/// whatever is passed here is what the slot ends up called — a placeholder becomes the
+/// slot's name. Hardware-verified on samples (2026-08-19) and programs (2026-08-20);
+/// the nameless-looking program form NSM was captured sending is this same shape
+/// carrying the one-byte name `"0"`, which is what a restored slot used to end up
+/// called.
 ///
-/// ⚠️ The `BEGIN_WRITE` argument layout is only partly understood: the fourth word is
-/// a Unix timestamp (NSM sends the file's mtime) and the trailing bytes are copied
-/// from an observed capture. The path is hardware-verified for programs (a field
-/// edited in Rust, written over USB, confirmed on the panel), but only ever with
-/// those captured trailing bytes. Back up before using it.
-///
-/// ⚠️ **This does not carry the caller's name for what it writes**, and the slot ends up
-/// called whatever those trailing bytes say — see the note beside them. Follow it with
-/// [`rename`], in the same session, to put a name on the slot.
-///
-/// ⚠️ The body goes out in a single `WRITE_DATA` frame, unlike the read path, which
-/// chunks at `READ_CHUNK`. Verified only for program-sized bodies; how the device
-/// takes a library-sized write is untested.
-pub async fn write_program<T: Transport>(
-    session: &mut Session<'_, T, ReadWrite>,
-    at: Location,
-    file: &[u8],
-    timestamp: u32,
-) -> Result<()> {
-    let file = envelope::unwrap(file)?;
-    let body = &file.body.0;
-
-    // The "Downloading..." label the instrument paints — NSM's backwards word for
-    // host → keyboard. Fire-and-forget, exactly as on the wire.
-    session.notify(&ui::label("Downloading...")?).await?;
-
-    let mut begin = Vec::new();
-    at.write_to(&mut begin);
-    begin.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    begin.extend_from_slice(&file.header.tag);
-    begin.extend_from_slice(&timestamp.to_be_bytes());
-    begin.extend_from_slice(&u32::MAX.to_be_bytes());
-    begin.extend_from_slice(&1u32.to_be_bytes());
-    // ⚠️ Inferred from the capture; not confirmed on hardware. A `1` followed by a single
-    // byte has the shape of the length-prefixed strings this wire uses everywhere else,
-    // so these last five bytes may be the **name** the slot ends up carrying — which
-    // would be `"0"` for every write this function makes. Until that is settled, a caller
-    // that needs a slot to be called something in particular follows the write with
-    // [`rename`] rather than trusting either reading.
-    begin.push(b'0');
-    session
-        .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
-        .await?;
-
-    let mut data = Vec::new();
-    at.write_to(&mut data);
-    data.extend_from_slice(&0u32.to_be_bytes()); // offset
-    data.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    data.extend_from_slice(body);
-    session
-        .request(Service::Program, 10, cmd::WRITE_DATA, &data)
-        .await?;
-
-    session.notify(&ui::percent(100)).await?;
-
-    let mut args = Vec::new();
-    at.write_to(&mut args);
-    session
-        .request(Service::Program, 10, cmd::END_TRANSFER, &args)
-        .await?;
-    Ok(())
-}
-
-/// Write an entity into a **library** class (piano, sample) — the classes a
-/// program-shaped write cannot reach.
-///
-/// One thing differs from [`write_program`]: the object's **name** is an argument of the
-/// write. The file carries none, so whatever is passed here is what the slot ends up
-/// called — a placeholder becomes the slot's name.
-///
-/// The body goes in one frame: a sample under the device's maximum transfer is not
+/// The body goes in one frame: a body under the device's maximum transfer is not
 /// chunked.
 ///
 /// ⚠️ **Do not send the `0x22`/`0x26` pair before this.** NSM emits it ahead of some
@@ -289,7 +220,7 @@ pub async fn write_program<T: Transport>(
 /// `BEGIN_WRITE` is refused with `0x1e` for the rest of the session. What the pair is for
 /// is unknown; what is measured is that a write without it succeeds and a write after it
 /// does not.
-pub async fn write_library<T: Transport>(
+pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
     file: &[u8],
