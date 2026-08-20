@@ -100,9 +100,23 @@ pub mod cmd {
     /// so no typed operation is built on it yet — the code is named for completeness.
     pub const RELINK: u32 = 0x35;
 
-    /// Begin writing an entity. Args: bank, slot, body length, format tag,
-    /// timestamp, `0xFFFFFFFF`, 1, and a trailing flag byte.
+    /// Begin writing an entity. Args: bank, slot, body length, format tag, timestamp,
+    /// `0xFFFFFFFF`, then the slot's **name** as a length-prefixed string.
+    ///
+    /// ⚠️ The name is an argument of the write, not metadata carried by the file. A
+    /// caller that passes a placeholder gets a slot called that.
     pub const BEGIN_WRITE: u32 = 0x0a;
+
+    /// First of two frames NSM sends before a **library** `BEGIN_WRITE`. One argument
+    /// word, observed only as `1`.
+    ///
+    /// Its purpose is unknown; what is measured is that a library write *without* the
+    /// pair is refused at `BEGIN_WRITE` with status `0x16`, and one *with* it succeeds.
+    /// ⚠️ Despite sitting in the range long treated as possibly-erase, this is a routine
+    /// part of a write NSM performs on every sample upload.
+    pub const WRITE_PREPARE: u32 = 0x22;
+    /// Second of the pair. No arguments; the reply carries `0, 1, 1, 0`.
+    pub const WRITE_PREPARE_2: u32 = 0x26;
     /// Begin reading an entity. Args: bank, slot.
     pub const BEGIN_READ: u32 = 0x0c;
     /// Finish a transfer, either direction. Args: bank, slot.

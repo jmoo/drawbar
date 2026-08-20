@@ -475,7 +475,21 @@ pub fn put(
     let file = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Fail before touching the device if the file is not what it claims to be.
     nord_usb::envelope::unwrap(&file).map_err(|e| e.to_string())?;
-    send(ui, &file, at, class, confirmed, &path.display().to_string())
+    // A library write carries the name, and nothing in the file supplies one, so the
+    // file stem is it — the same choice NSM makes.
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    send(
+        ui,
+        &file,
+        at,
+        class,
+        confirmed,
+        &path.display().to_string(),
+        Some(&stem),
+    )
 }
 
 /// Run one mutating operation in its own session, committing either way — an abandoned
@@ -509,6 +523,9 @@ pub fn send(
     class: ObjectClass,
     confirmed: bool,
     what: &str,
+    // Name for the destination, for the classes whose write carries one. `None` keeps
+    // whatever the slot is already called — the right default for a read-modify-write.
+    name: Option<&str>,
 ) -> Result<(), String> {
     let mut t = open_usb()?;
 
@@ -591,6 +608,13 @@ pub fn send(
             .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
 
+    // The name the destination ends up with: what the caller asked for, else what the
+    // slot is already called. Only the library classes put it on the wire.
+    let write_name = name
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().map(|i| i.name.clone()))
+        .unwrap_or_default();
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
@@ -603,8 +627,13 @@ pub fn send(
             "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
         ))
     } else {
-        one_shot!(&mut t, class, |s| usb_op::write_program(
-            &mut s, at, file, timestamp
+        one_shot!(&mut t, class, |s| write_entity(
+            &mut s,
+            at,
+            class,
+            file,
+            &write_name,
+            timestamp
         ))
     };
 
@@ -621,8 +650,19 @@ pub fn send(
                 "the write failed and {} is now empty; putting the original back",
                 shown(at)
             ));
-            match one_shot!(&mut t, class, |s| usb_op::write_program(
-                &mut s, at, &backup, timestamp
+            // Restoring puts back what the slot was called, not what the caller wanted
+            // the replacement named.
+            let restore_name = existing
+                .as_ref()
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| write_name.clone());
+            match one_shot!(&mut t, class, |s| write_entity(
+                &mut s,
+                at,
+                class,
+                &backup,
+                &restore_name,
+                timestamp
             )) {
                 Ok(()) => {
                     ui.note(format!("restored {}", shown(at)));
@@ -640,6 +680,27 @@ pub fn send(
                 )),
             }
         }
+    }
+}
+
+/// Write an entity, choosing the shape the destination class accepts.
+///
+/// Library classes take a different `BEGIN_WRITE` — it carries the object's name, and it
+/// needs a preamble the program write does not send. A program-shaped write aimed at one
+/// is refused with status `0x16`.
+async fn write_entity<T: nord_usb::transport::Transport>(
+    s: &mut Session<'_, T, nord_usb::ReadWrite>,
+    at: Location,
+    class: ObjectClass,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<(), nord_usb::Error> {
+    match class {
+        ObjectClass::Piano | ObjectClass::Sample => {
+            usb_op::write_library(s, at, file, name, timestamp).await
+        }
+        _ => usb_op::write_program(s, at, file, timestamp).await,
     }
 }
 

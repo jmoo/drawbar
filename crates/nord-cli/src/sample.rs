@@ -129,6 +129,7 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
             ObjectClass::Sample,
             args.yes,
             "the edited sample",
+            None,
         ),
     }
 }
