@@ -40,6 +40,8 @@ struct Cli {
     ///
     /// The script is what `--replay` and the golden tests read back. An operation that
     /// transfers a body writes that body into it in full.
+    ///
+    /// Bulk traffic only: `device info` reads endpoint 0, which never reaches the script.
     #[arg(long, global = true, value_name = "PATH")]
     record: Option<PathBuf>,
 

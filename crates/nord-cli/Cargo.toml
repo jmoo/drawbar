@@ -23,7 +23,7 @@ wedge = []
 # the backup in hand — the state the restore and rescue paths exist for, and otherwise
 # reachable only by pulling the cable inside a window a few milliseconds wide. Off by
 # default and gated for the same reason as `wedge`: it deletes a slot on purpose.
-fault-injection = []
+fault-injection = ["nord-usb/fault-injection"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

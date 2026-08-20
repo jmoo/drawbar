@@ -32,8 +32,7 @@ pub enum Source {
 pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     let report = match source {
         Source::Usb => {
-            let mut transport =
-                nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())?;
+            let mut transport = open_usb()?;
             collect(&mut transport)?
         }
         Source::Replay(path) => {
