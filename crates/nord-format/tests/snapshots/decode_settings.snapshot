@@ -154,8 +154,8 @@ rotary_horn_acceleration
 
 rotary_rotor_speed
   at      85..=87
-  raw     2    [1, 2]
-  decoded 2    [High, Normal]
+  raw     3    [0, 1, 2]
+  decoded 3    [High, Low, Normal]
 
 rotary_rotor_acceleration
   at      91..=93
