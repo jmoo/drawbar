@@ -364,7 +364,36 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
 /// This is not folded into [`Session::open`] on purpose. NSM sends no such frame, the
 /// golden replays pin our exchanges against real captures, and quietly diverging from
 /// that ground truth to paper over an operator-caused fault would cost more than it saves.
+/// Read and discard anything the device still has queued, until it goes quiet.
+///
+/// Unread replies are how the stream gets out of step; nothing here writes, so it is safe
+/// on a healthy instrument — it simply finds nothing.
+async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
+    for _ in 0..DRAIN_CAP {
+        match transport
+            .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+            .await?
+        {
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// How long to wait for a straggler before deciding the stream is quiet.
+const DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Upper bound on stragglers, so a device that will not stop talking cannot hang this.
+const DRAIN_CAP: usize = 16;
+
 pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
+    // Drain first. A reply nobody read leaves the stream one message ahead, so every
+    // later request is answered by the *previous* one's reply — the tell is an error
+    // naming two commands that are one apart. Sending anything before draining keeps the
+    // offset intact, which is why the two frames below cannot cure it on their own.
+    drain(transport).await?;
+
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
     transport.write(&goodbye.encode()).await?;
     let _ = transport.read(crate::transport::READ_BUFFER).await?;
