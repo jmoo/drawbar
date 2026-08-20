@@ -274,23 +274,21 @@ pub async fn write_program<T: Transport>(
     Ok(())
 }
 
-/// How many times to ask whether the library has finished settling before giving up and
-/// letting the write report the device's own refusal.
-const WRITE_READY_TRIES: usize = 40;
-
 /// Write an entity into a **library** class (piano, sample) — the classes a
 /// program-shaped write cannot reach.
 ///
-/// Two things differ from [`write_program`], both taken from an NSM capture of a sample
-/// upload:
+/// One thing differs from [`write_program`]: the object's **name** is an argument of the
+/// write. The file carries none, so whatever is passed here is what the slot ends up
+/// called — a placeholder becomes the slot's name.
 ///
-/// * the `0x22`/`0x26` preamble, without which `BEGIN_WRITE` is refused with `0x16`;
-/// * the object's **name**, which is an argument of the write. The device has nothing
-///   else to take it from — the file does not carry it — so whatever is passed here is
-///   what the slot ends up called.
+/// The body goes in one frame: a sample under the device's maximum transfer is not
+/// chunked.
 ///
-/// The body goes in one frame: a sample small enough to fit under the device's maximum
-/// transfer is not chunked.
+/// ⚠️ **Do not send the `0x22`/`0x26` pair before this.** NSM emits it ahead of some
+/// uploads and not others, and sending it puts the library into a state where
+/// `BEGIN_WRITE` is refused with `0x1e` for the rest of the session. What the pair is for
+/// is unknown; what is measured is that a write without it succeeds and a write after it
+/// does not.
 pub async fn write_library<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -300,31 +298,6 @@ pub async fn write_library<T: Transport>(
 ) -> Result<()> {
     let file = envelope::unwrap(file)?;
     let body = &file.body.0;
-
-    session.notify(&ui::label("Cleaning...")?).await?;
-    session
-        .request(
-            Service::Program,
-            10,
-            cmd::WRITE_PREPARE,
-            &1u32.to_be_bytes(),
-        )
-        .await?;
-
-    // `WRITE_PREPARE` starts the "Cleaning..." pass the instrument shows, and the write
-    // is refused with `0x1e` while it runs. The second preamble command reports progress:
-    // its third word reads 1 until the library settles, then 0. NSM's own capture caught
-    // it already at 0, which is why the wait is invisible there.
-    for _ in 0..WRITE_READY_TRIES {
-        let reply = session
-            .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
-            .await?;
-        let payload = reply.payload();
-        let busy = payload.len() >= 12 && payload[8..12] != [0, 0, 0, 0];
-        if !busy {
-            break;
-        }
-    }
 
     session.notify(&ui::label("Downloading...")?).await?;
 
