@@ -130,6 +130,11 @@ pub async fn read_body<T: Transport, C>(
 /// the smaller is used uniformly.
 const READ_CHUNK: u32 = 32720;
 
+/// Body bytes per `WRITE_DATA` frame. NSM writes at `32726` (the read side's other
+/// number), which with the 16 argument bytes and 18 bytes of framing fills the
+/// device's 32768-byte maximum transfer exactly.
+const WRITE_CHUNK: usize = 32726;
+
 /// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
 /// body length, the `"Uploading..."` progress label the instrument paints, `BEGIN_READ`,
 /// one `READ` per [`READ_CHUNK`] with the bar advancing as they arrive, then
@@ -203,6 +208,62 @@ async fn transfer_out<T: Transport, C>(
     Ok((meta, body))
 }
 
+/// What `0x26` answers once the library is consolidated and idle — the only state in
+/// which a library `BEGIN_WRITE` is accepted.
+const LIBRARY_READY: [u32; 3] = [1, 1, 0];
+
+/// How long to keep asking `0x26` whether the cleaning pass has finished. The pass took
+/// under a second on hardware; the bound exists for a longer pass on a churned library,
+/// not as an expected wait.
+const CLEANING_POLLS: u32 = 120;
+const CLEANING_POLL_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Run the library's cleaning pass and wait for it to finish. Paints "Cleaning..." on
+/// the display, exactly as NSM does before an upload.
+///
+/// The library keeps a clean/dirty state that gates writes: once a write has dirtied
+/// it, the next `BEGIN_WRITE` is refused `0x16` (the state a whole day of
+/// 2026-08-19/20 failures traced to) until a cleaning pass has run **in the write's
+/// own session**. After `0x22 ⟨1⟩`, `0x26` answers `1,0,1` while the pass runs
+/// (writing now is refused `0x1e`) and `1,1,0` when done. So: start the pass, poll
+/// until ready, then write — the dance NSM performs ahead of every upload that needs
+/// one. ⚠️ A bare `0x26` with no `0x22` before it can answer `1,1,0` while a write
+/// would still be refused, so the query is only read here, after the pass is started.
+async fn clean_library<T: Transport>(session: &mut Session<'_, T, ReadWrite>) -> Result<()> {
+    session.notify(&ui::label("Cleaning...")?).await?;
+    session.notify(&ui::percent(0)).await?;
+    session
+        .request(Service::Program, 10, cmd::WRITE_PREPARE, &1u32.to_be_bytes())
+        .await?;
+
+    for polls in 0..CLEANING_POLLS {
+        // The pass runs on the instrument; give it room before asking again. The first
+        // ask is immediate, which is the path a clean library takes.
+        if polls > 0 {
+            crate::deadline::with_timeout(std::future::pending::<()>(), CLEANING_POLL_SPACING)
+                .await;
+        }
+        let resp = session
+            .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
+            .await?;
+        let p = resp.payload();
+        if p.len() >= 12 {
+            let state = [
+                u32::from_be_bytes(p[0..4].try_into().unwrap()),
+                u32::from_be_bytes(p[4..8].try_into().unwrap()),
+                u32::from_be_bytes(p[8..12].try_into().unwrap()),
+            ];
+            if state == LIBRARY_READY {
+                return Ok(());
+            }
+        }
+    }
+    Err(Error::Transport(format!(
+        "the library's cleaning pass did not report ready within {} polls",
+        CLEANING_POLLS
+    )))
+}
+
 /// Write an entity into a slot. One shape for every class.
 ///
 /// The object's **name** is an argument of the write: the file carries none, so
@@ -212,14 +273,16 @@ async fn transfer_out<T: Transport, C>(
 /// carrying the one-byte name `"0"`, which is what a restored slot used to end up
 /// called.
 ///
-/// The body goes in one frame: a body under the device's maximum transfer is not
-/// chunked.
+/// The body is pushed in [`WRITE_CHUNK`]-sized `WRITE_DATA` frames, exactly as NSM
+/// sends them: every chunk but the last goes unacknowledged, and only the final one is
+/// answered. ⚠️ A body over the device's maximum transfer **must** be chunked — a
+/// single oversized frame leaves the instrument consuming everything that follows as
+/// continuation bytes, silent on bulk IN until a power cycle (found the hard way,
+/// 2026-08-20, with an 82KB sample).
 ///
-/// ⚠️ **Do not send the `0x22`/`0x26` pair before this.** NSM emits it ahead of some
-/// uploads and not others, and sending it puts the library into a state where
-/// `BEGIN_WRITE` is refused with `0x1e` for the rest of the session. What the pair is for
-/// is unknown; what is measured is that a write without it succeeds and a write after it
-/// does not.
+/// A **library** class (piano, sample) is cleaned first — see [`clean_library`]: its
+/// `BEGIN_WRITE` is refused with `0x16` whenever a write has dirtied the library since
+/// its last cleaning pass, and the pass is what re-arms it.
 pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -229,6 +292,10 @@ pub async fn write<T: Transport>(
 ) -> Result<()> {
     let file = envelope::unwrap(file)?;
     let body = &file.body.0;
+
+    if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
+        clean_library(session).await?;
+    }
 
     session.notify(&ui::label("Downloading...")?).await?;
 
@@ -244,14 +311,27 @@ pub async fn write<T: Transport>(
         .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
         .await?;
 
-    let mut data = Vec::new();
-    at.write_to(&mut data);
-    data.extend_from_slice(&0u32.to_be_bytes()); // offset
-    data.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    data.extend_from_slice(body);
-    session
-        .request(Service::Program, 10, cmd::WRITE_DATA, &data)
-        .await?;
+    let mut offset = 0usize;
+    while offset < body.len() {
+        let end = (offset + WRITE_CHUNK).min(body.len());
+        let chunk = &body[offset..end];
+        let mut data = Vec::new();
+        at.write_to(&mut data);
+        data.extend_from_slice(&(offset as u32).to_be_bytes());
+        data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        data.extend_from_slice(chunk);
+        if end == body.len() {
+            // Only the final chunk is acknowledged; the device answers once the whole
+            // body has arrived.
+            session
+                .request(Service::Program, 10, cmd::WRITE_DATA, &data)
+                .await?;
+        } else {
+            let msg = Message::new(Service::Program, 10, cmd::WRITE_DATA, data);
+            session.notify(&msg).await?;
+        }
+        offset = end;
+    }
 
     session.notify(&ui::percent(100)).await?;
 

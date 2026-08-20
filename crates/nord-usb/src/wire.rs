@@ -107,15 +107,18 @@ pub mod cmd {
     /// caller that passes a placeholder gets a slot called that.
     pub const BEGIN_WRITE: u32 = 0x0a;
 
-    /// First of two frames NSM sends before a **library** `BEGIN_WRITE`. One argument
-    /// word, observed only as `1`.
-    ///
-    /// Its purpose is unknown; what is measured is that a library write *without* the
-    /// pair is refused at `BEGIN_WRITE` with status `0x16`, and one *with* it succeeds.
-    /// ⚠️ Despite sitting in the range long treated as possibly-erase, this is a routine
-    /// part of a write NSM performs on every sample upload.
+    /// Start the library's cleaning/consolidation pass (`⟨1⟩`; paints "Cleaning...").
+    /// Re-arms library writes: once a write has dirtied the library, the next
+    /// `BEGIN_WRITE` is refused `0x16` until this pass has run and finished — inside
+    /// the write's own session, which is where NSM runs it before every upload that
+    /// needs one. Despite sitting in the range long treated as possibly-erase, it
+    /// destroys nothing.
     pub const WRITE_PREPARE: u32 = 0x22;
-    /// Second of the pair. No arguments; the reply carries `0, 1, 1, 0`.
+    /// Query the cleaning pass. No arguments; three reply words. **Meaningful only
+    /// after `0x22` in the same session** — a bare query can answer `1,1,0` while a
+    /// write would still be refused. After `0x22`: `1,1,0` done, write now; `1,0,1`
+    /// still running (a write now is refused `0x1e`); `1,0,0` observed after a
+    /// completed write.
     pub const WRITE_PREPARE_2: u32 = 0x26;
     /// Begin reading an entity. Args: bank, slot.
     pub const BEGIN_READ: u32 = 0x0c;
