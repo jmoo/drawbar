@@ -596,9 +596,17 @@ pub fn send(
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
 
-    let written = one_shot!(&mut t, class, |s| usb_op::write_program(
-        &mut s, at, file, timestamp
-    ));
+    let written = if fail_after_delete() {
+        // The slot is deleted and the backup is in memory: exactly the state the restore
+        // path exists for, reached without needing a real transport failure.
+        Err(nord_usb::Error::Transport(
+            "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
+        ))
+    } else {
+        one_shot!(&mut t, class, |s| usb_op::write_program(
+            &mut s, at, file, timestamp
+        ))
+    };
 
     match (written, backup) {
         (Ok(()), _) => {
@@ -633,6 +641,21 @@ pub fn send(
             }
         }
     }
+}
+
+/// Whether to skip the write and report a failure, so the restore and rescue paths can
+/// be exercised against a real instrument. Test tool: a genuine transport failure at this
+/// exact point is otherwise only reachable by pulling the cable mid-operation.
+///
+/// ⚠️ It leaves the slot deleted, so point it at a scratch slot with a copy on disk.
+#[cfg(feature = "fault-injection")]
+fn fail_after_delete() -> bool {
+    std::env::var_os("NORD_FAIL_AFTER_DELETE").is_some()
+}
+
+#[cfg(not(feature = "fault-injection"))]
+fn fail_after_delete() -> bool {
+    false
 }
 
 /// Last resort: the write failed, the restore failed, and the slot's former contents

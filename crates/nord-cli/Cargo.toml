@@ -19,6 +19,12 @@ path = "src/main.rs"
 # ships.
 wedge = []
 
+# `NORD_FAIL_AFTER_DELETE`, which makes a replace fail with the slot already deleted and
+# the backup in hand — the state the restore and rescue paths exist for, and otherwise
+# reachable only by pulling the cable inside a window a few milliseconds wide. Off by
+# default and gated for the same reason as `wedge`: it deletes a slot on purpose.
+fault-injection = []
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 # Line editing for `--sweep`, which prefills each prompt with the previous answer — the
