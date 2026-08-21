@@ -55,6 +55,10 @@
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             };
 
+            # `nix flake check`: formatting (treefmt, below) and clippy. Tests run inside
+            # the package builds — `nix build .#nord.all` is the other half of CI.
+            checks.clippy = pkgs.nord.clippy;
+
             legacyPackages = pkgs;
 
             packages = pkgs.nord.crates // pkgs.nord.crossPackages;

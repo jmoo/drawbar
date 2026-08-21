@@ -1,10 +1,14 @@
-# Tests every crate but drawbar, whose GUI stack is covered by the Nix builds
-# instead. `corpus` stays off — those tests need the private specimen corpus —
-# and the feature list mirrors each crate's `[package.metadata.nix]
-# testFeatures`, so this runs the same suites the Nix build does.
+# Everything through Nix, so CI runs the same toolchain, formatter and checks as
+# `nix flake check` and `nix build .#nord.all` on a laptop:
 #
-# `lint` holds the line `nix fmt` and clippy draw: a tree the formatter would
-# touch, or a warning clippy would raise, fails the run.
+#   check — treefmt (fails on anything `nix fmt` would change) and clippy over the
+#           workspace with `--deny warnings`.
+#   build — every crate with its test suite, the cross matrix (Windows under Wine,
+#           aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
+#
+# The corpus attrs (`nord.*-corpus`) need the private specimen repo and are not
+# part of `nord.all`. Magic Nix Cache keeps the store between runs; without it
+# every run rebuilds Wine, QEMU and the GUI stack from scratch.
 name: ci
 
 on:
@@ -16,35 +20,18 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: crates
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates
-      - run: >
-          cargo test -p nord-bits-derive -p nord-format -p nord-usb -p nord-cli
-          --features nord-format/bundle,nord-usb/replay,nord-usb/blocking
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - run: nix flake check --print-build-logs
 
-  lint:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v27
-      - run: nix fmt -- --fail-on-change
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates
-      - working-directory: crates
-        run: >
-          cargo clippy -p nord-bits-derive -p nord-format -p nord-usb -p nord-cli
-          --all-targets --features nord-format/bundle,nord-usb/replay,nord-usb/blocking
-          -- -D warnings
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - run: nix build .#nord.all --print-build-logs

@@ -3,6 +3,7 @@ let
   inherit (final.lib)
     attrNames
     cleanSourceWith
+    concatMap
     concatMapAttrs
     concatMapStringsSep
     concatStringsSep
@@ -505,6 +506,20 @@ in
       # roll-ups stay out: they are their own builds, and the R2 tier needs
       # credentials that `all` cannot assume.
       all = final.linkFarm "all" (crates // crossed);
+
+      # Clippy over every crate and target, with each crate's test features on so the
+      # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
+      clippy = crane.cargoClippy (
+        commonArgs
+        // {
+          inherit cargoArtifacts;
+          pname = "workspace-clippy";
+          cargoExtraArgs = "--locked --workspace ${
+            featureArgs (concatMap (name: map (f: "${name}/${f}") (testFeaturesFor name)) (attrNames manifests))
+          }";
+          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+        }
+      );
 
       all-corpus = final.linkFarm "all-corpus" committed;
 
