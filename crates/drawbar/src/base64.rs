@@ -22,23 +22,46 @@ pub fn encode(bytes: &[u8]) -> String {
     out
 }
 
-/// The bytes a string spells, or `None` if it is not base64 at all.
+/// The bytes a string spells, or `None` if it is not base64: a character outside the
+/// alphabet, padding anywhere but the end, a length no encoder produces, or leftover
+/// bits that are not zero. A truncated string is refused rather than read short.
 pub fn decode(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let mut word = 0u32;
     let mut have = 0u32;
+    let mut chars = 0usize;
+    let mut pads = 0usize;
     for c in text.bytes() {
         // Whitespace is layout, not data — a store that wrapped its lines still reads.
-        if c.is_ascii_whitespace() || c == b'=' {
+        if c.is_ascii_whitespace() {
             continue;
         }
+        if c == b'=' {
+            pads += 1;
+            continue;
+        }
+        if pads > 0 {
+            return None;
+        }
         let value = ALPHABET.iter().position(|a| *a == c)? as u32;
+        chars += 1;
         word = (word << 6) | value;
         have += 6;
         if have >= 8 {
             have -= 8;
             out.push((word >> have) as u8);
         }
+    }
+    // Four characters per three bytes: a tail of one character spells nothing, and a
+    // tail of two or three needs as many pads as it leaves empty.
+    let tail = chars % 4;
+    let wanted_pads = match tail {
+        0 => 0,
+        1 => return None,
+        n => 4 - n,
+    };
+    if pads != wanted_pads || (word & ((1 << have) - 1)) != 0 {
+        return None;
     }
     Some(out)
 }
@@ -75,5 +98,24 @@ mod tests {
     fn text_that_is_not_base64_decodes_to_nothing() {
         assert_eq!(decode("not base64!"), None);
         assert_eq!(decode("Zm9v*"), None);
+    }
+
+    /// A string cut short, or padded wrong, is not a shorter asset — it is no asset.
+    #[test]
+    fn a_truncated_or_mispadded_string_is_refused() {
+        assert_eq!(
+            decode("Zm9vY"),
+            None,
+            "a lone tail character spells nothing"
+        );
+        assert_eq!(decode("Zm9vYg"), None, "missing pads");
+        assert_eq!(decode("Zm9vYg="), None, "one pad short");
+        assert_eq!(decode("Zm9v=Yg=="), None, "a pad in the middle");
+        assert_eq!(decode("Zh=="), None, "leftover bits set");
+        assert_eq!(
+            decode("Zm9v Yg==\n").as_deref(),
+            Some(&b"foob"[..]),
+            "layout is fine"
+        );
     }
 }

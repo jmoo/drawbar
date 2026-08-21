@@ -34,6 +34,7 @@ nord-usb = { path = "../nord-usb", features = ["blocking", "nusb"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+# Exact: the Nix build's `wasm-bindgen-cli` is pinned to match it (see overlay.nix).
 wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [

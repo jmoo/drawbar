@@ -176,13 +176,13 @@ fn location(bank: &str, slot: &str) -> Option<Location> {
 
 /// Tabs separate the fields and newlines separate the lines, so a name holding either
 /// would be a name that ate the rest of the store.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('\t', "\\t")
         .replace('\n', "\\n")
 }
 
-fn unescape(text: &str) -> String {
+pub(crate) fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -262,7 +262,7 @@ mod tests {
     /// its bytes — and it is re-checked on the way in.
     #[test]
     fn the_list_comes_back_as_it_was() {
-        use crate::workspace::{ExportWhat, Fresh};
+        use crate::workspace::Fresh;
 
         let (mut before, mut log) = workspace();
         let id = before.create(Fresh::Program, &mut log).unwrap();
@@ -280,10 +280,7 @@ mod tests {
         assert_eq!(restored.name, "Africa-Split.ne5p");
         assert_eq!(restored.bytes, before.get(id).unwrap().bytes);
         assert!(matches!(restored.verify, crate::workspace::VerifyState::Ok));
-        assert_eq!(
-            after.export_name(id, ExportWhat::File).as_deref(),
-            Some("Africa-Split.ne5p")
-        );
+        assert_eq!(after.export_name(id).as_deref(), Some("Africa-Split.ne5p"));
     }
 
     /// ⚠️ A view is the only copy of what it holds, so quitting with an edited one open

@@ -1101,8 +1101,8 @@ mod tests {
     }
 
     /// The device's name is the name, verbatim — spaces and all. Making it path-safe is
-    /// the export dialog's business, and doing it here is how "Big strings" once went
-    /// back to the instrument as "Big-strings".
+    /// the export dialog's business; a name sanitised here would go back to the
+    /// instrument sanitised.
     #[test]
     fn a_read_keeps_the_slots_name_verbatim() {
         let info = ProgramInfo {

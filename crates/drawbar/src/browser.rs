@@ -18,7 +18,7 @@ use crate::device::{
 use crate::log::Log;
 use crate::strings::{folder, place, shown};
 use crate::tabs::Tabs;
-use crate::workspace::{ExportWhat, Fresh, LocalEntity, Workspace};
+use crate::workspace::{Fresh, LocalEntity, Workspace};
 
 /// What an asset is, which is what decides the folder it belongs in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -410,7 +410,11 @@ impl Folders {
 fn written(folders: &Folders) -> String {
     let mut out = format!("{FOLDERS_VERSION}\n");
     for folder in &folders.list {
-        out.push_str(&format!("f\t{}\t{}\n", folder.id, escaped(&folder.name)));
+        out.push_str(&format!(
+            "f\t{}\t{}\n",
+            folder.id,
+            crate::store::escape(&folder.name)
+        ));
     }
     for (entity, folder) in &folders.of {
         out.push_str(&format!("m\t{entity}\t{folder}\n"));
@@ -434,7 +438,7 @@ fn read(text: &str) -> Folders {
                 if let Ok(id) = id.parse() {
                     folders.list.push(Folder {
                         id,
-                        name: unescaped(name),
+                        name: crate::store::unescape(name),
                     });
                 }
             }
@@ -451,37 +455,6 @@ fn read(text: &str) -> Folders {
     let known: Vec<u64> = folders.list.iter().map(|folder| folder.id).collect();
     folders.of.retain(|_, folder| known.contains(folder));
     folders
-}
-
-/// Tabs separate the fields and newlines separate the lines, so a name holding either
-/// would be a name that ate the rest of the store.
-fn escaped(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
-}
-
-fn unescaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        match (c, chars.clone().next()) {
-            ('\\', Some('t')) => {
-                chars.next();
-                out.push('\t');
-            }
-            ('\\', Some('n')) => {
-                chars.next();
-                out.push('\n');
-            }
-            ('\\', Some('\\')) => {
-                chars.next();
-                out.push('\\');
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 pub struct Browser {
@@ -1019,7 +992,6 @@ impl Browser {
     /// on a row that was already selected. An editor armed by any second click sits
     /// there with the whole name selected, so the next keystroke — one meant for the
     /// document, or a stray one — replaces it, and the blur commits the replacement.
-    /// That is how a program came to be called "0".
     fn clicked(&mut self, item: Item, response: &egui::Response, name: egui::Rect, from: &str) {
         let on_name = response
             .interact_pointer_pos()
@@ -1934,7 +1906,7 @@ pub fn apply(
                 browser.folders.forget(id);
                 workspace.remove(id, log);
             }
-            Act::Save(id) => workspace.export(id, ExportWhat::File),
+            Act::Save(id) => workspace.export(id),
             Act::Refused(why) => log.say(why),
         }
     }

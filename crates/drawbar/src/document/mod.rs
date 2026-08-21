@@ -14,7 +14,7 @@ use crate::device::Device;
 use crate::fields;
 use crate::log::Log;
 use crate::strings;
-use crate::workspace::{ExportWhat, LocalEntity, Workspace};
+use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
 mod controls;
@@ -163,7 +163,7 @@ impl Document {
             }
         }
         if act.save {
-            workspace.export(id, ExportWhat::File);
+            workspace.export(id);
         }
         if act.revert {
             workspace.restore_bytes(id, opened.to_vec(), log);

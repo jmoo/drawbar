@@ -147,15 +147,13 @@ pub struct Outgoing {
 /// wire.
 #[derive(Clone)]
 pub struct Words {
-    pub log: String,
     pub doing: String,
     pub done: String,
     pub failed: String,
 }
 
-fn words(verbs: (&str, &str, &str), what: String, log: String) -> Words {
+fn words(verbs: (&str, &str, &str), what: String) -> Words {
     Words {
-        log,
         doing: format!("{} {what}…", verbs.0),
         done: format!("{} {what}", verbs.1),
         failed: format!("Could not {} {what}", verbs.2),
@@ -196,27 +194,23 @@ impl DeviceCmd {
 
     /// The plain-words sentences the status strip shows for this operation.
     pub fn words(&self) -> Words {
-        let log = self.label();
         match self {
-            DeviceCmd::ScanClass { class, .. } => words(READING, folder(*class).to_string(), log),
+            DeviceCmd::ScanClass { class, .. } => words(READING, folder(*class).to_string()),
             DeviceCmd::ScanBank { class, bank, .. } => {
-                words(READING, format!("{} — bank {bank}", folder(*class)), log)
+                words(READING, format!("{} — bank {bank}", folder(*class)))
             }
-            DeviceCmd::SlotInfo { class, at } => words(READING, place(*class, *at), log),
+            DeviceCmd::SlotInfo { class, at } => words(READING, place(*class, *at)),
             DeviceCmd::Deps { class, at } => {
-                words(READING, format!("what {} needs", place(*class, *at)), log)
+                words(READING, format!("what {} needs", place(*class, *at)))
             }
-            DeviceCmd::Get { class, at, .. } => words(
-                COPYING,
-                format!("{} to this computer", place(*class, *at)),
-                log,
-            ),
+            DeviceCmd::Get { class, at, .. } => {
+                words(COPYING, format!("{} to this computer", place(*class, *at)))
+            }
             DeviceCmd::Put {
                 class, at, name, ..
             } => words(
                 ("Sending", "Sent", "send"),
                 format!("“{name}” to {}", place(*class, *at)),
-                log,
             ),
             DeviceCmd::SendAll { class, items } => words(
                 ("Sending", "Sent", "send"),
@@ -224,35 +218,29 @@ impl DeviceCmd {
                     1 => format!("1 sound to {}", folder(*class)),
                     n => format!("{n} sounds to {}", folder(*class)),
                 },
-                log,
             ),
             DeviceCmd::Move { class, from, to } => words(
                 ("Moving", "Moved", "move"),
                 format!("{} to {}", place(*class, *from), place(*class, *to)),
-                log,
             ),
             DeviceCmd::Duplicate { class, from, to } => words(
                 COPYING,
                 format!("{} to {}", place(*class, *from), place(*class, *to)),
-                log,
             ),
             DeviceCmd::Delete { class, at } => {
-                words(("Deleting", "Deleted", "delete"), place(*class, *at), log)
+                words(("Deleting", "Deleted", "delete"), place(*class, *at))
             }
             DeviceCmd::Rename { class, at, name } => words(
                 ("Renaming", "Renamed", "rename"),
                 format!("{} to “{name}”", place(*class, *at)),
-                log,
             ),
             DeviceCmd::Select { class, at } => words(
                 ("Loading", "Loaded", "load"),
                 format!("{} on the instrument", place(*class, *at)),
-                log,
             ),
             DeviceCmd::Disconnect => words(
                 ("Releasing", "Released", "release"),
                 "the instrument".into(),
-                log,
             ),
         }
     }
@@ -1150,7 +1138,6 @@ mod tests {
             words.failed,
             "Could not send “Africa Split” to Programs 7:4"
         );
-        assert_eq!(words.log, "put Africa Split -> 7:4");
     }
 
     /// The folder name is what the panel calls the thing, never the class number.
