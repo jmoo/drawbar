@@ -282,10 +282,12 @@ pub enum DeviceEvent {
         class: ObjectClass,
         banks: Vec<Bank>,
     },
-    /// The slot the instrument's panel has loaded in a class.
+    /// The slot the instrument's panel has loaded in a class. `None` when the class
+    /// supports focus but nothing is loaded; never sent for a class the instrument
+    /// answers "focus does not apply" (`0x15` — pianos and samples).
     Focus {
         class: ObjectClass,
-        at: Location,
+        at: Option<Location>,
     },
     BankScanned {
         class: ObjectClass,
@@ -392,7 +394,7 @@ pub struct DeviceState {
     /// rather than a record of our own commands.
     selected: HashMap<u32, Location>,
     /// The slot the panel had loaded when the class was last read, per class.
-    focus: HashMap<u32, Location>,
+    focus: HashMap<u32, Option<Location>>,
     /// The device's own banks, per class: their names and their capacities.
     geometry: HashMap<u32, Vec<Bank>>,
     banks: HashMap<(u32, u32), Vec<Option<ProgramInfo>>>,
@@ -456,7 +458,14 @@ impl DeviceState {
     /// ⚠️ Read once per walk, so a selection made on the panel afterwards is not in here
     /// until the class is read again.
     pub fn focused(&self, class: ObjectClass) -> Option<Location> {
-        self.focus.get(&class.to_raw()).copied()
+        self.focus.get(&class.to_raw()).copied().flatten()
+    }
+
+    /// Whether the class answers focus reads at all. Pianos and samples refuse the
+    /// query outright (`0x15`), which is a different fact from "nothing loaded" —
+    /// `false` also while the class has never been read.
+    pub fn focus_applies(&self, class: ObjectClass) -> bool {
+        self.focus.contains_key(&class.to_raw())
     }
 
     /// What the last dependency list called a library id.
@@ -841,7 +850,7 @@ impl Device {
     /// Put the panel on a slot, as a walk's `FOCUS` read would have.
     #[cfg(test)]
     pub fn pretend_focused(&mut self, class: ObjectClass, at: Location) {
-        self.state.focus.insert(class.to_raw(), at);
+        self.state.focus.insert(class.to_raw(), Some(at));
     }
 
     /// Drain the worker's events into the cache, the local list and the tabs. Call once
