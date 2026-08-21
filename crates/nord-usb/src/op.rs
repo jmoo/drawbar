@@ -130,10 +130,16 @@ pub async fn read_body<T: Transport, C>(
 /// the smaller is used uniformly.
 const READ_CHUNK: u32 = 32720;
 
-/// Body bytes per `WRITE_DATA` frame. NSM writes at `32726` (the read side's other
-/// number), which with the 16 argument bytes and 18 bytes of framing fills the
-/// device's 32768-byte maximum transfer exactly.
-const WRITE_CHUNK: usize = 32726;
+/// Body bytes per `WRITE_DATA` frame. NSM wrote a sample at `32726` and a piano at
+/// `32720` — the same unexplained 6-byte pair the read side shows, per object. The
+/// host appears to choose; the smaller is used uniformly, mirroring `READ_CHUNK`.
+const WRITE_CHUNK: usize = 32720;
+
+/// Bytes per storage block in the library partitions (piano, sample), the unit their
+/// `STATUS` counters count. Measured 2026-08-20: deleting a 5,894,704-byte piano
+/// dropped `used` by 23 (= ceil at 256KiB), and NSM's cleaning argument for that
+/// upload was exactly `ceil(len/256KiB) - free`.
+const LIBRARY_BLOCK: usize = 262_144;
 
 /// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
 /// body length, the `"Uploading..."` progress label the instrument paints, `BEGIN_READ`,
@@ -208,32 +214,31 @@ async fn transfer_out<T: Transport, C>(
     Ok((meta, body))
 }
 
-/// What `0x26` answers once the library is consolidated and idle — the only state in
-/// which a library `BEGIN_WRITE` is accepted.
-const LIBRARY_READY: [u32; 3] = [1, 1, 0];
-
 /// How long to keep asking `0x26` whether the cleaning pass has finished. The pass took
 /// under a second on hardware; the bound exists for a longer pass on a churned library,
 /// not as an expected wait.
 const CLEANING_POLLS: u32 = 120;
 const CLEANING_POLL_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Run the library's cleaning pass and wait for it to finish. Paints "Cleaning..." on
-/// the display, exactly as NSM does before an upload.
+/// Reclaim `blocks` of library space and wait for the pass to finish. Paints
+/// "Cleaning..." on the display, exactly as NSM does before an upload that needs room.
 ///
-/// The library keeps a clean/dirty state that gates writes: once a write has dirtied
-/// it, the next `BEGIN_WRITE` is refused `0x16` (the state a whole day of
-/// 2026-08-19/20 failures traced to) until a cleaning pass has run **in the write's
-/// own session**. After `0x22 ⟨1⟩`, `0x26` answers `1,0,1` while the pass runs
-/// (writing now is refused `0x1e`) and `1,1,0` when done. So: start the pass, poll
-/// until ready, then write — the dance NSM performs ahead of every upload that needs
-/// one. ⚠️ A bare `0x26` with no `0x22` before it can answer `1,1,0` while a write
-/// would still be refused, so the query is only read here, after the pass is started.
-async fn clean_library<T: Transport>(session: &mut Session<'_, T, ReadWrite>) -> Result<()> {
+/// The library refuses a write it has no prepared room for — `BEGIN_WRITE` answers
+/// `0x16` (the state a whole day of 2026-08-19/20 failures traced to) until a cleaning
+/// pass has reclaimed enough blocks, **in the write's own session**. `0x22 ⟨n⟩` asks
+/// for `n` blocks; `0x26` then reads `[requested, done, running]` — poll until
+/// `running` returns to 0 (writing earlier is refused `0x1e`). `done` may end above
+/// `requested`. ⚠️ A bare `0x26` with no `0x22` before it answers a stale-looking
+/// ready triple while a write would still be refused, so it is only read here, after
+/// the pass is started.
+async fn clean_library<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    blocks: u32,
+) -> Result<()> {
     session.notify(&ui::label("Cleaning...")?).await?;
     session.notify(&ui::percent(0)).await?;
     session
-        .request(Service::Program, 10, cmd::WRITE_PREPARE, &1u32.to_be_bytes())
+        .request(Service::Program, 10, cmd::WRITE_PREPARE, &blocks.to_be_bytes())
         .await?;
 
     for polls in 0..CLEANING_POLLS {
@@ -248,12 +253,10 @@ async fn clean_library<T: Transport>(session: &mut Session<'_, T, ReadWrite>) ->
             .await?;
         let p = resp.payload();
         if p.len() >= 12 {
-            let state = [
-                u32::from_be_bytes(p[0..4].try_into().unwrap()),
-                u32::from_be_bytes(p[4..8].try_into().unwrap()),
-                u32::from_be_bytes(p[8..12].try_into().unwrap()),
-            ];
-            if state == LIBRARY_READY {
+            // Ready is the third word — `running` — returning to 0. The middle word
+            // (`done`) is not part of the test: it can end above the request.
+            let running = u32::from_be_bytes(p[8..12].try_into().unwrap());
+            if running == 0 {
                 return Ok(());
             }
         }
@@ -294,7 +297,14 @@ pub async fn write<T: Transport>(
     let body = &file.body.0;
 
     if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
-        clean_library(session).await?;
+        // A write needs one prepared block per LIBRARY_BLOCK of body. Reclaim exactly
+        // the shortfall, as NSM does; with enough already free the pair is skipped
+        // entirely, which is also NSM's behavior.
+        let needed = body.len().div_ceil(LIBRARY_BLOCK) as u32;
+        let free = status(session).await?.free;
+        if needed > free {
+            clean_library(session, needed - free).await?;
+        }
     }
 
     session.notify(&ui::label("Downloading...")?).await?;
