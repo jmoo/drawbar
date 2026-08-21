@@ -475,7 +475,29 @@ pub fn put(
     let file = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Fail before touching the device if the file is not what it claims to be.
     nord_usb::envelope::unwrap(&file).map_err(|e| e.to_string())?;
-    send(ui, &file, at, class, confirmed, &path.display().to_string())
+    // A library write carries the name, and nothing in the file supplies one, so the
+    // file stem is it — the same choice NSM makes.
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // The file's own modification time, as NSM sends.
+    let stamp = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as u32);
+
+    send(
+        ui,
+        &file,
+        at,
+        class,
+        confirmed,
+        &path.display().to_string(),
+        Some(&stem),
+        stamp,
+    )
 }
 
 /// Run one mutating operation in its own session, committing either way — an abandoned
@@ -509,6 +531,12 @@ pub fn send(
     class: ObjectClass,
     confirmed: bool,
     what: &str,
+    // Name for the destination, for the classes whose write carries one. `None` keeps
+    // whatever the slot is already called — the right default for a read-modify-write.
+    name: Option<&str>,
+    // Timestamp for the write. `None` means "now", which a device that has just been
+    // power-cycled may reject as being in the future.
+    stamp: Option<u32>,
 ) -> Result<(), String> {
     let mut t = open_usb()?;
 
@@ -561,6 +589,11 @@ pub fn send(
         }
         None => ui.note(format!("{} is empty; writing {what}", shown(at))),
     }
+    // What the slot will be called: the write carries the name, so say it up front —
+    // a put names the slot after the file, which is what NSM does too.
+    if let Some(name) = name.filter(|n| !n.is_empty()) {
+        ui.note(format!("the slot will be named {name:?}"));
+    }
     ui.confirm(confirmed)?;
 
     // After consent, not before: for a piano this read is minutes long, and nobody should
@@ -591,10 +624,23 @@ pub fn send(
             .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
+    // The timestamp the write carries. NSM sends the **file's modification time**, not
+    // the current time, and the device refuses a value it considers too far ahead —
+    // which a freshly power-cycled instrument does to any "now". Falling back to now()
+    // only when there is no file to ask.
+    let timestamp = stamp.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0)
+    });
+
+    // The name the destination ends up with: what the caller asked for, else what the
+    // slot is already called. Only the library classes put it on the wire.
+    let write_name = name
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().map(|i| i.name.clone()))
+        .unwrap_or_default();
 
     let written = if fail_after_delete() {
         // The slot is deleted and the backup is in memory: exactly the state the restore
@@ -603,8 +649,13 @@ pub fn send(
             "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
         ))
     } else {
-        one_shot!(&mut t, class, |s| usb_op::write_program(
-            &mut s, at, file, timestamp
+        one_shot!(&mut t, class, |s| write_entity(
+            &mut s,
+            at,
+            class,
+            file,
+            &write_name,
+            timestamp
         ))
     };
 
@@ -621,8 +672,19 @@ pub fn send(
                 "the write failed and {} is now empty; putting the original back",
                 shown(at)
             ));
-            match one_shot!(&mut t, class, |s| usb_op::write_program(
-                &mut s, at, &backup, timestamp
+            // Restoring puts back what the slot was called, not what the caller wanted
+            // the replacement named.
+            let restore_name = existing
+                .as_ref()
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| write_name.clone());
+            match one_shot!(&mut t, class, |s| write_entity(
+                &mut s,
+                at,
+                class,
+                &backup,
+                &restore_name,
+                timestamp
             )) {
                 Ok(()) => {
                     ui.note(format!("restored {}", shown(at)));
@@ -641,6 +703,19 @@ pub fn send(
             }
         }
     }
+}
+
+/// Write an entity. One shape for every class; the name rides in `BEGIN_WRITE`, so the
+/// slot keeps it — including across a `put`, which used to leave programs named `"0"`.
+async fn write_entity<T: nord_usb::transport::Transport>(
+    s: &mut Session<'_, T, nord_usb::ReadWrite>,
+    at: Location,
+    _class: ObjectClass,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<(), nord_usb::Error> {
+    usb_op::write(s, at, file, name, timestamp).await
 }
 
 /// Whether to skip the write and report a failure, so the restore and rescue paths can

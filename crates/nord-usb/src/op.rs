@@ -130,6 +130,17 @@ pub async fn read_body<T: Transport, C>(
 /// the smaller is used uniformly.
 const READ_CHUNK: u32 = 32720;
 
+/// Body bytes per `WRITE_DATA` frame. NSM wrote a sample at `32726` and a piano at
+/// `32720` — the same unexplained 6-byte pair the read side shows, per object. The
+/// host appears to choose; the smaller is used uniformly, mirroring `READ_CHUNK`.
+const WRITE_CHUNK: usize = 32720;
+
+/// Bytes per storage block in the library partitions (piano, sample), the unit their
+/// `STATUS` counters count. Measured 2026-08-20: deleting a 5,894,704-byte piano
+/// dropped `used` by 23 (= ceil at 256KiB), and NSM's cleaning argument for that
+/// upload was exactly `ceil(len/256KiB) - free`.
+const LIBRARY_BLOCK: usize = 262_144;
+
 /// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
 /// body length, the `"Uploading..."` progress label the instrument paints, `BEGIN_READ`,
 /// one `READ` per [`READ_CHUNK`] with the bar advancing as they arrive, then
@@ -203,38 +214,99 @@ async fn transfer_out<T: Transport, C>(
     Ok((meta, body))
 }
 
-/// Write a `.ne5p` file into a slot. Requires a [`ReadWrite`] session, which callers
-/// must obtain deliberately.
+/// How long to keep asking `0x26` whether the cleaning pass has finished. The pass took
+/// under a second on hardware; the bound exists for a longer pass on a churned library,
+/// not as an expected wait.
+const CLEANING_POLLS: u32 = 120;
+const CLEANING_POLL_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Reclaim `blocks` of library space and wait for the pass to finish. Paints
+/// "Cleaning..." on the display, exactly as NSM does before an upload that needs room.
 ///
-/// ⚠️ **The destination must be empty.** The device refuses to overwrite in place with
-/// status `4` (confirmed on hardware; NSM grays out its write button for a filled slot,
-/// so no capture of a replace exists). Replacing a slot is delete-then-write, and the
-/// window in between — where the only copy is in host memory — belongs to the caller.
+/// The library refuses a write it has no prepared room for — `BEGIN_WRITE` answers
+/// `0x16` (the state a whole day of 2026-08-19/20 failures traced to) until a cleaning
+/// pass has reclaimed enough blocks, **in the write's own session**. `0x22 ⟨n⟩` asks
+/// for `n` blocks; `0x26` then reads `[requested, done, running]` — poll until
+/// `running` returns to 0 (writing earlier is refused `0x1e`). `done` may end above
+/// `requested`. ⚠️ A bare `0x26` with no `0x22` before it answers a stale-looking
+/// ready triple while a write would still be refused, so it is only read here, after
+/// the pass is started.
+async fn clean_library<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    blocks: u32,
+) -> Result<()> {
+    session.notify(&ui::label("Cleaning...")?).await?;
+    session.notify(&ui::percent(0)).await?;
+    session
+        .request(Service::Program, 10, cmd::WRITE_PREPARE, &blocks.to_be_bytes())
+        .await?;
+
+    for polls in 0..CLEANING_POLLS {
+        // The pass runs on the instrument; give it room before asking again. The first
+        // ask is immediate, which is the path a clean library takes.
+        if polls > 0 {
+            crate::deadline::with_timeout(std::future::pending::<()>(), CLEANING_POLL_SPACING)
+                .await;
+        }
+        let resp = session
+            .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
+            .await?;
+        let p = resp.payload();
+        if p.len() >= 12 {
+            // Ready is the third word — `running` — returning to 0. The middle word
+            // (`done`) is not part of the test: it can end above the request.
+            let running = u32::from_be_bytes(p[8..12].try_into().unwrap());
+            if running == 0 {
+                return Ok(());
+            }
+        }
+    }
+    Err(Error::Transport(format!(
+        "the library's cleaning pass did not report ready within {} polls",
+        CLEANING_POLLS
+    )))
+}
+
+/// Write an entity into a slot. One shape for every class.
 ///
-/// ⚠️ The `BEGIN_WRITE` argument layout is only partly understood: the fourth word is
-/// a Unix timestamp (NSM sends the file's mtime) and the trailing bytes are copied
-/// from an observed capture. The path is hardware-verified for programs (a field
-/// edited in Rust, written over USB, confirmed on the panel), but only ever with
-/// those captured trailing bytes. Back up before using it.
+/// The object's **name** is an argument of the write: the file carries none, so
+/// whatever is passed here is what the slot ends up called — a placeholder becomes the
+/// slot's name. Hardware-verified on samples (2026-08-19) and programs (2026-08-20);
+/// the nameless-looking program form NSM was captured sending is this same shape
+/// carrying the one-byte name `"0"`, which is what a restored slot used to end up
+/// called.
 ///
-/// ⚠️ **This does not carry the caller's name for what it writes**, and the slot ends up
-/// called whatever those trailing bytes say — see the note beside them. Follow it with
-/// [`rename`], in the same session, to put a name on the slot.
+/// The body is pushed in [`WRITE_CHUNK`]-sized `WRITE_DATA` frames, exactly as NSM
+/// sends them: every chunk but the last goes unacknowledged, and only the final one is
+/// answered. ⚠️ A body over the device's maximum transfer **must** be chunked — a
+/// single oversized frame leaves the instrument consuming everything that follows as
+/// continuation bytes, silent on bulk IN until a power cycle (found the hard way,
+/// 2026-08-20, with an 82KB sample).
 ///
-/// ⚠️ The body goes out in a single `WRITE_DATA` frame, unlike the read path, which
-/// chunks at `READ_CHUNK`. Verified only for program-sized bodies; how the device
-/// takes a library-sized write is untested.
-pub async fn write_program<T: Transport>(
+/// A **library** class (piano, sample) is cleaned first — see [`clean_library`]: its
+/// `BEGIN_WRITE` is refused with `0x16` whenever a write has dirtied the library since
+/// its last cleaning pass, and the pass is what re-arms it.
+pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
     file: &[u8],
+    name: &str,
     timestamp: u32,
 ) -> Result<()> {
     let file = envelope::unwrap(file)?;
     let body = &file.body.0;
 
-    // The "Downloading..." label the instrument paints — NSM's backwards word for
-    // host → keyboard. Fire-and-forget, exactly as on the wire.
+    if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
+        // A write needs one prepared block per LIBRARY_BLOCK of body. Reclaim exactly
+        // the shortfall, as NSM does; with enough already free the pair is skipped
+        // entirely, which is also NSM's behavior.
+        let needed = body.len().div_ceil(LIBRARY_BLOCK) as u32;
+        let free = status(session).await?.free;
+        if needed > free {
+            clean_library(session, needed - free).await?;
+        }
+    }
+
     session.notify(&ui::label("Downloading...")?).await?;
 
     let mut begin = Vec::new();
@@ -243,26 +315,33 @@ pub async fn write_program<T: Transport>(
     begin.extend_from_slice(&file.header.tag);
     begin.extend_from_slice(&timestamp.to_be_bytes());
     begin.extend_from_slice(&u32::MAX.to_be_bytes());
-    begin.extend_from_slice(&1u32.to_be_bytes());
-    // ⚠️ Inferred from the capture; not confirmed on hardware. A `1` followed by a single
-    // byte has the shape of the length-prefixed strings this wire uses everywhere else,
-    // so these last five bytes may be the **name** the slot ends up carrying — which
-    // would be `"0"` for every write this function makes. Until that is settled, a caller
-    // that needs a slot to be called something in particular follows the write with
-    // [`rename`] rather than trusting either reading.
-    begin.push(b'0');
+    begin.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    begin.extend_from_slice(name.as_bytes());
     session
         .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
         .await?;
 
-    let mut data = Vec::new();
-    at.write_to(&mut data);
-    data.extend_from_slice(&0u32.to_be_bytes()); // offset
-    data.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    data.extend_from_slice(body);
-    session
-        .request(Service::Program, 10, cmd::WRITE_DATA, &data)
-        .await?;
+    let mut offset = 0usize;
+    while offset < body.len() {
+        let end = (offset + WRITE_CHUNK).min(body.len());
+        let chunk = &body[offset..end];
+        let mut data = Vec::new();
+        at.write_to(&mut data);
+        data.extend_from_slice(&(offset as u32).to_be_bytes());
+        data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        data.extend_from_slice(chunk);
+        if end == body.len() {
+            // Only the final chunk is acknowledged; the device answers once the whole
+            // body has arrived.
+            session
+                .request(Service::Program, 10, cmd::WRITE_DATA, &data)
+                .await?;
+        } else {
+            let msg = Message::new(Service::Program, 10, cmd::WRITE_DATA, data);
+            session.notify(&msg).await?;
+        }
+        offset = end;
+    }
 
     session.notify(&ui::percent(100)).await?;
 
@@ -306,7 +385,36 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
 /// This is not folded into [`Session::open`] on purpose. NSM sends no such frame, the
 /// golden replays pin our exchanges against real captures, and quietly diverging from
 /// that ground truth to paper over an operator-caused fault would cost more than it saves.
+/// Read and discard anything the device still has queued, until it goes quiet.
+///
+/// Unread replies are how the stream gets out of step; nothing here writes, so it is safe
+/// on a healthy instrument — it simply finds nothing.
+async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
+    for _ in 0..DRAIN_CAP {
+        match transport
+            .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+            .await?
+        {
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// How long to wait for a straggler before deciding the stream is quiet.
+const DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Upper bound on stragglers, so a device that will not stop talking cannot hang this.
+const DRAIN_CAP: usize = 16;
+
 pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
+    // Drain first. A reply nobody read leaves the stream one message ahead, so every
+    // later request is answered by the *previous* one's reply — the tell is an error
+    // naming two commands that are one apart. Sending anything before draining keeps the
+    // offset intact, which is why the two frames below cannot cure it on their own.
+    drain(transport).await?;
+
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
     transport.write(&goodbye.encode()).await?;
     let _ = transport.read(crate::transport::READ_BUFFER).await?;

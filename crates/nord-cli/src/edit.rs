@@ -101,7 +101,7 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
         }
         (Some(Target::Slot(at)), None) => match class {
             ObjectClass::Program => {
-                crate::device::send(ui, &edited, at, class, args.yes, "the edited program")
+                crate::device::send(ui, &edited, at, class, args.yes, "the edited program", None, None)
             }
             // ⚠️ `send` deletes the destination to make room, and whether the live
             // buffer or the settings singleton survives a delete/write of its class is
