@@ -475,8 +475,7 @@ pub fn put(
     let file = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Fail before touching the device if the file is not what it claims to be.
     nord_usb::envelope::unwrap(&file).map_err(|e| e.to_string())?;
-    // A library write carries the name, and nothing in the file supplies one, so the
-    // file stem is it — the same choice NSM makes.
+    // The write carries the slot's name and the file supplies none: the stem is it.
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -524,6 +523,7 @@ macro_rules! one_shot {
 /// status 4 to a write aimed at a slot that already holds something, so this reads the
 /// occupant, deletes it, writes, and puts the occupant back if the write fails — the slot
 /// is genuinely empty in between, and the only copy of its contents is in this process.
+#[allow(clippy::too_many_arguments)]
 pub fn send(
     ui: &Ui,
     file: &[u8],
@@ -531,11 +531,9 @@ pub fn send(
     class: ObjectClass,
     confirmed: bool,
     what: &str,
-    // Name for the destination, for the classes whose write carries one. `None` keeps
-    // whatever the slot is already called — the right default for a read-modify-write.
+    // `None` keeps whatever the slot is already called.
     name: Option<&str>,
-    // Timestamp for the write. `None` means "now", which a device that has just been
-    // power-cycled may reject as being in the future.
+    // `None` means now; the device can refuse a timestamp it considers future.
     stamp: Option<u32>,
 ) -> Result<(), String> {
     let mut t = open_usb()?;
@@ -589,8 +587,7 @@ pub fn send(
         }
         None => ui.note(format!("{} is empty; writing {what}", shown(at))),
     }
-    // What the slot will be called: the write carries the name, so say it up front —
-    // a put names the slot after the file, which is what NSM does too.
+    // The write carries the slot's name, so say it up front.
     if let Some(name) = name.filter(|n| !n.is_empty()) {
         ui.note(format!("the slot will be named {name:?}"));
     }
@@ -624,10 +621,8 @@ pub fn send(
             .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
 
-    // The timestamp the write carries. NSM sends the **file's modification time**, not
-    // the current time, and the device refuses a value it considers too far ahead —
-    // which a freshly power-cycled instrument does to any "now". Falling back to now()
-    // only when there is no file to ask.
+    // The device can refuse a timestamp it considers to be in the future, so prefer
+    // the file's mtime; now() only when there is no file to ask.
     let timestamp = stamp.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -635,8 +630,7 @@ pub fn send(
             .unwrap_or(0)
     });
 
-    // The name the destination ends up with: what the caller asked for, else what the
-    // slot is already called. Only the library classes put it on the wire.
+    // What the slot ends up called: the caller's choice, else the occupant's name.
     let write_name = name
         .map(str::to_string)
         .or_else(|| existing.as_ref().map(|i| i.name.clone()))
@@ -649,10 +643,9 @@ pub fn send(
             "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
         ))
     } else {
-        one_shot!(&mut t, class, |s| write_entity(
+        one_shot!(&mut t, class, |s| usb_op::write(
             &mut s,
             at,
-            class,
             file,
             &write_name,
             timestamp
@@ -678,10 +671,9 @@ pub fn send(
                 .as_ref()
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| write_name.clone());
-            match one_shot!(&mut t, class, |s| write_entity(
+            match one_shot!(&mut t, class, |s| usb_op::write(
                 &mut s,
                 at,
-                class,
                 &backup,
                 &restore_name,
                 timestamp
@@ -1314,13 +1306,12 @@ pub fn probe(
         words.extend_from_slice(&a.to_be_bytes());
     }
 
-    // Measured, not guessed: this one paints "Deleting..." on the instrument, never
-    // answers, and costs a power cycle. `--yes` is not enough of a gate for a command
-    // already known to do that.
-    if op == nord_usb::wire::cmd::DO_NOT_SEND_DELETING {
-        return Err(format!(
-            "{op:#04x} is known to hang the instrument: it shows \"Deleting...\" and \
-             never replies, and only a power cycle recovers. Refusing."
+    // Known wedges: no reply, and a power cycle to recover. A price, not a
+    // prohibition, so `--yes` proceeds informed.
+    if op == nord_usb::wire::cmd::DELETING_WEDGE || op == nord_usb::wire::cmd::NOTIFY_READ_WEDGE {
+        ui.note(format!(
+            "{op:#04x} is known to wedge the instrument (no reply, session lost, \
+             power cycle to recover); nothing stored has ever been harmed by it"
         ));
     }
 

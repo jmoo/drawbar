@@ -282,9 +282,8 @@ pub enum DeviceEvent {
         class: ObjectClass,
         banks: Vec<Bank>,
     },
-    /// The slot the instrument's panel has loaded in a class. `None` when the class
-    /// supports focus but nothing is loaded; never sent for a class the instrument
-    /// answers "focus does not apply" (`0x15` — pianos and samples).
+    /// The slot the panel has loaded in a class; `None` when focus is supported but
+    /// nothing is loaded. Never sent for a class that answers `0x15` (focus n/a).
     Focus {
         class: ObjectClass,
         at: Option<Location>,
@@ -461,9 +460,8 @@ impl DeviceState {
         self.focus.get(&class.to_raw()).copied().flatten()
     }
 
-    /// Whether the class answers focus reads at all. Pianos and samples refuse the
-    /// query outright (`0x15`), which is a different fact from "nothing loaded" —
-    /// `false` also while the class has never been read.
+    /// Whether the class answers focus reads at all; also `false` while the class has
+    /// never been read.
     pub fn focus_applies(&self, class: ObjectClass) -> bool {
         self.focus.contains_key(&class.to_raw())
     }
