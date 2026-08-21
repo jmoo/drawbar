@@ -232,8 +232,9 @@ fn explain(e: nord_usb::Error, at: Location) -> String {
 fn explain_walk(e: nord_usb::Error) -> String {
     match e {
         nord_usb::Error::DeviceStatus(usb_op::ENUMERATION_DISABLED) => {
-            "the instrument has disabled slot enumeration, which it does after any \
-             write since it was switched on; only a power cycle restores it, and \
+            "the instrument refused the enumeration request as malformed (status 0x11) \
+             — it refuses a cursor request without the direction word after any write \
+             since power-up. nord sends the full form, so this should not happen; \
              per-slot `info` still works in the meantime"
                 .into()
         }

@@ -614,13 +614,13 @@ fn a_stale_session_that_will_not_clear_is_reported() {
 
 /// A walk the device refuses mid-way must surface the refusal, not a partial list.
 ///
-/// `0x11` is the instrument disabling enumeration, which it does after any write since
-/// power-up ([`op::ENUMERATION_DISABLED`]). The dangerous failure mode would be
-/// `occupied_slots` treating the refusal like the end-of-walk status and returning
-/// whatever it had — an inventory that looks complete. No golden capture exists for this
-/// exchange (NSM never sends `NEXT_SLOT`), so the requests are built with our own
-/// encoder rather than replayed. The close still runs on the error path; the script
-/// ending with those exchanges makes `is_exhausted` the assertion that it was sent.
+/// `0x11` is the instrument refusing a cursor request ([`op::ENUMERATION_DISABLED`] —
+/// on hardware it refuses the legacy two-word shape after a write). The dangerous
+/// failure mode would be `occupied_slots` treating the refusal like the end-of-walk
+/// status and returning whatever it had — an inventory that looks complete. No golden
+/// capture of a refusal exists, so the requests are built with our own encoder rather
+/// than replayed. The close still runs on the error path; the script ending with those
+/// exchanges makes `is_exhausted` the assertion that it was sent.
 #[test]
 fn a_disabled_cursor_is_an_error_not_a_partial_list() {
     use nord_usb::{Message, Service};
@@ -637,10 +637,13 @@ fn a_disabled_cursor_is_an_error_not_a_partial_list() {
             direction: In,
             bytes: msg(0x1f, 1u32.to_be_bytes().to_vec()),
         },
-        // NEXT_SLOT 0:0 answered with enumeration disabled.
+        // NEXT_SLOT from the bank boundary answered with enumeration disabled.
         Step {
             direction: Out,
-            bytes: msg(0x20, vec![0; 8]),
+            bytes: msg(
+                0x20,
+                [0u32.to_be_bytes(), u32::MAX.to_be_bytes(), 0u32.to_be_bytes()].concat(),
+            ),
         },
         Step {
             direction: In,
