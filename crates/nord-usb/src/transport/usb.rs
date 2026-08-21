@@ -164,12 +164,8 @@ impl UsbTransport {
         })
     }
 
-    /// One read on the interrupt endpoint (`0x81`), or `None` if nothing arrives
-    /// within `timeout`.
-    ///
-    /// RE surface: NSM keeps a read pending here, but across the capture corpus the
-    /// endpoint has only ever produced data during the firmware-update handshake.
-    /// This exists to test whether anything else ever arrives.
+    /// One read on the interrupt endpoint (`0x81`), or `None` on timeout. Nothing is
+    /// known to arrive here outside the firmware-update handshake.
     pub async fn interrupt_read(
         &mut self,
         len: usize,
