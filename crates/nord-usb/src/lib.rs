@@ -23,6 +23,7 @@ pub mod envelope;
 pub mod error;
 pub mod op;
 pub mod session;
+pub mod sleep;
 pub mod transport;
 pub mod wire;
 

@@ -260,8 +260,7 @@ async fn clean_library<T: Transport>(
 
     for polls in 0..CLEANING_POLLS {
         if polls > 0 {
-            crate::deadline::with_timeout(std::future::pending::<()>(), CLEANING_POLL_SPACING)
-                .await;
+            crate::sleep::sleep(CLEANING_POLL_SPACING).await;
         }
         let resp = session
             .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
