@@ -352,6 +352,7 @@ async fn put<T: Transport>(
     }
 
     let timestamp = unix_now();
+  
     // "0" is a placeholder; the rename that follows is what names the slot.
     let written = op::write(s, at, &bytes, "0", timestamp).await;
 

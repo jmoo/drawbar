@@ -697,6 +697,19 @@ pub fn send(
     }
 }
 
+/// Write an entity. One shape for every class; the name rides in `BEGIN_WRITE`, so the
+/// slot keeps it — including across a `put`, which used to leave programs named `"0"`.
+async fn write_entity<T: nord_usb::transport::Transport>(
+    s: &mut Session<'_, T, nord_usb::ReadWrite>,
+    at: Location,
+    _class: ObjectClass,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<(), nord_usb::Error> {
+    usb_op::write(s, at, file, name, timestamp).await
+}
+
 /// Whether to skip the write and report a failure, so the restore and rescue paths can
 /// be exercised against a real instrument. Test tool: a genuine transport failure at this
 /// exact point is otherwise only reachable by pulling the cable mid-operation.
