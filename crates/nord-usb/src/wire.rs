@@ -101,24 +101,16 @@ pub mod cmd {
     pub const RELINK: u32 = 0x35;
 
     /// Begin writing an entity. Args: bank, slot, body length, format tag, timestamp,
-    /// `0xFFFFFFFF`, then the slot's **name** as a length-prefixed string.
-    ///
-    /// ⚠️ The name is an argument of the write, not metadata carried by the file. A
-    /// caller that passes a placeholder gets a slot called that.
+    /// `0xFFFFFFFF`, then the slot's **name**, length-prefixed — a placeholder name
+    /// becomes the slot's name.
     pub const BEGIN_WRITE: u32 = 0x0a;
 
-    /// Start the library's cleaning/consolidation pass (`⟨1⟩`; paints "Cleaning...").
-    /// Re-arms library writes: once a write has dirtied the library, the next
-    /// `BEGIN_WRITE` is refused `0x16` until this pass has run and finished — inside
-    /// the write's own session, which is where NSM runs it before every upload that
-    /// needs one. Despite sitting in the range long treated as possibly-erase, it
-    /// destroys nothing.
+    /// Reclaim library storage; the argument is a block count (256KiB blocks, what
+    /// `STATUS` counts). A library `BEGIN_WRITE` short on free blocks is refused
+    /// `0x16` until this has run in the same session. Destroys nothing.
     pub const WRITE_PREPARE: u32 = 0x22;
-    /// Query the cleaning pass. No arguments; three reply words. **Meaningful only
-    /// after `0x22` in the same session** — a bare query can answer `1,1,0` while a
-    /// write would still be refused. After `0x22`: `1,1,0` done, write now; `1,0,1`
-    /// still running (a write now is refused `0x1e`); `1,0,0` observed after a
-    /// completed write.
+    /// Query the cleaning pass: three reply words `[requested, done, running]`, ready
+    /// when `running` is 0. Only meaningful after `0x22` in the same session.
     pub const WRITE_PREPARE_2: u32 = 0x26;
     /// Begin reading an entity. Args: bank, slot.
     pub const BEGIN_READ: u32 = 0x0c;
@@ -150,33 +142,20 @@ pub mod cmd {
     /// status `0x15` from the library classes, which have no focus at all.
     pub const FOCUS: u32 = 0x31;
 
-    /// Adjacent occupied slot. Args: bank, slot, direction (`0` forward, `1`
-    /// backward); the reply carries bank and the neighbouring occupied slot. Slot
-    /// `0xffff_ffff` means "from the bank's boundary": the first occupied slot
-    /// forward, the last one backward.
-    ///
-    /// The status describes the *position asked about* — `0` in range, `1` past the end
-    /// — so it is the end-of-walk signal rather than a fault. An empty bank and a bank
-    /// the class does not have answer identically (`1`, slot `0xffff_ffff`), so bank
-    /// existence needs [`INFO`]. Occupied slots are sparse and their indices run past
-    /// the class's item count, so this is the only way to enumerate a library: `INFO`
-    /// answers one slot at a time and nothing else reports which ones hold anything.
-    ///
-    /// ⚠️ The direction word is not optional. A two-word request works on a boot with
-    /// no mutations behind it and is refused with status `0x11` after any write —
-    /// which is a refusal of that argument shape, not a disabled subsystem: the
-    /// three-word form keeps answering in the same session.
+    /// Adjacent occupied slot: `bank, slot, direction` (`0` forward, `1` backward);
+    /// slot `0xffff_ffff` walks from the bank's boundary. Status `1` is the
+    /// end-of-walk signal, not a fault; an empty bank and a missing bank answer
+    /// identically, so bank existence needs [`INFO`]. ⚠️ Omitting the direction word
+    /// is refused `0x11` after any write since power-up.
     pub const NEXT_SLOT: u32 = 0x20;
 
-    /// ⚠️ **Never send this.** It puts `"Deleting..."` and a full progress bar on the
-    /// instrument's display, returns no reply at all, and leaves the session impossible
-    /// to close — the label clears only on a power cycle. Sent with no arguments it
-    /// destroyed nothing, and what it does with arguments is untested.
-    ///
-    /// Named so it is recognisable in a capture, and so nobody probes this range again
-    /// expecting an "unsupported" answer: sitting above every documented command is not
-    /// evidence that a code is unimplemented.
-    pub const DO_NOT_SEND_DELETING: u32 = 0x7e;
+    /// Wedges the instrument: paints "Deleting...", never replies, and the session
+    /// cannot close. A power cycle clears it; nothing stored is harmed.
+    pub const DELETING_WEDGE: u32 = 0x7e;
+
+    /// Wedges the instrument like [`DELETING_WEDGE`]: no reply, the close goes
+    /// unanswered, and the bulk endpoints stall until a power cycle.
+    pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
     /// Unsolicited device → host notification — no request pairs with it, so it
     /// arrives in place of whatever reply the host reads for next. Observed on
@@ -184,6 +163,10 @@ pub mod cmd {
     /// absent from the capture corpus, so NSM presumably drains it silently.
     /// Hypothesis, not confirmed: "an object changed".
     pub const CHANGED: u32 = 0x2c;
+
+    /// Enable/disable change notifications for a class: `class, on`. The reported
+    /// read half is [`NOTIFY_READ_WEDGE`].
+    pub const NOTIFY_ENABLE: u32 = 0x2d;
 }
 
 /// The UI/session service (service 6, subsystem 1): the transaction's outer handshake

@@ -352,9 +352,7 @@ async fn put<T: Transport>(
     }
 
     let timestamp = unix_now();
-    // "0" is the placeholder the captured NSM program write carries; the slot is
-    // named properly by the rename that follows. Passing the real name here instead is
-    // a deliberate follow-up — the rename order is pinned by tests below.
+    // "0" is a placeholder; the rename that follows is what names the slot.
     let written = op::write(s, at, &bytes, "0", timestamp).await;
 
     Ok(match (written, backup) {
@@ -703,9 +701,8 @@ async fn scan_class<T: Transport>(
             banks: expected,
         });
 
-        // Where the panel is, which the browser marks. The two refusals are different
-        // answers: status 1 is "supported, nothing loaded" and 0x15 is "focus does not
-        // apply to this class" (pianos, samples) — only the first is worth an event.
+        // Status 1 is "supported, nothing loaded"; 0x15 is "focus does not apply to
+        // this class" — only the first is worth an event.
         match op::focus(&mut s).await {
             Ok(at) => emit.send(DeviceEvent::Focus { class, at: Some(at) }),
             Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),

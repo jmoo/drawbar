@@ -130,15 +130,37 @@ pub async fn read_body<T: Transport, C>(
 /// the smaller is used uniformly.
 const READ_CHUNK: u32 = 32720;
 
-/// Body bytes per `WRITE_DATA` frame. NSM wrote a sample at `32726` and a piano at
-/// `32720` — the same unexplained 6-byte pair the read side shows, per object. The
-/// host appears to choose; the smaller is used uniformly, mirroring `READ_CHUNK`.
+/// Body bytes per `WRITE_DATA` frame. The whole frame must stay under the device's
+/// max transfer; an oversized frame wedges the instrument until a power cycle.
 const WRITE_CHUNK: usize = 32720;
 
-/// Bytes per storage block in the library partitions (piano, sample), the unit their
-/// `STATUS` counters count. Measured 2026-08-20: deleting a 5,894,704-byte piano
-/// dropped `used` by 23 (= ceil at 256KiB), and NSM's cleaning argument for that
-/// upload was exactly `ceil(len/256KiB) - free`.
+/// Probe overrides for the transfer chunk sizes; the defaults are the captured values.
+#[cfg(feature = "fault-injection")]
+fn read_chunk() -> u32 {
+    std::env::var("NORD_READ_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(READ_CHUNK)
+}
+#[cfg(not(feature = "fault-injection"))]
+fn read_chunk() -> u32 {
+    READ_CHUNK
+}
+
+#[cfg(feature = "fault-injection")]
+fn write_chunk() -> usize {
+    std::env::var("NORD_WRITE_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(WRITE_CHUNK)
+}
+#[cfg(not(feature = "fault-injection"))]
+fn write_chunk() -> usize {
+    WRITE_CHUNK
+}
+
+/// Bytes per storage block in the library partitions (piano, sample) — the unit
+/// `STATUS`'s free/used words count there.
 const LIBRARY_BLOCK: usize = 262_144;
 
 /// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
@@ -168,7 +190,7 @@ async fn transfer_out<T: Transport, C>(
     let mut painted = None;
     while (body.len() as u32) < meta.body_len {
         let offset = body.len() as u32;
-        let want = READ_CHUNK.min(meta.body_len - offset);
+        let want = read_chunk().min(meta.body_len - offset);
 
         let mut req = args.clone();
         req.extend_from_slice(&offset.to_be_bytes());
@@ -214,23 +236,13 @@ async fn transfer_out<T: Transport, C>(
     Ok((meta, body))
 }
 
-/// How long to keep asking `0x26` whether the cleaning pass has finished. The pass took
-/// under a second on hardware; the bound exists for a longer pass on a churned library,
-/// not as an expected wait.
+/// Bound on polling `0x26` for the cleaning pass, which normally finishes within a
+/// second; the headroom is for a heavily churned library.
 const CLEANING_POLLS: u32 = 120;
 const CLEANING_POLL_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Reclaim `blocks` of library space and wait for the pass to finish. Paints
-/// "Cleaning..." on the display, exactly as NSM does before an upload that needs room.
-///
-/// The library refuses a write it has no prepared room for — `BEGIN_WRITE` answers
-/// `0x16` (the state a whole day of 2026-08-19/20 failures traced to) until a cleaning
-/// pass has reclaimed enough blocks, **in the write's own session**. `0x22 ⟨n⟩` asks
-/// for `n` blocks; `0x26` then reads `[requested, done, running]` — poll until
-/// `running` returns to 0 (writing earlier is refused `0x1e`). `done` may end above
-/// `requested`. ⚠️ A bare `0x26` with no `0x22` before it answers a stale-looking
-/// ready triple while a write would still be refused, so it is only read here, after
-/// the pass is started.
+/// Reclaim `blocks` of library space and wait for the pass to finish ("Cleaning..."
+/// on the display). Writing before it finishes is refused `0x1e`.
 async fn clean_library<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     blocks: u32,
@@ -242,8 +254,6 @@ async fn clean_library<T: Transport>(
         .await?;
 
     for polls in 0..CLEANING_POLLS {
-        // The pass runs on the instrument; give it room before asking again. The first
-        // ask is immediate, which is the path a clean library takes.
         if polls > 0 {
             crate::deadline::with_timeout(std::future::pending::<()>(), CLEANING_POLL_SPACING)
                 .await;
@@ -253,8 +263,7 @@ async fn clean_library<T: Transport>(
             .await?;
         let p = resp.payload();
         if p.len() >= 12 {
-            // Ready is the third word — `running` — returning to 0. The middle word
-            // (`done`) is not part of the test: it can end above the request.
+            // Ready is `running` returning to 0; `done` can end above the request.
             let running = u32::from_be_bytes(p[8..12].try_into().unwrap());
             if running == 0 {
                 return Ok(());
@@ -267,25 +276,8 @@ async fn clean_library<T: Transport>(
     )))
 }
 
-/// Write an entity into a slot. One shape for every class.
-///
-/// The object's **name** is an argument of the write: the file carries none, so
-/// whatever is passed here is what the slot ends up called — a placeholder becomes the
-/// slot's name. Hardware-verified on samples (2026-08-19) and programs (2026-08-20);
-/// the nameless-looking program form NSM was captured sending is this same shape
-/// carrying the one-byte name `"0"`, which is what a restored slot used to end up
-/// called.
-///
-/// The body is pushed in [`WRITE_CHUNK`]-sized `WRITE_DATA` frames, exactly as NSM
-/// sends them: every chunk but the last goes unacknowledged, and only the final one is
-/// answered. ⚠️ A body over the device's maximum transfer **must** be chunked — a
-/// single oversized frame leaves the instrument consuming everything that follows as
-/// continuation bytes, silent on bulk IN until a power cycle (found the hard way,
-/// 2026-08-20, with an 82KB sample).
-///
-/// A **library** class (piano, sample) is cleaned first — see [`clean_library`]: its
-/// `BEGIN_WRITE` is refused with `0x16` whenever a write has dirtied the library since
-/// its last cleaning pass, and the pass is what re-arms it.
+/// Write an entity into a slot; one shape for every class. `name` is what the slot
+/// ends up called — the file carries none, and a placeholder becomes the slot's name.
 pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -297,9 +289,8 @@ pub async fn write<T: Transport>(
     let body = &file.body.0;
 
     if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
-        // A write needs one prepared block per LIBRARY_BLOCK of body. Reclaim exactly
-        // the shortfall, as NSM does; with enough already free the pair is skipped
-        // entirely, which is also NSM's behavior.
+        // A library write is refused 0x16 unless a prepared block exists per
+        // LIBRARY_BLOCK of body; reclaim exactly the shortfall.
         let needed = body.len().div_ceil(LIBRARY_BLOCK) as u32;
         let free = status(session).await?.free;
         if needed > free {
@@ -323,7 +314,7 @@ pub async fn write<T: Transport>(
 
     let mut offset = 0usize;
     while offset < body.len() {
-        let end = (offset + WRITE_CHUNK).min(body.len());
+        let end = (offset + write_chunk()).min(body.len());
         let chunk = &body[offset..end];
         let mut data = Vec::new();
         at.write_to(&mut data);
@@ -331,8 +322,7 @@ pub async fn write<T: Transport>(
         data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
         data.extend_from_slice(chunk);
         if end == body.len() {
-            // Only the final chunk is acknowledged; the device answers once the whole
-            // body has arrived.
+            // Only the final chunk is acknowledged.
             session
                 .request(Service::Program, 10, cmd::WRITE_DATA, &data)
                 .await?;
@@ -507,15 +497,8 @@ pub async fn focus<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<L
     })
 }
 
-/// Device status refusing a [`cmd::NEXT_SLOT`] request that lacks the direction word.
-///
-/// The two-word `[bank][slot]` shape is accepted on a boot with no mutations behind it
-/// and refused with this status after any write since power-up — which looked like a
-/// power-cycle-only enumeration lockout until NSM's own sync traffic showed the
-/// three-word form answering during the "lockout". [`next_occupied`] sends the
-/// three-word form, so this status should no longer occur; it stays surfaced as
-/// [`Error::DeviceStatus`] rather than swallowed, because a walk refused for any
-/// reason must not pass off a partial list as an inventory.
+/// Device status refusing a [`cmd::NEXT_SLOT`] without the direction word. Surfaced
+/// rather than swallowed: a refused walk must not pass off a partial list.
 pub const ENUMERATION_DISABLED: u32 = 0x11;
 
 /// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
@@ -534,8 +517,7 @@ pub async fn next_occupied<T: Transport, C>(
 ) -> Result<Option<Location>> {
     let mut args = Vec::new();
     at.write_to(&mut args);
-    // Direction: 0 walks forward. The word is required — without it the device
-    // answers only until the first write of the power cycle (ENUMERATION_DISABLED).
+    // Direction, 0 = forward; omitting it is refused after any write since power-up.
     args.extend_from_slice(&0u32.to_be_bytes());
     match session
         .request(Service::Program, 10, cmd::NEXT_SLOT, &args)
