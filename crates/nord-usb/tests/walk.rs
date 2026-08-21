@@ -15,7 +15,7 @@
 //! than in this repo.
 //!
 //! ```sh
-//! NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
+//! NORD_CORPUS_ROOT=/path/to/nord-corpus \
 //!   cargo test -p nord-usb --features corpus
 //! ```
 
@@ -28,12 +28,12 @@ use nord_usb::transport::{Direction, ReplayTransport, Step};
 use nord_usb::wire::ObjectClass;
 use nord_usb::Session;
 
-/// Where the recorded walks live, under `NORD_CORPUS_DIR`.
+/// Where the recorded walks live: the Electro 5 tree's USB recordings.
 fn walk_dir() -> PathBuf {
-    let root: PathBuf = std::env::var_os("NORD_CORPUS_DIR")
+    let root: PathBuf = std::env::var_os("NORD_CORPUS_ROOT")
         .map(PathBuf::from)
-        .expect("set NORD_CORPUS_DIR to a nord-corpus/ne5 checkout for --features corpus");
-    root.join("usb/device/enumeration_walk")
+        .expect("set NORD_CORPUS_ROOT to a nord-corpus checkout for --features corpus");
+    root.join("ne5/usb/device/enumeration_walk")
 }
 
 /// Parse a `<O|I> <hex>` script. Blank lines and `#` comments are skipped.

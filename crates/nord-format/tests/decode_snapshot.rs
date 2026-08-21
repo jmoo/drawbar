@@ -23,7 +23,7 @@
 //! snapshot was bought for.
 //!
 //! ```sh
-//! NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
+//! NORD_CORPUS_ROOT=/path/to/nord-corpus \
 //!   cargo test -p nord-format --features corpus --test decode_snapshot
 //! ```
 
@@ -37,12 +37,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Root of the Electro 5 specimen corpus — see `tests/ne5.rs`.
-fn corpus_dir() -> PathBuf {
-    std::env::var_os("NORD_CORPUS_DIR")
-        .map(PathBuf::from)
-        .expect("set NORD_CORPUS_DIR to a nord-corpus/ne5 checkout for --features corpus")
-}
+#[path = "support/corpus.rs"]
+mod corpus_loc;
 
 /// The files pinned field-by-field by [`specimens`]: one per `programs/` subdirectory,
 /// each with a non-default value in the panel it was captured for, plus one factory
@@ -297,10 +293,7 @@ fn all_programs(root: &Path) -> Vec<PathBuf> {
 
 /// Every Stage 4 specimen of `ext`, sorted.
 fn stage_files(model: &str, ext: &str) -> Vec<PathBuf> {
-    let root = corpus_dir()
-        .parent()
-        .expect("NORD_CORPUS_DIR has no parent")
-        .join(model);
+    let root = corpus_loc::root().join(model);
     let mut found = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
@@ -351,7 +344,7 @@ fn decode_adds_nothing(raw: &BTreeSet<String>, decoded: &BTreeSet<String>) -> bo
 
 #[test]
 fn fields() {
-    let root = corpus_dir();
+    let root = corpus_loc::ne5();
     let programs = all_programs(&root);
 
     // Insertion-ordered by first sighting, which is declaration order within each panel.
@@ -595,7 +588,7 @@ fn stage23_fields() {
 
 #[test]
 fn specimens() {
-    let root = corpus_dir();
+    let root = corpus_loc::ne5();
     let mut out = String::new();
     out.push_str(
         "# Every field of a fixed handful of specimens. The companion to\n\
@@ -663,7 +656,7 @@ fn read_settings(path: &Path) -> Cbin<ne5::Settings> {
 /// field by field.
 #[test]
 fn settings() {
-    let root = corpus_dir();
+    let root = corpus_loc::ne5();
     let paths = all_settings(&root);
 
     let mut order = Vec::new();

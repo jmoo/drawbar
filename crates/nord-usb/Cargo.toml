@@ -38,7 +38,7 @@ fault-injection = []
 # Block on the async API from synchronous callers (the CLI). Tiny; not a runtime.
 blocking = ["dep:pollster"]
 
-# Corpus-backed golden shape tests (NORD_CORPUS_DIR), mirroring nord-format.
+# Corpus-backed golden shape tests (NORD_CORPUS_ROOT), mirroring nord-format.
 corpus = ["replay"]
 
 [dependencies]
@@ -63,3 +63,9 @@ web-sys = { version = "0.3", optional = true, features = [
   "UsbOutTransferResult",
   "UsbTransferStatus",
 ] }
+
+# The deadline tests block on futures whatever features are on, so the test
+# build always carries pollster — `--features replay` alone must compile, as
+# both READMEs and the replay guard instruct.
+[dev-dependencies]
+pollster = "0.4"

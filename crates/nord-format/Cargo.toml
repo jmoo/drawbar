@@ -22,13 +22,15 @@ testFeatures = ["bundle"]
 [features]
 default = []
 # ZIP-based backup bundles pull in the `zip` stack; opt in with `--features
-# bundle`. Off by default so parse-only consumers (and the corpus round-trip
-# tests, which never touch bundles) stay lean.
+# bundle`. Off by default so parse-only consumers stay lean.
 bundle = ["dep:zip"]
-# The corpus-backed round-trip/decode tests (tests/ne5.rs) need the private
-# specimen corpus (NORD_CORPUS_DIR). Off by default so the open minimal suite
-# runs anywhere; the Nix `nord-format-corpus` check enables it. Test-only.
-corpus = []
+# The corpus-backed sweeps (tests/corpus, tests/decode_sanity,
+# tests/decode_snapshot) need the private specimen corpus (NORD_CORPUS_ROOT).
+# Off by default so the open minimal suite runs anywhere; the
+# Nix `nord-format-corpus` check enables it. Test-only. Implies `bundle`: the
+# corpus holds ZIP banks and backups, and a sweep that cannot open them would
+# report a pass having read none of them.
+corpus = ["bundle"]
 
 # ⚠️ Pinned `=`: `#[bitbody]`-generated code names nord-format internals, so a
 # registry build must expand exactly the derive version this source was written
@@ -42,7 +44,15 @@ zip = { version = "2", optional = true, default-features = false, features = [
 ] }
 
 [dev-dependencies]
-regex = "1"
+libtest-mimic = "0.8"
+serde_json = "1"
+
+# The corpus sweep builds its own test list — one trial per specimen — so it
+# owns its harness.
+[[test]]
+name = "corpus"
+harness = false
+required-features = ["corpus"]
 
 # `corpus` is excluded: test-only, and useless without the private specimens.
 [package.metadata.docs.rs]

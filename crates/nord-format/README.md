@@ -81,25 +81,37 @@ refinement — never a risk to the write path.
 
 - **`bundle`** — ZIP-based backup bundles (pulls in the `zip` stack). Off by
   default so parse-only consumers stay lean; enable with `--features bundle`.
-- **`corpus`** — *test-only*. Gates the corpus-backed integration tests
-  (`tests/ne5.rs`); see below.
+- **`corpus`** — *test-only*. Gates the corpus-backed integration tests; see
+  below. Implies `bundle`, because the corpus holds ZIP banks.
 
 ## Tests
 
 Unit tests live inline (`#[cfg(test)] mod tests`) and run on a plain
-`cargo test`, as does `tests/dispatch.rs`, which synthesizes a file for every
-registered tag and checks dispatch + round-trip for both header generations.
-The **corpus integration suites** (`tests/ne5.rs` for Electro 5 depth,
-`tests/corpus.rs` for the all-model sweep) are gated behind the `corpus` feature
-because they need the specimen corpus, which lives in a separate private repo
-(`jmoo/nord-corpus`)
+`cargo test`, alongside two open integration suites: `tests/dispatch.rs`
+synthesizes a file for every registered tag in memory and checks dispatch +
+round-trip for both header generations, and `tests/fixtures.rs` does the same
+against the committed synthetic files in `tests/fixtures/` — golden bytes
+written by this crate's own writers — plus a sweep that sets every declared
+field to every declared value and reads it back.
+
+The **corpus suites** are gated behind the `corpus` feature because they need
+the specimen corpus, which lives in a separate private repo (`jmoo/nord-corpus`):
+
+- `tests/corpus` — one generated test per specimen, every model and both
+  storage tiers: container checksum, parse, byte-exact round trip, no
+  unnameable decoded values, and the specimen's oracle sidecar
+  (`<file>.oracle.json`) where the corpus ships one. A specimen joins the
+  sweep by existing.
+- `tests/decode_sanity.rs` — cross-file floors and behavior pins the one-file
+  trials cannot express.
+- `tests/decode_snapshot.rs` — per-field decode snapshots for the Electro 5
+  and Stage 4.
 
 ```sh
-cargo test -p nord-format                       # minimal suite (unit + dispatch)
+cargo test -p nord-format                       # open suite (unit + dispatch + fixtures)
 
-# Full corpus sweep — point at a nord-corpus checkout:
+# Corpus suites — point at a nord-corpus checkout:
 NORD_CORPUS_ROOT=/path/to/nord-corpus \
-NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
   cargo test -p nord-format --features corpus
 
 # With nix

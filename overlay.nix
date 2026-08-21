@@ -42,7 +42,13 @@ let
       filter =
         path: type:
         !hasInfix "/nord-cli/checks" path
-        && (crane.filterCargoSources path type || hasSuffix ".script" path || hasSuffix ".snapshot" path);
+        && (
+          crane.filterCargoSources path type
+          || hasSuffix ".script" path
+          || hasSuffix ".snapshot" path
+          # The committed synthetic specimens, whatever their extensions.
+          || hasInfix "/tests/fixtures/" path
+        );
     };
 
     strictDeps = true;
@@ -467,14 +473,12 @@ let
 
   # One suite per corpus crate: the crate's own package — `final`'s, so a later
   # overlay changing a crate changes its suite — re-run by `.override` with the
-  # specimens named and the feature that compiles the sweeps in.
-  #
-  # `NORD_CORPUS_DIR` is the Electro 5 tree and `NORD_CORPUS_ROOT` the corpus it
-  # sits in. The depth suite reads the first, the whole-corpus sweep the second.
+  # specimens named and the feature that compiles the sweeps in. The suites
+  # address the corpus by its root alone, joining `ne5/` where they want the
+  # Electro 5 tree.
   committed = genAttrs corpusCrates (
     name:
     final.nord.crates.${name}.override {
-      NORD_CORPUS_DIR = "${corpus}/ne5";
       NORD_CORPUS_ROOT = "${corpus}";
       cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
       pname = "${name}-corpus";
@@ -485,7 +489,6 @@ let
   full = mapAttrs (
     name: suite:
     suite.override {
-      NORD_CORPUS_DIR = "${corpusFull}/ne5";
       NORD_CORPUS_ROOT = "${corpusFull}";
       pname = "${name}-corpus-full";
     }
