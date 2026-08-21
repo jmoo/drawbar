@@ -133,19 +133,22 @@ pub mod cmd {
     /// status `0x15` from the library classes, which have no focus at all.
     pub const FOCUS: u32 = 0x31;
 
-    /// Next occupied slot at or after a position. Args: bank, slot; the reply carries
-    /// bank and the next occupied slot.
+    /// Adjacent occupied slot. Args: bank, slot, direction (`0` forward, `1`
+    /// backward); the reply carries bank and the neighbouring occupied slot. Slot
+    /// `0xffff_ffff` means "from the bank's boundary": the first occupied slot
+    /// forward, the last one backward.
     ///
     /// The status describes the *position asked about* — `0` in range, `1` past the end
-    /// — so it is the end-of-walk signal rather than a fault. Occupied slots are sparse
-    /// and their indices run past the class's item count, so this is the only way to
-    /// enumerate a library: `INFO` answers one slot at a time and nothing else reports
-    /// which ones hold anything.
+    /// — so it is the end-of-walk signal rather than a fault. An empty bank and a bank
+    /// the class does not have answer identically (`1`, slot `0xffff_ffff`), so bank
+    /// existence needs [`INFO`]. Occupied slots are sparse and their indices run past
+    /// the class's item count, so this is the only way to enumerate a library: `INFO`
+    /// answers one slot at a time and nothing else reports which ones hold anything.
     ///
-    /// ⚠️ Status `0x11` means the instrument has disabled enumeration, which it does
-    /// after any write since power-up — sometimes for one class at a time, eventually
-    /// for all, and nothing but a power cycle re-enables it. Every point command keeps
-    /// working, so a walk is only trustworthy on a boot with no writes behind it.
+    /// ⚠️ The direction word is not optional. A two-word request works on a boot with
+    /// no mutations behind it and is refused with status `0x11` after any write —
+    /// which is a refusal of that argument shape, not a disabled subsystem: the
+    /// three-word form keeps answering in the same session.
     pub const NEXT_SLOT: u32 = 0x20;
 
     /// ⚠️ **Never send this.** It puts `"Deleting..."` and a full progress bar on the
