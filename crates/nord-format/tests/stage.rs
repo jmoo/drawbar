@@ -149,19 +149,34 @@ stage_body!(
     Entity::OrganPreset(OrganPreset::Stage4(f)) => f
 );
 
-/// The one placement in the Stage 4 synth preset the corpus confirms by analogy rather
-/// than by a published table: layer A's zone sits one layer stride above B's.
+/// The placements in the Stage 4 presets the corpus confirms rather than a published
+/// table: layer A's zone, one layer stride above B's in each preset.
 #[test]
-fn stage4_synth_layers_are_one_stride_apart() {
+fn stage4_preset_zones_sit_one_stride_apart() {
+    // Zone = 9 in both layers, MSB-first. Synth: bits 338..=341 and 746..=749 are bits
+    // 2..=5 of bytes 42 and 93. Organ: 184..=187 and 432..=435 are the high nibbles of
+    // bytes 23 and 54. Piano: 144..=147 and 240..=243 the high nibbles of bytes 18 and 30.
     let mut raw = [0u8; ns4::synth::BODY_LEN];
-    // Both zones = 9, MSB-first: bits 338..=341 are byte 42's bits 2..=5, and
-    // 746..=749 byte 93's — the stride is a whole number of bytes.
     raw[42] |= 0b0010_0100;
     raw[93] |= 0b0010_0100;
     let body = ns4::synth::SynthPreset::try_from(raw).unwrap();
-    assert_eq!(
-        format!("{:?}", body.synth_a_kb_zones),
-        format!("{:?}", body.synth_b_kb_zones)
-    );
+    assert_eq!(format!("{:?}", body.synth_a_kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.synth_b_kb_zones), "V9");
     assert_eq!(<[u8; ns4::synth::BODY_LEN]>::from(&body), raw);
+
+    let mut raw = [0u8; ns4::organ_preset::BODY_LEN];
+    raw[23] |= 0b1001_0000;
+    raw[54] |= 0b1001_0000;
+    let body = ns4::organ_preset::OrganPreset::try_from(raw).unwrap();
+    assert_eq!(format!("{:?}", body.organ_a_kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.organ_b_kb_zones), "V9");
+    assert_eq!(<[u8; ns4::organ_preset::BODY_LEN]>::from(&body), raw);
+
+    let mut raw = [0u8; ns4::piano_preset::BODY_LEN];
+    raw[18] |= 0b1001_0000;
+    raw[30] |= 0b1001_0000;
+    let body = ns4::piano_preset::PianoPreset::try_from(raw).unwrap();
+    assert_eq!(format!("{:?}", body.piano_a_kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.piano_b_kb_zones), "V9");
+    assert_eq!(<[u8; ns4::piano_preset::BODY_LEN]>::from(&body), raw);
 }

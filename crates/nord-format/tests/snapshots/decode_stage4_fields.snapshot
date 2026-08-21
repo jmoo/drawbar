@@ -2389,7 +2389,7 @@ synth_c_fx.reverb_type                       397..=400               raw 10   [0
 synth_c_fx.amp_sim_eq_mode                   405..=408               raw 4    [0, 5, 8, 9]
 
 
-### ns4n piano preset — 165 fields, 62 unvarying
+### ns4n piano preset — 166 fields, 62 unvarying
 
 piano_b_layer_enabled                        41..=41                 raw 2    [0, 1]
 piano_a_layer_enabled                        42..=42                 raw 2    [0, 1]
@@ -2403,6 +2403,8 @@ piano_b_volume                               77..=83                 raw 19   [1
 piano_b_volume_wheel                         84..=91       UNVARYING raw 1    [127]
 piano_b_volume_aftertouch                    92..=99       UNVARYING raw 1    [127]
 piano_b_volume_ctrl_pedal                    100..=107     UNVARYING raw 1    [127]
+piano_a_kb_zones                             144..=147               raw 2    [5, 9]
+                                                                     dec 2    [V5, V9]
 piano_a_octave_shift                         148..=151     UNVARYING raw 1    [0]
 piano_a_pitch_stick_enabled                  152..=152               raw 2    [0, 1]
 piano_a_sustain_pedal_enabled                153..=153     UNVARYING raw 1    [1]
@@ -2565,7 +2567,7 @@ piano_b_fx.reverb_type                       397..=400               raw 7    [0
 piano_b_fx.amp_sim_eq_mode                   405..=408               raw 2    [0, 8]
 
 
-### ns4o organ preset — 165 fields, 116 unvarying
+### ns4o organ preset — 166 fields, 116 unvarying
 
 organ_b_layer_enabled                        41..=41       UNVARYING raw 1    [0]
 organ_a_layer_enabled                        42..=42                 raw 2    [0, 1]
@@ -2579,6 +2581,8 @@ organ_b_volume                               77..=83       UNVARYING raw 1    [1
 organ_b_volume_wheel                         84..=91       UNVARYING raw 1    [127]
 organ_b_volume_aftertouch                    92..=99       UNVARYING raw 1    [127]
 organ_b_volume_ctrl_pedal                    100..=107     UNVARYING raw 1    [127]
+organ_a_kb_zones                             184..=187               raw 3    [5, 6, 9]
+                                                                     dec 3    [V5, V6, V9]
 organ_a_octave_shift                         188..=191               raw 3    [0, 1, 2]
 organ_a_sustain_pedal_enabled                192..=192               raw 2    [0, 1]
 organ_a_model                                193..=195               raw 5    [0, 1, 2, 3, 4]
