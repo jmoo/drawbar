@@ -135,6 +135,33 @@ const READ_CHUNK: u32 = 32720;
 /// host appears to choose; the smaller is used uniformly, mirroring `READ_CHUNK`.
 const WRITE_CHUNK: usize = 32720;
 
+/// Chunk-size overrides for probing what the device actually accepts — the RE knob
+/// behind the 32720/32726 question. Compare against hardware, don't ship a change on
+/// their evidence alone.
+#[cfg(feature = "fault-injection")]
+fn read_chunk() -> u32 {
+    std::env::var("NORD_READ_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(READ_CHUNK)
+}
+#[cfg(not(feature = "fault-injection"))]
+fn read_chunk() -> u32 {
+    READ_CHUNK
+}
+
+#[cfg(feature = "fault-injection")]
+fn write_chunk() -> usize {
+    std::env::var("NORD_WRITE_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(WRITE_CHUNK)
+}
+#[cfg(not(feature = "fault-injection"))]
+fn write_chunk() -> usize {
+    WRITE_CHUNK
+}
+
 /// Bytes per storage block in the library partitions (piano, sample), the unit their
 /// `STATUS` counters count. Measured 2026-08-20: deleting a 5,894,704-byte piano
 /// dropped `used` by 23 (= ceil at 256KiB), and NSM's cleaning argument for that
@@ -168,7 +195,7 @@ async fn transfer_out<T: Transport, C>(
     let mut painted = None;
     while (body.len() as u32) < meta.body_len {
         let offset = body.len() as u32;
-        let want = READ_CHUNK.min(meta.body_len - offset);
+        let want = read_chunk().min(meta.body_len - offset);
 
         let mut req = args.clone();
         req.extend_from_slice(&offset.to_be_bytes());
@@ -323,7 +350,7 @@ pub async fn write<T: Transport>(
 
     let mut offset = 0usize;
     while offset < body.len() {
-        let end = (offset + WRITE_CHUNK).min(body.len());
+        let end = (offset + write_chunk()).min(body.len());
         let chunk = &body[offset..end];
         let mut data = Vec::new();
         at.write_to(&mut data);
