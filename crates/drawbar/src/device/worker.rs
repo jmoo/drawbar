@@ -704,7 +704,10 @@ async fn scan_class<T: Transport>(
         // Status 1 is "supported, nothing loaded"; 0x15 is "focus does not apply to
         // this class" — only the first is worth an event.
         match op::focus(&mut s).await {
-            Ok(at) => emit.send(DeviceEvent::Focus { class, at: Some(at) }),
+            Ok(at) => emit.send(DeviceEvent::Focus {
+                class,
+                at: Some(at),
+            }),
             Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),
             Err(Error::DeviceStatus(_)) => {}
             Err(e) => return Err(e),

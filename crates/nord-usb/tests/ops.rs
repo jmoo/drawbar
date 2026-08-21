@@ -642,7 +642,12 @@ fn a_disabled_cursor_is_an_error_not_a_partial_list() {
             direction: Out,
             bytes: msg(
                 0x20,
-                [0u32.to_be_bytes(), u32::MAX.to_be_bytes(), 0u32.to_be_bytes()].concat(),
+                [
+                    0u32.to_be_bytes(),
+                    u32::MAX.to_be_bytes(),
+                    0u32.to_be_bytes(),
+                ]
+                .concat(),
             ),
         },
         Step {

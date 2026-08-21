@@ -100,9 +100,16 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
             write_file(ui, &path, &edited)
         }
         (Some(Target::Slot(at)), None) => match class {
-            ObjectClass::Program => {
-                crate::device::send(ui, &edited, at, class, args.yes, "the edited program", None, None)
-            }
+            ObjectClass::Program => crate::device::send(
+                ui,
+                &edited,
+                at,
+                class,
+                args.yes,
+                "the edited program",
+                None,
+                None,
+            ),
             // ⚠️ `send` deletes the destination to make room, and whether the live
             // buffer or the settings singleton survives a delete/write of its class is
             // unconfirmed on hardware. Until it is, an edited slot of either stops at

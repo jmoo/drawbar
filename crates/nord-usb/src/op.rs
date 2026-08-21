@@ -250,7 +250,12 @@ async fn clean_library<T: Transport>(
     session.notify(&ui::label("Cleaning...")?).await?;
     session.notify(&ui::percent(0)).await?;
     session
-        .request(Service::Program, 10, cmd::WRITE_PREPARE, &blocks.to_be_bytes())
+        .request(
+            Service::Program,
+            10,
+            cmd::WRITE_PREPARE,
+            &blocks.to_be_bytes(),
+        )
         .await?;
 
     for polls in 0..CLEANING_POLLS {
@@ -590,8 +595,7 @@ pub async fn occupied_slots<T: Transport, C>(
                 // Staying inside the bank and moving forward, or the walk is not making
                 // progress and would spin.
                 Some(next)
-                    if next.bank == bank
-                        && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
+                    if next.bank == bank && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
                 {
                     found.push(next);
                     at = next;

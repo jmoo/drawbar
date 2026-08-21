@@ -2,6 +2,9 @@
 # instead. `corpus` stays off — those tests need the private specimen corpus —
 # and the feature list mirrors each crate's `[package.metadata.nix]
 # testFeatures`, so this runs the same suites the Nix build does.
+#
+# `lint` holds the line `nix fmt` and clippy draw: a tree the formatter would
+# touch, or a warning clippy would raise, fails the run.
 name: ci
 
 on:
@@ -27,3 +30,21 @@ jobs:
       - run: >
           cargo test -p nord-bits-derive -p nord-format -p nord-usb -p nord-cli
           --features nord-format/bundle,nord-usb/replay,nord-usb/blocking
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - run: nix fmt -- --fail-on-change
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+      - working-directory: crates
+        run: >
+          cargo clippy -p nord-bits-derive -p nord-format -p nord-usb -p nord-cli
+          --all-targets --features nord-format/bundle,nord-usb/replay,nord-usb/blocking
+          -- -D warnings
