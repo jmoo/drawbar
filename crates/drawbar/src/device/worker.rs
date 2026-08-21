@@ -352,7 +352,10 @@ async fn put<T: Transport>(
     }
 
     let timestamp = unix_now();
-    let written = op::write_program(s, at, &bytes, timestamp).await;
+    // "0" is the placeholder the captured NSM program write carries; the slot is
+    // named properly by the rename that follows. Passing the real name here instead is
+    // a deliberate follow-up — the rename order is pinned by tests below.
+    let written = op::write(s, at, &bytes, "0", timestamp).await;
 
     Ok(match (written, backup) {
         (Ok(()), _) => Ok(name_slot(s, at, what, emit, gone).await),
@@ -364,7 +367,7 @@ async fn put<T: Transport>(
                 "the write failed and {} is now empty; putting the original back",
                 shown(at)
             )));
-            match op::write_program(s, at, &backup, timestamp).await {
+            match op::write(s, at, &backup, "0", timestamp).await {
                 Ok(()) => Err(format!(
                     "{e} ({} was restored, and is unchanged)",
                     shown(at)
