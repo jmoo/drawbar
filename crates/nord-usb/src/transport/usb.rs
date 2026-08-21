@@ -164,6 +164,28 @@ impl UsbTransport {
         })
     }
 
+    /// One read on the interrupt endpoint (`0x81`), or `None` if nothing arrives
+    /// within `timeout`.
+    ///
+    /// RE surface: NSM keeps a read pending here, but across the capture corpus the
+    /// endpoint has only ever produced data during the firmware-update handshake.
+    /// This exists to test whether anything else ever arrives.
+    pub async fn interrupt_read(
+        &mut self,
+        len: usize,
+        timeout: Duration,
+    ) -> Result<Option<Vec<u8>>> {
+        use crate::deadline::with_timeout;
+        let buf = nusb::transfer::RequestBuffer::new(len);
+        match with_timeout(self.interface.interrupt_in(0x81, buf), timeout).await {
+            Some(completion) => {
+                completion.status.map_err(map_err("interrupt read"))?;
+                Ok(Some(completion.data))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// One vendor control read on endpoint 0, outside the bulk protocol entirely.
     ///
     /// Separate from [`Transport`] on purpose: WebUSB can issue control transfers, but

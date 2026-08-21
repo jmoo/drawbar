@@ -107,18 +107,18 @@ pub mod cmd {
     /// caller that passes a placeholder gets a slot called that.
     pub const BEGIN_WRITE: u32 = 0x0a;
 
-    /// Start the library's cleaning/consolidation pass (`⟨1⟩`; paints "Cleaning...").
-    /// Re-arms library writes: once a write has dirtied the library, the next
-    /// `BEGIN_WRITE` is refused `0x16` until this pass has run and finished — inside
-    /// the write's own session, which is where NSM runs it before every upload that
-    /// needs one. Despite sitting in the range long treated as possibly-erase, it
-    /// destroys nothing.
+    /// Reclaim library storage: the argument is a **block count** (256KiB blocks —
+    /// what `STATUS`'s free/used words count on the library partitions). Paints
+    /// "Cleaning...". A `BEGIN_WRITE` needing more prepared blocks than are free is
+    /// refused `0x16`; NSM sends exactly the shortfall, in the write's own session,
+    /// and skips the pair when free already covers the write. Despite sitting in the
+    /// range long treated as possibly-erase, it destroys nothing.
     pub const WRITE_PREPARE: u32 = 0x22;
-    /// Query the cleaning pass. No arguments; three reply words. **Meaningful only
-    /// after `0x22` in the same session** — a bare query can answer `1,1,0` while a
-    /// write would still be refused. After `0x22`: `1,1,0` done, write now; `1,0,1`
-    /// still running (a write now is refused `0x1e`); `1,0,0` observed after a
-    /// completed write.
+    /// Query the cleaning pass: three reply words, `[requested, done, running]`.
+    /// **Meaningful only after `0x22` in the same session** — a bare query answers a
+    /// ready-looking triple while a write would still be refused. `done` may end above
+    /// `requested`; ready is `running` returning 0 (a write while it runs is refused
+    /// `0x1e`).
     pub const WRITE_PREPARE_2: u32 = 0x26;
     /// Begin reading an entity. Args: bank, slot.
     pub const BEGIN_READ: u32 = 0x0c;
@@ -178,12 +178,25 @@ pub mod cmd {
     /// evidence that a code is unimplemented.
     pub const DO_NOT_SEND_DELETING: u32 = 0x7e;
 
+    /// ⚠️ **Never send this either.** Externally reported as the notification-read
+    /// pairing with [`NOTIFY_ENABLE`]; on this instrument (probed bare and with one
+    /// word, 2026-08-20) it never answers, the session's close then goes unanswered
+    /// too, and the bulk endpoints end up write-stalled — the power-cycle-only wedge.
+    /// Nothing stored was harmed either time.
+    pub const DO_NOT_SEND_NOTIFICATION_READ: u32 = 0x2a;
+
     /// Unsolicited device → host notification — no request pairs with it, so it
     /// arrives in place of whatever reply the host reads for next. Observed on
     /// hardware, queued by a front-panel STORE while a cable session was possible;
     /// absent from the capture corpus, so NSM presumably drains it silently.
     /// Hypothesis, not confirmed: "an object changed".
     pub const CHANGED: u32 = 0x2c;
+
+    /// Enable/disable change notifications for a class: `class, on`. Word 0 is the
+    /// class, word 1 a small enum (`0`/`1` accepted, `9` refused). Reported to pair
+    /// with a notification read at `0x2a` — see that code's warning: the read half is
+    /// a wedge on this instrument.
+    pub const NOTIFY_ENABLE: u32 = 0x2d;
 }
 
 /// The UI/session service (service 6, subsystem 1): the transaction's outer handshake
