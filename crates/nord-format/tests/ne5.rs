@@ -366,6 +366,7 @@ const SETTINGS_ORACLE: &[(&str, &str, &str)] = &[
         "Normal",
     ),
     ("rotary-rotor-acc-high", "rotary_rotor_acceleration", "High"),
+    ("rotary-rotor-speed-low", "rotary_rotor_speed", "Low"),
     ("rotary-rotor-speed-normal", "rotary_rotor_speed", "Normal"),
     ("rotary-rotor-speed-high", "rotary_rotor_speed", "High"),
     (
@@ -400,16 +401,13 @@ const SETTINGS_ORACLE: &[(&str, &str, &str)] = &[
 /// is the finding, so it is asserted rather than skipped: a corrected capture makes this
 /// fail, which is when the decode has something new to learn.
 ///
-/// * `mem-protect-*` and `midi-local-ctrl-mode-*` are the two cataloged settings with no
-///   decoded home — toggling either moves no bit of the body.
-/// * `rotary-rotor-speed-low` is a duplicate of the `high` capture, so `low` is the one
-///   rate value the sweep never reaches.
+/// `mem-protect-*` and `midi-local-ctrl-mode-*` are the two cataloged settings with no
+/// decoded home — toggling either moves no bit of the body.
 const SETTINGS_UNMOVED: &[(&str, &str)] = &[
     ("mem-protect-on", "baseline"),
     ("mem-protect-off", "baseline"),
     ("midi-local-ctrl-mode-on", "midi-local-ctrl-mode-off"),
     ("midi-local-ctrl-mode-off", "midi-local-ctrl-mode-on"),
-    ("rotary-rotor-speed-low", "rotary-rotor-speed-high"),
 ];
 
 /// Every `.ne5s` the corpus ships: the sweep, the standalone file and the backup's copy.

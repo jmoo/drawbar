@@ -36,6 +36,15 @@ struct Cli {
     #[arg(long, global = true, value_name = "WHEN", value_enum, default_value_t)]
     color: ColorChoice,
 
+    /// Mirror every frame exchanged with the instrument into a replay script at PATH.
+    ///
+    /// The script is what `--replay` and the golden tests read back. An operation that
+    /// transfers a body writes that body into it in full.
+    ///
+    /// Bulk traffic only: `device info` reads endpoint 0, which never reaches the script.
+    #[arg(long, global = true, value_name = "PATH")]
+    record: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -546,6 +555,7 @@ pub struct EditArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let ui = Ui::new(cli.color);
+    device::set_recording(cli.record);
 
     let result = match cli.command {
         Command::Inspect { files, raw } => inspect(&ui, &files, raw),

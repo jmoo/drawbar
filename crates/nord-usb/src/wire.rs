@@ -605,9 +605,33 @@ pub struct Message {
     is_response: bool,
 }
 
+/// The protocol version to put on [`Service::Program`] frames, when something other than
+/// the caller's is wanted.
+///
+/// The device treats 8, 9 and 10 as synonyms and drops anything newer; **values below 8
+/// stall the bulk endpoints and need a power cycle**, so this exists to compare the
+/// accepted window, not to sweep.
+#[cfg(feature = "fault-injection")]
+fn protocol_version_override() -> Option<u32> {
+    std::env::var("NORD_PROTOCOL_VERSION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+}
+
+#[cfg(not(feature = "fault-injection"))]
+fn protocol_version_override() -> Option<u32> {
+    None
+}
+
 impl Message {
     /// A request, to send to the device.
     pub fn new(service: Service, subsystem: u32, command: u32, args: Vec<u8>) -> Self {
+        // Only the program service carries a version here; the UI service's `1` is a real
+        // subsystem selector and overriding it would be a different frame entirely.
+        let subsystem = match service {
+            Service::Program => protocol_version_override().unwrap_or(subsystem),
+            _ => subsystem,
+        };
         Self {
             service,
             subsystem,

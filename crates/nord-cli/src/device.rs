@@ -10,6 +10,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use nord_usb::op;
 use nord_usb::transport::Transport;
@@ -31,8 +32,7 @@ pub enum Source {
 pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     let report = match source {
         Source::Usb => {
-            let mut transport =
-                nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())?;
+            let mut transport = open_usb()?;
             collect(&mut transport)?
         }
         Source::Replay(path) => {
@@ -241,8 +241,20 @@ fn explain_walk(e: nord_usb::Error) -> String {
     }
 }
 
+/// Where `--record` writes, for the one transport this process opens.
+static RECORDING: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Set once, from the parsed global flag, before any command runs.
+pub fn set_recording(path: Option<PathBuf>) {
+    let _ = RECORDING.set(path);
+}
+
 fn open_usb() -> Result<nord_usb::transport::UsbTransport, String> {
-    nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())
+    let t = nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())?;
+    match RECORDING.get().and_then(Option::as_deref) {
+        Some(path) => t.recording_to(path).map_err(|e| e.to_string()),
+        None => Ok(t),
+    }
 }
 
 /// One read in its own session: the slot's metadata, then its bytes.
@@ -583,9 +595,17 @@ pub fn send(
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
 
-    let written = one_shot!(&mut t, class, |s| usb_op::write_program(
-        &mut s, at, file, timestamp
-    ));
+    let written = if fail_after_delete() {
+        // The slot is deleted and the backup is in memory: exactly the state the restore
+        // path exists for, reached without needing a real transport failure.
+        Err(nord_usb::Error::Transport(
+            "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
+        ))
+    } else {
+        one_shot!(&mut t, class, |s| usb_op::write_program(
+            &mut s, at, file, timestamp
+        ))
+    };
 
     match (written, backup) {
         (Ok(()), _) => {
@@ -620,6 +640,21 @@ pub fn send(
             }
         }
     }
+}
+
+/// Whether to skip the write and report a failure, so the restore and rescue paths can
+/// be exercised against a real instrument. Test tool: a genuine transport failure at this
+/// exact point is otherwise only reachable by pulling the cable mid-operation.
+///
+/// ⚠️ It leaves the slot deleted, so point it at a scratch slot with a copy on disk.
+#[cfg(feature = "fault-injection")]
+fn fail_after_delete() -> bool {
+    std::env::var_os("NORD_FAIL_AFTER_DELETE").is_some()
+}
+
+#[cfg(not(feature = "fault-injection"))]
+fn fail_after_delete() -> bool {
+    false
 }
 
 /// Last resort: the write failed, the restore failed, and the slot's former contents
