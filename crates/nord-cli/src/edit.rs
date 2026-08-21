@@ -170,6 +170,9 @@ fn steer(tag: &str) -> &'static str {
 /// fields moved.
 fn stage(ui: &Ui, args: &EditArgs, file: &mut impl Editable) -> Result<Option<usize>, String> {
     if args.fields {
+        if !args.set.is_empty() {
+            return Err("--fields lists and writes nothing; drop it to apply --set".into());
+        }
         list_fields(ui, file);
         return Ok(None);
     }

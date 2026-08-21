@@ -410,13 +410,19 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
     // offset intact, which is why the two frames below cannot cure it on their own.
     drain(transport).await?;
 
+    // ⚠️ Bounded reads: the instrument this is for is the one that has stopped
+    // answering, and no reply to either frame is the expected outcome, not a failure.
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
     transport.write(&goodbye.encode()).await?;
-    let _ = transport.read(crate::transport::READ_BUFFER).await?;
+    let _ = transport
+        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .await?;
 
     let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
     transport.write(&close.encode()).await?;
-    let _ = transport.read(crate::transport::READ_BUFFER).await?;
+    let _ = transport
+        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .await?;
     Ok(())
 }
 

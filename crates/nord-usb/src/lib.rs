@@ -8,8 +8,7 @@
 //! - [`op`] — typed operations.
 //!
 //! The wire format was reverse-engineered from a corpus of NSM captures and is
-//! verified against all 4,589 messages in it. See the `nord-corpus` repo and the
-//! project notes for the capture methodology.
+//! verified against every message in it.
 //!
 //! # Portability
 //!

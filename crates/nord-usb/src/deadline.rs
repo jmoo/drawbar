@@ -87,7 +87,10 @@ pub async fn with_timeout<F: Future>(fut: F, limit: Duration) -> Option<F::Outpu
             return Poll::Ready(None);
         }
         // Registered once, not per poll: a transfer that wakes us several times before
-        // completing would otherwise pile up duplicate entries on the timer.
+        // completing would otherwise pile up duplicate entries on the timer. ⚠️ That
+        // makes the registered waker the *first* poll's; a future moved to another
+        // executor mid-wait would be woken on the old one and hang on the new. Every
+        // caller in this crate polls on one executor for the future's whole life.
         if !armed {
             armed = true;
             register(deadline, cx.waker().clone());
