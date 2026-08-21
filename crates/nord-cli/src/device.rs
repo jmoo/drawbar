@@ -1314,13 +1314,14 @@ pub fn probe(
         words.extend_from_slice(&a.to_be_bytes());
     }
 
-    // Measured, not guessed: this one paints "Deleting..." on the instrument, never
-    // answers, and costs a power cycle. `--yes` is not enough of a gate for a command
-    // already known to do that.
-    if op == nord_usb::wire::cmd::DO_NOT_SEND_DELETING {
-        return Err(format!(
-            "{op:#04x} is known to hang the instrument: it shows \"Deleting...\" and \
-             never replies, and only a power cycle recovers. Refusing."
+    // Measured, not guessed: these never answer and wedge the instrument until a
+    // power cycle. That is a price, not a prohibition — nothing stored has ever been
+    // harmed by a wedge — so `--yes` proceeds; the note makes sure it is an informed
+    // one.
+    if op == nord_usb::wire::cmd::DELETING_WEDGE || op == nord_usb::wire::cmd::NOTIFY_READ_WEDGE {
+        ui.note(format!(
+            "{op:#04x} is known to wedge the instrument (no reply, session lost, \
+             power cycle to recover); nothing stored has ever been harmed by it"
         ));
     }
 

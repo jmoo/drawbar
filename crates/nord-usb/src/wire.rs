@@ -168,22 +168,23 @@ pub mod cmd {
     /// three-word form keeps answering in the same session.
     pub const NEXT_SLOT: u32 = 0x20;
 
-    /// ⚠️ **Never send this.** It puts `"Deleting..."` and a full progress bar on the
-    /// instrument's display, returns no reply at all, and leaves the session impossible
-    /// to close — the label clears only on a power cycle. Sent with no arguments it
-    /// destroyed nothing, and what it does with arguments is untested.
+    /// Wedges the instrument: puts `"Deleting..."` and a full progress bar on the
+    /// display, never replies, and the session cannot close — a power cycle clears it.
+    /// **The cost is exactly that power cycle**: sent bare it destroyed nothing, and
+    /// no wedge in this project's history has harmed stored data. What it does *with*
+    /// arguments is untested.
     ///
-    /// Named so it is recognisable in a capture, and so nobody probes this range again
-    /// expecting an "unsupported" answer: sitting above every documented command is not
-    /// evidence that a code is unimplemented.
-    pub const DO_NOT_SEND_DELETING: u32 = 0x7e;
+    /// Named so it is recognisable in a capture, and so nobody probes it again
+    /// expecting an "unsupported" answer: sitting above every documented command is
+    /// not evidence that a code is unimplemented.
+    pub const DELETING_WEDGE: u32 = 0x7e;
 
-    /// ⚠️ **Never send this either.** Externally reported as the notification-read
-    /// pairing with [`NOTIFY_ENABLE`]; on this instrument (probed bare and with one
-    /// word, 2026-08-20) it never answers, the session's close then goes unanswered
-    /// too, and the bulk endpoints end up write-stalled — the power-cycle-only wedge.
-    /// Nothing stored was harmed either time.
-    pub const DO_NOT_SEND_NOTIFICATION_READ: u32 = 0x2a;
+    /// Wedges the instrument, same price as [`DELETING_WEDGE`]. Externally reported
+    /// as the notification-read pairing with [`NOTIFY_ENABLE`]; on this instrument
+    /// (probed bare and with one word, 2026-08-20) it never answers, the session's
+    /// close then goes unanswered too, and the bulk endpoints end up write-stalled
+    /// until a power cycle. Nothing stored was harmed either time.
+    pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
     /// Unsolicited device → host notification — no request pairs with it, so it
     /// arrives in place of whatever reply the host reads for next. Observed on
