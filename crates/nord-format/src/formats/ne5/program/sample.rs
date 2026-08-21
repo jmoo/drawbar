@@ -4,7 +4,7 @@ use crate::formats::ne5::Level;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 
-// 0x46..0x4d — the sample panel.
+// 0x46..=0x4c — the sample panel.
 
 /// The sample panel: which sample plays, its envelope, and its level.
 #[bitbody(8)]

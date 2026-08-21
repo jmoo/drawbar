@@ -16,7 +16,7 @@ pub struct RangedI8<const OFFSET: u8, const MIN: i8, const MAX: i8> {
 
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> RangedI8<OFFSET, MIN, MAX> {
     pub fn as_u8(&self) -> u8 {
-        (self.inner + OFFSET as i8) as u8
+        (i16::from(self.inner) + i16::from(OFFSET)) as u8
     }
 
     pub fn inner(&self) -> i8 {
@@ -52,7 +52,16 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<u8> for RangedI8<OF
     type Error = ParseError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        ((value as i8) - (OFFSET as i8)).try_into()
+        // Widened first: a stored byte above `i8::MAX` would otherwise wrap before the
+        // range check sees it.
+        let unbiased = i16::from(value) - i16::from(OFFSET);
+        match i8::try_from(unbiased) {
+            Ok(value) => value.try_into(),
+            Err(_) => Err(ParseError::OutOfBounds {
+                value: format!("{unbiased}"),
+                bound: format!("{MIN}..={MAX}"),
+            }),
+        }
     }
 }
 

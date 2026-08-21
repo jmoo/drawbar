@@ -15,9 +15,10 @@ use super::program::{
     SynthVibrato, SynthVoice,
 };
 use crate::cbin::{self, Cbin};
-use crate::components::{Frequency, Level, LibraryRef, MorphTarget, Rate, Time};
+use crate::components::{
+    Frequency, Interval, Level, LibraryRef, MorphTarget, Rate, Time, WideSelector,
+};
 use crate::error::Error;
-use crate::types::{RangedU16, RangedU8};
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns3y";
@@ -84,11 +85,11 @@ pub struct SynthPreset {
     #[bits(150..=152)]
     pub synth_oscillator_type: SynthOscillatorType,
     #[bits(153..=161)]
-    pub synth_oscillator_1_wave_form: RangedU16<511>,
+    pub synth_oscillator_1_wave_form: WideSelector<9>,
     #[bits(163..=166)]
     pub synth_oscillator_config: SynthOscillatorConfig,
     #[bits(167..=172)]
-    pub synth_pitch: RangedU8<63>,
+    pub synth_pitch: Interval,
     #[bits(173..=179)]
     pub synth_oscillator_control: Level,
     #[bits(180..=187)]

@@ -627,9 +627,6 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
         Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
-            if let Some(name) = b.name() {
-                ui.out(field(ui, 2, "name", name));
-            }
             ui.out(field(
                 ui,
                 2,

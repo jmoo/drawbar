@@ -59,7 +59,10 @@ impl Song {
     }
 
     pub fn get(&self, slot: u16) -> program::Location {
-        self.programs()[slot as usize]
+        match self.programs().get(slot as usize) {
+            Some(at) => *at,
+            None => panic!("no slot {slot}: a song holds {PROGRAM_COUNT} programs"),
+        }
     }
 
     pub fn set(&mut self, slot: u16, location: program::Location) {

@@ -20,7 +20,6 @@ pub struct Bundle {
     /// bundle rather than printed — a library owns no terminal — so a caller can decide
     /// whether a partial read is acceptable.
     skipped: Vec<(String, String)>,
-    name: Option<String>,
 }
 
 impl Bundle {
@@ -31,7 +30,6 @@ impl Bundle {
             pianos: Vec::new(),
             samples: Vec::new(),
             skipped: Vec::new(),
-            name: None,
         }
     }
 
@@ -76,14 +74,6 @@ impl Bundle {
         }
 
         Ok(bundle)
-    }
-
-    pub fn name(&self) -> Option<String> {
-        self.name.clone()
-    }
-
-    pub fn set_name(&mut self, name: String) {
-        self.name = Some(name);
     }
 
     pub fn programs(&self) -> &program::Bank {

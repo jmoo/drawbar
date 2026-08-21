@@ -133,6 +133,10 @@ impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
     );
 
     /// Decode the field out of `raw`.
+    ///
+    /// ⚠️ A plain integer narrower than the field reads its low bits and writes only
+    /// those, so `Field<u8, 0, 15>` is lossy across a read-modify-write. Give a wide
+    /// field a type as wide as the slot, or a ranged type that says what fits.
     pub fn get<const N: usize>(raw: &[u8; N]) -> Result<T, T::Error> {
         let () = SpanFits::<N, HI>::OK;
         T::from_bits(extract(raw, LO, HI))
@@ -162,6 +166,16 @@ impl<T: Packed<Error = Infallible>, const LO: u32, const HI: u32> Field<T, LO, H
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trap the ⚠️ on [`Field::get`] names, pinned so a change to it is a choice.
+    #[test]
+    fn a_narrow_integer_in_a_wide_slot_reads_and_writes_its_low_bits_only() {
+        let raw = [0xab, 0xcd];
+        assert_eq!(Field::<u8, 0, 15>::read(&raw), 0xcd);
+        let mut out = [0u8; 2];
+        Field::<u8, 0, 15>::set(&mut out, 0xcd);
+        assert_eq!(out, [0x00, 0xcd]);
+    }
 
     /// A `BITS`-wide value. `set` only takes a type that cannot overrun its slot, so a
     /// test that writes has to name a width — a bare `u8` in a nibble does not compile.

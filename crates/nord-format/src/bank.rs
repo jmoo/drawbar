@@ -69,6 +69,15 @@ where
     pub fn get(&self, location: L) -> Option<&Entry<T>> {
         self.items.get(&location.as_u16())
     }
+
+    /// How many slots hold an item.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 impl<T, L> Default for Bank<T, L>
@@ -90,13 +99,16 @@ where
         if !self.items.is_empty() {
             writeln!(f, "Bank(")?;
 
-            for (k, v) in self.items.iter() {
-                let location: L = match (*k).try_into() {
-                    Ok(l) => l,
-                    Err(_e) => panic!("Failed to convert u16 to Location: {:?}", *k),
-                };
-
-                write!(f, "{}:{}\t{:?},\n\n", location.x() + 1, location.y() + 1, v)?;
+            let mut keys: Vec<&u16> = self.items.keys().collect();
+            keys.sort_unstable();
+            for k in keys {
+                let v = &self.items[k];
+                match L::try_from(*k) {
+                    Ok(location) => {
+                        write!(f, "{}:{}\t{:?},\n\n", location.x() + 1, location.y() + 1, v)?
+                    }
+                    Err(_) => write!(f, "#{k}\t{v:?},\n\n")?,
+                }
             }
 
             writeln!(f, ")")

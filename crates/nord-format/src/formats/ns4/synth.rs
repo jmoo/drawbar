@@ -1,8 +1,10 @@
 //! The Stage 4 synth preset body (`.ns4y`): 497 bytes.
 //!
-//! One synth section as a program stores it, moved down 327 bytes, without the
-//! two placements a preset has no use for — the keyboard zone, which belongs to
-//! the program that loads it, and the extern CC values.
+//! One synth section as a program stores it, moved down 327 bytes. The keyboard
+//! zone and the extern CC values ride along for every layer, though a preset has
+//! no use for them. Layers are 408 bits apart; layer A's zone is confirmed
+//! against the corpus (it varies exactly as B's and C's do), its extern CC block
+//! is placed by the stride alone, since no specimen sets any layer's.
 
 use super::fx::FxChain;
 use super::synth_voice::SynthVoice;
@@ -75,6 +77,8 @@ pub struct SynthPreset {
     pub synth_a_sample_slot: RangedU16<4095>,
     #[bits(306..=337)]
     pub synth_a_sample_id: LibraryRef,
+    #[bits(338..=341)]
+    pub synth_a_kb_zones: KbZone4,
     #[bits(342..=345)]
     pub synth_a_octave_shift: OctaveShiftNibble,
     #[bits(346..=346)]
@@ -139,6 +143,22 @@ pub struct SynthPreset {
     pub synth_a_arpeggiator_pan: ArpPattern,
     #[bits(586..=587)]
     pub synth_a_unison_level: Selector<2>,
+    #[bits(588..=594)]
+    pub synth_a_extern_cc_val1: Level,
+    #[bits(595..=602)]
+    pub synth_a_extern_cc_val1_wheel: MorphTarget,
+    #[bits(603..=610)]
+    pub synth_a_extern_cc_val1_aftertouch: MorphTarget,
+    #[bits(611..=618)]
+    pub synth_a_extern_cc_val1_ctrl_pedal: MorphTarget,
+    #[bits(619..=625)]
+    pub synth_a_extern_cc_val2: Level,
+    #[bits(626..=633)]
+    pub synth_a_extern_cc_val2_wheel: MorphTarget,
+    #[bits(634..=641)]
+    pub synth_a_extern_cc_val2_aftertouch: MorphTarget,
+    #[bits(642..=649)]
+    pub synth_a_extern_cc_val2_ctrl_pedal: MorphTarget,
     #[bits(652..=656)]
     pub synth_a_vibrato_delay: Selector<5>,
     #[bits(696..=696)]

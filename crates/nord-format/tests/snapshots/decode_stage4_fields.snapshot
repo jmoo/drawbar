@@ -1848,7 +1848,7 @@ synth_c_fx.reverb_type                       397..=400               raw 5    [1
 synth_c_fx.amp_sim_eq_mode                   405..=408     UNVARYING raw 1    [0]
 
 
-### ns4y synth preset — 504 fields, 162 unvarying
+### ns4y synth preset — 513 fields, 170 unvarying
 
 synth_c_layer_enabled                        42..=42                 raw 2    [0, 1]
 synth_b_layer_enabled                        43..=43                 raw 2    [0, 1]
@@ -1875,6 +1875,8 @@ synth_a_samples_analog                       288..=288               raw 2    [0
 synth_a_sample_slot                          294..=305               raw 87   [0, 100, 102, 1026, 103, 1039, 104, 109, 110, 1100, …]
 synth_a_sample_id                            306..=337               raw 88   [1060642766, 1120507140, 122419831, 1236835218, 127033685, 1282040345, 1321663019, 1330716637, 1443776713, 1541413108, …]
                                                                      dec 88   [0x02c73ad9, 0x074bfa77, 0x07926155, 0x13c28411, 0x19d37317, 0x1a7b897f, 0x1afea9e7, 0x20c06cb8, 0x252bcf39, 0x264e69cd, …]
+synth_a_kb_zones                             338..=341               raw 5    [0, 1, 5, 6, 9]
+                                                                     dec 5    [V0, V1, V5, V6, V9]
 synth_a_octave_shift                         342..=345               raw 4    [0, 1, 14, 15]
                                                                      dec 4    [-1, -2, 0, 1]
 synth_a_pitch_stick_enabled                  346..=346               raw 2    [0, 1]
@@ -1911,6 +1913,14 @@ synth_a_arpeggiator_gate                     522..=553               raw 17   [0
 synth_a_arpeggiator_pan                      554..=585               raw 11   [0, 10510600, 132, 144, 1453696256, 2550661508, 2795133285, 537927746, 69608964, 71848034, …]
                                                                      dec 11   [0x00000000, 0x00000084, 0x00000090, 0x00981218, 0x00a06108, 0x04262604, 0x04485062, 0x20102042, 0x56a5a500, 0x98080184, …]
 synth_a_unison_level                         586..=587               raw 4    [0, 1, 2, 3]
+synth_a_extern_cc_val1                       588..=594     UNVARYING raw 1    [0]
+synth_a_extern_cc_val1_wheel                 595..=602     UNVARYING raw 1    [127]
+synth_a_extern_cc_val1_aftertouch            603..=610     UNVARYING raw 1    [127]
+synth_a_extern_cc_val1_ctrl_pedal            611..=618     UNVARYING raw 1    [127]
+synth_a_extern_cc_val2                       619..=625     UNVARYING raw 1    [0]
+synth_a_extern_cc_val2_wheel                 626..=633     UNVARYING raw 1    [127]
+synth_a_extern_cc_val2_aftertouch            634..=641     UNVARYING raw 1    [127]
+synth_a_extern_cc_val2_ctrl_pedal            642..=649     UNVARYING raw 1    [127]
 synth_a_vibrato_delay                        652..=656               raw 2    [0, 6]
 synth_b_samples_analog                       696..=696               raw 2    [0, 1]
 synth_b_sample_slot                          702..=713               raw 45   [0, 1026, 1033, 1051, 1101, 1103, 1201, 1202, 1206, 1214, …]

@@ -9,7 +9,7 @@ use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Display, Formatter};
 
-// 0x93..0xa4 — the effects panel.
+// 0x93..=0xa3 — the effects panel.
 
 /// The effects panel: the four effect slots, the reverb, the rotary and the
 /// EQ.
