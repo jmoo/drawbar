@@ -704,7 +704,10 @@ async fn scan_class<T: Transport>(
         // Status 1 is "supported, nothing loaded"; 0x15 is "focus does not apply to
         // this class" — only the first is worth an event.
         match op::focus(&mut s).await {
-            Ok(at) => emit.send(DeviceEvent::Focus { class, at: Some(at) }),
+            Ok(at) => emit.send(DeviceEvent::Focus {
+                class,
+                at: Some(at),
+            }),
             Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),
             Err(Error::DeviceStatus(_)) => {}
             Err(e) => return Err(e),
@@ -1098,8 +1101,8 @@ mod tests {
     }
 
     /// The device's name is the name, verbatim — spaces and all. Making it path-safe is
-    /// the export dialog's business, and doing it here is how "Big strings" once went
-    /// back to the instrument as "Big-strings".
+    /// the export dialog's business; a name sanitised here would go back to the
+    /// instrument sanitised.
     #[test]
     fn a_read_keeps_the_slots_name_verbatim() {
         let info = ProgramInfo {

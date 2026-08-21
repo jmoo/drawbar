@@ -250,13 +250,17 @@ async fn clean_library<T: Transport>(
     session.notify(&ui::label("Cleaning...")?).await?;
     session.notify(&ui::percent(0)).await?;
     session
-        .request(Service::Program, 10, cmd::WRITE_PREPARE, &blocks.to_be_bytes())
+        .request(
+            Service::Program,
+            10,
+            cmd::WRITE_PREPARE,
+            &blocks.to_be_bytes(),
+        )
         .await?;
 
     for polls in 0..CLEANING_POLLS {
         if polls > 0 {
-            crate::deadline::with_timeout(std::future::pending::<()>(), CLEANING_POLL_SPACING)
-                .await;
+            crate::sleep::sleep(CLEANING_POLL_SPACING).await;
         }
         let resp = session
             .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
@@ -405,13 +409,19 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
     // offset intact, which is why the two frames below cannot cure it on their own.
     drain(transport).await?;
 
+    // ⚠️ Bounded reads: the instrument this is for is the one that has stopped
+    // answering, and no reply to either frame is the expected outcome, not a failure.
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
     transport.write(&goodbye.encode()).await?;
-    let _ = transport.read(crate::transport::READ_BUFFER).await?;
+    let _ = transport
+        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .await?;
 
     let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
     transport.write(&close.encode()).await?;
-    let _ = transport.read(crate::transport::READ_BUFFER).await?;
+    let _ = transport
+        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .await?;
     Ok(())
 }
 
@@ -590,8 +600,7 @@ pub async fn occupied_slots<T: Transport, C>(
                 // Staying inside the bank and moving forward, or the walk is not making
                 // progress and would spin.
                 Some(next)
-                    if next.bank == bank
-                        && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
+                    if next.bank == bank && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
                 {
                     found.push(next);
                     at = next;

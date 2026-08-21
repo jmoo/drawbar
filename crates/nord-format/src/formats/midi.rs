@@ -32,3 +32,27 @@ impl Midi {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_kept_verbatim() {
+        let bytes = [b"MThd".as_slice(), &[0, 0, 0, 6, 0, 0, 0, 1, 0, 96]].concat();
+        let midi = Midi::read_from(&mut bytes.as_slice()).unwrap();
+        assert_eq!(midi.data, bytes);
+        let mut out = Vec::new();
+        midi.write_to(&mut out).unwrap();
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        assert!(Midi::read_from(&mut b"MTrk....".as_slice()).is_err());
+        assert!(
+            Midi::read_from(&mut b"MT".as_slice()).is_err(),
+            "shorter than the magic"
+        );
+    }
+}

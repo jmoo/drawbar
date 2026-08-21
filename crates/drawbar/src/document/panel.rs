@@ -464,7 +464,7 @@ fn bass(ui: &mut egui::Ui, fields: &[Field], first: &str, second: &str, sets: &m
     let mut positions = [0u8; drawbar_widget::BARS];
     positions[0] = read(first);
     positions[1] = read(second);
-    if let Some(moved) = controls::bars(ui, positions, true, 2) {
+    if let Some(moved) = controls::bars(ui, positions, true, &drawbar_widget::BASS_RANKS) {
         sets.push((first.to_string(), moved[0].to_string()));
         sets.push((second.to_string(), moved[1].to_string()));
     }

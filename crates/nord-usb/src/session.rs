@@ -337,6 +337,9 @@ impl<T: Transport, C> Session<'_, T, C> {
             };
 
             if resp.command != command + 1 {
+                // Same test `probe` makes: a reply that happens to share CHANGED's code
+                // is still a reply, and only passes the `!= command + 1` guard above
+                // because it is not the one being waited for.
                 if resp.command == cmd::CHANGED && drained < DRAIN_CAP {
                     drained += 1;
                     self.device_changed = true;

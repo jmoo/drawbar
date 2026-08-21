@@ -90,22 +90,7 @@ impl Default for Program {
     }
 }
 
-/// Gate a read on the versions this build's offsets are validated for.
-pub(crate) fn known_version(
-    format: &'static str,
-    version: u32,
-    supported: &'static [u32],
-) -> Result<(), Error> {
-    if !supported.contains(&version) {
-        return Err(ParseError::UnsupportedVersion {
-            format,
-            version,
-            supported,
-        }
-        .into());
-    }
-    Ok(())
-}
+pub(crate) use crate::formats::known_version;
 
 /// Gate a read on the `aux` word every slot-addressed specimen holds.
 ///

@@ -114,9 +114,8 @@ pub fn info(ui: &Ui) -> Result<(), String> {
             match nord_usb::transport::UsbTransport::open(d).and_then(|t| t.identity()) {
                 Ok(id) => {
                     ui.out(format!(
-                        "  firmware:  {}.{:02}",
-                        id.firmware / 100,
-                        id.firmware % 100
+                        "  firmware:  {}",
+                        crate::summary::version_label(u32::from(id.firmware))
                     ));
                     ui.out(format!("  build:     {}", id.build));
                     ui.out(format!("  max xfer:  {} bytes", id.max_transfer));
@@ -206,8 +205,8 @@ fn finish<T>(
 
 /// Turn the device's bare status code into something actionable.
 ///
-/// All three confirmed on hardware 2026-07-31: `0x1` from a vacant slot, `0x3` from
-/// `9:1` and `8:51`, `0x4` from a write aimed at an occupied slot.
+/// All three confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address
+/// past the instrument's geometry, `0x4` from a write aimed at an occupied slot.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
         nord_usb::Error::DeviceStatus(1) => {
@@ -222,6 +221,21 @@ fn explain(e: nord_usb::Error, at: Location) -> String {
                 shown(at)
             )
         }
+        other => other.to_string(),
+    }
+}
+
+/// [`explain`] for a verb with a source and a destination: an empty slot can only be
+/// the source, an occupied one only the destination.
+fn explain_pair(e: nord_usb::Error, from: Location, to: Location) -> String {
+    match e {
+        nord_usb::Error::DeviceStatus(1) => explain(e, from),
+        nord_usb::Error::DeviceStatus(4) => explain(e, to),
+        nord_usb::Error::DeviceStatus(3) => format!(
+            "{} or {} is out of range for this instrument",
+            shown(from),
+            shown(to)
+        ),
         other => other.to_string(),
     }
 }
@@ -479,7 +493,13 @@ pub fn put(
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty() && !s.starts_with('.'))
+        .ok_or_else(|| {
+            format!(
+                "{}: the slot takes its name from the file's stem, and this file has none",
+                path.display()
+            )
+        })?;
     // The file's own modification time, as NSM sends.
     let stamp = std::fs::metadata(&path)
         .and_then(|m| m.modified())
@@ -501,10 +521,6 @@ pub fn put(
 
 /// Run one mutating operation in its own session, committing either way — an abandoned
 /// session leaves the instrument mid-transaction with its progress label still painted.
-///
-/// A macro rather than a function because the operation borrows the session it is handed,
-/// and a closure returning a future that borrows its own argument cannot be written with
-/// the higher-ranked bound that would need.
 macro_rules! one_shot {
     ($t:expr, $class:expr, |$s:ident| $body:expr) => {
         nord_usb::block_on(async {
@@ -547,7 +563,7 @@ pub fn send(
         let closed = s.commit().await;
         finish(r, closed)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| explain(e, at))?;
     if let Some(reason) = bad {
         return Err(format!("{}: {reason}", shown(at)));
     }
@@ -815,7 +831,7 @@ pub fn move_object(
         let r = usb_op::move_object(&mut s, from, to).await;
         r.and(s.commit().await)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| explain_pair(e, from, to))?;
     ui.note(format!("moved {} -> {}", shown(from), shown(to)));
     Ok(())
 }
@@ -839,20 +855,42 @@ pub fn delete(
         ));
     }
     ui.confirm(confirmed)?;
-    nord_usb::block_on(async {
+    // Each delete lands on the instrument as it is sent: a failure part-way leaves the
+    // earlier ones gone, and the report has to say which.
+    let mut done = 0;
+    let outcome = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class)
-            .await?
+            .await
+            .map_err(|e| (slots[0], e))?
             .allow_destructive_writes();
         let mut r = Ok(());
         for &at in slots {
-            r = usb_op::delete(&mut s, at).await;
+            r = usb_op::delete(&mut s, at).await.map_err(|e| (at, e));
             if r.is_err() {
                 break;
             }
+            done += 1;
         }
-        r.and(s.commit().await)
-    })
-    .map_err(|e| e.to_string())?;
+        match (r, s.commit().await) {
+            (Err(e), _) => Err(e),
+            (Ok(()), Err(e)) => Err((slots[slots.len() - 1], e)),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    });
+    if let Err((at, e)) = outcome {
+        let gone: Vec<String> = slots[..done].iter().map(|&at| shown(at)).collect();
+        return Err(match done {
+            0 => format!("deleting {}: {}", shown(at), explain(e, at)),
+            _ => format!(
+                "deleting {}: {} — {} already deleted ({}); {} left alone",
+                shown(at),
+                explain(e, at),
+                done,
+                gone.join(", "),
+                slots.len() - done - 1
+            ),
+        });
+    }
     ui.note(format!("deleted {} item(s)", slots.len()));
     Ok(())
 }
@@ -881,7 +919,7 @@ pub fn rename(
         let r = usb_op::rename(&mut s, at, &name).await;
         r.and(s.commit().await)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| explain(e, at))?;
     ui.note(format!("renamed {} -> {:?}", shown(at), name));
     Ok(())
 }
@@ -914,7 +952,7 @@ pub fn duplicate(
         let r = usb_op::duplicate(&mut s, from, to).await;
         r.and(s.commit().await)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| explain_pair(e, from, to))?;
     ui.note(format!("duplicated {} -> {}", shown(from), shown(to)));
     Ok(())
 }
@@ -929,7 +967,7 @@ pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
         let closed = s.commit().await;
         r.and(closed)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| explain(e, at))?;
     ui.note(format!("selected {} on the instrument", shown(at)));
     Ok(())
 }
@@ -971,7 +1009,7 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
         let closed = s.commit().await;
         finish(r, closed)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| explain(e, at))?;
 
     // The device reports a row for a section that is not routed, resolving its model
     // index to a library object the program does not actually use — so an unfiltered
@@ -1134,6 +1172,11 @@ pub fn controls(
     value: u16,
     index: u16,
 ) -> Result<(), String> {
+    if from > to {
+        return Err(format!(
+            "--from {from:#04x} is above --to {to:#04x}; nothing to sweep"
+        ));
+    }
     let t = open_usb()?;
     let recipient = if interface {
         nord_usb::transport::usb::Recipient::Interface
@@ -1311,6 +1354,12 @@ pub fn probe(
         return Err("refusing to probe without --yes".into());
     }
 
+    if op == u32::MAX {
+        return Err(format!(
+            "{op:#x} has no `op + 1` reply code; the command space ends one below it"
+        ));
+    }
+
     let svc = nord_usb::Service::from_raw(service);
     let mut t = open_usb()?;
 
@@ -1345,8 +1394,8 @@ pub fn probe(
         let mut s = Session::open(&mut t, class).await?;
         let r = s
             .probe(
-                nord_usb::Service::Program,
-                10,
+                svc,
+                subsystem,
                 op,
                 &words,
                 std::time::Duration::from_secs(wait),

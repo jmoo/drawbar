@@ -215,8 +215,13 @@ fn bar(ui: &mut egui::Ui, field: &Field) -> Option<String> {
 /// Nine drawbars and the positions under them. No hex: the digits are the readout.
 pub fn register(ui: &mut egui::Ui, field: &Field, live: bool) -> Option<String> {
     let bits = drawbar_widget::parse(&field.value)?;
-    bars(ui, drawbar_widget::bars(bits), live, drawbar_widget::BARS)
-        .map(|moved| drawbar_widget::spell(drawbar_widget::bits(moved)))
+    bars(
+        ui,
+        drawbar_widget::bars(bits),
+        live,
+        &drawbar_widget::ALL_RANKS,
+    )
+    .map(|moved| drawbar_widget::spell(drawbar_widget::bits(moved)))
 }
 
 /// The drawbars themselves, plus the digits. Returns the positions when one is pulled.
@@ -224,14 +229,15 @@ pub fn bars(
     ui: &mut egui::Ui,
     positions: [u8; drawbar_widget::BARS],
     live: bool,
-    count: usize,
+    ranks: &[usize],
 ) -> Option<[u8; drawbar_widget::BARS]> {
     let mut moved = None;
+    let count = ranks.len().min(drawbar_widget::BARS);
     ui.vertical(|ui| {
-        moved = drawbar_widget::ui_count(ui, positions, live, count);
+        moved = drawbar_widget::ui_ranks(ui, positions, live, ranks);
         let shown = moved.unwrap_or(positions);
         ui.label(
-            egui::RichText::new(drawbar_widget::digits(&shown[..count.min(shown.len())]))
+            egui::RichText::new(drawbar_widget::digits(&shown[..count]))
                 .monospace()
                 .small()
                 .weak(),

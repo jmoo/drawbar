@@ -1,8 +1,9 @@
 //! The Stage 4 organ preset body (`.ns4o`): 139 bytes.
 //!
-//! One organ section as a program stores it, moved down 45 bytes, without the
-//! keyboard zone — that belongs to the program that loads the preset. The two
-//! layers still share one effects chain, so its fields carry no layer.
+//! One organ section as a program stores it, moved down 45 bytes, keyboard zone
+//! included on both layers though a preset has no use for it — layer A's is
+//! confirmed against the corpus, where it varies as a zone does. The two layers
+//! still share one effects chain, so its fields carry no layer.
 
 use super::fx::FxChain;
 use crate::cbin::{self, Cbin};
@@ -49,6 +50,8 @@ pub struct OrganPreset {
     pub organ_b_volume_aftertouch: MorphTarget,
     #[bits(100..=107)]
     pub organ_b_volume_ctrl_pedal: MorphTarget,
+    #[bits(184..=187)]
+    pub organ_a_kb_zones: KbZone4,
     #[bits(188..=191)]
     pub organ_a_octave_shift: OctaveShiftNibble,
     #[bits(192..=192)]

@@ -221,20 +221,14 @@ pub fn precious(entity: &LocalEntity) -> bool {
 
 /// The filename an export suggests for a verbatim name: made path-safe, and given the
 /// extension the bytes say it should have unless the name already carries one.
-fn export_filename(name: &str, bytes: &[u8], what: ExportWhat) -> String {
+fn export_filename(name: &str, bytes: &[u8]) -> String {
     let stem = match filename_stem(name) {
         s if s.is_empty() => "unnamed".to_string(),
         s => s,
     };
-    match what {
-        ExportWhat::Body => match stem.ends_with(".body") {
-            true => stem,
-            false => format!("{stem}.body"),
-        },
-        ExportWhat::File => match carries_tag(&stem) {
-            true => stem,
-            false => format!("{stem}.{}", format_tag(bytes)),
-        },
+    match carries_tag(&stem) {
+        true => stem,
+        false => format!("{stem}.{}", format_tag(bytes)),
     }
 }
 
@@ -530,13 +524,6 @@ enum Incoming {
     Failed(String),
 }
 
-/// Which bytes a save writes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ExportWhat {
-    File,
-    Body,
-}
-
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     selected: Option<u64>,
@@ -787,32 +774,21 @@ impl Workspace {
     /// ⚠️ The one place a name becomes a filename — and the one place a name is made
     /// path-safe. Everywhere else the name is verbatim: what the instrument or the
     /// operator called the thing, spaces and all, and that spelling is what a rename
-    /// sends back to the instrument. Sanitising anywhere earlier is how "Big strings"
-    /// once came back as "Big-strings".
-    pub fn export_name(&self, id: u64, what: ExportWhat) -> Option<String> {
+    /// sends back to the instrument.
+    pub fn export_name(&self, id: u64) -> Option<String> {
         let entity = self.get(id)?;
-        Some(export_filename(&entity.name, &entity.bytes, what))
+        Some(export_filename(&entity.name, &entity.bytes))
     }
 
-    pub fn export(&self, id: u64, what: ExportWhat) {
+    pub fn export(&self, id: u64) {
         let Some(entity) = self.entities.iter().find(|e| e.id == id) else {
             return;
         };
-        let name = match self.export_name(id, what) {
+        let name = match self.export_name(id) {
             Some(name) => name,
             None => return,
         };
-        let bytes = match what {
-            ExportWhat::File => Some(entity.bytes.clone()),
-            ExportWhat::Body => entity.raw_body(),
-        };
-        let Some(bytes) = bytes else {
-            let _ = self.tx.send(Incoming::Failed(format!(
-                "{}: not a CBIN container, so there is no header to strip",
-                entity.name,
-            )));
-            return;
-        };
+        let bytes = entity.bytes.clone();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         spawn(async move {
@@ -1251,24 +1227,15 @@ mod tests {
     #[test]
     fn an_export_sanitises_the_name_and_supplies_the_extension() {
         let bytes = Fresh::Program.bytes().unwrap();
-        let file = |name: &str| export_filename(name, &bytes, ExportWhat::File);
+        let file = |name: &str| export_filename(name, &bytes);
         assert_eq!(file("Big strings"), "Big-strings.ne5p");
         assert_eq!(file("patch.ne5p"), "patch.ne5p", "a carried tag is kept");
         assert_eq!(file("Bass 2.0"), "Bass-2.0.ne5p", "a dot is not a tag");
         assert_eq!(file("../../etc/passwd"), "etc-passwd.ne5p");
         assert_eq!(file("  "), "unnamed.ne5p");
         assert_eq!(
-            export_filename("Big strings", b"no header", ExportWhat::File),
+            export_filename("Big strings", b"no header"),
             "Big-strings.bin",
-        );
-        assert_eq!(
-            export_filename("Big strings.body", &bytes, ExportWhat::Body),
-            "Big-strings.body",
-            "a body dump is not double-tagged"
-        );
-        assert_eq!(
-            export_filename("Big strings", &bytes, ExportWhat::Body),
-            "Big-strings.body",
         );
     }
 
@@ -1323,12 +1290,8 @@ mod tests {
         // And the filename an export offers is that same name, not one worked back out
         // of the bytes.
         assert_eq!(
-            workspace.export_name(id, ExportWhat::File).as_deref(),
+            workspace.export_name(id).as_deref(),
             Some("Africa-Split.ne5p")
-        );
-        assert_eq!(
-            workspace.export_name(id, ExportWhat::Body).as_deref(),
-            Some("Africa-Split.ne5p.body")
         );
     }
 

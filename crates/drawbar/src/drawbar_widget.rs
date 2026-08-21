@@ -20,6 +20,11 @@ pub const MAX: u8 = 8;
 /// fixes; the labels are the panel's convention, not something the file states.
 const FOOTAGE: [&str; BARS] = ["16", "5⅓", "8", "4", "2⅔", "2", "1⅗", "1⅓", "1"];
 
+/// Every rank, in register order.
+pub const ALL_RANKS: [usize; BARS] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+/// The bass manual's two ranks, 16′ and 8′ — not the register's first two.
+pub const BASS_RANKS: [usize; 2] = [0, 2];
+
 fn stop_colour(bar: usize) -> egui::Color32 {
     match bar {
         0 | 1 => egui::Color32::from_rgb(0x6b, 0x4a, 0x33),
@@ -99,32 +104,28 @@ pub fn digits(positions: &[u8]) -> String {
     out
 }
 
-/// Nine drawbars. Returns the new positions when one has been pulled.
+/// The first `ranks.len()` bars of `positions`, each labelled and coloured as the rank
+/// it stands for. Returns the new positions when one has been pulled.
 ///
 /// `live` false paints them dimmed and ignores input — for a registration the
-/// instrument is not reading, where showing nine draggable bars would assert that
-/// moving them does something.
-pub fn ui(ui: &mut egui::Ui, positions: [u8; BARS], live: bool) -> Option<[u8; BARS]> {
-    ui_count(ui, positions, live, BARS)
-}
-
-/// The first `count` bars of a registration.
+/// instrument is not reading, where showing draggable bars would assert that moving
+/// them does something.
 ///
 /// ⚠️ The bass manual of b3+bass has two, and they are not the first two nibbles of a
-/// nine-drawbar block — they are their own fields. Drawing nine there would assert a
-/// registration that plays nothing.
-pub fn ui_count(
+/// nine-drawbar block — they are their own fields, at [`BASS_RANKS`]. Drawing nine
+/// there would assert a registration that plays nothing.
+pub fn ui_ranks(
     ui: &mut egui::Ui,
     positions: [u8; BARS],
     live: bool,
-    count: usize,
+    ranks: &[usize],
 ) -> Option<[u8; BARS]> {
     let mut moved = positions;
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        for (n, value) in moved.iter_mut().enumerate().take(count.min(BARS)) {
-            if bar(ui, Some(n), value, live) {
+        for (value, &rank) in moved.iter_mut().zip(ranks) {
+            if bar(ui, Some(rank), value, live) {
                 changed = true;
             }
         }

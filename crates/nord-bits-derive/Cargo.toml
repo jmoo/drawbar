@@ -3,6 +3,7 @@ name = "nord-bits-derive"
 categories = ["development-tools::procedural-macro-helpers"]
 description = "Declarative bit-packed panel definitions for nord-format"
 edition.workspace = true
+rust-version.workspace = true
 keywords = ["bitfield", "nord", "proc-macro"]
 license.workspace = true
 repository.workspace = true

@@ -40,3 +40,27 @@ impl std::fmt::Debug for Cne3 {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_library_is_kept_verbatim() {
+        let bytes = [b"CNE3".as_slice(), &[0x2c, 0x01, 0, 0, 7, 7, 7]].concat();
+        let lib = Cne3::read_from(&mut bytes.as_slice()).unwrap();
+        assert_eq!(lib.data, bytes);
+        let mut out = Vec::new();
+        lib.write_to(&mut out).unwrap();
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        assert!(Cne3::read_from(&mut b"CNE2....".as_slice()).is_err());
+        assert!(
+            Cne3::read_from(&mut b"CNE".as_slice()).is_err(),
+            "shorter than the magic"
+        );
+    }
+}

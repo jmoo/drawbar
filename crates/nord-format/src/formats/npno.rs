@@ -44,6 +44,13 @@ const NAME_END: usize = 0x40;
 /// Offset of the 128-entry per-note key map.
 const KEY_MAP_AT: usize = 0x8c;
 
+/// The stream versions the prefix offsets above are validated against. A body with
+/// another version still reads and writes verbatim; its name and key map are refused
+/// rather than read from offsets that may not hold them.
+pub const KNOWN_VERSIONS: &[u16] = &[0x450, 0x464];
+/// [`KNOWN_VERSIONS`] as the gate spells them.
+const KNOWN_VERSIONS_U32: &[u32] = &[0x450, 0x464];
+
 /// A piano library (`npno`): the CNSP prefix read in place, body verbatim.
 ///
 /// Reads and writes byte-exactly, checksum verified. Only the prefix decodes —
@@ -95,6 +102,14 @@ impl Piano {
         Ok(body)
     }
 
+    /// The body bytes, after checking the magic and that the stream version is one the
+    /// prefix offsets are pinned to.
+    fn mapped(&self) -> Result<&[u8], Error> {
+        let version = self.stream_version()?;
+        crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)?;
+        self.cnsp()
+    }
+
     /// The stream version at body `0x04` — `0x450` on v5.x specimens, `0x464`
     /// on v6.1.
     pub fn stream_version(&self) -> Result<u16, Error> {
@@ -109,7 +124,7 @@ impl Piano {
     /// *Electric Grand 1 CP80*, `("Electric Grand 1", "CP80")`. The variant is
     /// empty when the field carries none.
     pub fn name(&self) -> Result<(String, String), Error> {
-        let body = self.cnsp()?;
+        let body = self.mapped()?;
         let field = body
             .get(NAME_AT..NAME_END)
             .ok_or_else(|| ParseError::AssertFail("body ends inside the name field".to_string()))?;
@@ -123,7 +138,7 @@ impl Piano {
     /// every specimen, `0xFF` for a note the library does not cover. What the
     /// value indexes is not yet mapped; exposed verbatim.
     pub fn key_map(&self) -> Result<&[u8], Error> {
-        self.cnsp()?
+        self.mapped()?
             .get(KEY_MAP_AT..KEY_MAP_AT + 128)
             .ok_or_else(|| {
                 ParseError::AssertFail("body ends inside the key map".to_string()).into()
@@ -181,6 +196,18 @@ mod tests {
         assert_eq!(map.len(), 128);
         assert_eq!(map[0], 0xFF);
         assert_eq!(map[127], 0x19);
+    }
+
+    #[test]
+    fn an_unknown_stream_version_still_round_trips_but_does_not_decode() {
+        let mut p = piano(b"X#");
+        p.file.body.0[4..6].copy_from_slice(&0x0500u16.to_be_bytes());
+        assert_eq!(p.stream_version().unwrap(), 0x500);
+        assert!(
+            p.name().is_err(),
+            "the name offset is only pinned on known versions"
+        );
+        assert!(p.key_map().is_err());
     }
 
     #[test]

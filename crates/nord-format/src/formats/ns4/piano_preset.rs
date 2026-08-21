@@ -1,7 +1,8 @@
 //! The Stage 4 piano preset body (`.ns4n`): 151 bytes.
 //!
-//! One piano section as a program stores it, moved down 180 bytes, without the
-//! keyboard zone — that belongs to the program that loads the preset.
+//! One piano section as a program stores it, moved down 180 bytes, keyboard zone
+//! included on both layers though a preset has no use for it — layer A's is
+//! confirmed against the corpus, where it varies as a zone does.
 
 use super::fx::FxChain;
 use crate::cbin::{self, Cbin};
@@ -46,6 +47,8 @@ pub struct PianoPreset {
     pub piano_b_volume_aftertouch: MorphTarget,
     #[bits(100..=107)]
     pub piano_b_volume_ctrl_pedal: MorphTarget,
+    #[bits(144..=147)]
+    pub piano_a_kb_zones: KbZone4,
     #[bits(148..=151)]
     pub piano_a_octave_shift: OctaveShiftNibble,
     #[bits(152..=152)]

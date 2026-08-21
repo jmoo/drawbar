@@ -103,7 +103,7 @@ NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
   cargo test -p nord-format --features corpus
 
 # With nix
-nix build .#checks.<system>.nord-format-corpus
+nix build .#nord.nord-format-corpus
 ```
 
 ## Disclaimer

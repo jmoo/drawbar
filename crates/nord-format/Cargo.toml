@@ -3,6 +3,7 @@ name = "nord-format"
 categories = ["encoding", "parser-implementations"]
 description = "Parse and write Clavia / Nord keyboard binary file formats (Electro 5, …)"
 edition.workspace = true
+rust-version.workspace = true
 keywords = ["clavia", "electro", "nord", "parser"]
 license.workspace = true
 repository.workspace = true

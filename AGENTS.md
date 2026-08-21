@@ -54,8 +54,9 @@ This is a nix native project. Cargo needs to be executed from the nix devshell.
 If you reach for any other tools (python, jq, etc.) invoke them with nix shell if
 they are not installed globally.
 
-- Test: `cargo test --workspace` (from `crates/`). CI runs
-  `cargo test -p nord-bits-derive -p nord-format --features nord-format/bundle`.
+- Test: `cargo test --workspace` (from `crates/`). CI tests `nord-bits-derive`,
+  `nord-format`, `nord-usb` and `nord-cli` with each crate's `testFeatures`, and
+  fails on anything `nix fmt` would change or clippy would flag.
 - Corpus tests: `--features corpus` with `NORD_CORPUS_DIR` pointing at a
   `nord-corpus/ne5` checkout; without the private corpus they don't compile in,
   and the default suite must keep passing anywhere.

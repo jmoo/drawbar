@@ -4,7 +4,7 @@ use crate::components::sparse_enum;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 
-// 0x3a..0x41 — the piano panel.
+// 0x3a..=0x40 — the piano panel.
 
 /// The piano panel: category and model slot, plus the clav and acoustic
 /// playing options.

@@ -5,7 +5,7 @@ use crate::components::PartMix;
 use crate::formats::ne5::{Instrument, Level, OctaveShift, SplitPoint, Transpose};
 use nord_bits_derive::bitbody;
 
-// 0x2e..0x34 — the center panel.
+// 0x2e..=0x33 — the center panel.
 
 /// The center panel: part selection, split, transpose, gain, and the organ
 /// selector.

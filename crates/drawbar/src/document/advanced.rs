@@ -279,7 +279,8 @@ impl Advanced {
             return;
         };
         // Folded away: a library body prints hundreds of megabytes, and the operator who
-        // wants it will say so.
+        // wants it will say so. ⚠️ The format is synchronous and on the UI thread — opening
+        // this on a piano library holds the frame for as long as it takes.
         egui::CollapsingHeader::new("Show the decode")
             .id_salt("raw_debug")
             .show(ui, |ui| {

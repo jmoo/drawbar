@@ -20,7 +20,7 @@
 use super::slot::Slot;
 use crate::cbin::{self, Cbin, Header};
 use crate::components::{
-    sparse_enum, Level, MasterTempo, ProgramCategory, ReverbType, RotorSpeed, Selector, SplitNote,
+    Level, MasterTempo, ProgramCategory, ReverbType, RotorSpeed, Selector, SplitNote,
     StageTranspose,
 };
 use crate::error::Error;
@@ -157,39 +157,3 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error
 /// Total over the nibble: the widest encoding is `8 + 7 = 15`, so no stored pattern is
 /// refused.
 pub type OctaveShift = crate::components::OctaveShift<7, -7, 8>;
-
-sparse_enum!(
-    /// From the `ns2-organ-kb-zone` table in the Stage byte-map docs.
-    OrganKbZone, 3, {
-        0 => Lo, "LO";
-        1 => LoUp, "LO UP";
-        2 => Up, "UP";
-        3 => UpHi, "UP HI";
-        4 => Hi, "HI";
-        5 => LoUpHi, "LO UP HI";
-    }
-);
-
-sparse_enum!(
-    /// From the `ns2-piano-kb-zone` table in the Stage byte-map docs.
-    PianoKbZone, 3, {
-        0 => Lo, "LO";
-        1 => LoUp, "LO UP";
-        2 => Up, "UP";
-        3 => UpHi, "UP HI";
-        4 => Hi, "HI";
-        5 => LoUpHi, "LO UP HI";
-    }
-);
-
-sparse_enum!(
-    /// From the `ns2-synth-kb-zone` table in the Stage byte-map docs.
-    SynthKbZone, 3, {
-        0 => Lo, "LO";
-        1 => LoUp, "LO UP";
-        2 => Up, "UP";
-        3 => UpHi, "UP HI";
-        4 => Hi, "HI";
-        5 => LoUpHi, "LO UP HI";
-    }
-);

@@ -7,12 +7,18 @@
 # NORD_RUNNER prefixes every invocation when the binary is foreign.
 set -euo pipefail
 
+[ $# -ge 1 ] || {
+  echo "usage: $0 path/to/nord" >&2
+  exit 2
+}
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 here=$(cd "$(dirname "$0")" && pwd)
 
 run() { ${NORD_RUNNER:-} "$bin" "$@"; }
 
-cd "$(mktemp -d)"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+cd "$scratch"
 
 echo
 echo "== the command surface =="

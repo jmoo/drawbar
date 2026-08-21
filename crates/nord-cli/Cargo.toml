@@ -2,6 +2,7 @@
 name = "nord-cli"
 description = "Command-line tool for inspecting Clavia / Nord keyboard files (dogfoods nord-format)"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 version.workspace = true

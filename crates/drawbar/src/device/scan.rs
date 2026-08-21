@@ -20,6 +20,10 @@ pub struct Progress {
 }
 
 /// The classes still to read, and how far each got.
+///
+/// ⚠️ A class asked for while its own walk is running is queued again behind it: the
+/// walk in flight finishes on the instrument whatever happens here, and what it has
+/// read may already be stale. [`Scan::finished`] therefore never touches the queue.
 #[derive(Default)]
 pub struct Scan {
     queue: VecDeque<ObjectClass>,
@@ -59,10 +63,11 @@ impl Scan {
         progress.done = progress.done.max(bank);
     }
 
-    /// The walk ended — whether it ran out of banks or gave up part-way.
+    /// The walk ended — whether it ran out of banks or gave up part-way. Still running
+    /// if the class has been asked for again in the meantime.
     pub fn finished(&mut self, class: ObjectClass) {
-        self.queue.retain(|queued| *queued != class);
-        self.progress.entry(class.to_raw()).or_default().running = false;
+        let again = self.queue.contains(&class);
+        self.progress.entry(class.to_raw()).or_default().running = again;
     }
 
     pub fn progress(&self, class: ObjectClass) -> Option<Progress> {
@@ -131,7 +136,28 @@ mod tests {
         let mut scan = Scan::default();
         scan.start(ObjectClass::Program);
         scan.start(ObjectClass::SetList);
+        assert_eq!(scan.take(), Some(ObjectClass::Program));
         scan.finished(ObjectClass::Program);
         assert_eq!(scan.take(), Some(ObjectClass::SetList));
+    }
+
+    /// "Read this folder again" while it is being read means read it again, after.
+    #[test]
+    fn a_class_asked_for_during_its_own_walk_is_read_again() {
+        let mut scan = Scan::default();
+        scan.start(ObjectClass::Program);
+        assert_eq!(scan.take(), Some(ObjectClass::Program));
+        scan.bank(ObjectClass::Program, 2);
+
+        scan.start(ObjectClass::Program);
+        scan.finished(ObjectClass::Program);
+        assert!(
+            scan.progress(ObjectClass::Program).unwrap().running,
+            "the second walk is still owed"
+        );
+        assert_eq!(scan.take(), Some(ObjectClass::Program));
+        scan.finished(ObjectClass::Program);
+        assert!(!scan.progress(ObjectClass::Program).unwrap().running);
+        assert_eq!(scan.take(), None);
     }
 }

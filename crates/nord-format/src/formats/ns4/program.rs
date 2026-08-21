@@ -114,6 +114,8 @@ pub struct Program {
     pub rotary_speaker_stop_enabled: bool,
     #[bits(515..=515)]
     pub rotary_speaker_slow_fast: RotorSpeed,
+    /// ⚠️ Seven bits and knob-spaced values in the corpus (`0, 21, 42, 59, 75, 89, 91`),
+    /// not a six-way index — what maps them onto the panel's C1–V3 is open.
     #[bits(522..=528)]
     pub organ_vib_chorus_type: Level,
     #[bits(1481..=1481)]

@@ -43,6 +43,11 @@ const SETTING_WIDTH: usize = 27;
 
 /// `label:     value`, label dimmed so the eye runs down the values. `indent` is 2 for
 /// the file's own identity and 4 for anything sitting under a section heading.
+/// A version stored ×100, as the instrument prints it: `530` is `5.30`.
+pub(crate) fn version_label(v: u32) -> String {
+    format!("{}.{:02}", v / 100, v % 100)
+}
+
 fn field(ui: &Ui, indent: usize, label: &str, value: impl std::fmt::Display) -> String {
     let label = format!("{label}:");
     format!(
@@ -421,7 +426,7 @@ fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
         (Err(e), _) => ui.warn(format!("name unreadable: {e}")),
     }
     let v = s.header.version;
-    ui.out(field(ui, 2, "version", format!("{}.{}", v / 100, v % 100)));
+    ui.out(field(ui, 2, "version", version_label(v)));
     ui.out(field(ui, 2, "strokes", s.stroke_count().to_string()));
 
     section(ui, "Zones");
@@ -453,7 +458,7 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
     }
     // Content version, `format * 100 + revision`: 200 reads back as 2.0.
     let v = s.header.version;
-    ui.out(field(ui, 2, "version", format!("{}.{}", v / 100, v % 100)));
+    ui.out(field(ui, 2, "version", version_label(v)));
     let categories = s.categories();
     if !categories.is_empty() {
         ui.out(field(ui, 2, "category", categories.join(" / ")));
@@ -622,9 +627,6 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
         Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
-            if let Some(name) = b.name() {
-                ui.out(field(ui, 2, "name", name));
-            }
             ui.out(field(
                 ui,
                 2,
@@ -768,10 +770,7 @@ fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>
         "category",
         format!("{:?}", program::category(&p.header)),
     ));
-    ui.out(field(ui, 2, "version", {
-        let v = p.header.version;
-        format!("{}.{:02}", v / 100, v % 100)
-    }));
+    ui.out(field(ui, 2, "version", version_label(p.header.version)));
 
     section(ui, "Globals");
     ui.out(field(ui, 4, "panels", format!("{:?}", p.panel_enable)));
@@ -833,10 +832,7 @@ fn ns4_head(ui: &Ui, kind: &str, header: &nord_format::cbin::Header) {
     if let Some(id) = header.category() {
         ui.out(field(ui, 2, "category", format!("id {id}")));
     }
-    ui.out(field(ui, 2, "version", {
-        let v = header.version;
-        format!("{}.{:02}", v / 100, v % 100)
-    }));
+    ui.out(field(ui, 2, "version", version_label(header.version)));
 }
 
 fn ns4_note(ui: &Ui) {
