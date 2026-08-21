@@ -700,11 +700,12 @@ async fn scan_class<T: Transport>(
             banks: expected,
         });
 
-        // Where the panel is, which the browser marks. A refusal is an ordinary answer —
-        // nothing of the class is loaded, and the library classes have no focus at all —
-        // so it costs a dot and not a word.
+        // Where the panel is, which the browser marks. The two refusals are different
+        // answers: status 1 is "supported, nothing loaded" and 0x15 is "focus does not
+        // apply to this class" (pianos, samples) — only the first is worth an event.
         match op::focus(&mut s).await {
-            Ok(at) => emit.send(DeviceEvent::Focus { class, at }),
+            Ok(at) => emit.send(DeviceEvent::Focus { class, at: Some(at) }),
+            Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),
             Err(Error::DeviceStatus(_)) => {}
             Err(e) => return Err(e),
         }
@@ -1853,7 +1854,7 @@ mod wire_tests {
         let focused: Vec<Location> = events
             .try_iter()
             .filter_map(|event| match event {
-                DeviceEvent::Focus { at, .. } => Some(at),
+                DeviceEvent::Focus { at, .. } => at,
                 _ => None,
             })
             .collect();
