@@ -66,7 +66,7 @@ fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
 
         let outcome = pollster::block_on(drive::drive(&mut t, class, &verb[0], &verb[1..], dir));
         section
-            .expect
+            .expect()
             .check(&outcome)
             .map_err(|e| where_(i, intent, e))?;
 

@@ -44,3 +44,21 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
+
+impl Error {
+    /// This failure's name in a replay script's `expect: err <kind>` header.
+    ///
+    /// The vocabulary is short on purpose — it exists to tell one *expected* refusal
+    /// from another — so a failure it does not name is reported as the nearest kind
+    /// rather than left out, where the script would claim the operation succeeded. A
+    /// script that names the wrong kind fails the sweep, which is the report; a script
+    /// that names none passes silently, which is not.
+    pub fn expect_kind(&self) -> String {
+        match self {
+            Error::DeviceStatus(code) => format!("device-status {code:#x}"),
+            Error::UnexpectedResponse { .. } => "unexpected-response".into(),
+            Error::Replay(_) => "replay".into(),
+            _ => "transport".into(),
+        }
+    }
+}

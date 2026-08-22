@@ -34,14 +34,17 @@ error**, the same rule the corpus's specimen sidecars follow.
 | `trimmed` | file | what was left out of the capture, e.g. `ui-refresh` |
 | `note` | file | prose |
 | `intent` | section | what the host was doing: `<class> <verb> <args…>` |
-| `expect` | section | `ok` (the default) or `err <kind>` |
+| `expect` | section | `ok` (the default) or `err <kind>`, once per section |
 
 The file-level keys must precede the first frame. `intent` opens a **section** running to
 the next `intent` or to the end of the file: one command is several transactions — a
 `put` into an occupied slot is five — so a recording of one command is one script of
 several sections, driven in order on one transport.
 
-`expect` names the outcome of its own section:
+`expect` names the outcome of its own section, and may sit anywhere inside it — with the
+intent, or under the frames it judges. A recorder only learns the outcome once the frames
+are written, so that is where `nord --record` puts it, and only when the transaction
+failed: a section that says nothing expects `ok`.
 
 | `expect` | Passes on |
 |---|---|
@@ -91,9 +94,11 @@ nothing.
 
 ## Writing one
 
-`nord … --record <path>` writes all of this itself: the header, and an `intent` at every
-transaction it opens. A capture made that way is a finished golden — drop it in a
-directory here or in the corpus and it is a trial.
+`nord … --record <path>` writes all of this itself: the header, an `intent` at every
+transaction it opens, and an `expect` under one that failed — the empty slot a pre-check
+names before a `put`, or a rename the library classes refuse. A capture made that way is a
+finished golden, whichever way it went; drop it in a directory here or in the corpus and
+it is a trial.
 
 The hand-built ones under `session/` cover paths no instrument produces on request: a
 refused close, a notification flood, a session an earlier run left open. Four of them are

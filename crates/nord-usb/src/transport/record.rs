@@ -72,6 +72,19 @@ impl Recorder {
         self.line('I', bytes);
     }
 
+    /// Declare that the transaction just recorded failed, and how.
+    ///
+    /// Written after its frames rather than with its intent: the outcome is only known
+    /// once the operation is over, and a script that says nothing claims it succeeded.
+    pub fn expect(&mut self, e: &crate::error::Error) {
+        if self.failed.is_some() {
+            return;
+        }
+        if let Err(io) = writeln!(self.file, "# expect: err {}", e.expect_kind()) {
+            self.failed = Some(io);
+        }
+    }
+
     /// Write a free-form comment line, to mark what the following frames belong to.
     pub fn comment(&mut self, text: &str) {
         if self.failed.is_some() {
