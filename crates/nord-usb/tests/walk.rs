@@ -14,6 +14,11 @@
 //! Corpus-gated: the scripts carry slot names, so they live in the private corpus rather
 //! than in this repo.
 //!
+//! What is here rather than in `tests/replay` is the *result* of each walk: the sweep
+//! drives a script and checks its bytes, and these four also say how many slots the walk
+//! must find. Give those scripts a `# intent: <class> walk` header and the sweep drives
+//! them too, from the same files.
+//!
 //! ```sh
 //! NORD_CORPUS_ROOT=/path/to/nord-corpus \
 //!   cargo test -p nord-usb --features corpus
