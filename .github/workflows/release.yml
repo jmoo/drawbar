@@ -1,12 +1,23 @@
-# Publishes one crate to crates.io per tag: `<crate>-v<version>`, e.g.
-# `nord-format-v0.1.0`. Auth is crates.io Trusted Publishing (OIDC) — each
-# crate's crates.io settings must list this repo + workflow file; there is no
-# token secret to rotate. First-ever publish of a new crate can't use this
-# (Trusted Publishing is configured on an existing crate) — do it locally.
+# Releases are driven by Conventional Commits on master:
+#
+#   bump    — release-please maintains one Release PR that bumps each published
+#             crate's version and CHANGELOG, keeps nord-format's exact
+#             nord-bits-derive pin in sync and refreshes Cargo.lock (the
+#             cargo-workspace plugin). Merging it tags `<crate>-v<version>`
+#             GitHub releases.
+#   publish — publishes those to crates.io via Trusted Publishing (OIDC); there
+#             is no token secret to rotate. First-ever publish of a new crate
+#             can't use this (Trusted Publishing is configured on an existing
+#             crate) — do it locally.
+#
+# Manually pushing a `<crate>-v<version>` tag still publishes that crate
+# (`publish-tag`) — the escape hatch when something must go out without
+# waiting for a Release PR.
 name: release
 
 on:
   push:
+    branches: [master]
     tags:
       - "nord-bits-derive-v*"
       - "nord-format-v*"
@@ -14,7 +25,69 @@ on:
 permissions: {}
 
 jobs:
+  bump:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.rp.outputs.releases_created }}
+      paths_released: ${{ steps.rp.outputs.paths_released }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
   publish:
+    needs: bump
+    # always(): `bump` skips itself on tag pushes, which must not skip this job
+    if: always() && needs.bump.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchange with crates.io
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      # ⚠️ Order matters: nord-format pins an exact nord-bits-derive version,
+      # so the derive must be on the registry before nord-format publishes.
+      - name: publish nord-bits-derive
+        if: contains(fromJSON(needs.bump.outputs.paths_released), 'crates/nord-bits-derive')
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATE: nord-bits-derive
+        run: |
+          manifest_version="$(jq -r --arg p "crates/$CRATE" '.[$p]' ../.release-please-manifest.json)"
+          pkgid_version="$(cargo pkgid -p "$CRATE" | sed 's/.*[@#]//')"
+          if [ "$manifest_version" != "$pkgid_version" ]; then
+            echo "manifest says $manifest_version but Cargo.toml says $pkgid_version" >&2
+            exit 1
+          fi
+          cargo publish -p "$CRATE"
+      - name: publish nord-format
+        if: contains(fromJSON(needs.bump.outputs.paths_released), 'crates/nord-format')
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATE: nord-format
+        run: |
+          manifest_version="$(jq -r --arg p "crates/$CRATE" '.[$p]' ../.release-please-manifest.json)"
+          pkgid_version="$(cargo pkgid -p "$CRATE" | sed 's/.*[@#]//')"
+          if [ "$manifest_version" != "$pkgid_version" ]; then
+            echo "manifest says $manifest_version but Cargo.toml says $pkgid_version" >&2
+            exit 1
+          fi
+          cargo publish -p "$CRATE"
+
+  publish-tag:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,9 +103,10 @@ jobs:
         run: |
           crate="${GITHUB_REF_NAME%-v*}"
           tag_version="${GITHUB_REF_NAME##*-v}"
-          manifest_version="$(cargo pkgid -p "$crate" | sed 's/.*[@#]//')"
-          if [ "$tag_version" != "$manifest_version" ]; then
-            echo "tag says $tag_version but Cargo.toml says $manifest_version" >&2
+          manifest_version="$(jq -r --arg p "crates/$crate" '.[$p]' ../.release-please-manifest.json)"
+          pkgid_version="$(cargo pkgid -p "$crate" | sed 's/.*[@#]//')"
+          if [ "$tag_version" != "$manifest_version" ] || [ "$tag_version" != "$pkgid_version" ]; then
+            echo "tag says $tag_version, manifest says $manifest_version, Cargo.toml says $pkgid_version" >&2
             exit 1
           fi
           echo "crate=$crate" >> "$GITHUB_OUTPUT"
