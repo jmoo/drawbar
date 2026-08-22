@@ -1,6 +1,6 @@
 //! `BANK:SLOT`, the way the instrument labels a location.
 
-use nord_usb::wire::Location;
+use nord_usb::wire::{Location, ObjectClass};
 use std::path::PathBuf;
 
 /// A verb's target: a slot on the instrument, or a file standing in for one.
@@ -51,6 +51,23 @@ pub fn parse_all(slots: &[String]) -> Result<Vec<Location>, String> {
 /// One-indexed `bank N slot M`, matching the instrument's own labels.
 pub fn shown(at: Location) -> String {
     format!("bank {} slot {}", at.bank + 1, at.slot + 1)
+}
+
+/// The CLI's own noun for an object class — the word a recorded script's intent uses,
+/// and the word the sweep parses back.
+///
+/// A class with no noun of its own is reached as `nord raw --class N`, and is spelled
+/// for the record as the number it is.
+pub fn noun(class: ObjectClass) -> String {
+    match class {
+        ObjectClass::Piano => "piano".into(),
+        ObjectClass::Sample => "sample".into(),
+        ObjectClass::Program => "program".into(),
+        ObjectClass::SetList => "setlist".into(),
+        ObjectClass::Live => "live".into(),
+        ObjectClass::Settings => "settings".into(),
+        ObjectClass::Unknown(n) => format!("class-{n}"),
+    }
 }
 
 /// The compact `BANK:SLOT` spelling, as the address is typed on the command line.

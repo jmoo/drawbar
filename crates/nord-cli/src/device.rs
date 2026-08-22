@@ -17,7 +17,7 @@ use nord_usb::transport::Transport;
 use nord_usb::wire::{Location, ProgramInfo, Status};
 use nord_usb::{op as usb_op, ObjectClass, Session};
 
-use crate::slot::{addr, shown};
+use crate::slot::{addr, noun, shown};
 use crate::ui::Ui;
 
 /// Where to get the exchange from.
@@ -33,6 +33,7 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     let report = match source {
         Source::Usb => {
             let mut transport = open_usb()?;
+            transport.mark_intent("device status");
             collect(&mut transport)?
         }
         Source::Replay(path) => {
@@ -281,6 +282,8 @@ fn read_object(
     class: ObjectClass,
     body: bool,
 ) -> Result<(ProgramInfo, Vec<u8>), String> {
+    let verb = if body { "get-body" } else { "get" };
+    t.mark_intent(&format!("{} {verb} {}", noun(class), addr(at)));
     nord_usb::block_on(async {
         let mut s = Session::open(t, class).await?;
         let r = async {
@@ -557,6 +560,7 @@ pub fn send(
     // Bounds first, from the device's own geometry. Without this an impossible address
     // is only discovered once the transfer is under way, and the report is a status code
     // rather than a reason.
+    t.mark_intent(&format!("{} check-address {}", noun(class), addr(at)));
     let bad = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = usb_op::check_address(&mut s, at).await;
@@ -570,6 +574,7 @@ pub fn send(
 
     // Name what is about to be destroyed before destroying it. An empty destination is
     // not a failure: status 1 means the slot is vacant, so there is nothing to report.
+    t.mark_intent(&format!("{} info {}", noun(class), addr(at)));
     let existing = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = usb_op::info(&mut s, at).await;
@@ -611,6 +616,9 @@ pub fn send(
 
     // After consent, not before: for a piano this read is minutes long, and nobody should
     // sit through it only to be asked whether they meant it.
+    if existing.is_some() {
+        t.mark_intent(&format!("{} read {}", noun(class), addr(at)));
+    }
     let backup = match &existing {
         Some(_) => Some(
             nord_usb::block_on(async {
@@ -633,6 +641,7 @@ pub fn send(
 
     if existing.is_some() {
         ui.note(format!("deleting {} to make room", shown(at)));
+        t.mark_intent(&format!("{} delete {}", noun(class), addr(at)));
         one_shot!(&mut t, class, |s| usb_op::delete(&mut s, at))
             .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
@@ -659,6 +668,7 @@ pub fn send(
             "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
         ))
     } else {
+        t.mark_intent(&put_intent(class, what, at, &write_name, timestamp));
         one_shot!(&mut t, class, |s| usb_op::write(
             &mut s,
             at,
@@ -687,6 +697,13 @@ pub fn send(
                 .as_ref()
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| write_name.clone());
+            t.mark_intent(&put_intent(
+                class,
+                &rescue_name(at, &backup),
+                at,
+                &restore_name,
+                timestamp,
+            ));
             match one_shot!(&mut t, class, |s| usb_op::write(
                 &mut s,
                 at,
@@ -763,6 +780,7 @@ fn peek(
     class: ObjectClass,
     at: Location,
 ) -> Result<String, String> {
+    t.mark_intent(&format!("{} info {}", noun(class), addr(at)));
     nord_usb::block_on(async {
         let mut s = Session::open(t, class).await?;
         let r = usb_op::info(&mut s, at).await;
@@ -824,6 +842,7 @@ pub fn move_object(
         dest
     ));
     ui.confirm(confirmed)?;
+    t.mark_intent(&format!("{} move {} {}", noun(class), addr(from), addr(to)));
     nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class)
             .await?
@@ -855,6 +874,8 @@ pub fn delete(
         ));
     }
     ui.confirm(confirmed)?;
+    let addresses: Vec<String> = slots.iter().map(|&at| addr(at)).collect();
+    t.mark_intent(&format!("{} delete {}", noun(class), addresses.join(" ")));
     // Each delete lands on the instrument as it is sent: a failure part-way leaves the
     // earlier ones gone, and the report has to say which.
     let mut done = 0;
@@ -912,6 +933,7 @@ pub fn rename(
         name
     ));
     ui.confirm(confirmed)?;
+    t.mark_intent(&format!("{} rename {} {name:?}", noun(class), addr(at)));
     nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class)
             .await?
@@ -945,6 +967,12 @@ pub fn duplicate(
         dest
     ));
     ui.confirm(confirmed)?;
+    t.mark_intent(&format!(
+        "{} duplicate {} {}",
+        noun(class),
+        addr(from),
+        addr(to)
+    ));
     nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class)
             .await?
@@ -961,6 +989,7 @@ pub fn duplicate(
 /// confirmation is needed.
 pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut t = open_usb()?;
+    t.mark_intent(&format!("{} select {}", noun(class), addr(at)));
     nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = usb_op::select(&mut s, at).await;
@@ -1003,6 +1032,7 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
 /// List the piano/sample library objects an entity depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut t = open_usb()?;
+    t.mark_intent(&format!("{} deps {}", noun(class), addr(at)));
     let deps = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = usb_op::dependencies(&mut s, at).await;
@@ -1070,6 +1100,7 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
 /// Release anything an interrupted run left open on the instrument.
 pub fn recover(ui: &Ui) -> Result<(), String> {
     let mut t = open_usb()?;
+    t.mark_intent("device recover");
     nord_usb::block_on(usb_op::recover(&mut t)).map_err(|e| e.to_string())?;
     ui.note("released any session the instrument was still holding");
     ui.note("if slots were reading as empty, re-check them now");
@@ -1079,6 +1110,7 @@ pub fn recover(ui: &Ui) -> Result<(), String> {
 /// Report the instrument's storage layout, from the device's own tables. Read-only.
 pub fn geometry(ui: &Ui) -> Result<(), String> {
     let mut t = open_usb()?;
+    t.mark_intent("device geometry");
     let rows = nord_usb::block_on(async {
         // Any class opens a session; the partition table is device-wide.
         let mut s = Session::open(&mut t, ObjectClass::Program).await?;
@@ -1238,6 +1270,7 @@ pub fn controls(
 /// Report which object the panel has loaded in this class. Read-only.
 pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
     let mut t = open_usb()?;
+    t.mark_intent(&format!("{} focus", noun(class)));
     let (at, info) = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = async {
@@ -1269,6 +1302,14 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 /// items is a few hundred exchanges rather than a few hundred sessions.
 pub fn list(ui: &Ui, class: ObjectClass, cap: usize) -> Result<(), String> {
     let mut t = open_usb()?;
+    // The guard is part of what the walk sends, so it belongs in the intent whenever it
+    // is not the default the sweep assumes.
+    let bound = if cap == 1024 {
+        String::new()
+    } else {
+        format!(" {cap}")
+    };
+    t.mark_intent(&format!("{} walk{bound}", noun(class)));
     let rows = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = async {
@@ -1477,6 +1518,7 @@ fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
 /// file stores at all.
 pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut t = open_usb()?;
+    t.mark_intent(&format!("{} info {}", noun(class), addr(at)));
     let info = nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = usb_op::info(&mut s, at).await;
@@ -1520,6 +1562,7 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
 /// Read one object's bytes with no printing, for `edit`'s read-modify-write.
 pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
     let mut t = open_usb()?;
+    t.mark_intent(&format!("{} read {}", noun(class), addr(at)));
     nord_usb::block_on(async {
         let mut s = Session::open(&mut t, class).await?;
         let r = usb_op::read_program(&mut s, at).await;
@@ -1527,6 +1570,17 @@ pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
         finish(r, closed)
     })
     .map_err(|e| explain(e, at))
+}
+
+/// The intent line for a write: the file beside the script, the slot, and the two
+/// `BEGIN_WRITE` arguments the file itself does not carry — the name the slot ends up
+/// with, and the timestamp the device stores.
+fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u32) -> String {
+    let file = Path::new(what)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| what.to_string());
+    format!("{} put {file} {} {name:?} {stamp}", noun(class), addr(at))
 }
 
 /// Filename for a rescued slot: the location as the instrument labels it, and the
