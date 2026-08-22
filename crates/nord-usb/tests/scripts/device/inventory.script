@@ -4,6 +4,8 @@
 # Generated from the protocol spec; counters are real Electro 5 values,
 # read off the instrument on 2026-07-26.
 # Format: '<O|I> <hex>' -- O = host->device, I = device->host.
+# source: synthetic
+# intent: device status
 
 # ---- class 1 ----
 O 0000001200000006000000010000000006a1

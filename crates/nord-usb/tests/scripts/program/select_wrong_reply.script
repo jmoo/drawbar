@@ -1,0 +1,15 @@
+# source: synthetic
+# note: a mid-session reply answering the wrong command is a desync - nothing read
+#   after it pairs with its request - so the transaction ends. The script carries
+#   the GOODBYE exchange and no more, which is what proves the bail said it and
+#   that the caller's commit stayed off the wire.
+# intent: program select 2:12
+# expect: err unexpected-response
+O 0000001200000006000000010000000006a1
+I 000000160000000600000001000000010000000044ec
+O 000000160000000c0000000a0000000400000004a218
+I 0000001a0000000c0000000a00000005000000000000000467b0
+O 0000001a0000000c0000000a0000002f000000010000000b746a
+I 000000160000000c0000000a0000001f000000000a39  # an INFO reply where the SELECT's 0x30 belongs
+O 0000001200000006000000010000000226e3
+I 0000001600000006000000010000000300000000006f

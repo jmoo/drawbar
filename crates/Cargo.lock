@@ -1855,6 +1855,7 @@ name = "nord-usb"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "libtest-mimic",
  "nord-format",
  "nusb",
  "pollster",

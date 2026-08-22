@@ -453,6 +453,24 @@ impl Transport for ReplayTransport {
         Ok(())
     }
 
+    /// A bounded read answers `None` wherever the script has nothing for the device to
+    /// say — the end of it, or a frame the host sends next.
+    ///
+    /// That is what a recording of a timed-out read looks like: the read produced no
+    /// frame, so none was written down. Without this, replaying an operation built on
+    /// bounded reads — [`crate::op::recover`] drains the stream that way — would fail on
+    /// the very silence it was recorded against.
+    async fn read_timeout(
+        &mut self,
+        max: usize,
+        _limit: std::time::Duration,
+    ) -> Result<Option<Vec<u8>>> {
+        match self.script.get(self.pos) {
+            Some(step) if step.direction == Direction::In => self.read(max).await.map(Some),
+            _ => Ok(None),
+        }
+    }
+
     async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
         let step = self
             .script

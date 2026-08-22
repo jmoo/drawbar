@@ -1,0 +1,10 @@
+# source: nord
+# device: Nord Electro 5, firmware v2.04 build 592
+# note: two bare frames, no session around them - the session machinery is
+#   exactly what a wedged instrument refuses. The drain reads that precede
+#   them time out with nothing on the wire, so they leave no frame here.
+# intent: device recover
+O 0000001200000006000000010000000226e3
+I 0000001600000006000000010000000300000001104e
+O 000000120000000c0000000a000000066500
+I 000000160000000c0000000a00000007000000123e3d
