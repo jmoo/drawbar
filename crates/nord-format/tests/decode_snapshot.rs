@@ -34,13 +34,14 @@ use nord_format::formats::ne5::{OrganModel, Program};
 use nord_format::{Entity, Live, Settings};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs;
-use std::path::Path;
 
 #[path = "support/scan.rs"]
 mod scan;
+#[path = "support/snapshot.rs"]
+mod snapshot;
 
 use scan::{corpus, named};
+use snapshot::compare;
 
 /// The files pinned field-by-field by [`specimens`]: one per constructed panel,
 /// each with a non-default value in the panel it was captured for, plus one factory
@@ -680,50 +681,4 @@ fn settings() {
     }
 
     compare("decode_settings.snapshot", &out);
-}
-
-/// Compare against the committed snapshot, or rewrite it under `UPDATE_SNAPSHOTS=1`.
-fn compare(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/snapshots")
-        .join(name);
-
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, actual).unwrap();
-        println!("wrote {}", path.display());
-        return;
-    }
-
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "{} is missing ({e}) — generate it with UPDATE_SNAPSHOTS=1",
-            path.display()
-        )
-    });
-
-    if expected == actual {
-        return;
-    }
-
-    let mut diff = String::new();
-    for (n, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
-        if want != got {
-            let _ = write!(diff, "\n  line {}:\n    want {want}\n    got  {got}", n + 1);
-        }
-    }
-    if expected.lines().count() != actual.lines().count() {
-        let _ = write!(
-            diff,
-            "\n  length: want {} lines, got {}",
-            expected.lines().count(),
-            actual.lines().count()
-        );
-    }
-
-    panic!(
-        "{} no longer matches the decode:{diff}\n\nIf the change is intended, re-bless with \
-         UPDATE_SNAPSHOTS=1 — after reading the diff.",
-        path.display()
-    );
 }
