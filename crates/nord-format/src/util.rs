@@ -53,7 +53,17 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
     reader.seek(SeekFrom::Start(0))?;
 
     let result = match head[0] {
-        0x50 => Ok(unknown(FileType::Zip)),
+        // 'P' — a ZIP local-file header, checked in full so a stray P (or a bare
+        // central directory) is not called an archive.
+        0x50 => {
+            let mut head = [0u8; 4];
+            reader.read_exact(&mut head)?;
+            if &head == b"PK\x03\x04" {
+                Ok(unknown(FileType::Zip))
+            } else {
+                Err(ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned()).into())
+            }
+        }
 
         0x3c => Ok(unknown(FileType::Xml)),
 

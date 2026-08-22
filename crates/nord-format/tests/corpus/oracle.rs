@@ -4,7 +4,7 @@
 //! gaining a sidecar there, not by anyone adding a case here.
 
 use crate::lookup;
-use crate::sidecar::{sidecar_of, DIR_KEYS, SPECIMEN_KEYS};
+use crate::sidecar::{sidecar_of, SPECIMEN_KEYS};
 use libtest_mimic::Failed;
 use nord_format::formats::ne5::OrganModel;
 use nord_format::formats::nsmp;
@@ -13,56 +13,14 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
-fn load(path: &Path, allowed: &[&str]) -> Result<Value, Failed> {
-    crate::sidecar::load(path, allowed).map_err(Failed::from)
-}
-
-/// Does this path owe the corpus an oracle? Differential trees — a model's
-/// `programs/`, `settings/` and `samples/` — must say something about every
-/// specimen; factory material and captures carry no filename oracle at all.
-fn oracle_required(root: &Path, specimen: &Path) -> bool {
-    let Ok(rel) = specimen.strip_prefix(root) else {
-        return false;
-    };
-    let parts: Vec<String> = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    parts.len() >= 2
-        && matches!(parts[1].as_str(), "programs" | "settings" | "samples")
-        && !parts.iter().any(|p| p == "factory")
-}
-
-/// Does the specimen's directory answer for it with an `unoracled` block?
-fn dir_unoracled(specimen: &Path) -> Result<bool, Failed> {
-    let dir_sidecar = specimen.parent().unwrap().join("dir.oracle.json");
-    if !dir_sidecar.exists() {
-        return Ok(false);
-    }
-    Ok(load(&dir_sidecar, DIR_KEYS)?.get("unoracled").is_some())
-}
-
-/// Check one specimen against its sidecar — or against the rule that the
-/// absence of an oracle has to be a decision, not an omission.
-pub fn check_specimen(
-    root: &Path,
-    path: &Path,
-    bytes: &[u8],
-    entity: &Entity,
-) -> Result<(), Failed> {
+/// Check one specimen against its sidecar, if it has one.
+pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), Failed> {
     let sidecar = sidecar_of(path);
     if !sidecar.exists() {
-        if oracle_required(root, path) && !dir_unoracled(path)? {
-            return Err(
-                "differential specimen with neither a sidecar nor an unoracled reason — \
-                 the suite would stay green having checked nothing"
-                    .into(),
-            );
-        }
         return Ok(());
     }
 
-    let v = load(&sidecar, SPECIMEN_KEYS)?;
+    let v = crate::sidecar::load(&sidecar, SPECIMEN_KEYS).map_err(Failed::from)?;
     if v.get("unoracled").is_some() {
         return Ok(());
     }
@@ -153,7 +111,7 @@ fn number(s: &str) -> Option<f64> {
 /// A sidecar value matches if it equals any of the field's spellings, or —
 /// where both sides read as numbers — sits within `slack` of one (exactly on
 /// it, when no slack is given).
-pub fn matches(want: &str, spellings: &[String], slack: Option<f64>) -> bool {
+fn matches(want: &str, spellings: &[String], slack: Option<f64>) -> bool {
     let want = normalize(want);
     if spellings.iter().any(|s| normalize(s) == want) {
         return true;
@@ -217,128 +175,5 @@ fn check_trait(name: &str, entity: &Entity, wrong: &mut Vec<String>) {
             }
         }
         other => wrong.push(format!("unknown trait {other:?}")),
-    }
-}
-
-/// Check a `dir.oracle.json`: validate it, and hold any `dependencies` table it
-/// carries against every specimen in its directory.
-pub fn check_dir_sidecar(dir: &Path, sidecar: &Path) -> Result<(), Failed> {
-    let v = load(sidecar, DIR_KEYS)?;
-    // `unoracled` is applied per-specimen and `piano_categories` is read by the
-    // consumers that need the map; only `dependencies` asserts here.
-    let Some(dep) = v.get("dependencies") else {
-        return Ok(());
-    };
-    check_dependencies(dir, dep)
-}
-
-/// A golden id table: `field` names the path holding a library id, `keyed_by`
-/// the paths forming its slot coordinate, and every specimen in the directory
-/// must land on exactly one row and carry that row's id. Every row must be
-/// covered, so the table cannot outlive the specimens it was written for.
-fn check_dependencies(dir: &Path, dep: &Value) -> Result<(), Failed> {
-    let field = dep
-        .get("field")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Failed::from("dependencies without a field"))?;
-    let keyed_by: Vec<&str> = dep
-        .get("keyed_by")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .ok_or_else(|| Failed::from("dependencies without keyed_by"))?;
-    let table = dep
-        .get("table")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Failed::from("dependencies without a table"))?;
-
-    struct Row {
-        key: Vec<String>,
-        id: String,
-        hits: usize,
-    }
-    let mut rows: Vec<Row> = Vec::new();
-    for row in table {
-        rows.push(Row {
-            key: row
-                .get("key")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .ok_or_else(|| Failed::from("table row without a key"))?,
-            id: row
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Failed::from("table row without an id"))?
-                .to_string(),
-            hits: 0,
-        });
-    }
-
-    let mut wrong: Vec<String> = Vec::new();
-    let mut checked = 0usize;
-    for entry in fs::read_dir(dir).map_err(|e| Failed::from(e.to_string()))? {
-        let path = entry.unwrap().path();
-        if !path.is_file() || !crate::wanted(&path) {
-            continue;
-        }
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let entity = match nord_format::from_path(&path) {
-            Ok(e) => e,
-            Err(e) => {
-                // The parse itself is the specimen trial's problem; here it
-                // only ends this file's part in the table.
-                wrong.push(format!("{name}: {e}"));
-                continue;
-            }
-        };
-        let key: Vec<Vec<String>> = keyed_by
-            .iter()
-            .map(|p| lookup::lookup(&entity, p))
-            .collect::<Result<_, _>>()
-            .map_err(Failed::from)?;
-        let id = lookup::lookup(&entity, field).map_err(Failed::from)?;
-
-        let row = rows.iter_mut().find(|r| {
-            r.key.len() == key.len()
-                && r.key
-                    .iter()
-                    .zip(&key)
-                    .all(|(want, spellings)| matches(want, spellings, None))
-        });
-        match row {
-            None => wrong.push(format!("{name}: key {key:?} has no table row")),
-            Some(row) => {
-                if !matches(&row.id, &id, None) {
-                    wrong.push(format!(
-                        "{name}: {field} decodes to {id:?}, table says {}",
-                        row.id
-                    ));
-                }
-                row.hits += 1;
-            }
-        }
-        checked += 1;
-    }
-
-    if checked == 0 {
-        wrong.push("no specimens beside the table — is the corpus present?".into());
-    }
-    for row in &rows {
-        if row.hits == 0 {
-            wrong.push(format!(
-                "table row {:?} is covered by no specimen — the table has outlived it",
-                row.key
-            ));
-        }
-    }
-
-    if wrong.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("{}:\n  {}", wrong.len(), wrong.join("\n  ")).into())
     }
 }

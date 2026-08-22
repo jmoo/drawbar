@@ -8,53 +8,8 @@
 //! than placement and are spelled here by hand.
 
 use nord_format::bank::Item;
-use nord_format::fields::{Field, FieldValue};
 use nord_format::formats::ne5::{self, OrganModel};
-use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Sample, Settings, Song, Synth};
-
-/// The registry fields of any entity whose body declares one. `None` for the
-/// container-verified stubs, which decode nothing to ask about.
-pub fn field_values(entity: &Entity) -> Option<Vec<FieldValue>> {
-    match entity {
-        Entity::Program(Program::Electro5(f)) | Entity::Live(Live::Electro5(f)) => {
-            Some(f.field_values())
-        }
-        Entity::Program(Program::Stage2(f)) | Entity::Live(Live::Stage2(f)) => {
-            Some(f.field_values())
-        }
-        Entity::Program(Program::Stage3(f)) | Entity::Live(Live::Stage3(f)) => {
-            Some(f.field_values())
-        }
-        Entity::Program(Program::Stage4(f)) | Entity::Live(Live::Stage4(f)) => {
-            Some(f.field_values())
-        }
-        Entity::Settings(Settings::Electro5(f)) => Some(f.field_values()),
-        Entity::Song(Song::Electro5(f)) => Some(f.field_values()),
-        Entity::Synth(Synth::Stage3(f)) => Some(f.field_values()),
-        Entity::Synth(Synth::Stage4(f)) => Some(f.field_values()),
-        Entity::OrganPreset(OrganPreset::Stage4(f)) => Some(f.field_values()),
-        Entity::PianoPreset(PianoPreset::Stage4(f)) => Some(f.field_values()),
-        _ => None,
-    }
-}
-
-/// The same dispatch as [`field_values`], for the settable-field view, which
-/// carries both of a value's canonical spellings.
-fn registry(entity: &Entity) -> Option<Vec<Field>> {
-    match entity {
-        Entity::Program(Program::Electro5(f)) | Entity::Live(Live::Electro5(f)) => Some(f.fields()),
-        Entity::Program(Program::Stage2(f)) | Entity::Live(Live::Stage2(f)) => Some(f.fields()),
-        Entity::Program(Program::Stage3(f)) | Entity::Live(Live::Stage3(f)) => Some(f.fields()),
-        Entity::Program(Program::Stage4(f)) | Entity::Live(Live::Stage4(f)) => Some(f.fields()),
-        Entity::Settings(Settings::Electro5(f)) => Some(f.fields()),
-        Entity::Song(Song::Electro5(f)) => Some(f.fields()),
-        Entity::Synth(Synth::Stage3(f)) => Some(f.fields()),
-        Entity::Synth(Synth::Stage4(f)) => Some(f.fields()),
-        Entity::OrganPreset(OrganPreset::Stage4(f)) => Some(f.fields()),
-        Entity::PianoPreset(PianoPreset::Stage4(f)) => Some(f.fields()),
-        _ => None,
-    }
-}
+use nord_format::{Entity, Live, Program, Sample, Settings, Song};
 
 /// Every spelling `path` decodes to in `entity` — a sidecar value matching any
 /// of them matches the field. Errs on a path the entity cannot answer, which is
@@ -115,7 +70,7 @@ pub fn lookup(entity: &Entity, path: &str) -> Result<Vec<String>, String> {
 }
 
 fn registry_lookup(entity: &Entity, name: &str) -> Result<Vec<String>, String> {
-    let fields = registry(entity).ok_or("entity declares no field registry")?;
+    let fields = crate::registry::fields(entity).ok_or("entity declares no field registry")?;
     let field = fields
         .into_iter()
         .find(|f| f.path == name)

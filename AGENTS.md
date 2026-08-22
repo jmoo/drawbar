@@ -59,9 +59,9 @@ they are not installed globally.
   fails on anything `nix fmt` would change or clippy would flag.
 - Corpus tests: `--features corpus` with `NORD_CORPUS_ROOT` pointing at a
   `nord-corpus` checkout; without the private corpus they don't compile in, and
-  the default suite must keep passing anywhere. `tests/corpus` generates one test per
-  specimen — a specimen joins the sweep by existing, and its
-  `<file>.oracle.json` sidecar is asserted where the corpus ships one.
+  the default suite must keep passing anywhere. `tests/corpus` generates one test
+  per readable file — the committed `tests/fixtures/` always, the corpus with the
+  feature — and asserts the `<file>.oracle.json` sidecar where one exists.
 - Nix: `nix build .#<crate>` builds and tests one crate, `.#nord.all` every
   crate and cross target. Everything lives flat under the `nord` attribute;
   `packages` exposes the crates and cross builds. `nix flake check` verifies

@@ -449,7 +449,7 @@ let
   # access to it.
 
   corpusTree = builtins.fetchGit {
-    rev = "8c34f7ad59b9767f9084a5a062cbe9c1db722ee2";
+    rev = "828944a36b195f244c053bf7dd7e59fa8fb3fe5f";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
@@ -469,9 +469,7 @@ let
 
   # One suite per corpus crate: the crate's own package — `final`'s, so a later
   # overlay changing a crate changes its suite — re-run by `.override` with the
-  # specimens named and the feature that compiles the sweeps in. The suites
-  # address the corpus by its root alone, joining `ne5/` where they want the
-  # Electro 5 tree.
+  # specimens named and the feature that compiles the sweeps in.
   committed = genAttrs corpusCrates (
     name:
     final.nord.crates.${name}.override {

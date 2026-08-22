@@ -81,36 +81,34 @@ refinement — never a risk to the write path.
 
 - **`bundle`** — ZIP-based backup bundles (pulls in the `zip` stack). Off by
   default so parse-only consumers stay lean; enable with `--features bundle`.
-- **`corpus`** — *test-only*. Gates the corpus-backed integration tests; see
-  below. Implies `bundle`, because the corpus holds ZIP banks.
+- **`corpus`** — *test-only*. Adds the private specimen corpus to the sweep;
+  see below. Implies `bundle`, because the corpus holds ZIP banks.
 
 ## Tests
 
 Unit tests live inline (`#[cfg(test)] mod tests`) and run on a plain
-`cargo test`, alongside two open integration suites: `tests/dispatch.rs`
-synthesizes a file for every registered tag in memory and checks dispatch +
-round-trip for both header generations, and `tests/fixtures.rs` does the same
-against the committed synthetic files in `tests/fixtures/` — golden bytes
-written by this crate's own writers — plus a sweep that sets every declared
-field to every declared value and reads it back.
+`cargo test`, alongside `tests/dispatch.rs`, which synthesizes a file for
+every registered tag in memory and checks dispatch + round-trip for both
+header generations, and the **specimen sweep**, `tests/corpus`: one generated
+test per file — container checksum, parse, byte-exact round trip, no
+unnameable decoded values, every registry field set to a new value and read
+back without moving another, and the file's oracle sidecar
+(`<file>.oracle.json`) where it has one. A file joins by being readable; an
+oracle by existing beside it.
 
-The **corpus suites** are gated behind the `corpus` feature because they need
-the specimen corpus, which lives in a separate private repo (`jmoo/nord-corpus`):
-
-- `tests/corpus` — one generated test per specimen, every model and both
-  storage tiers: container checksum, parse, byte-exact round trip, no
-  unnameable decoded values, and the specimen's oracle sidecar
-  (`<file>.oracle.json`) where the corpus ships one. A specimen joins the
-  sweep by existing.
-- `tests/decode_sanity.rs` — cross-file floors and behavior pins the one-file
-  trials cannot express.
-- `tests/decode_snapshot.rs` — per-field decode snapshots for the Electro 5
-  and Stage 4.
+The sweep always reads `tests/fixtures/` — specimens this crate's own writers
+produced, with sidecars saying what was set, committed as the part of the
+corpus any checkout can carry (`tests/fixtures.rs` pins them as golden bytes).
+With `--features corpus` it also reads the private specimen corpus
+(`jmoo/nord-corpus`), as do two more suites that need the whole corpus in
+view at once: `tests/decode_sanity.rs` (cross-file invariants and behavior
+pins) and `tests/decode_snapshot.rs` (per-field decode snapshots for the
+Electro 5 and the Stage family).
 
 ```sh
-cargo test -p nord-format                       # open suite (unit + dispatch + fixtures)
+cargo test -p nord-format                       # open suite: unit + dispatch + fixtures sweep
 
-# Corpus suites — point at a nord-corpus checkout:
+# With the corpus — point at a nord-corpus checkout:
 NORD_CORPUS_ROOT=/path/to/nord-corpus \
   cargo test -p nord-format --features corpus
 

@@ -1,99 +1,42 @@
-//! The whole-corpus sweep: one test per specimen, built at runtime with
-//! `libtest-mimic`.
+//! The specimen sweep: one test per file, built at runtime with `libtest-mimic`.
 //!
-//! Every specimen of every model — the R2 tier included, when the assembly
-//! projects it in — parses, passes its container checksum, re-encodes
-//! byte-exactly, decodes no value its components cannot name, and satisfies its
-//! oracle sidecar where the corpus ships one. A specimen joins the sweep by
-//! existing; a model joins by having a directory. Nothing here names a model.
+//! Two trees feed it. `tests/fixtures/` — files this crate's own writers
+//! produced, committed so the sweep has something to read in any checkout —
+//! always; the private corpus under `NORD_CORPUS_ROOT` with `--features corpus`.
+//! Every file the reader recognizes, wherever it sits, is a specimen: it passes
+//! its container checksum, parses, re-encodes byte-exactly, decodes no value its
+//! components cannot name, every registry field of it takes a new value without
+//! moving another, and its `<file>.oracle.json` sidecar holds where there is
+//! one. Nothing here names a model or a directory.
 //!
 //! ```sh
+//! cargo test -p nord-format --test corpus                        # the fixtures
 //! NORD_CORPUS_ROOT=/path/to/nord-corpus \
-//!   cargo test -p nord-format --features corpus --test corpus
+//!   cargo test -p nord-format --features corpus --test corpus    # and the corpus
 //! ```
 //!
 //! Filter like any other test: `--test corpus ne5/settings` runs the trials
-//! whose corpus-relative path contains the string.
+//! whose path contains the string.
 
 mod lookup;
 mod oracle;
 
-#[path = "../support/corpus.rs"]
-mod corpus_loc;
+#[path = "../support/registry.rs"]
+mod registry;
+#[path = "../support/scan.rs"]
+mod scan;
 #[path = "../support/sidecar.rs"]
 mod sidecar;
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use nord_format::cbin::{self, Generation};
+#[cfg(feature = "bundle")]
 use nord_format::Entity;
-use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-/// Extensions the sweep reads as entities. Everything else in the corpus —
-/// captures, sidecars, manifests, documentation — is deliberately not a format.
-fn wanted(path: &Path) -> bool {
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return false;
-    };
-    // `.body` files are bare bodies with no container; `.skip.` marks a
-    // specimen the suite is told to ignore.
-    let name = path.file_name().unwrap().to_string_lossy();
-    if name.contains(".skip.") || name.ends_with(".body") {
-        return false;
-    }
-    !matches!(
-        ext,
-        "md" | "json"
-            | "xml"
-            | "nix"
-            | "lock"
-            | "tsv"
-            | "bin"
-            | "txt"
-            | "pcapng"
-            // Recorded wire exchanges, replayed by nord-usb rather than parsed.
-            | "script"
-            | "nsmpproj"
-            | "html"
-            | "pdf"
-            | "gitignore"
-    )
-}
-
-/// Directories the walk never enters: `pending/` is an untracked staging area,
-/// `tools/` is the corpus's own CLI.
-fn skipped_dir(name: &str) -> bool {
-    matches!(name, "pending" | "tools" | ".git")
-}
-
-/// Every wanted specimen and every oracle sidecar under the corpus.
-fn walk(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let mut specimens = Vec::new();
-    let mut sidecars = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if path.is_dir() {
-                if !skipped_dir(&name) {
-                    stack.push(path);
-                }
-            } else if name.ends_with(".oracle.json") {
-                sidecars.push(path);
-            } else if wanted(&path) {
-                specimens.push(path);
-            }
-        }
-    }
-    specimens.sort();
-    sidecars.sort();
-    (specimens, sidecars)
-}
-
-/// The corpus-relative path, `/`-joined on every platform so the documented
+/// The path under its root, `/`-joined on every platform so the documented
 /// filters and the trial kinds read the same everywhere.
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
@@ -115,8 +58,8 @@ fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
 }
 
 /// One specimen: checksum, parse, byte-exact round trip, no unnameable decoded
-/// values, and the oracle sidecar if the corpus ships one.
-fn specimen(root: &Path, path: &Path) -> Result<(), Failed> {
+/// values, every field moves alone, and the oracle sidecar if there is one.
+fn specimen(path: &Path) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
     let info = if bytes.starts_with(b"CBIN") {
@@ -135,7 +78,11 @@ fn specimen(root: &Path, path: &Path) -> Result<(), Failed> {
 
     // The archive layer does not re-encode, so for a bundle the parse itself —
     // every member read and container-verified — is the whole check.
-    if !matches!(entity, Entity::Bundle(_)) {
+    #[cfg(feature = "bundle")]
+    let is_bundle = matches!(entity, Entity::Bundle(_));
+    #[cfg(not(feature = "bundle"))]
+    let is_bundle = false;
+    if !is_bundle {
         let back =
             nord_format::to_bytes(&entity).map_err(|e| Failed::from(format!("re-encode: {e}")))?;
         if back != bytes {
@@ -154,7 +101,7 @@ fn specimen(root: &Path, path: &Path) -> Result<(), Failed> {
         })
         .unwrap_or(false);
     if !all_ones {
-        if let Some(values) = lookup::field_values(&entity) {
+        if let Some(values) = registry::field_values(&entity) {
             let unknown: Vec<String> = values
                 .into_iter()
                 // An out-of-table value renders as `unknown (raw)` / `Unknown(raw)`.
@@ -170,7 +117,9 @@ fn specimen(root: &Path, path: &Path) -> Result<(), Failed> {
         }
     }
 
-    oracle::check_specimen(root, path, &bytes, &entity)
+    registry::each_field_moves_alone(&bytes)?;
+
+    oracle::check_specimen(path, &bytes, &entity)
 }
 
 /// Out-of-table values the corpus is known to hold, exempted by exact field and
@@ -182,86 +131,50 @@ fn known_unexplained(field: &str, value: &str) -> bool {
     field.ends_with(".kb_zones") && value == "unknown (10)"
 }
 
-/// Floors on what the sweep read, so a whole directory, a whole format or a
-/// whole header generation silently dropping out of the walk fails the run
-/// rather than shrinking it. Each floor sits well under the committed tier, so
-/// corpus growth never trips one and only a loss does.
-fn coverage(specimens: &[PathBuf], root: &Path) -> Result<(), Failed> {
-    if specimens.len() < 9000 {
-        return Err(format!("only {} specimens read — corpus present?", specimens.len()).into());
+/// The trials for one tree, named `<label>/<path under root>`.
+fn trials_for(label: &str, root: &Path, trials: &mut Vec<Trial>) {
+    let (specimens, sidecars) = scan::walk(root);
+    if specimens.is_empty() {
+        let missing = format!("no specimen under {}", root.display());
+        trials.push(Trial::test(format!("{label}: present"), move || {
+            Err(missing.into())
+        }));
     }
-    // Every format has an extension of its own, so the spread of extensions is
-    // the spread of formats: one slipping out of `wanted` lands here.
-    let extensions: BTreeSet<_> = specimens.iter().filter_map(|s| s.extension()).collect();
-    if extensions.len() < 50 {
-        return Err(format!("only {} specimen extensions read", extensions.len()).into());
+
+    for path in specimens {
+        let name = rel(root, &path);
+        let kind = name.split('/').next().unwrap_or_default().to_string();
+        trials
+            .push(Trial::test(format!("{label}/{name}"), move || specimen(&path)).with_kind(kind));
     }
-    // Type-0 containers (the trailing crc16) must come from instrument-written
-    // files, or that generation is verified against synthetic bodies alone.
-    let type0 = specimens
-        .iter()
-        .filter(|s| {
-            let mut head = [0u8; 5];
-            fs::File::open(s)
-                .and_then(|mut f| f.read_exact(&mut head))
-                .is_ok()
-                && head.starts_with(b"CBIN")
-                && head[4] == 0
-        })
-        .count();
-    if type0 < 1000 {
-        return Err(format!("only {type0} type-0 containers read").into());
+
+    // A sidecar whose specimen is gone is an error, not a leftover.
+    for sidecar in sidecars {
+        let name = format!("{label}/{}", rel(root, &sidecar));
+        let target = sidecar::specimen_of(&sidecar);
+        trials.push(Trial::test(name, move || {
+            if target.exists() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "sidecar for {}, which is gone",
+                    target.file_name().unwrap().to_string_lossy()
+                )
+                .into())
+            }
+        }));
     }
-    for entry in fs::read_dir(root).map_err(|e| Failed::from(e.to_string()))? {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        if !path.is_dir() || skipped_dir(&name) {
-            continue;
-        }
-        if !specimens.iter().any(|s| s.starts_with(&path)) {
-            return Err(format!("model directory {name}/ contributed no specimen").into());
-        }
-    }
-    Ok(())
 }
 
 fn main() {
     let args = Arguments::from_args();
-    let root = corpus_loc::root();
-    let (specimens, sidecars) = walk(&root);
-
     let mut trials = Vec::new();
-    for path in specimens.clone() {
-        let name = rel(&root, &path);
-        let kind = name.split('/').next().unwrap_or_default().to_string();
-        let root = root.clone();
-        trials.push(Trial::test(name, move || specimen(&root, &path)).with_kind(kind));
-    }
 
-    for sidecar in sidecars {
-        let name = rel(&root, &sidecar);
-        if sidecar.file_name().is_some_and(|n| n == "dir.oracle.json") {
-            let dir = sidecar.parent().unwrap().to_path_buf();
-            trials.push(Trial::test(name, move || {
-                oracle::check_dir_sidecar(&dir, &sidecar)
-            }));
-        } else {
-            // A sidecar whose specimen is gone is an error, not a leftover.
-            let target = sidecar::specimen_of(&sidecar);
-            trials.push(Trial::test(name, move || {
-                if target.exists() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "sidecar for {}, which the corpus no longer holds",
-                        target.file_name().unwrap().to_string_lossy()
-                    )
-                    .into())
-                }
-            }));
-        }
-    }
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    trials_for("fixtures", &fixtures, &mut trials);
 
-    trials.push(Trial::test("coverage", move || coverage(&specimens, &root)));
+    #[cfg(feature = "corpus")]
+    trials_for("corpus", &scan::root(), &mut trials);
+
     libtest_mimic::run(&args, trials).exit();
 }

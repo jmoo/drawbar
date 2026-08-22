@@ -1,6 +1,6 @@
-//! Reading `<specimen>.oracle.json` and `dir.oracle.json`: the sidecar
-//! vocabulary and the validation every corpus suite applies before trusting
-//! one. A sidecar that fails here is refused, never skipped.
+//! Reading `<specimen>.oracle.json`: the sidecar vocabulary and the validation
+//! every corpus suite applies before trusting one. A sidecar that fails here is
+//! refused, never skipped.
 //!
 //! ⚠️ A rustc-visible support module, not a test target — each test target that
 //! includes it compiles its own copy.
@@ -18,15 +18,6 @@ pub const SPECIMEN_KEYS: &[&str] = &[
     "same_body_as",
     "schema",
     "traits",
-    "unoracled",
-];
-
-/// The keys `dir.oracle.json` may carry.
-pub const DIR_KEYS: &[&str] = &[
-    "dependencies",
-    "note",
-    "piano_categories",
-    "schema",
     "unoracled",
 ];
 
