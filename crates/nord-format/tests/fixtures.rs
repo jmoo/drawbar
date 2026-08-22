@@ -68,8 +68,7 @@ type Mutant = (
     fn(&Cbin<ne5::Program>),
 );
 
-/// One mutation per panel, plus the two straddling-byte cases that caught real
-/// packing bugs.
+/// One mutation per panel, plus two fields that straddle a byte boundary.
 fn mutants() -> Vec<Mutant> {
     vec![
         (
@@ -201,7 +200,11 @@ fn committed() -> BTreeMap<String, Vec<u8>> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().is_some_and(|n| n != "README.md") {
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n != "README.md" && !n.starts_with('.'))
+            {
                 let rel = path.strip_prefix(&root).unwrap().display().to_string();
                 out.insert(rel, fs::read(&path).unwrap());
             }

@@ -448,12 +448,8 @@ let
   # ⚠️ The corpus is a private repo, so evaluating this overlay at all needs read
   # access to it.
 
-  # ⚠️ The pinned rev lives on `size-tiering`, not the default branch, and
-  # `fetchGit` only fetches the refs it is told about — without this it reports the
-  # rev as not found. Drop it when the branch merges.
   corpusTree = builtins.fetchGit {
-    ref = "size-tiering";
-    rev = "43cfa477ac74a6e4f247ae97607b51f581b96aaf";
+    rev = "8c34f7ad59b9767f9084a5a062cbe9c1db722ee2";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 

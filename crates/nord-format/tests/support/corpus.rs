@@ -1,4 +1,8 @@
 //! Where the private specimen corpus lives.
+//!
+//! ⚠️ A rustc-visible support module, not a test target — each test target that
+//! includes it compiles its own copy.
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 

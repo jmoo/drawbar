@@ -4,64 +4,17 @@
 //! gaining a sidecar there, not by anyone adding a case here.
 
 use crate::lookup;
+use crate::sidecar::{sidecar_of, DIR_KEYS, SPECIMEN_KEYS};
 use libtest_mimic::Failed;
 use nord_format::formats::ne5::OrganModel;
 use nord_format::formats::nsmp;
 use nord_format::{Entity, Live, Program, Sample};
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// The keys a specimen sidecar may carry. An unknown key is an error, so the
-/// vocabulary cannot drift apart between the corpus and this reader.
-const SPECIMEN_KEYS: &[&str] = &[
-    "fields",
-    "note",
-    "same_body_as",
-    "schema",
-    "traits",
-    "unoracled",
-];
-
-/// The keys `dir.oracle.json` may carry.
-const DIR_KEYS: &[&str] = &[
-    "dependencies",
-    "note",
-    "piano_categories",
-    "schema",
-    "unoracled",
-];
-
-pub fn specimen_of(sidecar: &Path) -> PathBuf {
-    let name = sidecar.file_name().unwrap().to_string_lossy();
-    sidecar.with_file_name(name.trim_end_matches(".oracle.json").to_string())
-}
-
-fn sidecar_of(specimen: &Path) -> PathBuf {
-    let mut name = specimen.file_name().unwrap().to_os_string();
-    name.push(".oracle.json");
-    specimen.with_file_name(name)
-}
-
-/// Parse a sidecar, refusing an unknown schema or vocabulary rather than
-/// skipping it.
 fn load(path: &Path, allowed: &[&str]) -> Result<Value, Failed> {
-    let text = fs::read_to_string(path).map_err(|e| Failed::from(format!("sidecar: {e}")))?;
-    let value: Value =
-        serde_json::from_str(&text).map_err(|e| Failed::from(format!("sidecar: {e}")))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| Failed::from("sidecar is not an object"))?;
-    if object.get("schema").and_then(Value::as_u64) != Some(1) {
-        return Err("sidecar schema is not 1 — refusing rather than skipping".into());
-    }
-    if let Some(unknown) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
-        return Err(format!("unknown sidecar key {unknown:?}").into());
-    }
-    if object.get("unoracled").is_some() && object.get("fields").is_some() {
-        return Err("unoracled beside fields — the two are mutually exclusive".into());
-    }
-    Ok(value)
+    crate::sidecar::load(path, allowed).map_err(Failed::from)
 }
 
 /// Does this path owe the corpus an oracle? Differential trees — a model's

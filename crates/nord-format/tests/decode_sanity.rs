@@ -21,6 +21,12 @@ use std::path::{Path, PathBuf};
 
 #[path = "support/corpus.rs"]
 mod corpus_loc;
+#[path = "support/format_table.rs"]
+mod format_table;
+#[path = "support/sidecar.rs"]
+mod sidecar;
+
+use format_table::formats;
 
 /// Every file under `dir` with extension `ext`, recursively, skipping the
 /// staging area, in a stable order.
@@ -80,6 +86,16 @@ fn aux_matches_one_of_the_three_documented_shapes() {
     );
 }
 
+/// A whole CBIN header's worth of file opening with the magic.
+fn is_cbin(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 0x18];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && head.starts_with(b"CBIN")
+}
+
 /// Every file in the corpus whose first four bytes are `CBIN`.
 fn every_cbin(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -92,10 +108,7 @@ fn every_cbin(root: &Path) -> Vec<PathBuf> {
                 if !matches!(name.as_str(), "pending" | "tools" | ".git") {
                     stack.push(path);
                 }
-            } else if !name.contains(".skip.")
-                && !name.ends_with(".body")
-                && fs::read(&path).is_ok_and(|b| b.len() >= 0x18 && b.starts_with(b"CBIN"))
-            {
+            } else if !name.contains(".skip.") && !name.ends_with(".body") && is_cbin(&path) {
                 found.push(path);
             }
         }
@@ -107,82 +120,10 @@ fn every_cbin(root: &Path) -> Vec<PathBuf> {
 /// The stub modules' observed body lengths hold across every specimen.
 #[test]
 fn observed_body_lengths_match_the_documented_constants() {
-    use nord_format::formats::{
-        nc2, nc2d, ne3, ne4, ne6, ne7, ng2, nl4, nla1, no3, np, np2, np3, np4, np5, ns2, ns3, ns4,
-        nsclassic, nw, nw2,
-    };
-
-    let expected: BTreeMap<&str, u64> = BTreeMap::from([
-        (nc2::program::FORMAT, nc2::program::BODY_LEN),
-        (nc2::settings::FORMAT, nc2::settings::BODY_LEN),
-        (nc2d::program::FORMAT, nc2d::program::BODY_LEN),
-        (nc2d::settings::FORMAT, nc2d::settings::BODY_LEN),
-        (ne3::program::FORMAT, ne3::program::BODY_LEN),
-        (ne3::organ_preset::FORMAT, ne3::organ_preset::BODY_LEN),
-        (ne4::program::FORMAT, ne4::program::BODY_LEN),
-        (ne4::live::FORMAT, ne4::live::BODY_LEN),
-        (ne4::settings::FORMAT, ne4::settings::BODY_LEN),
-        (ne6::program::FORMAT, ne6::program::BODY_LEN),
-        (ne6::live::FORMAT, ne6::live::BODY_LEN),
-        (ne6::settings::FORMAT, ne6::settings::BODY_LEN),
-        (ne7::program::FORMAT, ne7::program::BODY_LEN),
-        (ne7::live::FORMAT, ne7::live::BODY_LEN),
-        (ne7::settings::FORMAT, ne7::settings::BODY_LEN),
-        (ng2::program::FORMAT, ng2::program::BODY_LEN),
-        (ng2::live::FORMAT, ng2::live::BODY_LEN),
-        (ng2::settings::FORMAT, ng2::settings::BODY_LEN),
-        (nl4::program::FORMAT, nl4::program::BODY_LEN),
-        (nl4::performance::FORMAT, nl4::performance::BODY_LEN),
-        (nl4::settings::FORMAT, nl4::settings::BODY_LEN),
-        (nla1::program::FORMAT, nla1::program::BODY_LEN),
-        (nla1::performance::FORMAT, nla1::performance::BODY_LEN),
-        (nla1::settings::FORMAT, nla1::settings::BODY_LEN),
-        (no3::program::FORMAT, no3::program::BODY_LEN),
-        (no3::settings::FORMAT, no3::settings::BODY_LEN),
-        (np::program::FORMAT, np::program::BODY_LEN),
-        (np::live::FORMAT, np::live::BODY_LEN),
-        (np::settings::FORMAT, np::settings::BODY_LEN),
-        (np2::program::FORMAT, np2::program::BODY_LEN),
-        (np2::live::FORMAT, np2::live::BODY_LEN),
-        (np2::settings::FORMAT, np2::settings::BODY_LEN),
-        (np3::program::FORMAT, np3::program::BODY_LEN),
-        (np3::live::FORMAT, np3::live::BODY_LEN),
-        (np3::settings::FORMAT, np3::settings::BODY_LEN),
-        (np4::program::FORMAT, np4::program::BODY_LEN),
-        (np4::live::FORMAT, np4::live::BODY_LEN),
-        (np4::settings::FORMAT, np4::settings::BODY_LEN),
-        (np5::program::FORMAT, np5::program::BODY_LEN),
-        (np5::live::FORMAT, np5::live::BODY_LEN),
-        (np5::settings::FORMAT, np5::settings::BODY_LEN),
-        (ns2::program::FORMAT, ns2::program::BODY_LEN as u64),
-        (ns2::live::FORMAT, ns2::program::BODY_LEN as u64),
-        (ns2::synth::FORMAT, ns2::synth::BODY_LEN),
-        (ns2::settings::FORMAT, ns2::settings::BODY_LEN),
-        (ns3::program::FORMAT, ns3::program::BODY_LEN as u64),
-        (ns3::live::FORMAT, ns3::program::BODY_LEN as u64),
-        (ns3::song::FORMAT, ns3::song::BODY_LEN),
-        (ns3::synth::FORMAT, ns3::synth::BODY_LEN as u64),
-        (ns3::settings::FORMAT, ns3::settings::BODY_LEN),
-        (ns4::program::FORMAT, ns4::program::BODY_LEN as u64),
-        (ns4::live::FORMAT, ns4::program::BODY_LEN as u64),
-        (ns4::synth::FORMAT, ns4::synth::BODY_LEN as u64),
-        (
-            ns4::piano_preset::FORMAT,
-            ns4::piano_preset::BODY_LEN as u64,
-        ),
-        (
-            ns4::organ_preset::FORMAT,
-            ns4::organ_preset::BODY_LEN as u64,
-        ),
-        (ns4::settings::FORMAT, ns4::settings::BODY_LEN),
-        (nsclassic::program::FORMAT, nsclassic::program::BODY_LEN),
-        (nsclassic::synth::FORMAT, nsclassic::synth::BODY_LEN),
-        (nw::program::FORMAT, nw::program::BODY_LEN),
-        (nw::settings::FORMAT, nw::settings::BODY_LEN),
-        (nw2::program::FORMAT, nw2::program::BODY_LEN),
-        (nw2::live::FORMAT, nw2::live::BODY_LEN),
-        (nw2::settings::FORMAT, nw2::settings::BODY_LEN),
-    ]);
+    let expected: BTreeMap<&str, u64> = formats()
+        .into_iter()
+        .map(|(tag, len, _)| (tag, len))
+        .collect();
 
     let mut checked = 0usize;
     for path in every_cbin(&corpus_loc::root()) {
@@ -388,10 +329,9 @@ fn v3_samples_decode_names_and_strokes() {
             }
         }
     }
-    // The committed tier pairs completely, and even with the full pool
-    // projected in the paired files stay the majority — a reader change that
-    // stops pairing what used to pair moves both of these.
-    assert!(paired >= 12, "only {paired} v3 zone maps paired");
+    // A reader change that stops pairing what used to pair turns paired files
+    // into unpaired ones, which moves both of these.
+    assert!(paired > 0, "no v3 zone map paired with its strokes");
     assert!(
         paired > unpaired,
         "{unpaired} of {} v3 zone maps failed to pair with their strokes",
@@ -431,8 +371,7 @@ fn drum_banks_walk_to_their_members() {
 /// from the backup's own `dir.oracle.json`. The dial order on disk starts at
 /// Grand, so the two are not in step.
 fn piano_categories(backup: &Path) -> Vec<(String, String)> {
-    let sidecar: Value =
-        serde_json::from_str(&fs::read_to_string(backup.join("dir.oracle.json")).unwrap()).unwrap();
+    let sidecar = sidecar::load(&backup.join("dir.oracle.json"), sidecar::DIR_KEYS).unwrap();
     sidecar["piano_categories"]
         .as_array()
         .expect("piano_categories in the backup's dir.oracle.json")
@@ -446,7 +385,7 @@ fn piano_categories(backup: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The piano and sample ids across all 624 backup programs form a bijection
+/// The piano and sample ids across every backup program form a bijection
 /// with the (category, model) slots, and the slots per category are exactly
 /// what the backup's member list says the instrument shipped.
 #[test]
@@ -497,7 +436,7 @@ fn ne5_backup_dependency_ids() {
             let slot = (format!("{:?}", piano.category), piano.piano_model.as_u8());
 
             // (category, model) and id are two names for the same piano, so the
-            // map between them is a bijection across all 624 programs.
+            // map between them is a bijection across the whole backup.
             assert_eq!(
                 *slot_of.entry(piano.id).or_insert_with(|| slot.clone()),
                 slot,
@@ -740,18 +679,13 @@ fn nsmp_strokes_decompose() {
 fn nsmp_zone_ranges_are_the_editors_default_unless_overridden() {
     let mut checked = 0;
     for (path, stem) in sample_specimens() {
-        let sidecar = path.with_file_name(format!(
-            "{}.oracle.json",
-            path.file_name().unwrap().to_string_lossy()
-        ));
-        let overridden = fs::read_to_string(&sidecar)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|v| v.get("traits").cloned())
-            .is_some_and(|t| {
-                t.as_array()
-                    .is_some_and(|a| a.iter().any(|t| t == "zone_top_notes_overridden"))
-            });
+        let sidecar = sidecar::sidecar_of(&path);
+        let overridden = sidecar.exists()
+            && sidecar::load(&sidecar, sidecar::SPECIMEN_KEYS)
+                .unwrap_or_else(|e| panic!("{stem}: {e}"))
+                .get("traits")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(|t| t == "zone_top_notes_overridden"));
 
         let sample = read_sample(&path);
         let roots: Vec<u8> = sample

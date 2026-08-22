@@ -20,12 +20,15 @@ mod oracle;
 
 #[path = "../support/corpus.rs"]
 mod corpus_loc;
+#[path = "../support/sidecar.rs"]
+mod sidecar;
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use nord_format::cbin::{self, Generation};
 use nord_format::Entity;
+use std::collections::BTreeSet;
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 /// Extensions the sweep reads as entities. Everything else in the corpus —
@@ -90,11 +93,15 @@ fn walk(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (specimens, sidecars)
 }
 
+/// The corpus-relative path, `/`-joined on every platform so the documented
+/// filters and the trial kinds read the same everywhere.
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
-        .display()
-        .to_string()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The body span of a CBIN file, from its generation: a type-1 body runs to end
@@ -175,13 +182,35 @@ fn known_unexplained(field: &str, value: &str) -> bool {
     field.ends_with(".kb_zones") && value == "unknown (10)"
 }
 
-/// Floors on what the sweep read, so a whole directory silently dropping out of
-/// the walk fails the run rather than shrinking it.
-fn coverage(root: &Path) -> Result<(), Failed> {
-    let (specimens, _) = walk(root);
-    // The committed tier holds ~9,900 readable specimens.
+/// Floors on what the sweep read, so a whole directory, a whole format or a
+/// whole header generation silently dropping out of the walk fails the run
+/// rather than shrinking it. Each floor sits well under the committed tier, so
+/// corpus growth never trips one and only a loss does.
+fn coverage(specimens: &[PathBuf], root: &Path) -> Result<(), Failed> {
     if specimens.len() < 9000 {
         return Err(format!("only {} specimens read — corpus present?", specimens.len()).into());
+    }
+    // Every format has an extension of its own, so the spread of extensions is
+    // the spread of formats: one slipping out of `wanted` lands here.
+    let extensions: BTreeSet<_> = specimens.iter().filter_map(|s| s.extension()).collect();
+    if extensions.len() < 50 {
+        return Err(format!("only {} specimen extensions read", extensions.len()).into());
+    }
+    // Type-0 containers (the trailing crc16) must come from instrument-written
+    // files, or that generation is verified against synthetic bodies alone.
+    let type0 = specimens
+        .iter()
+        .filter(|s| {
+            let mut head = [0u8; 5];
+            fs::File::open(s)
+                .and_then(|mut f| f.read_exact(&mut head))
+                .is_ok()
+                && head.starts_with(b"CBIN")
+                && head[4] == 0
+        })
+        .count();
+    if type0 < 1000 {
+        return Err(format!("only {type0} type-0 containers read").into());
     }
     for entry in fs::read_dir(root).map_err(|e| Failed::from(e.to_string()))? {
         let path = entry.unwrap().path();
@@ -202,7 +231,7 @@ fn main() {
     let (specimens, sidecars) = walk(&root);
 
     let mut trials = Vec::new();
-    for path in specimens {
+    for path in specimens.clone() {
         let name = rel(&root, &path);
         let kind = name.split('/').next().unwrap_or_default().to_string();
         let root = root.clone();
@@ -218,7 +247,7 @@ fn main() {
             }));
         } else {
             // A sidecar whose specimen is gone is an error, not a leftover.
-            let target = oracle::specimen_of(&sidecar);
+            let target = sidecar::specimen_of(&sidecar);
             trials.push(Trial::test(name, move || {
                 if target.exists() {
                     Ok(())
@@ -233,6 +262,6 @@ fn main() {
         }
     }
 
-    trials.push(Trial::test("coverage", move || coverage(&root)));
+    trials.push(Trial::test("coverage", move || coverage(&specimens, &root)));
     libtest_mimic::run(&args, trials).exit();
 }
