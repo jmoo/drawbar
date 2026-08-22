@@ -122,6 +122,13 @@ impl UsbTransport {
         }
     }
 
+    /// Record that the transaction just performed failed. No-op when not recording.
+    pub fn mark_expect(&mut self, e: &Error) {
+        if let Some(r) = self.record.as_mut() {
+            r.expect(e);
+        }
+    }
+
     /// Surface the first error the recorder hit, if it is recording. Call after the
     /// operation completes: a failed write is deliberately not allowed to abort a live
     /// session part-way.

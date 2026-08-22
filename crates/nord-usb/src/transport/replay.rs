@@ -22,7 +22,9 @@
 //! frame. `intent` and `expect` describe a **section**: `intent` opens one, which runs to
 //! the next `intent` or to the end of the file, so one recorded command that opened
 //! several transactions is one script of several sections, in order. `expect` names the
-//! outcome its own section must produce, and defaults to `ok`.
+//! outcome its own section must produce and defaults to `ok`; it may sit anywhere
+//! inside that section, because a recorder only learns the outcome once the frames are
+//! written.
 
 use super::Transport;
 use crate::error::{Error, Result};
@@ -79,8 +81,17 @@ pub struct Section {
     /// `<class> <verb> <args…>`, in the CLI's own spellings. `None` means the section
     /// declares nothing, and the frames are checkable but not drivable.
     pub intent: Option<String>,
-    pub expect: Expect,
+    /// What the section said to expect, if it said. Read through [`Section::expect`],
+    /// which supplies the default.
+    expect: Option<Expect>,
     pub steps: Vec<Step>,
+}
+
+impl Section {
+    /// The outcome this section must produce. A section that says nothing expects `ok`.
+    pub fn expect(&self) -> Expect {
+        self.expect.unwrap_or_default()
+    }
 }
 
 /// A parsed script: its file-level header, and its sections in wire order.
@@ -244,17 +255,14 @@ impl Script {
                         }
                     }
                     "expect" => {
-                        if !section.steps.is_empty() {
+                        if section.expect.is_some() {
                             return Err(fail(
                                 n,
-                                format_args!(
-                                    "expect comes after the frames it judges; put it with its \
-                                 section's intent"
-                                ),
+                                format_args!("this section already says what to expect"),
                             ));
                         }
                         section.expect =
-                            Expect::parse(value).map_err(|e| fail(n, format_args!("{e}")))?;
+                            Some(Expect::parse(value).map_err(|e| fail(n, format_args!("{e}")))?);
                     }
                     "source" | "device" | "trimmed" | "note" if seen_frame => {
                         return Err(fail(
@@ -337,7 +345,7 @@ impl Script {
                 };
                 return Err(Error::Replay(what));
             }
-            if section.intent.is_none() && section.expect != Expect::Ok {
+            if section.intent.is_none() && section.expect.is_some() {
                 return Err(Error::Replay(
                     "expect without an intent: nothing would be driven, so nothing could \
                      produce it"
@@ -508,7 +516,7 @@ mod tests {
         assert_eq!(script.header, Header::default());
         assert_eq!(script.sections.len(), 1);
         assert!(script.sections[0].intent.is_none());
-        assert_eq!(script.sections[0].expect, Expect::Ok);
+        assert_eq!(script.sections[0].expect(), Expect::Ok);
         assert_eq!(script.steps().len(), 2);
     }
 
@@ -570,10 +578,10 @@ mod tests {
             [2, 1, 2]
         );
         assert_eq!(
-            script.sections[1].expect,
+            script.sections[1].expect(),
             Expect::Err(ErrKind::DeviceStatus(1))
         );
-        assert_eq!(script.sections[2].expect, Expect::Ok);
+        assert_eq!(script.sections[2].expect(), Expect::Ok);
     }
 
     /// A device refusal is only useful if the script can name *which* one, so the code
@@ -628,12 +636,59 @@ mod tests {
         assert!(err.to_string().contains("before its first frame"), "{err}");
     }
 
-    /// An `expect` under the frames it judges reads as if it applied to them, and would
-    /// silently judge the *next* section instead.
+    /// A recorder only knows the outcome once the frames are written, so an `expect`
+    /// under them belongs to the section it closes, not to the next one.
     #[test]
-    fn an_expect_below_its_frames_is_refused() {
-        let err = Script::parse("# intent: program status\nO 00\n# expect: ok\n").unwrap_err();
-        assert!(err.to_string().contains("after the frames"), "{err}");
+    fn an_expect_below_its_frames_judges_the_section_it_closes() {
+        let script = Script::parse(
+            "# intent: program info 7:10\n\
+             O 00\n\
+             # expect: err device-status 0x1\n\
+             # intent: program focus\n\
+             O 01\n",
+        )
+        .unwrap();
+        assert_eq!(
+            script.sections[0].expect(),
+            Expect::Err(ErrKind::DeviceStatus(1))
+        );
+        assert_eq!(script.sections[1].expect(), Expect::Ok);
+    }
+
+    #[test]
+    fn a_section_may_only_say_what_to_expect_once() {
+        let err = Script::parse("# intent: program status\n# expect: ok\nO 00\n# expect: ok\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("already says"), "{err}");
+    }
+
+    /// Every kind the recorder writes must read back as the error it names, or a script
+    /// would declare a failure the sweep then judges to be a different one.
+    #[test]
+    fn a_recorded_failure_reads_back_as_the_error_it_names() {
+        let named = [
+            Error::DeviceStatus(0x15),
+            Error::UnexpectedResponse {
+                expected: 0x30,
+                got: 0x1f,
+            },
+            Error::Transport("stalled".into()),
+            Error::Replay("mismatch".into()),
+        ];
+        for e in named {
+            let line = format!("err {}", e.expect_kind());
+            let expect = Expect::parse(&line).unwrap_or_else(|m| panic!("{line}: {m}"));
+            assert!(
+                expect.check::<()>(&Err(e)).is_ok(),
+                "{line} does not read back as itself"
+            );
+        }
+        // A failure the vocabulary does not name is written as the nearest kind rather
+        // than left off, where the script would claim the operation succeeded.
+        assert_eq!(
+            Error::Truncated { got: 2, need: 8 }.expect_kind(),
+            "transport"
+        );
     }
 
     #[test]
