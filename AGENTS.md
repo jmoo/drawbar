@@ -2,5 +2,6 @@
 
 Everything needed to work in this repo — reverse engineering and copyright
 rules, commands, code style, comment style, commit and merge rules, and the
-release process — lives in [CONTRIBUTING.md](CONTRIBUTING.md). Read it and
-follow it.
+release process — is in CONTRIBUTING.md, imported below. Follow it.
+
+@CONTRIBUTING.md
