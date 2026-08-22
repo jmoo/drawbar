@@ -92,30 +92,27 @@ if they are not installed globally.
   in the body — marks a breaking change.
 - **PR titles follow the same rule.** With squash merges the PR title becomes
   the commit title on `master`, so it is the one that counts.
-- **Versions bump from titles**: `fix` bumps the patch version, `feat` the
-  minor, a breaking change the major. Any other type releases nothing on its
-  own. Only commits touching a published crate count toward that crate's bump.
+- **Versions live in `Cargo.toml`.** A PR that should ship a new version of
+  a published crate bumps that crate's `version` (and, for `nord-bits-derive`,
+  `nord-format`'s exact pin on it) in the same PR: `fix` → patch, `feat` →
+  minor, breaking → major. Nothing else tracks versions.
 
 ## Releasing
 
 `nord-bits-derive` and `nord-format` are published to crates.io; the other
 crates share the workspace version and are unpublished.
 
-Releases are automatic, driven by
-[release-please](https://github.com/googleapis/release-please):
+Releasing is automatic and idempotent: on every push to `master`,
+`.github/workflows/release.yml` publishes each crate whose `Cargo.toml` version
+is not yet on crates.io (Trusted Publishing via OIDC — no token secrets) and
+creates the `<crate>-v<version>` tag and GitHub release. A failed run is fixed
+by re-running it from the Actions tab. Cargo waits for a freshly published
+dependency to land in the index, so a derive bump and the format bump that pins
+it ship together from one PR.
 
-- Conventional commits landing on `master` open or update one **Release PR**
-  per batch of changes. It bumps each touched crate's `version`, appends to its
-  `CHANGELOG.md`, keeps `nord-format`'s exact `nord-bits-derive` pin in sync,
-  and refreshes `Cargo.lock`.
-- **Merging the Release PR** tags `<crate>-v<version>` GitHub releases and
-  publishes them to crates.io via Trusted Publishing (OIDC) — no token secrets
-  to rotate.
-- Escape hatch: pushing a `<crate>-v<version>` tag still publishes that crate,
-  after checking it against the manifest.
-- First-ever publish of a new crate can't use Trusted Publishing (it is
-  configured on an already-existing crate) — publish locally once, then add the
-  crate to `release-please-config.json` and `.release-please-manifest.json`.
+First-ever publish of a new crate can't use Trusted Publishing (it is
+configured on an already-existing crate) — publish locally once, then add the
+crate to `CRATES` in the workflow.
 
 ## Code style
 
