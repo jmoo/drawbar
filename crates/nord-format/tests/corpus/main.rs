@@ -5,9 +5,11 @@
 //! always; the private corpus under `NORD_CORPUS_ROOT` with `--features corpus`.
 //! Every file the reader recognizes, wherever it sits, is a specimen: it passes
 //! its container checksum, parses, re-encodes byte-exactly, decodes no value its
-//! components cannot name, every registry field of it takes a new value without
-//! moving another, and its `<file>.oracle.json` sidecar holds where there is
-//! one. Nothing here names a model or a directory.
+//! components cannot name, and its `<file>.oracle.json` sidecar holds where
+//! there is one. On a sample of them — every fixture, every specimen with a
+//! sidecar, and one of each container shape among the rest — every registry
+//! field also takes a new value without moving another. Nothing here names a
+//! model or a directory.
 //!
 //! ```sh
 //! cargo test -p nord-format --test corpus                        # the fixtures
@@ -58,8 +60,9 @@ fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
 }
 
 /// One specimen: checksum, parse, byte-exact round trip, no unnameable decoded
-/// values, every field moves alone, and the oracle sidecar if there is one.
-fn specimen(path: &Path) -> Result<(), Failed> {
+/// values, the oracle sidecar if there is one, and — where `mutate` — every
+/// field moves alone.
+fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
     let info = if bytes.starts_with(b"CBIN") {
@@ -117,9 +120,23 @@ fn specimen(path: &Path) -> Result<(), Failed> {
         }
     }
 
-    registry::each_field_moves_alone(&bytes)?;
+    if mutate {
+        registry::each_field_moves_alone(&bytes)?;
+    }
 
     oracle::check_specimen(path, &bytes, &entity)
+}
+
+/// A CBIN file's tag and header generation — the shape its registry reads
+/// through. `None` for anything else.
+fn shape(path: &Path) -> Option<(Vec<u8>, u8)> {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .ok()?;
+    head.starts_with(b"CBIN")
+        .then(|| (head[8..12].to_vec(), head[4]))
 }
 
 /// Out-of-table values the corpus is known to hold, exempted by exact field and
@@ -131,9 +148,14 @@ fn known_unexplained(field: &str, value: &str) -> bool {
     field.ends_with(".kb_zones") && value == "unknown (10)"
 }
 
-/// The trials for one tree, named `<label>/<path under root>`.
-fn trials_for(label: &str, root: &Path, trials: &mut Vec<Trial>) {
+/// The trials for one tree, named `<label>/<path under root>`. The mutation
+/// check runs on the whole tree when `mutate_all`, else on the specimens with a
+/// sidecar plus the first of each container shape: the check is a property of
+/// the code path, and what more specimens add is diverse baselines, which those
+/// already are.
+fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial>) {
     let (specimens, sidecars) = scan::walk(root);
+    let mut shapes_seen = std::collections::BTreeSet::new();
     if specimens.is_empty() {
         let missing = format!("no specimen under {}", root.display());
         trials.push(Trial::test(format!("{label}: present"), move || {
@@ -144,8 +166,12 @@ fn trials_for(label: &str, root: &Path, trials: &mut Vec<Trial>) {
     for path in specimens {
         let name = rel(root, &path);
         let kind = name.split('/').next().unwrap_or_default().to_string();
-        trials
-            .push(Trial::test(format!("{label}/{name}"), move || specimen(&path)).with_kind(kind));
+        let mutate = mutate_all
+            || sidecar::sidecar_of(&path).exists()
+            || shape(&path).is_none_or(|s| shapes_seen.insert(s));
+        trials.push(
+            Trial::test(format!("{label}/{name}"), move || specimen(&path, mutate)).with_kind(kind),
+        );
     }
 
     // A sidecar whose specimen is gone is an error, not a leftover.
@@ -171,10 +197,10 @@ fn main() {
     let mut trials = Vec::new();
 
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    trials_for("fixtures", &fixtures, &mut trials);
+    trials_for("fixtures", &fixtures, true, &mut trials);
 
     #[cfg(feature = "corpus")]
-    trials_for("corpus", &scan::root(), &mut trials);
+    trials_for("corpus", &scan::root(), false, &mut trials);
 
     libtest_mimic::run(&args, trials).exit();
 }

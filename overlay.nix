@@ -449,7 +449,7 @@ let
   # access to it.
 
   corpusTree = builtins.fetchGit {
-    rev = "828944a36b195f244c053bf7dd7e59fa8fb3fe5f";
+    rev = "de3f8f9123a14d3d8202aa68fc8414495ac8f710";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
