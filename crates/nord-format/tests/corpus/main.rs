@@ -127,18 +127,6 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     oracle::check_specimen(path, &bytes, &entity)
 }
 
-/// A CBIN file's tag and header generation — the shape its registry reads
-/// through. `None` for anything else.
-fn shape(path: &Path) -> Option<(Vec<u8>, u8)> {
-    use std::io::Read;
-    let mut head = [0u8; 12];
-    fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut head))
-        .ok()?;
-    head.starts_with(b"CBIN")
-        .then(|| (head[8..12].to_vec(), head[4]))
-}
-
 /// Out-of-table values the corpus is known to hold, exempted by exact field and
 /// rendering so anything new still fails. Each entry restates a doc on the
 /// component itself — the exemption lives where the value does.
@@ -168,7 +156,7 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
         let kind = name.split('/').next().unwrap_or_default().to_string();
         let mutate = mutate_all
             || sidecar::sidecar_of(&path).exists()
-            || shape(&path).is_none_or(|s| shapes_seen.insert(s));
+            || scan::shape(&path).is_none_or(|s| shapes_seen.insert(s));
         trials.push(
             Trial::test(format!("{label}/{name}"), move || specimen(&path, mutate)).with_kind(kind),
         );
