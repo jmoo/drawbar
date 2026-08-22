@@ -163,7 +163,9 @@ let
         "replay"
       ];
       testRunner = {
-        cmd = "wasmtime";
+        # The suite reads its scripts off the source tree, which a wasm sandbox
+        # sees only through a preopened directory.
+        cmd = "wasmtime --dir /";
         packages = [
           final.lld
           final.wasmtime
