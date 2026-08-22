@@ -421,7 +421,7 @@ let
 
   # The read-only inventory sweep, replayed. Exercises transport → wire → session
   # → op → CLI without a device, so the same proof runs on every target.
-  pocScript = ./crates/nord-usb/tests/fixtures/inventory.script;
+  pocScript = ./crates/nord-usb/tests/scripts/device/inventory.script;
 
   # The nord-cli end-to-end run, as the package's own install check. The scripts
   # live with the CLI — crates/nord-cli/checks — and run against any built

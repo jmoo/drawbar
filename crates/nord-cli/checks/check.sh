@@ -16,7 +16,7 @@ set -euo pipefail
 }
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 here=$(cd "$(dirname "$0")" && pwd)
-: "${POC_SCRIPT:=$here/../../nord-usb/tests/fixtures/inventory.script}"
+: "${POC_SCRIPT:=$here/../../nord-usb/tests/scripts/device/inventory.script}"
 export POC_SCRIPT
 
 run() { ${NORD_RUNNER:-} "$bin" "$@"; }
