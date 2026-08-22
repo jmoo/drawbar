@@ -29,7 +29,9 @@ pub use record::Recorder;
 #[cfg(feature = "replay")]
 pub mod replay;
 #[cfg(feature = "replay")]
-pub use replay::{Direction, ReplayTransport, Step};
+pub use replay::{
+    Direction, ErrKind, Expect, Header, ReplayTransport, Script, Section, Source, Step,
+};
 
 /// Clavia DMI AB. Read off the device descriptor in a firmware-update capture.
 pub const VENDOR_ID: u16 = 0x0ffc;
