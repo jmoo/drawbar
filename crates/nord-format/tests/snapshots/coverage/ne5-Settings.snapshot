@@ -1,0 +1,102 @@
+# ne5-Settings — read coverage over the specimen sweep. Runs of bits sharing a verdict.
+#
+# varies   an instrument writes this bit two ways (OR against AND over every
+#          corpus specimen of this body; all-ones bodies excluded). ⚠️ The
+#          committed fixtures are left out of this column: they are this
+#          crate's own writers' output over a zeroed body, so their unclaimed
+#          bits are evidence of nothing.
+# claimed  the path declaring it, from the layout — intent, not a read. A path
+#          marked (unregistered) is declared but reports no value.
+# answers  registry paths whose value moved when the bit was flipped and the
+#          file re-parsed, over the sampled specimens; `refused` is the parser
+#          rejecting the mutated file, which is a read too.
+#
+# Offsets are body-relative — a hex dump of the file adds the container's body
+# start, 0x2c on a type-1 header and 0x18 on a type-0. Bits inside a byte are
+# numbered LSB-first: `0x51[3:2]`.
+#
+# 272 bits; varies over 122 corpus specimens, answers over 124 flipped.
+
+bits           at                                 claimed by                                   varies  verdict    answers
+0..=15         0x00..0x02                         —                                            no      spare      —
+16..=16        0x02[7]                            startup_set_list_mode                        yes     read       startup_set_list_mode
+17..=17        0x02[6]                            startup_live_mode                            yes     read       startup_live_mode
+18..=18        0x02[5]                            —                                            no      spare      —
+19..=20        0x02[4:3]                          startup_live_slot                            yes     read       startup_live_slot
+21..=21        0x02[2]                            startup_program                              no      read       refused, startup_program
+22..=23        0x02[1:0]                          startup_program                              yes     read       startup_program
+24..=24        0x03[7]                            startup_program                              no      read       startup_program
+25..=29        0x03[6:2]                          startup_program                              yes     read       startup_program
+30..=30        0x03[1]                            startup_song                                 no      read       refused, startup_song
+31..=32        0x03[0]+0x04[7]                    startup_song                                 yes     read       startup_song
+33..=34        0x04[6:5]                          startup_song                                 no      read       startup_song
+35..=37        0x04[4:2]                          startup_song                                 yes     read       startup_song
+38..=39        0x04[1:0]                          control_change_mode                          yes     read       control_change_mode
+40..=41        0x05[7:6]                          program_change_mode                          yes     read       program_change_mode
+42..=42        0x05[5]                            —                                            no      spare      —
+43..=44        0x05[4:3]                          sustain_pedal_type                           yes     read       sustain_pedal_type
+45..=47        0x05[2:0]                          ctrl_pedal_type                              yes     read       ctrl_pedal_type
+48..=51        0x06[7:4]                          —                                            no      spare      —
+52..=53        0x06[3:2]                          rotary_ctrl_type                             yes     read       rotary_ctrl_type
+54..=54        0x06[1]                            rotary_pedal_mode                            yes     read       rotary_pedal_mode
+55..=55        0x06[0]                            fine_tune                                    yes     read       fine_tune, refused
+56..=56        0x07[7]                            fine_tune                                    yes     read       fine_tune
+57..=57        0x07[6]                            fine_tune                                    yes     read       fine_tune, refused
+58..=58        0x07[5]                            fine_tune                                    no      read       fine_tune, refused
+59..=59        0x07[4]                            fine_tune                                    yes     read       fine_tune
+60..=61        0x07[3:2]                          fine_tune                                    yes     read       fine_tune, refused
+62..=63        0x07[1:0]                          —                                            no      spare      —
+64..=64        0x08[7]                            piano_string_resonance                       yes     read       piano_string_resonance, refused
+65..=65        0x08[6]                            piano_string_resonance                       yes     read       piano_string_resonance
+66..=66        0x08[5]                            piano_string_resonance                       yes     read       piano_string_resonance, refused
+67..=67        0x08[4]                            piano_string_resonance                       no      read       piano_string_resonance, refused
+68..=68        0x08[3]                            global_transpose                             yes     read       global_transpose, refused
+69..=69        0x08[2]                            global_transpose                             yes     read       global_transpose
+70..=71        0x08[1:0]                          global_transpose                             yes     read       global_transpose, refused
+72..=76        0x09[7:3]                          global_channel                               yes     read       global_channel
+77..=78        0x09[2:1]                          —                                            no      spare      —
+79..=80        0x09[0]+0x0a[7]                    rotary_speaker_type                          no      read       rotary_speaker_type
+81..=81        0x0a[6]                            rotary_speaker_type                          yes     read       rotary_speaker_type
+82..=82        0x0a[5]                            rotary_horn_speed                            no      read       rotary_horn_speed
+83..=84        0x0a[4:3]                          rotary_horn_speed                            yes     read       rotary_horn_speed
+85..=85        0x0a[2]                            rotary_rotor_speed                           no      read       rotary_rotor_speed
+86..=87        0x0a[1:0]                          rotary_rotor_speed                           yes     read       rotary_rotor_speed
+88..=88        0x0b[7]                            rotary_horn_acceleration                     no      read       rotary_horn_acceleration
+89..=90        0x0b[6:5]                          rotary_horn_acceleration                     yes     read       rotary_horn_acceleration
+91..=91        0x0b[4]                            rotary_rotor_acceleration                    no      read       rotary_rotor_acceleration
+92..=93        0x0b[3:2]                          rotary_rotor_acceleration                    yes     read       rotary_rotor_acceleration
+94..=96        0x0b[1:0]+0x0c[7]                  rotary_balance                               yes     read       rotary_balance
+97..=97        0x0c[6]                            b3_perc_decay_fast                           no      read       b3_perc_decay_fast
+98..=99        0x0c[5:4]                          b3_perc_decay_fast                           yes     read       b3_perc_decay_fast
+100..=100      0x0c[3]                            b3_perc_decay_slow                           no      read       b3_perc_decay_slow
+101..=102      0x0c[2:1]                          b3_perc_decay_slow                           yes     read       b3_perc_decay_slow
+103..=103      0x0c[0]                            b3_perc_volume_normal                        no      read       b3_perc_volume_normal
+104..=105      0x0d[7:6]                          b3_perc_volume_normal                        yes     read       b3_perc_volume_normal
+106..=106      0x0d[5]                            b3_perc_volume_soft                          no      read       b3_perc_volume_soft
+107..=108      0x0d[4:3]                          b3_perc_volume_soft                          yes     read       b3_perc_volume_soft
+109..=109      0x0d[2]                            b3_tonewheel_mode                            no      read       b3_tonewheel_mode
+110..=111      0x0d[1:0]                          b3_tonewheel_mode                            yes     read       b3_tonewheel_mode
+112..=112      0x0e[7]                            b3_perc_db9_mute                             yes     read       b3_perc_db9_mute
+113..=114      0x0e[6:5]                          b3_key_click_level                           yes     read       b3_key_click_level
+115..=115      0x0e[4]                            —                                            no      spare      —
+116..=116      0x0e[3]                            b3_key_bounce                                yes     read       b3_key_bounce
+117..=117      0x0e[2]                            b3_trig_mode                                 yes     read       b3_trig_mode
+118..=122      0x0e[1:0]+0x0f[7:5]                lower_receive_channel                        yes     read       lower_receive_channel
+123..=127      0x0f[4:0]                          upper_receive_channel                        yes     read       upper_receive_channel
+128..=128      0x10[7]                            output_routing                               yes     read       output_routing
+129..=133      0x10[6:2]                          upper_split_channel                          yes     read       upper_split_channel
+134..=135      0x10[1:0]                          sustain_pedal_mode                           yes     read       sustain_pedal_mode
+136..=136      0x11[7]                            —                                            no      spare      —
+137..=137      0x11[6]                            transpose_at                                 yes     read       transpose_at
+138..=138      0x11[5]                            ctrl_pedal_gain                              yes     read       ctrl_pedal_gain
+139..=140      0x11[4:3]                          ctrl_pedal_gain                              no      read       ctrl_pedal_gain, refused
+141..=141      0x11[2]                            ctrl_pedal_gain                              yes     read       ctrl_pedal_gain
+142..=271      0x11[1:0]+0x12..0x22               —                                            no      spare      —
+
+## vary, unread — 0 bits
+## The instrument writes these and nothing reads them.
+  none
+
+## claimed, unanswered — 0 bits
+## Declared, but no flip moves a value: dead, or aimed at the wrong bits.
+  none

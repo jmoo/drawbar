@@ -1,0 +1,45 @@
+# ne5-Song — read coverage over the specimen sweep. Runs of bits sharing a verdict.
+#
+# varies   an instrument writes this bit two ways (OR against AND over every
+#          corpus specimen of this body; all-ones bodies excluded). ⚠️ The
+#          committed fixtures are left out of this column: they are this
+#          crate's own writers' output over a zeroed body, so their unclaimed
+#          bits are evidence of nothing.
+# claimed  the path declaring it, from the layout — intent, not a read. A path
+#          marked (unregistered) is declared but reports no value.
+# answers  registry paths whose value moved when the bit was flipped and the
+#          file re-parsed, over the sampled specimens; `refused` is the parser
+#          rejecting the mutated file, which is a read too.
+#
+# Offsets are body-relative — a hex dump of the file adds the container's body
+# start, 0x2c on a type-1 header and 0x18 on a type-0. Bits inside a byte are
+# numbered LSB-first: `0x51[3:2]`.
+#
+# 144 bits; varies over 77 corpus specimens, answers over 4 flipped.
+
+bits           at                                 claimed by                                   varies  verdict    answers
+0..=14         0x00+0x01[7:1]                     version (unregistered)                       no      unanswered —
+15..=15        0x01[0]                            version (unregistered)                       yes     BLIND      —
+16..=16        0x02[7]                            a (unregistered)                             yes     refused    refused
+17..=24        0x02[6:0]+0x03[7]                  a (unregistered)                             yes     BLIND      —
+25..=33        0x03[6:0]+0x04[7:6]                b (unregistered)                             yes     BLIND      —
+34..=42        0x04[5:0]+0x05[7:5]                c (unregistered)                             yes     BLIND      —
+43..=51        0x05[4:0]+0x06[7:4]                d (unregistered)                             yes     BLIND      —
+52..=143       0x06[3:0]+0x07..0x12               —                                            no      spare      —
+
+## vary, unread — 36 bits
+## The instrument writes these and nothing reads them.
+  15..=15        0x01[0]
+  17..=24        0x02[6:0]+0x03[7]
+  25..=33        0x03[6:0]+0x04[7:6]
+  34..=42        0x04[5:0]+0x05[7:5]
+  43..=51        0x05[4:0]+0x06[7:4]
+
+## claimed, unanswered — 51 bits
+## Declared, but no flip moves a value: dead, or aimed at the wrong bits.
+  0..=14         0x00+0x01[7:1]                     version (unregistered)
+  15..=15        0x01[0]                            version (unregistered)
+  17..=24        0x02[6:0]+0x03[7]                  a (unregistered)
+  25..=33        0x03[6:0]+0x04[7:6]                b (unregistered)
+  34..=42        0x04[5:0]+0x05[7:5]                c (unregistered)
+  43..=51        0x05[4:0]+0x06[7:4]                d (unregistered)
