@@ -1,0 +1,11 @@
+# source: synthetic
+# note: the HELLO landed, so the device may hold the UI session even though its
+#   reply was a refusal - and a held UI session makes every slot in every class
+#   read as empty until a power cycle. The script ends with the GOODBYE exchange,
+#   so exhaustion is the proof it was attempted.
+# intent: program status
+# expect: err device-status 0x5
+O 0000001200000006000000010000000006a1
+I 00000016000000060000000100000001000000051449
+O 0000001200000006000000010000000226e3
+I 0000001600000006000000010000000300000000006f
