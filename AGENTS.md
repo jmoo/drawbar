@@ -38,7 +38,7 @@ All reverse engineering is **blackbox**, for interoperability:
   written by our own tools or the instrument's panel). The specimen corpus,
   which does contain proprietary sample data, lives in the **private**
   `jmoo/nord-corpus` repo and is only reachable through the `corpus` cargo
-  feature + `NORD_CORPUS_DIR`.
+  feature + `NORD_CORPUS_ROOT`.
 - **No code from non-permissively-licensed projects.** BSD/MIT/Apache with
   attribution is fine; GPL/unlicensed is not.
 
@@ -57,9 +57,11 @@ they are not installed globally.
 - Test: `cargo test --workspace` (from `crates/`). CI tests `nord-bits-derive`,
   `nord-format`, `nord-usb` and `nord-cli` with each crate's `testFeatures`, and
   fails on anything `nix fmt` would change or clippy would flag.
-- Corpus tests: `--features corpus` with `NORD_CORPUS_DIR` pointing at a
-  `nord-corpus/ne5` checkout; without the private corpus they don't compile in,
-  and the default suite must keep passing anywhere.
+- Corpus tests: `--features corpus` with `NORD_CORPUS_ROOT` pointing at a
+  `nord-corpus` checkout; without the private corpus they don't compile in, and
+  the default suite must keep passing anywhere. `tests/corpus` generates one test
+  per readable file — the committed `tests/fixtures/` always, the corpus with the
+  feature — and asserts the `<file>.oracle.json` sidecar where one exists.
 - Nix: `nix build .#<crate>` builds and tests one crate, `.#nord.all` every
   crate and cross target. Everything lives flat under the `nord` attribute;
   `packages` exposes the crates and cross builds. `nix flake check` verifies

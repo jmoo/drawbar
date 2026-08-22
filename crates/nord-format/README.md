@@ -81,25 +81,35 @@ refinement — never a risk to the write path.
 
 - **`bundle`** — ZIP-based backup bundles (pulls in the `zip` stack). Off by
   default so parse-only consumers stay lean; enable with `--features bundle`.
-- **`corpus`** — *test-only*. Gates the corpus-backed integration tests
-  (`tests/ne5.rs`); see below.
+- **`corpus`** — *test-only*. Adds the private specimen corpus to the sweep;
+  see below. Implies `bundle`, because the corpus holds ZIP banks.
 
 ## Tests
 
 Unit tests live inline (`#[cfg(test)] mod tests`) and run on a plain
-`cargo test`, as does `tests/dispatch.rs`, which synthesizes a file for every
-registered tag and checks dispatch + round-trip for both header generations.
-The **corpus integration suites** (`tests/ne5.rs` for Electro 5 depth,
-`tests/corpus.rs` for the all-model sweep) are gated behind the `corpus` feature
-because they need the specimen corpus, which lives in a separate private repo
-(`jmoo/nord-corpus`)
+`cargo test`, alongside `tests/dispatch.rs`, which synthesizes a file for
+every registered tag in memory and checks dispatch + round-trip for both
+header generations, and the **specimen sweep**, `tests/corpus`: one generated
+test per file — container checksum, parse, byte-exact round trip, no
+unnameable decoded values, every registry field set to a new value and read
+back without moving another, and the file's oracle sidecar
+(`<file>.oracle.json`) where it has one. A file joins by being readable; an
+oracle by existing beside it.
+
+The sweep always reads `tests/fixtures/` — specimens this crate's own writers
+produced, with sidecars saying what was set, committed as the part of the
+corpus any checkout can carry (`tests/fixtures.rs` pins them as golden bytes).
+With `--features corpus` it also reads the private specimen corpus
+(`jmoo/nord-corpus`), as do two more suites that need the whole corpus in
+view at once: `tests/decode_sanity.rs` (cross-file invariants and behavior
+pins) and `tests/decode_snapshot.rs` (per-field decode snapshots for the
+Electro 5 and the Stage family).
 
 ```sh
-cargo test -p nord-format                       # minimal suite (unit + dispatch)
+cargo test -p nord-format                       # open suite: unit + dispatch + fixtures sweep
 
-# Full corpus sweep — point at a nord-corpus checkout:
+# With the corpus — point at a nord-corpus checkout:
 NORD_CORPUS_ROOT=/path/to/nord-corpus \
-NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
   cargo test -p nord-format --features corpus
 
 # With nix

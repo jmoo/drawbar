@@ -179,8 +179,8 @@ startup_live_slot
 
 startup_program
   at      21..=29
-  raw     4    [200, 201, 202, 221]
-  decoded 4    [(4, 0), (4, 1), (4, 2), (4, 21)]
+  raw     5    [0, 200, 201, 202, 221]
+  decoded 5    [(0, 0), (4, 0), (4, 1), (4, 2), (4, 21)]
 
 startup_song
   at      30..=37

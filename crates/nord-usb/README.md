@@ -91,7 +91,7 @@ carries a `Drop` assertion to catch the mistake in debug builds.
 | `web` | | Browser backend over WebUSB. **Hardware-verified for the read-only path** (Chrome/macOS: inventory, object info); writes and bulk reads not yet exercised. Chrome/Edge only — Firefox and Safari declined the spec. |
 | `replay` | | Drive the protocol from committed captures, no hardware. Used by the golden tests. |
 | `blocking` | | Block on the async API from synchronous callers (the CLI). Tiny; not a runtime. |
-| `corpus` | | Corpus-backed tests (`NORD_CORPUS_DIR`), implies `replay`. |
+| `corpus` | | Corpus-backed tests (`NORD_CORPUS_ROOT`), implies `replay`. |
 
 ### Portability
 

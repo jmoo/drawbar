@@ -23,7 +23,7 @@
 //! snapshot was bought for.
 //!
 //! ```sh
-//! NORD_CORPUS_DIR=/path/to/nord-corpus/ne5 \
+//! NORD_CORPUS_ROOT=/path/to/nord-corpus \
 //!   cargo test -p nord-format --features corpus --test decode_snapshot
 //! ```
 
@@ -31,22 +31,21 @@ use nord_format::cbin::Cbin;
 use nord_format::formats::ne5;
 use nord_format::formats::ne5::program::OrganPanel;
 use nord_format::formats::ne5::{OrganModel, Program};
-use nord_format::Entity;
+use nord_format::{Entity, Live, Settings};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Root of the Electro 5 specimen corpus — see `tests/ne5.rs`.
-fn corpus_dir() -> PathBuf {
-    std::env::var_os("NORD_CORPUS_DIR")
-        .map(PathBuf::from)
-        .expect("set NORD_CORPUS_DIR to a nord-corpus/ne5 checkout for --features corpus")
-}
+#[path = "support/scan.rs"]
+mod scan;
 
-/// The files pinned field-by-field by [`specimens`]: one per `programs/` subdirectory,
+use scan::{corpus, named};
+
+/// The files pinned field-by-field by [`specimens`]: one per constructed panel,
 /// each with a non-default value in the panel it was captured for, plus one factory
-/// program from the full backup as a specimen nobody constructed.
+/// program from the full backup as a specimen nobody constructed. Named by their
+/// trailing path components, wherever the corpus keeps them.
 const PINNED: &[&str] = &[
     "programs/center_panel/o00_0_p000_0_1_6_50_50.ne5p",
     "programs/equalizer/1_000000000064.ne5p",
@@ -256,71 +255,26 @@ fn rows(p: &Program) -> Vec<Row> {
     rows
 }
 
-fn read_program(path: &Path) -> Cbin<Program> {
-    match nord_format::from_path(path)
-        .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()))
-    {
-        Entity::Program(nord_format::Program::Electro5(p)) => p,
-        other => panic!("{} is not an Electro 5 program: {other:?}", path.display()),
-    }
-}
-
-/// `pending/` is a staging area of untracked local files, not corpus content — the
-/// snapshots would otherwise record whatever happened to be sitting in one checkout.
-const UNTRACKED: &str = "pending";
-
-/// Every `.ne5p` the corpus ships, in a stable order.
-fn all_programs(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n != UNTRACKED) {
-                    stack.push(path);
-                }
-            } else if path.extension().is_some_and(|e| e == "ne5p") {
-                found.push(path);
-            }
-        }
-    }
-    found.sort();
-    assert!(
-        found.len() > 100,
-        "found only {} programs under {} — is this a nord-corpus/ne5 checkout?",
-        found.len(),
-        root.display()
-    );
+/// Every Electro 5 program the corpus holds, in a stable order.
+fn all_programs() -> Vec<&'static Cbin<Program>> {
+    let found: Vec<_> = corpus()
+        .iter()
+        .filter_map(|s| match &s.entity {
+            Entity::Program(nord_format::Program::Electro5(p)) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert!(!found.is_empty(), "no Electro 5 program in the corpus");
     found
 }
 
-/// Every Stage 4 specimen of `ext`, sorted.
-fn stage_files(model: &str, ext: &str) -> Vec<PathBuf> {
-    let root = corpus_dir()
-        .parent()
-        .expect("NORD_CORPUS_DIR has no parent")
-        .join(model);
-    let mut found = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n != UNTRACKED) {
-                    stack.push(path);
-                }
-            } else if path.extension().is_some_and(|e| e == ext) {
-                found.push(path);
-            }
-        }
-    }
-    found.sort();
-    assert!(
-        !found.is_empty(),
-        "no .{ext} under {} — is this a nord-corpus checkout?",
-        root.display()
-    );
+/// Chooses the specimens one snapshot group is over, and reads their rows.
+type Pick = fn(&Entity) -> Option<Vec<Row>>;
+
+/// Every specimen `pick` accepts, as its registry rows, in a stable order.
+fn rows_of(pick: Pick) -> Vec<Vec<Row>> {
+    let found: Vec<_> = corpus().iter().filter_map(|s| pick(&s.entity)).collect();
+    assert!(!found.is_empty(), "no specimen of that kind in the corpus");
     found
 }
 
@@ -351,8 +305,7 @@ fn decode_adds_nothing(raw: &BTreeSet<String>, decoded: &BTreeSet<String>) -> bo
 
 #[test]
 fn fields() {
-    let root = corpus_dir();
-    let programs = all_programs(&root);
+    let programs = all_programs();
 
     // Insertion-ordered by first sighting, which is declaration order within each panel.
     let mut order = Vec::new();
@@ -360,8 +313,8 @@ fn fields() {
     let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-    for path in &programs {
-        for row in rows(&read_program(path)) {
+    for program in &programs {
+        for row in rows(program) {
             match placements.get(&row.key) {
                 None => {
                     order.push(row.key.clone());
@@ -435,34 +388,41 @@ fn stage4_fields() {
          # when a reader wants to look.\n",
     );
 
-    for (model, ext, label) in [
-        ("ns4", "ns4p", "ns4p program"),
-        ("ns4", "ns4l", "ns4l live"),
-        ("ns4", "ns4y", "ns4y synth preset"),
-        ("ns4", "ns4n", "ns4n piano preset"),
-        ("ns4", "ns4o", "ns4o organ preset"),
-    ] {
-        let files = stage_files(model, ext);
+    let groups: [(&str, Pick); 5] = [
+        ("ns4p program", |e| match e {
+            Entity::Program(nord_format::Program::Stage4(p)) => Some(packed("", p.field_values())),
+            _ => None,
+        }),
+        ("ns4l live", |e| match e {
+            Entity::Live(Live::Stage4(p)) => Some(packed("", p.field_values())),
+            _ => None,
+        }),
+        ("ns4y synth preset", |e| match e {
+            Entity::Synth(nord_format::Synth::Stage4(y)) => Some(packed("", y.field_values())),
+            _ => None,
+        }),
+        ("ns4n piano preset", |e| match e {
+            Entity::PianoPreset(nord_format::PianoPreset::Stage4(n)) => {
+                Some(packed("", n.field_values()))
+            }
+            _ => None,
+        }),
+        ("ns4o organ preset", |e| match e {
+            Entity::OrganPreset(nord_format::OrganPreset::Stage4(o)) => {
+                Some(packed("", o.field_values()))
+            }
+            _ => None,
+        }),
+    ];
+    for (label, pick) in groups {
+        let files = rows_of(pick);
         let mut order = Vec::new();
         let mut placements: BTreeMap<String, String> = BTreeMap::new();
         let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-        for path in &files {
-            let entity = nord_format::from_path(path).unwrap();
-            let rows = match &entity {
-                Entity::Program(nord_format::Program::Stage4(p)) => packed("", p.field_values()),
-                Entity::Live(nord_format::Live::Stage4(p)) => packed("", p.field_values()),
-                Entity::Synth(nord_format::Synth::Stage4(y)) => packed("", y.field_values()),
-                Entity::PianoPreset(nord_format::PianoPreset::Stage4(n)) => {
-                    packed("", n.field_values())
-                }
-                Entity::OrganPreset(nord_format::OrganPreset::Stage4(o)) => {
-                    packed("", o.field_values())
-                }
-                other => panic!("{}: decoded to {other:?}", path.display()),
-            };
-            for row in rows {
+        for rows in &files {
+            for row in rows.iter() {
                 match placements.get(&row.key) {
                     None => {
                         order.push(row.key.clone());
@@ -472,7 +432,10 @@ fn stage4_fields() {
                 }
                 let raw = row.raw_str();
                 raws.entry(row.key.clone()).or_default().insert(raw);
-                values.entry(row.key).or_default().insert(row.value);
+                values
+                    .entry(row.key.clone())
+                    .or_default()
+                    .insert(row.value.clone());
             }
         }
 
@@ -524,30 +487,37 @@ fn stage23_fields() {
          # the field's type says something the raw value does not already say.\n",
     );
 
-    for (model, ext, label) in [
-        ("ns3", "ns3f", "ns3f program"),
-        ("ns3", "ns3l", "ns3l live"),
-        ("ns2", "ns2p", "ns2p program"),
-        ("ns2", "ns2l", "ns2l live"),
-        ("ns3", "ns3y", "ns3y synth preset"),
-    ] {
-        let files = stage_files(model, ext);
+    let groups: [(&str, Pick); 5] = [
+        ("ns3f program", |e| match e {
+            Entity::Program(nord_format::Program::Stage3(p)) => Some(packed("", p.field_values())),
+            _ => None,
+        }),
+        ("ns3l live", |e| match e {
+            Entity::Live(Live::Stage3(p)) => Some(packed("", p.field_values())),
+            _ => None,
+        }),
+        ("ns2p program", |e| match e {
+            Entity::Program(nord_format::Program::Stage2(p)) => Some(packed("", p.field_values())),
+            _ => None,
+        }),
+        ("ns2l live", |e| match e {
+            Entity::Live(Live::Stage2(p)) => Some(packed("", p.field_values())),
+            _ => None,
+        }),
+        ("ns3y synth preset", |e| match e {
+            Entity::Synth(nord_format::Synth::Stage3(y)) => Some(packed("", y.field_values())),
+            _ => None,
+        }),
+    ];
+    for (label, pick) in groups {
+        let files = rows_of(pick);
         let mut order = Vec::new();
         let mut placements: BTreeMap<String, String> = BTreeMap::new();
         let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-        for path in &files {
-            let entity = nord_format::from_path(path).unwrap();
-            let rows = match &entity {
-                Entity::Program(nord_format::Program::Stage3(p)) => packed("", p.field_values()),
-                Entity::Live(nord_format::Live::Stage3(p)) => packed("", p.field_values()),
-                Entity::Program(nord_format::Program::Stage2(p)) => packed("", p.field_values()),
-                Entity::Live(nord_format::Live::Stage2(p)) => packed("", p.field_values()),
-                Entity::Synth(nord_format::Synth::Stage3(y)) => packed("", y.field_values()),
-                other => panic!("{}: decoded to {other:?}", path.display()),
-            };
-            for row in rows {
+        for rows in &files {
+            for row in rows.iter() {
                 match placements.get(&row.key) {
                     None => {
                         order.push(row.key.clone());
@@ -557,7 +527,10 @@ fn stage23_fields() {
                 }
                 let raw = row.raw_str();
                 raws.entry(row.key.clone()).or_default().insert(raw);
-                values.entry(row.key).or_default().insert(row.value);
+                values
+                    .entry(row.key.clone())
+                    .or_default()
+                    .insert(row.value.clone());
             }
         }
 
@@ -595,7 +568,6 @@ fn stage23_fields() {
 
 #[test]
 fn specimens() {
-    let root = corpus_dir();
     let mut out = String::new();
     out.push_str(
         "# Every field of a fixed handful of specimens. The companion to\n\
@@ -604,13 +576,16 @@ fn specimens() {
     );
 
     for name in PINNED {
-        let path = root.join(name);
-        assert!(
-            path.is_file(),
-            "pinned specimen {name} is missing — the corpus moved; update PINNED"
-        );
+        let mut hits = corpus().iter().filter(|s| s.path.ends_with(name));
+        let specimen = hits
+            .next()
+            .unwrap_or_else(|| panic!("pinned specimen {name} is missing; update PINNED"));
+        assert!(hits.next().is_none(), "pinned specimen {name} is ambiguous");
+        let Entity::Program(nord_format::Program::Electro5(program)) = &specimen.entity else {
+            panic!("{name} is not an Electro 5 program")
+        };
         let _ = write!(out, "\n=== {name}\n");
-        for row in rows(&read_program(&path)) {
+        for row in rows(program) {
             let _ = writeln!(
                 out,
                 "{:<34} {:<22} raw {:<12} {}",
@@ -625,35 +600,17 @@ fn specimens() {
     compare("decode_specimens.snapshot", &out);
 }
 
-/// Every `.ne5s` the corpus ships, in a stable order.
-fn all_settings(root: &Path) -> Vec<PathBuf> {
-    let mut found = vec![
-        root.join("settings.ne5s"),
-        root.join("usb/backup/full_backup/contents/Settings/Settings/Settings.ne5s"),
-    ];
-    for entry in fs::read_dir(root.join("settings")).expect("settings corpus") {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "ne5s") {
-            found.push(path);
-        }
-    }
-    found.sort();
-    assert!(
-        found.len() > 100,
-        "found only {} settings files under {} — is this a nord-corpus/ne5 checkout?",
-        found.len(),
-        root.display()
-    );
+/// Every Electro 5 settings file the corpus holds, in a stable order.
+fn all_settings() -> Vec<&'static Cbin<ne5::Settings>> {
+    let found: Vec<_> = corpus()
+        .iter()
+        .filter_map(|s| match &s.entity {
+            Entity::Settings(Settings::Electro5(f)) => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert!(!found.is_empty(), "no Electro 5 settings in the corpus");
     found
-}
-
-fn read_settings(path: &Path) -> Cbin<ne5::Settings> {
-    match nord_format::from_path(path)
-        .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()))
-    {
-        Entity::Settings(nord_format::Settings::Electro5(s)) => s,
-        other => panic!("{} is not Electro 5 settings: {other:?}", path.display()),
-    }
 }
 
 /// The settings panel over the whole `.ne5s` corpus, then one specimen in full.
@@ -663,16 +620,14 @@ fn read_settings(path: &Path) -> Cbin<ne5::Settings> {
 /// field by field.
 #[test]
 fn settings() {
-    let root = corpus_dir();
-    let paths = all_settings(&root);
+    let paths = all_settings();
 
     let mut order = Vec::new();
     let mut placements: BTreeMap<String, String> = BTreeMap::new();
     let mut raws: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-    for path in &paths {
-        let settings = read_settings(path);
+    for settings in &paths {
         // The flat body registers the startup settings too, so they are recorded
         // next to the menu settings rather than going unwatched.
         let rows = packed("", settings.field_values());
@@ -709,9 +664,11 @@ fn settings() {
 
     // The sweep's own reference capture: every setting at once, so a moved range has a
     // concrete place to show itself as well as an aggregate one.
-    let baseline = root.join("settings/baseline.ne5s");
+    let Entity::Settings(Settings::Electro5(baseline)) = &named("baseline.ne5s").entity else {
+        panic!("baseline.ne5s is not Electro 5 settings")
+    };
     let _ = write!(out, "\n=== settings/baseline.ne5s\n");
-    for row in packed("", read_settings(&baseline).field_values()) {
+    for row in packed("", baseline.field_values()) {
         let _ = writeln!(
             out,
             "{:<44} {:<12} raw {:<6} {}",

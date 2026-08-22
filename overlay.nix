@@ -42,7 +42,13 @@ let
       filter =
         path: type:
         !hasInfix "/nord-cli/checks" path
-        && (crane.filterCargoSources path type || hasSuffix ".script" path || hasSuffix ".snapshot" path);
+        && (
+          crane.filterCargoSources path type
+          || hasSuffix ".script" path
+          || hasSuffix ".snapshot" path
+          # The committed synthetic specimens, whatever their extensions.
+          || hasInfix "/tests/fixtures/" path
+        );
     };
 
     strictDeps = true;
@@ -442,12 +448,8 @@ let
   # ⚠️ The corpus is a private repo, so evaluating this overlay at all needs read
   # access to it.
 
-  # ⚠️ The pinned rev lives on `size-tiering`, not the default branch, and
-  # `fetchGit` only fetches the refs it is told about — without this it reports the
-  # rev as not found. Drop it when the branch merges.
   corpusTree = builtins.fetchGit {
-    ref = "size-tiering";
-    rev = "43cfa477ac74a6e4f247ae97607b51f581b96aaf";
+    rev = "de3f8f9123a14d3d8202aa68fc8414495ac8f710";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
@@ -468,13 +470,9 @@ let
   # One suite per corpus crate: the crate's own package — `final`'s, so a later
   # overlay changing a crate changes its suite — re-run by `.override` with the
   # specimens named and the feature that compiles the sweeps in.
-  #
-  # `NORD_CORPUS_DIR` is the Electro 5 tree and `NORD_CORPUS_ROOT` the corpus it
-  # sits in. The depth suite reads the first, the whole-corpus sweep the second.
   committed = genAttrs corpusCrates (
     name:
     final.nord.crates.${name}.override {
-      NORD_CORPUS_DIR = "${corpus}/ne5";
       NORD_CORPUS_ROOT = "${corpus}";
       cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
       pname = "${name}-corpus";
@@ -485,7 +483,6 @@ let
   full = mapAttrs (
     name: suite:
     suite.override {
-      NORD_CORPUS_DIR = "${corpusFull}/ne5";
       NORD_CORPUS_ROOT = "${corpusFull}";
       pname = "${name}-corpus-full";
     }
