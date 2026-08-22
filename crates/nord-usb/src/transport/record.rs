@@ -25,18 +25,41 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Create `path`, truncating it, and write the script preamble.
+    /// Create `path`, truncating it, and write the script header.
+    ///
+    /// The header says where the frames came from, which is what a reader needs to know
+    /// whether they are an oracle: `source: nord` is this project's own traffic, a
+    /// regression baseline rather than a match against the vendor application.
     ///
     /// Fails immediately if the path is not writable — the point at which a caller can
     /// still do something about it.
-    pub fn create(path: &Path) -> Result<Self> {
+    pub fn create(path: &Path, device: Option<&str>) -> Result<Self> {
         let mut file = File::create(path)?;
         writeln!(
             file,
             "# nord-usb replay script, recorded from hardware.\n\
-             # Format: '<O|I> <hex>' -- O = host->device, I = device->host."
+             # Format: '<O|I> <hex>' -- O = host->device, I = device->host.\n\
+             # source: nord"
         )?;
+        if let Some(device) = device {
+            writeln!(file, "# device: {device}")?;
+        }
         Ok(Self { file, failed: None })
+    }
+
+    /// Declare what the frames that follow are doing: `<class> <verb> <args…>`, in the
+    /// CLI's own spellings.
+    ///
+    /// One command opens several transactions — a move names both slots before moving
+    /// anything — so this is written per transaction, not per file, and each one opens a
+    /// section the replay sweep drives on its own.
+    pub fn intent(&mut self, intent: &str) {
+        if self.failed.is_some() {
+            return;
+        }
+        if let Err(e) = writeln!(self.file, "\n# intent: {intent}") {
+            self.failed = Some(e);
+        }
     }
 
     /// Record a frame the host sent.
