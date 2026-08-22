@@ -123,6 +123,32 @@ cargo test -p nord-usb --features replay
 the golden tests out and reports a pass having verified none of the wire encoding.
 The Nix build enables it via `[package.metadata.nix] testFeatures` in `Cargo.toml`.
 
+### The replay sweep
+
+`tests/replay` is one trial per `*.script` under `tests/scripts`, and — with
+`--features corpus` and `NORD_CORPUS_ROOT` — under the private corpus too. A
+capture joins the suite by existing; no test is written for it.
+
+Every script is checked for framing. A script whose header declares an **intent**
+is also driven: replayed through an exact-match transport, one section per
+transaction, each judged against what it said to `expect`, and the whole script
+required to be consumed.
+
+```
+# source: nord
+# device: Nord Electro 5, firmware v2.04 build 592
+# intent: program info 7:11
+O 0000001200000006000000010000000006a1
+…
+# intent: program move 7:11 7:12
+…
+```
+
+`nord … --record <path>` writes that header itself, so a capture made with the CLI
+is a finished golden. The full vocabulary — header keys, the `expect` values, and
+the intent → operation table — is in
+[`tests/scripts/README.md`](tests/scripts/README.md).
+
 ## Status
 
 > [!CAUTION]
