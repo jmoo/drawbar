@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::cbin;
 use crate::error::{Error, ParseError};
-use crate::formats::{cn3, midi};
+use crate::formats::{cn3, midi, nsmpproj};
 
 /// The container classes [`peek`] distinguishes.
 pub enum FileType {
@@ -13,6 +13,8 @@ pub enum FileType {
     /// An Electro 2 `.cn3` library — `CNE3` magic, not CBIN.
     Cne3,
     Midi,
+    /// A Nord Sample Editor project — `SMACEditorProject {` text, not CBIN.
+    SampleProject,
     Sysex,
     Xml,
     Zip,
@@ -24,6 +26,7 @@ impl FileType {
             FileType::Cbin => "cbin",
             FileType::Cne3 => "cne3",
             FileType::Midi => "midi",
+            FileType::SampleProject => "nsmpproj",
             FileType::Sysex => "sysex",
             FileType::Xml => "xml",
             FileType::Zip => "zip",
@@ -66,6 +69,17 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
         }
 
         0x3c => Ok(unknown(FileType::Xml)),
+
+        // 'S' — a Sample Editor project, checked in full so a stray S is not one.
+        0x53 => {
+            let mut head = vec![0u8; nsmpproj::MAGIC.len()];
+            reader.read_exact(&mut head)?;
+            if head == nsmpproj::MAGIC {
+                Ok(unknown(FileType::SampleProject))
+            } else {
+                Err(ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned()).into())
+            }
+        }
 
         0xf0 => Ok(unknown(FileType::Sysex)),
 
@@ -129,6 +143,7 @@ mod tests {
             (&b"\xf0\x33\x0f\x04\xf7\0\0\0\0\0\0\0\0"[..], "sysex"),
             (&b"MThd\0\0\0\x06\0\0\0\0\0"[..], "midi"),
             (&b"CNE3\x2c\x01\0\0\0\0\0\0\0"[..], "cne3"),
+            (&b"SMACEditorProject {\n}\n"[..], "nsmpproj"),
         ] {
             let mut reader = Cursor::new(bytes.to_vec());
             let peeked = peek(&mut reader).unwrap();
