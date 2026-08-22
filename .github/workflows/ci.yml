@@ -5,6 +5,9 @@
 #           workspace with `--deny warnings`.
 #   build — every crate with its test suite, the cross matrix (Windows under Wine,
 #           aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
+#   commits — PR titles and commit subjects follow Conventional Commits and no
+#             merge commits sneak in (CONTRIBUTING.md). Release versioning is
+#             driven by those titles, so this guards the release automation too.
 #
 # The corpus attrs (`nord.*-corpus`) need the private specimen repo and are not
 # part of `nord.all`. Magic Nix Cache keeps the store between runs; without it
@@ -35,3 +38,40 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v9
       - run: nix build .#nord.all --print-build-logs
+
+  commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # The PR's own head, not the merge ref — the merge ref contains a merge
+      # commit by construction.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: title is a Conventional Commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: .+'
+          if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error::PR title must be a Conventional Commit, e.g. 'fix(nord-format): …' — see CONTRIBUTING.md"
+            exit 1
+          fi
+      - name: subjects are Conventional Commits and history is linear
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: .+'
+          range="origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
+          status=0
+          while IFS= read -r subject; do
+            if ! printf '%s\n' "$subject" | grep -Eq "$pattern"; then
+              echo "::error::commit title must be a Conventional Commit (or squash the PR): $subject"
+              status=1
+            fi
+          done < <(git log --format=%s "$range")
+          merges="$(git rev-list --merges --count "$range")"
+          if [ "$merges" -ne 0 ]; then
+            echo "::error::$merges merge commit(s) in this PR — rebase onto ${{ github.base_ref }} instead — see CONTRIBUTING.md"
+            status=1
+          fi
+          exit $status
