@@ -37,6 +37,18 @@ pub fn wanted(path: &Path) -> bool {
     )
 }
 
+/// A CBIN file's tag and header generation — the shape its registry reads
+/// through. `None` for anything else.
+pub fn shape(path: &Path) -> Option<(Vec<u8>, u8)> {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .ok()?;
+    head.starts_with(b"CBIN")
+        .then(|| (head[8..12].to_vec(), head[4]))
+}
+
 /// Every wanted file under `root`, and every sidecar, each in a stable order.
 pub fn walk(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut specimens = Vec::new();
@@ -71,28 +83,38 @@ pub struct Specimen {
     pub entity: Entity,
 }
 
-/// The whole corpus, parsed once per test binary and shared by every test in
-/// it. A file that fails to parse panics here; the sweep in `tests/corpus`
-/// is where it is reported by name.
+/// Every specimen under `root`, read and parsed. A file that fails to parse
+/// panics here; the sweep in `tests/corpus` is where it is reported by name.
+fn read_tree(root: &Path) -> Vec<Specimen> {
+    let (paths, _) = walk(root);
+    assert!(!paths.is_empty(), "no specimen under {}", root.display());
+    paths
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            Specimen {
+                path,
+                bytes,
+                entity,
+            }
+        })
+        .collect()
+}
+
+/// The whole corpus, parsed once per test binary and shared by every test in it.
 pub fn corpus() -> &'static [Specimen] {
     static CORPUS: OnceLock<Vec<Specimen>> = OnceLock::new();
-    CORPUS.get_or_init(|| {
-        let root = root();
-        let (paths, _) = walk(&root);
-        assert!(!paths.is_empty(), "no specimen under {}", root.display());
-        paths
-            .into_iter()
-            .map(|path| {
-                let bytes = fs::read(&path).unwrap();
-                let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
-                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                Specimen {
-                    path,
-                    bytes,
-                    entity,
-                }
-            })
-            .collect()
+    CORPUS.get_or_init(|| read_tree(&root()))
+}
+
+/// The committed fixtures, the tree that is there in any checkout, parsed once
+/// per test binary.
+pub fn fixtures() -> &'static [Specimen] {
+    static FIXTURES: OnceLock<Vec<Specimen>> = OnceLock::new();
+    FIXTURES.get_or_init(|| {
+        read_tree(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
     })
 }
 
