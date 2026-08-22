@@ -46,8 +46,9 @@ let
           crane.filterCargoSources path type
           || hasSuffix ".script" path
           || hasSuffix ".snapshot" path
-          # The committed synthetic specimens, whatever their extensions.
+          # The committed specimens and replay scripts, whatever their extensions.
           || hasInfix "/tests/fixtures/" path
+          || hasInfix "/tests/scripts/" path
         );
     };
 
