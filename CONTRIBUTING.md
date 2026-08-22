@@ -75,12 +75,47 @@ if they are not installed globally.
 - Format: `nix fmt` formats the whole tree; `nix flake check` fails on anything
   it would have changed.
 
+## Commits & merges
+
+- **Linear history: no merge commits.** Integrate work into your branch with
+  rebase; integrate branches into `master` with squash or fast-forward merges.
+  CI fails any PR whose commits contain a merge commit.
+- **Every commit title is a Conventional Commit**:
+
+  ```
+  <type>(<optional scope>): description
+  ```
+
+  Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`,
+  `ci`, `chore`, `revert`. The scope is usually the crate name, e.g.
+  `fix(nord-format): …`. `!` before the colon — or a `BREAKING CHANGE:` footer
+  in the body — marks a breaking change.
+- **PR titles follow the same rule.** With squash merges the PR title becomes
+  the commit title on `master`, so it is the one that counts.
+- **Versions bump from titles**: `fix` bumps the patch version, `feat` the
+  minor, a breaking change the major. Any other type releases nothing on its
+  own. Only commits touching a published crate count toward that crate's bump.
+
 ## Releasing
 
-`nord-bits-derive` and `nord-format` are published to crates.io. Pushing a
-`<crate>-v<version>` tag triggers `.github/workflows/release.yml` (crates.io
-Trusted Publishing — no token secrets). Bump the crate's own `version` first;
-the other crates share the workspace version and are unpublished.
+`nord-bits-derive` and `nord-format` are published to crates.io; the other
+crates share the workspace version and are unpublished.
+
+Releases are automatic, driven by
+[release-please](https://github.com/googleapis/release-please):
+
+- Conventional commits landing on `master` open or update one **Release PR**
+  per batch of changes. It bumps each touched crate's `version`, appends to its
+  `CHANGELOG.md`, keeps `nord-format`'s exact `nord-bits-derive` pin in sync,
+  and refreshes `Cargo.lock`.
+- **Merging the Release PR** tags `<crate>-v<version>` GitHub releases and
+  publishes them to crates.io via Trusted Publishing (OIDC) — no token secrets
+  to rotate.
+- Escape hatch: pushing a `<crate>-v<version>` tag still publishes that crate,
+  after checking it against the manifest.
+- First-ever publish of a new crate can't use Trusted Publishing (it is
+  configured on an already-existing crate) — publish locally once, then add the
+  crate to `release-please-config.json` and `.release-please-manifest.json`.
 
 ## Code style
 
