@@ -6,7 +6,9 @@
 //! includes it compiles its own copy.
 #![allow(dead_code)]
 
+use nord_format::cbin::Cbin;
 use nord_format::fields::{Field, FieldValue};
+use nord_format::layout::{BodyLayout, LayoutField};
 use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Song, Synth};
 use std::io::Cursor;
 
@@ -46,6 +48,40 @@ pub fn fields(entity: &Entity) -> Option<Vec<Field>> {
 /// The decoded-value view.
 pub fn field_values(entity: &Entity) -> Option<Vec<FieldValue>> {
     with_registry!(entity, |f| f.field_values())
+}
+
+/// Which body an entity decodes to, as a name a file can be called after:
+/// the model module and the type — `ne5-Program`. Two entities over the same
+/// body share it, which is the point — `ne5p` and `ne5l` are one body.
+pub fn body_type(entity: &Entity) -> Option<String> {
+    with_registry!(entity, |f| body_name(f))
+}
+
+/// The body's declared bit map, for walking what the source claims. Nested
+/// entries chain to their own layouts.
+pub fn layout(entity: &Entity) -> Option<&'static [LayoutField]> {
+    with_registry!(entity, |f| body_layout(f))
+}
+
+/// Reached through the container so `with_registry!` can name the body type it
+/// never spells out.
+fn body_name<B>(_: &Cbin<B>) -> String {
+    model_qualified(std::any::type_name::<B>())
+}
+
+fn body_layout<B: BodyLayout>(_: &Cbin<B>) -> &'static [LayoutField] {
+    B::layout()
+}
+
+/// `…::formats::ne5::program::Program` → `ne5-Program`. The bare type name
+/// collides — four models declare a `Program` — so the model module qualifies it.
+fn model_qualified(path: &str) -> String {
+    let parts: Vec<&str> = path.split("::").collect();
+    let name = parts.last().copied().unwrap_or(path);
+    match parts.iter().position(|p| *p == "formats") {
+        Some(at) if at + 2 < parts.len() => format!("{}-{name}", parts[at + 1]),
+        _ => name.to_string(),
+    }
 }
 
 fn parse(bytes: &[u8]) -> Result<Entity, String> {
