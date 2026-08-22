@@ -1,0 +1,1081 @@
+SMACEditorProject {
+  m_fileFormatVersion = 54
+  m_createdByProdName = nord-format
+  m_createdByProdVer = v0.1.0
+  document {
+    m_zones.size = 3
+    m_instruments.size = 1
+    m_audioFiles.size = 3
+    m_maxStrength = 0
+    m_minStrength = 0
+    m_modifyDate = 1700000000
+  }
+  audio_file {
+    m_id = 1
+    m_fullName = audio/c3.wav
+    m_sampleRate = 44100
+    m_modifyDate = 1700000000
+  }
+  audio_file {
+    m_id = 2
+    m_fullName = audio/c4.wav
+    m_sampleRate = 44100
+    m_modifyDate = 1700000000
+  }
+  audio_file {
+    m_id = 3
+    m_fullName = audio/c5.wav
+    m_sampleRate = 44100
+    m_modifyDate = 1700000000
+  }
+  common_zone {
+    m_zoneId = 131
+    m_strokes.size = 1
+    m_modifyDate = 1700000000
+    m_mapTopNote = 0
+    common_stroke {
+      m_globalID = 3
+      m_fileID = 3
+      m_strokeType = 0
+      m_strength = 0
+      m_shortLoopUsesPitch = 1
+      m_begin = 0.000000
+      m_end = 4394.000000
+      m_start = 1.000000
+      m_startSecondary = 549.250000
+      m_stop = 4394.000000
+      m_loopEnabled = 0
+      m_shortLoopEnabled = 0
+      m_loopLengthShort = 0.000000
+      m_loopXFadeShort = 10
+      m_loopStart = 2197.000000
+      m_loopLengthLong = 2196.000000
+      m_loopDecayEnabled = 0
+      m_loopDecay = 20.000000
+      m_loopDetune = 0
+      m_loopXFadeLengthLong = 329.400000
+      m_loopXFModeLong = 0
+      m_release = 0.000000
+      m_fadeInEnable = 0
+      m_fadeInLength = 9600.000000
+      m_fadeOutLength = 9600.000000
+      m_fadeOutRef = 0
+      m_fadeOutMode = 0
+      m_fadeOutEnable = 0
+      m_modifyDate = 1700000000
+    }
+  }
+  common_zone {
+    m_zoneId = 130
+    m_strokes.size = 1
+    m_modifyDate = 1700000000
+    m_mapTopNote = 0
+    common_stroke {
+      m_globalID = 2
+      m_fileID = 2
+      m_strokeType = 0
+      m_strength = 0
+      m_shortLoopUsesPitch = 1
+      m_begin = 0.000000
+      m_end = 4394.000000
+      m_start = 1.000000
+      m_startSecondary = 549.250000
+      m_stop = 4394.000000
+      m_loopEnabled = 0
+      m_shortLoopEnabled = 0
+      m_loopLengthShort = 0.000000
+      m_loopXFadeShort = 10
+      m_loopStart = 2197.000000
+      m_loopLengthLong = 2196.000000
+      m_loopDecayEnabled = 0
+      m_loopDecay = 20.000000
+      m_loopDetune = 0
+      m_loopXFadeLengthLong = 329.400000
+      m_loopXFModeLong = 0
+      m_release = 0.000000
+      m_fadeInEnable = 0
+      m_fadeInLength = 9600.000000
+      m_fadeOutLength = 9600.000000
+      m_fadeOutRef = 0
+      m_fadeOutMode = 0
+      m_fadeOutEnable = 0
+      m_modifyDate = 1700000000
+    }
+  }
+  common_zone {
+    m_zoneId = 129
+    m_strokes.size = 1
+    m_modifyDate = 1700000000
+    m_mapTopNote = 0
+    common_stroke {
+      m_globalID = 1
+      m_fileID = 1
+      m_strokeType = 0
+      m_strength = 0
+      m_shortLoopUsesPitch = 1
+      m_begin = 0.000000
+      m_end = 4394.000000
+      m_start = 1.000000
+      m_startSecondary = 549.250000
+      m_stop = 4394.000000
+      m_loopEnabled = 0
+      m_shortLoopEnabled = 0
+      m_loopLengthShort = 0.000000
+      m_loopXFadeShort = 10
+      m_loopStart = 2197.000000
+      m_loopLengthLong = 2196.000000
+      m_loopDecayEnabled = 0
+      m_loopDecay = 20.000000
+      m_loopDetune = 0
+      m_loopXFadeLengthLong = 329.400000
+      m_loopXFModeLong = 0
+      m_release = 0.000000
+      m_fadeInEnable = 0
+      m_fadeInLength = 9600.000000
+      m_fadeOutLength = 9600.000000
+      m_fadeOutRef = 0
+      m_fadeOutMode = 0
+      m_fadeOutEnable = 0
+      m_modifyDate = 1700000000
+    }
+  }
+  instrument {
+    m_id = 0
+    m_type = 0
+    m_name = three-zones
+    m_crc = 0
+    m_crcProj = 0
+    m_revision = 0
+    m_zones.size = 3
+    m_maps.size = 1
+    m_modifyDate = 1700000000
+    m_loopDecayEnabled = 0
+    m_loopDecayHi = 20.000000
+    m_loopDecayLo = 20.000000
+    default_params {
+      m_bufferSize = 0
+      m_buffer = 
+    }
+    samplib_attrs {
+      m_decay = 5
+      m_release = 30
+      m_monoMode = 0
+      m_dynamics = 0
+      m_velAmpl = 1
+      m_velTimbre = 1
+      m_octaveShift = 0
+      m_atkVelocityAmount = 0
+      m_ne3SlowAttackMode = 0
+      m_fltSlope = 0
+      m_phaseVar = 0
+      m_rndStart = 0
+      m_fltKBT = 1
+      m_voiceMode = 0
+    }
+    m_categoryCategory = 15
+    m_categorySubCategory = 0
+    m_categoryTimbre = 0
+    m_categoryEnvelope = 0
+    m_categoryMotion = 1
+    m_categoryProduction = Production
+    m_categoryOrigin = Origin
+    m_categoryDynamicsEnable = 0
+    m_eqLowCutFreq = 50.000000
+    m_eqLowCutEnable = 0
+    m_eqMidGain_0 = 0.000000
+    m_eqMidGain_1 = 0.000000
+    m_eqMidFreq_0 = 1000.000000
+    m_eqMidFreq_1 = 4000.000000
+    m_eqMidQ_0 = 0.500000
+    m_eqMidQ_1 = 0.500000
+    m_eqMidEnable_0 = 0
+    m_eqMidEnable_1 = 0
+    instrument_zone {
+      m_zoneId = 131
+      m_strokes.size = 1
+      m_modifyDate = 1700000000
+      instrument_stroke {
+        m_globalID = 3
+        m_modifyDate = 1700000000
+      }
+    }
+    instrument_zone {
+      m_zoneId = 130
+      m_strokes.size = 1
+      m_modifyDate = 1700000000
+      instrument_stroke {
+        m_globalID = 2
+        m_modifyDate = 1700000000
+      }
+    }
+    instrument_zone {
+      m_zoneId = 129
+      m_strokes.size = 1
+      m_modifyDate = 1700000000
+      instrument_stroke {
+        m_globalID = 1
+        m_modifyDate = 1700000000
+      }
+    }
+    map_info {
+      m_id = 0
+      m_name = Map
+      m_gain = 1.000000
+      m_detune = 0
+      m_files.size = 3
+      m_notes.size = 92
+      m_zones.size = 3
+      m_modifyDate = 1700000000
+      m_macroSpinCtrlVal[0] = 1.000000
+      m_macroSpinCtrlVal[1] = 1.000000
+      m_macroSpinCtrlVal[2] = 1.000000
+      m_macroSpinCtrlVal[3] = 1.000000
+      m_macroSpinCtrlVal[4] = 1.000000
+      m_macroSpinCtrlVal[5] = 1.000000
+      m_macroSpinCtrlVal[6] = 1.000000
+      m_macroSpinCtrlVal[7] = 1.000000
+      m_normalize = 0
+      m_emphasisMode = 0
+      map_audiofile {
+        m_id = 1
+        m_isEnabled = 1
+        m_modifyDate = 1700000000
+      }
+      map_audiofile {
+        m_id = 2
+        m_isEnabled = 1
+        m_modifyDate = 1700000000
+      }
+      map_audiofile {
+        m_id = 3
+        m_isEnabled = 1
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 17
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 18
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 19
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 20
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 21
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 22
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 23
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 24
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 25
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 26
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 27
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 28
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 29
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 30
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 31
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 32
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 33
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 34
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 35
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 36
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 37
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 38
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 39
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 40
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 41
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 42
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 43
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 44
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 45
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 46
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 47
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 48
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 49
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 50
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 51
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 52
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 53
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 54
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 55
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 56
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 57
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 58
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 59
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 60
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 61
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 62
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 63
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 64
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 65
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 66
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 67
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 68
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 69
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 70
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 71
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 72
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 73
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 74
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 75
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 76
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 77
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 78
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 79
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 80
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 81
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 82
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 83
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 84
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 85
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 86
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 87
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 88
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 89
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 90
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 91
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 92
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 93
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 94
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 95
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 96
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 97
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 98
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 99
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 100
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 101
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 102
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 103
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 104
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 105
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 106
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 107
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      note_info {
+        m_no = 108
+        m_gain = 1.000000
+        m_detune = 0
+        m_modifyDate = 1700000000
+      }
+      map_zone {
+        m_zoneId = 131
+        m_rootKey = 72
+        m_isEnabled = 1
+        m_btmNote = 71
+        m_topNote = 96
+        m_zoneMode = 0
+        m_zonePlayback = 0
+        m_isOneShot = 0
+        m_ImagingEnable = 0
+        m_ImagingL = 1.000000
+        m_ImagingR2L = 0.000000
+        m_ImagingL2R = 0.000000
+        m_ImagingR = 1.000000
+        m_eqLowCutFreq = 50.000000
+        m_eqLowCutEnable = 0
+        m_eqMidGain_0 = 0.000000
+        m_eqMidGain_1 = 0.000000
+        m_eqMidFreq_0 = 1000.000000
+        m_eqMidFreq_1 = 4000.000000
+        m_eqMidQ_0 = 0.500000
+        m_eqMidQ_1 = 0.500000
+        m_eqMidEnable_0 = 0
+        m_eqMidEnable_1 = 0
+        m_eqHiCutFreq = 10000.000000
+        m_eqHiCutEnable = 0
+        m_eqMidGain_2 = 0.000000
+        m_eqMidFreq_2 = 6000.000000
+        m_eqMidQ_2 = 0.500000
+        m_eqMidEnable_2 = 0
+        m_eqMidDynGainEn_0 = 0
+        m_eqMidDynGainEn_1 = 0
+        m_eqMidDynGainEn_2 = 0
+        m_eqMidVarGainEn_0 = 0
+        m_eqMidVarGainEn_1 = 0
+        m_eqMidVarGainEn_2 = 0
+        m_eqMidVarGainAtcTime_0 = 0.000000
+        m_eqMidVarGainAtcTime_1 = 0.000000
+        m_eqMidVarGainAtcTime_2 = 0.000000
+        m_eqMidVarGainDcyTime_0 = 0.000000
+        m_eqMidVarGainDcyTime_1 = 0.000000
+        m_eqMidVarGainDcyTime_2 = 0.000000
+        m_eqDynLPEnable = 0
+        m_eqDynLPHoldOff = 0.200000
+        m_eqDynLPInitialFreqHi = 17000.000000
+        m_eqDynLPInitialFreqLo = 10000.000000
+        m_eqDynLPFinalFreqHi = 5000.000000
+        m_eqDynLPFinalFreqLo = 3000.000000
+        m_eqDynLPReleaseFreqHi = 8000.000000
+        m_eqDynLPReleaseFreqLo = 3000.000000
+        m_eqDynLPFinalFreq2Hi = 3000.000000
+        m_eqDynLPFinalFreq2Lo = 2000.000000
+        m_eqTrackingMultFactor = 1.000000
+        m_eqTrackingGain1 = 0.000000
+        m_eqTrackingGain2 = 0.000000
+        m_eqTrackingGain3 = 0.000000
+        m_eqTrackingGain4 = 0.000000
+        m_eqTrackingGain5 = 0.000000
+        m_eqTrackingGain6 = 0.000000
+        m_eqTrackingGain7 = 0.000000
+        m_eqTrackingGain8 = 0.000000
+        m_eqTrackingGain9 = 0.000000
+        m_eqTrackingGain10 = 0.000000
+        m_eqTrackingEnable = 0
+        m_eqTrackingBand1Enable = 0
+        m_eqTrackingBand2Enable = 0
+        m_eqTrackingBand3Enable = 0
+        m_eqTrackingBand4Enable = 0
+        m_eqTrackingBand5Enable = 0
+        m_eqTrackingBand6Enable = 0
+        m_eqTrackingBand7Enable = 0
+        m_eqTrackingBand8Enable = 0
+        m_eqTrackingBand9Enable = 0
+        m_eqTrackingBand10Enable = 0
+        m_strokes.size = 1
+        m_modifyDate = 1700000000
+        map_stroke {
+          m_globalID = 3
+          m_isEnabled = 1
+          m_gain = 1.000000
+          m_detune = 0
+          m_relStrength = 1
+          m_relStrengthEdited = 0
+          m_relStrengthTop = 16384
+          m_relStrengthTopEdited = 0
+          m_velocityMin = 0
+          m_velocityMax = 127
+          m_attackLen = 0.000000
+          m_modifyDate = 1700000000
+        }
+      }
+      map_zone {
+        m_zoneId = 130
+        m_rootKey = 61
+        m_isEnabled = 1
+        m_btmNote = 54
+        m_topNote = 70
+        m_zoneMode = 0
+        m_zonePlayback = 0
+        m_isOneShot = 0
+        m_ImagingEnable = 0
+        m_ImagingL = 1.000000
+        m_ImagingR2L = 0.000000
+        m_ImagingL2R = 0.000000
+        m_ImagingR = 1.000000
+        m_eqLowCutFreq = 50.000000
+        m_eqLowCutEnable = 0
+        m_eqMidGain_0 = 0.000000
+        m_eqMidGain_1 = 0.000000
+        m_eqMidFreq_0 = 1000.000000
+        m_eqMidFreq_1 = 4000.000000
+        m_eqMidQ_0 = 0.500000
+        m_eqMidQ_1 = 0.500000
+        m_eqMidEnable_0 = 0
+        m_eqMidEnable_1 = 0
+        m_eqHiCutFreq = 10000.000000
+        m_eqHiCutEnable = 0
+        m_eqMidGain_2 = 0.000000
+        m_eqMidFreq_2 = 6000.000000
+        m_eqMidQ_2 = 0.500000
+        m_eqMidEnable_2 = 0
+        m_eqMidDynGainEn_0 = 0
+        m_eqMidDynGainEn_1 = 0
+        m_eqMidDynGainEn_2 = 0
+        m_eqMidVarGainEn_0 = 0
+        m_eqMidVarGainEn_1 = 0
+        m_eqMidVarGainEn_2 = 0
+        m_eqMidVarGainAtcTime_0 = 0.000000
+        m_eqMidVarGainAtcTime_1 = 0.000000
+        m_eqMidVarGainAtcTime_2 = 0.000000
+        m_eqMidVarGainDcyTime_0 = 0.000000
+        m_eqMidVarGainDcyTime_1 = 0.000000
+        m_eqMidVarGainDcyTime_2 = 0.000000
+        m_eqDynLPEnable = 0
+        m_eqDynLPHoldOff = 0.200000
+        m_eqDynLPInitialFreqHi = 17000.000000
+        m_eqDynLPInitialFreqLo = 10000.000000
+        m_eqDynLPFinalFreqHi = 5000.000000
+        m_eqDynLPFinalFreqLo = 3000.000000
+        m_eqDynLPReleaseFreqHi = 8000.000000
+        m_eqDynLPReleaseFreqLo = 3000.000000
+        m_eqDynLPFinalFreq2Hi = 3000.000000
+        m_eqDynLPFinalFreq2Lo = 2000.000000
+        m_eqTrackingMultFactor = 1.000000
+        m_eqTrackingGain1 = 0.000000
+        m_eqTrackingGain2 = 0.000000
+        m_eqTrackingGain3 = 0.000000
+        m_eqTrackingGain4 = 0.000000
+        m_eqTrackingGain5 = 0.000000
+        m_eqTrackingGain6 = 0.000000
+        m_eqTrackingGain7 = 0.000000
+        m_eqTrackingGain8 = 0.000000
+        m_eqTrackingGain9 = 0.000000
+        m_eqTrackingGain10 = 0.000000
+        m_eqTrackingEnable = 0
+        m_eqTrackingBand1Enable = 0
+        m_eqTrackingBand2Enable = 0
+        m_eqTrackingBand3Enable = 0
+        m_eqTrackingBand4Enable = 0
+        m_eqTrackingBand5Enable = 0
+        m_eqTrackingBand6Enable = 0
+        m_eqTrackingBand7Enable = 0
+        m_eqTrackingBand8Enable = 0
+        m_eqTrackingBand9Enable = 0
+        m_eqTrackingBand10Enable = 0
+        m_strokes.size = 1
+        m_modifyDate = 1700000000
+        map_stroke {
+          m_globalID = 2
+          m_isEnabled = 1
+          m_gain = 1.000000
+          m_detune = 0
+          m_relStrength = 1
+          m_relStrengthEdited = 0
+          m_relStrengthTop = 16384
+          m_relStrengthTopEdited = 0
+          m_velocityMin = 0
+          m_velocityMax = 127
+          m_attackLen = 0.000000
+          m_modifyDate = 1700000000
+        }
+      }
+      map_zone {
+        m_zoneId = 129
+        m_rootKey = 48
+        m_isEnabled = 1
+        m_btmNote = 17
+        m_topNote = 53
+        m_zoneMode = 0
+        m_zonePlayback = 0
+        m_isOneShot = 0
+        m_ImagingEnable = 0
+        m_ImagingL = 1.000000
+        m_ImagingR2L = 0.000000
+        m_ImagingL2R = 0.000000
+        m_ImagingR = 1.000000
+        m_eqLowCutFreq = 50.000000
+        m_eqLowCutEnable = 0
+        m_eqMidGain_0 = 0.000000
+        m_eqMidGain_1 = 0.000000
+        m_eqMidFreq_0 = 1000.000000
+        m_eqMidFreq_1 = 4000.000000
+        m_eqMidQ_0 = 0.500000
+        m_eqMidQ_1 = 0.500000
+        m_eqMidEnable_0 = 0
+        m_eqMidEnable_1 = 0
+        m_eqHiCutFreq = 10000.000000
+        m_eqHiCutEnable = 0
+        m_eqMidGain_2 = 0.000000
+        m_eqMidFreq_2 = 6000.000000
+        m_eqMidQ_2 = 0.500000
+        m_eqMidEnable_2 = 0
+        m_eqMidDynGainEn_0 = 0
+        m_eqMidDynGainEn_1 = 0
+        m_eqMidDynGainEn_2 = 0
+        m_eqMidVarGainEn_0 = 0
+        m_eqMidVarGainEn_1 = 0
+        m_eqMidVarGainEn_2 = 0
+        m_eqMidVarGainAtcTime_0 = 0.000000
+        m_eqMidVarGainAtcTime_1 = 0.000000
+        m_eqMidVarGainAtcTime_2 = 0.000000
+        m_eqMidVarGainDcyTime_0 = 0.000000
+        m_eqMidVarGainDcyTime_1 = 0.000000
+        m_eqMidVarGainDcyTime_2 = 0.000000
+        m_eqDynLPEnable = 0
+        m_eqDynLPHoldOff = 0.200000
+        m_eqDynLPInitialFreqHi = 17000.000000
+        m_eqDynLPInitialFreqLo = 10000.000000
+        m_eqDynLPFinalFreqHi = 5000.000000
+        m_eqDynLPFinalFreqLo = 3000.000000
+        m_eqDynLPReleaseFreqHi = 8000.000000
+        m_eqDynLPReleaseFreqLo = 3000.000000
+        m_eqDynLPFinalFreq2Hi = 3000.000000
+        m_eqDynLPFinalFreq2Lo = 2000.000000
+        m_eqTrackingMultFactor = 1.000000
+        m_eqTrackingGain1 = 0.000000
+        m_eqTrackingGain2 = 0.000000
+        m_eqTrackingGain3 = 0.000000
+        m_eqTrackingGain4 = 0.000000
+        m_eqTrackingGain5 = 0.000000
+        m_eqTrackingGain6 = 0.000000
+        m_eqTrackingGain7 = 0.000000
+        m_eqTrackingGain8 = 0.000000
+        m_eqTrackingGain9 = 0.000000
+        m_eqTrackingGain10 = 0.000000
+        m_eqTrackingEnable = 0
+        m_eqTrackingBand1Enable = 0
+        m_eqTrackingBand2Enable = 0
+        m_eqTrackingBand3Enable = 0
+        m_eqTrackingBand4Enable = 0
+        m_eqTrackingBand5Enable = 0
+        m_eqTrackingBand6Enable = 0
+        m_eqTrackingBand7Enable = 0
+        m_eqTrackingBand8Enable = 0
+        m_eqTrackingBand9Enable = 0
+        m_eqTrackingBand10Enable = 0
+        m_strokes.size = 1
+        m_modifyDate = 1700000000
+        map_stroke {
+          m_globalID = 1
+          m_isEnabled = 1
+          m_gain = 1.000000
+          m_detune = 0
+          m_relStrength = 1
+          m_relStrengthEdited = 0
+          m_relStrengthTop = 16384
+          m_relStrengthTopEdited = 0
+          m_velocityMin = 0
+          m_velocityMax = 127
+          m_attackLen = 0.000000
+          m_modifyDate = 1700000000
+        }
+      }
+    }
+  }
+}

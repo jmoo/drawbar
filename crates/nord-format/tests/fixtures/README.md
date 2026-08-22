@@ -10,6 +10,9 @@ being readable, and `<file>.oracle.json` beside one says what was set.
 - `ne5/` — Electro 5 entities built through the public constructors and
   setters: defaults, one mutated program per panel, a settings edit, a song,
   each edit pinned by its sidecar.
+- `nsmpproj/` — Sample Editor projects from `nsmpproj::Project::new`: one
+  zone, three, and three with the middle zone retuned and its range moved,
+  each pinned by its sidecar.
 
 The files are golden: `tests/fixtures.rs` regenerates the same bytes and
 compares, so a writer change shows up as a byte diff in git rather than moving

@@ -1,0 +1,9 @@
+{
+  "fields": {
+    "bottom_notes": "[66, 54, 17]",
+    "name": "three-zones",
+    "root_keys": "[72, 60, 48]",
+    "top_notes": "[96, 65, 53]"
+  },
+  "schema": 1
+}

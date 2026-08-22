@@ -64,6 +64,40 @@ pub fn lookup(entity: &Entity, path: &str) -> Result<Vec<String>, String> {
             }
             _ => {}
         },
+        Entity::SampleProject(p) => {
+            let zones = || p.zones().map_err(|e| e.to_string());
+            match path {
+                "name" => return Ok(vec![p.name().map_err(|e| e.to_string())?]),
+                "version" => {
+                    return Ok(vec![p
+                        .file_format_version()
+                        .map_err(|e| e.to_string())?
+                        .to_string()])
+                }
+                "root_keys" => {
+                    let roots: Vec<u8> = zones()?.iter().map(|z| z.root_key).collect();
+                    return Ok(vec![format!("{roots:?}")]);
+                }
+                "top_notes" => {
+                    let tops: Vec<u8> = zones()?.iter().map(|z| z.top_note).collect();
+                    return Ok(vec![format!("{tops:?}")]);
+                }
+                "bottom_notes" => {
+                    let bottoms: Vec<u8> = zones()?.iter().map(|z| z.bottom_note).collect();
+                    return Ok(vec![format!("{bottoms:?}")]);
+                }
+                "audio_files" => {
+                    let files: Vec<String> = p
+                        .audio_files()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|f| f.path)
+                        .collect();
+                    return Ok(vec![format!("{files:?}")]);
+                }
+                _ => {}
+            }
+        }
         _ => {}
     }
     registry_lookup(entity, path)

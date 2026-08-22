@@ -16,6 +16,7 @@ mod format_table;
 use format_table::formats;
 use nord_format::cbin::{Cbin, Generation, Header, RawBody};
 use nord_format::formats::ne5::{self, EqualizerPart};
+use nord_format::formats::nsmpproj::{self, NewZone};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -190,6 +191,70 @@ fn synthesized() -> BTreeMap<String, Vec<u8>> {
         mutate(&mut program);
         put(format!("ne5/{name}"), to_bytes(&program));
         put(format!("ne5/{name}.oracle.json"), sidecar(pinned));
+    }
+
+    // Sample Editor projects: the one-pass layout for one zone and for three,
+    // and a three-zone project with its middle zone retuned and widened.
+    {
+        let zone = |path: &str, root_key| NewZone {
+            path: format!("audio/{path}"),
+            sample_rate: 44100,
+            frames: 4394,
+            root_key,
+        };
+        let one = nsmpproj::Project::new("one-zone", &[zone("c4.wav", 60)], 1_700_000_000).unwrap();
+        put(
+            "nsmpproj/one-zone.nsmpproj".into(),
+            one.render().into_bytes(),
+        );
+        put(
+            "nsmpproj/one-zone.nsmpproj.oracle.json".into(),
+            sidecar(&[
+                ("name", "one-zone"),
+                ("version", "54"),
+                ("root_keys", "[60]"),
+                ("bottom_notes", "[17]"),
+                ("top_notes", "[84]"),
+                ("audio_files", "[\"audio/c4.wav\"]"),
+            ]),
+        );
+        let three = || {
+            nsmpproj::Project::new(
+                "three-zones",
+                &[zone("c3.wav", 48), zone("c4.wav", 60), zone("c5.wav", 72)],
+                1_700_000_000,
+            )
+            .unwrap()
+        };
+        put(
+            "nsmpproj/three-zones.nsmpproj".into(),
+            three().render().into_bytes(),
+        );
+        put(
+            "nsmpproj/three-zones.nsmpproj.oracle.json".into(),
+            sidecar(&[
+                ("name", "three-zones"),
+                ("root_keys", "[72, 60, 48]"),
+                ("bottom_notes", "[66, 54, 17]"),
+                ("top_notes", "[96, 65, 53]"),
+            ]),
+        );
+        let mut edited = three();
+        edited.set_root_key(130, 61).unwrap();
+        edited.set_key_range(130, 54, 70).unwrap();
+        edited.set_key_range(131, 71, 96).unwrap();
+        put(
+            "nsmpproj/middle-zone-edited.nsmpproj".into(),
+            edited.render().into_bytes(),
+        );
+        put(
+            "nsmpproj/middle-zone-edited.nsmpproj.oracle.json".into(),
+            sidecar(&[
+                ("root_keys", "[72, 61, 48]"),
+                ("bottom_notes", "[71, 54, 17]"),
+                ("top_notes", "[96, 70, 53]"),
+            ]),
+        );
     }
 
     out

@@ -33,7 +33,12 @@ pub fn wanted(path: &Path) -> bool {
     };
     matches!(
         peek(&mut file).map(|p| p.file_type),
-        Ok(FileType::Cbin | FileType::Cne3 | FileType::Midi | FileType::Sysex | FileType::Zip)
+        Ok(FileType::Cbin
+            | FileType::Cne3
+            | FileType::Midi
+            | FileType::SampleProject
+            | FileType::Sysex
+            | FileType::Zip)
     )
 }
 
