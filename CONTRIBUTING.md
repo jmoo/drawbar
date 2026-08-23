@@ -1,13 +1,16 @@
 # Contributing
 
-Rust tools for reading, editing, and moving programs on Clavia Nord
-instruments: reverse-engineered file formats (`nord-format`), the USB vendor
-protocol (`nord-usb`), a CLI (`nord-cli`), the bitfield derive backing them
-(`nord-bits-derive`), and an egui app for the desktop and the browser
-(`drawbar`).
+**What is this?**
+
+Rust tools for interacting with Clavia Nord instruments: 
+ - reverse-engineered file formats (`nord-format`)
+ - the USB vendor protocol (`nord-usb`)
+ - a CLI (`nord-cli`)
+ - the bitfield derive backing them (`nord-bits-derive`)
+ - and an egui app for the desktop and the browser (`drawbar`)
 
 > **This is a public, open-source repo.** Keep personal information, secrets,
-> and Claude's persistent memory out of it. Private notes, RFCs, and the
+> and agent persistent memory out of it. Private notes, RFCs, and the
 > specimen corpus live elsewhere; if you wouldn't post it publicly, it doesn't
 > go in this repo.
 
@@ -22,13 +25,10 @@ All reverse engineering is **blackbox**, for interoperability:
   and protocol come from specimen files, captured USB traffic, and hardware
   observation on instruments the author owns.
 - **No license violations.** Do not copy code, tables, or data from projects
-  without a permissive license. Documentation under a permissive license may be
-  used with credit (e.g. Chris55's `nord-documentation`, BSD-3). A source with
-  no clear license may be *read* but not reproduced — values only documented
-  there stay raw integers rather than named enums.
+  without a permissive license.
 - **Public or leaked documentation may be consulted.** Consulting a document is
   fine; copying its text or embedding its data verbatim is a licensing
-  question, per the rule above.
+  question, per the rule above. 
 
 ## Copyright material
 
@@ -38,7 +38,9 @@ All reverse engineering is **blackbox**, for interoperability:
   written by our own tools or the instrument's panel). The specimen corpus,
   which does contain proprietary sample data, lives in the **private**
   `jmoo/nord-corpus` repo and is only reachable through the `corpus` cargo
-  feature + `NORD_CORPUS_ROOT`.
+  feature + `NORD_CORPUS_ROOT`. You can test against your own corpus using
+  that envvar if you do not have access to jmoo/nord-corpus. See
+  `crates/nord-format/tests/fixtures` for an example corpus layout.
 - **No code from non-permissively-licensed projects.** BSD/MIT/Apache with
   attribution is fine; GPL/unlicensed is not.
 
@@ -48,7 +50,7 @@ Run cargo from `crates/` — `.cargo/config.toml` is discovered by walking up
 from the working directory, and wasm builds need its
 `--cfg=web_sys_unstable_apis` flag.
 
-DO NOT ASSUME ANY TOOL IS INSTALLED.
+DO NOT ASSUME ANY TOOL IS INSTALLED GLOBALLY.
 
 This is a nix native project. Cargo needs to be executed from the nix devshell.
 If you reach for any other tools (python, jq, etc.) invoke them with nix shell
@@ -198,6 +200,9 @@ is usually carrying exposition. Format and protocol files legitimately run
 higher — the bytes genuinely need explaining. Application code does not.
 Investigate, don't reflexively cut: deleting a hazard to hit a number is worse
 than the exposition was.
+
+**Prefer 1-2 line comments most of the time (or no comment at all)** Exceptions 
+include top of file documentation intended for docgen viewing.
 
 ## Working in this repo
 
