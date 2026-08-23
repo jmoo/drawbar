@@ -32,10 +32,9 @@ let
 
   workspaceManifest = (importTOML (workspace + "/Cargo.toml")).workspace;
   inherit (workspaceManifest) members;
-  inherit (workspaceManifest.package) edition version;
+  inherit (workspaceManifest.package) edition;
 
   commonArgs = {
-    inherit version;
     src = cleanSourceWith {
       name = "source";
       src = workspace;
@@ -61,6 +60,7 @@ let
     commonArgs
     // {
       pname = "workspace";
+      version = "0";
       cargoExtraArgs = "--locked --workspace --exclude drawbar";
     }
   );
@@ -93,6 +93,7 @@ let
         cargoExtraArgs = "--locked -p ${crate}";
         cargoTestExtraArgs = featureArgs (testFeaturesFor crate);
         pname = crate;
+        inherit (manifests.${crate}) version;
       }
       // builtins.removeAttrs args [ "crate" ]
     )
@@ -238,6 +239,7 @@ let
         commonArgs
         // {
           pname = "${crate}-${name}";
+          inherit (manifests.${crate}) version;
           CARGO_BUILD_TARGET = tripleOf spec;
           cargoExtraArgs = escapeShellArgs (
             [
@@ -306,7 +308,7 @@ let
               exit 1
             fi
 
-            echo "${crate} ${version} built for ${tripleOf spec}" > "$out/BUILD_INFO"
+            echo "${crate} ${manifests.${crate}.version} built for ${tripleOf spec}" > "$out/BUILD_INFO"
             echo "installed:" >&2
             ls -la "$out" >&2
           '';
@@ -368,6 +370,7 @@ let
         # carrying a bundled one; without it the cdylib dies at link time.
         nativeBuildInputs = [ final.lld ];
         pname = "drawbar-web";
+        inherit (manifests.drawbar) version;
       };
     in
     crane.buildPackage (
@@ -511,6 +514,7 @@ in
         // {
           inherit cargoArtifacts;
           pname = "workspace-clippy";
+          version = "0";
           cargoExtraArgs = "--locked --workspace ${
             featureArgs (concatMap (name: map (f: "${name}/${f}") (testFeaturesFor name)) (attrNames manifests))
           }";
