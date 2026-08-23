@@ -1,6 +1,10 @@
-//! `nord` — a thin CLI over [`nord_format`] and `nord_usb`, purely to dogfood them.
+//! `nord` — a thin CLI over [`nord_format`] and `nord_usb` to interact with 
+//! your Clavia / Nord projects and files.
 //!
-//! Not a product; it exists to exercise the libraries and surface API friction.
+//! > This is an unofficial, community project: **not affiliated with, endorsed
+//! > by, or supported by Clavia DMI AB**. "Nord" and the instrument names are
+//! > Clavia's trademarks, used here only to identify which files this crate
+//! > reads.
 //!
 //! The nouns are the protocol's object classes: `nord program`, `nord sample`,
 //! `nord setlist` and `nord live` are [`slot_action`] with the class fixed, `nord

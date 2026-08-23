@@ -3,7 +3,6 @@
 //! Everything here is target-independent except the file-picker and download glue: the
 //! same shell runs as a native window and as a wasm module in a browser tab.
 //!
-//! > ⚠️ 🧱 This project can brick a Nord device. See the crate README.
 
 pub mod app;
 pub mod base64;

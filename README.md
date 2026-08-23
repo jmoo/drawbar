@@ -1,5 +1,5 @@
 # 🎚️ drawbar
-> # ⚠️ Use at your own risk, this is alpha software ⚠️
+> #### ⚠️ Use at your own risk, this is alpha software ⚠️
 
 Drawbar is a blackbox Clavia / Nord reverse engineering project in Rust that aims to be portable,
 complete, and well-tested. The core of the project is [nord-format](crates/nord-format/README.md) --
