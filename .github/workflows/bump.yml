@@ -49,6 +49,9 @@ jobs:
           purge-created: 0
           purge-primary-key: never
       - name: bump from the PR title
+        # Explicit bash turns pipefail on; the default run shell would let the
+        # tee mask a failing bump.
+        shell: bash
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BASE: origin/${{ github.event.pull_request.base.ref }}

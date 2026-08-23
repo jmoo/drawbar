@@ -1,13 +1,13 @@
 [package]
 name = "nord-format"
 categories = ["encoding", "parser-implementations"]
-description = "Parse and write Clavia / Nord keyboard binary file formats (Electro 5, …)"
+description = "Read and write Clavia / Nord keyboard file formats — programs, samples, set lists, settings, backups — with byte-exact round-trips"
 edition.workspace = true
 rust-version.workspace = true
 keywords = ["clavia", "electro", "nord", "parser"]
 license.workspace = true
 repository.workspace = true
-version = "0.1.0"
+version = "0.1.1"
 
 [lib]
 name = "nord_format"
@@ -32,7 +32,7 @@ corpus = ["bundle"]
 # registry build must expand exactly the derive version this source was written
 # against. When the derive changes, publish it first, then bump this pin.
 [dependencies]
-nord-bits-derive = { path = "../nord-bits-derive", version = "=0.1.0" }
+nord-bits-derive = { path = "../nord-bits-derive", version = "=0.1.1" }
 crcxx = "0.3.1"
 thiserror = "2"
 zip = { version = "2", optional = true, default-features = false, features = [

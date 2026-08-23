@@ -283,6 +283,26 @@ fn committed() -> BTreeMap<String, Vec<u8>> {
     out
 }
 
+// ⚠️ `m_createdByProdVer` holds the writing crate's own version, so a release
+// bump changes written bytes with no writer change. Compared under a fixed
+// placeholder so the golden fixtures survive version bumps.
+fn normalized(name: &str, bytes: &[u8]) -> Vec<u8> {
+    if !name.ends_with(".nsmpproj") {
+        return bytes.to_vec();
+    }
+    let text = std::str::from_utf8(bytes).unwrap();
+    text.lines()
+        .map(|l| {
+            if l.trim_start().starts_with("m_createdByProdVer = ") {
+                "  m_createdByProdVer = <crate version>\n".to_string()
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect::<String>()
+        .into_bytes()
+}
+
 /// The committed files are exactly what the writers write today — no drifted
 /// bytes, no missing fixture, no stale leftover. `UPDATE_FIXTURES=1`
 /// regenerates instead of comparing.
@@ -310,7 +330,9 @@ fn committed_fixtures_are_what_the_writers_write() {
     for (name, bytes) in &generated {
         match committed.get(name) {
             None => wrong.push(format!("{name}: not committed")),
-            Some(disk) if disk != bytes => wrong.push(format!("{name}: bytes differ")),
+            Some(disk) if normalized(name, disk) != normalized(name, bytes) => {
+                wrong.push(format!("{name}: bytes differ"))
+            }
             Some(_) => {}
         }
     }

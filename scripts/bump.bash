@@ -159,7 +159,7 @@ for crate in "${crates[@]}"; do
   done < <(dependents_of "$crate")
 done
 
-cargo update --manifest-path "$workspace/Cargo.toml" --workspace --offline --quiet
+cargo update --manifest-path "$workspace/Cargo.toml" --workspace --quiet
 
 summary=""
 for crate in "${crates[@]}"; do
