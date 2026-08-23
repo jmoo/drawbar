@@ -84,6 +84,8 @@
                   settings.formatting.array_auto_collapse = false;
                 };
               };
+              # Follow `source`d files so lib.bash's definitions count.
+              settings.formatter.shellcheck.options = [ "--external-sources" ];
             };
           };
       }
