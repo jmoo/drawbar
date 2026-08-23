@@ -1,4 +1,4 @@
-//! `nord` — a thin CLI over [`nord_format`] and `nord_usb` to interact with 
+//! `nord` — a thin CLI over [`nord_format`] and `nord_usb` to interact with
 //! your Clavia / Nord projects and files.
 //!
 //! > This is an unofficial, community project: **not affiliated with, endorsed
