@@ -20,14 +20,27 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
+      actions: write # cache-nix-action purges superseded caches
       contents: write # tags and releases
       id-token: write # OIDC token exchange with crates.io
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # release notes walk the history back to the previous tag
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-release-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+          restore-prefixes-first-match: nix-release-${{ runner.os }}-
+          gc-max-store-size-linux: 4G
+          purge: true
+          purge-prefixes: nix-release-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
       # The devshell carries the scripts' tools and the pinned toolchain;
