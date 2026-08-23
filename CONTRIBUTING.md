@@ -79,10 +79,10 @@ if they are not installed globally.
 
 ## Commits & merges
 
-- **Linear history: no merge commits.** Integrate work into your branch with
-  rebase; integrate branches into `master` with squash or fast-forward merges.
-  CI fails any PR whose commits contain a merge commit.
-- **Every commit title is a Conventional Commit**:
+- **PRs are squashed.** The repo ruleset only lets a squash merge onto
+  `master`, so history stays linear and the PR title becomes the commit title
+  that lands. Commits on the PR branch itself can be anything.
+- **Every PR title is a Conventional Commit** — CI checks it:
 
   ```
   <type>(<optional scope>): description
@@ -92,9 +92,7 @@ if they are not installed globally.
   `ci`, `chore`, `revert`. The scope is usually the crate name, e.g.
   `fix(nord-format): …`. `!` before the colon — or a `BREAKING CHANGE:` footer
   in the body — marks a breaking change.
-- **PR titles follow the same rule.** With squash merges the PR title becomes
-  the commit title on `master`, so it is the one that counts.
-- **Versions bump from commits.** `scripts/bump.bash` reads each crate's
+- **Versions bump from those titles.** `scripts/bump.bash` reads each crate's
   Conventional Commits since its last release tag: a breaking change (`!` or a
   `BREAKING CHANGE:` footer) bumps the major (the minor while the crate is
   0.x), `feat` the minor, `fix`/`perf`/`revert` the patch; anything else
