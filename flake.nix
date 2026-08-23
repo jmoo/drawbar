@@ -50,7 +50,12 @@
 
             devShells.default = pkgs.lib.crane.devShell {
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              packages = [ pkgs.rust-analyzer ];
+              # scripts/*.bash (see their `nix-deps` lines)
+              packages = with pkgs; [
+                gh
+                jq
+                rust-analyzer
+              ];
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             };
@@ -71,6 +76,7 @@
                   enable = true;
                   package = pkgs.nord.rustfmt;
                 };
+                shellcheck.enable = true;
                 shfmt.enable = true;
                 taplo = {
                   enable = true;
