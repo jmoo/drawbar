@@ -1,7 +1,7 @@
 [package]
 name = "nord-format"
 categories = ["encoding", "parser-implementations"]
-description = "Parse and write Clavia / Nord keyboard binary file formats (Electro 5, …)"
+description = "Read and write Clavia / Nord keyboard file formats — programs, samples, set lists, settings, backups — with byte-exact round-trips"
 edition.workspace = true
 rust-version.workspace = true
 keywords = ["clavia", "electro", "nord", "parser"]

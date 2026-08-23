@@ -1,6 +1,6 @@
 [package]
 name = "nord-cli"
-description = "Command-line tool for inspecting Clavia / Nord keyboard files (dogfoods nord-format)"
+description = "Command-line tool for Clavia / Nord keyboards — inspect, edit, verify, and transfer programs, samples, and settings"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

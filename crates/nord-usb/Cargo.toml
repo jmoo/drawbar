@@ -1,6 +1,6 @@
 [package]
 name = "nord-usb"
-description = "Clavia / Nord device transport and vendor protocol over USB"
+description = "Talk to Clavia / Nord keyboards over USB — the vendor protocol behind Nord Sound Manager, on desktop and in the browser"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

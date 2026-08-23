@@ -1,6 +1,6 @@
 [package]
 name = "drawbar"
-description = "egui app over nord-format and nord-usb: Nord files in the browser or on the desktop"
+description = "Desktop and browser app for Clavia / Nord keyboards — view, edit, and transfer sounds over USB"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
