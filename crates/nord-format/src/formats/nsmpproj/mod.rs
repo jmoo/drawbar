@@ -327,9 +327,10 @@ impl Project {
     /// Unexplained: `m_crc` and `m_crcProj` (the editor's checksum of the
     /// generated instrument — algorithm unknown) are written as 0, and
     /// `m_startSecondary` (an analysis result the editor stores, within a
-    /// percent of `end / 8` in every specimen) as exactly that. The editor
-    /// repairs derived state on load; whether it accepts a file naming another
-    /// product in `m_createdByProdName` is not confirmed.
+    /// percent of `end / 8` in every specimen) as exactly that. Confirmed in
+    /// Nord Sample Editor 3: it opens such a project (and asks for the audio
+    /// files if they are not where the paths say), repairing derived state on
+    /// load.
     pub fn new(name: &str, zones: &[NewZone], modified: u32) -> Result<Project, ParseError> {
         if zones.is_empty() {
             return Err(ParseError::AssertFail(
