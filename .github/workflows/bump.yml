@@ -21,6 +21,7 @@ jobs:
       || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'bump'))
     runs-on: ubuntu-latest
     permissions:
+      actions: write # cache-nix-action purges superseded caches
       contents: write
     steps:
       - name: same-repo branches only
@@ -33,8 +34,20 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0 # merge-base with the base branch, and the release tags
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-bump-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+          restore-prefixes-first-match: nix-bump-${{ runner.os }}-
+          gc-max-store-size-linux: 4G
+          purge: true
+          purge-prefixes: nix-bump-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
       - name: bump from the PR title
         env:
           TITLE: ${{ github.event.pull_request.title }}

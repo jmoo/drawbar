@@ -10,8 +10,12 @@
 #             release notes read it.
 #
 # The corpus attrs (`nord.*-corpus`) need the private specimen repo and are not
-# part of `nord.all`. Magic Nix Cache keeps the store between runs; without it
-# every run rebuilds Wine, QEMU and the GUI stack from scratch.
+# part of `nord.all`. cache-nix-action keeps the store between runs in the
+# GitHub Actions cache (10 GB per repo, LRU-evicted); without it every run
+# rebuilds Wine, QEMU and the GUI stack from scratch. Each job caches under its
+# own key so the check job's smaller store never shadows the build job's; gc
+# trims the store to what the run used before saving, and superseded caches are
+# purged to stay under the quota.
 name: ci
 
 on:
@@ -21,22 +25,47 @@ on:
 
 permissions:
   contents: read
+  actions: write # cache-nix-action purges superseded caches
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-check-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock') }}
+          restore-prefixes-first-match: nix-check-${{ runner.os }}-
+          gc-max-store-size-linux: 4G
+          purge: true
+          purge-prefixes: nix-check-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
       - run: nix flake check --print-build-logs
 
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+          purge: true
+          purge-prefixes: nix-build-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
       - run: nix build .#nord.all --print-build-logs
 
   commits:
