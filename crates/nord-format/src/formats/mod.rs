@@ -58,6 +58,7 @@ pub mod ns3;
 pub mod ns4;
 pub mod nsclassic;
 pub mod nsmp;
+pub mod nsmpproj;
 pub mod nw;
 pub mod nw2;
 pub mod sysex;

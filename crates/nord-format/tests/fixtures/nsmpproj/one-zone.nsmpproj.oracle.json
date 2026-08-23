@@ -1,0 +1,11 @@
+{
+  "fields": {
+    "audio_files": "[\"audio/c4.wav\"]",
+    "bottom_notes": "[17]",
+    "name": "one-zone",
+    "root_keys": "[60]",
+    "top_notes": "[84]",
+    "version": "54"
+  },
+  "schema": 1
+}

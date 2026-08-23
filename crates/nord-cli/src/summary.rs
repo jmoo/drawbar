@@ -7,6 +7,7 @@ use nord_format::cbin::Cbin;
 use nord_format::formats::ne5;
 use nord_format::formats::ne5::{Instrument, OrganModel};
 use nord_format::formats::nsmp::{stroke, Sample};
+use nord_format::formats::nsmpproj;
 use nord_format::{Entity, Live, Program, Settings, Song};
 
 use crate::note;
@@ -449,6 +450,79 @@ fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
     }
 }
 
+/// The Sample Editor project printout: identity, the audio files, the zone map.
+fn sample_project(ui: &Ui, p: &nsmpproj::Project) {
+    ui.out(field(ui, 2, "type", "Sample Editor project (nsmpproj)"));
+    match p.name() {
+        Ok(name) => ui.out(field(ui, 2, "name", name)),
+        Err(e) => ui.warn(format!("name unreadable: {e}")),
+    }
+    if let Ok((product, version)) = p.created_by() {
+        ui.out(field(ui, 2, "editor", format!("{product} {version}")));
+    }
+    if let Ok(v) = p.file_format_version() {
+        ui.out(field(ui, 2, "version", v));
+    }
+
+    section(ui, "Audio files");
+    match p.audio_files() {
+        Err(e) => ui.warn(format!("audio files unreadable: {e}")),
+        Ok(files) => {
+            for f in files {
+                ui.out(field(
+                    ui,
+                    4,
+                    &format!("file {}", f.id),
+                    format!("{}  {} {}", f.path, ui.dim("Hz"), f.sample_rate),
+                ));
+            }
+        }
+    }
+
+    section(ui, "Zones");
+    let (zones, strokes) = match (p.zones(), p.strokes()) {
+        (Ok(z), Ok(s)) => (z, s),
+        (Err(e), _) | (_, Err(e)) => {
+            ui.warn(format!("zone table unreadable: {e}"));
+            return;
+        }
+    };
+    ui.out(format!("    {}", ui.dim("high to low")));
+    for zone in &zones {
+        let range = format!(
+            "{}..{}",
+            note::name(zone.bottom_note),
+            note::name(zone.top_note)
+        );
+        let files: Vec<String> = zone
+            .strokes
+            .iter()
+            .map(|zs| {
+                strokes
+                    .iter()
+                    .find(|s| s.global_id == zs.global_id)
+                    .map_or_else(
+                        || format!("stroke {}?", zs.global_id),
+                        |s| format!("file {}", s.file_id),
+                    )
+            })
+            .collect();
+        ui.out(field(
+            ui,
+            4,
+            &format!("zone {}", zone.zone_id),
+            format!(
+                "{range:<10} {} {} ({})  {}{}",
+                ui.dim("root"),
+                note::name(zone.root_key),
+                zone.root_key,
+                files.join(", "),
+                if zone.enabled { "" } else { "  (disabled)" }
+            ),
+        ));
+    }
+}
+
 /// The sample-instrument printout: identity, then the zone map.
 fn sample(ui: &Ui, s: &Cbin<Sample>) {
     ui.out(field(ui, 2, "type", "sample instrument (nsmp)"));
@@ -625,6 +699,7 @@ pub fn print(ui: &Ui, entity: &Entity) {
         }
         Entity::Sample(nord_format::Sample::V2(s)) => sample(ui, s),
         Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
+        Entity::SampleProject(p) => sample_project(ui, p),
         Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
             ui.out(field(

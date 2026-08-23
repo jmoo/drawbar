@@ -43,7 +43,7 @@ pub mod util;
 use crate::cbin::{Cbin, RawBody};
 use crate::formats::{
     cn3, midi, nc2, nc2d, nd2, nd3, ne3, ne4, ne5, ne6, ne7, ng2, nl4, nla1, no3, np, np2, np3,
-    np4, np5, npip, npno, ns2, ns3, ns4, nsclassic, nsmp, nw, nw2, sysex,
+    np4, np5, npip, npno, ns2, ns3, ns4, nsclassic, nsmp, nsmpproj, nw, nw2, sysex,
 };
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
@@ -235,6 +235,9 @@ pub enum Entity {
     Performance(Performance),
     Program(Program),
     Sample(Sample),
+    /// A Nord Sample Editor project (`.nsmpproj`) — the text file the editor
+    /// saves and generates an `nsmp` from.
+    SampleProject(nsmpproj::Project),
     Settings(Settings),
     Song(Song),
     Synth(Synth),
@@ -260,6 +263,7 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
         FileType::Sysex => Ok(Entity::Sysex(sysex::Sysex::read_from(reader)?)),
         FileType::Midi => Ok(Entity::Midi(midi::Midi::read_from(reader)?)),
         FileType::Cne3 => Ok(Entity::Cne3(cn3::Cne3::read_from(reader)?)),
+        FileType::SampleProject => Ok(Entity::SampleProject(nsmpproj::Project::read_from(reader)?)),
         FileType::Cbin => read_cbin(reader, header.format.as_str()),
         e => Err(ParseError::UnknownFileType(e.as_str().to_string()).into()),
     }
@@ -695,6 +699,7 @@ impl Entity {
             Entity::PipeLibrary(_) => id("C2 pipe library", npip::pipe_library::FORMAT),
             Entity::Sample(Sample::V2(_)) => id("sample instrument", nsmp::FORMAT),
             Entity::Sample(Sample::V3(_)) => id("sample instrument (nsmp3/nsmp4)", nsmp::FORMAT),
+            Entity::SampleProject(_) => id("Sample Editor project", nsmpproj::FORMAT),
             Entity::Sysex(_) => id("SysEx dump", "syx"),
             Entity::Midi(_) => id("MIDI file", "mid"),
             Entity::Cne3(_) => id("Electro 2 library", "cn3"),
@@ -763,6 +768,7 @@ impl Entity {
             },
             Entity::Sample(Sample::V2(f)) => f.write_to(w),
             Entity::Sample(Sample::V3(f)) => f.write_to(w),
+            Entity::SampleProject(f) => f.write_to(w),
             Entity::Settings(s) => match s {
                 Settings::C2(f)
                 | Settings::C2D(f)

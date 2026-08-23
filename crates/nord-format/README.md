@@ -25,7 +25,9 @@ In brief:
   (every documented parameter placed; values raw except where the community
   maps enumerate them).
 - **Structurally decoded** — sample instruments (`nsmp`: rename, retune, remap;
-  the audio stays encoded) and piano libraries (`npno`: the CNSP prefix).
+  the audio stays encoded), piano libraries (`npno`: the CNSP prefix) and
+  Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
+  strokes and audio files read and edited, new projects written).
 - **Container-verified stubs** — every other corpus format: 60+ CBIN tags
   across the whole model line, plus the Lead SysEx/MIDI banks and the `.cn3`
   Electro 2 library, all carried verbatim. ZIP backup bundles parse behind the
