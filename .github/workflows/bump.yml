@@ -33,12 +33,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0 # merge-base with the base branch, and the release tags
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
       - name: bump from the PR title
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BASE: origin/${{ github.event.pull_request.base.ref }}
-        run: scripts/bump.bash --title "$TITLE" --base "$BASE" | tee "$RUNNER_TEMP/bump.log"
+        run: nix develop -c scripts/bump.bash --title "$TITLE" --base "$BASE" | tee "$RUNNER_TEMP/bump.log"
       - name: commit and push
         run: |
           if git diff --quiet; then

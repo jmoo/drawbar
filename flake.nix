@@ -52,6 +52,7 @@
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
               # scripts/*.bash (see their `nix-deps` lines)
               packages = with pkgs; [
+                curl
                 gh
                 jq
                 rust-analyzer
