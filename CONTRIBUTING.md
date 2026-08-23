@@ -92,27 +92,35 @@ if they are not installed globally.
   in the body — marks a breaking change.
 - **PR titles follow the same rule.** With squash merges the PR title becomes
   the commit title on `master`, so it is the one that counts.
-- **Versions live in `Cargo.toml`.** A PR that should ship a new version of
-  a published crate bumps that crate's `version` (and, for `nord-bits-derive`,
-  `nord-format`'s exact pin on it) in the same PR: `fix` → patch, `feat` →
-  minor, breaking → major. Nothing else tracks versions.
+- **Versions bump from commits.** `scripts/bump.bash` reads each crate's
+  Conventional Commits since its last release tag: a breaking change (`!` or a
+  `BREAKING CHANGE:` footer) bumps the major (the minor while the crate is
+  0.x), `feat` the minor, `fix`/`perf`/`revert` the patch; anything else
+  releases nothing. Only commits touching the crate's directory count, and a
+  crate whose dependency was bumped gets at least a patch bump.
 
 ## Releasing
 
-`nord-bits-derive` and `nord-format` are published to crates.io; the other
-crates share the workspace version and are unpublished.
+Every crate is published to crates.io, each with its own version in its
+`Cargo.toml` — the only place versions live. Both scripts take `--dry-run`
+to show what they would do; run them from the dev shell, which has their
+tools.
 
-Releasing is automatic and idempotent: on every push to `master`,
-`.github/workflows/release.yml` publishes each crate whose `Cargo.toml` version
-is not yet on crates.io (Trusted Publishing via OIDC — no token secrets) and
-creates the `<crate>-v<version>` tag and GitHub release. A failed run is fixed
-by re-running it from the Actions tab. Cargo waits for a freshly published
-dependency to land in the index, so a derive bump and the format bump that pins
-it ship together from one PR.
+1. **Bump**: `scripts/bump.bash` rewrites the versions (and the workspace
+   dependency requirements that point at them) and refreshes `Cargo.lock`.
+   Commit with the `chore(release): …` title it suggests and merge the PR.
+2. **Release**: on every push to `master`, `release.yml` runs
+   `scripts/release.bash`, which publishes each crate whose version has no
+   `<crate>-v<version>` tag yet (Trusted Publishing via OIDC — no token
+   secrets) and creates that tag as a GitHub release. The notes are the
+   crate's commits since its previous tag, grouped into breaking changes,
+   features, bug fixes, performance and other. Dependencies go before
+   dependents. Idempotent: a failed run is fixed by re-running it from the
+   Actions tab.
 
 First-ever publish of a new crate can't use Trusted Publishing (it is
-configured on an already-existing crate) — publish locally once, then add the
-crate to `CRATES` in the workflow.
+configured on an already-existing crate) — `cargo publish` it locally once;
+the scripts pick it up from `cargo metadata` with no further wiring.
 
 ## Code style
 

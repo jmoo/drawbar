@@ -1,12 +1,12 @@
 # Cargo.toml is the only source of truth for versions. On every push to master,
-# each published crate whose `version` is not yet on crates.io is published via
-# Trusted Publishing (OIDC — no token secret) and tagged `<crate>-v<version>`
-# with a GitHub release. Both steps are idempotent, so a failed run is fixed by
-# re-running it (`workflow_dispatch`).
+# scripts/release.bash publishes each crate whose version has no
+# `<crate>-v<version>` tag yet (Trusted Publishing via OIDC — no token secret)
+# and creates that tag as a GitHub release with notes from its Conventional
+# Commits. Idempotent, so a failed run is fixed by re-running it
+# (`workflow_dispatch`). scripts/bump.bash is how versions move.
 #
 # First-ever publish of a new crate can't use this (Trusted Publishing is
-# configured on an existing crate) — publish locally once, then add the crate
-# to CRATES below.
+# configured on an existing crate) — publish locally once.
 name: release
 
 on:
@@ -17,66 +17,19 @@ on:
 permissions: {}
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write # tags and releases
       id-token: write # OIDC token exchange with crates.io
-    defaults:
-      run:
-        working-directory: crates
-    env:
-      # ⚠️ Dependency order: nord-format pins an exact nord-bits-derive version,
-      # so the derive must be on the registry before nord-format publishes.
-      CRATES: nord-bits-derive nord-format
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # release notes walk the history back to the previous tag
       - uses: dtolnay/rust-toolchain@stable
-      - name: find crates whose version is not on crates.io
-        id: pending
-        run: |
-          pending=""
-          for crate in $CRATES; do
-            version="$(cargo pkgid -p "$crate" | sed 's/.*[@#]//')"
-            # sparse index path for names of 4+ chars: <first two>/<next two>/<name>
-            index="https://index.crates.io/${crate:0:2}/${crate:2:2}/$crate"
-            # 404 is a crate with no release at all, not a failed lookup
-            code="$(curl -s -o index.json -w '%{http_code}' "$index")"
-            case "$code" in
-              200) ;;
-              404) : > index.json ;;
-              *) echo "::error::$index returned HTTP $code"; exit 1 ;;
-            esac
-            if jq -e --arg v "$version" 'select(.vers == $v)' index.json > /dev/null; then
-              echo "$crate $version is already published"
-            else
-              pending="$pending $crate@$version"
-            fi
-          done
-          echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
       - uses: rust-lang/crates-io-auth-action@v1
-        if: steps.pending.outputs.crates != ''
         id: auth
-      - name: publish
-        if: steps.pending.outputs.crates != ''
+      - run: scripts/release.bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          PENDING: ${{ steps.pending.outputs.crates }}
-        run: |
-          for spec in $PENDING; do
-            cargo publish -p "${spec%@*}"
-          done
-      - name: tag and release
-        if: steps.pending.outputs.crates != ''
-        env:
           GH_TOKEN: ${{ github.token }}
-          PENDING: ${{ steps.pending.outputs.crates }}
-        run: |
-          for spec in $PENDING; do
-            tag="${spec%@*}-v${spec#*@}"
-            if git ls-remote --exit-code --tags origin "$tag" > /dev/null; then
-              echo "$tag already exists"
-              continue
-            fi
-            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes
-          done
