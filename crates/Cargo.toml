@@ -14,8 +14,6 @@ license = "BSD-3-Clause"
 # `u64::is_multiple_of` and friends.
 rust-version = "1.87"
 repository = "https://github.com/jmoo/drawbar"
-# Default version for unpublished crates
-version = "0.1.0"
 
 # Cargo profiles only take effect at the workspace root.
 [profile.release]

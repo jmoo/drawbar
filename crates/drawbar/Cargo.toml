@@ -4,8 +4,8 @@ description = "egui app over nord-format and nord-usb: Nord files in the browser
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-version.workspace = true
-publish = false
+repository.workspace = true
+version = "0.1.0"
 
 [lib]
 # `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
@@ -26,11 +26,16 @@ eframe = { version = "0.32", default-features = false, features = [
   "wayland",
   "x11",
 ] }
-nord-format = { path = "../nord-format", features = ["bundle"] }
+nord-format = { path = "../nord-format", version = "0.1.0", features = [
+  "bundle",
+] }
 rfd = "0.15"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-nord-usb = { path = "../nord-usb", features = ["blocking", "nusb"] }
+nord-usb = { path = "../nord-usb", version = "0.1.0", features = [
+  "blocking",
+  "nusb",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -53,6 +58,6 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceRequestOptions",
   "Window",
 ] }
-nord-usb = { path = "../nord-usb", default-features = false, features = [
+nord-usb = { path = "../nord-usb", version = "0.1.0", default-features = false, features = [
   "web",
 ] }

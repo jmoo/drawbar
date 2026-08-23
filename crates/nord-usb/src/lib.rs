@@ -1,5 +1,10 @@
 //! Clavia / Nord device transport and vendor protocol over USB.
 //!
+//! > This is an unofficial, community project: **not affiliated with, endorsed
+//! > by, or supported by Clavia DMI AB**. "Nord" and the instrument names are
+//! > Clavia's trademarks, used here only to identify which files this crate
+//! > reads.
+//!
 //! Layered so the protocol is testable without hardware:
 //!
 //! - [`wire`] — message framing and codec. Pure, fully decoded, no I/O.

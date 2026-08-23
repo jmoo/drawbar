@@ -1,43 +1,38 @@
-# Publishes one crate to crates.io per tag: `<crate>-v<version>`, e.g.
-# `nord-format-v0.1.0`. Auth is crates.io Trusted Publishing (OIDC) — each
-# crate's crates.io settings must list this repo + workflow file; there is no
-# token secret to rotate. First-ever publish of a new crate can't use this
-# (Trusted Publishing is configured on an existing crate) — do it locally.
+# Cargo.toml is the only source of truth for versions. On every push to master,
+# scripts/release.bash publishes each crate whose version has no
+# `<crate>-v<version>` tag yet (Trusted Publishing via OIDC — no token secret)
+# and creates that tag as a GitHub release with notes from its Conventional
+# Commits. Idempotent, so a failed run is fixed by re-running it
+# (`workflow_dispatch`). scripts/bump.bash is how versions move.
+#
+# First-ever publish of a new crate can't use this (Trusted Publishing is
+# configured on an existing crate) — publish locally once.
 name: release
 
 on:
   push:
-    tags:
-      - "nord-bits-derive-v*"
-      - "nord-format-v*"
+    branches: [master]
+  workflow_dispatch:
 
 permissions: {}
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # tags and releases
       id-token: write # OIDC token exchange with crates.io
-    defaults:
-      run:
-        working-directory: crates
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Resolve crate and check tag against manifest
-        id: tag
-        run: |
-          crate="${GITHUB_REF_NAME%-v*}"
-          tag_version="${GITHUB_REF_NAME##*-v}"
-          manifest_version="$(cargo pkgid -p "$crate" | sed 's/.*[@#]//')"
-          if [ "$tag_version" != "$manifest_version" ]; then
-            echo "tag says $tag_version but Cargo.toml says $manifest_version" >&2
-            exit 1
-          fi
-          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+        with:
+          fetch-depth: 0 # release notes walk the history back to the previous tag
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - run: cargo publish -p "${{ steps.tag.outputs.crate }}"
+      # The devshell carries the scripts' tools and the pinned toolchain;
+      # `nix develop` keeps the caller's env, so the tokens pass through.
+      - run: nix develop -c scripts/release.bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
