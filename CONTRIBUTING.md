@@ -106,9 +106,16 @@ Every crate is published to crates.io, each with its own version in its
 to show what they would do; run them from the dev shell, which has their
 tools.
 
-1. **Bump**: `scripts/bump.bash` rewrites the versions (and the workspace
-   dependency requirements that point at them) and refreshes `Cargo.lock`.
-   Commit with the `chore(release): …` title it suggests and merge the PR.
+1. **Bump**: put the `bump` label on the PR. `bump.yml` runs
+   `scripts/bump.bash --title` with the PR title — the squashed commit that
+   will land — applies its level to the crates the diff touches (plus at
+   least a patch for their dependents), refreshes `Cargo.lock` and pushes
+   the `chore(release): …` commit. It re-runs on every push and retitle
+   while the label is on, converging from the merge-base versions, so a
+   stale bump corrects itself. Fork PRs can't be pushed to: run
+   `scripts/bump.bash --title '<pr title>'` locally instead. Plain
+   `scripts/bump.bash` (no `--title`) is the catch-up mode: run on master,
+   it bumps each crate from its commits since its last release tag.
 2. **Release**: on every push to `master`, `release.yml` runs
    `scripts/release.bash`, which publishes each crate whose version has no
    `<crate>-v<version>` tag yet (Trusted Publishing via OIDC — no token
