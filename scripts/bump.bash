@@ -55,6 +55,7 @@ done
 source "$(dirname "${BASH_SOURCE[0]}")/lib.bash"
 
 declare -A new_version reason
+bumped=0
 crates=()
 while IFS= read -r crate; do crates+=("$crate"); done < <(crates_in_publish_order)
 
@@ -84,6 +85,7 @@ if [[ -n $title ]]; then
     from="$(manifest_version_at "$merge_base" "$dir")"
     new_version[$crate]="$(next_version "$from" "$level")"
     reason[$crate]="$level: PR title, from $from at the merge-base"
+    bumped=$((bumped + 1))
   done
 else
   merge_base=""
@@ -98,6 +100,7 @@ else
     [[ $level == none ]] && continue
     new_version[$crate]="$(next_version "$(crate_version "$crate")" "$level")"
     reason[$crate]="$level: $(wc -l <<<"$commits" | tr -d ' ') commit(s) since $tag"
+    bumped=$((bumped + 1))
   done
 fi
 
@@ -122,12 +125,13 @@ while ((grew)); do
       [[ -z "$(latest_tag "$dependent")" ]] && continue
       new_version[$dependent]="$(next_version "$(base_version "$dependent")" patch)"
       reason[$dependent]="patch: depends on $crate"
+      bumped=$((bumped + 1))
       grew=1
     done < <(dependents_of "$crate")
   done
 done
 
-if ((${#new_version[@]} == 0)); then
+if ((bumped == 0)); then
   echo "nothing to bump"
   exit 0
 fi
