@@ -436,6 +436,60 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
     from_stream(&mut BufReader::new(File::open(path)?))
 }
 
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// A registry read and written through the entity lands on the same field the
+    /// body's own accessors reach, so neither consumer needs to name the body type.
+    #[test]
+    fn the_entity_registry_reads_and_writes_the_body() {
+        let mut entity = Entity::Program(Program::Electro5(ne5::program::new(
+            (0, 0).try_into().unwrap(),
+        )));
+
+        let before = entity.registry().unwrap().fields();
+        assert!(before.iter().any(|f| f.path == "center_panel.transpose"));
+
+        entity
+            .registry_mut()
+            .unwrap()
+            .set_field("center_panel.transpose", "-5")
+            .unwrap();
+        let after = entity.registry().unwrap().fields();
+        let transpose = after
+            .iter()
+            .find(|f| f.path == "center_panel.transpose")
+            .unwrap();
+        assert_eq!(transpose.value, "-5");
+    }
+
+    /// A stub-backed entity has no registry, and says so the same way in both
+    /// directions.
+    #[test]
+    fn a_stub_has_no_registry() {
+        let file = Cbin {
+            header: cbin::Header::new("ne6p", (0, 0), 1),
+            body: RawBody(vec![0; 16]),
+        };
+        let mut entity = Entity::Program(Program::Electro6(file));
+        assert!(entity.registry().is_none());
+        assert!(entity.registry_mut().is_none());
+    }
+
+    /// A song's fields are private, so its registry would list nothing — it is
+    /// deliberately not a registry entity, and `Song::set` is its editing surface.
+    #[test]
+    fn a_song_is_not_a_registry_entity() {
+        let song = ne5::song::new(
+            (0, 0).try_into().unwrap(),
+            ne5::song::DEFAULT_VERSION,
+            [(0, 0).try_into().unwrap(); 4],
+        );
+        assert!(Entity::Song(Song::Electro5(song)).registry().is_none());
+    }
+}
+
 #[cfg(all(test, feature = "bundle"))]
 mod bundle_tests {
     use super::*;
@@ -527,6 +581,67 @@ pub struct Identity {
     pub format: &'static str,
 }
 
+macro_rules! registry_bodies {
+    ($($body:ty),* $(,)?) => {$(
+        impl fields::Registry for Cbin<$body> {
+            fn fields(&self) -> Vec<fields::Field> {
+                self.body.fields()
+            }
+            fn field_values(&self) -> Vec<fields::FieldValue> {
+                self.body.field_values()
+            }
+            fn set_field(&mut self, path: &str, value: &str) -> Result<(), fields::FieldError> {
+                self.body.set_field(path, value)
+            }
+        }
+    )*};
+}
+
+registry_bodies!(
+    ne5::Program,
+    ne5::Settings,
+    ns2::Program,
+    ns3::Program,
+    ns3::SynthPreset,
+    ns4::Program,
+    ns4::organ_preset::OrganPreset,
+    ns4::piano_preset::PianoPreset,
+    ns4::synth::SynthPreset,
+);
+
+/// The registry-declaring entities, read through `&` or `&mut` as asked. One
+/// list serving both directions. The live buffer is the program body under
+/// another tag, so the two share an arm. `ne5::Song` declares no public
+/// fields — its registry would be empty, so it is not one of these.
+macro_rules! with_registry {
+    ($entity:expr, $($reference:tt)*) => {
+        match $entity {
+            Entity::Program(Program::Electro5(f)) | Entity::Live(Live::Electro5(f)) => {
+                Some(f as $($reference)* dyn fields::Registry)
+            }
+            Entity::Program(Program::Stage2(f)) | Entity::Live(Live::Stage2(f)) => {
+                Some(f as $($reference)* dyn fields::Registry)
+            }
+            Entity::Program(Program::Stage3(f)) | Entity::Live(Live::Stage3(f)) => {
+                Some(f as $($reference)* dyn fields::Registry)
+            }
+            Entity::Program(Program::Stage4(f)) | Entity::Live(Live::Stage4(f)) => {
+                Some(f as $($reference)* dyn fields::Registry)
+            }
+            Entity::Settings(Settings::Electro5(f)) => Some(f as $($reference)* dyn fields::Registry),
+            Entity::Synth(Synth::Stage3(f)) => Some(f as $($reference)* dyn fields::Registry),
+            Entity::Synth(Synth::Stage4(f)) => Some(f as $($reference)* dyn fields::Registry),
+            Entity::OrganPreset(OrganPreset::Stage4(f)) => {
+                Some(f as $($reference)* dyn fields::Registry)
+            }
+            Entity::PianoPreset(PianoPreset::Stage4(f)) => {
+                Some(f as $($reference)* dyn fields::Registry)
+            }
+            _ => None,
+        }
+    };
+}
+
 impl Entity {
     /// The container of a stub-backed entity — every variant whose body is
     /// container-verified but undecoded. `None` for the decoded formats and the
@@ -597,6 +712,19 @@ impl Entity {
             | Entity::PipeLibrary(f) => Some(f),
             _ => None,
         }
+    }
+
+    /// The generated field registry behind this entity, for reading.
+    /// `None` for the container-verified stubs and the non-panel carriers.
+    pub fn registry(&self) -> Option<&dyn fields::Registry> {
+        with_registry!(self, &)
+    }
+
+    /// The registry again, for setting fields. The same bodies answer both:
+    /// a body that lists its fields but refuses to set them cannot be
+    /// declared here.
+    pub fn registry_mut(&mut self) -> Option<&mut dyn fields::Registry> {
+        with_registry!(self, &mut)
     }
 
     /// The entity's [`Identity`]: its human label and the tag its file carries.

@@ -181,6 +181,22 @@ impl Display for FieldError {
 
 impl std::error::Error for FieldError {}
 
+/// The generated field registry behind an entity, where its body declares one.
+///
+/// `#[bitbody]` generates these three methods on every body with public
+/// fields; this trait is the same surface behind one name, so a caller can
+/// list and set fields without naming the body type.
+/// [`Entity::registry`](crate::Entity::registry) is where one comes from —
+/// a body joins by being declared there, and every consumer sees it at once.
+pub trait Registry {
+    /// Every settable field, described under its full path.
+    fn fields(&self) -> Vec<Field>;
+    /// Every registered field's current value, in declaration order.
+    fn field_values(&self) -> Vec<FieldValue>;
+    /// Set one field by its full path.
+    fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError>;
+}
+
 /// One settable field of a body, addressed the way `--set` addresses it.
 pub struct Field {
     /// The field's full registry path, e.g. `center_panel.transpose`.
