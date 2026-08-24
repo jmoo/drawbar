@@ -45,8 +45,9 @@ let
           crane.filterCargoSources path type
           || hasSuffix ".script" path
           || hasSuffix ".snapshot" path
-          # The committed synthetic specimens, whatever their extensions.
+          # The committed specimens and replay scripts, whatever their extensions.
           || hasInfix "/tests/fixtures/" path
+          || hasInfix "/tests/scripts/" path
         );
     };
 
@@ -162,7 +163,9 @@ let
         "replay"
       ];
       testRunner = {
-        cmd = "wasmtime";
+        # The suite reads its scripts off the source tree, which a wasm sandbox
+        # sees only through a preopened directory.
+        cmd = "wasmtime --dir /";
         packages = [
           final.lld
           final.wasmtime
@@ -421,7 +424,7 @@ let
 
   # The read-only inventory sweep, replayed. Exercises transport → wire → session
   # → op → CLI without a device, so the same proof runs on every target.
-  pocScript = ./crates/nord-usb/tests/fixtures/inventory.script;
+  pocScript = ./crates/nord-usb/tests/scripts/device/inventory.script;
 
   # The nord-cli end-to-end run, as the package's own install check. The scripts
   # live with the CLI — crates/nord-cli/checks — and run against any built
@@ -452,7 +455,7 @@ let
   # access to it.
 
   corpusTree = builtins.fetchGit {
-    rev = "de3f8f9123a14d3d8202aa68fc8414495ac8f710";
+    rev = "2298260349f67ff55b23f958243d508782dfe0ec";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 

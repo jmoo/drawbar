@@ -37,6 +37,8 @@ pub fn list() -> Result<Vec<DeviceInfo>> {
 
 pub struct UsbTransport {
     interface: Interface,
+    /// What the device descriptor calls itself, kept for the recorder's header.
+    product: Option<String>,
     /// Set to mirror every frame into a replay script. `None` is the normal case.
     record: Option<Recorder>,
     // A persistent IN queue: submitting a fresh buffer per read is simpler to reason
@@ -75,6 +77,7 @@ impl UsbTransport {
         let read_queue = interface.bulk_in_queue(EP_IN);
         Ok(Self {
             interface,
+            product: info.product_string().map(str::to_owned),
             record: None,
             read_queue,
         })
@@ -85,14 +88,44 @@ impl UsbTransport {
     /// The script is written as it goes, so it stays useful even if the run ends badly.
     /// Recording an operation that moves a body writes that body out in full.
     pub fn recording_to(mut self, path: &std::path::Path) -> Result<Self> {
-        self.record = Some(Recorder::create(path)?);
+        self.record = Some(Recorder::create(path, self.describe().as_deref())?);
         Ok(self)
+    }
+
+    /// Model and firmware for the script header, best effort: the model comes from the
+    /// descriptor, the rest from endpoint 0, and an instrument that will not answer
+    /// there is still worth recording.
+    fn describe(&self) -> Option<String> {
+        let product = self.product.as_deref()?;
+        Some(match self.identity() {
+            Ok(id) => format!(
+                "{product}, firmware v{}.{:02} build {}",
+                id.firmware / 100,
+                id.firmware % 100,
+                id.build
+            ),
+            Err(_) => product.to_string(),
+        })
+    }
+
+    /// Declare what the frames that follow belong to. No-op when not recording.
+    pub fn mark_intent(&mut self, intent: &str) {
+        if let Some(r) = self.record.as_mut() {
+            r.intent(intent);
+        }
     }
 
     /// Label the frames that follow in the script. No-op when not recording.
     pub fn mark(&mut self, what: &str) {
         if let Some(r) = self.record.as_mut() {
             r.comment(what);
+        }
+    }
+
+    /// Record that the transaction just performed failed. No-op when not recording.
+    pub fn mark_expect(&mut self, e: &Error) {
+        if let Some(r) = self.record.as_mut() {
+            r.expect(e);
         }
     }
 

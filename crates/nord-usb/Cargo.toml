@@ -68,4 +68,13 @@ web-sys = { version = "0.3", optional = true, features = [
 # build always carries pollster — `--features replay` alone must compile, as
 # both READMEs and the replay guard instruct.
 [dev-dependencies]
+libtest-mimic = "0.8"
 pollster = "0.4"
+
+# The replay sweep builds its own test list — one trial per script — so it owns its
+# harness. It reads the committed scripts on every run and the corpus with the feature
+# on, and needs the transport those scripts drive.
+[[test]]
+name = "replay"
+harness = false
+required-features = ["replay"]
