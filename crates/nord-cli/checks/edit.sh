@@ -14,6 +14,10 @@ set -euo pipefail
   exit 2
 }
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+here=$(cd "$(dirname "$0")" && pwd)
+# A real editor-written project for the file-verb section; POC_PROJECT
+# overrides it where the checkout is not beside the script (the nix build).
+: "${POC_PROJECT:=$here/../../nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj}"
 
 run() { ${NORD_RUNNER:-} "$bin" "$@"; }
 
@@ -102,3 +106,91 @@ grep -q '^center_panel.transpose ' fields.txt || {
   exit 1
 }
 echo "ok: edit moved exactly the bytes it named, and nothing else"
+
+echo
+echo "== nord edit: the file verb reaches the registry =="
+run edit base.ne5p --set center_panel.gain=100 -o viafile.ne5p >viafile.txt 2>err.txt || {
+  echo "nord edit failed on a program file:"
+  cat err.txt
+  exit 1
+}
+run verify viafile.ne5p >verified.txt 2>err.txt || {
+  echo "a file-verb edit did not round-trip:"
+  cat verified.txt err.txt
+  exit 1
+}
+run inspect viafile.ne5p >decoded.txt 2>err.txt
+grep -q 'gain: *100' decoded.txt || {
+  echo "the file-verb edit did not land:"
+  cat decoded.txt
+  exit 1
+}
+echo "ok: nord edit drives the same registry the noun does"
+
+echo
+echo "== nord setlist edit =="
+run setlist edit --set slot1=2:5 --set slot4=8:50 -o set.ne5t >set.txt 2>err.txt || {
+  echo "writing an edited default set list failed:"
+  cat err.txt
+  exit 1
+}
+run verify set.ne5t >verified.txt 2>err.txt || {
+  echo "a written set list did not round-trip:"
+  cat verified.txt err.txt
+  exit 1
+}
+run inspect set.ne5t >decoded.txt 2>err.txt
+for want in 'bank 2 slot 5' 'bank 8 slot 50'; do
+  grep -q "$want" decoded.txt || {
+    echo "the set list edit did not land in the decode (missing '$want'):"
+    cat decoded.txt
+    exit 1
+  }
+done
+run setlist edit set.ne5t --fields >fields.txt 2>err.txt || {
+  echo "setlist --fields failed:"
+  cat err.txt
+  exit 1
+}
+grep -q '^slot1 ' fields.txt || {
+  echo "setlist --fields does not list the slots:"
+  cat fields.txt
+  exit 1
+}
+echo "ok: a set list's four slots edit and round-trip"
+
+echo
+echo "== nord edit: a Sample Editor project =="
+cp "$POC_PROJECT" proj.nsmpproj
+run verify proj.nsmpproj >verified.txt 2>err.txt || {
+  echo "the project fixture did not round-trip:"
+  cat verified.txt err.txt
+  exit 1
+}
+run edit proj.nsmpproj --fields >fields.txt 2>err.txt || {
+  echo "project --fields failed:"
+  cat err.txt
+  exit 1
+}
+grep -q '^name ' fields.txt || {
+  echo "project --fields does not list the name:"
+  cat fields.txt
+  exit 1
+}
+run edit proj.nsmpproj --set name=Renamed -o renamed.nsmpproj >edited.txt 2>err.txt || {
+  echo "project edit failed:"
+  cat err.txt
+  exit 1
+}
+run verify renamed.nsmpproj >verified.txt 2>err.txt || {
+  echo "an edited project did not round-trip:"
+  cat verified.txt err.txt
+  exit 1
+}
+run inspect renamed.nsmpproj >decoded.txt 2>err.txt
+grep -q 'Renamed' decoded.txt || {
+  echo "the project rename did not come back out of the decode:"
+  cat decoded.txt
+  exit 1
+}
+echo "ok: a Sample Editor project lists, edits and round-trips"

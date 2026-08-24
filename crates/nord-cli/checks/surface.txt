@@ -5,11 +5,11 @@
 #
 # program, raw, sample and setlist share the slot verbs on purpose: they are
 # the same class of storage, addressed the same way.
-: inspect verify device program setlist live settings sample help
+: inspect verify edit device program setlist live settings sample help
 device: controls status info recover geometry help
 live: get info deps edit help
 program: get put move rename duplicate delete select info deps focus list probe edit help
 raw: get put move rename duplicate delete select info deps focus list probe help
 sample: get put move rename duplicate delete select info deps focus list probe edit help
-setlist: get put move rename duplicate delete select info deps focus list probe help
+setlist: get put move rename duplicate delete select info deps focus list probe edit help
 settings: edit help

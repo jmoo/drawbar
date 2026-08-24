@@ -426,6 +426,9 @@ let
   # → op → CLI without a device, so the same proof runs on every target.
   pocScript = ./crates/nord-usb/tests/scripts/device/inventory.script;
 
+  # An editor-written Sample Editor project, for the file-verb edit check.
+  pocProject = ./crates/nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj;
+
   # The nord-cli end-to-end run, as the package's own install check. The scripts
   # live with the CLI — crates/nord-cli/checks — and run against any built
   # binary; this shim only wires in the store paths and, for a foreign binary,
@@ -444,6 +447,7 @@ let
         runHook preInstallCheck
         NORD_RUNNER=${optionalString (emulator != null) emulator.cmd} \
           POC_SCRIPT=${pocScript} \
+          POC_PROJECT=${pocProject} \
           bash ${./crates/nord-cli/checks}/check.sh "$out/${bin}"
         runHook postInstallCheck
       '';

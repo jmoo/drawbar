@@ -10,6 +10,7 @@ A command-line tool (`nord`) over [`nord-format`](../nord-format) and
 |---|---|
 | `inspect` | Decode file(s) and print a readable summary |
 | `verify` | Re-encode file(s) and check the bytes come back identical |
+| `edit` | Change fields inside any editable file, whatever format it holds |
 | `device` | The instrument itself — what is on the bus, and what it holds |
 | `program` | Programs on the instrument (object class 4) |
 | `setlist` | Set lists on the instrument (object class 5) |
@@ -18,16 +19,16 @@ A command-line tool (`nord`) over [`nord-format`](../nord-format) and
 | `sample` | Sample instruments — the library (object class 3), or `.nsmp` files |
 | `raw` | Hidden: the same verbs, addressed by class number |
 
-`inspect` and `verify` work on files. The other nouns are the protocol's object
-classes, and normally talk to an attached instrument — but the read-only verbs
-(`get`, `info`, `deps`) and `edit` also take a file in place of a slot. `program`
-and `setlist` share one verb vocabulary:
+`inspect`, `verify` and `edit` work on files. The other nouns are the protocol's
+object classes, and normally talk to an attached instrument — but the read-only
+verbs (`get`, `info`, `deps`) and each noun's `edit` also take a file in place of
+a slot. `program` and `setlist` share one verb vocabulary:
 
 ```
 get put            transfer
 move rename duplicate delete select   organization
 info deps          interrogation
-edit               content (program, live, settings, sample)
+edit               content (program, setlist, live, settings, sample)
 ```
 
 `live` keeps only the read-only subset plus `edit` — the live buffer is the panel
@@ -208,12 +209,12 @@ to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
 ## Editing an object
 
 `edit` is the only verb that changes what is *inside* an object, and it exists on
-four nouns: `nord program edit`, `nord live edit` (the live buffer is the
+five nouns: `nord program edit`, `nord live edit` (the live buffer is the
 program body under another tag, so the fields are identical), `nord settings
 edit` (the menu settings, plus the `startup_*` state the instrument restores at
-power-up), and `nord sample edit` (below). For the first three the field paths
-are `nord-format`'s own names, generated from the panel declarations, so
-`--fields` lists whatever the library currently knows:
+power-up), `nord setlist edit` (below), and `nord sample edit` (below). For the
+first three the field paths are `nord-format`'s own names, generated from the
+panel declarations, so `--fields` lists whatever the library currently knows:
 
 ```sh
 nord program edit --fields                       # what is settable, and what it takes
@@ -265,6 +266,17 @@ center_panel.transpose                   0 -> -5
 > clears that bit once it is set, and an untouched program holds `+1` rather than
 > `0`. Setting one half without the other warns; it is not refused.
 
+### `nord setlist edit`
+
+A set list is the four program slots it points at, so those are its fields:
+`slot1` to `slot4`, each taking a program address as the instrument shows it.
+
+```sh
+nord setlist edit song.ne5t --fields
+nord setlist edit song.ne5t --set slot1=2:5 --set slot4=8:50 -o out.ne5t
+nord setlist edit --set slot1=1:1 -o blank.ne5t     # a fresh set list
+```
+
 ### `nord sample edit`
 
 A sample instrument is mostly encoded audio, so its settable fields are the ones
@@ -277,6 +289,22 @@ first, the way `inspect` lists them:
 nord sample edit inst.nsmp --fields
 nord sample edit inst.nsmp --set name="My Piano" --set zone2.top_note=C4 -o out.nsmp
 nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
+```
+
+### `nord edit` — files with no noun
+
+The top-level `edit` dispatches on the file itself rather than on an object
+class, so it reaches every format `nord-format` can set: the Electro 5 bodies
+above, the Stage 2/3/4 programs, the Stage 3/4 synth presets, the Stage 4
+organ and piano presets — any body with a generated field registry — plus set
+lists, sample instruments, and Nord Sample Editor projects (`.nsmpproj`: the
+instrument name, each zone's root key and key range, and each audio file's
+path, addressed by the ids `inspect` prints).
+
+```sh
+nord edit stage.ns3f --fields
+nord edit stage.ns3f --set split_enabled=true -o out.ns3f
+nord edit project.nsmpproj --set name=Marimba --set zone129.root_key=C3 --yes
 ```
 
 ## Build & run

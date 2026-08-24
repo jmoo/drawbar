@@ -1,20 +1,18 @@
 //! `nord sample edit` — rename, retune and remap a sample instrument.
 //!
-//! The spelling mirrors `nord program edit`, but the fields come from [`Sample`]'s
-//! accessors rather than a declarative panel: a sample is mostly encoded audio, and
-//! only what the format crate can patch in place is settable — the name, and each
-//! zone's root key and top note.
+//! The spelling mirrors `nord program edit`, but the fields come from
+//! [`editors::SampleEditor`]'s accessors rather than a declarative panel: a
+//! sample is mostly encoded audio, and only what the format crate can patch in
+//! place is settable — the name, and each zone's root key and top note.
 
 use std::path::PathBuf;
 
 use clap::Args;
-use nord_format::cbin::Cbin;
-use nord_format::formats::nsmp::Sample;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
 use crate::edit::{print_byte_diff, write_file};
-use crate::note;
+use crate::editors::{self, SampleEditor};
 use crate::slot::Target;
 use crate::ui::Ui;
 
@@ -59,44 +57,27 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
 
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
-    let Entity::Sample(any) = &mut entity else {
-        return Err("sample edit only understands sample instruments (.nsmp)".into());
-    };
-    let sample = match any {
-        nord_format::Sample::V2(sample) => sample,
+    let sample = match &mut entity {
+        Entity::Sample(nord_format::Sample::V2(sample)) => sample,
         // Editing needs the v2 zone/stroke accessors; the v3/v4 chain is read-only.
-        nord_format::Sample::V3(_) => {
+        Entity::Sample(nord_format::Sample::V3(_)) => {
             return Err(
                 "this instrument is nsmp3/nsmp4 content; only v2 (.nsmp) can be edited".into(),
             )
         }
+        Entity::SampleProject(_) => {
+            return Err(
+                "this is a Sample Editor project, not a sample instrument — try `nord edit`".into(),
+            )
+        }
+        _ => return Err("sample edit only understands sample instruments (.nsmp)".into()),
     };
 
-    if args.fields {
-        return list_fields(ui, sample);
-    }
-    if args.set.is_empty() {
-        return Err("nothing to do: pass --set PATH=VALUE, or --fields to see what exists".into());
-    }
-
-    // Every change lands before anything is written, so a bad path or an out-of-range
-    // value cannot leave a half-edited sample behind.
-    let before = snapshot(sample)?;
-    for assignment in &args.set {
-        let (path, value) = assignment
-            .split_once('=')
-            .ok_or_else(|| format!("expected PATH=VALUE, got {assignment:?}"))?;
-        apply(sample, path.trim(), value.trim())?;
-    }
-    let after = snapshot(sample)?;
-
-    let mut changed = 0;
-    for ((path, b), (_, a)) in before.iter().zip(&after) {
-        if b != a {
-            changed += 1;
-            ui.out(format!("{path:<20} {b} -> {}", ui.bold(a)));
-        }
-    }
+    let Some(changed) = editors::stage(ui, args.fields, &args.set, &mut SampleEditor(sample))?
+    else {
+        // `--fields` has listed them and is done.
+        return Ok(());
+    };
     if changed == 0 {
         ui.note("no field changed; writing nothing");
         return Ok(());
@@ -133,59 +114,4 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
             None,
         ),
     }
-}
-
-/// Every settable field with its display value, in path order.
-fn snapshot(sample: &Cbin<Sample>) -> Result<Vec<(String, String)>, String> {
-    let mut out = vec![(
-        "name".to_string(),
-        sample.name().map_err(|e| e.to_string())?,
-    )];
-    let zones = sample.zones().map_err(|e| e.to_string())?;
-    let strokes = sample.strokes().map_err(|e| e.to_string())?;
-    for (i, (zone, stroke)) in zones.iter().zip(&strokes).enumerate() {
-        let n = i + 1;
-        out.push((format!("zone{n}.root_key"), note::name(stroke.root_key)));
-        out.push((format!("zone{n}.top_note"), note::name(zone.top_note)));
-    }
-    Ok(out)
-}
-
-fn apply(sample: &mut Cbin<Sample>, path: &str, value: &str) -> Result<(), String> {
-    if path == "name" {
-        return sample.set_name(value).map_err(|e| e.to_string());
-    }
-    let unknown = || format!("unknown field {path:?}; --fields lists what exists");
-    let (zone, field) = path.split_once('.').ok_or_else(unknown)?;
-    let index = zone
-        .strip_prefix("zone")
-        .and_then(|n| n.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .ok_or_else(unknown)?;
-    // Checked here so the message speaks the CLI's 1-based numbering, not the
-    // format crate's 0-based one.
-    let zones = sample.zones().map_err(|e| e.to_string())?.len();
-    if index > zones {
-        return Err(format!("no zone {index}: the instrument has {zones}"));
-    }
-    let value = note::parse(value)?;
-    match field {
-        "root_key" => sample.set_root_key(index - 1, value),
-        "top_note" => sample.set_zone_top_note(index - 1, value),
-        _ => return Err(unknown()),
-    }
-    .map_err(|e| e.to_string())
-}
-
-fn list_fields(ui: &Ui, sample: &Cbin<Sample>) -> Result<(), String> {
-    ui.out(format!("{:<20} {:<16} {}", "path", "value", "accepts"));
-    for (path, value) in snapshot(sample)? {
-        let accepts = if path == "name" {
-            format!("up to {} bytes", nord_format::formats::nsmp::MAX_NAME_LEN)
-        } else {
-            "a note name (C4, F#3) or 0-127".to_string()
-        };
-        ui.out(format!("{path:<20} {value:<16} {accepts}"));
-    }
-    Ok(())
 }

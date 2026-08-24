@@ -1,50 +1,28 @@
-//! `nord program edit` and `nord live edit` — change fields inside a program body.
+//! `nord program edit`, `nord live edit`, `nord setlist edit` and `nord
+//! settings edit` — change fields inside an Electro 5 body.
 //!
-//! Field paths and values come straight from `#[bitpanel]`, so `--fields` cannot go
-//! stale and a field becomes settable by being declared. The live buffer is the program
-//! body under another tag, so both nouns run this one command with the class fixed.
+//! Field paths and values come straight from `#[bitpanel]`, so `--fields`
+//! cannot go stale and a field becomes settable by being declared. The live
+//! buffer is the program body under another tag, so both nouns run this one
+//! command with the class fixed. The set list has no registry — its four slots
+//! are set through [`editors::SongEditor`], in the same `--set` vocabulary.
 //!
-//! A file and a slot are the same command. The slot form is a read-modify-write over
-//! USB, so it obeys the rule every mutation obeys — describe the target, then refuse
-//! without `--yes`. Editing a file in place takes the same guard; `-o` avoids it.
+//! A file and a slot are the same command. The slot form is a read-modify-write
+//! over USB, so it obeys the rule every mutation obeys — describe the target,
+//! then refuse without `--yes`. Editing a file in place takes the same guard;
+//! `-o` avoids it.
 
 use std::path::Path;
 
-use nord_format::cbin::Cbin;
-use nord_format::fields::{ControlKind, FieldError, Unit};
+use nord_format::fields::{ControlKind, Field, Registry, Unit};
 use nord_format::formats::ne5;
-use nord_format::formats::ne5::program::Field;
-use nord_format::{Entity, Live, Program, Settings};
+use nord_format::{Entity, Live, Program, Settings, Song};
 use nord_usb::ObjectClass;
 
+use crate::editors;
 use crate::slot::Target;
 use crate::ui::Ui;
 use crate::EditArgs;
-
-/// The files `edit` drives: the program body in either slot space, and the settings
-/// singleton. One vocabulary — `--set path=value` — over each.
-trait Editable {
-    fn fields(&self) -> Vec<Field>;
-    fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError>;
-}
-
-impl Editable for Cbin<ne5::Program> {
-    fn fields(&self) -> Vec<Field> {
-        self.body.fields()
-    }
-    fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError> {
-        self.body.set_field(path, value)
-    }
-}
-
-impl Editable for Cbin<ne5::Settings> {
-    fn fields(&self) -> Vec<Field> {
-        self.body.fields()
-    }
-    fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError> {
-        self.body.set_field(path, value)
-    }
-}
 
 pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
     // No target is `--fields` or `-o` with nothing to read: a fresh default object.
@@ -68,6 +46,9 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
         (Entity::Program(Program::Electro5(p)), ObjectClass::Program) => stage(ui, &args, p)?,
         (Entity::Live(Live::Electro5(l)), ObjectClass::Live) => stage(ui, &args, l)?,
         (Entity::Settings(Settings::Electro5(s)), ObjectClass::Settings) => stage(ui, &args, s)?,
+        (Entity::Song(Song::Electro5(s)), ObjectClass::SetList) => {
+            editors::stage(ui, args.fields, &args.set, &mut editors::SongEditor(s))?
+        }
         _ => return Err(mismatch(&entity, class)),
     };
     // `--fields` has listed them and is done.
@@ -110,6 +91,16 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
                 None,
                 None,
             ),
+            ObjectClass::SetList => crate::device::send(
+                ui,
+                &edited,
+                at,
+                class,
+                args.yes,
+                "the edited set list",
+                None,
+                None,
+            ),
             // ⚠️ `send` deletes the destination to make room, and whether the live
             // buffer or the settings singleton survives a delete/write of its class is
             // unconfirmed on hardware. Until it is, an edited slot of either stops at
@@ -130,14 +121,20 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
 /// The bytes of a fresh default object: what a target-less `--fields` lists and a
 /// target-less `-o` starts from.
 fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
+    let first = |e| format!("{e}");
     let entity = match class {
         ObjectClass::Program => Entity::Program(Program::Electro5(ne5::program::new(
-            (0, 0).try_into().map_err(|e| format!("{e}"))?,
+            (0, 0).try_into().map_err(first)?,
         ))),
         ObjectClass::Live => Entity::Live(Live::Electro5(ne5::live::new(
-            (0, 0).try_into().map_err(|e| format!("{e}"))?,
+            (0, 0).try_into().map_err(first)?,
         ))),
         ObjectClass::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
+        ObjectClass::SetList => Entity::Song(Song::Electro5(ne5::song::new(
+            (0, 0).try_into().map_err(first)?,
+            ne5::song::DEFAULT_VERSION,
+            [(0, 0).try_into().map_err(first)?; 4],
+        ))),
         other => return Err(format!("edit does not exist for {}", other.label())),
     };
     nord_format::to_bytes(&entity).map_err(|e| e.to_string())
@@ -145,30 +142,38 @@ fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
 
 /// The target decoded, but not to what this noun edits.
 fn mismatch(entity: &Entity, class: ObjectClass) -> String {
-    let got = crate::file::entity_tag(entity);
     format!(
-        "this command edits {} ({}); the target holds {got}{}",
+        "this command edits {} ({}); the target holds {}{}",
         class.label(),
         crate::file::tag(class).unwrap_or("?"),
-        steer(got),
+        crate::file::entity_tag(entity),
+        steer(entity),
     )
 }
 
-/// The `edit` that reads a tag's files — empty for a tag whose noun has none, so the
-/// message never points at a command that does not exist.
-fn steer(tag: &str) -> &'static str {
-    match tag {
+/// The `edit` that reads this entity's files — empty for something nothing
+/// edits, so the message never points at a command that does not exist.
+fn steer(entity: &Entity) -> &'static str {
+    match crate::file::entity_tag(entity) {
         "ne5p" => " — try `nord program edit`",
         "ne5l" => " — try `nord live edit`",
         "ne5s" => " — try `nord settings edit`",
+        "ne5t" => " — try `nord setlist edit`",
         "nsmp" => " — try `nord sample edit`",
+        // Everything else editable — the Stage bodies, the Sample Editor
+        // project — has no noun of its own and lives under the file verb.
+        _ if crate::file_edit::editable(entity) => " — try `nord edit`",
         _ => "",
     }
 }
 
 /// List the fields (`--fields`, `None`) or apply every `--set`, returning how many
 /// fields moved.
-fn stage(ui: &Ui, args: &EditArgs, file: &mut impl Editable) -> Result<Option<usize>, String> {
+pub(crate) fn stage(
+    ui: &Ui,
+    args: &EditArgs,
+    file: &mut dyn Registry,
+) -> Result<Option<usize>, String> {
     if args.fields {
         if !args.set.is_empty() {
             return Err("--fields lists and writes nothing; drop it to apply --set".into());
@@ -231,7 +236,7 @@ fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
 /// Echo every field whose value moved, before and after.
 ///
 /// Display lives on the value, so this prints exactly what `nord inspect` would.
-fn report_changes(ui: &Ui, before: &[ne5::program::Field], after: &[ne5::program::Field]) -> usize {
+fn report_changes(ui: &Ui, before: &[Field], after: &[Field]) -> usize {
     let mut changed = 0;
     for (b, a) in before.iter().zip(after) {
         if b.display == a.display {
@@ -320,7 +325,7 @@ fn control(kind: ControlKind) -> String {
     }
 }
 
-fn list_fields(ui: &Ui, file: &impl Editable) {
+fn list_fields(ui: &Ui, file: &dyn Registry) {
     ui.out(format!(
         "{:<40} {:<12} {:<14} {:<28} {}",
         "path", "bits", "control", "value", "accepts"
@@ -351,10 +356,10 @@ fn list_fields(ui: &Ui, file: &impl Editable) {
 mod tests {
     use super::*;
 
-    /// A wrong-format target must steer to the noun whose `edit` reads it, and never
-    /// to one that has no `edit` at all.
+    /// A wrong-format target must steer to the noun whose `edit` reads it — and for a
+    /// format with no noun, to the file verb — never to a command that does not exist.
     #[test]
-    fn a_mismatched_target_steers_to_the_noun_that_edits_it() {
+    fn a_mismatched_target_steers_to_the_command_that_edits_it() {
         let live = Entity::Live(Live::Electro5(ne5::live::new((0, 0).try_into().unwrap())));
         let err = mismatch(&live, ObjectClass::Program);
         assert!(err.contains("nord live edit"), "{err}");
@@ -369,12 +374,37 @@ mod tests {
         let err = mismatch(&settings, ObjectClass::Program);
         assert!(err.contains("nord settings edit"), "{err}");
 
-        // Samples have their own edit, outside this command.
-        assert!(steer("nsmp").contains("nord sample edit"));
+        let song = Entity::Song(Song::Electro5(ne5::song::new(
+            (0, 0).try_into().unwrap(),
+            ne5::song::DEFAULT_VERSION,
+            [(0, 0).try_into().unwrap(); 4],
+        )));
+        let err = mismatch(&song, ObjectClass::Program);
+        assert!(err.contains("nord setlist edit"), "{err}");
 
-        // Set lists and pianos have no edit, so no steer may be invented.
-        for tag in ["ne5t", "npno", "zip"] {
-            assert_eq!(steer(tag), "", "{tag}");
-        }
+        // A registry body with no noun of its own goes to the file verb.
+        let stage = nord_format::from_stream(&mut std::io::Cursor::new(
+            crate::file_edit::tests::stage3_program(),
+        ))
+        .unwrap();
+        let err = mismatch(&stage, ObjectClass::Program);
+        assert!(err.contains("nord edit"), "{err}");
+
+        // A piano library has no edit anywhere, so no steer may be invented.
+        assert_eq!(
+            steer(&nord_format::from_stream(&mut std::io::Cursor::new(pipe_library())).unwrap()),
+            "",
+        );
+    }
+
+    /// The smallest container-verified stub: enough bytes to decode, nothing to edit.
+    fn pipe_library() -> Vec<u8> {
+        let file = nord_format::cbin::Cbin {
+            header: nord_format::cbin::Header::new("npip", (0xffff, 0xffff), 1),
+            body: nord_format::cbin::RawBody(vec![0x5a; 16]),
+        };
+        let mut out = std::io::Cursor::new(Vec::new());
+        file.write_to(&mut out).unwrap();
+        out.into_inner()
     }
 }
