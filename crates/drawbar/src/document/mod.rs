@@ -19,7 +19,9 @@ use crate::workspace::{LocalEntity, Workspace};
 mod advanced;
 mod controls;
 mod panel;
+mod project;
 mod sample;
+mod setlist;
 
 use advanced::Advanced;
 use controls::{Ctx, Sets};
@@ -63,8 +65,11 @@ pub struct Document {
     /// Per-field legal values and controls, cached as they are drawn. One per document —
     /// see [`Ctx`].
     ctx: Ctx,
-    /// The name box for a sample instrument, so a half-typed name survives a frame.
+    /// The name box for a sample instrument or a Sample Editor project, so a
+    /// half-typed name survives a frame.
     name: String,
+    /// The path boxes for a project's audio files, by file id — same reason.
+    paths: std::collections::HashMap<u32, String>,
     /// The last refusal, and what caused it.
     error: Option<String>,
     /// Whether this document has already had its dependencies read without being asked.
@@ -98,7 +103,15 @@ impl Document {
             self.name = decoded
                 .and_then(sample::snapshot)
                 .and_then(Result::ok)
-                .map_or(String::new(), |snapshot| snapshot.name);
+                .map(|snapshot| snapshot.name)
+                .or_else(|| {
+                    decoded
+                        .and_then(project::snapshot)
+                        .and_then(Result::ok)
+                        .map(|snapshot| snapshot.name)
+                })
+                .unwrap_or_default();
+            self.paths.clear();
         }
 
         let faces = faces(entity, registry.as_deref());
@@ -283,6 +296,9 @@ impl Document {
         if sample::is_sample(decoded) {
             return self.sample_body(ui, decoded, sets);
         }
+        if project::is_project(decoded) {
+            return self.project_body(ui, decoded, sets);
+        }
         if let Some(fields) = registry {
             if fields::is_electro5_panel(decoded) {
                 return panel::program(ui, &self.ctx, fields, piano, sets);
@@ -292,7 +308,7 @@ impl Document {
             }
             return panel::plain(ui, &self.ctx, fields, sets);
         }
-        set_list(ui, decoded);
+        setlist::ui(ui, decoded, sets);
     }
 
     fn sample_body(&mut self, ui: &mut egui::Ui, decoded: &nord_format::Entity, sets: &mut Sets) {
@@ -317,6 +333,16 @@ impl Document {
         }
     }
 
+    fn project_body(&mut self, ui: &mut egui::Ui, decoded: &nord_format::Entity, sets: &mut Sets) {
+        match project::snapshot(decoded) {
+            Some(Ok(snapshot)) => project::ui(ui, &snapshot, &mut self.name, &mut self.paths, sets),
+            Some(Err(why)) => {
+                ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
+            }
+            None => {}
+        }
+    }
+
     /// Apply this frame's changes to the working copy.
     ///
     /// All of them or none: a control that owns two fields must not leave one half
@@ -332,10 +358,15 @@ impl Document {
             return Ok(());
         };
         let bytes = entity.bytes.clone();
-        let sample = entity.entity.as_ref().is_some_and(sample::is_sample);
-        let result = match sample {
-            true => sample::apply(&bytes, &sets),
-            false => fields::apply(&bytes, &sets).map(|(_, out)| out),
+        let decoded = entity.entity.as_ref();
+        let result = if decoded.is_some_and(sample::is_sample) {
+            sample::apply(&bytes, &sets)
+        } else if decoded.is_some_and(project::is_project) {
+            project::apply(&bytes, &sets)
+        } else if decoded.is_some_and(fields::is_set_list) {
+            setlist::apply(&bytes, &sets)
+        } else {
+            fields::apply(&bytes, &sets).map(|(_, out)| out)
         };
         match result {
             Ok(out) if out == bytes => {
@@ -372,10 +403,12 @@ impl Document {
 /// beside nothing reads as an abbreviation of something missing.
 fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<(View, &'static str)> {
     let mut faces = Vec::new();
-    let friendly = entity
-        .entity
-        .as_ref()
-        .is_some_and(|e| fields::has_registry(e) || fields::is_set_list(e) || sample::is_sample(e));
+    let friendly = entity.entity.as_ref().is_some_and(|e| {
+        fields::has_registry(e)
+            || fields::is_set_list(e)
+            || sample::is_sample(e)
+            || project::is_project(e)
+    });
     if friendly {
         faces.push((View::Basic, "Basic"));
     }
@@ -495,29 +528,6 @@ fn library_id(value: &str) -> Option<u32> {
     match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
         None => text.parse().ok(),
-    }
-}
-
-/// A set list: the four programs it points at. The four slots are what a set list is.
-fn set_list(ui: &mut egui::Ui, entity: &nord_format::Entity) {
-    let nord_format::Entity::Song(nord_format::Song::Electro5(song)) = entity else {
-        ui.label(egui::RichText::new("Nothing about this format is editable here yet.").weak());
-        return;
-    };
-    ui.label(
-        egui::RichText::new("The four programs this song plays.")
-            .small()
-            .weak(),
-    );
-    for (i, at) in song.body.programs().iter().enumerate() {
-        let (bank, slot) = at.inner();
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [90.0, ui.spacing().interact_size.y],
-                egui::Label::new(format!("Slot {}", i + 1)).halign(egui::Align::LEFT),
-            );
-            ui.label(format!("Programs {}:{}", bank + 1, slot + 1));
-        });
     }
 }
 

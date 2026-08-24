@@ -187,7 +187,7 @@ pub fn ui(
 }
 
 /// A MIDI note as a name: `C4` is middle C. Typing a number works too.
-fn note_picker(ui: &mut egui::Ui, id: (&str, usize), note: u8) -> Option<String> {
+pub(crate) fn note_picker(ui: &mut egui::Ui, id: (&str, usize), note: u8) -> Option<String> {
     let mut value = note as f64;
     let response = ui.push_id(id, |ui| {
         ui.add(

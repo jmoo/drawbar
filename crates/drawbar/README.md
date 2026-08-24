@@ -182,6 +182,11 @@ Sample instruments show their name and the stretch of keyboard each zone covers,
 root key and top note as note names (`C4` is middle C). Only v2 `.nsmp` content can be
 changed; nsmp3/nsmp4 is carried verbatim.
 
+Set lists are their four program slots, each editable as the `BANK:SLOT` pair the
+instrument shows. Sample Editor projects (`.nsmpproj`) show the instrument's name,
+each zone's root key and key range, and the audio files the editor will look for —
+all editable, saved back as the same text file the editor reads.
+
 ### Sending changes back
 
 Editing something you copied off the instrument does not write to it. The document is
@@ -209,7 +214,7 @@ nothing more; the bytes are in the slot either way.
 ### Advanced
 
 The other face of every document, and the only face for something with no friendly view
-(a file that did not decode, a set list).
+(a file that did not decode).
 
 It is the whole body as a table: one row per field the library declares — label, path,
 bit placement, decoded value, and the stored spelling in a cell you can type into.
