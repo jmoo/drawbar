@@ -265,6 +265,7 @@ async fn clean_library<T: Transport>(
         )
         .await?;
 
+    let mut painted = Some(0);
     for polls in 0..CLEANING_POLLS {
         if polls > 0 {
             crate::sleep::sleep(CLEANING_POLL_SPACING).await;
@@ -274,10 +275,21 @@ async fn clean_library<T: Transport>(
             .await?;
         let p = resp.payload();
         if p.len() >= 12 {
-            // Ready is `running` returning to 0; `done` can end above the request.
+            // Reply is `[requested, done, running]`. Ready is `running` returning to
+            // 0; `done` can end above the request, so the bar is clamped.
+            let requested = u32::from_be_bytes(p[0..4].try_into().unwrap());
+            let done = u32::from_be_bytes(p[4..8].try_into().unwrap());
             let running = u32::from_be_bytes(p[8..12].try_into().unwrap());
             if running == 0 {
+                if painted != Some(100) {
+                    session.notify(&ui::percent(100)).await?;
+                }
                 return Ok(());
+            }
+            let pct = (done as u64 * 100 / requested.max(1) as u64).min(99) as u16;
+            if painted != Some(pct) {
+                session.notify(&ui::percent(pct)).await?;
+                painted = Some(pct);
             }
         }
     }
@@ -324,6 +336,7 @@ pub async fn write<T: Transport>(
         .await?;
 
     let mut offset = 0usize;
+    let mut painted = None;
     while offset < body.len() {
         let end = (offset + write_chunk()).min(body.len());
         let chunk = &body[offset..end];
@@ -342,9 +355,20 @@ pub async fn write<T: Transport>(
             session.notify(&msg).await?;
         }
         offset = end;
+
+        // Same bar the read side drives: whole percents, one message per step — a
+        // body inside one chunk still produces exactly one `100`, so small writes
+        // put the same frames on the wire as before the bar animated.
+        let pct = (offset as u64 * 100 / (body.len().max(1)) as u64) as u16;
+        if painted != Some(pct) {
+            session.notify(&ui::percent(pct)).await?;
+            painted = Some(pct);
+        }
     }
 
-    session.notify(&ui::percent(100)).await?;
+    if painted != Some(100) {
+        session.notify(&ui::percent(100)).await?;
+    }
 
     let mut args = Vec::new();
     at.write_to(&mut args);
