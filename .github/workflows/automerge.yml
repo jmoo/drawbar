@@ -1,0 +1,43 @@
+# Put the `automerge` label on a PR and it squash-merges itself once the
+# required checks (master ruleset: check, build, commits) go green; take the
+# label off and auto-merge disarms.
+#
+# Runs as the drawbar-automerge GitHub App: a token is minted per run and dies
+# within the hour, the app has only Contents + Pull requests on this repo, and
+# it holds no ruleset bypass. Never use GITHUB_TOKEN here — a merge attributed
+# to github-actions triggers no workflows, so ci.yml would not run on the
+# merged result and the release job would silently never publish it. App
+# events trigger workflows normally.
+#
+# Config: variable AUTOMERGE_APP_ID (the app's id) and secret
+# AUTOMERGE_APP_PRIVATE_KEY (its PEM), under Settings → Secrets and variables.
+name: automerge
+
+on:
+  pull_request:
+    types: [labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  automerge:
+    if: github.event.label.name == 'automerge'
+    runs-on: ubuntu-latest
+    steps:
+      - name: mint an app token
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+      - name: arm or disarm
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ github.event.pull_request.number }}
+          ARM: ${{ github.event.action == 'labeled' }}
+        run: |
+          if [ "$ARM" = "true" ]; then
+            gh pr merge --auto --squash "$PR" --repo "$GITHUB_REPOSITORY"
+          else
+            gh pr merge --disable-auto "$PR" --repo "$GITHUB_REPOSITORY"
+          fi
