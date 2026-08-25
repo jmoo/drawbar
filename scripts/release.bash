@@ -9,7 +9,7 @@
 # `--dry-run` prints what would happen, notes included, and touches nothing.
 #
 # Needs a crates.io token in CARGO_REGISTRY_TOKEN (or `cargo login`) and
-# `gh auth`; release.yml provides both.
+# `gh auth`; ci.yml's release job provides both.
 
 usage() {
   echo "usage: $0 [--dry-run]" >&2

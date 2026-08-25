@@ -5,7 +5,8 @@
 # job re-runs itself on every later push or retitle while the label is on.
 #
 # The push uses GITHUB_TOKEN, so it triggers no other workflows: fine, because
-# release.yml publishes from the merged result on master, not from this branch.
+# ci.yml's release job publishes from the merged result on master, not from
+# this branch.
 name: bump
 
 on:

@@ -4,7 +4,7 @@
 # Bump crate versions from Conventional Commits, rewrite the workspace
 # dependency requirements that point at a bumped crate, and refresh Cargo.lock.
 # Prints the plan and a suggested `chore(release): …` commit title; `--dry-run`
-# stops at the plan. release.yml publishes whatever the merged result is new.
+# stops at the plan. ci.yml's release job publishes whatever the merged result is new.
 #
 #   breaking change (`!` or BREAKING CHANGE:) → major   (minor while 0.x)
 #   feat                                       → minor

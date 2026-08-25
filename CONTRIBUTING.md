@@ -116,8 +116,9 @@ tools.
    `scripts/bump.bash --title '<pr title>'` locally instead. Plain
    `scripts/bump.bash` (no `--title`) is the catch-up mode: run on master,
    it bumps each crate from its commits since its last release tag.
-2. **Release**: on every push to `master`, `release.yml` runs
-   `scripts/release.bash`, which publishes each crate whose version has no
+2. **Release**: on every push to `master`, the `release` job in `ci.yml` —
+   gated on the check and build jobs passing, so a red master never publishes —
+   runs `scripts/release.bash`, which publishes each crate whose version has no
    `<crate>-v<version>` tag yet (Trusted Publishing via OIDC — no token
    secrets) and creates that tag as a GitHub release. The notes are the
    crate's commits since its previous tag, grouped into breaking changes,
