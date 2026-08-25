@@ -159,9 +159,16 @@ fn write_chunk() -> usize {
     WRITE_CHUNK
 }
 
-/// Bytes per storage block in the library partitions (piano, sample) — the unit
-/// `STATUS`'s free/used words count there.
-const LIBRARY_BLOCK: usize = 262_144;
+/// Bytes per storage block in a library partition — the unit `STATUS`'s free/used
+/// words count there. Per class: the piano partition is 4096 × 256 KiB (1 GB), the
+/// sample partition 2048 × 128 KiB (256 MB). Undercounting `needed` here makes
+/// `BEGIN_WRITE` refuse `0x16` even right after the cleaning pass.
+fn library_block(class: ObjectClass) -> usize {
+    match class {
+        ObjectClass::Sample => 131_072,
+        _ => 262_144,
+    }
+}
 
 /// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
 /// body length, the `"Uploading..."` progress label the instrument paints, `BEGIN_READ`,
@@ -294,8 +301,8 @@ pub async fn write<T: Transport>(
 
     if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
         // A library write is refused 0x16 unless a prepared block exists per
-        // LIBRARY_BLOCK of body; reclaim exactly the shortfall.
-        let needed = body.len().div_ceil(LIBRARY_BLOCK) as u32;
+        // storage block of body; reclaim exactly the shortfall.
+        let needed = body.len().div_ceil(library_block(session.class())) as u32;
         let free = status(session).await?.free;
         if needed > free {
             clean_library(session, needed - free).await?;
