@@ -23,6 +23,7 @@ name: ci
 
 on:
   pull_request:
+  merge_group: # the merge queue's synthetic branches; check and build gate them
   push:
     branches: [master]
   workflow_dispatch: # re-run a failed release; the checks run again first
