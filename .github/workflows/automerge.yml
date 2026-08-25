@@ -2,10 +2,15 @@
 # required checks (master ruleset: check, build, commits) go green; take the
 # label off and auto-merge disarms.
 #
-# This must run with AUTOMERGE_TOKEN — a fine-grained PAT (contents and pull
-# requests read/write on this repo) — never GITHUB_TOKEN: a merge attributed
+# Runs as the drawbar-automerge GitHub App: a token is minted per run and dies
+# within the hour, the app has only Contents + Pull requests on this repo, and
+# it holds no ruleset bypass. Never use GITHUB_TOKEN here — a merge attributed
 # to github-actions triggers no workflows, so ci.yml would not run on the
-# merged result and the release job would silently never publish it.
+# merged result and the release job would silently never publish it. App
+# events trigger workflows normally.
+#
+# Config: variable AUTOMERGE_APP_ID (the app's id) and secret
+# AUTOMERGE_APP_PRIVATE_KEY (its PEM), under Settings → Secrets and variables.
 name: automerge
 
 on:
@@ -19,16 +24,18 @@ jobs:
     if: github.event.label.name == 'automerge'
     runs-on: ubuntu-latest
     steps:
+      - name: mint an app token
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
       - name: arm or disarm
         env:
-          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
           PR: ${{ github.event.pull_request.number }}
           ARM: ${{ github.event.action == 'labeled' }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::AUTOMERGE_TOKEN secret is not set — see the header comment"
-            exit 1
-          fi
           if [ "$ARM" = "true" ]; then
             gh pr merge --auto --squash "$PR" --repo "$GITHUB_REPOSITORY"
           else
