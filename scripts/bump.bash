@@ -23,6 +23,11 @@
 #                              merge-base, so re-running after more commits or
 #                              a retitle converges instead of double-bumping.
 #
+# ⚠️ In title mode a crate takes the higher of the title's level and the level
+# its already-unreleased commits call for. A PR that merges without the `bump`
+# label leaves its commits on the base branch at the last released version, and
+# the title alone would then publish, say, a feat under a patch.
+#
 # Either way a crate that depends on a bumped crate gets at least a patch bump
 # so the new requirement ships. A crate with no release tag yet is never
 # bumped: its Cargo.toml already says what the first release is.
@@ -56,6 +61,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.bash"
 
 declare -A new_version reason
 bumped=0
+merge_base=""
+
+# The level called for by commits that are on the base branch and unreleased —
+# what PRs that merged without the `bump` label left behind.
+unreleased_level() {
+  local tag
+  tag="$(latest_tag "$1")"
+  if [[ -z $tag ]]; then
+    echo none
+    return
+  fi
+  commits_for "$1" "$tag" "${merge_base:-HEAD}" | bump_level
+}
+
 crates=()
 while IFS= read -r crate; do crates+=("$crate"); done < <(crates_in_publish_order)
 
@@ -83,12 +102,17 @@ if [[ -n $title ]]; then
       continue
     fi
     from="$(manifest_version_at "$merge_base" "$dir")"
-    new_version[$crate]="$(next_version "$from" "$level")"
-    reason[$crate]="$level: PR title, from $from at the merge-base"
+    pending="$(unreleased_level "$crate")"
+    crate_level="$(max_level "$level" "$pending")"
+    new_version[$crate]="$(next_version "$from" "$crate_level")"
+    if [[ $crate_level == "$level" ]]; then
+      reason[$crate]="$crate_level: PR title, from $from at the merge-base"
+    else
+      reason[$crate]="$crate_level: unreleased $pending outranks the title's $level, from $from"
+    fi
     bumped=$((bumped + 1))
   done
 else
-  merge_base=""
   for crate in "${crates[@]}"; do
     tag="$(latest_tag "$crate")"
     if [[ -z $tag ]]; then
@@ -123,8 +147,11 @@ while ((grew)); do
     while IFS= read -r dependent; do
       [[ -z $dependent || -n ${new_version[$dependent]:-} ]] && continue
       [[ -z "$(latest_tag "$dependent")" ]] && continue
-      new_version[$dependent]="$(next_version "$(base_version "$dependent")" patch)"
-      reason[$dependent]="patch: depends on $crate"
+      dependent_level="$(max_level patch "$(unreleased_level "$dependent")")"
+      new_version[$dependent]="$(next_version "$(base_version "$dependent")" "$dependent_level")"
+      reason[$dependent]="$dependent_level: depends on $crate"
+      [[ $dependent_level == patch ]] ||
+        reason[$dependent]="$dependent_level: depends on $crate, and has unreleased $dependent_level commits"
       bumped=$((bumped + 1))
       grew=1
     done < <(dependents_of "$crate")

@@ -115,7 +115,10 @@ tools.
    `scripts/bump.bash --title` with the PR title — the squashed commit that
    will land — applies its level to the crates the diff touches (plus at
    least a patch for their dependents), refreshes `Cargo.lock` and pushes
-   the `chore(release): …` commit. It re-runs on every push and retitle
+   the `chore(release): …` commit. ⚠️ Each crate takes **the higher of the
+   title's level and the level its already-unreleased commits call for**, so a
+   `feat` that merged without the label is not carried out later under a
+   `fix`. It re-runs on every push and retitle
    while the label is on, converging from the merge-base versions, so a
    stale bump corrects itself. Fork PRs can't be pushed to: run
    `scripts/bump.bash --title '<pr title>'` locally instead. Plain
@@ -130,7 +133,9 @@ tools.
    crate's commits since its previous tag, grouped into breaking changes,
    features, bug fixes, performance and other. Dependencies go before
    dependents. Idempotent: a failed run is fixed by re-running it from the
-   Actions tab.
+   Actions tab. It refuses the whole run — before publishing anything — if any
+   crate's version understates its own commits since its last tag; the cure is
+   `scripts/bump.bash` on master, which bumps from the full history.
 
 First-ever publish of a new crate can't use Trusted Publishing (it is
 configured on an already-existing crate) — `cargo publish` it locally once;

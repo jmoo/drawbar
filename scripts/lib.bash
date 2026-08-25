@@ -42,13 +42,13 @@ dependents_of() {
 latest_tag() { git -C "$repo" tag --list "$1-v*" --sort=-v:refname | head -n1; }
 
 # Conventional commits touching the crate since `$2` (a tag; empty means all
-# history), newest first, one per line:
+# history) and up to `$3` (default HEAD), newest first, one per line:
 #   <sha>\t<type>\t<breaking 0|1>\t<scope>\t<description>
 # A subject that is not a Conventional Commit gets type `other`.
 conventional='^([a-z]+)(\(([^)]+)\))?(!)?:[[:space:]]+(.*)$'
 commits_for() {
-  local crate=$1 since=${2:-} range
-  range="${since:+$since..}HEAD"
+  local crate=$1 since=${2:-} until=${3:-HEAD} range
+  range="${since:+$since..}$until"
   git -C "$repo" log --format='%H%x1f%s%x1f%b%x1e' "$range" -- "$(crate_dir "$crate")" |
     while IFS=$'\x1f' read -r -d $'\x1e' sha subject body; do
       sha=${sha//$'\n'/} # git log ends each record with a newline
@@ -73,6 +73,20 @@ bump_level() {
     END { print (level == 3 ? "major" : level == 2 ? "minor" : level == 1 ? "patch" : "none") }'
 }
 
+level_rank() {
+  case $1 in
+  major) echo 3 ;;
+  minor) echo 2 ;;
+  patch) echo 1 ;;
+  *) echo 0 ;;
+  esac
+}
+
+# The higher of two levels.
+max_level() {
+  if (($(level_rank "$1") >= $(level_rank "$2"))); then echo "$1"; else echo "$2"; fi
+}
+
 # Before 1.0 a breaking change bumps the minor: 0.x is the pre-release line and
 # cargo already treats 0.MINOR as the compatibility boundary.
 next_version() {
@@ -85,6 +99,19 @@ next_version() {
   patch) echo "$major.$minor.$((patch + 1))" ;;
   none) echo "$version" ;;
   esac
+}
+
+# True when dotted version `$1` is at least dotted version `$2`.
+version_at_least() {
+  local -a have want
+  IFS=. read -r -a have <<<"$1"
+  IFS=. read -r -a want <<<"$2"
+  local i
+  for i in 0 1 2; do
+    if ((${have[i]:-0} > ${want[i]:-0})); then return 0; fi
+    if ((${have[i]:-0} < ${want[i]:-0})); then return 1; fi
+  done
+  return 0
 }
 
 # The `[package] version` of the manifest at `$2/Cargo.toml` as of ref `$1`;
