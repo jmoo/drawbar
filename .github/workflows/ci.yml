@@ -13,12 +13,13 @@
 #             them. Cargo.toml is the only source of truth for versions.
 #
 # The corpus attrs (`nord.*-corpus`) need the private specimen repo and are not
-# part of `nord.all`. cache-nix-action keeps the store between runs in the
-# GitHub Actions cache (10 GB per repo, LRU-evicted); without it every run
-# rebuilds Wine, QEMU and the GUI stack from scratch. Each job caches under its
-# own key so the check job's smaller store never shadows the build job's; gc
-# trims the store to what the run used before saving, and superseded caches are
-# purged to stay under the quota.
+# part of `nord.all`; `corpus.yml` runs the committed tier with a deploy key.
+# cache-nix-action keeps the store between runs in the GitHub Actions cache
+# (10 GB per repo, LRU-evicted); without it every run rebuilds Wine, QEMU and
+# the GUI stack from scratch. Each job caches under its own key so the check
+# job's smaller store never shadows the build job's; gc trims the store to what
+# the run used before saving, and superseded caches are purged to stay under
+# the quota.
 name: ci
 
 on:

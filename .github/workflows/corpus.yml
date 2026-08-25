@@ -1,0 +1,55 @@
+# The corpus suites, which `ci.yml` cannot run: `nord.*-corpus` reads the
+# private `jmoo/nord-corpus` tree through the `corpusTree` pin in `overlay.nix`,
+# so it needs a deploy key. Without a gate here, a pin bump lands green and
+# breaks `nix build .#nord.all-corpus` for whoever runs it next.
+#
+# The committed tier only. `nord.all-corpus-full` splices in the R2 tier —
+# several GB of vendor payload — and stays on the machines that already hold R2
+# credentials and a seeded store.
+#
+# ⚠️ This job never writes a cache. The committed tier carries vendor bytes, and
+# a cache in a public repo is readable by a fork's `pull_request` run, which
+# executes the workflow file from the PR head. Restore-only against the build
+# job's key: the toolchain comes back, nothing corpus-shaped goes out.
+name: corpus
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    # A fork has no deploy key, and a fork's pull request is not given one.
+    # Skip rather than fail red on a clone or an outside contribution.
+    if: >-
+      github.repository == 'jmoo/drawbar'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action/restore@v7
+        with:
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
+      # `builtins.fetchGit` resolves the pin at evaluation time, in the
+      # evaluator — so the key belongs to the invoking user, not the daemon.
+      - name: corpus read access
+        env:
+          DEPLOY_KEY: ${{ secrets.NORD_CORPUS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" >~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >>~/.ssh/known_hosts
+      - run: nix build .#nord.all-corpus --print-build-logs
