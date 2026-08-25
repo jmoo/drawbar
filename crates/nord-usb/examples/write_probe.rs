@@ -28,7 +28,10 @@ fn report(step: &str, reply: Option<&Message>) -> Option<u32> {
         }
         Some(msg) => {
             let status = msg.status();
-            println!("{step}: reply command {:#x}, status {status:?}", msg.command);
+            println!(
+                "{step}: reply command {:#x}, status {status:?}",
+                msg.command
+            );
             status
         }
     }
@@ -48,7 +51,11 @@ fn main() {
         .find_map(|a| a.strip_prefix("send="))
         .map(|p| std::fs::read(p).expect("send body file"));
     let transport = nord_usb::transport::UsbTransport::open_first().expect("open device");
-    let mut transport = match args.get(3).filter(|a| !a.starts_with("send=")).or(args.get(4)) {
+    let mut transport = match args
+        .get(3)
+        .filter(|a| !a.starts_with("send="))
+        .or(args.get(4))
+    {
         Some(path) => transport
             .recording_to(std::path::Path::new(path))
             .expect("recording"),
@@ -74,8 +81,15 @@ fn main() {
 
         let payload = send.as_ref().unwrap_or(&before);
         if let Some(p) = &send {
-            assert_eq!(p.len(), before.len(), "send body must match the slot's length");
-            println!("mutation mode: sending {} bytes that differ from the slot", p.len());
+            assert_eq!(
+                p.len(),
+                before.len(),
+                "send body must match the slot's length"
+            );
+            println!(
+                "mutation mode: sending {} bytes that differ from the slot",
+                p.len()
+            );
         }
 
         // The probe. Args composed exactly as op::write does, name kept.
