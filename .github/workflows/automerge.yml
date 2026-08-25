@@ -1,0 +1,36 @@
+# Put the `automerge` label on a PR and it squash-merges itself once the
+# required checks (master ruleset: check, build, commits) go green; take the
+# label off and auto-merge disarms.
+#
+# This must run with AUTOMERGE_TOKEN — a fine-grained PAT (contents and pull
+# requests read/write on this repo) — never GITHUB_TOKEN: a merge attributed
+# to github-actions triggers no workflows, so ci.yml would not run on the
+# merged result and the release job would silently never publish it.
+name: automerge
+
+on:
+  pull_request:
+    types: [labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  automerge:
+    if: github.event.label.name == 'automerge'
+    runs-on: ubuntu-latest
+    steps:
+      - name: arm or disarm
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          ARM: ${{ github.event.action == 'labeled' }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::AUTOMERGE_TOKEN secret is not set — see the header comment"
+            exit 1
+          fi
+          if [ "$ARM" = "true" ]; then
+            gh pr merge --auto --squash "$PR" --repo "$GITHUB_REPOSITORY"
+          else
+            gh pr merge --disable-auto "$PR" --repo "$GITHUB_REPOSITORY"
+          fi
