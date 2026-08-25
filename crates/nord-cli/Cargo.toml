@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.1.1"
+version = "0.1.2"
 
 # The binary is just `nord`; the crate/package is `nord-cli`.
 [[bin]]
@@ -36,7 +36,7 @@ dialoguer = { version = "0.12", default-features = false }
 nord-format = { path = "../nord-format", version = "0.1.1", features = [
   "bundle",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.1.1", features = [
+nord-usb = { path = "../nord-usb", version = "0.2.0", features = [
   "blocking",
   "replay",
 ] }
