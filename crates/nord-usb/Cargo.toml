@@ -78,3 +78,9 @@ pollster = "0.4"
 name = "replay"
 harness = false
 required-features = ["replay"]
+
+# The bench probe drives real hardware; targets without the desktop transport
+# (wasm, wasi) must skip it.
+[[example]]
+name = "write_probe"
+required-features = ["nusb", "blocking"]
