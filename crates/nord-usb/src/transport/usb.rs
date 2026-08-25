@@ -27,6 +27,24 @@ fn map_err<E: std::fmt::Display>(what: &str) -> impl FnOnce(E) -> Error + '_ {
     move |e| Error::Transport(format!("{what}: {e}"))
 }
 
+/// Why the device would not open.
+///
+/// A missing udev rule fails *here* rather than at the interface claim: the usbfs node
+/// is not writable, so the device never opens and the claim is never reached. Naming the
+/// rule is the difference between a one-line fix and hunting a hardware fault, so the
+/// hint has to ride on this call to be seen at all.
+fn open_error(e: std::io::Error) -> Error {
+    let hint = if cfg!(target_os = "linux") && e.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            " — no write access to the device node; what is usually missing is a udev rule \
+             granting it for vendor {VENDOR_ID:04x}"
+        )
+    } else {
+        String::new()
+    };
+    Error::Transport(format!("opening device: {e}{hint}"))
+}
+
 /// Every attached Clavia device.
 pub fn list() -> Result<Vec<DeviceInfo>> {
     Ok(nusb::list_devices()
@@ -69,9 +87,10 @@ impl UsbTransport {
                 )
             })?;
 
-        let device = info.open().map_err(map_err("opening device"))?;
+        let device = info.open().map_err(open_error)?;
         let interface = device.claim_interface(iface_num).map_err(map_err(
-            "claiming the vendor interface (on Linux this usually means a udev rule is missing)",
+            "claiming the vendor interface (another application holding it — Nord Sound \
+             Manager, or a WebUSB page — will block this)",
         ))?;
 
         let read_queue = interface.bulk_in_queue(EP_IN);
@@ -313,6 +332,32 @@ impl Transport for UsbTransport {
                  the connection is out of step and the instrument needs a power cycle"
                     .into(),
             )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error as IoError, ErrorKind};
+
+    /// The udev hint is the whole point of this branch, and the failure it explains is
+    /// the one every first run on Linux hits.
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "the hint is Linux-only")]
+    fn permission_denied_names_the_udev_rule() {
+        let msg = open_error(IoError::from(ErrorKind::PermissionDenied)).to_string();
+        assert!(msg.contains("udev"), "{msg}");
+        assert!(msg.contains("0ffc"), "{msg}");
+    }
+
+    /// Every other failure is something else entirely — a rule would not fix a device
+    /// that has been unplugged, and saying so would send the reader the wrong way.
+    #[test]
+    fn other_failures_do_not_mention_udev() {
+        for kind in [ErrorKind::NotFound, ErrorKind::ResourceBusy] {
+            let msg = open_error(IoError::from(kind)).to_string();
+            assert!(!msg.contains("udev"), "{kind:?}: {msg}");
         }
     }
 }

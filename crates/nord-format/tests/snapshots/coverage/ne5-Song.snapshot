@@ -15,7 +15,7 @@
 # start, 0x2c on a type-1 header and 0x18 on a type-0. Bits inside a byte are
 # numbered LSB-first: `0x51[3:2]`.
 #
-# 144 bits; varies over 77 corpus specimens, answers over 4 flipped.
+# 144 bits; varies over 79 corpus specimens, answers over 4 flipped.
 
 bits           at                                 claimed by                                   varies  verdict    answers
 0..=14         0x00+0x01[7:1]                     version (unregistered)                       no      unanswered —
