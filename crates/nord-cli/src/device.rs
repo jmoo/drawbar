@@ -1442,10 +1442,32 @@ pub fn probe(
 
     // Known wedges: no reply, and a power cycle to recover. A price, not a
     // prohibition, so `--yes` proceeds informed.
-    if op == nord_usb::wire::cmd::DELETING_WEDGE || op == nord_usb::wire::cmd::NOTIFY_READ_WEDGE {
+    if op == nord_usb::wire::cmd::NOTIFY_READ_WEDGE {
         ui.note(format!(
             "{op:#04x} is known to wedge the instrument (no reply, session lost, \
              power cycle to recover); nothing stored has ever been harmed by it"
+        ));
+    }
+
+    // The one code that destroys data rather than costing a power cycle. The session's
+    // class is what aims it, so the warning names the target it is currently pointed at.
+    if op == nord_usb::wire::cmd::ERASE_ALL {
+        ui.note(format!(
+            "{op:#04x} is reported to erase an ENTIRE PARTITION — as aimed, all of {}. \
+             Unlike the wedges this does not cost a power cycle, it costs the data; \
+             restoring a library means a backup and a long upload",
+            class.label()
+        ));
+    }
+
+    // The general form of that warning. A code above the answering range is not a
+    // spare slot: one of them starts erasing and cannot be talked out of it.
+    if op > nord_usb::wire::cmd::HIGHEST_ANSWERING {
+        ui.note(format!(
+            "{op:#04x} is above {:#04x}, the highest command this instrument has been \
+             seen to answer; codes up there are unexplored and at least one is \
+             destructive",
+            nord_usb::wire::cmd::HIGHEST_ANSWERING
         ));
     }
 
