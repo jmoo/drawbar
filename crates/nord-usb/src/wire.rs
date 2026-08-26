@@ -149,12 +149,26 @@ pub mod cmd {
     /// is refused `0x11` after any write since power-up.
     pub const NEXT_SLOT: u32 = 0x20;
 
-    /// Wedges the instrument: paints "Deleting...", never replies, and the session
-    /// cannot close. A power cycle clears it; nothing stored is harmed.
-    pub const DELETING_WEDGE: u32 = 0x7e;
+    /// Erases an entire partition.
+    ///
+    /// Reported by independent interop projects as erase-all-in-partition; **not
+    /// confirmed on hardware, deliberately.** A session is class-scoped, so the session
+    /// is what aims this: opened on a library class it takes the whole piano or sample
+    /// store, which is hundreds of megabytes and a long restore from a backup. Named
+    /// here so it can be recognised and refused, not so it can be sent.
+    pub const ERASE_ALL: u32 = 0x24;
 
-    /// Wedges the instrument like [`DELETING_WEDGE`]: no reply, the close goes
-    /// unanswered, and the bulk endpoints stall until a power cycle.
+    /// Highest command the instrument has ever been seen to answer.
+    ///
+    /// Above this is unexplored space, and it is not empty: at least one code up there
+    /// reaches a destructive path, paints its own progress label, never replies, and
+    /// needs a power cycle. Distance from the known range is not evidence that a code is
+    /// unimplemented.
+    pub const HIGHEST_ANSWERING: u32 = 0x3d;
+
+    /// Wedges the instrument: no reply, the session's close goes unanswered, and the
+    /// bulk endpoints stall until a power cycle. Reported elsewhere as the read half of
+    /// [`NOTIFY_ENABLE`], which is not what it does here.
     pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
     /// Unsolicited device → host notification — no request pairs with it, so it
