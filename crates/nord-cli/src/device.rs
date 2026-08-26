@@ -78,6 +78,9 @@ pub fn info(ui: &Ui) -> Result<(), String> {
     if devices.is_empty() {
         return Err("no Clavia device found".into());
     }
+    // Remembered rather than returned on the spot: the descriptors below are worth
+    // printing for every device even when one of them will not answer.
+    let mut unreachable = None;
     for (i, d) in devices.iter().enumerate() {
         if i > 0 {
             ui.out("");
@@ -110,9 +113,7 @@ pub fn info(ui: &Ui) -> Result<(), String> {
         ));
 
         // Endpoint 0, so this needs no transaction and still answers on an instrument
-        // that has stopped serving the bulk protocol. Claiming the interface can fail
-        // for the ordinary reason (something else holds it), which is not worth turning
-        // an identification command into an error.
+        // that has stopped serving the bulk protocol.
         if vendor_iface {
             match nord_usb::transport::UsbTransport::open(d).and_then(|t| t.identity()) {
                 Ok(id) => {
@@ -123,11 +124,19 @@ pub fn info(ui: &Ui) -> Result<(), String> {
                     ui.out(format!("  build:     {}", id.build));
                     ui.out(format!("  max xfer:  {} bytes", id.max_transfer));
                 }
-                Err(e) => ui.out(format!("  firmware:  {}", ui.dim(e.to_string()))),
+                Err(e) => {
+                    ui.out(format!("  firmware:  {}", ui.dim(e.to_string())));
+                    unreachable.get_or_insert_with(|| e.to_string());
+                }
             }
         }
     }
-    Ok(())
+    // This is what a caller runs to find out whether the instrument can be reached at
+    // all, so the exit code has to carry that answer and not just the printed lines.
+    match unreachable {
+        Some(e) => Err(format!("could not identify the instrument: {e}")),
+        None => Ok(()),
+    }
 }
 
 fn collect<T: Transport>(transport: &mut T) -> Result<Vec<Status>, String> {
