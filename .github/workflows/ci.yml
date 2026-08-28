@@ -5,20 +5,21 @@
 #           workspace with `--deny warnings`.
 #   build — every crate with its test suite, the cross matrix (Windows under Wine,
 #           aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
+#   corpus — `nord.all-corpus`, the committed tier of the private specimen
+#            corpus. Needs a deploy key, so it does not run on forks.
 #   commits — the PR title is a Conventional Commit (CONTRIBUTING.md): it is
 #             the squashed commit that lands on master, and version bumps and
 #             release notes read it.
-#   release — master pushes only, and only after check and build pass:
+#   release — master pushes only, and only after check, build and corpus pass:
 #             scripts/release.bash publishes un-tagged crate versions and tags
 #             them. Cargo.toml is the only source of truth for versions.
 #
-# The corpus attrs (`nord.*-corpus`) need the private specimen repo and are not
-# part of `nord.all`. cache-nix-action keeps the store between runs in the
-# GitHub Actions cache (10 GB per repo, LRU-evicted); without it every run
-# rebuilds Wine, QEMU and the GUI stack from scratch. Each job caches under its
-# own key so the check job's smaller store never shadows the build job's; gc
-# trims the store to what the run used before saving, and superseded caches are
-# purged to stay under the quota.
+# cache-nix-action keeps the store between runs in the GitHub Actions cache
+# (10 GB per repo, LRU-evicted); without it every run rebuilds Wine, QEMU and
+# the GUI stack from scratch. Each job caches under its own key so the check
+# job's smaller store never shadows the build job's; gc trims the store to what
+# the run used before saving, and superseded caches are purged to stay under
+# the quota.
 name: ci
 
 on:
@@ -72,6 +73,59 @@ jobs:
           purge-primary-key: never
       - run: nix build .#nord.all --print-build-logs
 
+  # `nord.*-corpus` reads the private `jmoo/nord-corpus` tree through the
+  # `corpusTree` pin in `overlay.nix`, so it needs a deploy key and sits outside
+  # `nord.all`. Without this gate a pin bump lands green and leaves
+  # `nix build .#nord.all-corpus` broken for whoever runs it next.
+  #
+  # The committed tier only. `nord.all-corpus-full` splices in the R2 tier —
+  # several GB of vendor payload — and stays on the machines that already hold
+  # R2 credentials and a seeded store.
+  #
+  # ⚠️ This job never writes a cache. The committed tier carries vendor bytes,
+  # and a cache in a public repo is readable by a fork's `pull_request` run,
+  # which executes the workflow file from the PR head. Restore-only against the
+  # build job's key: the toolchain comes back, nothing corpus-shaped goes out.
+  corpus:
+    # A fork has no deploy key, and a fork's pull request is not given one:
+    # skip rather than fail an outside contribution for lacking private access.
+    if: >-
+      github.repository == 'jmoo/drawbar'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_KEY: ${{ secrets.NORD_CORPUS_DEPLOY_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      # ⚠️ An unset secret is the empty string, which writes a valid empty file
+      # and surfaces 200 lines into a Nix trace as `error in libcrypto`. Say
+      # what is actually wrong instead.
+      - name: deploy key is present
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::NORD_CORPUS_DEPLOY_KEY is unset — the corpus gate needs a read-only deploy key on jmoo/nord-corpus (CONTRIBUTING.md)"
+            exit 1
+          fi
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action/restore@v7
+        with:
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
+      # `builtins.fetchGit` resolves the pin at evaluation time, in the
+      # evaluator — so the key belongs to the invoking user, not the daemon.
+      - name: corpus read access
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" >~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >>~/.ssh/known_hosts
+      - run: nix build .#nord.all-corpus --print-build-logs
+
   commits:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -101,7 +155,7 @@ jobs:
   # configured on an existing crate) — publish locally once.
   release:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-    needs: [check, build]
+    needs: [check, build, corpus]
     runs-on: ubuntu-latest
     permissions:
       actions: write # cache-nix-action purges superseded caches

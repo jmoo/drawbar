@@ -73,7 +73,12 @@ if they are not installed globally.
   `.#nord.all-corpus-full` swaps in the R2 tier, which needs a store seeded by
   `corpus nix-add` or R2 credentials in the builder; `.#nord.corpus` and
   `.#nord.corpus-full` are the assemblies themselves. The corpus repo is
-  private, so evaluating any corpus attr needs read access to it.
+  private, so evaluating any corpus attr needs read access to it. CI's `corpus`
+  job runs the committed tier on every in-repo PR and gates publishing; it
+  reads the repo through the `NORD_CORPUS_DEPLOY_KEY` secret, a read-only
+  deploy key on `jmoo/nord-corpus`, and skips on forks, which cannot have one.
+  ⚠️ A corpus pin bump and a coverage-snapshot re-bless travel together — the
+  specimen count is part of the snapshot, so any growth in the corpus trips it.
 - Format: `nix fmt` formats the whole tree; `nix flake check` fails on anything
   it would have changed.
 
@@ -110,21 +115,27 @@ tools.
    `scripts/bump.bash --title` with the PR title — the squashed commit that
    will land — applies its level to the crates the diff touches (plus at
    least a patch for their dependents), refreshes `Cargo.lock` and pushes
-   the `chore(release): …` commit. It re-runs on every push and retitle
+   the `chore(release): …` commit. ⚠️ Each crate takes **the higher of the
+   title's level and the level its already-unreleased commits call for**, so a
+   `feat` that merged without the label is not carried out later under a
+   `fix`. It re-runs on every push and retitle
    while the label is on, converging from the merge-base versions, so a
    stale bump corrects itself. Fork PRs can't be pushed to: run
    `scripts/bump.bash --title '<pr title>'` locally instead. Plain
    `scripts/bump.bash` (no `--title`) is the catch-up mode: run on master,
    it bumps each crate from its commits since its last release tag.
 2. **Release**: on every push to `master`, the `release` job in `ci.yml` —
-   gated on the check and build jobs passing, so a red master never publishes —
+   gated on the check, build and corpus jobs passing, so a red master never
+   publishes —
    runs `scripts/release.bash`, which publishes each crate whose version has no
    `<crate>-v<version>` tag yet (Trusted Publishing via OIDC — no token
    secrets) and creates that tag as a GitHub release. The notes are the
    crate's commits since its previous tag, grouped into breaking changes,
    features, bug fixes, performance and other. Dependencies go before
    dependents. Idempotent: a failed run is fixed by re-running it from the
-   Actions tab.
+   Actions tab. It refuses the whole run — before publishing anything — if any
+   crate's version understates its own commits since its last tag; the cure is
+   `scripts/bump.bash` on master, which bumps from the full history.
 
 First-ever publish of a new crate can't use Trusted Publishing (it is
 configured on an already-existing crate) — `cargo publish` it locally once;

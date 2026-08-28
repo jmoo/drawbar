@@ -84,6 +84,30 @@ trap 'rm -rf "$tmp"' EXIT
 sha="$(git -C "$repo" rev-parse HEAD)"
 git -C "$repo" fetch --quiet --tags origin
 
+# ⚠️ Publishing is irreversible — crates.io yanks, it does not delete. A PR that
+# merges without the `bump` label leaves release-worthy commits at the last
+# released version, so a later bump can carry them out under a version that
+# understates them. Check every crate before publishing any, so a run either
+# releases the whole set or touches nothing.
+under_bumped=()
+while IFS= read -r crate; do
+  version="$(crate_version "$crate")"
+  if git -C "$repo" rev-parse -q --verify "refs/tags/$crate-v$version" >/dev/null; then continue; fi
+  previous="$(latest_tag "$crate")"
+  [[ -z $previous ]] && continue # first release: the manifest is the whole claim
+  from="${previous#"$crate"-v}"
+  wanted="$(next_version "$from" "$(commits_for "$crate" "$previous" | bump_level)")"
+  version_at_least "$version" "$wanted" ||
+    under_bumped+=("$crate is $version, but its commits since $previous call for $wanted")
+done < <(crates_in_publish_order)
+
+if ((${#under_bumped[@]})); then
+  echo "refusing to publish a version that understates its own changes:" >&2
+  printf '  %s\n' "${under_bumped[@]}" >&2
+  echo "run scripts/bump.bash on master — catch-up mode bumps from the full history — then re-run" >&2
+  exit 1
+fi
+
 while IFS= read -r crate; do
   version="$(crate_version "$crate")"
   tag="$crate-v$version"
