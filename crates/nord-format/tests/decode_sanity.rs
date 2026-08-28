@@ -591,7 +591,10 @@ fn nsmp_every_stroke_decodes() {
         }
     }
     assert!(decoded > 0, "no stroke decoded");
-    assert!(stereo < decoded / 100, "stereo is meant to be the rare case");
+    assert!(
+        stereo < decoded / 100,
+        "stereo is meant to be the rare case"
+    );
 }
 
 /// The same source rendered at v2, v3 and v4 decodes to the same audio.

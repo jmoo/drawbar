@@ -153,10 +153,6 @@ pub const FIELD_RATE: u32 = (SOURCE_RATE * PITCH_DEN + PITCH_NUM / 2) / PITCH_NU
 /// material look like a stream with no records in it.
 const COUNT_MASK: u32 = 0x3fff;
 
-/// Fields per cell on a mono stroke. A content run is a whole number of these; a
-/// stereo stroke doubles it, which is how the terminator gives stereo away.
-const CELL: usize = 24;
-
 /// Field values the predictor keeps. The order field is three bits wide, but only
 /// 0 to 4 occur and a fourth-order difference reaches no further back than this.
 const MAX_ORDER: usize = 4;
@@ -855,8 +851,16 @@ mod tests {
             let audio = decode(&s, 0, layout).unwrap();
             let last = layout.cell() - 1;
             assert_eq!(audio.samples[last], 10 * last as i16, "{layout:?}");
-            assert_eq!(audio.samples[last + 1], 10 * (last + 1) as i16, "{layout:?}");
-            assert_eq!(audio.samples[last + 2], 10 * (last + 2) as i16, "{layout:?}");
+            assert_eq!(
+                audio.samples[last + 1],
+                10 * (last + 1) as i16,
+                "{layout:?}"
+            );
+            assert_eq!(
+                audio.samples[last + 2],
+                10 * (last + 2) as i16,
+                "{layout:?}"
+            );
         }
     }
 
