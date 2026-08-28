@@ -290,7 +290,7 @@ fn decode_file(
             note::name(meta.root_key),
             note::name(zone.top_note),
         );
-        match codec::decode(stroke, at) {
+        match codec::decode(stroke, at, codec::Layout::V2) {
             Ok(audio) => {
                 coverage.decoded += 1;
                 coverage.fields += audio.samples.len();
@@ -385,15 +385,15 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
     let (at, stroke) = instrument.stroke_streams()[0];
-    let stream = codec::walk(stroke, at).map_err(|e| e.to_string())?;
-    let audio = codec::decode(stroke, at).map_err(|e| e.to_string())?;
+    let stream = codec::walk(stroke, at, codec::Layout::V2).map_err(|e| e.to_string())?;
+    let audio = codec::decode(stroke, at, codec::Layout::V2).map_err(|e| e.to_string())?;
     ui.out(format!(
         "{} frames -> {} fields ({:.3} s), shift {}, peak {}, {} record(s)",
         source.frames(),
         stream.fields,
         audio.seconds(),
-        codec::shift(stroke).unwrap_or_default(),
-        codec::peak(stroke).unwrap_or_default(),
+        codec::shift(stroke, codec::Layout::V2).unwrap_or_default(),
+        codec::peak(stroke, codec::Layout::V2).unwrap_or_default(),
         stream.records.len(),
     ));
     ui.out(ui.dim(if audio.differenced == 0 {
@@ -476,13 +476,13 @@ fn deep(path: &Path) -> Result<String, String> {
     let streams = sample.stroke_streams();
     let mut records = 0usize;
     for (index, (at, stroke)) in streams.iter().enumerate() {
-        let stream = codec::walk(stroke, *at).map_err(|e| format!("stroke {index}: {e}"))?;
+        let stream = codec::walk(stroke, *at, codec::Layout::V2).map_err(|e| format!("stroke {index}: {e}"))?;
         records += stream.records.len();
         // The walk already had to land exactly on the record the directory names,
         // so what is left to check is the one pointer it does not consume.
         let directory = codec::Directory::read(stroke)
             .ok_or_else(|| format!("stroke {index} is too short for its word directory"))?;
-        let resync = codec::Directory::resolve(directory.resync, *at);
+        let resync = codec::Directory::resolve(directory.resync, *at, codec::Layout::V2);
         if !stream.records.iter().any(|r| r.at == resync) {
             return Err(format!(
                 "stroke {index}: the resync pointer lands at word {resync}, which is not a record"

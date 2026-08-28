@@ -740,7 +740,7 @@ fn nsmp_the_count_laws_reproduce_the_editors_landmarks() {
         let plan = nsmp::encode::Plan::new(frames).unwrap();
         let sample = v2_named(name);
         let (at, stroke) = sample.stroke_streams()[0];
-        let stream = nsmp::codec::walk(stroke, at).unwrap();
+        let stream = nsmp::codec::walk(stroke, at, nsmp::codec::Layout::V2).unwrap();
 
         assert_eq!(stream.fields, plan.fields, "{name}: total fields");
         let warmup: usize = stream

@@ -10,9 +10,10 @@
 //! chain is the same.
 //!
 //! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
-//! and can retune, rename and remap them without touching a byte of audio. The v2
-//! [`codec`] decodes that audio to samples and [`encode`] builds a new instrument from
-//! PCM; the v3/v4 chain keeps its strokes opaque.
+//! and can retune, rename and remap them without touching a byte of audio. The [`codec`]
+//! decodes that audio to samples in every generation — it is one codec in three sets of
+//! units, so a caller only picks the right [`codec::Layout`]. [`encode`] builds a new
+//! instrument from PCM, v2 only.
 
 pub mod codec;
 pub mod encode;
@@ -125,14 +126,8 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error>
 /// `meta`, in that order, in both container generations. Inferred from
 /// specimens; not confirmed on hardware.
 ///
-/// ⚠️ The stroke payload past the id fields is the encoded audio, and it stays
-/// verbatim deliberately. The block codec independent interop projects describe
-/// (a u32 header of count/order/width fields, fixed binomial predictors, a stop
-/// sentinel) was tested against this corpus and **did not reproduce**: the
-/// layout frames a handful of strokes exactly and fails the rest, and where it
-/// frames, the predictor arithmetic diverges on real data. Do not implement
-/// audio decode from that description without new evidence — a matched
-/// WAV-in/nsmp-out differential pair is the missing oracle.
+/// The stroke payloads are the encoded audio, and [`Self::stroke_streams`] hands
+/// them to [`codec`] at [`codec::Layout::V3`].
 #[derive(Debug)]
 pub struct SampleV3 {
     pub sections: Vec<section::Section4>,
@@ -230,6 +225,54 @@ impl Cbin<SampleV3> {
             &map.payload,
             &self.stroke_ids()?,
         )?)
+    }
+
+    /// Every stroke's encoded stream with its offset from the start of the body, in
+    /// file order.
+    ///
+    /// The offset is the base the stroke's own [`codec::Directory`] is written
+    /// against, so a caller checking those pointers needs this pairing rather than
+    /// the payload alone. The streams are [`codec::Layout::V3`].
+    pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
+        let mut at = 0;
+        let mut out = Vec::new();
+        for section in &self.body.sections {
+            if section.is(section::STK4) {
+                out.push((at + section::HEADER4_LEN, section.payload.as_slice()));
+            }
+            at += section.encoded_len();
+        }
+        out
+    }
+
+    /// One zone's encoded stream, in [`Self::zones`] order, ready for
+    /// [`codec::decode`] at [`codec::Layout::V3`].
+    ///
+    /// Paired by the global id the zone record names, so it is safe on library
+    /// content whose strokes are not in zone order.
+    pub fn zone_stream(&self, index: usize) -> Result<(usize, &[u8]), Error> {
+        let zones = self.zones()?;
+        let zone = zones
+            .get(index)
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
+        let mut at = 0;
+        for section in &self.body.sections {
+            if section.is(section::STK4)
+                && section
+                    .payload
+                    .get(0..4)
+                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                    == Some(zone.stroke_gid)
+            {
+                return Ok((at + section::HEADER4_LEN, section.payload.as_slice()));
+            }
+            at += section.encoded_len();
+        }
+        Err(ParseError::AssertFail(format!(
+            "zone {index} names stroke {}, which the file does not contain",
+            zone.stroke_gid
+        ))
+        .into())
     }
 }
 
