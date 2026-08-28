@@ -160,9 +160,8 @@ pub struct EncodeArgs {
     /// Difference content records down to the narrowest predictor order, the way the
     /// instrument's own encoder does.
     ///
-    /// ⚠️ Smaller, and `nord sample decode` reads the result back only approximately:
-    /// where a differenced run resumes from is not recorded in the stream and the rule
-    /// for recovering it is unsolved.
+    /// Smaller, and read back exactly: the predictor's history runs unbroken from the
+    /// stroke's opening ramp-in, so a differenced run needs nothing to resume from.
     #[arg(long)]
     pub predict: bool,
 
@@ -397,15 +396,14 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
         codec::peak(stroke).unwrap_or_default(),
         stream.records.len(),
     ));
-    ui.out(if audio.exact() {
-        ui.dim("the stream reads back exactly: no record differences its fields")
+    ui.out(ui.dim(if audio.differenced == 0 {
+        "every field is stated outright: no record differences its own".to_string()
     } else {
-        ui.dim(format!(
-            "{}% of fields sit in a differenced run, which decodes shape-correct and \
-             level-approximate",
+        format!(
+            "{}% of fields came through the predictor",
             100 * audio.differenced / audio.samples.len().max(1),
-        ))
-    });
+        )
+    }));
 
     let path = args
         .out

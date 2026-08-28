@@ -501,8 +501,8 @@ fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, 
     })
 }
 
-/// Writes one record: its header word, then its fields right-anchored against the end
-/// of the space the header claims.
+/// Writes one record: its header word, then its fields, which start at the first bit
+/// after it. Any alignment tail is left zero at the end of the segment.
 fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32]) {
     let head = (u32::from(spec.one_to_one) << 23)
         | (u32::from(spec.width - 1) << 19)
@@ -510,10 +510,7 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32]) {
         | spec.count as u32;
     words[at * 3..at * 3 + 3].copy_from_slice(&head.to_be_bytes()[1..]);
 
-    let bits = 24 + spec.count * usize::from(spec.width);
-    let span = bits.div_ceil(24);
-    // The padding sits between the header word and the first field, not after the last.
-    let mut bit = at * 24 + span * 24 - spec.count * usize::from(spec.width);
+    let mut bit = at * 24 + 24;
     for k in 0..spec.count {
         let field = spec.first + k;
         let value = if spec.order == 0 {
@@ -824,7 +821,10 @@ mod tests {
             let q = quantise(&source, &plan);
 
             let audio = codec::decode(stroke, at).unwrap();
-            assert!(audio.exact(), "a plain stream reports itself exact");
+            assert_eq!(
+                audio.differenced, 0,
+                "a plain stream states every field outright"
+            );
             assert_eq!(audio.samples.len(), plan.fields);
             let gain = 1i32 << q.shift;
             for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
@@ -848,6 +848,53 @@ mod tests {
         let zero_crossings = window.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count();
         // 10000 fields at 35002 Hz is 0.2857 s, which holds 125.7 cycles of 440 Hz.
         assert!((124..=127).contains(&zero_crossings), "{zero_crossings}");
+    }
+
+    /// A record's fields start at the first bit after its header word, so a record
+    /// whose count leaves an alignment tail has that tail at the *end*.
+    ///
+    /// Only the 1:1 runs leave one — a content run's count is a whole number of
+    /// cells, so its fields fill the segment exactly. Packing from the far end
+    /// instead is invisible on content and displaces every warmup and resync.
+    #[test]
+    fn a_records_fields_start_right_after_its_header() {
+        // 30 fields of 13 bits is 390, leaving 18 spare bits in 18 words.
+        let spec = Spec {
+            one_to_one: true,
+            width: 13,
+            order: 0,
+            first: 0,
+            count: 30,
+        };
+        let tail = spec.span() * 24 - 24 - spec.count * usize::from(spec.width);
+        assert_eq!(tail, 18, "this spec is chosen to leave a tail");
+
+        let values: Vec<i32> = (0..30).map(|k| k * 7 - 40).collect();
+        let mut words = vec![0u8; spec.span() * 3];
+        write_record(&mut words, 0, &spec, &values);
+
+        // The tail is the last `tail` bits of the segment, and nothing is in it.
+        let total = spec.span() * 24;
+        for bit in total - tail..total {
+            assert_eq!(
+                words[bit / 8] >> (7 - bit % 8) & 1,
+                0,
+                "bit {bit} is in the alignment tail and should be clear"
+            );
+        }
+        // And the reader agrees about where the values are.
+        let mut stroke = vec![0u8; codec::HEADER_LEN];
+        stroke.extend_from_slice(&words);
+        stroke.extend_from_slice(&[0x80, 0x00, 0x18]);
+        let end = (codec::HEADER_LEN / 3 + spec.span()) as u16;
+        for (i, p) in [codec::HEADER_LEN as u16 / 3, 0, end, end]
+            .iter()
+            .enumerate()
+        {
+            stroke[20 + 9 * i..22 + 9 * i].copy_from_slice(&p.to_be_bytes());
+        }
+        let walked = codec::walk(&stroke, 0).unwrap();
+        assert_eq!(walked.records[0].values, values);
     }
 
     /// The file is a file: it parses, checksums, and round-trips as bytes.
