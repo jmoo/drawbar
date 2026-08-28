@@ -71,6 +71,23 @@ fn v2_samples() -> impl Iterator<
     })
 }
 
+/// Every sample instrument's stroke streams, with the codec layout its generation
+/// implies — `.nsmp`, `.nsmp3` and `.nsmp4` alike. One codec reads all three, so
+/// the stream tests below make no distinction beyond this.
+fn sample_streams() -> impl Iterator<
+    Item = (
+        &'static Specimen,
+        nsmp::codec::Layout,
+        Vec<(usize, &'static [u8])>,
+    ),
+> {
+    corpus().iter().filter_map(|s| match &s.entity {
+        Entity::Sample(Sample::V2(v)) => Some((s, nsmp::codec::Layout::V2, v.stroke_streams())),
+        Entity::Sample(Sample::V3(v)) => Some((s, nsmp::codec::Layout::V3, v.stroke_streams())),
+        _ => None,
+    })
+}
+
 /// A fresh, owned parse of the one specimen with this file name — for the
 /// tests that edit one.
 fn v2_named(name: &str) -> nord_format::cbin::Cbin<nsmp::Sample> {
@@ -467,8 +484,9 @@ fn nsmp_strokes_decompose() {
     assert!(seen > 0, "no stroke walked");
 }
 
-/// Every v2 stroke's encoded audio walks end to end, and the walk lands exactly
-/// where the stroke header's own word directory says it should.
+/// Every stroke's encoded audio walks end to end, and the walk lands exactly
+/// where the stroke header's own word directory says it should — in every
+/// generation.
 ///
 /// The directory is written by the encoder and read by nothing else here, so
 /// agreement between it and an independent walk is a real check on both. A grammar
@@ -476,21 +494,21 @@ fn nsmp_strokes_decompose() {
 #[test]
 fn nsmp_streams_walk_to_the_terminator_the_header_names() {
     let mut walked = 0;
-    for (s, sample) in v2_samples() {
+    for (s, layout, streams) in sample_streams() {
         let where_ = s.path.display();
-        for (index, (at, stroke)) in sample.stroke_streams().into_iter().enumerate() {
-            let stream = nsmp::codec::walk(stroke, at)
+        for (index, (at, stroke)) in streams.into_iter().enumerate() {
+            let stream = nsmp::codec::walk(stroke, at, layout)
                 .unwrap_or_else(|e| panic!("{where_} stroke {index}: {e}"));
             let directory = nsmp::codec::Directory::read(stroke)
                 .unwrap_or_else(|| panic!("{where_} stroke {index}: no word directory"));
-            let resolve = |p: u16| nsmp::codec::Directory::resolve(p, at);
+            let resolve = |p: u16| nsmp::codec::Directory::resolve(p, at, layout);
             assert_eq!(
                 resolve(directory.first_record),
                 stream.first_record,
                 "{where_} stroke {index}: the chain starts somewhere the header does not name"
             );
             assert_eq!(
-                resolve(directory.terminator[0]),
+                resolve(directory.terminator),
                 stream.terminator,
                 "{where_} stroke {index}: the chain ends somewhere the header does not name"
             );
@@ -500,6 +518,26 @@ fn nsmp_streams_walk_to_the_terminator_the_header_names() {
             assert!(
                 stream.records.iter().any(|r| r.at == resync),
                 "{where_} stroke {index}: the resync pointer is not a record boundary"
+            );
+            // So is the pointer that names the marked record: reading it as a second
+            // copy of the terminator instead stops the walk partway through every
+            // vendor stroke. A stroke marks at most one record, and where it marks
+            // one this is where it says to look. The converse does not hold — the
+            // pointer names a record on unmarked strokes too.
+            let named = resolve(directory.mark);
+            assert!(
+                named == stream.terminator || stream.records.iter().any(|r| r.at == named),
+                "{where_} stroke {index}: the mark pointer is neither a record nor the end"
+            );
+            let marked: Vec<usize> = stream
+                .records
+                .iter()
+                .filter(|r| r.mark)
+                .map(|r| r.at)
+                .collect();
+            assert!(
+                marked.is_empty() || marked == [named],
+                "{where_} stroke {index}: marked {marked:?} but the header names {named}"
             );
             assert!(
                 !stream.records.is_empty(),
@@ -511,26 +549,27 @@ fn nsmp_streams_walk_to_the_terminator_the_header_names() {
     assert!(walked > 0, "no stream walked");
 }
 
-/// Every v2 stroke decodes to audio, and the lattice accounting is consistent:
-/// the chain's field counts sum to the sample length, whatever each record's
-/// differencing order.
+/// Every stroke decodes to audio in every generation, and the lattice accounting
+/// is consistent: the chain's field counts sum to the sample length, whatever each
+/// record's differencing order.
 ///
-/// A stereo stroke is the one refusal — two streams share its header — and it says
-/// so by name rather than interleaving them.
+/// A stereo stroke is the one refusal — two streams share its header, which the
+/// terminator gives away by cellwise doubling the layout's own size — and it says so
+/// by name rather than interleaving them.
 #[test]
 fn nsmp_every_stroke_decodes() {
     let mut decoded = 0;
     let mut stereo = 0;
-    for (s, sample) in v2_samples() {
+    for (s, layout, streams) in sample_streams() {
         let where_ = s.path.display();
-        for (index, (at, stroke)) in sample.stroke_streams().into_iter().enumerate() {
-            let stream = nsmp::codec::walk(stroke, at).unwrap();
-            let audio = match nsmp::codec::decode(stroke, at) {
+        for (index, (at, stroke)) in streams.into_iter().enumerate() {
+            let stream = nsmp::codec::walk(stroke, at, layout).unwrap();
+            let audio = match nsmp::codec::decode(stroke, at, layout) {
                 Ok(audio) => audio,
                 Err(nsmp::codec::Unsupported::Stereo) => {
                     assert_eq!(
                         stream.cell,
-                        Some(48),
+                        Some(2 * layout.cell()),
                         "{where_} stroke {index}: refused as stereo without a stereo cell"
                     );
                     stereo += 1;
@@ -552,10 +591,88 @@ fn nsmp_every_stroke_decodes() {
         }
     }
     assert!(decoded > 0, "no stroke decoded");
-    assert!(
-        stereo < decoded / 100,
-        "stereo is meant to be the rare case"
-    );
+    assert!(stereo < decoded / 100, "stereo is meant to be the rare case");
+}
+
+/// The same source rendered at v2, v3 and v4 decodes to the same audio.
+///
+/// The three generations differ only in units — 3-byte words against 4, 24-field
+/// cells against 32, a 51-byte stroke header against 68 — so a triplet is the
+/// sharpest check there is on the port: one wrong constant moves the field lattice
+/// and the decoded lengths stop matching, which they do not on any twin.
+///
+/// Sample values agree to within a quantiser step, and never exactly, for two
+/// reasons that are the codec working as designed: the wide generations sometimes
+/// choose a finer shift, and a cell that falls under the coder's noise floor is
+/// dropped whole — so with cells of different sizes the two renders drop different
+/// material at the bottom bit. The comparison is therefore made only where all
+/// three decode exactly; a differenced run carries no level to compare.
+#[test]
+fn nsmp_a_source_rendered_at_every_generation_decodes_the_same() {
+    let audio = |s: &'static Specimen, layout| {
+        let (at, stroke) = match &s.entity {
+            Entity::Sample(Sample::V2(v)) => v.stroke_streams()[0],
+            Entity::Sample(Sample::V3(v)) => v.stroke_streams()[0],
+            other => panic!("{}: {other:?} is not a sample", s.path.display()),
+        };
+        (
+            nsmp::codec::decode(stroke, at, layout)
+                .unwrap_or_else(|e| panic!("{}: {e}", s.path.display())),
+            nsmp::codec::shift(stroke, layout).unwrap(),
+        )
+    };
+    let by_name = |name: &str| corpus().iter().find(|s| s.path.ends_with(name));
+
+    let mut triplets = 0;
+    let mut compared = 0;
+    for wide in corpus()
+        .iter()
+        .filter(|s| s.path.extension().is_some_and(|e| e == "nsmp3"))
+    {
+        let stem = wide
+            .path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let (Some(narrow), Some(widest)) = (
+            by_name(&format!("{stem}.nsmp")),
+            by_name(&format!("{stem}.nsmp4")),
+        ) else {
+            continue;
+        };
+        triplets += 1;
+
+        let (v2, s2) = audio(narrow, nsmp::codec::Layout::V2);
+        let (v3, s3) = audio(wide, nsmp::codec::Layout::V3);
+        let (v4, s4) = audio(widest, nsmp::codec::Layout::V3);
+        assert_eq!(
+            (v2.samples.len(), v2.samples.len()),
+            (v3.samples.len(), v4.samples.len()),
+            "{stem}: the generations decode to different lengths, so the lattice moved"
+        );
+
+        compared += 1;
+        // One step of the coarser grid, and never less than the few LSB the cell
+        // sizes cost on their own at the noise floor.
+        let step = |a: i32, b: i32| 4.max(1 << a.max(b).max(0));
+        for (other, step) in [(&v3, step(s2, s3)), (&v4, step(s2, s4))] {
+            let worst = v2
+                .samples
+                .iter()
+                .zip(&other.samples)
+                .map(|(&a, &b)| (i32::from(a) - i32::from(b)).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= step,
+                "{stem}: the generations disagree by {worst}, past the {step} a \
+                 quantiser step accounts for"
+            );
+        }
+    }
+    assert!(triplets > 0, "no v2/v3/v4 triplet");
+    assert_eq!(compared, triplets, "every triplet is compared");
 }
 
 /// A sine specimen decodes to that sine: the editor was handed a C4 tone, and the
@@ -568,7 +685,7 @@ fn nsmp_a_known_sine_decodes_to_its_own_pitch() {
     for name in ["A-sine-C4.nsmp", "F-sine-1s-C4.nsmp"] {
         let sample = v2_named(name);
         let (at, stroke) = sample.stroke_streams()[0];
-        let audio = nsmp::codec::decode(stroke, at).unwrap();
+        let audio = nsmp::codec::decode(stroke, at, nsmp::codec::Layout::V2).unwrap();
         let rate = f64::from(nsmp::codec::FIELD_RATE);
         // Middle C, which is what the specimen's file name says was recorded.
         let want = 440.0 * 2f64.powf((60.0 - 69.0) / 12.0);
