@@ -91,14 +91,19 @@ pub fn set_top_note(map: &mut [u8], index: usize, note: u8) -> Result<(), ParseE
 ///
 /// | map | record | gid at | low note | stored order |
 /// |---|---|---|---|---|
-/// | 12 | 11 B, no trailer | +5 | tiled, not stored | high → low |
-/// | 14 | 16 B, 1 B trailer | +8 | at +2 | low → high |
-/// | 21 | 16 B, 2 B trailer | +8 | at +2 | high → low |
+/// | 12 | 11 B | +5 | tiled, not stored | high → low |
+/// | 14 | 16 B | +8 | at +2 | low → high |
+/// | 21 | 16 B | +8 | at +2 | high → low |
 ///
 /// A one-byte zone count sits immediately before the records, and equals the
 /// stroke count on every specimen. Inferred from specimens; not confirmed on
 /// hardware. (A `map` version 13 is reported to share the 16-byte layout, but
 /// no specimen shows it, so it is refused rather than assumed.)
+///
+/// ⚠️ **What follows the table is not modelled, and is not a fixed size even
+/// within one version.** v12 ends on the last record and v14 leaves one byte,
+/// but v21 leaves two on library content and six on what the editor writes. So
+/// [`read_v3`] *finds* the table instead of assuming where it ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneV3 {
     /// The referenced stroke's global id — the u32 its `stk` payload leads with.
@@ -112,18 +117,29 @@ pub struct ZoneV3 {
     pub low_note: Option<u8>,
 }
 
+/// Bytes past the zone table this reader will look through for it.
+///
+/// The table sits at the end of `map` under something whose size is not modelled —
+/// six bytes at most across the corpus, and version 21 shows two sizes on its own.
+const MAX_TAIL: usize = 8;
+
 /// Reads the v3/v4 zone table. `strokes` is the body's `(gid, root key)` list,
 /// used to size the table and to verify every record against the stroke it
 /// names — a misaligned read cannot pass it.
+///
+/// Because the bytes after the table are not a fixed size, the read walks back from
+/// the end of the section and takes the first placement where the count byte and
+/// *every* record's `(gid, root key)` agree with the body's own strokes. That is the
+/// same verification either way; only the search is new, and no misalignment
+/// survives it.
 pub fn read_v3(
     map_version: u32,
     map: &[u8],
     strokes: &[(u32, u8)],
 ) -> Result<Vec<ZoneV3>, ParseError> {
-    let (record_len, gid_at, trailer, has_low) = match map_version {
-        12 => (11usize, 5usize, 0usize, false),
-        14 => (16, 8, 1, true),
-        21 => (16, 8, 2, true),
+    let (record_len, gid_at, has_low) = match map_version {
+        12 => (11usize, 5usize, false),
+        14 | 21 => (16, 8, true),
         v => {
             return Err(ParseError::AssertFail(format!(
                 "map section version {v} has no zone layout derived from a specimen"
@@ -132,45 +148,58 @@ pub fn read_v3(
     };
 
     let n = strokes.len();
-    let start = map
-        .len()
-        .checked_sub(trailer + n * record_len)
-        .filter(|&s| s >= 1)
-        .ok_or_else(|| {
-            ParseError::AssertFail(format!(
-                "map section is {} bytes, too short for {n} zone records",
-                map.len()
-            ))
-        })?;
-    if map[start - 1] as usize != n {
-        return Err(ParseError::AssertFail(format!(
-            "zone count {} does not match the {n} strokes",
-            map[start - 1]
-        )));
-    }
+    let table = |tail: usize| -> Result<Vec<ZoneV3>, ParseError> {
+        let start = map
+            .len()
+            .checked_sub(tail + n * record_len)
+            .filter(|&s| s >= 1)
+            .ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "map section is {} bytes, too short for {n} zone records",
+                    map.len()
+                ))
+            })?;
+        if map[start - 1] as usize != n {
+            return Err(ParseError::AssertFail(format!(
+                "zone count {} does not match the {n} strokes",
+                map[start - 1]
+            )));
+        }
+        (0..n)
+            .map(|i| {
+                let r = &map[start + i * record_len..][..record_len];
+                let gid = u32::from_be_bytes(r[gid_at..gid_at + 4].try_into().unwrap());
+                let root = strokes.iter().find(|(g, _)| *g == gid).map(|(_, r)| *r);
+                match root {
+                    Some(root) if root == r[0] => Ok(ZoneV3 {
+                        stroke_gid: gid,
+                        root_key: r[0],
+                        top_note: r[1],
+                        low_note: has_low.then(|| r[2]),
+                    }),
+                    Some(root) => Err(ParseError::AssertFail(format!(
+                        "zone {i} carries root {} but its stroke {gid} holds {root}",
+                        r[0]
+                    ))),
+                    None => Err(ParseError::AssertFail(format!(
+                        "zone {i} references stroke {gid}, which the body does not hold"
+                    ))),
+                }
+            })
+            .collect()
+    };
 
-    (0..n)
-        .map(|i| {
-            let r = &map[start + i * record_len..][..record_len];
-            let gid = u32::from_be_bytes(r[gid_at..gid_at + 4].try_into().unwrap());
-            let root = strokes.iter().find(|(g, _)| *g == gid).map(|(_, r)| *r);
-            match root {
-                Some(root) if root == r[0] => Ok(ZoneV3 {
-                    stroke_gid: gid,
-                    root_key: r[0],
-                    top_note: r[1],
-                    low_note: has_low.then(|| r[2]),
-                }),
-                Some(root) => Err(ParseError::AssertFail(format!(
-                    "zone {i} carries root {} but its stroke {gid} holds {root}",
-                    r[0]
-                ))),
-                None => Err(ParseError::AssertFail(format!(
-                    "zone {i} references stroke {gid}, which the body does not hold"
-                ))),
-            }
-        })
-        .collect()
+    let mut first = None;
+    for tail in 0..=MAX_TAIL {
+        match table(tail) {
+            Ok(zones) => return Ok(zones),
+            // The complaint worth reporting is the one from the tightest fit; the
+            // later placements only say the table is not there either.
+            Err(e) => first.get_or_insert(e),
+        };
+    }
+    Err(first
+        .unwrap_or_else(|| ParseError::AssertFail(format!("map section is {} bytes", map.len()))))
 }
 
 /// The key ranges the editor lays out for a set of root keys, high to low.
