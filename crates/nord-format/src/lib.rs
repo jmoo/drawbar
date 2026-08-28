@@ -17,8 +17,7 @@
 //! whether its body decodes fully, partially, or not at all: decoded values
 //! are views over a verbatim body, bits no field claims survive untouched,
 //! and `to_bytes(from_stream(x)) == x` bit-for-bit (archives are read-only).
-//! That invariant is tested against a private corpus of more than 10,000 real
-//! files.
+//! That invariant is tested against a private corpus of real files.
 //!
 //! [`from_path`] / [`from_stream`] sniff any supported file and decode it
 //! into an [`Entity`]; [`to_bytes`] is the inverse.
@@ -475,9 +474,8 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
         if names.is_empty() {
             return Err(ParseError::AssertFail("the archive holds no members".into()).into());
         }
-        // ⚠️ meta.xml alone does not say Electro 5: the whole family's backups
-        // carry one (verified against real Piano/Organ 3/C2D/Lead 4 factory
-        // restores). Only .ne5* members make it an Electro 5 bundle.
+        // ⚠️ `meta.xml` is shared across product families; only `.ne5*` members identify
+        // an Electro 5 bundle.
         if names.iter().any(|n| {
             std::path::Path::new(n)
                 .extension()

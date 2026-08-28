@@ -1,19 +1,8 @@
 //! Typed operations.
 //!
-//! Each is a single-item primitive that runs inside a [`Session`]; a caller batches by
-//! opening one session and looping (which is exactly how NSM batches — the wrapper once,
-//! the per-item unit repeated).
-//!
-//! # What is reproduced, and what is not
-//!
-//! These emit the command bytes NSM sends to *effect* an operation, including the
-//! fire-and-forget progress strings that paint the instrument's own display
-//! ([`ui::label`]/[`ui::percent`]). They deliberately omit the reads NSM issues purely
-//! to repaint its **host-side browser** — the `INFO`/`DEPENDENCIES` refresh after a
-//! copy, the `STATUS` counter re-read that closes each transaction, and the whole
-//! bank-refresh transaction that follows a write. Those change nothing on the device;
-//! reproducing a specific GUI's bookkeeping is not the library's job. Everything sent
-//! here is verified byte-for-byte against the capture corpus.
+//! Each primitive runs inside a [`Session`]; callers can batch by opening one
+//! session and applying the primitive repeatedly. Operations include device-side
+//! progress messages but omit reads used only to refresh a host UI.
 
 use crate::envelope;
 use crate::error::{Error, Result};
@@ -60,11 +49,9 @@ pub async fn inventory<T: Transport>(transport: &mut T) -> Result<Vec<Status>> {
                 session.commit().await?;
                 out.push(s);
             }
-            // The class is skipped, but the transaction still gets its closing
-            // exchanges — an abandoned session strands the instrument on its progress
-            // screen. A close that fails too is genuinely unrecoverable here.
+            // A skipped class still owes the instrument its closing exchanges.
             Err(_) => {
-                let _ = session.commit().await;
+                session.commit().await?;
             }
         }
     }
@@ -140,6 +127,7 @@ fn read_chunk() -> u32 {
     std::env::var("NORD_READ_CHUNK")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|&size| size > 0)
         .unwrap_or(READ_CHUNK)
 }
 #[cfg(not(feature = "fault-injection"))]
@@ -152,6 +140,7 @@ fn write_chunk() -> usize {
     std::env::var("NORD_WRITE_CHUNK")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|&size| size > 0)
         .unwrap_or(WRITE_CHUNK)
 }
 #[cfg(not(feature = "fault-injection"))]
@@ -170,12 +159,7 @@ fn library_block(class: ObjectClass) -> usize {
     }
 }
 
-/// The shared read sequence NSM uses, reproduced byte-for-byte: `INFO` to learn the
-/// body length, the `"Uploading..."` progress label the instrument paints, `BEGIN_READ`,
-/// one `READ` per [`READ_CHUNK`] with the bar advancing as they arrive, then
-/// `END_TRANSFER`. Returns the metadata and the reassembled body.
-///
-/// ("Uploading" is NSM's own — and backwards — word for keyboard → host.)
+/// Read the metadata and body through the device's chunked transfer sequence.
 async fn transfer_out<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
@@ -190,9 +174,7 @@ async fn transfer_out<T: Transport, C>(
         .request(Service::Program, 10, cmd::BEGIN_READ, &args)
         .await?;
 
-    // Capacity is clamped: `body_len` is device-supplied, and a corrupt or hostile
-    // value must not become a gigabyte allocation up front. Real bodies larger than the
-    // clamp (pianos) just grow the vector as chunks arrive.
+    // Clamp allocation from the device-supplied length; large valid bodies grow by chunk.
     let mut body = Vec::with_capacity((meta.body_len as usize).min(1 << 20));
     let mut painted = None;
     while (body.len() as u32) < meta.body_len {
@@ -206,25 +188,10 @@ async fn transfer_out<T: Transport, C>(
             .request(Service::Program, 10, cmd::READ, &req)
             .await?;
 
-        // Payload is bank, slot, offset, length, then this chunk of the body.
-        let p = resp.payload();
-        let chunk = p.get(16..).ok_or(Error::Truncated {
-            got: p.len(),
-            need: 16,
-        })?;
-        // A short chunk would silently misalign every subsequent offset, so it is an
-        // error rather than something to resynchronize from.
-        if chunk.len() != want as usize {
-            return Err(Error::Transport(format!(
-                "asked for {want} bytes at offset {offset} but the device sent {}",
-                chunk.len()
-            )));
-        }
+        let chunk = read_payload(resp.payload(), at, offset, want)?;
         body.extend_from_slice(chunk);
 
-        // The bar is bytes transferred over bytes expected, and only moves on a whole
-        // percent — one message per step, the way NSM drives it. A body inside one chunk
-        // therefore still produces exactly one `100`.
+        // Progress moves only at whole percentages.
         let pct = (body.len() as u64 * 100 / (meta.body_len.max(1)) as u64) as u16;
         if painted != Some(pct) {
             session.notify(&ui::percent(pct)).await?;
@@ -241,6 +208,31 @@ async fn transfer_out<T: Transport, C>(
         .request(Service::Program, 10, cmd::END_TRANSFER, &args)
         .await?;
     Ok((meta, body))
+}
+
+fn read_payload(payload: &[u8], at: Location, offset: u32, length: u32) -> Result<&[u8]> {
+    if payload.len() < 16 {
+        return Err(Error::Truncated {
+            got: payload.len(),
+            need: 16,
+        });
+    }
+    let word = |start| u32::from_be_bytes(payload[start..start + 4].try_into().unwrap());
+    let echoed = (word(0), word(4), word(8), word(12));
+    let expected = (at.bank, at.slot, offset, length);
+    if echoed != expected {
+        return Err(Error::Transport(format!(
+            "READ response echoed {echoed:?}, expected {expected:?}"
+        )));
+    }
+    let body = &payload[16..];
+    if body.len() != length as usize {
+        return Err(Error::Transport(format!(
+            "asked for {length} bytes at offset {offset} but the device sent {}",
+            body.len()
+        )));
+    }
+    Ok(body)
 }
 
 /// Bound on polling `0x26` for the cleaning pass, which normally finishes within a
@@ -310,6 +302,10 @@ pub async fn write<T: Transport>(
 ) -> Result<()> {
     let file = envelope::unwrap(file)?;
     let body = &file.body.0;
+    let body_len = u32::try_from(body.len())
+        .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
+    let name_len = u32::try_from(name.len())
+        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
 
     if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
         // A library write is refused 0x16 unless a prepared block exists per
@@ -325,11 +321,11 @@ pub async fn write<T: Transport>(
 
     let mut begin = Vec::new();
     at.write_to(&mut begin);
-    begin.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    begin.extend_from_slice(&body_len.to_be_bytes());
     begin.extend_from_slice(&file.header.tag);
     begin.extend_from_slice(&timestamp.to_be_bytes());
     begin.extend_from_slice(&u32::MAX.to_be_bytes());
-    begin.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    begin.extend_from_slice(&name_len.to_be_bytes());
     begin.extend_from_slice(name.as_bytes());
     session
         .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
@@ -338,7 +334,7 @@ pub async fn write<T: Transport>(
     let mut offset = 0usize;
     let mut painted = None;
     while offset < body.len() {
-        let end = (offset + write_chunk()).min(body.len());
+        let end = offset.saturating_add(write_chunk()).min(body.len());
         let chunk = &body[offset..end];
         let mut data = Vec::new();
         at.write_to(&mut data);
@@ -356,9 +352,6 @@ pub async fn write<T: Transport>(
         }
         offset = end;
 
-        // Same bar the read side drives: whole percents, one message per step — a
-        // body inside one chunk still produces exactly one `100`, so small writes
-        // put the same frames on the wire as before the bar animated.
         let pct = (offset as u64 * 100 / (body.len().max(1)) as u64) as u16;
         if painted != Some(pct) {
             session.notify(&ui::percent(pct)).await?;
@@ -392,28 +385,7 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
     Ok(())
 }
 
-/// Release anything the instrument is still holding from an abandoned session.
-///
-/// **Operator-driven, and deliberately not automatic.** Two faults hide behind "the
-/// instrument is broken", and each is one frame to cure:
-///
-/// - An abandoned **UI** session (`HELLO` with no `GOODBYE`) makes the device answer
-///   every slot in every class as **empty** — a wrong answer that looks like a right one.
-///   Nothing detects it, because nothing fails. A bare `GOODBYE` clears it.
-/// - An abandoned **class** session makes it refuse operations with status `0x12`.
-///   A bare `SESSION_CLOSE` clears that, and [`Session::open`] already does it.
-///
-/// Both are sent **bare** — no session wrapped around them — because the session
-/// machinery is exactly what is broken. Both are best-effort: sending them to a healthy
-/// instrument is harmless, so this needs no diagnosis first.
-///
-/// This is not folded into [`Session::open`] on purpose. NSM sends no such frame, the
-/// golden replays pin our exchanges against real captures, and quietly diverging from
-/// that ground truth to paper over an operator-caused fault would cost more than it saves.
-/// Read and discard anything the device still has queued, until it goes quiet.
-///
-/// Unread replies are how the stream gets out of step; nothing here writes, so it is safe
-/// on a healthy instrument — it simply finds nothing.
+/// Drain queued replies until the transport stays quiet.
 async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
     for _ in 0..DRAIN_CAP {
         match transport
@@ -433,11 +405,12 @@ const DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 /// Upper bound on stragglers, so a device that will not stop talking cannot hang this.
 const DRAIN_CAP: usize = 16;
 
+/// Release UI and class state left by an abandoned session.
+///
+/// A bare `GOODBYE` clears the UI state that makes every slot appear empty; a bare
+/// `SESSION_CLOSE` clears class status `0x12`. Queued replies are drained first.
 pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
-    // Drain first. A reply nobody read leaves the stream one message ahead, so every
-    // later request is answered by the *previous* one's reply — the tell is an error
-    // naming two commands that are one apart. Sending anything before draining keeps the
-    // offset intact, which is why the two frames below cannot cure it on their own.
+    // An unread reply leaves every subsequent request paired with its predecessor.
     drain(transport).await?;
 
     // ⚠️ Bounded reads: the instrument this is for is the one that has stopped
@@ -500,7 +473,7 @@ pub async fn check_address<T: Transport, C>(
         let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         return Ok(Some(format!(
             "bank {} does not exist; this class has {} ({})",
-            at.bank + 1,
+            at.user_bank(),
             banks.len(),
             names.join(", ")
         )));
@@ -512,7 +485,7 @@ pub async fn check_address<T: Transport, C>(
             "\"{}\" holds {} slots, so slot {} is out of range",
             bank.name,
             bank.slots,
-            at.slot + 1
+            at.user_slot()
         )));
     }
     Ok(None)
@@ -744,7 +717,9 @@ pub async fn rename<T: Transport>(
 ) -> Result<()> {
     let mut args = Vec::new();
     at.write_to(&mut args);
-    args.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    let name_len = u32::try_from(name.len())
+        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
+    args.extend_from_slice(&name_len.to_be_bytes());
     args.extend_from_slice(name.as_bytes());
     session
         .request(Service::Program, 10, cmd::RENAME, &args)
@@ -770,4 +745,23 @@ pub async fn duplicate<T: Transport>(
         .request(Service::Program, 10, cmd::COPY, &args)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_chunk_must_echo_its_request() {
+        let at = Location { bank: 2, slot: 3 };
+        let mut payload = Vec::new();
+        for word in [at.bank, at.slot, 40, 3] {
+            payload.extend_from_slice(&word.to_be_bytes());
+        }
+        payload.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(read_payload(&payload, at, 40, 3).unwrap(), [1, 2, 3]);
+
+        payload[3] ^= 1;
+        assert!(read_payload(&payload, at, 40, 3).is_err());
+    }
 }

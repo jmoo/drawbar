@@ -336,14 +336,8 @@ impl Cbin<Sample> {
         Ok(())
     }
 
-    /// Refuses the pre-2.0 library layout by name rather than by symptom.
-    ///
-    /// Version 8 is the original Sample Library, and its `map` section does not follow
-    /// `801 + 15·(zones−1)` — the two specimens hold ten zones in 906 bytes and one in
-    /// 798, against 936 and 801. The zone table is somewhere else, or shaped
-    /// differently; either way the 2.0 reader walks off into the wrong bytes and
-    /// reports a length complaint that says nothing about the real cause. The section
-    /// chain, name and checksum are unaffected and still read.
+    /// Pre-2.0 libraries use a different zone layout; their section chain, name, and
+    /// checksum remain readable.
     fn require_known_layout(&self) -> Result<(), Error> {
         if self.header.version < LIBRARY_2_VERSION {
             return Err(ParseError::AssertFail(format!(

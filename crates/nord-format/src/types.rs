@@ -9,13 +9,30 @@ use crate::error::ParseError;
 use crate::fields::{ControlKind, Unit};
 
 /// An i8 value that is bounded by MIN and MAX and can be converted to a u8 by adding OFFSET.
-#[derive(Copy, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct RangedI8<const OFFSET: u8, const MIN: i8, const MAX: i8> {
     inner: i8,
 }
 
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> RangedI8<OFFSET, MIN, MAX> {
+    const VALID: () = {
+        assert!(MIN <= MAX, "MIN must not exceed MAX");
+        assert!(
+            MIN as i16 + OFFSET as i16 >= 0,
+            "MIN + OFFSET must fit in u8",
+        );
+        assert!(
+            MAX as i16 + OFFSET as i16 <= u8::MAX as i16,
+            "MAX + OFFSET must fit in u8",
+        );
+    };
+    const DEFAULT_VALID: () = {
+        let () = Self::VALID;
+        assert!(MIN <= 0 && 0 <= MAX, "the default value must be in range");
+    };
+
     pub fn as_u8(&self) -> u8 {
+        let () = Self::VALID;
         (i16::from(self.inner) + i16::from(OFFSET)) as u8
     }
 
@@ -24,9 +41,20 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> RangedI8<OFFSET, MIN, MAX> 
     }
 }
 
+impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Default for RangedI8<OFFSET, MIN, MAX> {
+    fn default() -> Self {
+        let () = Self::DEFAULT_VALID;
+        Self { inner: 0 }
+    }
+}
+
 /// Stored biased by `OFFSET`, so the widest encoding is `MAX + OFFSET`.
 impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Packed for RangedI8<OFFSET, MIN, MAX> {
-    const MAX_BITS: u32 = bits_for((MAX as i16 + OFFSET as i16) as u64);
+    const MAX_BITS: u32 = {
+        let () = Self::VALID;
+        bits_for((MAX as i16 + OFFSET as i16) as u64)
+    };
+    const DECODE_BITS: u32 = u8::BITS;
     /// A signed shift. ⚠️ The unit is the model's — octaves for an octave shift,
     /// semitones for a transpose — and the alias does not carry it, so the kind says
     /// only that the control is signed.
@@ -52,6 +80,7 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<u8> for RangedI8<OF
     type Error = ParseError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
+        let () = Self::VALID;
         // Widened first: a stored byte above `i8::MAX` would otherwise wrap before the
         // range check sees it.
         let unbiased = i16::from(value) - i16::from(OFFSET);
@@ -69,6 +98,7 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> TryFrom<i8> for RangedI8<OF
     type Error = ParseError;
 
     fn try_from(value: i8) -> Result<Self, Self::Error> {
+        let () = Self::VALID;
         if value < MIN || value > MAX {
             return Err(ParseError::OutOfBounds {
                 value: format!("{value}"),
@@ -130,6 +160,7 @@ impl<const MAX: u8> RangedU8<MAX> {
 
 impl<const MAX: u8> Packed for RangedU8<MAX> {
     const MAX_BITS: u32 = bits_for(MAX as u64);
+    const DECODE_BITS: u32 = u8::BITS;
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
@@ -207,6 +238,7 @@ impl<const MAX: u16> RangedU16<MAX> {
 
 impl<const MAX: u16> Packed for RangedU16<MAX> {
     const MAX_BITS: u32 = bits_for(MAX as u64);
+    const DECODE_BITS: u32 = u16::BITS;
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
@@ -261,13 +293,25 @@ impl<const MAX: u16> PartialEq<u16> for RangedU16<MAX> {
 /// Both parameters are **counts**, so the valid coordinates are `0..X_COUNT` and
 /// `0..Y_COUNT`. The pair packs into a single u16 as `x * Y_COUNT + y`, which is a
 /// bijection onto `0..X_COUNT * Y_COUNT` exactly because `Y_COUNT` is the stride.
-#[derive(Clone, Default, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RangedU16Pair<const X_COUNT: u16, const Y_COUNT: u16> {
     inner: (u16, u16),
 }
 
 impl<const X_COUNT: u16, const Y_COUNT: u16> RangedU16Pair<X_COUNT, Y_COUNT> {
+    const VALID: () = {
+        assert!(
+            X_COUNT > 0 && Y_COUNT > 0,
+            "coordinate counts must be nonzero"
+        );
+        assert!(
+            X_COUNT as u32 * Y_COUNT as u32 <= u16::MAX as u32 + 1,
+            "coordinate space must fit in u16",
+        );
+    };
+
     pub fn new(x: u16, y: u16) -> Result<Self, ParseError> {
+        let () = Self::VALID;
         if x >= X_COUNT {
             return Err(ParseError::OutOfBounds {
                 value: format!("{x}"),
@@ -286,14 +330,8 @@ impl<const X_COUNT: u16, const Y_COUNT: u16> RangedU16Pair<X_COUNT, Y_COUNT> {
     }
 
     pub fn from_u16(value: u16) -> Result<Self, ParseError> {
-        match (value.checked_div(Y_COUNT), value.checked_rem(Y_COUNT)) {
-            (Some(x), Some(y)) => (x, y).try_into(),
-            // A zero `Y_COUNT` names no locations, so no value decodes into one.
-            _ => Err(ParseError::OutOfBounds {
-                value: format!("{value}"),
-                bound: format!("0..{}", X_COUNT as u32 * Y_COUNT as u32),
-            }),
-        }
+        let () = Self::VALID;
+        (value / Y_COUNT, value % Y_COUNT).try_into()
     }
 
     pub fn inner(&self) -> (u16, u16) {
@@ -301,6 +339,7 @@ impl<const X_COUNT: u16, const Y_COUNT: u16> RangedU16Pair<X_COUNT, Y_COUNT> {
     }
 
     pub fn as_u16(&self) -> u16 {
+        let () = Self::VALID;
         (self.inner.0 * Y_COUNT) + self.inner.1
     }
 
@@ -313,9 +352,20 @@ impl<const X_COUNT: u16, const Y_COUNT: u16> RangedU16Pair<X_COUNT, Y_COUNT> {
     }
 }
 
+impl<const X_COUNT: u16, const Y_COUNT: u16> Default for RangedU16Pair<X_COUNT, Y_COUNT> {
+    fn default() -> Self {
+        let () = Self::VALID;
+        Self { inner: (0, 0) }
+    }
+}
+
 /// The widest encoding is the last location, `X_COUNT * Y_COUNT - 1`.
 impl<const X_COUNT: u16, const Y_COUNT: u16> Packed for RangedU16Pair<X_COUNT, Y_COUNT> {
-    const MAX_BITS: u32 = bits_for((X_COUNT as u64 * Y_COUNT as u64).saturating_sub(1));
+    const MAX_BITS: u32 = {
+        let () = Self::VALID;
+        bits_for(X_COUNT as u64 * Y_COUNT as u64 - 1)
+    };
+    const DECODE_BITS: u32 = u16::BITS;
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {

@@ -101,12 +101,10 @@ oracle by existing beside it.
 
 The sweep always reads `tests/fixtures/` — specimens this crate's own writers
 produced, with sidecars saying what was set, committed as the part of the
-corpus any checkout can carry (`tests/fixtures.rs` pins them as golden bytes).
-With `--features corpus` it also reads the private specimen corpus
-(`jmoo/nord-corpus`), as do two more suites that need the whole corpus in
-view at once: `tests/decode_sanity.rs` (cross-file invariants and behavior
-pins) and `tests/decode_snapshot.rs` (per-field decode snapshots for the
-Electro 5 and the Stage family).
+corpus any checkout can carry.
+With `--features corpus` it also reads the private specimen corpus. Two more
+suites then check corpus-backed behaviors (`tests/corpus_behaviors.rs`) and verify
+that every registered bit affects its declared field (`tests/coverage.rs`).
 
 ```sh
 cargo test -p nord-format                       # open suite: unit + dispatch + fixtures sweep

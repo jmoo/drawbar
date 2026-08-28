@@ -45,7 +45,7 @@ struct Cli {
 
     /// Mirror every frame exchanged with the instrument into a replay script at PATH.
     ///
-    /// The script is what `--replay` and the golden tests read back. An operation that
+    /// The script is what `--replay` and the protocol tests read back. An operation that
     /// transfers a body writes that body into it in full.
     ///
     /// Bulk traffic only: `device info` reads endpoint 0, which never reaches the script.
@@ -395,7 +395,7 @@ enum SlotAction {
         ///
         /// Change one thing on the instrument, say what you changed, and that capture is
         /// filed under your answer; repeat until a blank line. For building the
-        /// one-field-at-a-time corpus that pins down where a field lives.
+        /// one-field-at-a-time corpus used to locate fields.
         #[arg(long, requires = "out")]
         sweep: bool,
     },

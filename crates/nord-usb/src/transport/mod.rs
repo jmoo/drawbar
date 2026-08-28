@@ -11,10 +11,7 @@ pub mod usb;
 #[cfg(feature = "nusb")]
 pub use usb::UsbTransport;
 
-// ⚠️ Also gated on the architecture, not just the feature: `web-sys` only emits its
-// WebUSB bindings under `--cfg=web_sys_unstable_apis`, which `crates/.cargo/config.toml`
-// sets for the wasm target alone. Off wasm32 the module is simply absent, so a host
-// build of a workspace member that enables `web` still compiles.
+// ⚠️ `web-sys` emits WebUSB only under the unstable cfg supplied for wasm targets.
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub mod web;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]

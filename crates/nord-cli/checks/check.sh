@@ -52,10 +52,8 @@ grep -q "Usage: $name" help.txt || {
   exit 1
 }
 
-# The POC itself: a full read-only inventory sweep over a replayed exchange,
-# exercising transport → wire → session → op → CLI without a device. This is
-# the proof that the protocol stack works on this target, not merely that the
-# binary starts.
+# A replayed inventory exercises transport → wire → session → op → CLI, proving
+# the target behaves rather than merely starts.
 echo
 echo "== $name device status --replay =="
 run device status --replay "$POC_SCRIPT" >poc.txt 2>err.txt || {

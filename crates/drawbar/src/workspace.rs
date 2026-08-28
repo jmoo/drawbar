@@ -112,9 +112,7 @@ pub struct Container {
 impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
-        // The one header fact the parsed `Header` does not carry: a type-1 file holds
-        // a crc32 over its body at 0x18, a type-0 file a crc16 over the whole file in
-        // its last two bytes.
+        // `Header` omits the generation-specific checksum field.
         let (checksum_label, checksum) = match info.header.generation {
             Generation::V0 => {
                 let tail = bytes.get(bytes.len().checked_sub(2)?..)?;
@@ -604,9 +602,7 @@ impl Workspace {
             return id;
         };
         entity.kept = false;
-        // ⚠️ Said again, differently. `ingest` has already announced this as being on
-        // this computer, which is the one thing a view is not — and the banner over the
-        // document says so. The last line the operator reads has to be the true one.
+        // ⚠️ `ingest` logs a local copy; override that message because a view is transient.
         let where_ = match entity.origin.slot() {
             Some((class, at)) => crate::strings::place(class, at),
             None => "the instrument".to_string(),

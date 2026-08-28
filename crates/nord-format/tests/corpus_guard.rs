@@ -1,6 +1,6 @@
 //! The one test target that compiles under every feature set.
 //!
-//! ⚠️ The corpus suites (`decode_sanity.rs`, `decode_snapshot.rs`, and the corpus
+//! ⚠️ The corpus suites (`corpus_behaviors.rs`, `coverage.rs`, and the corpus
 //! half of `tests/corpus`) need `--features corpus`; without it they compile out
 //! and `cargo test` reports a pass having verified none of the decode. A set
 //! `NORD_CORPUS_ROOT` is someone saying they meant to run them.

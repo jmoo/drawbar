@@ -22,18 +22,8 @@ use super::{DeviceCmd, DeviceEvent, Outgoing};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
-/// Run many items inside **one** session.
-///
-/// ⚠️ Open once, loop the per-item unit, commit once — the batching shape `nord_usb::op`
-/// documents and the one the capture corpus shows NSM using. A session per item makes
-/// the instrument cycle its own display through an open and a close for every slot.
-///
-/// The body may emit events as it goes; they reach the UI while the run is still
-/// running, which is what makes a long walk feel live. The session is committed on
-/// **every** path out of the body, including an early `?`.
-///
-/// `write` escalates to a destructive session — the batch-write path needs it, a scan
-/// must not have it.
+/// Run a batch in one session, committing even when an item fails.
+/// `write` selects the destructive session mode; events remain live during the batch.
 macro_rules! one_session {
     ($t:expr, $class:expr, $changed:expr, |$s:ident| $body:block) => {
         one_session!(@run Session::open($t, $class).await?, $changed, |$s| $body)
@@ -284,16 +274,8 @@ async fn execute<T: Transport>(
     }
 }
 
-/// Write bytes into a slot, replacing whatever is there.
-///
-/// ⚠️ **An occupied destination is replaced, not overwritten.** The instrument answers
-/// status 4 to a write aimed at a slot that already holds something, so the occupant is
-/// read, deleted, and put back if the write fails — the slot is genuinely empty in
-/// between, and the only copy of its contents is in this process's memory. If the
-/// restore fails too, those bytes leave here as [`DeviceEvent::Rescued`] rather than
-/// being dropped on the floor.
-///
-/// Runs inside a session the caller owns, so a batch shares one.
+/// Replace a slot inside the caller's session.
+/// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -302,19 +284,12 @@ async fn put<T: Transport>(
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
-    // The destination exists, per the device's own geometry, before anything is deleted
-    // for it. Without this an impossible address is discovered once the transfer is under
-    // way and reported as a status code rather than as "there is no bank 7".
-    //
-    // ⚠️ **Fails open, and the single arm is the whole of it.** Only a check that came
-    // back and said no may stop a write; a check that could not be *made* — a truncated
-    // reply, a read that timed out — must not, because this is a read-only preflight and
-    // the write path answers for the address itself. Handing its error out of here would
-    // also feed the transport test that decides the instrument has gone, so a preflight
-    // that merely timed out would drop every cached name in the browser.
+    // ⚠️ Only a completed preflight may refuse the address. A failed preflight does
+    // not prove the write invalid; the authoritative info/write exchanges still follow.
     if let Ok(Some(why)) = op::check_address(s, at).await {
         return Ok(Err(format!("{}: {why}", shown(at))));
     }
+    let timestamp = unix_now()?;
 
     let existing = match op::info(s, at).await {
         Ok(info) => Some(info),
@@ -351,7 +326,6 @@ async fn put<T: Transport>(
         }
     }
 
-    let timestamp = unix_now();
     // "0" is a placeholder; the rename that follows is what names the slot.
     let written = op::write(s, at, &bytes, "0", timestamp).await;
 
@@ -390,17 +364,8 @@ async fn put<T: Transport>(
     })
 }
 
-/// Give the slot the name the thing just written into it goes by here.
-///
-/// ⚠️ **A write does not carry this app's name for what it wrote.** `BEGIN_WRITE` has a
-/// name argument of its own and nothing in this app chooses it, so without this the slot
-/// ends up called whatever that argument says — and the label the operator has been
-/// reading all along is not what the panel shows afterwards.
-///
-/// Runs inside the caller's session, before it commits, and therefore ahead of the
-/// reselect the UI queues once the whole command has landed. A rename that fails is
-/// reported and nothing more: the bytes are in the slot either way, and stopping a batch
-/// over a name would leave the instrument half-written for the sake of a label.
+/// Rename a newly written slot before commit; writes do not carry the local label.
+/// A rename failure is reported but does not fail a successful write.
 async fn name_slot<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -425,19 +390,10 @@ async fn name_slot<T: Transport>(
     }
 }
 
-/// What the instrument is asked to call a slot, from what this app calls the object.
-///
-/// The local list names a program the way a file is named — `Africa-Split.ne5p` — and the
-/// panel has no use for the format tag, so it comes off. Nothing else is changed: the
-/// name is the operator's, and this is the one place it crosses back onto the hardware.
-///
-/// `None` where there would be nothing left to send, which leaves the slot named whatever
-/// the write named it rather than blanking it.
+/// Strip the format suffix from a local label, preserving the operator's text.
+/// Returns `None` rather than sending a blank name.
 fn slot_label(name: &str) -> Option<String> {
-    /// ⚠️ This app's own bound, not the instrument's. Nothing on the wire limits a rename
-    /// — the length field is a `u32` — and no capture shows one being refused for length,
-    /// so there is no measured ceiling to hold to. This is here so a name that got out of
-    /// hand cannot be written onto the panel whole.
+    /// An application bound; the instrument's maximum is unknown.
     const LONGEST: usize = 64;
 
     let mut label = name.trim();
@@ -583,14 +539,7 @@ async fn slot_info<T: Transport>(
     finish(r, closed)
 }
 
-/// How long any single read in a walk may take.
-///
-/// Every read is bounded either way — a session with no limit of its own still holds to
-/// [`nord_usb::session::READ_LIMIT`] — so this buys speed of failure and nothing else: a
-/// walk that has wedged reports in ten seconds rather than thirty, and its closing
-/// exchanges are bounded with it. A walk is dozens of small reads that a working
-/// instrument answers in milliseconds, which is what makes the tighter bound safe here
-/// and not on a transfer.
+/// A shorter per-frame limit for metadata walks; transfers keep the session default.
 const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 
 /// ⚠️ A ceiling on a walk, not a device fact. What really ends a walk is the device's own
@@ -639,18 +588,8 @@ struct Walked {
     how: &'static str,
 }
 
-/// One class end to end, all inside one session: its geometry, its counters, the slot the
-/// panel is on, then every bank.
-///
-/// The device is asked to divide the class into banks itself ([`op::banks`]) — which for
-/// pianos names the panel's categories — and only where it will not does the caller's
-/// `per_bank`/`cap` guess stand in.
-///
-/// Slots are found by cursor ([`op::occupied_slots`]) on a class sparse enough for it to
-/// pay — see [`worth_the_cursor`] — and by asking about every address otherwise. The
-/// cursor is also refused outright with [`op::ENUMERATION_DISABLED`]; see that constant
-/// for when. Either way a vacant slot is a `None` row, so the banks that leave here have
-/// the same shape.
+/// Scan one class in one session, preferring device geometry and sparse enumeration.
+/// Both enumeration paths return the same bank shape, including vacant rows.
 async fn scan_class<T: Transport>(
     t: &mut T,
     class: ObjectClass,
@@ -713,10 +652,7 @@ async fn scan_class<T: Transport>(
             Err(e) => return Err(e),
         }
 
-        // Two gates, and they are different questions. The cursor reports content and
-        // never the end of a class, so a plan with only a guessed ceiling has nothing to
-        // stop it painting empty banks past the last real one; and on a full class the
-        // cursor costs more round trips than it saves.
+        // The cursor is useful only for sparse content with a known class boundary.
         let capacity: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
         let sparse = capacity.is_none_or(|capacity| worth_the_cursor(held, capacity));
         let found = match ends_known && sparse {
@@ -744,9 +680,7 @@ async fn scan_class<T: Transport>(
                 Some(capacity) => walk_bank(&mut s, planned.bank, capacity).await?,
                 None => walk_open_bank(&mut s, planned.bank).await?,
             };
-            // A bank the device refused outright is past the end of the class — but only
-            // where nothing said where that end is. Told its banks, the walk reads them
-            // all, because an empty one is not a last one.
+            // Without geometry, a refused bank marks the end; an empty known bank does not.
             if slots.is_empty() && !ends_known {
                 break;
             }
@@ -760,9 +694,7 @@ async fn scan_class<T: Transport>(
                 bank: planned.bank,
                 slots,
             });
-            // A short bank is the end of the class only when nothing said where that is.
-            // Told the banks, the walk trusts them: a category that holds fewer than its
-            // capacity is a short bank and not a last one.
+            // A short bank marks the end only when the device supplied no geometry.
             if short && !ends_known {
                 break;
             }
@@ -793,26 +725,12 @@ fn guessed(banks: u32, per_bank: u32) -> Vec<Planned> {
         .collect()
 }
 
-/// Whether the cursor walk is worth its round trips on a class this full.
-///
-/// The cursor costs roughly two exchanges per **occupied** slot — one to step onto it and
-/// one to read its name — plus a probe per bank; asking about every address costs one per
-/// **address**. So the cursor wins on a sparse class, loses on a full one, and the two
-/// cross at half full.
-///
-/// ⚠️ Not a micro-optimisation: a factory instrument's program banks are full, so the
-/// wrong answer here makes the commonest scan there is pay double.
+/// Use cursor enumeration below half capacity, where its two exchanges per item win.
 fn worth_the_cursor(held: u32, capacity: u32) -> bool {
     capacity > 0 && held.saturating_mul(2) < capacity
 }
 
-/// How many occupied slots the cursor walk may report before it is cut off.
-///
-/// ⚠️ A bank the device stated no capacity for contributes the whole remaining budget,
-/// never the caller's per-bank guess. A sample library is one such bank, and capping it at
-/// the 50 a program bank holds would report the first 50 of 120 samples as though that
-/// were all of them — with no error raised anywhere, and the folder's own header saying
-/// otherwise.
+/// Bound cursor enumeration; an unstated bank capacity receives the remaining budget.
 fn cap_slots(plan: &[Planned], held: u32) -> usize {
     let stated: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
     match stated {
@@ -840,9 +758,7 @@ async fn occupied<T: Transport, C>(
     for at in found {
         match op::info(s, at).await {
             Ok(info) => out.push((at, info)),
-            // A slot the cursor named and the read found vacant: something emptied it
-            // between the two. Skipped rather than failed — the rest of the class is
-            // still good, and one row is not worth losing a folder over.
+            // A cursor hit may be emptied before INFO; keep the rest of the scan.
             Err(Error::DeviceStatus(1)) => {}
             Err(e) => return Err(e),
         }
@@ -1031,16 +947,25 @@ async fn delete<T: Transport>(
 /// ⚠️ `SystemTime::now()` traps on `wasm32-unknown-unknown`, so the browser's own clock
 /// is what the web build reads.
 #[cfg(not(target_arch = "wasm32"))]
-fn unix_now() -> u32 {
-    std::time::SystemTime::now()
+fn unix_now() -> Result<u32, Error> {
+    let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0)
+        .map_err(|e| {
+            Error::InvalidArgument(format!("system clock is before the Unix epoch: {e}"))
+        })?;
+    u32::try_from(elapsed.as_secs())
+        .map_err(|_| Error::InvalidArgument("system time does not fit the device protocol".into()))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn unix_now() -> u32 {
-    (js_sys::Date::now() / 1000.0) as u32
+fn unix_now() -> Result<u32, Error> {
+    let seconds = js_sys::Date::now() / 1000.0;
+    if !(0.0..=f64::from(u32::MAX)).contains(&seconds) {
+        return Err(Error::InvalidArgument(
+            "system time does not fit the device protocol".into(),
+        ));
+    }
+    Ok(seconds as u32)
 }
 
 /// What the workspace calls an object read off the instrument.
@@ -1073,7 +998,11 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
         .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
         .map(|tag| String::from_utf8_lossy(tag).into_owned())
         .unwrap_or_else(|| "bin".to_string());
-    format!("nord-rescued-{}-{}.{format}", at.bank + 1, at.slot + 1)
+    format!(
+        "nord-rescued-{}-{}.{format}",
+        at.user_bank(),
+        at.user_slot()
+    )
 }
 
 #[cfg(test)]
@@ -1385,9 +1314,7 @@ mod wire_tests {
                 }
                 cmd::INFO => {
                     let at = at();
-                    // Status 3 is "outside this instrument's slot space", which is how a
-                    // walk with nothing else to go on finds the end of a bank and of the
-                    // class.
+                    // Status 3 marks the address-space boundary for geometry-free walks.
                     let capacity = self.banks.get(at.bank as usize).map(|(_, slots)| *slots);
                     if capacity.is_none_or(|slots| at.slot >= slots) {
                         return Some((3, Vec::new()));

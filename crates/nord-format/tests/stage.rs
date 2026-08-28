@@ -153,9 +153,7 @@ stage_body!(
 /// table: layer A's zone, one layer stride above B's in each preset.
 #[test]
 fn stage4_preset_zones_sit_one_stride_apart() {
-    // Zone = 9 in both layers, MSB-first. Synth: bits 338..=341 and 746..=749 are bits
-    // 2..=5 of bytes 42 and 93. Organ: 184..=187 and 432..=435 are the high nibbles of
-    // bytes 23 and 54. Piano: 144..=147 and 240..=243 the high nibbles of bytes 18 and 30.
+    // Zone 9 is placed directly into both layers at each preset type's declared offsets.
     let mut raw = [0u8; ns4::synth::BODY_LEN];
     raw[42] |= 0b0010_0100;
     raw[93] |= 0b0010_0100;

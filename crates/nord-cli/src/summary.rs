@@ -96,13 +96,20 @@ fn drawbars(ui: &Ui, positions: &[u8]) -> String {
 /// gets the same rendering; only the `kind` line and the slot space differ. `at` is the
 /// header's own `(bank, slot)`, whichever space the caller reads it in.
 fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
+    ui.out(field(ui, 2, "type", kind));
+    ui.out(field(ui, 2, "location", location(at.0, at.1)));
+    keyboard(ui, p);
+    voices(ui, p);
+    effects(ui, p);
+    organ(ui, p);
+}
+
+fn keyboard(ui: &Ui, p: &ne5::Program) {
     let split = if p.center_panel.split {
         format!("yes @ {:?}", p.center_panel.split_point)
     } else {
         "no".to_string()
     };
-    ui.out(field(ui, 2, "type", kind));
-    ui.out(field(ui, 2, "location", location(at.0, at.1)));
 
     section(ui, "Keyboard");
     for (name, part, octave, sustain, control) in [
@@ -160,7 +167,9 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
         ),
     ));
     ui.out(field(ui, 4, "gain", p.center_panel.gain));
+}
 
+fn voices(ui: &Ui, p: &ne5::Program) {
     section(ui, "Voices");
     let (piano, sample) = (&p.piano_panel, &p.sample_panel);
     ui.out(field(
@@ -214,11 +223,9 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
             dep_id(sample.id),
         ),
     ));
+}
 
-    // Effects. Each value prints itself: a `Level` carries the panel's 0..10 reading,
-    // and the fields that are not on that scale — the fx rates in hertz, the delay time
-    // in milliseconds, the equalizer's bipolar decibels — carry their own. Deciding it
-    // here is what let fx1's rate print a 0..10 reading it does not have.
+fn effects(ui: &Ui, p: &ne5::Program) {
     let fx = &p.effects_panel;
     section(ui, "Effects");
     ui.out(format!(
@@ -278,10 +285,7 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
         )),
         None => off("delay", &fx.fx4),
     }
-    // ⚠️ Inferred from specimens; not confirmed on hardware. `fx5` set is read as
-    // reverb *on*: every `fx5_1xx` specimen holds it set, and the opposite sense
-    // would make all of them captures of a disabled reverb whose type and wet
-    // level were varied.
+    // Inferred from specimens; not confirmed on hardware: `fx5` set means reverb on.
     if fx.fx5 {
         ui.out(format!(
             "    {:<FX_WIDTH$}{:<15}  {} {}",
@@ -320,7 +324,9 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
         ui.dim("stop"),
         if fx.rotary_stop { "on" } else { "off" },
     ));
+}
 
+fn organ(ui: &Ui, p: &ne5::Program) {
     // The file keeps the full state of all four models, and b3+bass cannot be
     // read without preset 1 and preset 2 side by side, so every row is printed.
     if p.center_panel.lower_part == Instrument::Organ
@@ -347,13 +353,9 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
                 let mark = if Some(model) == sel_model { "*" } else { " " };
                 let live = if o.preset(model) == preset { "<" } else { " " };
 
-                // In b3+bass, preset 1 is the bass manual: two drawbars, kept
-                // outside the nine-nibble block. The nine nibbles are stale
-                // there, so printing them would be actively misleading.
+                // B3+bass preset 1 uses two bass drawbars; its nine-nibble block is stale.
                 let bars = if selected.is_b3_bass() && model == OrganModel::B3 && preset == 1 {
-                    // Only two of the nine positions exist on the bass manual;
-                    // dots for the rest so it lines up with the other rows and
-                    // cannot be misread as a nine-drawbar registration.
+                    // Dots align the two-bar bass manual without inventing seven bars.
                     let b = o.b3_bass_drawbars();
                     let plain = format!("{}{}.......", b[0], b[1]);
                     if ui.unicode() {
@@ -362,10 +364,7 @@ fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
                         plain
                     }
                 } else if model == OrganModel::Farfisa {
-                    // Farfisa's drawbars are on/off tabs on the panel, but the
-                    // file still stores nine positions and the low bits of each
-                    // vary independently of the on/off threshold. Show both, or
-                    // the display silently discards them.
+                    // Farfisa tabs are on/off, but their stored positions retain extra bits.
                     let (on, off) = if ui.unicode() {
                         ('█', '·')
                     } else {
@@ -584,9 +583,7 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
             ),
         ));
     }
-    // A total over a partly-unknown set would read as a measurement, so say which
-    // part is missing instead. Only the first stroke of a many-zone instrument can
-    // be unknown, so this is at most one line of caveat.
+    // Do not present a partial packet count as a complete measurement.
     let counted: usize = strokes.iter().filter_map(|s| s.packets).sum();
     let unknown = strokes.iter().filter(|s| s.packets.is_none()).count();
     ui.out(field(
@@ -633,9 +630,7 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Settings(Settings::Electro5(s)) => {
             ui.out(field(ui, 2, "type", "Electro 5 settings (ne5s)"));
 
-            // Not a menu — the state the instrument restores at power-up. The Live slot
-            // and the program are each retained while the other is in use, so both are
-            // shown whichever mode is active.
+            // Startup retains both program and live locations regardless of active mode.
             let boot = &s.body;
             section(ui, "Startup");
             for (name, value) in [

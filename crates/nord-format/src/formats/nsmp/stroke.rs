@@ -23,10 +23,9 @@ const LATER_HEADER_LEN: usize = 372;
 /// completely, the whole thing grows by one [`PACKET_LEN`] and the header starts over
 /// with a full packet's worth of room.
 ///
-/// Measured over every version-200 specimen: 39 of 42 put the first packet 1146 bytes
-/// into the body and the other 3 put it at 1527. It also reconciles the vendor library
-/// with our own output, which differ by 15 bytes of header at equal zone counts for the
-/// mundane reason that their `cat` section is 9 bytes where ours is 24.
+/// Observed first-packet offsets are 1146 and 1527. This also explains the 15-byte
+/// header difference between vendor files and our output at equal zone counts: their
+/// `cat` payload is 9 bytes and ours is 24.
 const PREAMBLE: usize = 990;
 
 /// The first stroke's header, from the two sections that share the preamble with it.
@@ -35,9 +34,7 @@ const PREAMBLE: usize = 990;
 pub fn first_header_len(cat_len: usize, map_len: usize) -> usize {
     let used = cat_len + map_len;
     let mut room = PREAMBLE;
-    // Strictly greater: a header of zero does not occur, and an instrument whose
-    // metadata lands exactly on the boundary takes the next step up. Twelve zones of
-    // ours is that case.
+    // Exact-boundary metadata advances because a zero-length header does not occur.
     while room <= used {
         room += PACKET_LEN;
     }

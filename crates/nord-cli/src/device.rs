@@ -8,7 +8,7 @@
 //! `duplicate`) each describe what they will touch and then refuse to proceed without
 //! `--yes`.
 
-use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -48,10 +48,7 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
         }
     };
 
-    // Not merely an empty inventory: every class is queried, so nothing coming back
-    // means no class answered at all. Reporting that as success would make a wedged
-    // instrument look like a working one with nothing on it — but a connection failing
-    // mid-run produces the same empty report, so the message cannot assert the wedge.
+    // An empty report means no class answered, not that every class is empty.
     if report.is_empty() {
         return Err(
             "no object class answered — either the instrument is not in a usable \
@@ -99,9 +96,7 @@ pub fn info(ui: &Ui) -> Result<(), String> {
             "  serial:    {}",
             d.serial_number().unwrap_or("(none reported)")
         ));
-        // The vendor-specific interface is the one this protocol rides. Without it the
-        // device is a Clavia but not one this tool can drive, and saying so here saves a
-        // confusing failure inside the first transaction.
+        // The protocol requires the vendor-specific interface, not USB-MIDI alone.
         let vendor_iface = d.interfaces().any(|i| i.class() == 0xff);
         ui.out(format!(
             "  protocol:  {}",
@@ -279,7 +274,7 @@ pub fn set_recording(path: Option<PathBuf>) {
 /// Run one transaction on the instrument, recording what it was for and — if it failed —
 /// what it produced.
 ///
-/// A recording is a finished golden only if the script says both, and they cannot be
+/// A recording is replayable only if the script says both, and they cannot be
 /// written at the same moment: the intent goes ahead of the frames, the outcome is only
 /// known once they are on disk. A success writes nothing, because a section that says
 /// nothing expects `ok`.
@@ -421,9 +416,7 @@ pub fn sweep(
     ui.note("each prompt reopens with your last answer, editable; clear it to finish");
 
     let mut captured = 0usize;
-    // The previous answer, waiting in the next prompt's buffer. A sweep walks one field
-    // along its range, so consecutive answers differ by a digit and retyping the whole
-    // line each step is most of the work.
+    // Reuse the last answer because adjacent captures usually differ by one value.
     let mut previous = String::new();
     while let Some(label) = ui.ask("what changed", &previous)? {
         previous = label.clone();
@@ -434,10 +427,8 @@ pub fn sweep(
                 continue;
             }
         };
-        // Refuse a name already used *before* reading: the read is the slow part, and a
-        // capture that silently replaced an earlier one would leave the corpus holding
-        // two states under one description.
-        if taken(&dir, &stem) {
+        // Refuse duplicates before the slow device read.
+        if taken(&dir, &stem)? {
             ui.warn(format!(
                 "{stem:?} is already captured; give this one another name"
             ));
@@ -457,7 +448,14 @@ pub fn sweep(
             true => format!("{stem}.bin"),
             false => format!("{stem}.{}", info.format),
         });
-        std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        output
+            .write_all(&file)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         captured += 1;
         ui.note(format!("  {} ({} bytes)", path.display(), file.len()));
     }
@@ -472,17 +470,14 @@ pub fn sweep(
 /// is the only record of what the bytes mean, so it stays readable: whitespace runs
 /// become one `-`, and only what a path cannot carry is dropped.
 fn stem(label: &str) -> Result<String, String> {
-    // A separator is owed rather than written, so a run of them collapses to one `-` and
-    // nothing trailing survives. `-` itself is owed too: `5 -> 6` loses the `>` to the
-    // rule below, and three dashes in its place read as noise.
+    // Defer separators so runs collapse and trailing punctuation disappears.
     let mut owed = false;
     let mut out = String::with_capacity(label.len());
     for c in label.chars() {
         match c {
             '-' => owed = !out.is_empty(),
             _ if c.is_whitespace() => owed = !out.is_empty(),
-            // Path separators, plus the characters a Windows filename cannot hold — a
-            // corpus is read on both.
+            // The corpus must remain readable on Windows.
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => owed = !out.is_empty(),
             _ if c.is_control() => {}
             _ => {
@@ -493,24 +488,36 @@ fn stem(label: &str) -> Result<String, String> {
             }
         }
     }
-    // A leading dot hides the file, dots alone spell `.` and `..`, and a trailing one is
-    // dropped by Windows. Leading dashes go with them: a name starting with one is an
-    // option to every tool that later reads this directory.
+    // Trim shell-option prefixes and dots that are hidden or invalid across platforms.
     let out = out.trim_matches(['.', '-']);
     if out.is_empty() {
         return Err(format!("{label:?} leaves nothing usable as a filename"));
+    }
+    let device = out.split('.').next().unwrap_or(out).to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device
+            .strip_prefix("COM")
+            .or_else(|| device.strip_prefix("LPT"))
+            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    if reserved {
+        return Err(format!("{label:?} is a reserved filename on Windows"));
     }
     Ok(out.to_string())
 }
 
 /// Whether a capture under this name already exists, whatever extension it took.
-fn taken(dir: &Path, stem: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries
-        .flatten()
-        .any(|e| Path::new(&e.file_name()).file_stem() == Some(OsStr::new(stem)))
+fn taken(dir: &Path, stem: &str) -> Result<bool, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let same = Path::new(&entry.file_name())
+            .file_stem()
+            .is_some_and(|held| held.to_string_lossy().eq_ignore_ascii_case(stem));
+        if same {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Write a file into a slot, overwriting it.
@@ -540,7 +547,14 @@ pub fn put(
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as u32);
+        .map(|d| u32::try_from(d.as_secs()))
+        .transpose()
+        .map_err(|_| {
+            format!(
+                "{}: modification time does not fit the protocol",
+                path.display()
+            )
+        })?;
 
     send(
         ui,
@@ -589,9 +603,7 @@ pub fn send(
 ) -> Result<(), String> {
     let mut t = open_usb()?;
 
-    // Bounds first, from the device's own geometry. Without this an impossible address
-    // is only discovered once the transfer is under way, and the report is a status code
-    // rather than a reason.
+    // Check geometry before the transfer starts.
     let bad = transact(
         &mut t,
         format!("{} check-address {}", noun(class), addr(at)),
@@ -608,6 +620,17 @@ pub fn send(
     if let Some(reason) = bad {
         return Err(format!("{}: {reason}", shown(at)));
     }
+
+    let timestamp = match stamp {
+        Some(stamp) => stamp,
+        None => {
+            let elapsed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| format!("system clock is before the Unix epoch: {e}"))?;
+            u32::try_from(elapsed.as_secs())
+                .map_err(|_| "system time does not fit the device protocol".to_string())?
+        }
+    };
 
     // Name what is about to be destroyed before destroying it. An empty destination is
     // not a failure: status 1 means the slot is vacant, so there is nothing to report.
@@ -685,15 +708,6 @@ pub fn send(
         )
         .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
-
-    // The device can refuse a timestamp it considers to be in the future, so prefer
-    // the file's mtime; now() only when there is no file to ask.
-    let timestamp = stamp.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as u32)
-            .unwrap_or(0)
-    });
 
     // What the slot ends up called: the caller's choice, else the occupant's name.
     let write_name = name
@@ -1098,13 +1112,9 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     })
     .map_err(|e| explain(e, at))?;
 
-    // The device reports a row for a section that is not routed, resolving its model
-    // index to a library object the program does not actually use — so an unfiltered
-    // list names pianos a program's own body records as `none`.
+    // Unrouted sections still report rows, but they are not live dependencies.
     let (live, idle): (Vec<_>, Vec<_>) = deps.iter().partition(|d| d.flag == 1);
-    // A routed section with nothing assigned still gets a row, with a null id. It is a
-    // real fact about the program but it is not a dependency, and listing it as one
-    // invites a bundle walk to look for an object that does not exist.
+    // Null ids describe unassigned routed sections, not library objects.
     let (live, unassigned): (Vec<_>, Vec<_>) = live.into_iter().partition(|d| d.is_required());
 
     if live.is_empty() {
@@ -1376,10 +1386,7 @@ pub fn list(ui: &Ui, class: ObjectClass, cap: usize) -> Result<(), String> {
             let r = async {
                 let mut rows = Vec::new();
                 for at in usb_op::occupied_slots(&mut s, cap).await? {
-                    // The cursor reports what follows a position, never whether the
-                    // position itself holds anything, so the first address may be empty.
-                    // An empty slot answers status 1, which is a refusal and leaves the
-                    // session usable.
+                    // The cursor may return an empty starting address; status 1 is harmless.
                     match usb_op::info(&mut s, at).await {
                         Ok(info) => rows.push((at, info)),
                         Err(nord_usb::Error::DeviceStatus(1)) => {}
@@ -1489,9 +1496,7 @@ pub fn probe(
     let svc = nord_usb::Service::from_raw(service);
     let mut t = open_usb()?;
 
-    // No session: write the frame, read whatever comes back. For recovering from a state
-    // where the session machinery itself is what refuses, so wrapping this in a session
-    // would fail before the command was ever sent.
+    // Bare probes bypass session machinery that may itself be refusing commands.
     if bare {
         let reply = nord_usb::block_on(async {
             let req = nord_usb::Message::new(svc, subsystem, op, words.clone());
@@ -1529,10 +1534,7 @@ pub fn probe(
             .await;
         let changed = s.instrument_changed();
         let closed = s.commit().await;
-        // Deliberately not `finish`: a probed command may well invalidate the session,
-        // and losing what it answered because the close then failed throws away the
-        // finding this whole command exists to collect. The close's failure is reported
-        // alongside rather than instead.
+        // Preserve a probe reply even if that unknown command made the close fail.
         r.map(|reply| (reply, changed, closed.err()))
     })
     .map_err(|e| e.to_string())?;
@@ -1673,15 +1675,17 @@ fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u
 /// Filename for a rescued slot: the location as the instrument labels it, and the
 /// object's own format tag so the file can be handed straight back to `put`.
 fn rescue_name(at: Location, backup: &[u8]) -> String {
-    // Read the tag out of the header rather than through `envelope::unwrap`, which also
-    // verifies the checksum. These bytes are the last copy of the slot even if they fail
-    // that check, so naming them must not depend on it.
+    // The rescue name must survive a bad checksum in the slot's last remaining copy.
     let format = backup
         .get(8..12)
         .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
         .map(|tag| String::from_utf8_lossy(tag).into_owned())
         .unwrap_or_else(|| "bin".to_string());
-    format!("nord-rescued-{}-{}.{format}", at.bank + 1, at.slot + 1)
+    format!(
+        "nord-rescued-{}-{}.{format}",
+        at.user_bank(),
+        at.user_slot()
+    )
 }
 
 #[cfg(test)]
@@ -1740,7 +1744,7 @@ mod tests {
     /// indistinguishable from the ones around it.
     #[test]
     fn an_answer_with_no_filename_in_it_is_refused() {
-        for bad in ["...", "/", "  ", "?*", "-"] {
+        for bad in ["...", "/", "  ", "?*", "-", "CON", "lpt1.txt"] {
             assert!(stem(bad).is_err(), "{bad:?}");
         }
     }

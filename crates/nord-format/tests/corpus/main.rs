@@ -93,9 +93,7 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         }
     }
 
-    // A decoded value no component can name is worth investigating, not
-    // suppressing. An all-ones body is exempt: it is a slot the instrument
-    // never wrote, so every field there is legitimately out of table.
+    // All-ones bodies are unwritten slots, so their fields may be outside every table.
     let all_ones = info
         .as_ref()
         .map(|i| {
@@ -107,9 +105,7 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         if let Some(values) = registry::field_values(&entity) {
             let unknown: Vec<String> = values
                 .into_iter()
-                // An out-of-table value renders as `unknown (raw)` / `Unknown(raw)`.
-                // A *named* variant spelled Unknown — the Electro 5's old-firmware
-                // off routing — is vocabulary, not a gap, and renders bare.
+                // Parenthesized `unknown` is out-of-table; a bare named Unknown is valid.
                 .filter(|v| v.value.contains("unknown (") || v.value.contains("Unknown("))
                 .filter(|v| !known_unexplained(&v.name, &v.value))
                 .map(|v| format!("{} = {}", v.name, v.value))

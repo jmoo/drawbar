@@ -1,19 +1,8 @@
 //! Converting between the wire's entity **body** and an on-disk `CBIN` file.
 //!
-//! The device transfers only the body — 121 bytes for an Electro 5 program — while a
-//! `.ne5p` on disk is that body behind a `CBIN` header. The header is fully determined
-//! by the body plus the slot it came from, so a read can be turned into a byte-exact
-//! file and a file can be stripped back down for a write. The header codec and the
-//! checksum live in `nord_format::cbin`; this module only pairs a wire body with the
-//! header the device implies.
-//!
-//! **Verified**: rebuilding the header from `(body, bank, slot, version)` reproduces all
-//! 41 program specimens in the corpus byte-for-byte.
-//!
-//! ⚠️ The header is *not* fully determined by the body and slot alone: the schema version
-//! at `0x14` differs per format tag (`ne5p` is 4, `ne5t` is 0 or 1), so it has to be
-//! supplied by the caller from the device's own `0x1e` object-info response. Substituting
-//! a constant reproduces programs correctly and silently corrupts every other class.
+//! The device transfers an entity body without its on-disk `CBIN` header. The
+//! format, schema version, slot, and body reported by the device determine that
+//! header; the container codec and checksum remain in `nord_format::cbin`.
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
@@ -28,8 +17,12 @@ pub fn crc32(data: &[u8]) -> u32 {
 
 /// A wire slot as the header's `(bank, slot)` pair. Zero-indexed on both sides — one
 /// below the display.
-fn slot(at: Location) -> (u16, u16) {
-    (at.bank as u16, at.slot as u16)
+fn slot(at: Location) -> Result<(u16, u16)> {
+    let bank = u16::try_from(at.bank)
+        .map_err(|_| Error::InvalidArgument(format!("bank {} does not fit in CBIN", at.bank)))?;
+    let slot = u16::try_from(at.slot)
+        .map_err(|_| Error::InvalidArgument(format!("slot {} does not fit in CBIN", at.slot)))?;
+    Ok((bank, slot))
 }
 
 /// The slot a header addresses, as the wire spells it.
@@ -59,7 +52,7 @@ pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec
     }
 
     let file = Cbin {
-        header: Header::new(format, slot(at), version),
+        header: Header::new(format, slot(at)?, version),
         body: RawBody(body.to_vec()),
     };
     let mut out = Cursor::new(Vec::new());
@@ -157,5 +150,17 @@ mod tests {
             unwrap(&file).is_err(),
             "a corrupted body should fail the checksum"
         );
+    }
+
+    #[test]
+    fn wrap_rejects_an_address_the_container_cannot_represent() {
+        let at = Location {
+            bank: u16::MAX as u32 + 1,
+            slot: 0,
+        };
+        assert!(matches!(
+            wrap("ne5p", at, 4, &[1]),
+            Err(Error::InvalidArgument(_))
+        ));
     }
 }

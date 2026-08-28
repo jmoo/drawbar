@@ -98,10 +98,8 @@ fn open() -> Result<(DeviceCard, UsbTransport), String> {
     let interface = interface.interface_number();
 
     let transport = UsbTransport::open(&info).map_err(|e| e.to_string())?;
-    // Endpoint 0, outside the bulk protocol and outside any session, so it is answerable
-    // here and on an instrument that has stopped serving the protocol entirely. A device
-    // that will not answer is still a device this app can drive, so a failure costs the
-    // identity lines and nothing else.
+    // Endpoint 0 is outside sessions; failure here hides identity details but does not
+    // make the bulk transport unusable.
     let identity = transport.identity().ok();
 
     let card = DeviceCard {

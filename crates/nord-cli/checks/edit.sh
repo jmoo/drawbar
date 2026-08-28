@@ -32,11 +32,8 @@ run program edit --set center_panel.gain=64 -o base.ne5p >/dev/null 2>err.txt ||
   cat err.txt
   exit 1
 }
-# ⚠️ Capture to a file and grep the file — never pipe an emulated binary
-# straight into `grep`. Under Wine that pipeline reports no match for a line
-# the captured output plainly contains, and the failure branch cannot show it
-# to you either. Cause not established; the file is the reliable form and
-# costs nothing.
+# ⚠️ Under Wine, piping directly to grep can miss present output. Capture first;
+# the cause is unknown and the file path is reliable.
 run verify base.ne5p >verified.txt 2>err.txt || {
   echo "a written program did not round-trip:"
   cat verified.txt err.txt
@@ -54,11 +51,8 @@ run program edit base.ne5p \
 }
 cat edited.txt
 
-# `transpose_enabled` is bit 23 and `transpose` bits 24..=27 of a panel
-# starting at 0x2e, so bytes 0x30 and 0x31 — plus the body CRC at 0x18..=0x1b,
-# which any body change moves. `cmp -l` counts from one.
-# `cmp` reports a difference by exiting non-zero, which is the expected
-# outcome here, so its status must not end the script.
+# Transpose owns bytes 0x30..=0x31; any body edit also moves CRC 0x18..=0x1b.
+# `cmp -l` counts from one and exits nonzero when it finds the expected differences.
 moved=$( (cmp -l base.ne5p edited.ne5p || true) | awk '{print $1}' | tr '\n' ' ')
 [ "$moved" = "25 26 27 28 49 50 " ] || {
   echo "edit touched the wrong bytes"
@@ -79,9 +73,8 @@ grep -q 'transpose: -5  (on)' decoded.txt || {
   exit 1
 }
 
-# Presentation is gated on a TTY, and there is none here. This is the check
-# the byte-identical Wine/Linux result rests on: an escape sequence surviving
-# a pipe would make that comparison depend on the console, not on the decode.
+# Non-TTY output must omit escapes so Wine/Linux comparison reflects the decode,
+# not their consoles.
 run program edit base.ne5p --set center_panel.gain=1 --dry-run >plain.txt 2>&1
 run --color=always program edit base.ne5p --set center_panel.gain=1 --dry-run \
   >colored.txt 2>&1

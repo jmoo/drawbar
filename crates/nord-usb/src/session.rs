@@ -43,21 +43,10 @@ pub const DRAIN_CAP: usize = 32;
 /// recoverable without touching the instrument: see [`Session::open`].
 pub const STALE_SESSION: u32 = 0x12;
 
-/// How long any write may take when the caller has set no limit of its own.
-///
-/// Generous on purpose: this is not a latency budget but a liveness one. Frames are small
-/// and a working instrument accepts them in milliseconds, so the only thing this can
-/// catch is an endpoint that has stopped accepting writes altogether — a state where the
-/// alternative is hanging forever with nothing to report.
+/// Per-frame write liveness bound.
 pub const WRITE_LIMIT: Duration = Duration::from_secs(10);
 
-/// How long any single read may take when the caller has set no limit of its own.
-///
-/// A liveness bound, not a latency one, and deliberately far longer than
-/// [`WRITE_LIMIT`]: a read waits on the device to *do* something, and an erase before a
-/// large write is genuinely slow. It bounds one frame, not one operation — a piano
-/// transfer is thousands of frames and each arrives promptly — so the only thing this can
-/// catch is a device that has stopped answering, where the alternative is waiting forever.
+/// Default per-frame read liveness bound; callers may override it per session.
 pub const READ_LIMIT: Duration = Duration::from_secs(30);
 
 pub struct Session<'t, T: Transport, C = ReadOnly> {
@@ -67,10 +56,7 @@ pub struct Session<'t, T: Transport, C = ReadOnly> {
     class: ObjectClass,
     closed: bool,
     device_changed: bool,
-    /// How long any single read in this session may take. `None` waits forever, which
-    /// is right for the commands NSM sends — they always answer. Set it before probing
-    /// a command that might not, so the closing exchanges cannot hang either.
-    read_limit: Option<Duration>,
+    read_limit: Duration,
     _capability: PhantomData<C>,
 }
 
@@ -86,40 +72,23 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             class,
             closed: false,
             device_changed: false,
-            read_limit: None,
+            read_limit: READ_LIMIT,
             _capability: PhantomData,
         };
 
-        // The UI/session-service handshake, then the class-scoped open, one fallible
-        // step at a time — each failure needs to know whether the `HELLO` reached the
-        // device, because from that moment on it holds a UI session that only `GOODBYE`
-        // releases.
-        //
-        // ⚠️ Left half-open the device does not hang or refuse: it keeps answering, and
-        // reports device status 0x1 ("empty") for every slot in every object class. That
-        // survives reopening the session and clears only on a power cycle. Confirmed on
-        // hardware.
-        //
-        // Errors are caught rather than propagated with `?` so the half-built session
-        // can be released first ([`Self::release`] marks it closed and says the
-        // best-effort GOODBYE) — the Drop assertion is there to catch *forgotten*
-        // commits, not failed connections.
+        // ⚠️ Confirmed on hardware: an abandoned UI session makes every slot appear empty.
         s.handshake().await?;
 
         let opened = s.open_class(class).await;
 
-        // A session left open by an earlier run makes the device refuse this one with
-        // `0x12`, and every operation is wrapped in a session — so without this the
-        // instrument looks broken and the fix (a bare SESSION_CLOSE) is unreachable
-        // through any normal command.
-        //
         // ⚠️ This covers an abandoned *class* session only. An abandoned **UI** session
-        // is a different fault with a different cure: the device keeps answering and
-        // reports every slot as empty, with no error to react to. Nothing here can detect
-        // that, and the honest fix is operator-driven — see [`recover`].
+        // reports every slot as empty without an error; [`recover`] handles that case.
         let opened = match opened {
             Err(Error::DeviceStatus(STALE_SESSION)) => {
-                s.discard_stale_session().await?;
+                if let Err(error) = s.discard_stale_session().await {
+                    s.release().await;
+                    return Err(error);
+                }
                 s.open_class(class).await
             }
             other => other,
@@ -136,10 +105,6 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     }
 
     /// The UI half of opening: `HELLO` and its reply.
-    ///
-    /// Split out because the stale-session recovery has to run it a second time — the
-    /// device is only truly well again after a session has been closed properly, so the
-    /// recovery ends one and begins another.
     async fn handshake(&mut self) -> Result<()> {
         let hello = Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO, Vec::new());
         if let Err(e) = self.notify(&hello).await {
@@ -181,9 +146,6 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     }
 
     /// Escalate to a session that can mutate the device.
-    ///
-    /// Deliberately verbose and deliberately not `From`/`Into`: device writes can
-    /// destroy patches, so callers should back up first.
     pub fn allow_destructive_writes(mut self) -> Session<'t, T, ReadWrite> {
         let transport = self.transport.take();
         let (class, closed, device_changed) = (self.class, self.closed, self.device_changed);
@@ -217,15 +179,9 @@ impl<T: Transport, C> Session<'_, T, C> {
         self.device_changed
     }
 
-    /// Bound every read in this session, closing exchanges included.
-    ///
-    /// Off by default, because the operations NSM performs always draw a reply and a
-    /// spurious timeout mid-transfer would be worse than waiting. Set it before
-    /// [`Self::probe`]: a command that answers nothing otherwise hangs the caller in
-    /// [`Self::commit`] rather than in the probe, having already passed the probe's own
-    /// timeout — which is exactly the trap that a bounded probe alone does not close.
+    /// Override the per-frame [`READ_LIMIT`] for this session, including its close.
     pub fn set_read_limit(&mut self, limit: Duration) {
-        self.read_limit = Some(limit);
+        self.read_limit = limit;
     }
 
     /// One frame from the device, honoring [`Self::set_read_limit`].
@@ -233,21 +189,21 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// `Ok(None)` means the limit passed with nothing read. The transport has already
     /// cancelled the outstanding transfer by then, so the session is still in step.
     async fn read_frame(&mut self) -> Result<Option<Message>> {
-        let limit = Some(self.read_limit.unwrap_or(READ_LIMIT));
+        self.read_frame_with_limit(self.read_limit).await
+    }
+
+    async fn read_frame_with_limit(&mut self, limit: Duration) -> Result<Option<Message>> {
         let transport = self
             .transport
             .as_mut()
             .ok_or_else(|| Error::Transport("session has no transport".into()))?;
 
-        let raw = match limit {
-            Some(limit) => match transport
-                .read_timeout(crate::transport::READ_BUFFER, limit)
-                .await?
-            {
-                Some(raw) => raw,
-                None => return Ok(None),
-            },
-            None => transport.read(crate::transport::READ_BUFFER).await?,
+        let raw = match transport
+            .read_timeout(crate::transport::READ_BUFFER, limit)
+            .await?
+        {
+            Some(raw) => raw,
+            None => return Ok(None),
         };
         Message::decode_response(&raw).map(Some)
     }
@@ -277,16 +233,18 @@ impl<T: Transport, C> Session<'_, T, C> {
         args: &[u8],
         limit: Duration,
     ) -> Result<Option<Message>> {
-        self.set_read_limit(limit);
+        let response = command.checked_add(1).ok_or_else(|| {
+            Error::InvalidArgument("command 0xffffffff has no response code".into())
+        })?;
         let req = Message::new(service, subsystem, command, args.to_vec());
         self.notify(&req).await?;
 
         let mut drained = 0;
         loop {
-            let Some(resp) = self.read_frame().await? else {
+            let Some(resp) = self.read_frame_with_limit(limit).await? else {
                 return Ok(None);
             };
-            if resp.command == cmd::CHANGED && resp.command != command + 1 && drained < DRAIN_CAP {
+            if resp.command == cmd::CHANGED && resp.command != response && drained < DRAIN_CAP {
                 drained += 1;
                 self.device_changed = true;
                 continue;
@@ -317,13 +275,14 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// matching reply is a desync: nothing read after it can be paired with its
     /// request, so the transaction is released before the error is reported.
     async fn response_to(&mut self, command: u32) -> Result<Message> {
+        let expected = command.checked_add(1).ok_or_else(|| {
+            Error::InvalidArgument("command 0xffffffff has no response code".into())
+        })?;
         let mut drained = 0;
         loop {
             let resp = match self.read_frame().await {
                 Ok(Some(resp)) => resp,
-                // The limit passed with no reply. Nothing can be paired with this
-                // request afterwards, so it is a desync like any other — but the
-                // transfer was cancelled, so the close still has a chance of landing.
+                // A timed-out request desynchronizes replies, but cancellation may let close land.
                 Ok(None) => {
                     self.release().await;
                     return Err(Error::Transport(format!(
@@ -336,10 +295,7 @@ impl<T: Transport, C> Session<'_, T, C> {
                 }
             };
 
-            if resp.command != command + 1 {
-                // Same test `probe` makes: a reply that happens to share CHANGED's code
-                // is still a reply, and only passes the `!= command + 1` guard above
-                // because it is not the one being waited for.
+            if resp.command != expected {
                 if resp.command == cmd::CHANGED && drained < DRAIN_CAP {
                     drained += 1;
                     self.device_changed = true;
@@ -347,28 +303,27 @@ impl<T: Transport, C> Session<'_, T, C> {
                 }
                 self.release().await;
                 return Err(Error::UnexpectedResponse {
-                    expected: command + 1,
+                    expected,
                     got: resp.command,
                 });
             }
             return match resp.status() {
                 // A refusal is not a desync: request and reply are still in step, the
                 // session stays usable, and the caller still owes it a close.
-                Some(0) | None => Ok(resp),
+                Some(0) => Ok(resp),
                 Some(code) => Err(Error::DeviceStatus(code)),
+                None => {
+                    self.release().await;
+                    Err(Error::Truncated { got: 0, need: 4 })
+                }
             };
         }
     }
 
-    /// Best-effort release after a bail: mark the transaction over and say GOODBYE
-    /// once. Idempotent, so a bail inside [`Self::response_to`] and the caller's own
-    /// error path can both come through here.
+    /// Best-effort, idempotent release after a failed exchange.
     ///
-    /// ⚠️ The HELLO is the half that wedges the instrument (see [`Self::open`]), so
-    /// every bail must reach this before its error is reported. The caller is owed
-    /// the original error, and failures here are deliberately dropped; the stream may
-    /// be desynced by now, so the GOODBYE's reply is read to keep it out of the next
-    /// session's queue but not interpreted.
+    /// ⚠️ `HELLO` without `GOODBYE` wedges inventory reads. Release failures do not
+    /// replace the operation's original error.
     async fn release(&mut self) {
         if self.closed {
             return;
@@ -378,8 +333,6 @@ impl<T: Transport, C> Session<'_, T, C> {
         if self.notify(&goodbye).await.is_err() {
             return;
         }
-        // Best effort, and bounded when the session is: this runs on the failure path,
-        // where the reason for failing may well be a device that has stopped answering.
         let _ = self.read_frame().await;
     }
 
@@ -389,24 +342,13 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// device never acknowledges them, so routing them through [`Self::request`] would
     /// block forever on a response that never comes.
     ///
-    /// Like [`Self::request`] this does not test `closed`, and does not need to:
-    /// [`Self::commit`] and [`Self::abort`] both consume `self`, so a session past
-    /// its close cannot be reached again. After a mid-session bail ([`Self::release`])
-    /// the flag also marks the transaction already released, which `commit` checks
-    /// itself.
     pub(crate) async fn notify(&mut self, msg: &Message) -> Result<()> {
-        let limit = self.read_limit;
         let transport = self
             .transport
             .as_mut()
             .ok_or_else(|| Error::Transport("session has no transport".into()))?;
         let encoded = msg.encode();
-        // Every write is bounded, whether or not the caller asked for a limit. A frame is
-        // small and a healthy device takes it in milliseconds, so [`WRITE_LIMIT`] cannot
-        // plausibly fire on a working instrument — while a stalled endpoint blocks here
-        // forever, before any read, which is how a `--wait 3` probe once hung for minutes.
-        let limit = limit.unwrap_or(WRITE_LIMIT);
-        if transport.write_timeout(&encoded, limit).await? {
+        if transport.write_timeout(&encoded, WRITE_LIMIT).await? {
             Ok(())
         } else {
             Err(Error::Transport(format!(
@@ -414,32 +356,25 @@ impl<T: Transport, C> Session<'_, T, C> {
                  are stalled, and a power cycle is the only way out — `nord device recover` \
                  cannot help, because that frame cannot be delivered either",
                 msg.command,
-                limit.as_secs()
+                WRITE_LIMIT.as_secs()
             )))
         }
     }
 
     /// Run the closing exchanges. Always prefer this over dropping.
     pub async fn commit(mut self) -> Result<()> {
-        // Already released by a mid-session bail: the GOODBYE was said, the stream is
-        // desynced, and the closing exchanges would pair with stale replies. The bail's
-        // own error — which the caller already holds — is the report.
+        // A failed exchange already released the session and reported its error.
         if self.closed {
             return Ok(());
         }
-        // Marked closed before the exchanges, not after: a transaction gets one close
-        // attempt, and a failed one must surface as the `Err` it is. Marking afterwards
-        // means a failure drops `self` unclosed inside this call, and the `Drop`
-        // assertion panics over the very error the caller was owed.
+        // Mark first so a failed close surfaces as `Err` instead of a Drop assertion.
         self.closed = true;
         if let Err(e) = self
             .request(Service::Program, 10, cmd::SESSION_CLOSE, &[])
             .await
         {
-            // ⚠️ Still say GOODBYE: the HELLO is the half that wedges the instrument
-            // into answering "empty" for every slot (see `open`), so a refused close
-            // must not strand it. The caller is owed the close's error, so a failure
-            // here is deliberately dropped.
+            // ⚠️ A refused close must still say GOODBYE; its failure does not replace
+            // the class-close error.
             let _ = self
                 .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
                 .await;

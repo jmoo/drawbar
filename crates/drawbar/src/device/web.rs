@@ -84,10 +84,7 @@ impl Link {
                     return;
                 }
             };
-            // ⚠️ The desktop reads the identity over vendor control transfers on
-            // endpoint 0. WebUSB can issue one, but nothing in `nord_usb`'s web
-            // transport does, so the browser build shows none of it rather than a guess
-            // at any of it.
+            // ⚠️ The WebUSB transport does not expose the endpoint-0 identity request.
             let card = DeviceCard {
                 build: None,
                 firmware: None,
@@ -156,9 +153,7 @@ fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
             }
             return pump(&inner, &emit);
         }
-        // ⚠️ Release the interface, or Nord Sound Manager and the desktop backend stay
-        // locked out for as long as the tab is open. A device that has already gone has
-        // nothing to release, and closing it can only fail.
+        // ⚠️ Release a connected interface so other hosts are not locked out.
         if flow == Flow::Released {
             if let Err(e) = transport.close().await {
                 emit.send(DeviceEvent::OpFailed(e.to_string()));
@@ -203,9 +198,7 @@ fn watch_for_unplug(
         let mut state = held.borrow_mut();
         state.queue.clear();
         state.device = None;
-        // A transport whose device has gone cannot be closed, and there is nothing left
-        // to hand back: dropping it is the whole of the cleanup. While a command is
-        // running the transport is out of the cell, and the pump drops it on the way out.
+        // An unplugged transport cannot be closed; whichever owner holds it drops it.
         state.transport = None;
         let said = std::mem::replace(&mut state.lost, true);
         drop(state);

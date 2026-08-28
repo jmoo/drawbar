@@ -1,7 +1,7 @@
 //! The one test target that compiles under every feature set — the twin of
 //! `nord-format/tests/corpus_guard.rs`.
 //!
-//! ⚠️ The golden replays are the only check on the encoder, and they are
+//! ⚠️ The protocol replays are the only integration check on the encoder, and they are
 //! `#![cfg(feature = "replay")]`. A bare `cargo test -p nord-usb` compiles them
 //! out and passes having verified none of the wire encoding.
 

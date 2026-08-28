@@ -20,6 +20,11 @@ pub trait Packed: Sized {
     /// fits its slot.
     const MAX_BITS: u32;
 
+    /// Widest input [`Self::from_bits`] can inspect without truncating it.
+    ///
+    /// This differs from [`Self::MAX_BITS`] for sparse or range-checked types.
+    const DECODE_BITS: u32 = Self::MAX_BITS;
+
     /// Which panel control this value is, for a caller building an interface over the
     /// field registry.
     ///
@@ -108,13 +113,14 @@ pub struct Field<T, const LO: u32, const HI: u32>(PhantomData<fn() -> T>);
 struct SpanFits<const N: usize, const HI: u32>;
 
 impl<const N: usize, const HI: u32> SpanFits<N, HI> {
-    const OK: () = assert!((HI as usize) < 8 * N, "bit field extends past the panel");
+    const OK: () = assert!(((HI / 8) as usize) < N, "bit field extends past the panel");
 }
 
 impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
     /// Width of the field in bits.
     pub const WIDTH: u32 = {
         assert!(HI >= LO, "a bit range must not end before it starts");
+        assert!(HI - LO < 64, "a bit field cannot be wider than u64");
         HI - LO + 1
     };
 
@@ -127,17 +133,20 @@ impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
 
     /// Compile-time check that every value of `T` fits. Forced by [`Self::set`].
     const FITS: () = assert!(
-        T::MAX_BITS <= HI - LO + 1,
+        T::MAX_BITS <= Self::WIDTH,
         "this type can hold values wider than the field; give this field a type that \
          carries its range",
     );
 
+    /// Compile-time check that decoding cannot truncate the field before `T` sees it.
+    const READS: () = assert!(
+        Self::WIDTH <= T::DECODE_BITS,
+        "this field is wider than its type; decoding it would discard high bits",
+    );
+
     /// Decode the field out of `raw`.
-    ///
-    /// ⚠️ A plain integer narrower than the field reads its low bits and writes only
-    /// those, so `Field<u8, 0, 15>` is lossy across a read-modify-write. Give a wide
-    /// field a type as wide as the slot, or a ranged type that says what fits.
     pub fn get<const N: usize>(raw: &[u8; N]) -> Result<T, T::Error> {
+        let () = Self::READS;
         let () = SpanFits::<N, HI>::OK;
         T::from_bits(extract(raw, LO, HI))
     }
@@ -167,18 +176,7 @@ impl<T: Packed<Error = Infallible>, const LO: u32, const HI: u32> Field<T, LO, H
 mod tests {
     use super::*;
 
-    /// The trap the ⚠️ on [`Field::get`] names, pinned so a change to it is a choice.
-    #[test]
-    fn a_narrow_integer_in_a_wide_slot_reads_and_writes_its_low_bits_only() {
-        let raw = [0xab, 0xcd];
-        assert_eq!(Field::<u8, 0, 15>::read(&raw), 0xcd);
-        let mut out = [0u8; 2];
-        Field::<u8, 0, 15>::set(&mut out, 0xcd);
-        assert_eq!(out, [0x00, 0xcd]);
-    }
-
-    /// A `BITS`-wide value. `set` only takes a type that cannot overrun its slot, so a
-    /// test that writes has to name a width — a bare `u8` in a nibble does not compile.
+    /// A `BITS`-wide value for exercising fields narrower than a byte.
     #[derive(Debug, PartialEq, Eq)]
     struct Small<const BITS: u32>(u8);
 

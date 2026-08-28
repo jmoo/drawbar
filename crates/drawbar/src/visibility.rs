@@ -191,10 +191,8 @@ pub fn organ(fields: &[Field]) -> Option<Organ> {
             Registration {
                 preset,
                 live: preset == live,
-                // ⚠️ In b3+bass, preset 1 is the bass manual: only two drawbars are
-                // live and they sit outside the nine-nibble block, which holds stale
-                // leftovers. Showing those nine would assert a registration that plays
-                // nothing.
+                // ⚠️ B3+bass preset 1 uses two separate bass drawbars; its nine-nibble
+                // block is stale.
                 bars: match (bass && preset == 1, paths.tabs) {
                     (true, _) => Bars::Bass("organ_panel.b3_bass_bar1", "organ_panel.b3_bass_bar2"),
                     (false, true) => Bars::Tabs(paths.presets[i]),

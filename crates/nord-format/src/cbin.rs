@@ -20,9 +20,8 @@
 //! | `0x18` | body… | crc32 over the body, 16 zero bytes, body at `0x2c` |
 //! | EOF−2 | crc16 over every byte before it, LE | — |
 //!
-//! The container reads and writes in one forward pass and holds O(1) state, so a
-//! 42MB library costs the same memory as a 165-byte program. Whether a body
-//! allocates is the body's own choice.
+//! The container reads and writes in one forward pass with O(1) state; body allocation
+//! belongs to the body type.
 
 use crate::crc::{Crc16Stream, Crc32Stream};
 use crate::error::{Error, ParseError};
@@ -89,14 +88,8 @@ pub struct Header {
     /// u32 at `0x0c`. On slot-addressed formats the low u16 is the bank and the
     /// high u16 the slot; see [`Header::slot`].
     pub location: u32,
-    /// u32 at `0x10`. Three shapes across the corpus: `0xFFFFFFFF` (no value —
-    /// the whole Electro 5 family, Piano 2/3, `nspg`, `nss`); a low u16 under a
-    /// zero high u16 — the **program category** id on program formats (inferred
-    /// from specimens; independent interop projects report the vendor librarian
-    /// reads it as such — Stage 2/3 names in
-    /// [`ProgramCategory`](crate::components::ProgramCategory)); or both halves
-    /// set (`ns3y`, `nsmp`, `nd2p`), where the high u16's meaning is open.
-    /// Preserved verbatim in every case; see [`Header::category`].
+    /// u32 at `0x10`: unset, a program category in the low u16, or a format-specific
+    /// two-word value. Preserved verbatim; see [`Header::category`].
     pub aux: u32,
     /// u32 at `0x14`: a format's schema version (`ne5p` holds 4) or a library's
     /// content version (`nsmp` holds format×100 + revision).
@@ -403,7 +396,13 @@ pub struct RawBody(pub Vec<u8>);
 
 impl Body for RawBody {
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<RawBody, Error> {
-        let mut bytes = vec![0u8; r.len() as usize];
+        let len = usize::try_from(r.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the body is too large for this platform",
+            )
+        })?;
+        let mut bytes = vec![0u8; len];
         r.read_exact(&mut bytes)?;
         Ok(RawBody(bytes))
     }
@@ -685,8 +684,7 @@ mod tests {
         out
     }
 
-    /// Both generations of the same body round-trip byte-exactly, and the type-0
-    /// file is 18 bytes shorter — the corpus's measured delta.
+    /// Both generations round-trip and differ only by their 18-byte checksum layout.
     #[test]
     fn both_generations_round_trip_and_differ_by_18_bytes() {
         let body = [0xaa, 0xbb, 0xcc, 0xdd, 0xee];
@@ -723,9 +721,7 @@ mod tests {
         bytes[0x0c] ^= 0xff;
         assert!(read::<Five>(&mut Cursor::new(&bytes), "test").is_err());
 
-        // ...and the type-1 crc32 does not: the same header corruption decodes,
-        // which is how Clavia files one sample variant per device by editing the
-        // location alone.
+        // Type-1 checksums only the body, so location edits remain valid.
         let mut bytes = v1_file(&[1, 2, 3, 4, 5]);
         bytes[0x0c] ^= 0xff;
         assert!(read::<Five>(&mut Cursor::new(&bytes), "test").is_ok());

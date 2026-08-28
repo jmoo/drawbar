@@ -90,9 +90,8 @@ if [[ -n $title ]]; then
     exit 0
   fi
   merge_base="$(git -C "$repo" merge-base "$base" HEAD)"
-  # What the PR touches, not counting bump commits already on the branch —
-  # their manifest edits would otherwise promote every dependent to the
-  # title's level on a re-run.
+  # Ignore existing bump commits; their manifest edits would promote every
+  # dependent to the title's level on a re-run.
   changed="$(git -C "$repo" log --invert-grep --grep='^chore(release): ' --format= --name-only "$merge_base..HEAD" | sort -u)"
   for crate in "${crates[@]}"; do
     dir="$(crate_dir "$crate")"
@@ -175,8 +174,7 @@ for crate in "${crates[@]}"; do
   manifest="$repo/$(crate_dir "$crate")/Cargo.toml"
   sed -i.bak "/^\[package\]/,/^\[/ s/^version = \"[^\"]*\"/version = \"${new_version[$crate]}\"/" "$manifest"
   rm "$manifest.bak"
-  # ⚠️ The requirement must sit on the dependency's first line
-  # (`nord-usb = { path = …, version = "…", … }`); a `version` on a
+  # ⚠️ The requirement must be on the dependency's first line; a `version` on a
   # continuation line is not rewritten.
   while IFS= read -r dependent; do
     [[ -n $dependent ]] || continue

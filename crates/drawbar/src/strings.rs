@@ -645,7 +645,7 @@ pub fn folder(class: ObjectClass) -> &'static str {
 /// One-indexed `BANK:SLOT`, the way the instrument and Nord Sound Manager label a
 /// location.
 pub fn shown(at: Location) -> String {
-    format!("{}:{}", at.bank + 1, at.slot + 1)
+    format!("{}:{}", at.user_bank(), at.user_slot())
 }
 
 /// Where something is, the way a person would say it: `Programs 7:4`.

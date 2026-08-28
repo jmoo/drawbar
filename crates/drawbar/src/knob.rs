@@ -91,15 +91,11 @@ pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> O
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        // ⚠️ Interacted under the knob's own id rather than the one egui would hand out
-        // in order: the focus ring, the keyboard steps and the drag all key off it, and
-        // an auto id moves the moment a section grows a control above this one.
+        // ⚠️ Auto ids move when a preceding control is added, losing drag and focus state.
         let (rect, _) = ui.allocate_exact_size(egui::vec2(DIAL, DIAL), egui::Sense::hover());
         let response = ui.interact(rect, id, egui::Sense::click_and_drag());
 
-        // A drag is carried as a fraction rather than as the value it lands on: a step of
-        // one is a couple of points of travel on a 0..127 field, and rounding each frame
-        // to the value would drop every movement short of one.
+        // Carry fractional travel so sub-step movement accumulates instead of rounding away.
         let held = id.with("held");
         if response.drag_started() {
             ui.data_mut(|d| d.insert_temp(held, fraction(value, min, max)));
@@ -207,9 +203,7 @@ fn readout(
             .font(egui::TextStyle::Small)
             .horizontal_align(egui::Align::Center),
     );
-    // ⚠️ The box cannot be given the focus in the frame the double-click opened it: egui
-    // takes focus back from any widget that was not itself under a press this frame, and
-    // the press was on the dial. So it is asked for on the frames after, until it lands.
+    // ⚠️ egui reclaims focus on the opening press; arm requests until a later frame lands it.
     if ui.data(|d| d.get_temp::<bool>(arming)).unwrap_or(false) {
         match box_.has_focus() {
             true => ui.data_mut(|d| d.remove::<bool>(arming)),

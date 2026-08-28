@@ -102,15 +102,12 @@ impl Control {
     /// `true`/`false` or names them.
     pub fn of(field: &Field, legal: &[String]) -> Control {
         match field.spec.control {
-            // ⚠️ `Drawbar` is the *bar*, not the registration: the Electro 5 packs all
-            // nine into one field and the Stages give each bar its own nibble, and both
-            // carry this one kind. The width is what tells them apart.
+            // ⚠️ Both a packed registration and one bar have Drawbar kind; width separates them.
             ControlKind::Drawbar if field.spec.width == drawbar_widget::REGISTER_BITS => {
                 Control::Register
             }
             ControlKind::Drawbar if field.spec.width == drawbar_widget::BAR_BITS => Control::Bar,
-            // A step grid and a library id both need a control this app does not have: a
-            // grid to draw, and the instrument's own catalogue to pick a name out of.
+            // Pattern and reference controls need UI data this app does not have.
             ControlKind::Pattern | ControlKind::Reference => Control::Stored,
             ControlKind::Toggle if legal == ["false", "true"] => Control::Toggle,
             // A knob says so, so its values are travel however few of them there are.
@@ -118,10 +115,7 @@ impl Control {
             | ControlKind::Knob(_)
             | ControlKind::Morph
             | ControlKind::Shift(_) => turned(legal),
-            // ⚠️ `Number` is the kind a field has when nothing has been claimed about it,
-            // so it is not a knob — it is an integer, and a short run of those is a
-            // four-position switch as often as it is travel. Only a run too long to read
-            // as a list turns.
+            // ⚠️ Number means unclassified; only a range too long to present as a list turns.
             _ => picked(legal),
         }
     }

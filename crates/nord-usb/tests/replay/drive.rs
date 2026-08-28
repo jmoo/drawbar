@@ -54,20 +54,36 @@ pub async fn drive(
     dir: &Path,
 ) -> Result<Option<Produced>> {
     match verb {
-        // Device-wide: the class-less verbs, each of which opens its own transactions.
         "status" if class.is_none() => op::inventory(t).await.map(|_| None),
         "recover" => op::recover(t).await.map(|_| None),
-        "geometry" => {
-            // Any class opens the session; the partition table is device-wide.
-            session!(t, ObjectClass::Program, |s| async {
-                for p in op::partitions(&mut s).await? {
-                    op::banks(&mut s, p.index).await?;
-                }
-                Ok(())
-            })
-            .map(|()| None)
+        "geometry" => geometry(t).await,
+        "get" | "read" | "get-body" | "read-body" => {
+            drive_read(t, need_class(class)?, verb, args, dir).await
         }
+        "put" | "move" | "duplicate" | "rename" | "delete" => {
+            drive_write(t, need_class(class)?, verb, args, dir).await
+        }
+        _ => drive_query(t, class, verb, args).await,
+    }
+}
 
+async fn geometry(t: &mut ReplayTransport) -> Result<Option<Produced>> {
+    session!(t, ObjectClass::Program, |s| async {
+        for partition in op::partitions(&mut s).await? {
+            op::banks(&mut s, partition.index).await?;
+        }
+        Ok(())
+    })
+    .map(|()| None)
+}
+
+async fn drive_query(
+    t: &mut ReplayTransport,
+    class: Option<ObjectClass>,
+    verb: &str,
+    args: &[String],
+) -> Result<Option<Produced>> {
+    match verb {
         "status" => session!(t, need_class(class)?, |s| op::status(&mut s)).map(|_| None),
         "focus" => session!(t, need_class(class)?, |s| async {
             // Whatever the panel has loaded is then named, as the CLI names it. An
@@ -96,18 +112,14 @@ pub async fn drive(
             session!(t, need_class(class)?, |s| op::select(&mut s, at)).map(|_| None)
         }
         "walk" => {
-            // The runaway guard, not an item count: a walk that stopped *at* the count
-            // would never issue the probe that discovers the bank has no more occupied
-            // slots, and would fall one request short of the recording.
+            // This bounds requests; reaching it must not masquerade as end-of-bank.
             let cap = match args.first() {
                 Some(cap) => number(cap)? as usize,
                 None => 1024,
             };
             session!(t, need_class(class)?, |s| async {
                 for at in op::occupied_slots(&mut s, cap).await? {
-                    // The cursor reports what follows a position, never whether the
-                    // position itself holds anything, so an empty first address is
-                    // normal and its refusal leaves the session usable.
+                    // The cursor's starting address may be empty; status 1 remains in step.
                     match op::info(&mut s, at).await {
                         Ok(_) | Err(Error::DeviceStatus(1)) => {}
                         Err(e) => return Err(e),
@@ -117,25 +129,40 @@ pub async fn drive(
             })
             .map(|()| None)
         }
+        other => Err(bad(format!("unknown verb {other:?}"))),
+    }
+}
 
-        // Reads. `get` is the CLI's, which names the slot before reading it; `read` and
-        // `read-body` are the bare transfers the CLI performs inside a larger operation.
-        "get" | "read" | "get-body" | "read-body" => {
-            let at = slot(args, 0)?;
-            let named = args.get(1).map(|f| dir.join(f));
-            let (name_first, whole) = (verb.starts_with("get"), !verb.ends_with("body"));
-            let bytes = session!(t, need_class(class)?, |s| async {
-                if name_first {
-                    op::info(&mut s, at).await?;
-                }
-                match whole {
-                    true => op::read_program(&mut s, at).await,
-                    false => op::read_body(&mut s, at).await,
-                }
-            })?;
-            Ok(named.map(|expected| Produced { bytes, expected }))
+async fn drive_read(
+    t: &mut ReplayTransport,
+    class: ObjectClass,
+    verb: &str,
+    args: &[String],
+    dir: &Path,
+) -> Result<Option<Produced>> {
+    let at = slot(args, 0)?;
+    let named = args.get(1).map(|file| dir.join(file));
+    let (name_first, whole) = (verb.starts_with("get"), !verb.ends_with("body"));
+    let bytes = session!(t, class, |s| async {
+        if name_first {
+            op::info(&mut s, at).await?;
         }
+        match whole {
+            true => op::read_program(&mut s, at).await,
+            false => op::read_body(&mut s, at).await,
+        }
+    })?;
+    Ok(named.map(|expected| Produced { bytes, expected }))
+}
 
+async fn drive_write(
+    t: &mut ReplayTransport,
+    class: ObjectClass,
+    verb: &str,
+    args: &[String],
+    dir: &Path,
+) -> Result<Option<Produced>> {
+    match verb {
         "put" => {
             let file = std::fs::read(dir.join(text(args, 0)?))?;
             let (at, name, stamp) = (
@@ -143,22 +170,19 @@ pub async fn drive(
                 text(args, 2)?,
                 number(args.get(3).map_or("", String::as_str))?,
             );
-            rw_session!(t, need_class(class)?, |s| op::write(
-                &mut s, at, &file, name, stamp
-            ))
-            .map(|()| None)
+            rw_session!(t, class, |s| op::write(&mut s, at, &file, name, stamp)).map(|()| None)
         }
         "move" => {
             let (from, to) = (slot(args, 0)?, slot(args, 1)?);
-            rw_session!(t, need_class(class)?, |s| op::move_object(&mut s, from, to)).map(|()| None)
+            rw_session!(t, class, |s| op::move_object(&mut s, from, to)).map(|()| None)
         }
         "duplicate" => {
             let (from, to) = (slot(args, 0)?, slot(args, 1)?);
-            rw_session!(t, need_class(class)?, |s| op::duplicate(&mut s, from, to)).map(|()| None)
+            rw_session!(t, class, |s| op::duplicate(&mut s, from, to)).map(|()| None)
         }
         "rename" => {
             let (at, name) = (slot(args, 0)?, text(args, 1)?);
-            rw_session!(t, need_class(class)?, |s| op::rename(&mut s, at, name)).map(|()| None)
+            rw_session!(t, class, |s| op::rename(&mut s, at, name)).map(|()| None)
         }
         "delete" => {
             if args.is_empty() {
@@ -167,8 +191,7 @@ pub async fn drive(
             let slots: Vec<Location> = (0..args.len())
                 .map(|i| slot(args, i))
                 .collect::<Result<_>>()?;
-            // Every item runs inside one session, the way the instrument is batched.
-            rw_session!(t, need_class(class)?, |s| async {
+            rw_session!(t, class, |s| async {
                 for at in &slots {
                     op::delete(&mut s, *at).await?;
                 }
@@ -176,8 +199,7 @@ pub async fn drive(
             })
             .map(|()| None)
         }
-
-        other => Err(bad(format!("unknown verb {other:?}"))),
+        _ => unreachable!("write verbs are dispatched by drive"),
     }
 }
 

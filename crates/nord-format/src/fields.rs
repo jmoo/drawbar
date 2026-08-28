@@ -1,15 +1,7 @@
 //! Field-level introspection over a `#[bitbody]`'s fields.
 //!
-//! The generated registry lets a caller walk a body's fields without naming any of
-//! them, which is what the decode snapshot needs: a new field appears in the output
-//! by being declared, not by anyone remembering to add it. `set_field` is the same
-//! idea in the write direction — a field becomes settable by being declared, so a
-//! CLI cannot fall behind the library.
-//!
-//! Both halves of the snapshot's view of a [`FieldValue`] matter. `raw` is the field's
-//! bits with no type applied, so it pins the placement — move a range by one bit and it
-//! changes on nearly every specimen. `value` is the decoded rendering, so it pins the
-//! interpretation. A change to either is visible, and they fail in different places.
+//! Generated registries let callers inspect and edit declared fields without a
+//! second, manually synchronized list of names.
 
 use std::fmt::{self, Debug, Display, Formatter};
 
@@ -258,9 +250,7 @@ pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, Fiel
             }
         }
     } else if let Some(bits) = stored_value(&wanted) {
-        // A field too wide to walk is spelled by its stored bits. For the nine-nibble
-        // drawbar blocks that is the readable form anyway: `0x087654321` is the nine
-        // positions in order.
+        // Wide fields use stored bits; for a drawbar block the hex digits are its bars.
         if let Ok(v) = T::from_bits(bits) {
             return Ok(v);
         }

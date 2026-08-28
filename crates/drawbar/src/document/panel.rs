@@ -340,9 +340,7 @@ fn organ_section(
     rows: &[&Field],
     sets: &mut Sets,
 ) {
-    // The model picker is always here, whatever it is set to: it is how a program comes
-    // to have one organ rather than another. Beside it go the settings the whole organ
-    // shares, whichever registration is playing.
+    // Model and shared organ settings remain visible regardless of the active registration.
     controls::strip(ui, |ui| {
         if let Some(field) = find(fields, "center_panel.organ_type") {
             controls::cell(ui, ctx, field, sets);

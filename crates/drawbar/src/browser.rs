@@ -827,10 +827,8 @@ impl Browser {
             .count();
         head.context_menu(|ui| {
             self.select(item);
-            // ⚠️ The count is the whole point of putting it there. "Send all" up in the
-            // heading writes what is **waiting**; this writes everything in the folder
-            // that came off a slot, waiting or not — two scopes behind one verb, and the
-            // number is what tells them apart before the modal does.
+            // ⚠️ Unlike "Send all", this includes unchanged slot-backed items. The count
+            // distinguishes those scopes before the confirmation dialog.
             if ui
                 .add_enabled(
                     sendable > 0,
@@ -1321,17 +1319,14 @@ impl Browser {
             response = response
                 .on_hover_text("open in a tab as a view of this slot — it is not on this computer");
         }
-        // The one place a jump lands: the row itself, once the headings above it have
-        // been forced open and it has a rectangle to be scrolled to.
+        // A jump can scroll only after its parent headings have exposed this row.
         if self.jump == Some((class, at)) {
             self.jump = None;
             self.selection = Some(item);
             response.scroll_to_me(Some(egui::Align::Center));
         }
 
-        // ⚠️ A piano is a library of hundreds of megabytes, read whole into memory by
-        // anything that fetches it. The folder lists what is installed and offers no way
-        // to pull one down, which is also what read-only means here.
+        // ⚠️ Pianos are large libraries fetched whole, so this browser only lists them.
         let fetchable = !read_only(class);
 
         if let Some(name) = &held {
@@ -1455,10 +1450,8 @@ impl Browser {
             }
             return None;
         }
-        // ⚠️ The field's own Enter, not the frame's. `Ui::input` answers for the whole
-        // app: an Enter meant for a knob's number box or a table cell reads as one here
-        // too, and would close an editor the operator has not finished with. A single
-        // line surrenders the focus on Enter, so the two together are the gesture.
+        // ⚠️ Global Enter may belong to another editor. Commit only when this field lost
+        // focus on the same keypress.
         let lost = output.response.lost_focus();
         let entered = lost && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if !lost {
@@ -1684,9 +1677,7 @@ fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         (false, true) => Some(visuals.faint_bg_color),
         (false, false) => None,
     };
-    // ⚠️ A selected row is painted in the instrument's red, and the body grey a row is
-    // otherwise written in does not survive it. The colour that goes with the fill is the
-    // one egui keeps beside it.
+    // ⚠️ Normal body text has insufficient contrast on the selection fill.
     let ink = match selected {
         true => visuals.selection.stroke.color,
         false => visuals.text_color(),
@@ -1819,18 +1810,12 @@ pub fn apply(
             Act::Keep(id) => workspace.keep(id, log),
             Act::NewFolder => {
                 let id = browser.folders.make();
-                // ⚠️ The name `make` settled on, not the one it starts from. Prefilling
-                // the editor with "New folder" beside an existing "New folder" is an
-                // Enter away from two folders of one name — which is exactly what
-                // `make` picked a different one to avoid.
+                // ⚠️ Edit the unique name chosen by `make`, not its generic seed.
                 let name = browser.folders.name_of(id).unwrap_or_default().to_string();
                 browser.start_rename(Item::Folder(id), &name);
             }
             Act::RemoveFolder(id) => {
-                // ⚠️ The editor goes with it. A folder being renamed draws the editor in
-                // place of its heading, and a removed folder draws nothing at all — so a
-                // rename left armed here is one no row will ever close, and the next
-                // folder to take this id inherits it.
+                // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Folder(id));
                 browser.folders.remove(id);
             }
@@ -1846,9 +1831,7 @@ pub fn apply(
             }
             Act::Open(Item::Folder(_)) => {}
             Act::Open(Item::Local(id)) => tabs.open(id, workspace),
-            // ⚠️ One view per slot. A second read of a slot already being viewed would
-            // be two working copies of one place — edited apart, both owed back to it,
-            // and both queued into a single batch, where the last one written wins.
+            // ⚠️ One view per slot prevents divergent copies queued back to one address.
             Act::Open(Item::Slot { class, at }) => match workspace.view_of(class, at) {
                 Some(id) => tabs.open(id, workspace),
                 None => device.send(
@@ -1917,9 +1900,7 @@ pub fn apply(
 /// The one write path a batch takes, whether the batch is everything waiting or one of
 /// this computer's own folders: same refusal, same grouping, same per-item flow.
 fn send_batch(ids: &[u64], workspace: &Workspace, device: &mut Device, log: &mut Log) {
-    // Refused before the transport is touched: bytes that are not what they claim to be
-    // must not reach a delete-then-write, and one bad item stops the whole batch rather
-    // than being skipped past.
+    // Validate the whole batch before the first delete-then-write.
     for entity in ids.iter().filter_map(|id| workspace.get(*id)) {
         if owed(entity).is_none() {
             continue;
@@ -1961,23 +1942,11 @@ fn grouped(ids: &[u64], workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing
     by_class
 }
 
-/// Whether an outgoing file is of a format the destination folder has never been seen
-/// holding, and the sentence saying so.
-///
-/// ⚠️ **A warning, never a refusal.** A write is a delete followed by a write, so a file
-/// the instrument turns out not to want costs the occupant of the slot — and the New
-/// menu now makes another model's program one click away. But nothing here has watched
-/// an instrument refuse one, so this reports what the scan can see and leaves the
-/// decision where it belongs.
-///
-/// `resident` is what the walk actually read, so an unscanned folder says nothing rather
-/// than guessing: not known is not the same as does not match.
+/// Warn when an outgoing tag differs from every scanned resident tag.
+/// An unreadable tag or unscanned folder yields no warning; this never refuses a write.
 pub fn foreign_format(outgoing: &str, resident: &[String]) -> Option<String> {
     let outgoing = outgoing.trim();
-    // ⚠️ `?` is what this app calls bytes that told it nothing — not a format that
-    // differs from every other. A file whose own tag could not be read is one there is
-    // nothing true to say about, and saying it anyway is a false alarm on exactly the
-    // files an operator is least sure of.
+    // ⚠️ `?` means unreadable, not a format known to differ from the instrument.
     let readable = !outgoing.is_empty() && outgoing.chars().all(|c| c.is_ascii_alphanumeric());
     if !readable || resident.is_empty() {
         return None;

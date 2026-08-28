@@ -171,22 +171,10 @@ pub struct Settings {
     #[bits(91..=93)]
     pub rotary_rotor_acceleration: RotaryRate,
 
-    // ── Startup ────────────────────────────────────────────────────────────────
-    //
-    // Boot-state settings: none of these appears in a menu, and the instrument
-    // restores each at power-up. Changing any of the 34 cataloged settings leaves
-    // every bit here alone, and a settings file written by a different capture
-    // session differs here and nowhere else.
-    //
-    // Both locations are `bank * 50 + slot`, zero-based — the packing
-    // [`crate::formats::ne5::song`] uses for its program references.
-    //
-    // `startup_live_slot` survives leaving Live mode and `startup_program` survives
-    // entering it, so each holds the last selection of its kind rather than the
-    // current one.
-    /// Inferred from specimens; not confirmed on hardware. One specimen holds it — the
-    /// one capture made in set list mode. The full backup moves `startup_song` without
-    /// it, so the bit tracks the mode, not the song.
+    // Restored at boot; each field retains the last selection of its own mode.
+    // Locations use the song map's zero-based `bank * 50 + slot` packing.
+    /// Inferred from specimens; not confirmed on hardware. A set-list-mode capture sets
+    /// it, while a backup changes `startup_song` independently.
     #[bits(16..=16)]
     pub startup_set_list_mode: bool,
     #[bits(17..=17)]
@@ -195,9 +183,7 @@ pub struct Settings {
     pub startup_live_slot: LiveSlot,
     #[bits(21..=29)]
     pub startup_program: program::Location,
-    /// Inferred from specimens; not confirmed on hardware. The sweep never leaves the
-    /// first slot, and the two files that do move it are a full backup and a capture
-    /// predating the sweep.
+    /// Inferred from backup and panel captures; not confirmed on hardware.
     #[bits(30..=37)]
     pub startup_song: song::Location,
 }
@@ -835,7 +821,7 @@ mod tests {
     }
 
     /// Channels are stored zero-based with 16 for off, so the two ends and the off value
-    /// are what pin the encoding.
+    /// establish the encoding.
     #[test]
     fn a_midi_channel_is_stored_zero_based_with_sixteen_for_off() {
         for (bits, channel) in [

@@ -1,99 +1,134 @@
-//! A timeout for a single future, without pulling in a runtime.
+//! Process-wide timer support without an async runtime.
 //!
-//! The crate has no timer source: `pollster` parks the calling thread and wakes on the
-//! waker, and nothing else in the dependency set can schedule work. One shared thread
-//! provides that source for the whole process.
-//!
-//! Every transfer is bounded ([`crate::session::WRITE_LIMIT`],
-//! [`crate::session::READ_LIMIT`]), so this sits under the hot path — a piano is
-//! thousands of chunks. A thread per call would mean a thread per chunk, so registrations
-//! go to one long-lived thread that sleeps until the nearest deadline.
+//! Native transfers share one timer thread; creating a thread per chunk would be
+//! prohibitive for library transfers containing thousands of chunks.
 
 use std::future::{poll_fn, Future};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
-/// Deadlines waiting to fire, and the thread that fires them.
+struct Entry {
+    at: Instant,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl Entry {
+    fn update(&self, waker: &Waker) {
+        let mut current = self.waker.lock().unwrap();
+        if current.as_ref().is_some_and(|old| !old.will_wake(waker)) {
+            *current = Some(waker.clone());
+        }
+    }
+}
+
 struct Timer {
-    pending: Mutex<Vec<(Instant, Waker)>>,
+    pending: Mutex<Vec<Arc<Entry>>>,
     signal: Condvar,
+}
+
+struct Registration {
+    timer: &'static Timer,
+    entry: Arc<Entry>,
+}
+
+impl Registration {
+    fn new(at: Instant, waker: &Waker) -> Self {
+        let timer = shared_timer();
+        let entry = Arc::new(Entry {
+            at,
+            waker: Mutex::new(Some(waker.clone())),
+        });
+        timer.pending.lock().unwrap().push(Arc::clone(&entry));
+        timer.signal.notify_one();
+        Self { timer, entry }
+    }
+
+    fn update(&self, waker: &Waker) {
+        self.entry.update(waker);
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.entry.waker.lock().unwrap().take();
+        self.timer.signal.notify_one();
+    }
 }
 
 fn shared_timer() -> &'static Timer {
     static SHARED: OnceLock<&'static Timer> = OnceLock::new();
     SHARED.get_or_init(|| {
-        let shared: &'static Timer = Box::leak(Box::new(Timer {
+        let timer: &'static Timer = Box::leak(Box::new(Timer {
             pending: Mutex::new(Vec::new()),
             signal: Condvar::new(),
         }));
         std::thread::Builder::new()
             .name("nord-usb-deadline".into())
-            .spawn(move || run(shared))
+            .spawn(move || run(timer))
             .expect("spawning the deadline thread");
-        shared
+        timer
     })
 }
 
-fn run(t: &'static Timer) {
-    let mut pending = t.pending.lock().unwrap();
+fn run(timer: &'static Timer) {
+    let mut pending = timer.pending.lock().unwrap();
     loop {
         let now = Instant::now();
-        // Wake everything due, and keep the rest.
-        let mut i = 0;
-        while i < pending.len() {
-            if pending[i].0 <= now {
-                let (_, waker) = pending.swap_remove(i);
-                waker.wake();
-            } else {
-                i += 1;
+        let mut due = Vec::new();
+        pending.retain(|entry| {
+            let mut waker = entry.waker.lock().unwrap();
+            match waker.as_ref() {
+                None => false,
+                Some(_) if entry.at <= now => {
+                    due.push(waker.take().unwrap());
+                    false
+                }
+                Some(_) => true,
             }
+        });
+
+        if !due.is_empty() {
+            drop(pending);
+            for waker in due {
+                waker.wake();
+            }
+            pending = timer.pending.lock().unwrap();
+            continue;
         }
-        let next = pending.iter().map(|(at, _)| *at).min();
-        pending = match next {
+
+        pending = match pending.iter().map(|entry| entry.at).min() {
             Some(at) => {
                 let wait = at.saturating_duration_since(Instant::now());
-                t.signal.wait_timeout(pending, wait).unwrap().0
+                timer.signal.wait_timeout(pending, wait).unwrap().0
             }
-            // Nothing registered: sleep until something is.
-            None => t.signal.wait(pending).unwrap(),
+            None => timer.signal.wait(pending).unwrap(),
         };
     }
 }
 
-fn register(at: Instant, waker: Waker) {
-    let t = shared_timer();
-    t.pending.lock().unwrap().push((at, waker));
-    t.signal.notify_one();
-}
-
-/// Run `fut` to completion, giving up after `limit`.
+/// Run `future` to completion, returning `None` when `limit` passes first.
 ///
-/// `None` means the deadline passed first. The future is dropped at that point, which
-/// cancels it as far as Rust is concerned — but **a dropped future does not cancel work
-/// already handed to the OS**. A caller that submitted an I/O request must still cancel
-/// it at the device layer, or the next read will collect the abandoned reply and every
-/// request after it will be paired with the wrong response.
-pub async fn with_timeout<F: Future>(fut: F, limit: Duration) -> Option<F::Output> {
-    let mut fut = Box::pin(fut);
-    let deadline = Instant::now() + limit;
-    let mut armed = false;
+/// Dropping an I/O future does not necessarily cancel work already submitted to
+/// the operating system. Transport implementations must cancel that work before
+/// issuing another request.
+pub async fn with_timeout<F: Future>(future: F, limit: Duration) -> Option<F::Output> {
+    let mut future = Box::pin(future);
+    let deadline = Instant::now().checked_add(limit);
+    let mut registration: Option<Registration> = None;
 
     poll_fn(move |cx| {
-        if let Poll::Ready(v) = fut.as_mut().poll(cx) {
-            return Poll::Ready(Some(v));
+        if let Poll::Ready(value) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(value));
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|at| Instant::now() >= at) {
             return Poll::Ready(None);
         }
-        // Registered once, not per poll: a transfer that wakes us several times before
-        // completing would otherwise pile up duplicate entries on the timer. ⚠️ That
-        // makes the registered waker the *first* poll's; a future moved to another
-        // executor mid-wait would be woken on the old one and hang on the new. Every
-        // caller in this crate polls on one executor for the future's whole life.
-        if !armed {
-            armed = true;
-            register(deadline, cx.waker().clone());
+        if let Some(deadline) = deadline {
+            match &registration {
+                Some(armed) => armed.update(cx.waker()),
+                None => registration = Some(Registration::new(deadline, cx.waker())),
+            }
         }
         Poll::Pending
     })
@@ -103,6 +138,8 @@ pub async fn with_timeout<F: Future>(fut: F, limit: Duration) -> Option<F::Outpu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
 
     #[test]
     fn a_ready_future_returns_its_value() {
@@ -111,29 +148,56 @@ mod tests {
     }
 
     #[test]
-    fn a_future_that_never_completes_times_out() {
+    fn a_pending_future_times_out() {
         let got = pollster::block_on(with_timeout(
             poll_fn(|_| Poll::<()>::Pending),
-            Duration::from_millis(50),
+            Duration::from_millis(20),
         ));
         assert_eq!(got, None);
     }
 
-    /// The timer is shared, so a slow deadline must not hold up a quicker one behind it.
     #[test]
-    fn deadlines_fire_independently_of_registration_order() {
+    fn a_shorter_deadline_is_not_blocked_by_an_earlier_registration() {
         let slow = std::thread::spawn(|| {
             pollster::block_on(with_timeout(
                 poll_fn(|_| Poll::<()>::Pending),
-                Duration::from_secs(30),
+                Duration::from_millis(150),
             ))
         });
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
         let quick = pollster::block_on(with_timeout(
             poll_fn(|_| Poll::<()>::Pending),
-            Duration::from_millis(50),
+            Duration::from_millis(20),
         ));
-        assert_eq!(quick, None, "a later, shorter deadline did not fire first");
-        drop(slow); // left running; the process outlives it
+        assert_eq!(quick, None);
+        assert_eq!(slow.join().unwrap(), None);
+    }
+
+    struct Counter(AtomicUsize);
+
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_registration_tracks_a_replacement_waker() {
+        let first = Waker::from(Arc::new(Counter(AtomicUsize::new(0))));
+        let second = Waker::from(Arc::new(Counter(AtomicUsize::new(0))));
+        let entry = Entry {
+            at: Instant::now(),
+            waker: Mutex::new(Some(first)),
+        };
+
+        entry.update(&second);
+
+        assert!(entry
+            .waker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .will_wake(&second));
     }
 }

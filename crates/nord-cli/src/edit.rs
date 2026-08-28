@@ -101,10 +101,7 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
                 None,
                 None,
             ),
-            // ⚠️ `send` deletes the destination to make room, and whether the live
-            // buffer or the settings singleton survives a delete/write of its class is
-            // unconfirmed on hardware. Until it is, an edited slot of either stops at
-            // a file.
+            // ⚠️ Delete/write is not hardware-confirmed for live slots or settings.
             _ => Err(format!(
                 "writing {} back over USB is unproven; give -o a path to save the edit \
                  as a .{} file",

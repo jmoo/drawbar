@@ -13,12 +13,12 @@
 //!                                           with u32 status  preceding bytes
 //! ```
 //!
-//! Verified against **every** message in the specimen corpus: 4,589 messages,
-//! 100% CRC match and 100% length-field match.
+//! Inferred from captured traffic; frame lengths and CRCs are checked across the
+//! capture corpus.
 //!
-//! The response to a request is `command + 1` and inserts a `u32` status (0 = success)
-//! ahead of the echoed arguments. That inserted word is the reason responses run
-//! exactly 4 bytes longer than their requests.
+//! A response to a request is `command + 1` and inserts a `u32` status (0 = success)
+//! ahead of the echoed arguments. The unsolicited [`cmd::CHANGED`] notification is
+//! status-less.
 //!
 //! Requests are *usually* even, but that is a pattern and not a rule — [`cmd::SELECT`]
 //! is `0x2f`, an odd request whose response is `0x30`. **Direction is the only reliable
@@ -274,9 +274,7 @@ impl ProgramInfo {
     const NAME_LEN_AT: usize = 28;
 
     pub fn decode(msg: &Message) -> Result<Self> {
-        // See `Dependency::decode_all` — `payload` only strips the status word for a
-        // message marked as a response, so decoding a request here would shift every
-        // offset by four.
+        // A request-decoded message retains the status position and shifts every field.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "object info must be decoded from a response (use Message::decode_response)".into(),
@@ -291,34 +289,16 @@ impl ProgramInfo {
         }
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
 
-        // The layout is fixed, confirmed across ten replies spanning all four format
-        // tags (ne5p, ne5t, npno, nsmp) in the set-list bundle capture:
-        //
-        //   bank | slot | body_len | format[4] | version | word | word
-        //        | name_len | name | pad to 8 | crc32
-        //
-        // The two words at 20 and 24 are `0xffffffff` for the slot-addressed classes
-        // but carry content-specific values for library objects, so they are read as
-        // opaque and skipped rather than asserted.
-        //
-        // The name length is read, never searched for: names run long, and the corpus
-        // holds a 54-character one ("3 Violins SM_Chamberlin_MMaster mono small version
-        // 2.0").
+        // Words 20 and 24 vary for libraries, so preserve their position without asserting them.
         let name_len = word(Self::NAME_LEN_AT) as usize;
         let name_start = Self::NAME_LEN_AT + 4;
-        let name_end = name_start + name_len;
-        if name_end > p.len() {
-            return Err(Error::Truncated {
-                got: p.len(),
-                need: name_end,
-            });
-        }
+        let name_end = checked_end(p, name_start, name_len)?;
         let name = String::from_utf8_lossy(&p[name_start..name_end])
             .trim_end()
             .to_owned();
 
         // Trailing word, past the padding. Absent if the reply stops at the name.
-        let crc32 = match p.len() >= name_end + 4 {
+        let crc32 = match p.len().saturating_sub(name_end) >= 4 {
             true => match word(p.len() - 4) {
                 u32::MAX => None,
                 crc => Some(crc),
@@ -344,12 +324,30 @@ impl ProgramInfo {
 const PARTITION_FIELDS: usize = 29;
 
 fn read_u32(buf: &[u8], at: usize) -> Result<u32> {
-    buf.get(at..at + 4)
+    let end = at.checked_add(4).ok_or(Error::Truncated {
+        got: buf.len(),
+        need: usize::MAX,
+    })?;
+    buf.get(at..end)
         .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
         .ok_or(Error::Truncated {
             got: buf.len(),
-            need: at + 4,
+            need: end,
         })
+}
+
+fn checked_end(buf: &[u8], start: usize, len: usize) -> Result<usize> {
+    let end = start.checked_add(len).ok_or(Error::Truncated {
+        got: buf.len(),
+        need: usize::MAX,
+    })?;
+    if end > buf.len() {
+        return Err(Error::Truncated {
+            got: buf.len(),
+            need: end,
+        });
+    }
+    Ok(end)
 }
 
 /// One of the device's storage partitions, from [`cmd::PARTITIONS`].
@@ -392,21 +390,21 @@ impl Partition {
     /// and every one after it lands mid-field, which looks like corruption rather than a
     /// framing mistake.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
+        if !msg.is_response() {
+            return Err(Error::InvalidArgument(
+                "partitions must be decoded from a response".into(),
+            ));
+        }
         let p = msg.payload();
         let count = *p.first().ok_or(Error::Truncated { got: 0, need: 1 })? as usize;
         let mut out = Vec::with_capacity(count);
         let mut at = 1;
         for index in 0..count {
             let len = read_u32(p, at)? as usize;
-            let end = at + 4 + len;
-            let fields_end = end + PARTITION_FIELDS;
-            if fields_end > p.len() {
-                return Err(Error::Truncated {
-                    got: p.len(),
-                    need: fields_end,
-                });
-            }
-            let name = String::from_utf8_lossy(&p[at + 4..end])
+            let name_start = checked_end(p, at, 4)?;
+            let end = checked_end(p, name_start, len)?;
+            let fields_end = checked_end(p, end, PARTITION_FIELDS)?;
+            let name = String::from_utf8_lossy(&p[name_start..end])
                 .trim_end()
                 .to_string();
             out.push(Partition {
@@ -425,6 +423,11 @@ impl Bank {
     /// Decode a [`cmd::BANKS`] reply: the echoed partition, a count, then
     /// `[u32 name_len][name][u32 slots]` records.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
+        if !msg.is_response() {
+            return Err(Error::InvalidArgument(
+                "banks must be decoded from a response".into(),
+            ));
+        }
         let p = msg.payload();
         let count = *p.get(4).ok_or(Error::Truncated {
             got: p.len(),
@@ -434,17 +437,11 @@ impl Bank {
         let mut at = 5;
         for index in 0..count {
             let len = read_u32(p, at)? as usize;
-            let end = at + 4 + len;
-            let name = if end <= p.len() {
-                String::from_utf8_lossy(&p[at + 4..end])
-                    .trim_end()
-                    .to_string()
-            } else {
-                return Err(Error::Truncated {
-                    got: p.len(),
-                    need: end,
-                });
-            };
+            let name_start = checked_end(p, at, 4)?;
+            let end = checked_end(p, name_start, len)?;
+            let name = String::from_utf8_lossy(&p[name_start..end])
+                .trim_end()
+                .to_string();
             out.push(Bank {
                 index: index as u32,
                 name,
@@ -523,10 +520,7 @@ impl Dependency {
     /// `[u8 flag][u32 reserved][u32 class][u32 id][u32 name_len][name][u32 has_location][u32 bank][u32 slot]`
     /// with no alignment padding, so an entry is `29 + name_len` bytes.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
-        // [`Message::payload`] strips the leading status word only when the message is
-        // marked as a response. Decoding a DEPENDENCIES reply with `Message::decode`
-        // instead of `decode_response` would leave that word in place and shift every
-        // offset below by four. Refuse rather than misparse.
+        // Request decoding leaves the status position in place and shifts every entry.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "dependency list must be decoded from a response (use Message::decode_response)"
@@ -543,33 +537,18 @@ impl Dependency {
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
         let count = word(8) as usize;
 
-        // `count` is device-supplied and unvalidated; the smallest entry is 29 bytes,
-        // so a payload of this length bounds how many can really follow. Without the
-        // clamp a corrupt count is a multi-gigabyte allocation before the loop's
-        // truncation checks ever run.
+        // Bound allocation by the payload's minimum possible entry count.
         let mut out = Vec::with_capacity(count.min((p.len() - 12) / 29));
         let mut i = 12;
         for _ in 0..count {
             // flag(1) + reserved(4) + class(4) + id(4) + name_len(4) = 17 bytes.
-            if i + 17 > p.len() {
-                return Err(Error::Truncated {
-                    got: p.len(),
-                    need: i + 17,
-                });
-            }
+            let name_start = checked_end(p, i, 17)?;
             let flag = p[i];
             let class = ObjectClass::from_raw(word(i + 5));
             let id = word(i + 9);
             let name_len = word(i + 13) as usize;
-            let name_start = i + 17;
-            let name_end = name_start + name_len;
-            // name + has_location(4) + bank(4) + slot(4).
-            if name_end + 12 > p.len() {
-                return Err(Error::Truncated {
-                    got: p.len(),
-                    need: name_end + 12,
-                });
-            }
+            let name_end = checked_end(p, name_start, name_len)?;
+            let record_end = checked_end(p, name_end, 12)?;
             let name = String::from_utf8_lossy(&p[name_start..name_end]).into_owned();
             let has_location = word(name_end) != 0;
             let location = has_location.then(|| Location {
@@ -583,7 +562,7 @@ impl Dependency {
                 name,
                 location,
             });
-            i = name_end + 12;
+            i = record_end;
         }
         Ok(out)
     }
@@ -591,8 +570,7 @@ impl Dependency {
 
 /// CRC-16/CCITT-FALSE — poly `0x1021`, init `0xFFFF`, no reflection, no xorout.
 ///
-/// Identified by brute-forcing the standard CRC-16 parameter space against known
-/// message/trailer pairs, then confirmed against all 4,589 corpus messages.
+/// Identified from known message/trailer pairs and checked across the capture corpus.
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
     for &byte in data {
@@ -614,8 +592,8 @@ pub struct Message {
     pub service: Service,
     pub subsystem: u32,
     pub command: u32,
-    /// Everything between the command word and the CRC. For a response this still
-    /// includes the leading status word — use [`Message::status`] to read it.
+    /// Everything between the command word and the CRC. Ordinary responses include
+    /// their leading status word; [`cmd::CHANGED`] does not.
     pub args: Vec<u8>,
     /// Set by the decoder from the direction the bytes traveled. Not inferable from
     /// the command code — see [`Message::is_response`].
@@ -670,18 +648,17 @@ impl Message {
         self.is_response
     }
 
-    /// The status word a response leads with. `Some(0)` is success.
+    /// The status word an ordinary response leads with. `Some(0)` is success.
     pub fn status(&self) -> Option<u32> {
-        if !self.is_response || self.args.len() < 4 {
+        if !self.is_response || self.command == cmd::CHANGED || self.args.len() < 4 {
             return None;
         }
         Some(u32::from_be_bytes(self.args[..4].try_into().ok()?))
     }
 
-    /// Arguments with the response status word stripped, so request and response
-    /// argument lists line up.
+    /// Arguments with an ordinary response's status stripped. Notifications are unchanged.
     pub fn payload(&self) -> &[u8] {
-        if self.is_response && self.args.len() >= 4 {
+        if self.is_response && self.command != cmd::CHANGED && self.args.len() >= 4 {
             &self.args[4..]
         } else {
             &self.args
@@ -703,6 +680,13 @@ impl Message {
     /// Decode bytes received *from* the device.
     pub fn decode_response(buf: &[u8]) -> Result<Self> {
         let mut m = Self::decode(buf)?;
+        // CHANGED is an unsolicited notification, not a command response, and carries no status.
+        if m.command != cmd::CHANGED && buf.len() < HEADER_LEN + 4 + CRC_LEN {
+            return Err(Error::Truncated {
+                got: buf.len(),
+                need: HEADER_LEN + 4 + CRC_LEN,
+            });
+        }
         m.is_response = true;
         Ok(m)
     }
@@ -744,13 +728,8 @@ impl Message {
 /// What kind of object a session is about.
 ///
 /// `SESSION_OPEN` carries one of these, and [`cmd::STATUS`] then reports on that class
-/// alone — which is why the same instrument reports different totals depending on what
-/// was opened. Names for 1/3/4/5 are inferred from item counts cross-checked against a
-/// full backup (29 pianos, 139 samples, ~375 programs); 6 and 7 are read from the
-/// backup capture itself, whose closing transactions open class 6 and fetch the three
-/// `ne5l` Live bodies, then open class 7 and fetch the 34-byte `ne5s` settings body —
-/// byte-identical to the files NSM extracts. The numeric codes are what the device
-/// actually sends, so an unrecognized one is preserved rather than rejected.
+/// alone. Names are inferred from captured inventory and backup traffic; an
+/// unrecognized numeric class is preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectClass {
     Piano,
@@ -829,17 +808,14 @@ pub struct Status {
 }
 
 impl Status {
-    pub fn total(&self) -> u32 {
-        self.free + self.used
+    pub fn total(&self) -> u64 {
+        u64::from(self.free) + u64::from(self.used)
     }
 
     /// Blocks per item, when every item of this class costs the same.
     ///
-    /// Fixed-size classes divide exactly: on a real Electro 5, programs cost **141**
-    /// blocks each (`379 × 141 = 53439`, then `380 × 141 = 53580` after adding one)
-    /// and set lists cost **38**. Variable-size classes — pianos and samples, where
-    /// the content really does differ per item — do not divide evenly and yield
-    /// `None`.
+    /// Fixed-size classes divide both used and total blocks exactly. Variable-size
+    /// library classes yield `None`.
     pub fn blocks_per_item(&self) -> Option<u32> {
         if self.count == 0 || self.used == 0 || !self.used.is_multiple_of(self.count) {
             return None;
@@ -847,7 +823,7 @@ impl Status {
         let per = self.used / self.count;
         // Only trust it if the class capacity is also a whole number of items;
         // otherwise the division is a coincidence.
-        (per != 0 && self.total().is_multiple_of(per)).then_some(per)
+        (per != 0 && self.total().is_multiple_of(u64::from(per))).then_some(per)
     }
 
     /// Total item slots, for classes where items are fixed-size.
@@ -855,7 +831,8 @@ impl Status {
     /// Far more meaningful than raw blocks: programs report 400, which is exactly the
     /// 8 banks × 50 slots of an Electro 5.
     pub fn slots(&self) -> Option<u32> {
-        self.blocks_per_item().map(|per| self.total() / per)
+        self.blocks_per_item()
+            .and_then(|per| u32::try_from(self.total() / u64::from(per)).ok())
     }
 
     pub fn used_percent(&self) -> f32 {
@@ -870,9 +847,7 @@ impl Status {
     /// Decode a [`cmd::STATUS`] response. Arguments after the status word are
     /// `count, free, used, …`.
     pub fn decode(class: ObjectClass, msg: &Message) -> Result<Self> {
-        // Same guard as `ProgramInfo::decode`: `payload` only strips the status word
-        // from a response, so a request-decoded message would shift every counter by
-        // four bytes.
+        // Request decoding would leave the status position and shift every counter.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "status must be decoded from a response (use Message::decode_response)".into(),
@@ -907,11 +882,9 @@ pub struct Location {
 impl Location {
     /// From the one-indexed numbering used by the UI and capture names.
     ///
-    /// Zero is not a user address — the panel counts from 1 — and underflows here, so
-    /// callers own validating input (the CLI rejects `0:1` with a message naming the
-    /// numbering).
+    /// Panics if either number is zero.
     pub fn from_user(bank: u32, slot: u32) -> Self {
-        debug_assert!(
+        assert!(
             bank >= 1 && slot >= 1,
             "from_user takes the panel's one-indexed numbering; got {bank}:{slot}"
         );
@@ -919,6 +892,16 @@ impl Location {
             bank: bank - 1,
             slot: slot - 1,
         }
+    }
+
+    /// The one-indexed bank number shown by the instrument.
+    pub fn user_bank(self) -> u64 {
+        u64::from(self.bank) + 1
+    }
+
+    /// The one-indexed slot number shown by the instrument.
+    pub fn user_slot(self) -> u64 {
+        u64::from(self.slot) + 1
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
@@ -1033,6 +1016,23 @@ mod tests {
     }
 
     #[test]
+    fn a_response_without_a_status_word_is_truncated() {
+        let bytes = Message::new(Service::Program, 10, cmd::STATUS + 1, Vec::new()).encode();
+        assert!(matches!(
+            Message::decode_response(&bytes),
+            Err(Error::Truncated { need: 22, .. })
+        ));
+    }
+
+    #[test]
+    fn changed_is_a_statusless_notification() {
+        let bytes = Message::new(Service::Program, 10, cmd::CHANGED, vec![1, 2, 3, 4]).encode();
+        let message = Message::decode_response(&bytes).unwrap();
+        assert_eq!(message.status(), None);
+        assert_eq!(message.payload(), [1, 2, 3, 4]);
+    }
+
+    #[test]
     fn crc_matches_known_messages() {
         // Session open/close and the UI hello, straight from the corpus.
         for raw in [
@@ -1059,11 +1059,7 @@ mod tests {
         );
     }
 
-    /// Object info decodes identically across all four format tags, from real replies
-    /// in the set-list bundle capture. This pins three things at once: `version` is at
-    /// a fixed offset (and is the name's own version x100 for library content), the
-    /// name length is read rather than guessed, and `0xffffffff` means "not
-    /// checksummed" rather than being handed back as a checksum.
+    /// Object info uses its declared name length and treats `0xffffffff` as no checksum.
     #[test]
     fn object_info_decodes_every_format() {
         let cases: &[(&str, &str, u32, Option<u32>, &str)] = &[
