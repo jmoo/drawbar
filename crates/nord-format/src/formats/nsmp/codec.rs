@@ -17,20 +17,19 @@
 //! so where the chain begins comes from the header's [`Directory`] rather than from
 //! the first non-zero word. That is why a walk needs the stroke's offset in the body.
 //!
-//! ⚠️ **A differenced run's constants of integration are not in the file.** Where a
-//! run is meant to resume from is unsettled — the 1:1 records that separate runs do
-//! not sit on the differenced trajectory, so carrying the running history across one
-//! seeds the next run wrong, and at order 2 or 3 a wrong seed diverges over a run
-//! thousands of fields long. [`decode`] therefore integrates each run from rest and
-//! removes its degree-(N−1) trend, which is stable and leaves the waveform inside a
-//! run right; what such a run cannot report is its own level, and at higher orders
-//! its own slow drift. Sustained material whose whole signal *is* that trend — flat
-//! DC, a long linear ramp — decodes towards silence.
+//! A record may store the Nth backward difference of its fields rather than the
+//! fields themselves, so [`decode`] runs a predictor: `V(f) = e(f) − Σ(−1)^j
+//! C(N,j)·V(f−j)`, over one running history carried across every record boundary
+//! and through every skip. Nothing needs seeding — a stroke opens with a 1:1 ramp-in
+//! that settles on the content's own field value, and the history takes it from
+//! there.
 //!
-//! So decoded audio comes in two grades, and [`Audio::exact`] says which:
-//! order-0 material — every impulse, every noise probe, most sparse test content —
-//! reconstructs exactly, while anything differenced is right in shape and
-//! approximate in level. Instrument content is overwhelmingly the second kind.
+//! ⚠️ **A record's fields are left-anchored**: they start at the first bit after the
+//! header word, and the alignment tail is at the *end* of the segment. Reading from
+//! the far end instead is invisible on content records, whose field counts leave no
+//! tail, and displaces every 1:1 record — the warmup and the resyncs — by a whole
+//! number of field slots, or rotates the values inside their width when the tail is
+//! not a multiple of it.
 //!
 //! Everything here is inferred from specimens; not confirmed on hardware.
 
@@ -89,6 +88,14 @@ pub const FIELD_RATE: u32 = (SOURCE_RATE * PITCH_DEN + PITCH_NUM / 2) / PITCH_NU
 /// material look like a stream with no records in it.
 const COUNT_MASK: u32 = 0x3fff;
 
+/// Fields per cell on a mono stroke. A content run is a whole number of these; a
+/// stereo stroke doubles it, which is how the terminator gives stereo away.
+const CELL: usize = 24;
+
+/// Field values the predictor keeps. The order field is three bits wide, but only
+/// 0 to 4 occur and a fourth-order difference reaches no further back than this.
+const MAX_ORDER: usize = 4;
+
 /// Why a stroke's stream could not be walked.
 ///
 /// Decode coverage is a number, not a hope: a stroke either decodes or says which of
@@ -113,6 +120,12 @@ pub enum Unsupported {
     },
     /// The chain reached the end of the stroke without a terminator.
     NoTerminator,
+    /// A stereo stroke: two streams under one header, which this does not separate.
+    ///
+    /// The terminator gives the cell size away — 48 fields where a mono stroke has
+    /// 24. Decoding it as one stream interleaves the channels and the predictor
+    /// runs away, so it is refused instead.
+    Stereo,
 }
 
 impl Unsupported {
@@ -123,6 +136,7 @@ impl Unsupported {
             Unsupported::Malformed { .. } => "malformed-record",
             Unsupported::Desync { .. } => "desync",
             Unsupported::NoTerminator => "no-terminator",
+            Unsupported::Stereo => "stereo",
         }
     }
 }
@@ -141,6 +155,11 @@ impl fmt::Display for Unsupported {
             Unsupported::NoTerminator => {
                 write!(f, "the chain ran off the end with no terminator")
             }
+            Unsupported::Stereo => write!(
+                f,
+                "a stereo stroke carries two streams under one header, which this \
+                 decoder does not separate"
+            ),
         }
     }
 }
@@ -204,9 +223,9 @@ pub struct Audio {
     /// Nonzero on transients: the kernel rings, so a full-scale edge overshoots what
     /// a 16-bit source could hold.
     pub clipped: usize,
-    /// Fields that came out of a differenced run, and so carry no level of their
-    /// own — see this module's note on constants of integration. Real instrument
-    /// content is nearly all of this; sparse test material is none of it.
+    /// Fields that came through the predictor rather than being stated outright.
+    /// Real instrument content is nearly all of this; sparse test material is none
+    /// of it. Both kinds carry a level — this is a description, not a caveat.
     pub differenced: usize,
 }
 
@@ -214,12 +233,6 @@ impl Audio {
     /// Duration in seconds.
     pub fn seconds(&self) -> f64 {
         self.samples.len() as f64 / f64::from(FIELD_RATE)
-    }
-
-    /// Whether every field reconstructs exactly, rather than up to the level its
-    /// run cannot report.
-    pub fn exact(&self) -> bool {
-        self.differenced == 0
     }
 }
 
@@ -351,9 +364,9 @@ pub fn walk(stroke: &[u8], stroke_at: usize) -> Result<Stream, Unsupported> {
         if i + span > last.unwrap_or(words) {
             return Err(Unsupported::Desync { word: i });
         }
-        // Fields are right-anchored in the record, so the padding sits between the
-        // header word and the first field rather than after the last one.
-        let base = i * 24 + span * 24 - bits + 24;
+        // Fields start at the first bit after the header word; the alignment tail
+        // is at the end of the segment.
+        let base = i * 24 + 24;
         let values = (0..count)
             .map(|k| read_field(stream, base + k * usize::from(width), width))
             .collect();
@@ -380,35 +393,52 @@ pub fn walk(stroke: &[u8], stroke_at: usize) -> Result<Stream, Unsupported> {
 /// `stroke_at` is the stroke payload's offset from the start of the body.
 pub fn decode(stroke: &[u8], stroke_at: usize) -> Result<Audio, Unsupported> {
     let stream = walk(stroke, stroke_at)?;
+    if stream.cell == Some(2 * CELL) {
+        return Err(Unsupported::Stereo);
+    }
     let shift = shift(stroke)
         .ok_or(Unsupported::Short)?
         .clamp(-SHIFT_LIMIT, SHIFT_LIMIT);
     let mut samples = vec![0i16; stream.fields];
     let mut clipped = 0;
     let mut differenced = 0;
-    let mut run = Vec::new();
-    let gain = (2.0f64).powi(shift);
+    // The predictor's whole state: the last MAX_ORDER field values, carried across
+    // record boundaries and through skips. A stroke opens with a ramp-in that
+    // settles on the content's own level, so there is nothing else to seed.
+    let mut history = [0i64; MAX_ORDER];
     for record in &stream.records {
-        // Only content records difference; the 1:1 regime always stores values.
+        // Only content records difference; the 1:1 regime always states values.
         let order = if record.one_to_one {
             0
         } else {
-            usize::from(record.order)
+            usize::from(record.order).min(MAX_ORDER)
         };
-        if order == 0 {
-            run.clear();
-            run.extend(record.values.iter().map(|&v| f64::from(v)));
-        } else {
+        if order > 0 {
             differenced += record.values.len();
-            integrate(&record.values, order, &mut run);
         }
-        for (k, &value) in run.iter().enumerate() {
+        for (k, &residual) in record.values.iter().enumerate() {
+            let mut value = i64::from(residual);
+            for j in 1..=order {
+                let term = binomial(order, j).saturating_mul(history[j - 1]);
+                value = if j.is_multiple_of(2) {
+                    value.saturating_sub(term)
+                } else {
+                    value.saturating_add(term)
+                };
+            }
+            history.copy_within(0..MAX_ORDER - 1, 1);
+            history[0] = value;
+
             let Some(slot) = samples.get_mut(record.first_field + k) else {
-                break;
+                continue;
             };
-            let wide = (value * gain).round();
-            *slot = wide.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
-            if f64::from(*slot) != wide {
+            let wide = if shift >= 0 {
+                value.saturating_mul(1 << shift)
+            } else {
+                value >> -shift
+            };
+            *slot = wide.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+            if i64::from(*slot) != wide {
                 clipped += 1;
             }
         }
@@ -420,111 +450,13 @@ pub fn decode(stroke: &[u8], stroke_at: usize) -> Result<Audio, Unsupported> {
     })
 }
 
-/// Integrates one differenced run into `out`, then removes the trend the file does
-/// not pin down.
-///
-/// `V(f) = e(f) − Σ(−1)^j C(N,j)·V(f−j)` run from a zero start, which leaves the
-/// result wrong by some degree-(N−1) polynomial — the N constants of integration,
-/// which nothing in the stream records. Least-squares fitting that polynomial to
-/// the result and subtracting it removes the error along with whatever real signal
-/// happens to have the same shape, and, unlike carrying a guessed state forward,
-/// cannot run away: an initial slope that is off by one diverges over a run
-/// thousands of fields long.
-fn integrate(residuals: &[i32], order: usize, out: &mut Vec<f64>) {
-    out.clear();
-    out.reserve(residuals.len());
-    for (k, &e) in residuals.iter().enumerate() {
-        let mut v = f64::from(e);
-        for j in 1..=order {
-            if let Some(previous) = k.checked_sub(j).map(|i| out[i]) {
-                v += sign(j) * binomial(order, j) * previous;
-            }
-        }
-        out.push(v);
-    }
-    detrend(out, order);
-}
-
-/// `(−1)^(j+1)`, the sign a backward difference's jth term carries back.
-fn sign(j: usize) -> f64 {
-    if j.is_multiple_of(2) {
-        -1.0
-    } else {
-        1.0
-    }
-}
-
-fn binomial(n: usize, k: usize) -> f64 {
-    let mut c = 1.0;
+/// `C(n, k)`, for the small orders a record header can express.
+fn binomial(n: usize, k: usize) -> i64 {
+    let mut c = 1i64;
     for i in 0..k {
-        c = c * (n - i) as f64 / (i + 1) as f64;
+        c = c * (n - i) as i64 / (i + 1) as i64;
     }
     c
-}
-
-/// Subtracts the least-squares polynomial of degree `terms − 1` from `y`.
-///
-/// The abscissa is normalised to −1..1, which keeps the normal equations conditioned
-/// on runs of many thousands of fields.
-fn detrend(y: &mut [f64], terms: usize) {
-    let n = y.len();
-    if terms == 0 || n <= terms {
-        y.fill(0.0);
-        return;
-    }
-    let x = |k: usize| 2.0 * k as f64 / (n - 1) as f64 - 1.0;
-
-    // Normal equations, each row the `terms` coefficients then the target.
-    let mut m = vec![[0.0f64; 8]; 4];
-    for (k, &value) in y.iter().enumerate() {
-        let mut power = [1.0f64; 8];
-        for i in 1..2 * terms {
-            power[i] = power[i - 1] * x(k);
-        }
-        for (i, row) in m.iter_mut().enumerate().take(terms) {
-            for (j, cell) in row.iter_mut().enumerate().take(terms) {
-                *cell += power[i + j];
-            }
-            row[terms] += value * power[i];
-        }
-    }
-
-    let mut coefficients = [0.0f64; 4];
-    for i in 0..terms {
-        let pivot = (i..terms)
-            .max_by(|&a, &b| m[a][i].abs().total_cmp(&m[b][i].abs()))
-            .unwrap_or(i);
-        m.swap(i, pivot);
-        if m[i][i] == 0.0 {
-            continue;
-        }
-        for r in 0..terms {
-            if r != i {
-                let factor = m[r][i] / m[i][i];
-                let pivot_row = m[i];
-                for (j, cell) in m[r].iter_mut().enumerate().take(terms + 1).skip(i) {
-                    *cell -= factor * pivot_row[j];
-                }
-            }
-        }
-    }
-    for i in 0..terms {
-        coefficients[i] = if m[i][i] == 0.0 {
-            0.0
-        } else {
-            m[i][terms] / m[i][i]
-        };
-    }
-
-    for (k, value) in y.iter_mut().enumerate() {
-        let mut power = 1.0;
-        let mut fitted = 0.0;
-        for &c in coefficients.iter().take(terms) {
-            fitted += c * power;
-            power *= x(k);
-        }
-        *value -= fitted;
-    }
 }
 
 /// One field, `width` bits big-endian from `bit`, sign-extended.
@@ -558,7 +490,7 @@ mod tests {
         let span = bits.div_ceil(24);
         let mut out = vec![0u8; span * 3];
         out[..3].copy_from_slice(&head.to_be_bytes()[1..]);
-        let mut at = span * 24 - bits + 24;
+        let mut at = 24;
         for &v in values {
             let raw = (v as u32) & ((1u32 << width) - 1);
             for b in (0..width).rev() {
@@ -649,37 +581,59 @@ mod tests {
     }
 
     /// A first-order run stores the differences of its field values, so reading it
-    /// is a running sum. The offset that sum starts from is not in the file, which
-    /// is why the result is reported around zero rather than around the true level.
+    /// is a running sum — and the sum continues from whatever the record before it
+    /// left the predictor holding, rather than restarting.
     #[test]
-    fn a_differenced_run_integrates_back_to_its_own_shape() {
-        // A triangle: +1 for twelve fields, then −1 for twelve.
-        let mut deltas = vec![1i32; 24];
-        for d in &mut deltas[12..] {
-            *d = -1;
-        }
-        let s = stroke(1, 22, 0, &[block(false, 4, 1, &deltas)]);
-        let audio = decode(&s, 0).unwrap();
-        assert_eq!(audio.differenced, 24);
-        // The peak sits where the differences change sign, and the run reads as its
-        // own shape with the mean taken out.
-        let peak = audio
-            .samples
-            .iter()
-            .position(|&v| v == *audio.samples.iter().max().unwrap());
-        assert_eq!(peak, Some(11));
-        assert!(
-            audio
-                .samples
-                .iter()
-                .map(|&v| i32::from(v))
-                .sum::<i32>()
-                .abs()
-                <= 24
+    fn a_differenced_run_integrates_from_the_running_history() {
+        // A plain record settling on 100, then a first-order run of zeros, which
+        // is how sustained material is coded: nothing changes, so nothing is sent.
+        let mut settle = cell(13, 0);
+        settle.iter_mut().for_each(|v| *v = 100);
+        let hold = vec![0i32; 48];
+        let s = stroke(
+            1,
+            22,
+            0,
+            &[block(true, 13, 0, &settle), block(false, 13, 1, &hold)],
         );
-        // Rising then falling, one turn.
-        let turns = audio.samples.windows(2).filter(|w| w[1] < w[0]).count();
-        assert_eq!(turns, 12);
+        let audio = decode(&s, 0).unwrap();
+        assert_eq!(audio.differenced, 48);
+        // The level carries: every field of the differenced run holds the value the
+        // 1:1 record settled on.
+        assert!(audio.samples[24..72].iter().all(|&v| v == 100));
+    }
+
+    /// A second-order run integrates twice, so a constant residual is a parabola
+    /// and a zero residual continues the slope the history already holds.
+    #[test]
+    fn a_second_order_run_carries_slope_as_well_as_level() {
+        let mut ramp = cell(13, 0);
+        for (k, v) in ramp.iter_mut().enumerate() {
+            *v = 10 * k as i32;
+        }
+        let coast = vec![0i32; 24];
+        let s = stroke(
+            1,
+            22,
+            0,
+            &[block(true, 13, 0, &ramp), block(false, 13, 2, &coast)],
+        );
+        let audio = decode(&s, 0).unwrap();
+        // The ramp ends at 230 rising by 10; the second-order coast keeps going.
+        assert_eq!(audio.samples[23], 230);
+        assert_eq!(audio.samples[24], 240);
+        assert_eq!(audio.samples[25], 250);
+    }
+
+    /// The 1:1 records are the ones an anchoring mistake moves: their field counts
+    /// leave an alignment tail, and reading it as a lead-in displaces every value.
+    #[test]
+    fn a_one_to_one_record_with_an_alignment_tail_reads_from_the_front() {
+        // 30 fields of 13 bits is 390, which leaves 18 spare bits in 18 words.
+        let values: Vec<i32> = (0..30).map(|k| k * 7 - 40).collect();
+        let s = stroke(1, 22, 0, &[block(true, 13, 0, &values)]);
+        let walked = walk(&s, 0).unwrap();
+        assert_eq!(walked.records[0].values, values);
     }
 
     #[test]

@@ -514,15 +514,30 @@ fn nsmp_streams_walk_to_the_terminator_the_header_names() {
 /// Every v2 stroke decodes to audio, and the lattice accounting is consistent:
 /// the chain's field counts sum to the sample length, whatever each record's
 /// differencing order.
+///
+/// A stereo stroke is the one refusal — two streams share its header — and it says
+/// so by name rather than interleaving them.
 #[test]
 fn nsmp_every_stroke_decodes() {
     let mut decoded = 0;
+    let mut stereo = 0;
     for (s, sample) in v2_samples() {
         let where_ = s.path.display();
         for (index, (at, stroke)) in sample.stroke_streams().into_iter().enumerate() {
-            let audio = nsmp::codec::decode(stroke, at)
-                .unwrap_or_else(|e| panic!("{where_} stroke {index}: {e}"));
             let stream = nsmp::codec::walk(stroke, at).unwrap();
+            let audio = match nsmp::codec::decode(stroke, at) {
+                Ok(audio) => audio,
+                Err(nsmp::codec::Unsupported::Stereo) => {
+                    assert_eq!(
+                        stream.cell,
+                        Some(48),
+                        "{where_} stroke {index}: refused as stereo without a stereo cell"
+                    );
+                    stereo += 1;
+                    continue;
+                }
+                Err(e) => panic!("{where_} stroke {index}: {e}"),
+            };
             assert_eq!(
                 audio.samples.len(),
                 stream.records.iter().map(|r| r.values.len()).sum::<usize>(),
@@ -537,6 +552,10 @@ fn nsmp_every_stroke_decodes() {
         }
     }
     assert!(decoded > 0, "no stroke decoded");
+    assert!(
+        stereo < decoded / 100,
+        "stereo is meant to be the rare case"
+    );
 }
 
 /// A sine specimen decodes to that sine: the editor was handed a C4 tone, and the

@@ -153,7 +153,6 @@ struct Coverage {
     files: usize,
     zones: usize,
     decoded: usize,
-    approximate: usize,
     fields: usize,
     differenced: usize,
     reasons: BTreeMap<&'static str, usize>,
@@ -167,18 +166,12 @@ impl Coverage {
     fn line(&self) -> String {
         let unsupported: usize = self.reasons.values().sum();
         let mut line = format!(
-            "{} file(s), {} zone(s): {} decoded ({} exact, {} approximate), \
-             {unsupported} unsupported",
-            self.files,
-            self.zones,
-            self.decoded,
-            self.decoded - self.approximate,
-            self.approximate,
+            "{} file(s), {} zone(s): {} decoded, {unsupported} unsupported",
+            self.files, self.zones, self.decoded
         );
         if self.fields > 0 {
             line.push_str(&format!(
-                "; {:.1}% of decoded fields sit in a differenced run, right in shape \
-                 and approximate in level",
+                "; {:.1}% of decoded fields came through the predictor",
                 100.0 * self.differenced as f64 / self.fields as f64,
             ));
         }
@@ -268,10 +261,9 @@ fn decode_file(
                 coverage.fields += audio.samples.len();
                 coverage.differenced += audio.differenced;
                 let mut notes = Vec::new();
-                if !audio.exact() {
-                    coverage.approximate += 1;
+                if audio.differenced > 0 {
                     notes.push(format!(
-                        "approximate: {}% differenced",
+                        "{}% predicted",
                         100 * audio.differenced / audio.samples.len().max(1)
                     ));
                 }
