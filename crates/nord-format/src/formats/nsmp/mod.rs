@@ -15,6 +15,16 @@
 //! units, so a caller only picks the right [`codec::Layout`]. [`encode`] builds a new
 //! instrument from PCM, v2 only.
 
+/// A zone and the stroke stream that plays it, ready for [`codec::decode`].
+pub struct ZoneAudio<'a> {
+    pub root_key: u8,
+    pub top_note: u8,
+    /// The stream's offset from the start of the body, which is the base its own
+    /// word directory was written against.
+    pub at: usize,
+    pub stream: &'a [u8],
+}
+
 pub mod codec;
 pub mod encode;
 pub mod kernel;

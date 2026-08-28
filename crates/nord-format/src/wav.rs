@@ -1,5 +1,7 @@
 //! A minimal RIFF/WAVE reader and writer, for moving audio in and out of the codec.
 
+use crate::error::{Error, ParseError};
+
 /// A mono 16-bit PCM WAV file.
 ///
 /// `rate` goes into the header unchanged: decoded audio comes off its own lattice
@@ -52,12 +54,12 @@ impl Pcm16 {
 /// float, 8/24/32-bit, and the extensible header, is refused by name rather than
 /// misread. Channel count and rate come back as stored; what to do with them is the
 /// caller's policy.
-pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, String> {
+pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
     let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
 
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("not a RIFF/WAVE file".into());
+        return Err(ParseError::AssertFail("not a RIFF/WAVE file".into()).into());
     }
 
     let mut format = None;
@@ -69,10 +71,11 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, String> {
         let body = at + 8;
         let end = body.checked_add(size).filter(|&e| e <= bytes.len());
         let Some(end) = end else {
-            return Err(format!(
+            return Err(ParseError::AssertFail(format!(
                 "chunk {} claims {size} bytes but the file ends first",
                 String::from_utf8_lossy(id)
-            ));
+            ))
+            .into());
         };
         match id {
             b"fmt " if size >= 16 => {
@@ -91,21 +94,24 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, String> {
     }
 
     let Some((encoding, channels, rate, bits)) = format else {
-        return Err("no fmt chunk".into());
+        return Err(ParseError::AssertFail("no fmt chunk".into()).into());
     };
     if encoding != 1 {
-        return Err(format!(
+        return Err(ParseError::AssertFail(format!(
             "encoding {encoding} is not uncompressed PCM; only PCM (1) is read"
-        ));
+        ))
+        .into());
     }
     if bits != 16 {
-        return Err(format!("{bits}-bit samples; only 16-bit PCM is read"));
+        return Err(
+            ParseError::AssertFail(format!("{bits}-bit samples; only 16-bit PCM is read")).into(),
+        );
     }
     if channels == 0 {
-        return Err("the fmt chunk declares no channels".into());
+        return Err(ParseError::AssertFail("the fmt chunk declares no channels".into()).into());
     }
     let Some(data) = data else {
-        return Err("no data chunk".into());
+        return Err(ParseError::AssertFail("no data chunk".into()).into());
     };
 
     let samples = bytes[data]
@@ -150,11 +156,11 @@ mod tests {
 
         let mut wav = mono_pcm16(&[1i16], 44_100);
         wav[34] = 24; // bits per sample
-        assert!(read_pcm16(&wav).unwrap_err().contains("24-bit"));
+        assert!(read_pcm16(&wav).unwrap_err().to_string().contains("24-bit"));
 
         let mut wav = mono_pcm16(&[1i16], 44_100);
         wav[20] = 3; // IEEE float
-        assert!(read_pcm16(&wav).unwrap_err().contains("PCM"));
+        assert!(read_pcm16(&wav).unwrap_err().to_string().contains("PCM"));
 
         let mut wav = mono_pcm16(&[1i16], 44_100);
         wav[40..44].copy_from_slice(&999u32.to_le_bytes()); // data chunk overruns

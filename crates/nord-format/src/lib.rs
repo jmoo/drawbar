@@ -39,6 +39,7 @@ pub mod formats;
 pub mod layout;
 pub mod types;
 pub mod util;
+pub mod wav;
 
 use crate::cbin::{Cbin, RawBody};
 use crate::formats::{
@@ -209,6 +210,77 @@ pub enum Sample {
     /// The nsmp3/nsmp4 generations: section chain decoded, strokes stored
     /// verbatim and decodable through [`nsmp::codec`].
     V3(Cbin<nsmp::SampleV3>),
+}
+
+impl Sample {
+    /// Which generation's units this body's stroke streams are in.
+    pub fn layout(&self) -> nsmp::codec::Layout {
+        match self {
+            Sample::V2(_) => nsmp::codec::Layout::V2,
+            Sample::V3(_) => nsmp::codec::Layout::V3,
+        }
+    }
+
+    /// The generation to name in a report, taken from the content version rather
+    /// than the file name.
+    pub fn generation(&self) -> &'static str {
+        match self {
+            Sample::V2(_) => "v2",
+            Sample::V3(s) if s.header.version >= 400 => "v4",
+            Sample::V3(_) => "v3",
+        }
+    }
+
+    /// Every zone in stored order, paired with the stream that plays it.
+    ///
+    /// One codec reads all three generations, so the only thing that branches here
+    /// is which accessors reach the zones and their streams.
+    pub fn zones(&self) -> Result<Vec<nsmp::ZoneAudio<'_>>, Error> {
+        match self {
+            Sample::V2(s) => {
+                let zones = s.zones()?;
+                let strokes = s.strokes()?;
+                zones
+                    .iter()
+                    .zip(&strokes)
+                    .enumerate()
+                    .map(|(i, (zone, stroke))| {
+                        let (at, stream) = s.zone_stream(i)?;
+                        Ok(nsmp::ZoneAudio {
+                            root_key: stroke.root_key,
+                            top_note: zone.top_note,
+                            at,
+                            stream,
+                        })
+                    })
+                    .collect()
+            }
+            Sample::V3(s) => {
+                let zones = s.zones()?;
+                zones
+                    .iter()
+                    .enumerate()
+                    .map(|(i, zone)| {
+                        let (at, stream) = s.zone_stream(i)?;
+                        Ok(nsmp::ZoneAudio {
+                            root_key: zone.root_key,
+                            top_note: zone.top_note,
+                            at,
+                            stream,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Every stroke's stream in file order, whether or not a zone names it.
+    pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
+        match self {
+            Sample::V2(s) => s.stroke_streams(),
+            Sample::V3(s) => s.stroke_streams(),
+        }
+    }
 }
 
 /// One decoded file.

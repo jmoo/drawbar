@@ -11,8 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use nord_format::cbin::Cbin;
-use nord_format::formats::nsmp::{codec, encode, Sample, SampleV3};
+use nord_format::formats::nsmp::{codec, encode};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -21,7 +20,6 @@ use crate::editors::{self, SampleEditor};
 use crate::note;
 use crate::slot::Target;
 use crate::ui::Ui;
-use crate::wav;
 
 #[derive(Args)]
 pub struct EditArgs {
@@ -223,98 +221,11 @@ impl Coverage {
 }
 
 /// One zone: what it plays, where, and the stream that holds it.
-struct ZoneAudio<'a> {
-    root_key: u8,
-    top_note: u8,
-    /// The stream's offset from the start of the body, which is the base its own
-    /// word directory was written against.
-    at: usize,
-    stream: &'a [u8],
-}
-
-/// A sample instrument's body, whichever generation it is.
-///
-/// One codec reads all three, so the only thing that branches here is which
-/// accessors reach the zones and their streams — and which [`codec::Layout`] the
-/// streams are in.
-enum Body {
-    V2(Cbin<Sample>),
-    V3(Cbin<SampleV3>),
-}
-
-impl Body {
-    fn layout(&self) -> codec::Layout {
-        match self {
-            Body::V2(_) => codec::Layout::V2,
-            Body::V3(_) => codec::Layout::V3,
-        }
-    }
-
-    /// What generation to say in a report: the extension, effectively, but taken
-    /// from the content version rather than the file name.
-    fn generation(&self) -> &'static str {
-        match self {
-            Body::V2(_) => "v2",
-            Body::V3(s) if s.header.version >= 400 => "v4",
-            Body::V3(_) => "v3",
-        }
-    }
-
-    /// Every zone in stored order, paired with the stream that plays it.
-    fn zones(&self) -> Result<Vec<ZoneAudio<'_>>, String> {
-        match self {
-            Body::V2(s) => {
-                let zones = s.zones().map_err(|e| e.to_string())?;
-                let strokes = s.strokes().map_err(|e| e.to_string())?;
-                zones
-                    .iter()
-                    .zip(&strokes)
-                    .enumerate()
-                    .map(|(i, (zone, stroke))| {
-                        let (at, stream) = s.zone_stream(i).map_err(|e| e.to_string())?;
-                        Ok(ZoneAudio {
-                            root_key: stroke.root_key,
-                            top_note: zone.top_note,
-                            at,
-                            stream,
-                        })
-                    })
-                    .collect()
-            }
-            Body::V3(s) => {
-                let zones = s.zones().map_err(|e| e.to_string())?;
-                zones
-                    .iter()
-                    .enumerate()
-                    .map(|(i, zone)| {
-                        let (at, stream) = s.zone_stream(i).map_err(|e| e.to_string())?;
-                        Ok(ZoneAudio {
-                            root_key: zone.root_key,
-                            top_note: zone.top_note,
-                            at,
-                            stream,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
-    /// Every stroke's stream in file order, whether or not a zone names it.
-    fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
-        match self {
-            Body::V2(s) => s.stroke_streams(),
-            Body::V3(s) => s.stroke_streams(),
-        }
-    }
-}
-
 /// The sample body of a file, or why this command cannot reach one.
-fn body(path: &Path) -> Result<Body, String> {
+fn body(path: &Path) -> Result<nord_format::Sample, String> {
     let entity = nord_format::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
     match entity {
-        Entity::Sample(nord_format::Sample::V2(sample)) => Ok(Body::V2(sample)),
-        Entity::Sample(nord_format::Sample::V3(sample)) => Ok(Body::V3(sample)),
+        Entity::Sample(sample) => Ok(sample),
         other => Err(format!(
             "{}: a {} file, not a sample instrument",
             path.display(),
@@ -362,7 +273,7 @@ fn decode_file(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "sample".into());
 
-    for (index, zone) in body.zones()?.iter().enumerate() {
+    for (index, zone) in body.zones().map_err(|e| e.to_string())?.iter().enumerate() {
         coverage.zones += 1;
         let n = index + 1;
         let head = format!(
@@ -393,8 +304,11 @@ fn decode_file(
                 );
                 if let Some(dir) = out {
                     let file = dir.join(format!("{stem}-zone{n}.wav"));
-                    std::fs::write(&file, wav::mono_pcm16(&audio.samples, codec::FIELD_RATE))
-                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    std::fs::write(
+                        &file,
+                        nord_format::wav::mono_pcm16(&audio.samples, codec::FIELD_RATE),
+                    )
+                    .map_err(|e| format!("{}: {e}", file.display()))?;
                     row.push_str(&format!("  -> {}", file.display()));
                 }
                 ui.out(row);
@@ -425,7 +339,8 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     }
 
     let bytes = std::fs::read(&args.wav).map_err(|e| format!("{}: {e}", args.wav.display()))?;
-    let source = wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", args.wav.display()))?;
+    let source =
+        nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", args.wav.display()))?;
     if source.rate != codec::SOURCE_RATE {
         return Err(format!(
             "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
