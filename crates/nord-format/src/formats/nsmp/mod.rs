@@ -15,6 +15,7 @@
 //! keeps its strokes opaque.
 
 pub mod codec;
+pub mod kernel;
 pub mod section;
 pub mod stroke;
 pub mod zone;
