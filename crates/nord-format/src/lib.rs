@@ -206,7 +206,8 @@ pub enum PianoPreset {
 #[derive(Debug)]
 pub enum Sample {
     V2(Cbin<nsmp::Sample>),
-    /// The nsmp3/nsmp4 generations: section chain decoded, strokes verbatim.
+    /// The nsmp3/nsmp4 generations: section chain decoded, strokes stored
+    /// verbatim and decodable through [`nsmp::codec`].
     V3(Cbin<nsmp::SampleV3>),
 }
 
