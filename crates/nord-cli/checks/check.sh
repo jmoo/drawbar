@@ -18,6 +18,8 @@ bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 here=$(cd "$(dirname "$0")" && pwd)
 : "${POC_SCRIPT:=$here/../../nord-usb/tests/scripts/device/inventory.script}"
 export POC_SCRIPT
+: "${POC_PROJECT:=$here/../../nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj}"
+export POC_PROJECT
 
 run() { ${NORD_RUNNER:-} "$bin" "$@"; }
 

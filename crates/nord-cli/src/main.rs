@@ -10,15 +10,18 @@
 //! `nord setlist` and `nord live` are [`slot_action`] with the class fixed, `nord
 //! settings` carries the one verb its singleton needs (`edit`), and the hidden
 //! `nord raw --class N` is [`slot_action`] with the class given as a number.
-//! `inspect`/`verify` dispatch on the CBIN format tag rather than on a class, so they sit
-//! at the top level.
+//! `inspect`/`verify`/`edit` dispatch on the format rather than on a class, so they
+//! sit at the top level — `edit` is how the formats with no noun of their own (the
+//! Stage bodies, the Sample Editor project) are edited.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own, which today is pianos (1).
 
 mod device;
 mod edit;
+mod editors;
 mod file;
+mod file_edit;
 mod note;
 mod sample;
 mod slot;
@@ -77,6 +80,14 @@ enum Command {
         files: Vec<PathBuf>,
     },
 
+    /// Change fields inside any editable file, whatever format it holds.
+    ///
+    /// The file twin of the noun edits: where those speak to the Electro 5's
+    /// object classes, this dispatches on the file itself, so the formats with
+    /// no noun — Stage programs and presets, Sample Editor projects — are
+    /// editable too. `--fields` lists what the file offers.
+    Edit(file_edit::FileEditArgs),
+
     /// The attached instrument itself: what is on the bus, and what it holds.
     Device {
         #[command(subcommand)]
@@ -93,7 +104,7 @@ enum Command {
     /// Set lists on the instrument (object class 5). Same verbs as `nord program`.
     Setlist {
         #[command(subcommand)]
-        action: SlotAction,
+        action: SetlistAction,
     },
 
     /// The live buffer — the panel as it stands (object class 6), in slots 1:1 to 1:3.
@@ -229,6 +240,22 @@ enum ProgramAction {
     ///
     /// With no target the program is a fresh default one, so `--fields` needs nothing to
     /// read and `-o` writes a blank `.ne5p` to start from.
+    Edit(EditArgs),
+}
+
+/// `nord setlist`: every class-generic verb, plus the one that changes the four
+/// program slots a set list points at.
+#[derive(Subcommand)]
+enum SetlistAction {
+    #[command(flatten)]
+    Slot(SlotAction),
+
+    /// Change the programs a set list plays, in a file or in a slot.
+    ///
+    /// The four slots are `slot1` to `slot4`, each taking a program address as
+    /// the instrument shows it: `--set slot1=2:5`. `--fields` lists them. With
+    /// no target the set list is a fresh default one, so `-o` writes a blank
+    /// `.ne5t` to start from.
     Edit(EditArgs),
 }
 
@@ -564,6 +591,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Inspect { files, raw } => inspect(&ui, &files, raw),
         Command::Verify { files } => verify(&ui, &files),
+        Command::Edit(args) => file_edit::run(&ui, args),
         Command::Device { action } => match action {
             DeviceAction::Status { replay, json } => {
                 let source = match replay {
@@ -596,7 +624,10 @@ fn main() -> ExitCode {
             SampleAction::Slot(action) => slot_action(&ui, action, ObjectClass::Sample),
             SampleAction::Edit(args) => sample::run(&ui, args),
         },
-        Command::Setlist { action } => slot_action(&ui, action, ObjectClass::SetList),
+        Command::Setlist { action } => match action {
+            SetlistAction::Slot(action) => slot_action(&ui, action, ObjectClass::SetList),
+            SetlistAction::Edit(args) => edit::run(&ui, args, ObjectClass::SetList),
+        },
         Command::Live { action } => match action {
             LiveAction::Slot(action) => slot_action(&ui, action.into(), ObjectClass::Live),
             LiveAction::Edit(args) => edit::run(&ui, args, ObjectClass::Live),

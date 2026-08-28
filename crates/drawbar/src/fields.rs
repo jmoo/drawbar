@@ -7,89 +7,23 @@
 use std::io::Cursor;
 use std::ops::Range;
 
-use nord_format::cbin::Cbin;
-use nord_format::fields::{ControlKind, Field, FieldError};
-use nord_format::formats::{ne5, ns2, ns3, ns4};
-use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Song, Synth};
+use nord_format::fields::{ControlKind, Field};
+use nord_format::{Entity, Live, Program, Settings, Song};
 
 use crate::drawbar_widget;
 
-/// The bodies the document drives: one vocabulary — `path = value` — over each.
-trait Editable {
-    fn fields(&self) -> Vec<Field>;
-    fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError>;
-}
-
-macro_rules! editable {
-    ($body:ty) => {
-        impl Editable for Cbin<$body> {
-            fn fields(&self) -> Vec<Field> {
-                self.body.fields()
-            }
-            fn set_field(&mut self, path: &str, value: &str) -> Result<(), FieldError> {
-                self.body.set_field(path, value)
-            }
-        }
-    };
-}
-
-editable!(ne5::Program);
-editable!(ne5::Settings);
-editable!(ns2::Program);
-editable!(ns3::Program);
-editable!(ns3::SynthPreset);
-editable!(ns4::Program);
-editable!(ns4::organ_preset::OrganPreset);
-editable!(ns4::piano_preset::PianoPreset);
-editable!(ns4::synth::SynthPreset);
-
-/// Every entity whose body carries the generated registry, read in whichever direction
-/// the caller asked for.
-///
-/// One list serving [`body`] and [`body_mut`] both: a body that lists its fields and
-/// refuses to set them, or the reverse, cannot be written here. The live buffer is the
-/// program body under another tag, so the two share an arm.
-macro_rules! registry {
-    ($entity:expr, $($reference:tt)*) => {
-        match $entity {
-            Entity::Live(Live::Electro5(f)) | Entity::Program(Program::Electro5(f)) => {
-                Some(f as $($reference)* dyn Editable)
-            }
-            Entity::Live(Live::Stage2(f)) | Entity::Program(Program::Stage2(f)) => {
-                Some(f as $($reference)* dyn Editable)
-            }
-            Entity::Live(Live::Stage3(f)) | Entity::Program(Program::Stage3(f)) => {
-                Some(f as $($reference)* dyn Editable)
-            }
-            Entity::Live(Live::Stage4(f)) | Entity::Program(Program::Stage4(f)) => {
-                Some(f as $($reference)* dyn Editable)
-            }
-            Entity::OrganPreset(OrganPreset::Stage4(f)) => Some(f as $($reference)* dyn Editable),
-            Entity::PianoPreset(PianoPreset::Stage4(f)) => Some(f as $($reference)* dyn Editable),
-            Entity::Settings(Settings::Electro5(f)) => Some(f as $($reference)* dyn Editable),
-            Entity::Synth(Synth::Stage3(f)) => Some(f as $($reference)* dyn Editable),
-            Entity::Synth(Synth::Stage4(f)) => Some(f as $($reference)* dyn Editable),
-            _ => None,
-        }
-    };
-}
-
-fn body(entity: &Entity) -> Option<&dyn Editable> {
-    registry!(entity, &)
-}
-
-fn body_mut(entity: &mut Entity) -> Option<&mut dyn Editable> {
-    registry!(entity, &mut)
-}
-
 /// Every registered field's current value, for a body that has a registry.
+///
+/// The dispatch is `nord-format`'s own [`Entity::registry`], so a body becomes
+/// editable here by being declared there — this app keeps no list to fall
+/// behind.
 pub fn fields_of(entity: &Entity) -> Option<Vec<Field>> {
-    body(entity).map(|body| body.fields())
+    entity.registry().map(|body| body.fields())
 }
 
 /// Whether the body carries the generated registry, and so has a friendly view at all.
 pub fn has_registry(entity: &Entity) -> bool {
-    body(entity).is_some()
+    entity.registry().is_some()
 }
 
 /// Whether the body is an Electro 5 panel — the one the document knows section by
@@ -108,10 +42,11 @@ pub fn is_electro5_settings(entity: &Entity) -> bool {
 /// Whether the body is an Electro 5 set list: the four programs it points at, which is
 /// the whole of it.
 ///
-/// ⚠️ Its own view rather than a field strip, because `ne5::Song` lists nothing — its four
-/// slots are private fields and no generated accessor reaches them. The Stage 3's song is
-/// an undecoded stub with no view at all, so it is not one of these: claiming it were
-/// would put an empty Basic page in front of the byte record, which is all it has.
+/// ⚠️ Its own view rather than a field strip, because `ne5::Song` declares no registry —
+/// its four slots are private fields, edited through `Song::set` in
+/// `document::setlist`. The Stage 3's song is an undecoded stub with no view at all,
+/// so it is not one of these: claiming it were would put an empty Basic page in front
+/// of the byte record, which is all it has.
 pub fn is_set_list(entity: &Entity) -> bool {
     matches!(entity, Entity::Song(Song::Electro5(_)))
 }
@@ -125,12 +60,15 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<(Vec<Field>, Vec
     let mut entity =
         nord_format::from_stream(&mut Cursor::new(bytes)).map_err(|e| e.to_string())?;
     {
-        let body = body_mut(&mut entity).ok_or("this entity has no field registry")?;
+        let body = entity
+            .registry_mut()
+            .ok_or("this entity has no field registry")?;
         for (path, value) in sets {
             body.set_field(path, value).map_err(|e| e.to_string())?;
         }
     }
-    let fields = body(&entity)
+    let fields = entity
+        .registry()
         .ok_or("this entity has no field registry")?
         .fields();
     let out = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
@@ -376,6 +314,7 @@ pub mod blank {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nord_format::formats::ne5;
 
     fn program() -> Vec<u8> {
         let entity = Entity::Program(Program::Electro5(ne5::program::new(

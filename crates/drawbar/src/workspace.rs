@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui;
 use nord_format::cbin::{Cbin, Generation, Header};
-use nord_format::formats::{ne5, ns2, ns3, ns4};
+use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
 use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Song, Synth};
 use nord_usb::{Location, ObjectClass};
 
@@ -261,24 +261,32 @@ fn filename_stem(label: &str) -> String {
 }
 
 /// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
-/// `x.body`), so an export must not stack a second one on it.
+/// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it.
 fn carries_tag(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(stem, tag)| {
         !stem.trim().is_empty()
-            && (2..=5).contains(&tag.len())
+            && ((2..=5).contains(&tag.len()) || tag.eq_ignore_ascii_case(nsmpproj::FORMAT))
             && tag.chars().all(|c| c.is_ascii_alphanumeric())
             && tag.chars().any(|c| c.is_ascii_alphabetic())
     })
 }
 
-/// The extension a nameless export gets: the CBIN tag the bytes themselves carry, or
-/// `bin` for bytes that carry none.
+/// The extension a nameless export gets: the CBIN tag the bytes themselves carry,
+/// the non-CBIN container's own name, or `bin` for bytes that carry neither.
 fn format_tag(bytes: &[u8]) -> String {
-    bytes
-        .get(8..12)
-        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
-        .map(|tag| String::from_utf8_lossy(tag).into_owned())
-        .unwrap_or_else(|| "bin".to_string())
+    // ⚠️ Offset 8 only means anything under the CBIN magic — a text format can
+    // hold alphanumerics there by accident.
+    if bytes.starts_with(nord_format::cbin::MAGIC) {
+        return bytes
+            .get(8..12)
+            .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
+            .map(|tag| String::from_utf8_lossy(tag).into_owned())
+            .unwrap_or_else(|| "bin".to_string());
+    }
+    if bytes.starts_with(nsmpproj::MAGIC) {
+        return nsmpproj::FORMAT.to_string();
+    }
+    "bin".to_string()
 }
 
 /// Re-encode and compare — the check `nord verify` runs on a file.
@@ -1237,6 +1245,31 @@ mod tests {
             export_filename("Big strings", b"no header"),
             "Big-strings.bin",
         );
+    }
+
+    /// A project is text, so nothing at the CBIN tag offset means anything —
+    /// the export must not read one out of the prose, and the long extension
+    /// counts as carried.
+    #[test]
+    fn a_project_export_keeps_its_own_extension() {
+        let project = nord_format::formats::nsmpproj::Project::new(
+            "One",
+            &[nord_format::formats::nsmpproj::NewZone {
+                path: "one.wav".into(),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key: 60,
+            }],
+            0,
+        )
+        .unwrap();
+        let bytes = nord_format::to_bytes(&Entity::SampleProject(project)).unwrap();
+        assert_eq!(
+            export_filename("proj.nsmpproj", &bytes),
+            "proj.nsmpproj",
+            "a carried project extension is kept"
+        );
+        assert_eq!(export_filename("My Kit", &bytes), "My-Kit.nsmpproj");
     }
 
     /// A file that does not decode is still a row: the error is the report.
