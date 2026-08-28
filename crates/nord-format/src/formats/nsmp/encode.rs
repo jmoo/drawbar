@@ -200,7 +200,10 @@ impl Plan {
         if frames < MIN_FRAMES {
             return Err(ParseError::OutOfBounds {
                 value: format!("{frames} frames"),
-                bound: format!("at least {MIN_FRAMES} — shorter input opens the stream a way this crate has not modelled"),
+                bound: format!(
+                    "the modelled range: at least {MIN_FRAMES} frames, below which the \
+                     stream opens a way this crate has not modelled"
+                ),
             }
             .into());
         }
@@ -466,7 +469,12 @@ fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, 
     if total > MAX_STREAM_WORDS {
         return Err(ParseError::OutOfBounds {
             value: format!("a stream of {total} words"),
-            bound: format!("{MAX_STREAM_WORDS} — past it the stroke header's 16-bit word directory cannot address the chain"),
+            bound: format!(
+                "{MAX_STREAM_WORDS} words, the reach of the stroke header's 16-bit word \
+                 directory; shorten the source or code it with {:?}, which is several \
+                 times denser on anything smooth",
+                Predictor::Minimising
+            ),
         }
         .into());
     }
@@ -674,8 +682,11 @@ fn sty() -> Section {
 /// against. Nothing in the file records a source rate, so handing this audio at any
 /// other rate transposes the result rather than failing.
 ///
-/// Refuses input shorter than [`MIN_FRAMES`], and a name past
-/// [`MAX_NAME_LEN`](super::MAX_NAME_LEN).
+/// Refuses input shorter than [`MIN_FRAMES`], a name past
+/// [`MAX_NAME_LEN`](super::MAX_NAME_LEN), and audio whose stream would outrun the
+/// stroke header's 16-bit word directory. That last ceiling is what the predictor
+/// buys: at [`Predictor::Plain`] loud material fills the directory in a few seconds,
+/// where [`Predictor::Minimising`] carries several times as long.
 pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Error> {
     const ID: u32 = 1;
 
