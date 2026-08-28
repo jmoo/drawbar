@@ -1,5 +1,6 @@
 # Everything through Nix, so CI runs the same toolchain, formatter and checks as
-# `nix flake check` and `nix build .#nord.all` on a laptop:
+# `nix flake check` and `nix build .#nord.all` on a laptop. The PR title check
+# lives in title.yml, which alone re-runs when a title is edited:
 #
 #   check — treefmt (fails on anything `nix fmt` would change) and clippy over the
 #           workspace with `--deny warnings`.
@@ -7,9 +8,6 @@
 #           aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
 #   corpus — `nord.all-corpus`, the committed tier of the private specimen
 #            corpus. Needs a deploy key, so it does not run on forks.
-#   commits — the PR title is a Conventional Commit (CONTRIBUTING.md): it is
-#             the squashed commit that lands on master, and version bumps and
-#             release notes read it.
 #   release — master pushes only, and only after check, build and corpus pass:
 #             scripts/release.bash publishes un-tagged crate versions and tags
 #             them. Cargo.toml is the only source of truth for versions.
@@ -126,33 +124,6 @@ jobs:
           ssh-keyscan -t ed25519 github.com >>~/.ssh/known_hosts
       - run: nix build .#nord.all-corpus --print-build-logs
 
-  commits:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      # Only the title: PRs are squashed, so it is the commit that lands on
-      # master, and release notes and version bumps read it. Branch commits
-      # are anyone's business.
-      - name: title is a Conventional Commit
-        env:
-          TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: .+'
-          if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
-            echo "::error::PR title must be a Conventional Commit, e.g. 'fix(nord-format): ...' — see CONTRIBUTING.md"
-            exit 1
-          fi
-
-  # On master, publish whatever the checks just proved. The job body is
-  # release.bash: publish each crate whose version has no `<crate>-v<version>`
-  # tag yet (Trusted Publishing via OIDC — no token secret) and create that tag
-  # as a GitHub release with notes from its Conventional Commits. Idempotent,
-  # so a failed run is fixed by re-running the workflow (workflow_dispatch) —
-  # which re-runs the checks first, deliberately: publishing must never outrun
-  # them.
-  #
-  # First-ever publish of a new crate can't use this (Trusted Publishing is
-  # configured on an existing crate) — publish locally once.
   release:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [check, build, corpus]

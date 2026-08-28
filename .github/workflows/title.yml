@@ -1,0 +1,31 @@
+# The PR title is a Conventional Commit (CONTRIBUTING.md): PRs are squashed, so
+# the title is the commit that lands on master, and version bumps and release
+# notes read it.
+#
+# Its own workflow because it is the one check that has to re-run on `edited`.
+# ci.yml cannot take that trigger: `edited` fires on every title and body tweak,
+# and rebuilding the cross matrix for a typo is not worth it.
+#
+# ⚠️ `commits` is a required check on master. Renaming this job renames the
+# check, and every open PR blocks on a context that no longer reports.
+name: title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: title is a Conventional Commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: .+'
+          if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error::PR title must be a Conventional Commit, e.g. 'fix(nord-format): ...' — see CONTRIBUTING.md"
+            exit 1
+          fi
