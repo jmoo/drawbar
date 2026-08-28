@@ -1,4 +1,4 @@
-//! A minimal RIFF/WAVE writer, for handing decoded audio to anything that plays it.
+//! A minimal RIFF/WAVE reader and writer, for moving audio in and out of the codec.
 
 /// A mono 16-bit PCM WAV file.
 ///
@@ -30,9 +30,136 @@ pub fn mono_pcm16(samples: &[i16], rate: u32) -> Vec<u8> {
     out
 }
 
+/// Uncompressed 16-bit PCM read off a RIFF/WAVE file.
+#[derive(Debug)]
+pub struct Pcm16 {
+    pub rate: u32,
+    pub channels: u16,
+    /// Frames interleaved by channel, as stored.
+    pub samples: Vec<i16>,
+}
+
+impl Pcm16 {
+    /// Frames, whatever the channel count.
+    pub fn frames(&self) -> usize {
+        self.samples.len() / usize::from(self.channels).max(1)
+    }
+}
+
+/// Reads a 16-bit PCM WAV.
+///
+/// Only uncompressed PCM at 16 bits is accepted — every other encoding, including
+/// float, 8/24/32-bit, and the extensible header, is refused by name rather than
+/// misread. Channel count and rate come back as stored; what to do with them is the
+/// caller's policy.
+pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, String> {
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".into());
+    }
+
+    let mut format = None;
+    let mut data = None;
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32_at(at + 4) as usize;
+        let body = at + 8;
+        let end = body.checked_add(size).filter(|&e| e <= bytes.len());
+        let Some(end) = end else {
+            return Err(format!(
+                "chunk {} claims {size} bytes but the file ends first",
+                String::from_utf8_lossy(id)
+            ));
+        };
+        match id {
+            b"fmt " if size >= 16 => {
+                format = Some((
+                    u16_at(body),
+                    u16_at(body + 2),
+                    u32_at(body + 4),
+                    u16_at(body + 14),
+                ))
+            }
+            b"data" => data = Some(body..end),
+            _ => {}
+        }
+        // Chunks are padded to an even length, and the pad is not in the size.
+        at = end + end % 2;
+    }
+
+    let Some((encoding, channels, rate, bits)) = format else {
+        return Err("no fmt chunk".into());
+    };
+    if encoding != 1 {
+        return Err(format!(
+            "encoding {encoding} is not uncompressed PCM; only PCM (1) is read"
+        ));
+    }
+    if bits != 16 {
+        return Err(format!("{bits}-bit samples; only 16-bit PCM is read"));
+    }
+    if channels == 0 {
+        return Err("the fmt chunk declares no channels".into());
+    }
+    let Some(data) = data else {
+        return Err("no data chunk".into());
+    };
+
+    let samples = bytes[data]
+        .chunks_exact(2)
+        .map(|s| i16::from_le_bytes([s[0], s[1]]))
+        .collect();
+    Ok(Pcm16 {
+        rate,
+        channels,
+        samples,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_this_writes_it_reads_back() {
+        let want = [0i16, 1, -1, i16::MIN, 12_345];
+        let read = read_pcm16(&mono_pcm16(&want, 44_100)).unwrap();
+        assert_eq!(read.rate, 44_100);
+        assert_eq!(read.channels, 1);
+        assert_eq!(read.samples, want);
+        assert_eq!(read.frames(), 5);
+    }
+
+    #[test]
+    fn a_chunk_before_the_data_is_walked_past() {
+        let mut wav = mono_pcm16(&[7i16, 8], 44_100);
+        // A 3-byte LIST chunk, which pads to 4, spliced in ahead of the data chunk.
+        let extra: Vec<u8> = b"LIST\x03\x00\x00\x00abc\x00".to_vec();
+        wav.splice(36..36, extra.iter().copied());
+        let size = u32::from_le_bytes(wav[4..8].try_into().unwrap()) + extra.len() as u32;
+        wav[4..8].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(read_pcm16(&wav).unwrap().samples, vec![7, 8]);
+    }
+
+    #[test]
+    fn anything_but_sixteen_bit_pcm_is_refused_by_name() {
+        assert!(read_pcm16(b"not a wav at all").is_err());
+
+        let mut wav = mono_pcm16(&[1i16], 44_100);
+        wav[34] = 24; // bits per sample
+        assert!(read_pcm16(&wav).unwrap_err().contains("24-bit"));
+
+        let mut wav = mono_pcm16(&[1i16], 44_100);
+        wav[20] = 3; // IEEE float
+        assert!(read_pcm16(&wav).unwrap_err().contains("PCM"));
+
+        let mut wav = mono_pcm16(&[1i16], 44_100);
+        wav[40..44].copy_from_slice(&999u32.to_le_bytes()); // data chunk overruns
+        assert!(read_pcm16(&wav).is_err());
+    }
 
     #[test]
     fn the_header_describes_the_samples_that_follow() {

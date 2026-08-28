@@ -281,6 +281,14 @@ enum SampleAction {
     /// with a reason, and the run ends in a coverage count.
     Decode(sample::DecodeArgs),
 
+    /// EXPERIMENTAL: build a one-zone v2 instrument from a 44.1 kHz mono 16-bit WAV.
+    ///
+    /// The file this writes obeys every structural law the format is known to have and
+    /// decodes back through `nord sample decode` exactly, but it is not byte-identical
+    /// to what Nord Sample Editor would emit, and no instrument has yet played one.
+    /// Pass `--experimental` to acknowledge that and write anything.
+    Encode(sample::EncodeArgs),
+
     /// Round-trip a sample instrument, and with `--deep` also walk its audio stream.
     Verify(sample::VerifyArgs),
 }
@@ -636,6 +644,7 @@ fn main() -> ExitCode {
             SampleAction::Slot(action) => slot_action(&ui, action, ObjectClass::Sample),
             SampleAction::Edit(args) => sample::run(&ui, args),
             SampleAction::Decode(args) => sample::decode(&ui, args),
+            SampleAction::Encode(args) => sample::encode(&ui, args),
             SampleAction::Verify(args) => sample::verify(&ui, args),
         },
         Command::Setlist { action } => match action {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::cbin::Cbin;
-use nord_format::formats::nsmp::{codec, Sample};
+use nord_format::formats::nsmp::{codec, encode, Sample};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -133,6 +133,42 @@ pub struct DecodeArgs {
     /// and the run is a coverage report.
     #[arg(short, long, value_name = "DIR")]
     pub out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct EncodeArgs {
+    /// A 44.1 kHz mono 16-bit PCM WAV.
+    #[arg(value_name = "WAV")]
+    pub wav: PathBuf,
+
+    /// Where to write the instrument. Defaults to the WAV's name with `.nsmp`.
+    #[arg(short, long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+
+    /// Instrument name, up to 14 bytes. Defaults to the WAV's file stem.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// The note the sample plays untransposed at: a name (`C4`, `F#3`) or 0-127.
+    #[arg(long, value_name = "NOTE", default_value = "C4")]
+    pub root_key: String,
+
+    /// The highest note the zone covers. Defaults to two octaves above the root.
+    #[arg(long, value_name = "NOTE")]
+    pub top_note: Option<String>,
+
+    /// Difference content records down to the narrowest predictor order, the way the
+    /// instrument's own encoder does.
+    ///
+    /// ⚠️ Smaller, and `nord sample decode` reads the result back only approximately:
+    /// where a differenced run resumes from is not recorded in the stream and the rule
+    /// for recovering it is unsolved.
+    #[arg(long)]
+    pub predict: bool,
+
+    /// Acknowledge that this codec tier is unproven on hardware. Required.
+    #[arg(long)]
+    pub experimental: bool,
 }
 
 #[derive(Args)]
@@ -295,6 +331,86 @@ fn decode_file(
         }
     }
     Ok(())
+}
+
+/// `nord sample encode`: a WAV into a one-zone v2 instrument.
+pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
+    if !args.experimental {
+        return Err(
+            "encoding is experimental: the file it writes is structurally sound and \
+             decodes back exactly, but it is not byte-identical to the editor's output \
+             and no instrument has been shown to play one. Pass --experimental to write \
+             it anyway."
+                .into(),
+        );
+    }
+
+    let bytes = std::fs::read(&args.wav).map_err(|e| format!("{}: {e}", args.wav.display()))?;
+    let source = wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", args.wav.display()))?;
+    if source.rate != codec::SOURCE_RATE {
+        return Err(format!(
+            "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
+             own resampler is not decoded, so resample the WAV first",
+            args.wav.display(),
+            source.rate,
+            codec::SOURCE_RATE,
+        ));
+    }
+    if source.channels != 1 {
+        return Err(format!(
+            "{}: {} channels — only mono is encoded; a stroke pair under one header is \
+             how the format carries stereo and that layout is not written yet",
+            args.wav.display(),
+            source.channels,
+        ));
+    }
+
+    let stem = args
+        .wav
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sample".into());
+    let name = args.name.unwrap_or_else(|| stem.clone());
+    let mut options = encode::Options::new(&name)
+        .root_key(note::parse(&args.root_key)?)
+        .predictor(if args.predict {
+            encode::Predictor::Minimising
+        } else {
+            encode::Predictor::Plain
+        });
+    if let Some(top) = &args.top_note {
+        options = options.top_note(note::parse(top)?);
+    }
+
+    let instrument = encode::instrument(&source.samples, &options).map_err(|e| e.to_string())?;
+    let out = instrument.to_bytes().map_err(|e| e.to_string())?;
+
+    let (at, stroke) = instrument.stroke_streams()[0];
+    let stream = codec::walk(stroke, at).map_err(|e| e.to_string())?;
+    let audio = codec::decode(stroke, at).map_err(|e| e.to_string())?;
+    ui.out(format!(
+        "{} frames -> {} fields ({:.3} s), shift {}, peak {}, {} record(s)",
+        source.frames(),
+        stream.fields,
+        audio.seconds(),
+        codec::shift(stroke).unwrap_or_default(),
+        codec::peak(stroke).unwrap_or_default(),
+        stream.records.len(),
+    ));
+    ui.out(if audio.exact() {
+        ui.dim("the stream reads back exactly: no record differences its fields")
+    } else {
+        ui.dim(format!(
+            "{}% of fields sit in a differenced run, which decodes shape-correct and \
+             level-approximate",
+            100 * audio.differenced / audio.samples.len().max(1),
+        ))
+    });
+
+    let path = args
+        .out
+        .unwrap_or_else(|| args.wav.with_file_name(format!("{stem}.nsmp")));
+    write_file(ui, &path, &out)
 }
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
