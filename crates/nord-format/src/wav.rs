@@ -8,10 +8,17 @@ use crate::error::{Error, ParseError};
 /// rather than a standard rate, and resampling it here would guess at an
 /// interpolator the instrument has not given up.
 pub fn mono_pcm16(samples: &[i16], rate: u32) -> Vec<u8> {
+    pcm16(samples, rate, 1)
+}
+
+/// A 16-bit PCM WAV file of `channels` channels, `samples` interleaved by channel.
+///
+/// See [`mono_pcm16`] on the rate. Half the sample library is stereo, so this is the
+/// general case rather than an extra.
+pub fn pcm16(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
     const BITS: u16 = 16;
-    const CHANNELS: u16 = 1;
-    let block = CHANNELS * BITS / 8;
-    let data = samples.len() * usize::from(block);
+    let block = channels * BITS / 8;
+    let data = samples.len() * usize::from(BITS / 8);
 
     let mut out = Vec::with_capacity(44 + data);
     out.extend_from_slice(b"RIFF");
@@ -19,7 +26,7 @@ pub fn mono_pcm16(samples: &[i16], rate: u32) -> Vec<u8> {
     out.extend_from_slice(b"WAVEfmt ");
     out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
     out.extend_from_slice(&1u16.to_le_bytes()); // PCM, uncompressed
-    out.extend_from_slice(&CHANNELS.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
     out.extend_from_slice(&rate.to_le_bytes());
     out.extend_from_slice(&(rate * u32::from(block)).to_le_bytes());
     out.extend_from_slice(&block.to_le_bytes());
