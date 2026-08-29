@@ -43,16 +43,17 @@ use std::fmt;
 ///
 /// `.nsmp3` and `.nsmp4` share every unit — word size, cell size, header length — and
 /// differ only in behaviour: v4 sometimes quantises one bit finer, which the stroke
-/// header states either way, and v4 alone splits a stereo stroke's 1:1 payloads per
-/// channel ([`Layout::splits_wide_openings`]). That second difference changes how long
-/// a record is, so the two cannot share one variant.
+/// header states either way, and v4 alone gives a stereo stroke's two channels a word
+/// stream each ([`Layout::splits_wide_openings`]) where v2 and v3 alternate fields.
+/// That second difference changes how long a record is, so the two cannot share one
+/// variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     /// `.nsmp`: 3-byte words, 24-field cells, a 51-byte stroke header.
     V2,
     /// `.nsmp3`: 4-byte words, 32-field cells, a 68-byte stroke header.
     V3,
-    /// `.nsmp4`: [`Layout::V3`]'s units, and per-channel 1:1 payloads on stereo.
+    /// `.nsmp4`: [`Layout::V3`]'s units, and a word stream per channel on stereo.
     V4,
 }
 
@@ -68,14 +69,18 @@ impl Layout {
         }
     }
 
-    /// Whether a stereo stroke stores each 1:1 record's payload as two per-channel
-    /// halves, each padded to its own word boundary.
+    /// Whether a stereo stroke gives each channel its own run of words, the two
+    /// interleaved word by word, rather than interleaving the channels field by field.
     ///
-    /// ⚠️ **True on [`Layout::V4`] only.** A v3 stereo stroke packs the same record as
-    /// one run of fields, and mono strokes never split in any generation. Content
-    /// records are never split anywhere. Assuming the split where it does not happen —
-    /// or missing it where it does — puts every later record at the wrong offset,
-    /// because the two sizings differ by one word whenever the halves do not tile.
+    /// ⚠️ **True on [`Layout::V4`] only.** v2 and v3 alternate whole fields, so their
+    /// records are one bit-run and size like any other. Mono never splits anywhere.
+    ///
+    /// It is a sizing question as well as a de-interleaving one: each channel's half of
+    /// a record is padded to a whole word, so the payload is
+    /// `2 × ceil((count/2 × width) / word_bits)` words. That exceeds the unsplit
+    /// `ceil((word_bits + count × width) / word_bits)` by one whenever the halves do
+    /// not tile — which content records never do, their counts being multiples of the
+    /// stereo cell, and 1:1 records regularly do.
     pub const fn splits_wide_openings(self) -> bool {
         matches!(self, Layout::V4)
     }
@@ -574,9 +579,10 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         }
 
         let span = if wide_openings && one_to_one && count.is_multiple_of(2) {
-            // Each channel's half is padded to a word of its own, so the record is a
-            // word longer than one run of the same fields whenever the halves do not
-            // tile.
+            // Each channel's share is padded to a whole word, so the record is a word
+            // longer than one run of the same fields whenever the halves do not tile.
+            // Content counts are multiples of the stereo cell and always tile; the 1:1
+            // records are where it shows.
             1 + 2 * (count / 2 * usize::from(width)).div_ceil(word_bits)
         } else {
             (word_bits + count * usize::from(width)).div_ceil(word_bits)
