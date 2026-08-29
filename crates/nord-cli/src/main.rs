@@ -27,6 +27,7 @@ mod sample;
 mod slot;
 mod summary;
 mod ui;
+mod wav;
 
 use clap::{Args, Parser, Subcommand};
 use nord_usb::ObjectClass;
@@ -271,6 +272,17 @@ enum SampleAction {
     /// patch in place — the name, and each zone's root key and top note. `--fields`
     /// lists them.
     Edit(sample::EditArgs),
+
+    /// Decode a v2 instrument's audio to WAV, one file per zone.
+    ///
+    /// The audio comes out on its own lattice — about 35 kHz — because the rate the
+    /// instrument plays it back at is a property of its interpolator, which is not
+    /// decoded. Anything the stream grammar cannot walk is reported as unsupported
+    /// with a reason, and the run ends in a coverage count.
+    Decode(sample::DecodeArgs),
+
+    /// Round-trip a sample instrument, and with `--deep` also walk its audio stream.
+    Verify(sample::VerifyArgs),
 }
 
 /// `nord live`: the verbs that mean anything for the live buffer.
@@ -623,6 +635,8 @@ fn main() -> ExitCode {
         Command::Sample { action } => match action {
             SampleAction::Slot(action) => slot_action(&ui, action, ObjectClass::Sample),
             SampleAction::Edit(args) => sample::run(&ui, args),
+            SampleAction::Decode(args) => sample::decode(&ui, args),
+            SampleAction::Verify(args) => sample::verify(&ui, args),
         },
         Command::Setlist { action } => match action {
             SetlistAction::Slot(action) => slot_action(&ui, action, ObjectClass::SetList),

@@ -467,6 +467,141 @@ fn nsmp_strokes_decompose() {
     assert!(seen > 0, "no stroke walked");
 }
 
+/// Every v2 stroke's encoded audio walks end to end, and the walk lands exactly
+/// where the stroke header's own word directory says it should.
+///
+/// The directory is written by the encoder and read by nothing else here, so
+/// agreement between it and an independent walk is a real check on both. A grammar
+/// that framed any record at the wrong size would arrive somewhere else.
+#[test]
+fn nsmp_streams_walk_to_the_terminator_the_header_names() {
+    let mut walked = 0;
+    for (s, sample) in v2_samples() {
+        let where_ = s.path.display();
+        for (index, (at, stroke)) in sample.stroke_streams().into_iter().enumerate() {
+            let stream = nsmp::codec::walk(stroke, at)
+                .unwrap_or_else(|e| panic!("{where_} stroke {index}: {e}"));
+            let directory = nsmp::codec::Directory::read(stroke)
+                .unwrap_or_else(|| panic!("{where_} stroke {index}: no word directory"));
+            let resolve = |p: u16| nsmp::codec::Directory::resolve(p, at);
+            assert_eq!(
+                resolve(directory.first_record),
+                stream.first_record,
+                "{where_} stroke {index}: the chain starts somewhere the header does not name"
+            );
+            assert_eq!(
+                resolve(directory.terminator[0]),
+                stream.terminator,
+                "{where_} stroke {index}: the chain ends somewhere the header does not name"
+            );
+            // The resync pointer is the one the walk does not consume, so it is an
+            // independent check that the record boundaries fell where they should.
+            let resync = resolve(directory.resync);
+            assert!(
+                stream.records.iter().any(|r| r.at == resync),
+                "{where_} stroke {index}: the resync pointer is not a record boundary"
+            );
+            assert!(
+                !stream.records.is_empty(),
+                "{where_} stroke {index}: empty chain"
+            );
+            walked += 1;
+        }
+    }
+    assert!(walked > 0, "no stream walked");
+}
+
+/// Every v2 stroke decodes to audio, and the lattice accounting is consistent:
+/// the chain's field counts sum to the sample length, whatever each record's
+/// differencing order.
+///
+/// A stereo stroke is the one refusal — two streams share its header — and it says
+/// so by name rather than interleaving them.
+#[test]
+fn nsmp_every_stroke_decodes() {
+    let mut decoded = 0;
+    let mut stereo = 0;
+    for (s, sample) in v2_samples() {
+        let where_ = s.path.display();
+        for (index, (at, stroke)) in sample.stroke_streams().into_iter().enumerate() {
+            let stream = nsmp::codec::walk(stroke, at).unwrap();
+            let audio = match nsmp::codec::decode(stroke, at) {
+                Ok(audio) => audio,
+                Err(nsmp::codec::Unsupported::Stereo) => {
+                    assert_eq!(
+                        stream.cell,
+                        Some(48),
+                        "{where_} stroke {index}: refused as stereo without a stereo cell"
+                    );
+                    stereo += 1;
+                    continue;
+                }
+                Err(e) => panic!("{where_} stroke {index}: {e}"),
+            };
+            assert_eq!(
+                audio.samples.len(),
+                stream.records.iter().map(|r| r.values.len()).sum::<usize>(),
+                "{where_} stroke {index}: decoded length is not the chain's field total"
+            );
+            assert!(
+                audio.samples.len() > 100,
+                "{where_} stroke {index}: {} fields is too short to be a sample",
+                audio.samples.len()
+            );
+            decoded += 1;
+        }
+    }
+    assert!(decoded > 0, "no stroke decoded");
+    assert!(
+        stereo < decoded / 100,
+        "stereo is meant to be the rare case"
+    );
+}
+
+/// A sine specimen decodes to that sine: the editor was handed a C4 tone, and the
+/// decoded audio's strongest partial lands on it within a few cents.
+///
+/// This is the one end-to-end check on the whole chain — lattice pitch, the header
+/// shift, and the differencing order — against material whose source is known.
+#[test]
+fn nsmp_a_known_sine_decodes_to_its_own_pitch() {
+    for name in ["A-sine-C4.nsmp", "F-sine-1s-C4.nsmp"] {
+        let sample = v2_named(name);
+        let (at, stroke) = sample.stroke_streams()[0];
+        let audio = nsmp::codec::decode(stroke, at).unwrap();
+        let rate = f64::from(nsmp::codec::FIELD_RATE);
+        // Middle C, which is what the specimen's file name says was recorded.
+        let want = 440.0 * 2f64.powf((60.0 - 69.0) / 12.0);
+        let window: Vec<f64> = audio
+            .samples
+            .iter()
+            .skip(audio.samples.len() / 4)
+            .take(2048)
+            .map(|&v| f64::from(v))
+            .collect();
+        let power = |hz: f64| -> f64 {
+            let w = std::f64::consts::TAU * hz / rate;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, &v) in window.iter().enumerate() {
+                re += v * (w * i as f64).cos();
+                im -= v * (w * i as f64).sin();
+            }
+            re * re + im * im
+        };
+        // Scan a semitone either side; the peak must be the tone, not a neighbour.
+        let step = 2f64.powf(1.0 / 1200.0);
+        let best = (-100..=100)
+            .map(|c| want * step.powi(c))
+            .max_by(|a, b| power(*a).total_cmp(&power(*b)))
+            .unwrap();
+        let cents = 1200.0 * (best / want).log2();
+        assert!(
+            cents.abs() < 10.0,
+            "{name}: strongest partial is {best:.2} Hz, {cents:.1} cents off {want:.2}"
+        );
+    }
+}
+
 /// On every sample with a sidecar, the zone key ranges match what the editor lays
 /// out from the root keys — unless the sidecar's `zone_top_notes_overridden` trait
 /// says they were moved by hand, which the per-specimen sweep asserts from the

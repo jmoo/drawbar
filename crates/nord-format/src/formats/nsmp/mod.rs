@@ -9,10 +9,12 @@
 //! every v4 is type 1, while v3 is split. The container handles the difference; the
 //! chain is the same.
 //!
-//! **The audio is encoded and stays that way.** Strokes are kept verbatim, so this reads
-//! and rewrites instruments byte-exactly and can retune, rename and remap them — but it
-//! cannot decode or synthesise the audio itself.
+//! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
+//! and can retune, rename and remap them without touching a byte of audio. The v2
+//! [`codec`] decodes that audio to samples; nothing encodes it, and the v3/v4 chain
+//! keeps its strokes opaque.
 
+pub mod codec;
 pub mod section;
 pub mod stroke;
 pub mod zone;
@@ -334,6 +336,54 @@ impl Cbin<Sample> {
                     })
             })
             .collect()
+    }
+
+    /// Every stroke's encoded stream with its offset from the start of the body, in
+    /// file order.
+    ///
+    /// The offset is the base the stroke's own [`codec::Directory`] is written
+    /// against, so a caller checking those pointers needs this pairing rather than
+    /// the payload alone.
+    pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
+        let mut at = 0;
+        let mut out = Vec::new();
+        for section in &self.body.sections {
+            if section.is(section::STK) {
+                out.push((at + section::HEADER_LEN, section.payload.as_slice()));
+            }
+            at += section.encoded_len();
+        }
+        out
+    }
+
+    /// One zone's encoded stream, in [`Self::zones`] order, ready for
+    /// [`codec::decode`].
+    ///
+    /// Paired by stroke id like [`Self::strokes`], so it is safe on library content
+    /// that the editor did not build in a single pass.
+    pub fn zone_stream(&self, index: usize) -> Result<(usize, &[u8]), Error> {
+        let zones = self.zones()?;
+        let zone = zones
+            .get(index)
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
+        let wanted = u32::from(zone.stroke_id);
+        let mut at = 0;
+        for section in &self.body.sections {
+            if section.is(section::STK)
+                && section
+                    .payload
+                    .get(0..4)
+                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                    == Some(wanted)
+            {
+                return Ok((at + section::HEADER_LEN, section.payload.as_slice()));
+            }
+            at += section.encoded_len();
+        }
+        Err(ParseError::AssertFail(format!(
+            "zone {index} names stroke {wanted}, which the file does not contain"
+        ))
+        .into())
     }
 
     /// Every stroke with the global id it carries, in the order the sections appear.
