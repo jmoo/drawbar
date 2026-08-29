@@ -309,6 +309,20 @@ fn ne5_live_body_decodes_as_a_program() {
     assert!(seen > 0, "no Electro 5 live slot in the corpus");
 }
 
+#[test]
+fn ne5_live_slots_occupy_one_three_slot_bank() {
+    use nord_format::bank::Item;
+
+    let slots = ne5_lives()
+        .map(|(specimen, live)| {
+            let location = live.location();
+            assert_eq!(location.x(), 0, "{}", specimen.path.display());
+            location.inner()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(slots, BTreeSet::from([(0, 0), (0, 1), (0, 2)]));
+}
+
 /// The drawbar accessors must be read/write inverses without disturbing other bits.
 #[test]
 fn ne5_drawbars_survive_a_rewrite() {

@@ -155,11 +155,7 @@ pub struct EncodeArgs {
     #[arg(long, value_name = "NOTE")]
     pub top_note: Option<String>,
 
-    /// Difference content records down to the narrowest predictor order, the way the
-    /// instrument's own encoder does.
-    ///
-    /// Smaller, and read back exactly: the predictor's history runs unbroken from the
-    /// stroke's opening ramp-in, so a differenced run needs nothing to resume from.
+    /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
     #[arg(long)]
     pub predict: bool,
 
@@ -220,7 +216,6 @@ impl Coverage {
     }
 }
 
-/// One zone: what it plays, where, and the stream that holds it.
 /// The sample body of a file, or why this command cannot reach one.
 fn body(path: &Path) -> Result<nord_format::Sample, String> {
     let entity = nord_format::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -304,11 +299,10 @@ fn decode_file(
                 );
                 if let Some(dir) = out {
                     let file = dir.join(format!("{stem}-zone{n}.wav"));
-                    std::fs::write(
-                        &file,
-                        nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels),
-                    )
-                    .map_err(|e| format!("{}: {e}", file.display()))?;
+                    let wav =
+                        nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels)
+                            .map_err(|e| format!("{}: {e}", file.display()))?;
+                    std::fs::write(&file, wav).map_err(|e| format!("{}: {e}", file.display()))?;
                     row.push_str(&format!("  -> {}", file.display()));
                 }
                 ui.out(row);
@@ -462,10 +456,7 @@ pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Walks every stroke's stream and cross-checks it against the header's directory.
-///
-/// The directory is written by the encoder and read by nothing else here, so
-/// agreement between it and an independent walk is a real check on both.
+/// Walks every stroke and verifies all four directory landmarks.
 fn deep(path: &Path) -> Result<String, String> {
     let body = body(path)?;
     let layout = body.layout();
@@ -477,22 +468,34 @@ fn deep(path: &Path) -> Result<String, String> {
             codec::walk(stroke, *at, layout).map_err(|e| format!("stroke {index}: {e}"))?;
         records += stream.records.len();
         marked += stream.records.iter().filter(|r| r.mark).count();
-        // The walk already had to land exactly on the record the directory names,
-        // so what is left to check is the one pointer it does not consume.
         let directory = codec::Directory::read(stroke)
             .ok_or_else(|| format!("stroke {index} is too short for its word directory"))?;
-        // The pointer is 16 bits, so on a stroke longer than that it names one word
-        // per period and only the walk knows which. Match it modulo the period
-        // rather than picking an alias and hoping.
-        //
-        // A stroke with no resync at all — one 1:1 run, the warmup — points here at
-        // the terminator instead, the same collapse ptr[2] makes when a stroke has
-        // only two runs.
-        let resync = codec::Directory::resolve(directory.resync, *at, layout);
-        let names = |at: usize| at % codec::WRAP == resync % codec::WRAP;
-        if !names(stream.terminator) && !stream.records.iter().any(|r| names(r.at)) {
+        let words = (stroke.len() - layout.header_len()) / layout.word();
+        let first = codec::Directory::resolve(directory.first_record, *at, layout);
+        let terminator = codec::Directory::resolve_end(directory.terminator, *at, layout, words);
+        if first != stream.first_record || terminator != stream.terminator {
             return Err(format!(
-                "stroke {index}: the resync pointer lands at word {resync}, which is not a record"
+                "stroke {index}: directory says {first}..{terminator}, walk found {}..{}",
+                stream.first_record, stream.terminator
+            ));
+        }
+        let names = |pointer: u16, word: usize| {
+            word % codec::WRAP == codec::Directory::resolve(pointer, *at, layout) % codec::WRAP
+        };
+        if !names(directory.resync, stream.terminator)
+            && !stream.records.iter().any(|r| names(directory.resync, r.at))
+        {
+            return Err(format!("stroke {index}: resync does not name a record"));
+        }
+        if !names(directory.mark, stream.terminator)
+            && !stream.records.iter().any(|r| names(directory.mark, r.at))
+        {
+            return Err(format!("stroke {index}: mark does not name a record"));
+        }
+        let actual: Vec<_> = stream.records.iter().filter(|r| r.mark).collect();
+        if actual.len() > 1 || actual.first().is_some_and(|r| !names(directory.mark, r.at)) {
+            return Err(format!(
+                "stroke {index}: marked record disagrees with the directory"
             ));
         }
     }

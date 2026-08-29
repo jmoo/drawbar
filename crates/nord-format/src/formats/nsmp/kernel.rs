@@ -22,14 +22,11 @@ pub const ONE: i64 = 1 << 23;
 /// Phases in the bank, one per residue of `PITCH_NUM·f mod PITCH_DEN`.
 pub const PHASES: usize = PITCH_DEN as usize;
 
-/// Taps per phase.
-///
-/// Tap `j` weighs the source sample `16 − j` places past `floor(t(f))`, so the window
-/// reaches 15 samples back and 16 forward. The kernel's own support ends inside that.
+/// Taps per phase, spanning 15 samples behind and 16 ahead.
 pub const TAPS: usize = 32;
 
 /// Where tap 0 sits relative to `floor(t(f))`, in source samples.
-const FIRST_TAP: i64 = 16;
+const FIRST_TAP: i128 = 16;
 
 /// `g(δ) = A·sinc(δ/Z)·(0.543 + 0.457·cos(πδ/L))` for `|δ| < L`, zero beyond.
 const A: f64 = 0.827_50;
@@ -51,11 +48,7 @@ fn g(delta: f64) -> f64 {
     A * sinc(delta / Z) * (0.543 + 0.457 * (std::f64::consts::PI * delta / L).cos())
 }
 
-/// The whole bank, `[phase][tap]`, built once.
-///
-/// Each phase is scaled so its taps sum to exactly [`ONE`]: the DC gain is unity by
-/// construction rather than to within rounding, so constant material resamples to
-/// itself and a step keeps its level.
+/// Lazily build the `[phase][tap]` bank with exact [`ONE`] DC gain per phase.
 pub fn taps() -> &'static [[i32; TAPS]; PHASES] {
     static BANK: OnceLock<Box<[[i32; TAPS]; PHASES]>> = OnceLock::new();
     BANK.get_or_init(|| {
@@ -79,39 +72,30 @@ pub fn taps() -> &'static [[i32; TAPS]; PHASES] {
     })
 }
 
-/// The lattice position of field `f`, as `(source sample, phase)`.
-///
-/// The sample is `floor(t(f))` and the phase indexes [`taps`].
-pub fn lattice(field: usize) -> (i64, usize) {
-    let t = PITCH_NUM as u64 * field as u64;
+/// Return field `f` as `(floor(source position), phase)` without index overflow.
+pub fn lattice(field: usize) -> (i128, usize) {
+    let t = u128::from(PITCH_NUM) * field as u128;
     (
-        (t / u64::from(PITCH_DEN)) as i64,
-        (t % u64::from(PITCH_DEN)) as usize,
+        (t / u128::from(PITCH_DEN)) as i128,
+        (t % u128::from(PITCH_DEN)) as usize,
     )
 }
 
-/// Field `f` of `source`, before quantisation: `Σ x[k]·g(t(f) − k)` scaled by [`ONE`].
-///
-/// Samples outside `source` read as zero, so the lattice runs from the first field to
-/// however far past the last sample a caller asks — the encoder uses that to let the
-/// kernel ring out past the end of the input.
+/// Accumulate field `f` at [`ONE`] scale; samples outside `source` are zero.
 pub fn accumulate(source: &[i16], field: usize) -> i64 {
     let (base, phase) = lattice(field);
     let row = &taps()[phase];
     let mut acc = 0i64;
     for (j, &tap) in row.iter().enumerate() {
-        let at = base + FIRST_TAP - j as i64;
-        if at >= 0 && (at as usize) < source.len() {
+        let at = base + FIRST_TAP - j as i128;
+        if at >= 0 && at < source.len() as i128 {
             acc += i64::from(source[at as usize]) * i64::from(tap);
         }
     }
     acc
 }
 
-/// Field `f` of `source` in source units, truncated toward zero.
-///
-/// The quantiser's first stage: the products sum at full precision and the total is
-/// truncated once, so a field is not the sum of separately rounded contributions.
+/// Return a field in source units, truncating once after the full-precision sum.
 pub fn field(source: &[i16], at: usize) -> i64 {
     accumulate(source, at) / ONE
 }
@@ -160,7 +144,7 @@ mod tests {
             let (a, pa) = lattice(f);
             let (b, pb) = lattice(f + PITCH_DEN as usize);
             assert_eq!(pa, pb);
-            assert_eq!(b - a, i64::from(PITCH_NUM));
+            assert_eq!(b - a, i128::from(PITCH_NUM));
         }
     }
 

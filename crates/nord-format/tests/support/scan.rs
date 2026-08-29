@@ -62,14 +62,13 @@ pub fn walk(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
             let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
             if path.is_dir() {
-                if path.file_name().is_some_and(|n| n != ".git") {
-                    stack.push(path);
-                }
-            } else if path
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().ends_with(".oracle.json"))
-            {
+                stack.push(path);
+            } else if name.ends_with(".oracle.json") {
                 sidecars.push(path);
             } else if wanted(&path) {
                 specimens.push(path);

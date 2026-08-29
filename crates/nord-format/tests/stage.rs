@@ -149,6 +149,27 @@ stage_body!(
     Entity::OrganPreset(OrganPreset::Stage4(f)) => f
 );
 
+#[test]
+fn program_split_bits_have_exact_placements() {
+    let mut raw = [0u8; ns2::program::BODY_LEN];
+    raw[3] = 0x04;
+    let stage2 = ns2::Program::try_from(raw).unwrap();
+    assert!(stage2.split_enabled());
+    assert_eq!(<[u8; ns2::program::BODY_LEN]>::from(&stage2), raw);
+
+    let mut raw = [0u8; ns3::program::BODY_LEN];
+    raw[5] = 0x10;
+    let stage3 = ns3::Program::try_from(raw).unwrap();
+    assert!(stage3.split_enabled);
+    assert_eq!(<[u8; ns3::program::BODY_LEN]>::from(&stage3), raw);
+
+    let mut raw = [0u8; ns4::program::BODY_LEN];
+    raw[5] = 0x80;
+    let stage4 = ns4::Program::try_from(raw).unwrap();
+    assert!(stage4.split_enabled);
+    assert_eq!(<[u8; ns4::program::BODY_LEN]>::from(&stage4), raw);
+}
+
 /// The placements in the Stage 4 presets the corpus confirms rather than a published
 /// table: layer A's zone, one layer stride above B's in each preset.
 #[test]

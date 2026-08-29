@@ -10,9 +10,8 @@
 //! of predictor order per record is reproduced only under [`Predictor::Minimising`].
 //!
 //! So two claims, and only two: a file from here **round-trips through this crate's
-//! own decoder exactly** under the default [`Predictor::Plain`], and it obeys every
-//! structural law the format is known to have. Whether an instrument plays it is a
-//! hardware question this crate cannot answer.
+//! own decoder exactly** under either predictor, and it obeys every structural law
+//! the format is known to have. Instrument playback remains a hardware question.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -37,10 +36,7 @@ const HEADER_LEN: usize = codec::Layout::V2.header_len();
 /// Content version of the Sample Library 2.0 layout this writes.
 const VERSION: u32 = 200;
 
-/// What the CBIN header's `aux` word holds on every v2 sample instrument.
-///
-/// Unexplained: constant across the corpus, where slot-addressed formats keep
-/// `0xFFFFFFFF`.
+/// Unexplained v2 sample-instrument `aux` value.
 const AUX: u32 = 0x000f_0000;
 
 /// Section schema versions, which do not track the content version.
@@ -62,16 +58,15 @@ const MAX_CELLS: usize = 682;
 /// this with a remainder of at least 25, which the count laws guarantee.
 const CHUNK: usize = 32;
 
-/// Widest field this writes.
-///
-/// The grammar reaches 16, but the instrument's encoder saturates at 13 rather than
-/// re-scaling, so a shift is chosen to keep every field inside it — see
-/// [`Quantised::shift`].
+/// Widest emitted field; quantisation shifts values until they fit.
 const MAX_WIDTH: u8 = 13;
 
 /// Narrowest field. Width 2 is the draft the encoder codes everything at before it
 /// promotes anything, and a width-1 flag-1 record is the terminator.
 const MIN_WIDTH: u8 = 2;
+
+/// Absolute field ceiling imposed by the stream directory and minimum width.
+const MAX_FIELDS: usize = MAX_STREAM_WORDS * 24 / MIN_WIDTH as usize;
 
 /// Words of stream the allocation starts from, before any packet.
 const SLACK_WORDS: usize = 38;
@@ -82,18 +77,11 @@ const PACKET_WORDS: usize = 127;
 /// Source samples the kernel is allowed to ring out past the end of the input.
 const RING_OUT: usize = 160;
 
-/// Numerator and denominator of the resync position, `R1 = round(ρ·frames)`.
-///
-/// ρ is pinned to a narrow interval by the length ladder and this is its simplest
-/// member; the exact value would take a render longer than any specimen held.
+/// Resync position ratio: `R1 = round(63·frames/634)`.
 const RHO_NUM: u64 = 63;
 const RHO_DEN: u64 = 634;
 
-/// Shortest input this writes.
-///
-/// Below roughly four thousand frames the instrument's encoder opens the stream
-/// differently, and what it does there is not modelled — so refuse rather than emit a
-/// stroke whose shape is a guess.
+/// Shortest modelled input; shorter streams use an unresolved opening.
 pub const MIN_FRAMES: usize = 4096;
 
 /// Longest input the stroke header's 16-bit word directory can address unambiguously.
@@ -111,22 +99,11 @@ const DIFFERENCE: [&[i32]; 5] = [
 /// How content records code their fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Predictor {
-    /// Every record stores field values outright, at order 0.
-    ///
-    /// Larger than the instrument's own output and trivially decodable: nothing has to
-    /// know where a differenced run resumes from, so this crate's decoder reads such a
-    /// stream back exactly.
+    /// Store every content field outright at order zero.
     #[default]
     Plain,
-    /// Each record takes the predictor order that makes its fields narrowest, with the
-    /// smallest sum of residuals breaking a tie — the law the instrument's encoder
-    /// follows, exactly, on every corpus record.
-    ///
-    /// ⚠️ Much smaller, and **this crate's decoder reads it back only approximately**:
-    /// where a differenced run resumes from is not recorded anywhere in the stream, and
-    /// the rule for recovering it is unsolved, so [`codec::decode`] reconstructs such
-    /// runs shape-correct and level-approximate. Residuals here are taken against the
-    /// unbroken field history, which is what a decoder that knew the rule would use.
+    /// Choose the narrowest predictor per cell, breaking ties by residual sum.
+    /// Smaller than plain records and exact through this crate's decoder.
     Minimising,
 }
 
@@ -174,11 +151,7 @@ impl Options {
     }
 }
 
-/// Where a stroke's landmarks fall, from the frame count alone.
-///
-/// The whole layout of a stroke is a function of how many source frames it covers.
-/// Warmup and resync are phase adjusters: they exist so that whole cells reach the
-/// next landmark, which is why their lengths are residues rather than constants.
+/// Stroke landmarks derived from the source frame count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
     /// Source frames the stroke covers.
@@ -210,11 +183,19 @@ impl Plan {
             }
             .into());
         }
-        let fields = round_ratio(
-            (frames + RING_OUT) as u64 * u64::from(PITCH_DEN),
-            u64::from(PITCH_NUM),
-        );
-        let resync_at = round_ratio(frames as u64 * RHO_NUM, RHO_DEN);
+        let frames = u64::try_from(frames).map_err(|_| size_error(frames))?;
+        let fields = frames
+            .checked_add(RING_OUT as u64)
+            .and_then(|n| n.checked_mul(u64::from(PITCH_DEN)))
+            .and_then(|n| round_ratio(n, u64::from(PITCH_NUM)))
+            .ok_or_else(|| size_error(frames as usize))?;
+        if fields > MAX_FIELDS {
+            return Err(size_error(frames as usize).into());
+        }
+        let resync_at = frames
+            .checked_mul(RHO_NUM)
+            .and_then(|n| round_ratio(n, RHO_DEN))
+            .ok_or_else(|| size_error(frames as usize))?;
         let warmup = band(resync_at);
         let resync = band(fields - warmup);
         if resync_at < warmup || fields < resync_at + resync {
@@ -225,7 +206,7 @@ impl Plan {
             .into());
         }
         Ok(Plan {
-            frames,
+            frames: frames as usize,
             fields,
             resync_at,
             warmup,
@@ -237,23 +218,25 @@ impl Plan {
 }
 
 /// `round(num/den)`, half away from zero, on non-negative integers.
-fn round_ratio(num: u64, den: u64) -> usize {
-    ((num * 2 + den) / (2 * den)) as usize
+fn round_ratio(num: u64, den: u64) -> Option<usize> {
+    num.checked_add(den / 2)
+        .and_then(|n| usize::try_from(n / den).ok())
 }
 
-/// The 1:1 run length that carries a landmark's cell phase.
-///
-/// The unique multiple-of-24 offset putting the residue of `r` in `[25, 96]`: the
-/// residue is taken in `[1, 24]` and lifted by one, two or three cells by thirds.
+fn size_error(frames: usize) -> ParseError {
+    ParseError::OutOfBounds {
+        value: format!("{frames} frames"),
+        bound: format!("audio whose encoded stream fits {MAX_STREAM_WORDS} words"),
+    }
+}
+
+/// The 25..=96-field 1:1 run that preserves a landmark's cell phase.
 fn band(r: usize) -> usize {
     let residue = (r % CELL + CELL - 1) % CELL + 1;
     residue + CELL * ((residue - 1) / 8 + 1)
 }
 
-/// A 1:1 run split into records: chunks of 32 with the remainder last.
-///
-/// The count laws keep every chunk in 25..=32, since [`band`] only ever returns a
-/// length in 25..=32, 57..=64 or 89..=96.
+/// Split a 1:1 run into legal 25..=32-field records.
 fn chunks(mut n: usize) -> Vec<usize> {
     let mut out = Vec::new();
     while n > CHUNK {
@@ -276,17 +259,8 @@ struct Quantised {
     peak: u32,
 }
 
-/// Resamples, then picks the shift that keeps every field inside [`MAX_WIDTH`].
-///
-/// The instrument's own rule for choosing a shift is not known — it is not a function
-/// of the peak alone — so this takes the conservative choice that reproduces: the
-/// smallest shift under which nothing needs a wider field than the encoder ever
-/// declares. The header states the shift outright, so a decoder recovers it exactly
-/// whatever the rule was.
-///
-/// The shift is never negative. A negative one buys precision only when the source
-/// carries detail below its own LSB, and 16-bit input has none: the fields are already
-/// integers in source units by the time the shift applies.
+/// Resample and choose the smallest nonnegative shift that fits [`MAX_WIDTH`].
+/// The instrument's shift-selection rule remains unknown.
 fn quantise(source: &[i16], plan: &Plan) -> Quantised {
     let raw: Vec<i64> = (0..plan.fields).map(|f| kernel::field(source, f)).collect();
     let low = raw.iter().copied().min().unwrap_or(0);
@@ -344,10 +318,7 @@ impl Spec {
     }
 }
 
-/// The residual a record of `order` stores for field `at`.
-///
-/// The Nth backward difference of the field history, which runs unbroken across record
-/// boundaries — so a record's first residuals reach back into the record before it.
+/// The Nth backward difference at `at`, across record boundaries.
 fn residual(values: &[i32], at: usize, order: u8) -> i64 {
     DIFFERENCE[usize::from(order)]
         .iter()
@@ -390,12 +361,7 @@ fn best_order(values: &[i32], first: usize, predictor: Predictor) -> (u8, u8) {
     (best.2, best.0)
 }
 
-/// Every record of a stroke, in stream order.
-///
-/// The 1:1 runs store field values outright at whatever width they need; the content
-/// between them is cut into records covering runs of cells that agree on order and
-/// width, which is what makes a run the encoder declined to promote come out as the
-/// width-2 record sitting over its own draft.
+/// Partition 1:1 values and like-coded content cells into records.
 fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Vec<Spec> {
     let mut out = Vec::new();
     let mut at = 0usize;
@@ -460,11 +426,7 @@ struct Stream {
     terminator: usize,
 }
 
-/// Lays the records into the allocation the format gives them.
-///
-/// The stream region is `38 + 127·P` words for the smallest `P` that holds the chain,
-/// and the chain is **right-aligned** in it: the terminator takes the last word and
-/// the slack in front stays zero.
+/// Right-align records in the smallest `38 + 127·P`-word allocation.
 fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, Error> {
     let chain: usize = specs.iter().map(Spec::span).sum::<usize>() + 1;
     let packets = chain.saturating_sub(SLACK_WORDS).div_ceil(PACKET_WORDS);
@@ -531,11 +493,7 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32]) {
     }
 }
 
-/// Statistic A: the reciprocal of the peak as a normalised binary float, whose
-/// exponent byte is the only place the quantiser shift is written down.
-///
-/// `A = 2^(41+s) / PEAK`, mantissa normalised into `[2^19, 2^20)`. Reading it back
-/// through [`codec::shift`] returns `s` exactly.
+/// Encode `A = 2^(41+s)/peak` so its exponent carries the quantiser shift.
 fn statistic_a(peak: u32, shift: i32) -> (u32, u8) {
     let peak = u64::from(peak.max(1));
     let bits = 64 - peak.leading_zeros() as i32;
@@ -544,10 +502,7 @@ fn statistic_a(peak: u32, shift: i32) -> (u32, u8) {
     (mantissa as u32, (22 + shift - bits + exact_power) as u8)
 }
 
-/// The fixed 51-byte stroke header.
-///
-/// `body_at` is the stroke payload's offset from the start of the body: the word
-/// directory counts from there, and its pointers are 16 bits wide, so they wrap.
+/// Build the fixed header and its body-relative, wrapping word directory.
 fn stroke_header(id: u32, root_key: u8, q: &Quantised, stream: &Stream, body_at: usize) -> Vec<u8> {
     let mut head = vec![0u8; HEADER_LEN];
     head[0..4].copy_from_slice(&id.to_be_bytes());
@@ -580,10 +535,7 @@ fn stroke_header(id: u32, root_key: u8, q: &Quantised, stream: &Stream, body_at:
     head
 }
 
-/// One zone's `stk` payload: the fixed header, then the stream.
-///
-/// `body_at` is where the payload will sit relative to the start of the body, which
-/// the word directory is written against.
+/// Encode one zone's stroke at body offset `body_at`.
 pub fn stroke(
     source: &[i16],
     root_key: u8,
@@ -591,6 +543,13 @@ pub fn stroke(
     body_at: usize,
     predictor: Predictor,
 ) -> Result<Vec<u8>, Error> {
+    midi_note("root key", root_key)?;
+    body_at
+        .checked_add(HEADER_LEN)
+        .ok_or_else(|| ParseError::OutOfBounds {
+            value: format!("body offset {body_at}"),
+            bound: "an addressable stroke header".into(),
+        })?;
     let plan = Plan::new(source.len())?;
     let q = quantise(source, &plan);
     let specs = records(&q.values, &plan, predictor);
@@ -640,11 +599,7 @@ fn cat() -> Section {
     }
 }
 
-/// The `map` section: the keyboard map, then the zone table.
-///
-/// The map itself is 128 six-byte records each leading with `0x10`, behind a one-byte
-/// lead of the same value. Unexplained: identical on every corpus specimen, and
-/// nothing yet made it move.
+/// Build the unexplained fixed keyboard map and zone table.
 fn map(zones: &[(u32, u8)]) -> Section {
     let mut payload = vec![0u8; super::zone::RECORDS_AT + super::zone::RECORD_LEN * zones.len()];
     payload[0] = 0x10;
@@ -676,23 +631,17 @@ fn sty() -> Section {
     }
 }
 
-/// Builds a one-zone sample instrument around `source`.
-///
-/// `source` is mono PCM at [`codec::SOURCE_RATE`] — the rate the lattice is defined
-/// against. Nothing in the file records a source rate, so handing this audio at any
-/// other rate transposes the result rather than failing.
-///
-/// Refuses input shorter than [`MIN_FRAMES`], a name past
-/// [`MAX_NAME_LEN`](super::MAX_NAME_LEN), and audio whose stream would outrun the
-/// stroke header's 16-bit word directory. That last ceiling is what the predictor
-/// buys: at [`Predictor::Plain`] loud material fills the directory in a few seconds,
-/// where [`Predictor::Minimising`] carries several times as long.
+/// Build a one-zone v2 instrument from mono PCM at [`codec::SOURCE_RATE`].
+/// Refuses unmodelled lengths, invalid metadata, and streams past the directory limit.
 pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Error> {
     const ID: u32 = 1;
 
+    midi_note("root key", options.root_key)?;
+    let top_note = options.resolved_top_note();
+    midi_note("top note", top_note)?;
     let hdr = hdr(&options.name)?;
     let cat = cat();
-    let map = map(&[(ID, options.resolved_top_note())]);
+    let map = map(&[(ID, top_note)]);
 
     // The directory the stroke carries counts words from the start of the body, so the
     // sections in front of it have to be sized before its stream can be written.
@@ -730,6 +679,17 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Err
             ],
         },
     })
+}
+
+fn midi_note(name: &str, note: u8) -> Result<(), Error> {
+    if note <= 127 {
+        return Ok(());
+    }
+    Err(ParseError::OutOfBounds {
+        value: format!("{name} {note}"),
+        bound: "a MIDI note from 0 through 127".into(),
+    }
+    .into())
 }
 
 #[cfg(test)]
@@ -793,7 +753,16 @@ mod tests {
     fn short_input_is_refused_rather_than_guessed_at() {
         assert!(Plan::new(MIN_FRAMES - 1).is_err());
         assert!(Plan::new(MIN_FRAMES).is_ok());
+        assert!(Plan::new(usize::MAX).is_err());
         assert!(instrument(&vec![0i16; 1024], &Options::new("Test")).is_err());
+    }
+
+    #[test]
+    fn midi_notes_outside_the_wire_range_are_refused() {
+        let source = vec![0i16; MIN_FRAMES];
+        assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
+        assert!(instrument(&source, &Options::new("Test").top_note(255)).is_err());
+        assert!(stroke(&source, 128, 1, 0, Predictor::Plain).is_err());
     }
 
     /// The allocation is `38 + 127·P` words with the chain right-aligned, so a
@@ -808,32 +777,35 @@ mod tests {
         assert_eq!(&stroke.payload[stroke.payload.len() - 3..], &[0x80, 0, 24]);
     }
 
-    /// The whole point of the tier: what this writes, this crate's decoder reads back
-    /// as the very field values that were quantised.
     #[test]
-    fn a_plain_stream_round_trips_through_the_decoder_exactly() {
-        for source in [
-            sine(440.0, 12_000.0, 44_100),
-            sine(30.0, 32_000.0, 20_000),
-            vec![0i16; 8192],
-            vec![9000i16; 8192],
-        ] {
-            let file = encoded(&source, Predictor::Plain);
-            let (at, stroke) = file.stroke_streams()[0];
-            let plan = Plan::new(source.len()).unwrap();
-            let q = quantise(&source, &plan);
+    fn every_predictor_round_trips_through_the_decoder_exactly() {
+        let mut differenced = 0usize;
+        for predictor in [Predictor::Plain, Predictor::Minimising] {
+            for source in [
+                sine(440.0, 12_000.0, 44_100),
+                sine(30.0, 32_000.0, 20_000),
+                vec![0i16; 8192],
+                vec![9000i16; 8192],
+            ] {
+                let file = encoded(&source, predictor);
+                let (at, stroke) = file.stroke_streams()[0];
+                let plan = Plan::new(source.len()).unwrap();
+                let q = quantise(&source, &plan);
 
-            let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
-            assert_eq!(
-                audio.differenced, 0,
-                "a plain stream states every field outright"
-            );
-            assert_eq!(audio.samples.len(), plan.fields);
-            let gain = 1i32 << q.shift;
-            for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
-                assert_eq!(i32::from(got), want * gain, "field {f}");
+                let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+                assert_eq!(audio.samples.len(), plan.fields);
+                if predictor == Predictor::Plain {
+                    assert_eq!(audio.differenced, 0);
+                } else {
+                    differenced += audio.differenced;
+                }
+                let gain = 1i32 << q.shift;
+                for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
+                    assert_eq!(i32::from(got), want * gain, "{predictor:?} field {f}");
+                }
             }
         }
+        assert!(differenced > 0, "minimising never chose a predictor");
     }
 
     /// The audio survives the trip as audio, not only as numbers: a sine comes back a
@@ -853,12 +825,6 @@ mod tests {
         assert!((124..=127).contains(&zero_crossings), "{zero_crossings}");
     }
 
-    /// A record's fields start at the first bit after its header word, so a record
-    /// whose count leaves an alignment tail has that tail at the *end*.
-    ///
-    /// Only the 1:1 runs leave one — a content run's count is a whole number of
-    /// cells, so its fields fill the segment exactly. Packing from the far end
-    /// instead is invisible on content and displaces every warmup and resync.
     #[test]
     fn a_records_fields_start_right_after_its_header() {
         // 30 fields of 13 bits is 390, leaving 18 spare bits in 18 words.
@@ -1076,9 +1042,6 @@ mod tests {
         }
     }
 
-    /// The fixed bytes of the stroke header, in the shape the format holds them: the
-    /// id and root key, the constant at +6, and a `0x80` behind the first three
-    /// directory pointers but not the fourth.
     #[test]
     fn the_stroke_header_holds_the_fixed_bytes_where_the_format_puts_them() {
         let file = instrument(

@@ -41,14 +41,8 @@
 
 use std::fmt;
 
-/// Which generation's units a stroke stream is in.
-///
-/// `.nsmp3` and `.nsmp4` share every unit — word size, cell size, header length — and
-/// differ only in behaviour: v4 sometimes quantises one bit finer, which the stroke
-/// header states either way, and v4 alone gives a stereo stroke's two channels a word
-/// stream each ([`Layout::splits_wide_openings`]) where v2 and v3 alternate fields.
-/// That second difference changes how long a record is, so the two cannot share one
-/// variant.
+/// Stream units for one sample generation.
+/// V4 alone alternates stereo channel words instead of fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     /// `.nsmp`: 3-byte words, 24-field cells, a 51-byte stroke header.
@@ -60,9 +54,7 @@ pub enum Layout {
 }
 
 impl Layout {
-    /// The layout a body's content version implies. The u32 at `0x14` runs
-    /// `format × 100 + revision`, so anything from 300 up is the wide chain and
-    /// anything from 400 up is v4.
+    /// The layout implied by a `format × 100 + revision` content version.
     pub fn from_version(version: u32) -> Layout {
         match version {
             v if v >= super::V4_FROM_VERSION => Layout::V4,
@@ -71,28 +63,13 @@ impl Layout {
         }
     }
 
-    /// Whether a stereo stroke gives each channel its own run of words, the two
-    /// interleaved word by word, rather than interleaving the channels field by field.
-    ///
-    /// ⚠️ **True on [`Layout::V4`] only.** v2 and v3 alternate whole fields, so their
-    /// records are one bit-run and size like any other. Mono never splits anywhere.
-    ///
-    /// It is a sizing question as well as a de-interleaving one: each channel's half of
-    /// a record is padded to a whole word, so the payload is
-    /// `2 × ceil((count/2 × width) / word_bits)` words. That exceeds the unsplit
-    /// `ceil((word_bits + count × width) / word_bits)` by one whenever the halves do
-    /// not tile — which content records never do, their counts being multiples of the
-    /// stereo cell, and 1:1 records regularly do.
+    /// Whether stereo channels occupy alternating, independently padded word streams.
+    /// True only for V4; only 1:1 records gain padding because content tiles whole words.
     pub const fn splits_wide_openings(self) -> bool {
         matches!(self, Layout::V4)
     }
 
-    /// Bytes per stream word. A record header is exactly one word, and the top byte
-    /// of a wide word is never part of it.
-    ///
-    /// ⚠️ The top byte is not always zero — vendor *payload* words fill it. It is only
-    /// the header's own reserved space, so the check belongs on words being read as
-    /// headers, not on the stream at large.
+    /// Bytes per stream word. A header occupies one word's low 24 bits.
     pub const fn word(self) -> usize {
         match self {
             Layout::V2 => 3,
@@ -100,10 +77,7 @@ impl Layout {
         }
     }
 
-    /// Bytes of fixed stroke header ahead of the word stream.
-    ///
-    /// The wide header is the narrow one field for field — same statistics, same
-    /// directory — plus two float32s and the room to hold them.
+    /// Bytes in the fixed stroke header before the word stream.
     pub const fn header_len(self) -> usize {
         match self {
             Layout::V2 => 51,
@@ -111,11 +85,7 @@ impl Layout {
         }
     }
 
-    /// Fields per cell. A content record covers whole cells, so its count is a
-    /// multiple of this; the terminator's own count states it.
-    ///
-    /// ⚠️ A stereo stroke cells at twice this, which is still a multiple of it, so
-    /// this is the divisor to check against rather than the cell size to assume.
+    /// Fields per mono cell. Content counts are multiples; stereo terminators double it.
     pub const fn cell(self) -> usize {
         match self {
             Layout::V2 => 24,
@@ -128,16 +98,10 @@ impl Layout {
     }
 }
 
-/// Statistic A's exponent byte, at this offset in the stroke payload.
-///
-/// Statistic A is the reciprocal of the content peak, carried as a normalised
-/// binary float whose mantissa sits at `+9..11`. The exponent is the only place the
-/// quantiser shift is written down — see [`shift`].
+/// Statistic A's exponent byte; [`shift`] recovers the quantiser scale from it.
 const STAT_A_EXP_AT: usize = 12;
 
-/// Statistic B, the content peak: 24 bits big-endian at this offset.
-///
-/// The largest coded field before the shift, with the frame-0 marker excluded.
+/// Statistic B: the content peak as a 24-bit big-endian value.
 const PEAK_AT: usize = 13;
 
 /// Where the wide stroke header's two float32s sit. Both big-endian.
@@ -154,29 +118,12 @@ const SHIFT_LIMIT: i32 = 32;
 const SEEK_AT: usize = 20;
 const SEEK_STRIDE: usize = 9;
 
-/// Where the directory's 16-bit pointers roll over, in words.
-///
-/// ⚠️ **Strokes do run longer than this**, so a resolved pointer names a whole family
-/// of words `WRAP` apart and the reader has to pick. Which alias is right depends on
-/// what the pointer names: the terminator sits at the end of the stream, so it takes
-/// the highest alias that still lands inside it, while `ptr[0]` opens the stream and
-/// takes the lowest. Raising both the same way puts the opening record past the
-/// content. Vendor strokes reach 216 KiB — 72,000-odd words — where the editor's own
-/// renders never leave the first period.
+/// Period of a 16-bit directory pointer, in words.
+/// Openings use the first alias; terminators use the last in-range alias.
 pub const WRAP: usize = 1 << 16;
 
-/// Input samples per [`PITCH_DEN`] fields.
-///
-/// ⚠️ **An approximation, by 1.6e-7.** The pitch is `22050/17501` — the ratio that
-/// puts the field rate on a round 35,002 Hz — and `349/277` is its continued-fraction
-/// convergent. The error is a timing drift of about one field per 17,501, invisible
-/// on anything short and not audible on anything, but it is a drift rather than an
-/// offset, so a long stroke's late fields land on the wrong side of a quantiser edge.
-///
-/// It stays because [`super::kernel::PHASES`] is `PITCH_DEN`: the exact ratio wants a
-/// 17,501-phase bank where this wants 277, and the instrument's own kernel is neither
-/// — it is a 512-entry table read by truncating the phase to 9 bits. Moving to the
-/// exact pitch means replacing the analytic bank, not editing two numbers.
+/// Approximation of `22050/17501`; it drifts one field per 17,501.
+/// The analytic kernel intentionally uses its 277-phase denominator.
 pub const PITCH_NUM: u32 = 349;
 /// Fields per [`PITCH_NUM`] input samples.
 pub const PITCH_DEN: u32 = 277;
@@ -189,31 +136,19 @@ pub const SOURCE_RATE: u32 = 44_100;
 /// rounding here only absorbs what [`PITCH_NUM`] approximates.
 pub const FIELD_RATE: u32 = (SOURCE_RATE * PITCH_DEN + PITCH_NUM / 2) / PITCH_NUM;
 
-/// Bits of a record header's field count: `[flag:1][width−1:4][00][order:3][count:14]`.
-///
-/// ⚠️ The count runs well past a byte — a merged content run reaches this field's own
-/// ceiling of 682 whole cells. Reading it as eight bits frames short records
-/// correctly and then derails on the first long one, which is what makes dense
-/// material look like a stream with no records in it.
+/// Mask for the 14-bit count in `[flag][width−1][reserved][mark][order][count]`.
 const COUNT_MASK: u32 = 0x3fff;
 
 /// Field values the predictor keeps. The order field is three bits wide, but only
 /// 0 to 4 occur and a fourth-order difference reaches no further back than this.
 const MAX_ORDER: usize = 4;
 
-/// Why a stroke's stream could not be walked.
-///
-/// Decode coverage is a number, not a hope: a stroke either decodes or says which of
-/// these it hit, so a sweep over a library can be counted by [`reason`].
-///
-/// [`reason`]: Unsupported::reason
+/// Why a stroke stream could not be walked or decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {
     /// Shorter than the fixed header, so there is no stream to walk.
     Short,
-    /// A word that is not a record header: the reserved bit or a wide word's top
-    /// byte set, no fields at all, or a content run that is not a whole number of
-    /// cells.
+    /// A word violates the record header or content-count grammar.
     Malformed {
         /// Word index within the stream, counting from [`HEADER_LEN`].
         word: usize,
@@ -223,6 +158,16 @@ pub enum Unsupported {
     Desync {
         /// Word index within the stream, counting from [`HEADER_LEN`].
         word: usize,
+    },
+    /// Bytes remain after the last complete stream word.
+    PartialWord {
+        /// Trailing bytes, always fewer than [`Layout::word`].
+        bytes: usize,
+    },
+    /// The header requests a shift that cannot describe encoded audio.
+    Shift {
+        /// Signed shift recovered from the header.
+        bits: i32,
     },
     /// The chain reached the end of the stroke without a terminator.
     NoTerminator,
@@ -235,6 +180,8 @@ impl Unsupported {
             Unsupported::Short => "short-stroke",
             Unsupported::Malformed { .. } => "malformed-record",
             Unsupported::Desync { .. } => "desync",
+            Unsupported::PartialWord { .. } => "partial-word",
+            Unsupported::Shift { .. } => "invalid-shift",
             Unsupported::NoTerminator => "no-terminator",
         }
     }
@@ -251,6 +198,12 @@ impl fmt::Display for Unsupported {
                 f,
                 "the record at word {word} runs past the end of the stroke"
             ),
+            Unsupported::PartialWord { bytes } => {
+                write!(f, "the stream ends with {bytes} byte(s) of a partial word")
+            }
+            Unsupported::Shift { bits } => {
+                write!(f, "the header's {bits}-bit quantiser shift is invalid")
+            }
             Unsupported::NoTerminator => {
                 write!(f, "the chain ran off the end with no terminator")
             }
@@ -272,36 +225,12 @@ pub struct Record {
     pub one_to_one: bool,
     /// Bits per field, 1 to 16.
     pub width: u8,
-    /// Differencing order, 0 to 4. A record of order N stores the Nth backward
-    /// difference of its field values, `e(f) = Σ(−1)^j C(N,j)·V(f−j)`, so reading
-    /// it takes N integrations. Smooth material codes at 1 to 3; every impulse and
-    /// noise probe codes at 0.
-    ///
-    /// ⚠️ It is not layout — it changes neither the record's length nor its field
-    /// base — and it is only ever set on content records.
+    /// Difference order, 0..=4. Content stores the Nth backward difference.
     pub order: u8,
-    /// A flag one record per stroke carries, on vendor library content only.
-    ///
-    /// ⚠️ **A parser must carry it rather than refuse it.** Every stroke the editor
-    /// writes leaves it clear, in all three generations, so a corpus of fresh renders
-    /// never shows it and reading its bit as reserved rejects the entire vendor
-    /// library instead. Where it is set it is set exactly once, always on a
-    /// [`Record::one_to_one`] record, and usually on the one the header directory's
-    /// resync pointer names. What it means is unknown.
+    /// Unexplained vendor flag, usually on the directory's resync record.
     pub mark: bool,
-    /// Stored fields, sign-extended. What they mean depends on [`Record::order`]:
-    /// at 0 they are the field values, otherwise their Nth difference. Dequantise
-    /// by shifting left by [`shift`].
-    ///
-    /// ⚠️ **Channel-major on a stereo stroke** — the first half is one channel's
-    /// fields and the second half the other's, whichever way the stream stored them.
-    /// The walk undoes the interleave so that a reader never has to know which
-    /// generation it came from; what it must know is that the two halves are
-    /// *separate signals*, each predicted against its own history.
-    ///
-    /// ⚠️ A width-2 record is the noise floor the encoder decided not to code — it
-    /// planted the header over its own working draft and left the data behind. The
-    /// values are real, at two bits; they are not a marker to be skipped.
+    /// Channel-major signed values at order zero; signed differences otherwise.
+    /// Width two is ordinary draft data, not a skip marker.
     pub values: Vec<i32>,
 }
 
@@ -315,13 +244,9 @@ pub struct Stream {
     pub first_record: usize,
     /// Word index where the chain stops.
     pub terminator: usize,
-    /// Fields per cell, read off the terminator word: 24 for a mono [`Layout::V2`]
-    /// stroke, 48 for a stereo one, 32 for [`Layout::V3`]. `None` when the stream
-    /// ends at the record the header's directory names instead of at a width-1
-    /// terminator, which is how some library content ends.
+    /// Terminator cell count, or `None` when the directory ends the chain directly.
     pub cell: Option<usize>,
-    /// Channels the stroke carries: 2 when the terminator states twice the layout's
-    /// cell, 1 otherwise. Half of the vendor library is stereo.
+    /// Channels the stroke carries: 2 when the terminator doubles the layout's cell.
     pub channels: usize,
 }
 
@@ -333,14 +258,9 @@ pub struct Audio {
     pub samples: Vec<i16>,
     /// 1 or 2.
     pub channels: u16,
-    /// Fields whose dequantised value ran past 16 bits and was clamped.
-    ///
-    /// Nonzero on transients: the kernel rings, so a full-scale edge overshoots what
-    /// a 16-bit source could hold.
+    /// Fields clamped after dequantisation, commonly from kernel ringing.
     pub clipped: usize,
-    /// Fields that came through the predictor rather than being stated outright.
-    /// Real instrument content is nearly all of this; sparse test material is none
-    /// of it. Both kinds carry a level — this is a description, not a caveat.
+    /// Fields reconstructed from differences rather than stated outright.
     pub differenced: usize,
 }
 
@@ -356,12 +276,7 @@ impl Audio {
     }
 }
 
-/// The content peak the stroke header records, or `None` if it is too short.
-///
-/// ⚠️ **The wide generations sign it.** They store the extreme field with its sign and
-/// start the accumulator at −1, so a silent stroke reads `-1` where a [`Layout::V2`]
-/// one reads `0`. The magnitude is the same quantity in both, and the magnitude is what
-/// the quantiser scales against.
+/// Header content peak. Wide layouts store it signed; V2 stores its magnitude.
 pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
     let b = stroke.get(PEAK_AT..PEAK_AT + 3)?;
     let v = u32::from_be_bytes([0, b[0], b[1], b[2]]);
@@ -372,23 +287,8 @@ pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
     })
 }
 
-/// The stroke's quantiser shift, read out of the header.
-///
-/// Fields are stored shifted right by this much, so dequantising shifts back by it.
-/// It counts single bits, so odd values occur, and it is **signed** — content
-/// sitting below the source's 16-bit LSB is shifted *left* by the encoder, which
-/// means dequantising it shifts right.
-///
-/// ⚠️ Read it here, not from the field width. The width saturates at 13 and stops
-/// discriminating above that; this byte does not.
-///
-/// ⚠️ The exponent alone is not the shift: it is the shift biased by how many bits
-/// the peak statistic A was normalised against occupies, so recovering one needs the
-/// other. On instruments the editor wrote in one pass that peak is [`peak`], and this
-/// is exact. **On vendor library content statistic A's mantissa does not reproduce
-/// from [`peak`]**, so the encoder normalised against something else there and this
-/// can read low by a few bits — decoded vendor audio is right in shape and can be
-/// quiet by a power of two.
+/// Signed quantiser shift recovered from statistic A's exponent and [`peak`].
+/// Vendor statistic A is unresolved, so library amplitude may decode low.
 pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
     let peak = peak(stroke, layout)?.unsigned_abs().max(1);
     let exponent = i32::from(*stroke.get(STAT_A_EXP_AT)?);
@@ -397,12 +297,7 @@ pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
     Some(exponent + bits - EXPONENT_BIAS - exact_power)
 }
 
-/// The two float32s a [`Layout::V3`] stroke header carries past the directory,
-/// `None` on [`Layout::V2`], which has neither.
-///
-/// What they mean is unknown. Every stroke the editor wrote holds `(0.0, 20.0)`;
-/// vendor library strokes vary in both, so they are content-dependent rather than
-/// constants. Reported, not interpreted.
+/// Two unexplained wide-header floats, absent from V2.
 pub fn tail_floats(stroke: &[u8], layout: Layout) -> Option<[f32; 2]> {
     if layout == Layout::V2 {
         return None;
@@ -414,26 +309,14 @@ pub fn tail_floats(stroke: &[u8], layout: Layout) -> Option<[f32; 2]> {
     Some([at(TAIL_FLOATS_AT[0])?, at(TAIL_FLOATS_AT[1])?])
 }
 
-/// The stroke header's word directory: four landmarks in the record chain.
-///
-/// The unit is stream words counted from the start of the body — so the unit itself
-/// changes with the [`Layout`] — and resolving a pointer needs the stroke's own
-/// offset. See [`Directory::resolve`].
+/// Four word pointers into a stroke chain, relative to the sample body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Directory {
     /// Where the chain starts.
     pub first_record: u16,
     /// The stroke's resync record.
     pub resync: u16,
-    /// The [`Record::mark`] record, on strokes that carry one; the terminator again
-    /// on strokes that do not.
-    ///
-    /// ⚠️ **Not a second copy of the terminator**, though it looks like one: every
-    /// instrument the editor writes leaves it equal to [`Directory::terminator`],
-    /// and every vendor stroke that marks a record points it at that record instead.
-    /// Reading it as the end of the chain therefore stops the walk partway through
-    /// vendor content, in every generation, while nothing in a corpus of fresh
-    /// renders would show it.
+    /// Marked record, or the terminator when no record is marked.
     pub mark: u16,
     /// Where the chain ends.
     pub terminator: u16,
@@ -455,27 +338,13 @@ impl Directory {
         })
     }
 
-    /// A stored pointer as a word index within the stream.
-    ///
-    /// `stroke_at` is the stroke payload's offset from the start of the body — the
-    /// same base the pointers were written against.
-    ///
-    /// ⚠️ The pointers are 16 bits and count from the body, not from the stroke, so
-    /// they wrap on an instrument bigger than [`WRAP`] words — which sample-library
-    /// pianos are. The arithmetic is modular for that reason, and the result is only
-    /// meaningful if it lands inside the stroke: a caller must range-check it.
+    /// Resolve a pointer to its first alias within the stream; callers must range-check.
     pub fn resolve(pointer: u16, stroke_at: usize, layout: Layout) -> usize {
         let base = (stroke_at + layout.header_len()) / layout.word() % WRAP;
         (usize::from(pointer) + WRAP - base) % WRAP
     }
 
-    /// A stored pointer resolved against a stream of `words`, taking the **last** of
-    /// its aliases that still lands inside it.
-    ///
-    /// This is the reading for [`Directory::terminator`], which by definition sits at
-    /// the end of the stream. On a stroke shorter than [`WRAP`] words it is exactly
-    /// [`Directory::resolve`]; past that it is the only reading that finds the end
-    /// rather than a word one period short of it.
+    /// Resolve a pointer to its last alias within a stream of `words`.
     pub fn resolve_end(pointer: u16, stroke_at: usize, layout: Layout, words: usize) -> usize {
         let mut at = Directory::resolve(pointer, stroke_at, layout);
         while at + WRAP < words {
@@ -485,40 +354,27 @@ impl Directory {
     }
 }
 
-/// The cell size a word states if it is the stream's terminator, or `None` if it is
-/// not one.
-///
-/// A terminator is a width-1 flag-1 word whose count is the cell size — `cell` on a
-/// mono stroke, twice it on a stereo one.
-///
-/// ⚠️ **The count is the test, not a detail read off afterwards.** Payload words land
-/// on that bit pattern with other counts, and taking the first of them for the end
-/// stops the walk in the middle of the stream: one library stroke carries a count-0
-/// match at word 94 of 11,244, with its directory naming the last word and ten
-/// thousand more words of content in between.
+/// Return the mono or stereo cell count when `raw` is a valid terminator.
 fn terminator_cell(raw: u32, cell: usize) -> Option<usize> {
     let v = raw & 0x00ff_ffff;
     let one_to_one = v >> 23 != 0;
     let width = ((v >> 19) & 0xf) + 1;
     let mark = (v >> 18) & 1 != 0;
+    let reserved = (v >> 17) & 1 != 0;
+    let order = (v >> 14) & 0x7;
     let count = (v & COUNT_MASK) as usize;
-    let ok =
-        one_to_one && width == 1 && raw >> 24 == 0 && !mark && (count == cell || count == 2 * cell);
+    let ok = one_to_one
+        && width == 1
+        && raw >> 24 == 0
+        && !mark
+        && !reserved
+        && order == 0
+        && (count == cell || count == 2 * cell);
     ok.then_some(count)
 }
 
-/// Walks a stroke's record chain.
-///
-/// The grammar has one production, and it is the same bit layout in every generation.
-/// A record header word is `[flag:1][width−1:4][reserved:1][mark:1][order:3][count:14]`
-/// in its low 24 bits, followed by `count × width` bits of two's-complement fields,
-/// right-anchored and padded to a word boundary. A flag-1 record at width 1 is the
-/// terminator and ends the stream; its count is the cell size. There is no separate
-/// skip token — a run the encoder declined to code is an ordinary width-2 record
-/// sitting over its own draft.
-///
-/// `stroke_at` is the stroke payload's offset from the start of the body;
-/// [`crate::formats::nsmp::Sample`]'s stream accessors hand it over with the bytes.
+/// Walk signed record fields from the directory opening to the terminator.
+/// `stroke_at` is the stroke payload's offset from the sample body.
 pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, Unsupported> {
     let word_len = layout.word();
     let word_bits = layout.word_bits();
@@ -526,6 +382,10 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
     let stream = stroke
         .get(layout.header_len()..)
         .ok_or(Unsupported::Short)?;
+    let trailing = stream.len() % word_len;
+    if trailing != 0 {
+        return Err(Unsupported::PartialWord { bytes: trailing });
+    }
     let words = stream.len() / word_len;
     let word = |i: usize| -> u32 {
         stream[i * word_len..][..word_len]
@@ -534,10 +394,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
     };
     let directory = Directory::read(stroke);
 
-    // The directory brackets the stream. Falling back to scanning is right on
-    // anything the editor wrote in one pass, and wrong on library content: its
-    // slack still holds words from whatever the allocation held before, and its
-    // last record is not the width-1 terminator a scan would look for.
+    // Prefer the directory: stale allocation slack can look like a record.
     let first_record = directory
         .map(|d| Directory::resolve(d.first_record, stroke_at, layout))
         .filter(|&at| at < words)
@@ -546,10 +403,8 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         .map(|d| Directory::resolve_end(d.terminator, stroke_at, layout, words))
         .filter(|&at| at < words);
 
-    // Whether the stroke is stereo is stated by the terminator, and a stereo stroke
-    // needs that answer before it can read — on [`Layout::V4`], size — its first
-    // record. Read it off the word the directory names rather than discovering it at
-    // the end.
+    // Stereo affects V4 record sizing, so read it from the directory's terminator
+    // before walking the first record.
     let stereo = last.is_some_and(|at| terminator_cell(word(at), cell) == Some(2 * cell));
     let wide_openings = stereo && layout.splits_wide_openings();
 
@@ -583,17 +438,16 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         }
         if over != 0
             || (v >> 17) & 1 != 0
+            || usize::from(order) > MAX_ORDER
             || count == 0
+            || (stereo && !count.is_multiple_of(2))
             || (!one_to_one && !count.is_multiple_of(cell))
         {
             return Err(Unsupported::Malformed { word: i });
         }
 
-        let span = if wide_openings && one_to_one && count.is_multiple_of(2) {
-            // Each channel's share is padded to a whole word, so the record is a word
-            // longer than one run of the same fields whenever the halves do not tile.
-            // Content counts are multiples of the stereo cell and always tile; the 1:1
-            // records are where it shows.
+        let span = if wide_openings && one_to_one {
+            // Each channel half is word-padded independently.
             1 + 2 * (count / 2 * usize::from(width)).div_ceil(word_bits)
         } else {
             (word_bits + count * usize::from(width)).div_ceil(word_bits)
@@ -601,16 +455,13 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         if i + span > last.unwrap_or(words) {
             return Err(Unsupported::Desync { word: i });
         }
-        // Fields start at the first bit after the header word; the alignment tail
-        // is at the end of the segment.
         let base = (i + 1) * word_bits;
         let values = if !stereo {
             (0..count)
                 .map(|k| read_field(stream, base + k * usize::from(width), width))
                 .collect()
         } else if wide_openings {
-            // Each channel owns alternate words. Gather one channel's words into a
-            // run of its own and the fields fall out of it at the usual offsets.
+            // Gather each channel's alternating words into a contiguous bitstream.
             let per = count / 2;
             let channel_words = (per * usize::from(width)).div_ceil(word_bits);
             let mut values = Vec::with_capacity(count);
@@ -625,7 +476,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             }
             values
         } else {
-            // One run of fields, the channels taking turns within it.
+            // V2 and V3 alternate channel fields in one bitstream.
             let field = |k: usize| read_field(stream, base + k * usize::from(width), width);
             (0..count)
                 .map(|k| field(2 * (k % (count / 2)) + k / (count / 2)))
@@ -650,32 +501,25 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
     Err(Unsupported::NoTerminator)
 }
 
-/// Decodes a stroke payload into audio at [`FIELD_RATE`].
-///
-/// `stroke_at` is the stroke payload's offset from the start of the body.
+/// Decode a stroke at body offset `stroke_at` into [`FIELD_RATE`] audio.
 pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, Unsupported> {
     let stream = walk(stroke, stroke_at, layout)?;
     let channels = stream.channels;
-    let shift = shift(stroke, layout)
-        .ok_or(Unsupported::Short)?
-        .clamp(-SHIFT_LIMIT, SHIFT_LIMIT);
+    let shift = shift(stroke, layout).ok_or(Unsupported::Short)?;
+    if !(-SHIFT_LIMIT..=SHIFT_LIMIT).contains(&shift) {
+        return Err(Unsupported::Shift { bits: shift });
+    }
     let mut samples = vec![0i16; stream.fields];
     let mut clipped = 0;
     let mut differenced = 0;
-    // The predictor's whole state: the last MAX_ORDER field values, carried across
-    // record boundaries and through skips. A stroke opens with a ramp-in that
-    // settles on the content's own level, so there is nothing else to seed.
-    //
-    // ⚠️ **One history per channel.** A stereo stroke's two channels are two signals
-    // that happen to share a header; predicting one against the other's samples makes
-    // the integration diverge rather than merely sound wrong.
+    // Predictor history spans records and skips; stereo channels need independent state.
     let mut history = [[0i64; MAX_ORDER]; 2];
     for record in &stream.records {
         // Only content records difference; the 1:1 regime always states values.
         let order = if record.one_to_one {
             0
         } else {
-            usize::from(record.order).min(MAX_ORDER)
+            usize::from(record.order)
         };
         if order > 0 {
             differenced += record.values.len();
@@ -759,7 +603,7 @@ mod tests {
         head.to_be_bytes()[4 - layout.word()..].to_vec()
     }
 
-    /// Packs a record: header word then right-anchored fields.
+    /// Packs a record with fields immediately after its header.
     fn block(layout: Layout, one_to_one: bool, width: u8, order: u8, values: &[i32]) -> Vec<u8> {
         packed(layout, one_to_one, width, order, false, values)
     }
@@ -782,7 +626,35 @@ mod tests {
         let span = (bits + count * usize::from(width)).div_ceil(bits);
         let mut out = vec![0u8; span * layout.word()];
         out[..layout.word()].copy_from_slice(&head.to_be_bytes()[4 - layout.word()..]);
-        let mut at = bits;
+        write_values(&mut out, bits, width, values);
+        out
+    }
+
+    fn split_block(layout: Layout, width: u8, values: &[i32]) -> Vec<u8> {
+        let bits = layout.word_bits();
+        let half = values.len() / 2;
+        let half_words = (half * usize::from(width)).div_ceil(bits);
+        let mut out = vec![0u8; (1 + 2 * half_words) * layout.word()];
+        let head = (1u32 << 23) | (u32::from(width - 1) << 19) | values.len() as u32;
+        out[..layout.word()].copy_from_slice(&head.to_be_bytes());
+        for channel in 0..2 {
+            let mut packed = vec![0u8; half_words * layout.word()];
+            write_values(
+                &mut packed,
+                0,
+                width,
+                &values[channel * half..(channel + 1) * half],
+            );
+            for word in 0..half_words {
+                let from = word * layout.word();
+                let to = (1 + 2 * word + channel) * layout.word();
+                out[to..to + layout.word()].copy_from_slice(&packed[from..from + layout.word()]);
+            }
+        }
+        out
+    }
+
+    fn write_values(out: &mut [u8], mut at: usize, width: u8, values: &[i32]) {
         for &v in values {
             let raw = (v as u32) & ((1u32 << width) - 1);
             for b in (0..width).rev() {
@@ -792,13 +664,9 @@ mod tests {
                 at += 1;
             }
         }
-        out
     }
 
-    /// A stroke whose header points at `chain`, built as if the stroke sat at
-    /// offset 0 in the body so a pointer is just a word index.
-    ///
-    /// `peak` and `exponent` are the two content statistics [`shift`] reads.
+    /// Build a stroke at body offset zero whose directory points at `chain`.
     fn stroke(layout: Layout, peak: i32, exponent: u8, lead: usize, chain: &[Vec<u8>]) -> Vec<u8> {
         let word = layout.word();
         let mut s = vec![0u8; layout.header_len()];
@@ -977,9 +845,6 @@ mod tests {
         }
     }
 
-    /// The wide generations sign statistic B, so a stroke whose extreme field is
-    /// negative stores it as such — and the shift comes off its magnitude, which is
-    /// the same quantity the narrow generation stores unsigned.
     #[test]
     fn statistic_b_is_signed_in_the_wide_layout() {
         let s = stroke(Layout::V3, -8191, exponent_for(8191, 2), 0, &[]);
@@ -1007,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn fields_are_right_anchored_and_sign_extended() {
+    fn fields_are_left_anchored_and_sign_extended() {
         for layout in BOTH {
             let mut values = run(layout, 0);
             values[..4].copy_from_slice(&[1, -1, 4095, -4096]);
@@ -1038,9 +903,6 @@ mod tests {
         }
     }
 
-    /// The bit vendor strokes set on one record each is carried through the walk.
-    /// Refusing it instead rejects every vendor instrument in every generation,
-    /// while nothing the editor writes would ever show the difference.
     #[test]
     fn a_marked_record_walks_and_says_it_is_marked() {
         for layout in BOTH {
@@ -1068,9 +930,6 @@ mod tests {
         }
     }
 
-    /// A first-order run stores the differences of its field values, so reading it
-    /// is a running sum — and the sum continues from whatever the record before it
-    /// left the predictor holding, rather than restarting.
     #[test]
     fn a_differenced_run_integrates_from_the_running_history() {
         for layout in BOTH {
@@ -1146,6 +1005,34 @@ mod tests {
             let walked = walk(&s, 0, layout).unwrap();
             assert_eq!(walked.records[0].values, values, "{layout:?}");
         }
+    }
+
+    #[test]
+    fn v4_stereo_openings_skip_each_channels_padding() {
+        let values: Vec<i32> = (0..66).map(|k| k % 31 - 15).collect();
+        let mut s = stroke(Layout::V4, 1, 22, 0, &[split_block(Layout::V4, 5, &values)]);
+        let term = s.len() - Layout::V4.word();
+        s[term..].copy_from_slice(&((1u32 << 23) | 64).to_be_bytes());
+
+        let walked = walk(&s, 0, Layout::V4).unwrap();
+        assert_eq!(walked.records[0].values, values);
+        assert_eq!(walked.cell, Some(64));
+        let audio = decode(&s, 0, Layout::V4).unwrap();
+        let interleaved = values[..33]
+            .iter()
+            .zip(&values[33..])
+            .flat_map(|(&left, &right)| [left as i16, right as i16])
+            .collect::<Vec<_>>();
+        assert_eq!(audio.samples, interleaved);
+    }
+
+    #[test]
+    fn a_stereo_record_needs_whole_channel_pairs() {
+        let layout = Layout::V3;
+        let mut s = stroke(layout, 1, 22, 0, &[block(layout, true, 5, 0, &[1])]);
+        let term = s.len() - layout.word();
+        s[term..].copy_from_slice(&((1u32 << 23) | 64).to_be_bytes());
+        assert_eq!(walk(&s, 0, layout), Err(Unsupported::Malformed { word: 0 }));
     }
 
     #[test]
@@ -1270,6 +1157,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn malformed_codec_boundaries_are_refused() {
+        for layout in BOTH {
+            let values = run(layout, 1);
+            let order_five = stroke(layout, 1, 22, 0, &[block(layout, false, 4, 5, &values)]);
+            assert_eq!(
+                walk(&order_five, 0, layout),
+                Err(Unsupported::Malformed { word: 0 })
+            );
+
+            let mut partial = stroke(layout, 1, 22, 0, &[]);
+            partial.push(0);
+            assert_eq!(
+                walk(&partial, 0, layout),
+                Err(Unsupported::PartialWord { bytes: 1 })
+            );
+
+            let shifted = stroke(layout, 1, exponent_for(1, SHIFT_LIMIT + 1), 0, &[]);
+            assert_eq!(
+                decode(&shifted, 0, layout),
+                Err(Unsupported::Shift {
+                    bits: SHIFT_LIMIT + 1
+                })
+            );
+        }
+    }
+
     /// A wide word's top byte is not part of the record header, and a word carrying
     /// one is not a record.
     #[test]
@@ -1348,8 +1262,10 @@ mod tests {
         // The shape without the count is payload, not the end of the stream.
         assert_eq!(terminator_cell(0x0080_0000, 32), None);
         assert_eq!(terminator_cell(0x0080_0018, 32), None);
-        // A marked record is a record, and a wide word's top byte is reserved here.
+        // Mark, reserved, order, and a wide word's top byte must stay clear.
         assert_eq!(terminator_cell(0x00c4_0020, 32), None);
+        assert_eq!(terminator_cell(0x0082_0020, 32), None);
+        assert_eq!(terminator_cell(0x0080_4020, 32), None);
         assert_eq!(terminator_cell(0x6580_0020, 32), None);
     }
 
