@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
 # nix-deps: cargo curl gh git jq
-#
-# Release every crate whose Cargo.toml version has no `<crate>-v<version>` tag
-# yet: publish it to crates.io (skipped when that version is already there)
-# and create the tag as a GitHub release whose notes are the crate's
-# Conventional Commits since its previous tag, grouped by kind. Dependencies go
-# before dependents. Every step is idempotent, so a failed run is re-run as is.
-# `--dry-run` prints what would happen, notes included, and touches nothing.
-#
-# Needs a crates.io token in CARGO_REGISTRY_TOKEN (or `cargo login`) and
-# `gh auth`; ci.yml's release job provides both.
+# Publish untagged manifest versions in dependency order, then create releases.
 
 usage() {
   echo "usage: $0 [--dry-run]" >&2
@@ -84,11 +75,8 @@ trap 'rm -rf "$tmp"' EXIT
 sha="$(git -C "$repo" rev-parse HEAD)"
 git -C "$repo" fetch --quiet --tags origin
 
-# ⚠️ Publishing is irreversible — crates.io yanks, it does not delete. A PR that
-# merges without the `bump` label leaves release-worthy commits at the last
-# released version, so a later bump can carry them out under a version that
-# understates them. Check every crate before publishing any, so a run either
-# releases the whole set or touches nothing.
+# ⚠️ Publishing is irreversible. Validate every version against its commits
+# before publishing any crate, so the run touches all or none.
 under_bumped=()
 while IFS= read -r crate; do
   version="$(crate_version "$crate")"

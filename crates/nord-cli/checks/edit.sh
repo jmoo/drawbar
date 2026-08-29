@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# `edit` needs no instrument and no corpus: a fresh default program is a legal
-# `.ne5p`, so the whole contract — one field changes, its bytes and the
-# checksum move, nothing else does, and the decode reports the new value —
-# runs anywhere the binary does.
-#
-#   checks/edit.sh path/to/nord
-#
-# NORD_RUNNER prefixes every invocation when the binary is foreign.
+# End-to-end edit contracts against fresh defaults and an editor-produced fixture.
+# NORD_RUNNER prefixes invocations of a foreign binary.
 set -euo pipefail
 
 [ $# -ge 1 ] || {

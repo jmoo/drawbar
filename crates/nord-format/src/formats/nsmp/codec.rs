@@ -770,9 +770,7 @@ mod tests {
 
     #[test]
     fn a_stereo_stroke_predicts_each_channel_against_its_own_history() {
-        // Two ramps of opposite slope. Order 1 stores first differences, so reading
-        // them against one shared history integrates the wrong signal and the two
-        // channels come back as a runaway rather than as ramps.
+        // Opposing first-order ramps expose shared predictor history as runaway output.
         for layout in [Layout::V2, Layout::V3, Layout::V4] {
             let per = layout.cell();
             let l: Vec<i32> = (0..per as i32).map(|k| 10 * k).collect();

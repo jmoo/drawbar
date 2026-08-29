@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# The whole end-to-end run against a built `nord`: it answers --help, replays
-# the inventory sweep, holds its command surface still (surface.sh) and edits a
-# program byte-exactly (edit.sh).
-#
-#   checks/check.sh path/to/nord
-#
-# NORD_RUNNER prefixes every invocation when the binary is foreign — wine,
-# qemu-aarch64 — and POC_SCRIPT names the replay fixture, defaulting to the
-# checkout's own copy.
+# End-to-end installed binary checks: surface, USB replay, and file edits.
+# NORD_RUNNER supports foreign binaries; POC_* select the fixtures.
 set -euo pipefail
 
 [ $# -ge 1 ] || {

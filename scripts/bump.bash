@@ -1,36 +1,6 @@
 #!/usr/bin/env bash
 # nix-deps: cargo git jq
-#
-# Bump crate versions from Conventional Commits, rewrite the workspace
-# dependency requirements that point at a bumped crate, and refresh Cargo.lock.
-# Prints the plan and a suggested `chore(release): …` commit title; `--dry-run`
-# stops at the plan. ci.yml's release job publishes whatever the merged result is new.
-#
-#   breaking change (`!` or BREAKING CHANGE:) → major   (minor while 0.x)
-#   feat                                       → minor
-#   fix / perf / revert                        → patch
-#   anything else                              → no bump
-#
-# Two ways to pick what bumps:
-#
-#   bump.bash                  each crate, from its commits since its last
-#                              release tag (catch-up mode, run on master)
-#   bump.bash --title <t>      the crates touched by the diff against --base
-#                              (default origin/master), at the level the one
-#                              title says — the PR flow, where the squashed
-#                              title is the only commit that will land.
-#                              Targets are computed from the versions at the
-#                              merge-base, so re-running after more commits or
-#                              a retitle converges instead of double-bumping.
-#
-# ⚠️ In title mode a crate takes the higher of the title's level and the level
-# its already-unreleased commits call for. A PR that merges without the `bump`
-# label leaves its commits on the base branch at the last released version, and
-# the title alone would then publish, say, a feat under a patch.
-#
-# Either way a crate that depends on a bumped crate gets at least a patch bump
-# so the new requirement ships. A crate with no release tag yet is never
-# bumped: its Cargo.toml already says what the first release is.
+# Bump crates from Conventional Commits and propagate dependency releases.
 
 usage() {
   echo "usage: $0 [--dry-run] [--title <pr-title> [--base <ref>]]" >&2

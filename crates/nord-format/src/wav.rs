@@ -24,7 +24,7 @@ pub fn pcm16(samples: &[i16], rate: u32, channels: u16) -> Result<Vec<u8>, Error
         }
         .into());
     }
-    if samples.len() % usize::from(channels) != 0 {
+    if !samples.len().is_multiple_of(usize::from(channels)) {
         return Err(ParseError::OutOfBounds {
             value: format!("{} samples", samples.len()),
             bound: format!("whole {channels}-channel frames"),

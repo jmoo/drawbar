@@ -70,9 +70,7 @@ pub fn run(ui: &Ui, args: FileEditArgs) -> Result<(), String> {
         out: None,
         yes: args.yes,
     };
-    // The registry first: a body that declares one is edited through it, and
-    // the accessor-backed formats each get their editor. The borrow of
-    // `entity` must end before `to_bytes` reads it whole.
+    // End the mutable editor borrow before `to_bytes` reads the whole entity.
     let staged = if entity.registry().is_some() {
         crate::edit::stage(ui, &noun_args, entity.registry_mut().unwrap())?
     } else {
