@@ -701,3 +701,68 @@ fn nsmp_bad_checksum_is_refused() {
     bytes[last] ^= 0xff;
     assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
 }
+
+/// The structural emitter against the editor's own output.
+///
+/// `T-sil.nsmp` is one second of silence as Nord Sample Editor wrote it. Encoding the
+/// same second reproduces it byte for byte apart from four bytes of checksum and the
+/// content the editor's source carried that a silent WAV does not: its stream opens
+/// with a ±1 marker in the warmup's first payload word, which also sets the content
+/// peak in the stroke header. Everything else — section chain, section versions,
+/// preamble sizes, the allocation, the count laws' landmarks, the record headers, the
+/// word directory — comes out identical.
+#[test]
+fn nsmp_a_silent_second_reproduces_the_editors_own_file() {
+    let want = &named("T-sil.nsmp").bytes;
+    let options = nsmp::encode::Options::new("T-sil").root_key(60);
+    let got = nsmp::encode::instrument(&vec![0i16; 44_100], &options)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+
+    assert_eq!(got.len(), want.len());
+    let differing: Vec<usize> = (0..want.len()).filter(|&i| got[i] != want[i]).collect();
+    // 0x18..0x1c is the checksum; 0x410 is the content peak in the stroke header, and
+    // 0x47d..0x47f the marker's own word.
+    assert_eq!(
+        differing,
+        vec![0x18, 0x19, 0x1a, 0x1b, 0x410, 0x47d, 0x47e],
+        "bytes that differ from the editor's file"
+    );
+}
+
+/// The count laws generate the landmarks the editor put in its own files: the field
+/// total, the resync position, and the two 1:1 run lengths around it.
+#[test]
+fn nsmp_the_count_laws_reproduce_the_editors_landmarks() {
+    // (specimen, source frames) — the frame counts the generator wrote them from.
+    for (name, frames) in [("T-sil.nsmp", 44_100usize), ("A-impulse-C4.nsmp", 4_410)] {
+        let plan = nsmp::encode::Plan::new(frames).unwrap();
+        let sample = v2_named(name);
+        let (at, stroke) = sample.stroke_streams()[0];
+        let stream = nsmp::codec::walk(stroke, at).unwrap();
+
+        assert_eq!(stream.fields, plan.fields, "{name}: total fields");
+        let warmup: usize = stream
+            .records
+            .iter()
+            .take_while(|r| r.one_to_one)
+            .map(|r| r.values.len())
+            .sum();
+        assert_eq!(warmup, plan.warmup, "{name}: warmup fields");
+        let resync = stream
+            .records
+            .iter()
+            .skip_while(|r| r.one_to_one)
+            .find(|r| r.one_to_one)
+            .unwrap();
+        assert_eq!(resync.first_field, plan.resync_at, "{name}: resync field");
+        let resync_fields: usize = stream
+            .records
+            .iter()
+            .filter(|r| r.one_to_one && r.first_field >= plan.resync_at)
+            .map(|r| r.values.len())
+            .sum();
+        assert_eq!(resync_fields, plan.resync, "{name}: resync fields");
+    }
+}

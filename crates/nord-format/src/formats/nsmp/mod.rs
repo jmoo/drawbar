@@ -11,10 +11,12 @@
 //!
 //! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
 //! and can retune, rename and remap them without touching a byte of audio. The v2
-//! [`codec`] decodes that audio to samples; nothing encodes it, and the v3/v4 chain
-//! keeps its strokes opaque.
+//! [`codec`] decodes that audio to samples and [`encode`] builds a new instrument from
+//! PCM; the v3/v4 chain keeps its strokes opaque.
 
 pub mod codec;
+pub mod encode;
+pub mod kernel;
 pub mod section;
 pub mod stroke;
 pub mod zone;
