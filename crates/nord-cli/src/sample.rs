@@ -481,8 +481,16 @@ fn deep(path: &Path) -> Result<String, String> {
         // so what is left to check is the one pointer it does not consume.
         let directory = codec::Directory::read(stroke)
             .ok_or_else(|| format!("stroke {index} is too short for its word directory"))?;
+        // The pointer is 16 bits, so on a stroke longer than that it names one word
+        // per period and only the walk knows which. Match it modulo the period
+        // rather than picking an alias and hoping.
+        //
+        // A stroke with no resync at all — one 1:1 run, the warmup — points here at
+        // the terminator instead, the same collapse ptr[2] makes when a stroke has
+        // only two runs.
         let resync = codec::Directory::resolve(directory.resync, *at, layout);
-        if !stream.records.iter().any(|r| r.at == resync) {
+        let names = |at: usize| at % codec::WRAP == resync % codec::WRAP;
+        if !names(stream.terminator) && !stream.records.iter().any(|r| names(r.at)) {
             return Err(format!(
                 "stroke {index}: the resync pointer lands at word {resync}, which is not a record"
             ));

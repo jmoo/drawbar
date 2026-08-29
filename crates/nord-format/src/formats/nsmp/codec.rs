@@ -41,34 +41,55 @@ use std::fmt;
 
 /// Which generation's units a stroke stream is in.
 ///
-/// `.nsmp3` and `.nsmp4` share one set of units, so [`Layout::V3`] covers both; the
-/// only thing that separates the two extensions is that v4 sometimes quantises one bit
-/// finer, and the stroke header states that shift either way.
+/// `.nsmp3` and `.nsmp4` share every unit — word size, cell size, header length — and
+/// differ only in behaviour: v4 sometimes quantises one bit finer, which the stroke
+/// header states either way, and v4 alone splits a stereo stroke's 1:1 payloads per
+/// channel ([`Layout::splits_wide_openings`]). That second difference changes how long
+/// a record is, so the two cannot share one variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     /// `.nsmp`: 3-byte words, 24-field cells, a 51-byte stroke header.
     V2,
-    /// `.nsmp3` and `.nsmp4`: 4-byte words, 32-field cells, a 68-byte stroke header.
+    /// `.nsmp3`: 4-byte words, 32-field cells, a 68-byte stroke header.
     V3,
+    /// `.nsmp4`: [`Layout::V3`]'s units, and per-channel 1:1 payloads on stereo.
+    V4,
 }
 
 impl Layout {
     /// The layout a body's content version implies. The u32 at `0x14` runs
-    /// `format × 100 + revision`, so anything from 300 up is the wide chain.
+    /// `format × 100 + revision`, so anything from 300 up is the wide chain and
+    /// anything from 400 up is v4.
     pub fn from_version(version: u32) -> Layout {
-        if version >= super::V3_FROM_VERSION {
-            Layout::V3
-        } else {
-            Layout::V2
+        match version {
+            v if v >= super::V4_FROM_VERSION => Layout::V4,
+            v if v >= super::V3_FROM_VERSION => Layout::V3,
+            _ => Layout::V2,
         }
     }
 
+    /// Whether a stereo stroke stores each 1:1 record's payload as two per-channel
+    /// halves, each padded to its own word boundary.
+    ///
+    /// ⚠️ **True on [`Layout::V4`] only.** A v3 stereo stroke packs the same record as
+    /// one run of fields, and mono strokes never split in any generation. Content
+    /// records are never split anywhere. Assuming the split where it does not happen —
+    /// or missing it where it does — puts every later record at the wrong offset,
+    /// because the two sizings differ by one word whenever the halves do not tile.
+    pub const fn splits_wide_openings(self) -> bool {
+        matches!(self, Layout::V4)
+    }
+
     /// Bytes per stream word. A record header is exactly one word, and the top byte
-    /// of a [`Layout::V3`] word has never been anything but zero.
+    /// of a wide word is never part of it.
+    ///
+    /// ⚠️ The top byte is not always zero — vendor *payload* words fill it. It is only
+    /// the header's own reserved space, so the check belongs on words being read as
+    /// headers, not on the stream at large.
     pub const fn word(self) -> usize {
         match self {
             Layout::V2 => 3,
-            Layout::V3 => 4,
+            Layout::V3 | Layout::V4 => 4,
         }
     }
 
@@ -79,19 +100,19 @@ impl Layout {
     pub const fn header_len(self) -> usize {
         match self {
             Layout::V2 => 51,
-            Layout::V3 => 68,
+            Layout::V3 | Layout::V4 => 68,
         }
     }
 
     /// Fields per cell. A content record covers whole cells, so its count is a
     /// multiple of this; the terminator's own count states it.
     ///
-    /// ⚠️ A stereo [`Layout::V2`] stroke cells at 48, which is a multiple of 24, so
+    /// ⚠️ A stereo stroke cells at twice this, which is still a multiple of it, so
     /// this is the divisor to check against rather than the cell size to assume.
     pub const fn cell(self) -> usize {
         match self {
             Layout::V2 => 24,
-            Layout::V3 => 32,
+            Layout::V3 | Layout::V4 => 32,
         }
     }
 
@@ -128,11 +149,27 @@ const SEEK_STRIDE: usize = 9;
 
 /// Where the directory's 16-bit pointers roll over, in words.
 ///
-/// ⚠️ A stroke longer than this could not be addressed unambiguously; none is, and
-/// the allocation would have to reach 192 KiB for one to be.
+/// ⚠️ **Strokes do run longer than this**, so a resolved pointer names a whole family
+/// of words `WRAP` apart and the reader has to pick. Which alias is right depends on
+/// what the pointer names: the terminator sits at the end of the stream, so it takes
+/// the highest alias that still lands inside it, while `ptr[0]` opens the stream and
+/// takes the lowest. Raising both the same way puts the opening record past the
+/// content. Vendor strokes reach 216 KiB — 72,000-odd words — where the editor's own
+/// renders never leave the first period.
 pub const WRAP: usize = 1 << 16;
 
-/// Input samples per [`PITCH_DEN`] fields. Exact, not an approximation.
+/// Input samples per [`PITCH_DEN`] fields.
+///
+/// ⚠️ **An approximation, by 1.6e-7.** The pitch is `22050/17501` — the ratio that
+/// puts the field rate on a round 35,002 Hz — and `349/277` is its continued-fraction
+/// convergent. The error is a timing drift of about one field per 17,501, invisible
+/// on anything short and not audible on anything, but it is a drift rather than an
+/// offset, so a long stroke's late fields land on the wrong side of a quantiser edge.
+///
+/// It stays because [`super::kernel::PHASES`] is `PITCH_DEN`: the exact ratio wants a
+/// 17,501-phase bank where this wants 277, and the instrument's own kernel is neither
+/// — it is a 512-entry table read by truncating the phase to 9 bits. Moving to the
+/// exact pitch means replacing the analytic bank, not editing two numbers.
 pub const PITCH_NUM: u32 = 349;
 /// Fields per [`PITCH_NUM`] input samples.
 pub const PITCH_DEN: u32 = 277;
@@ -141,8 +178,8 @@ pub const PITCH_DEN: u32 = 277;
 /// rate nor its bit depth survives anywhere in the file.
 pub const SOURCE_RATE: u32 = 44_100;
 
-/// Field rate in Hz: `44100 × 277/349` is 35002.006, rounded to the nearest integer
-/// because a WAV header holds no fraction.
+/// Field rate in Hz. Exactly 35,002 — `44100 × 17501/22050` is a whole number, and the
+/// rounding here only absorbs what [`PITCH_NUM`] approximates.
 pub const FIELD_RATE: u32 = (SOURCE_RATE * PITCH_DEN + PITCH_NUM / 2) / PITCH_NUM;
 
 /// Bits of a record header's field count: `[flag:1][width−1:4][00][order:3][count:14]`.
@@ -309,17 +346,17 @@ impl Audio {
 
 /// The content peak the stroke header records, or `None` if it is too short.
 ///
-/// ⚠️ **[`Layout::V3`] signs it.** The wide generations store the extreme field with
-/// its sign and start the accumulator at −1, so a silent stroke reads `-1` where a
-/// [`Layout::V2`] one reads `0`. The magnitude is the same quantity in both, and the
-/// magnitude is what the quantiser scales against.
+/// ⚠️ **The wide generations sign it.** They store the extreme field with its sign and
+/// start the accumulator at −1, so a silent stroke reads `-1` where a [`Layout::V2`]
+/// one reads `0`. The magnitude is the same quantity in both, and the magnitude is what
+/// the quantiser scales against.
 pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
     let b = stroke.get(PEAK_AT..PEAK_AT + 3)?;
     let v = u32::from_be_bytes([0, b[0], b[1], b[2]]);
     Some(match layout {
         Layout::V2 => v as i32,
-        Layout::V3 if v >= 1 << 23 => v as i32 - (1 << 24),
-        Layout::V3 => v as i32,
+        _ if v >= 1 << 23 => v as i32 - (1 << 24),
+        _ => v as i32,
     })
 }
 
@@ -419,6 +456,43 @@ impl Directory {
         let base = (stroke_at + layout.header_len()) / layout.word() % WRAP;
         (usize::from(pointer) + WRAP - base) % WRAP
     }
+
+    /// A stored pointer resolved against a stream of `words`, taking the **last** of
+    /// its aliases that still lands inside it.
+    ///
+    /// This is the reading for [`Directory::terminator`], which by definition sits at
+    /// the end of the stream. On a stroke shorter than [`WRAP`] words it is exactly
+    /// [`Directory::resolve`]; past that it is the only reading that finds the end
+    /// rather than a word one period short of it.
+    pub fn resolve_end(pointer: u16, stroke_at: usize, layout: Layout, words: usize) -> usize {
+        let mut at = Directory::resolve(pointer, stroke_at, layout);
+        while at + WRAP < words {
+            at += WRAP;
+        }
+        at
+    }
+}
+
+/// The cell size a word states if it is the stream's terminator, or `None` if it is
+/// not one.
+///
+/// A terminator is a width-1 flag-1 word whose count is the cell size — `cell` on a
+/// mono stroke, twice it on a stereo one.
+///
+/// ⚠️ **The count is the test, not a detail read off afterwards.** Payload words land
+/// on that bit pattern with other counts, and taking the first of them for the end
+/// stops the walk in the middle of the stream: one library stroke carries a count-0
+/// match at word 94 of 11,244, with its directory naming the last word and ten
+/// thousand more words of content in between.
+fn terminator_cell(raw: u32, cell: usize) -> Option<usize> {
+    let v = raw & 0x00ff_ffff;
+    let one_to_one = v >> 23 != 0;
+    let width = ((v >> 19) & 0xf) + 1;
+    let mark = (v >> 18) & 1 != 0;
+    let count = (v & COUNT_MASK) as usize;
+    let ok =
+        one_to_one && width == 1 && raw >> 24 == 0 && !mark && (count == cell || count == 2 * cell);
+    ok.then_some(count)
 }
 
 /// Walks a stroke's record chain.
@@ -447,27 +521,32 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             .fold(0u32, |v, &b| (v << 8) | u32::from(b))
     };
     let directory = Directory::read(stroke);
-    let pointer = |get: fn(&Directory) -> u16| -> Option<usize> {
-        directory
-            .map(|d| Directory::resolve(get(&d), stroke_at, layout))
-            .filter(|&at| at < words)
-    };
 
     // The directory brackets the stream. Falling back to scanning is right on
     // anything the editor wrote in one pass, and wrong on library content: its
     // slack still holds words from whatever the allocation held before, and its
     // last record is not the width-1 terminator a scan would look for.
-    let first_record = pointer(|d| d.first_record)
+    let first_record = directory
+        .map(|d| Directory::resolve(d.first_record, stroke_at, layout))
+        .filter(|&at| at < words)
         .unwrap_or_else(|| (0..words).find(|&at| word(at) != 0).unwrap_or(words));
-    let last = pointer(|d| d.terminator);
+    let last = directory
+        .map(|d| Directory::resolve_end(d.terminator, stroke_at, layout, words))
+        .filter(|&at| at < words);
+
+    // Whether the stroke is stereo is stated by the terminator, and a wide stereo
+    // stroke needs that answer before it can size its first 1:1 record. Read it off
+    // the word the directory names rather than discovering it at the end.
+    let wide_openings = layout.splits_wide_openings()
+        && last.is_some_and(|at| terminator_cell(word(at), cell) == Some(2 * cell));
 
     let mut records = Vec::new();
     let mut fields = 0usize;
     let mut i = first_record;
     while i < words {
         let raw = word(i);
-        // A wide word's top byte is not part of the record header and has never held
-        // anything; a narrow word has no top byte to hold anything in.
+        // A wide word's top byte is not part of the record header, and no header has
+        // ever set it; a narrow word has no top byte to set.
         let over = raw >> 24;
         let v = raw & 0x00ff_ffff;
         let one_to_one = v >> 23 != 0;
@@ -476,7 +555,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         let order = ((v >> 14) & 0x7) as u8;
         let count = (v & COUNT_MASK) as usize;
 
-        let ends_here = one_to_one && width == 1 && over == 0 && !mark;
+        let ends_here = terminator_cell(raw, cell).is_some();
         if Some(i) == last || ends_here {
             return Ok(Stream {
                 records,
@@ -494,8 +573,14 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             return Err(Unsupported::Malformed { word: i });
         }
 
-        let bits = word_bits + count * usize::from(width);
-        let span = bits.div_ceil(word_bits);
+        let span = if wide_openings && one_to_one && count.is_multiple_of(2) {
+            // Each channel's half is padded to a word of its own, so the record is a
+            // word longer than one run of the same fields whenever the halves do not
+            // tile.
+            1 + 2 * (count / 2 * usize::from(width)).div_ceil(word_bits)
+        } else {
+            (word_bits + count * usize::from(width)).div_ceil(word_bits)
+        };
         if i + span > last.unwrap_or(words) {
             return Err(Unsupported::Desync { word: i });
         }
@@ -1058,6 +1143,49 @@ mod tests {
         assert_eq!(Layout::from_version(8), Layout::V2);
         assert_eq!(Layout::from_version(200), Layout::V2);
         assert_eq!(Layout::from_version(300), Layout::V3);
-        assert_eq!(Layout::from_version(420), Layout::V3);
+        assert_eq!(Layout::from_version(310), Layout::V3);
+        assert_eq!(Layout::from_version(400), Layout::V4);
+        assert_eq!(Layout::from_version(420), Layout::V4);
+    }
+
+    #[test]
+    fn only_v4_splits_a_stereo_stroke_s_openings() {
+        assert!(Layout::V4.splits_wide_openings());
+        assert!(!Layout::V3.splits_wide_openings());
+        assert!(!Layout::V2.splits_wide_openings());
+    }
+
+    #[test]
+    fn a_terminator_is_a_width_one_word_stating_the_cell_size() {
+        // Mono and stereo terminators, in both word sizes.
+        assert_eq!(terminator_cell(0x0080_0018, 24), Some(24));
+        assert_eq!(terminator_cell(0x0080_0030, 24), Some(48));
+        assert_eq!(terminator_cell(0x0080_0020, 32), Some(32));
+        assert_eq!(terminator_cell(0x0080_0040, 32), Some(64));
+        // The shape without the count is payload, not the end of the stream.
+        assert_eq!(terminator_cell(0x0080_0000, 32), None);
+        assert_eq!(terminator_cell(0x0080_0018, 32), None);
+        // A marked record is a record, and a wide word's top byte is reserved here.
+        assert_eq!(terminator_cell(0x00c4_0020, 32), None);
+        assert_eq!(terminator_cell(0x6580_0020, 32), None);
+    }
+
+    #[test]
+    fn the_terminator_pointer_rises_past_the_period_and_the_opening_does_not() {
+        let first = Directory::resolve(5_999, 0, Layout::V2);
+        // A stroke inside one period has one alias, so both readings agree.
+        assert_eq!(
+            Directory::resolve_end(5_999, 0, Layout::V2, first + 1),
+            first
+        );
+        // Past it the terminator takes the last alias that still lands inside the
+        // stream, while resolve — what the opening pointer uses — stays at the first.
+        for periods in 1..4 {
+            let words = first + periods * WRAP + 1;
+            assert_eq!(
+                Directory::resolve_end(5_999, 0, Layout::V2, words),
+                first + periods * WRAP
+            );
+        }
     }
 }
