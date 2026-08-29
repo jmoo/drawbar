@@ -7,9 +7,10 @@
 //! store the Nth backward difference of its fields rather than the fields themselves.
 //!
 //! Three generations share this one codec, and every entry point takes the [`Layout`]
-//! saying which. Only *units* differ — word width, cell size, header size — so a caller
-//! that gets the layout right gets the same decoder in all three; the lattice, the
-//! kernel, the quantiser and the grammar's bit layout do not move.
+//! saying which. Mostly what differs is *units* — word width, cell size, header size —
+//! and the lattice, the kernel, the quantiser and the grammar's bit layout do not move
+//! at all. The one behavioural difference is how a **stereo** stroke carries its two
+//! channels: v2 and v3 alternate fields, v4 alternates words.
 //!
 //! The lattice is absolute, so field 0 is the start of the source and the stream's
 //! own length gives the duration. The resampling kernel measures unity gain at every
@@ -23,10 +24,11 @@
 //!
 //! A record may store the Nth backward difference of its fields rather than the
 //! fields themselves, so [`decode`] runs a predictor: `V(f) = e(f) − Σ(−1)^j
-//! C(N,j)·V(f−j)`, over one running history carried across every record boundary
-//! and through every skip. Nothing needs seeding — a stroke opens with a 1:1 ramp-in
-//! that settles on the content's own field value, and the history takes it from
-//! there.
+//! C(N,j)·V(f−j)`, over a running history carried across every record boundary and
+//! through every skip. Nothing needs seeding — a stroke opens with a 1:1 ramp-in that
+//! settles on the content's own field value, and the history takes it from there.
+//! **A stereo stroke keeps one history per channel**; they are two signals sharing a
+//! header, and predicting one against the other's samples diverges.
 //!
 //! ⚠️ **A record's fields are left-anchored**: they start at the first bit after the
 //! header word, and the alignment tail is at the *end* of the segment. Reading from
@@ -224,12 +226,6 @@ pub enum Unsupported {
     },
     /// The chain reached the end of the stroke without a terminator.
     NoTerminator,
-    /// A stereo stroke: two streams under one header, which this does not separate.
-    ///
-    /// The terminator gives the cell size away — 48 fields where a mono stroke has
-    /// 24. Decoding it as one stream interleaves the channels and the predictor
-    /// runs away, so it is refused instead.
-    Stereo,
 }
 
 impl Unsupported {
@@ -240,7 +236,6 @@ impl Unsupported {
             Unsupported::Malformed { .. } => "malformed-record",
             Unsupported::Desync { .. } => "desync",
             Unsupported::NoTerminator => "no-terminator",
-            Unsupported::Stereo => "stereo",
         }
     }
 }
@@ -259,11 +254,6 @@ impl fmt::Display for Unsupported {
             Unsupported::NoTerminator => {
                 write!(f, "the chain ran off the end with no terminator")
             }
-            Unsupported::Stereo => write!(
-                f,
-                "a stereo stroke carries two streams under one header, which this \
-                 decoder does not separate"
-            ),
         }
     }
 }
@@ -303,6 +293,12 @@ pub struct Record {
     /// at 0 they are the field values, otherwise their Nth difference. Dequantise
     /// by shifting left by [`shift`].
     ///
+    /// ⚠️ **Channel-major on a stereo stroke** — the first half is one channel's
+    /// fields and the second half the other's, whichever way the stream stored them.
+    /// The walk undoes the interleave so that a reader never has to know which
+    /// generation it came from; what it must know is that the two halves are
+    /// *separate signals*, each predicted against its own history.
+    ///
     /// ⚠️ A width-2 record is the noise floor the encoder decided not to code — it
     /// planted the header over its own working draft and left the data behind. The
     /// values are real, at two bits; they are not a marker to be skipped.
@@ -324,13 +320,19 @@ pub struct Stream {
     /// ends at the record the header's directory names instead of at a width-1
     /// terminator, which is how some library content ends.
     pub cell: Option<usize>,
+    /// Channels the stroke carries: 2 when the terminator states twice the layout's
+    /// cell, 1 otherwise. Half of the vendor library is stereo.
+    pub channels: usize,
 }
 
 /// Decoded audio for one zone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
-    /// One sample per field, at [`FIELD_RATE`].
+    /// One sample per field, at [`FIELD_RATE`], **interleaved by channel** — so on a
+    /// stereo zone this is `L R L R` and holds two samples per frame.
     pub samples: Vec<i16>,
+    /// 1 or 2.
+    pub channels: u16,
     /// Fields whose dequantised value ran past 16 bits and was clamped.
     ///
     /// Nonzero on transients: the kernel rings, so a full-scale edge overshoots what
@@ -343,9 +345,14 @@ pub struct Audio {
 }
 
 impl Audio {
+    /// Frames — samples per channel, which is what the duration is measured in.
+    pub fn frames(&self) -> usize {
+        self.samples.len() / usize::from(self.channels).max(1)
+    }
+
     /// Duration in seconds.
     pub fn seconds(&self) -> f64 {
-        self.samples.len() as f64 / f64::from(FIELD_RATE)
+        self.frames() as f64 / f64::from(FIELD_RATE)
     }
 }
 
@@ -539,13 +546,16 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         .map(|d| Directory::resolve_end(d.terminator, stroke_at, layout, words))
         .filter(|&at| at < words);
 
-    // Whether the stroke is stereo is stated by the terminator, and a wide stereo
-    // stroke needs that answer before it can size its first 1:1 record. Read it off
-    // the word the directory names rather than discovering it at the end.
-    let wide_openings = layout.splits_wide_openings()
-        && last.is_some_and(|at| terminator_cell(word(at), cell) == Some(2 * cell));
+    // Whether the stroke is stereo is stated by the terminator, and a stereo stroke
+    // needs that answer before it can read — on [`Layout::V4`], size — its first
+    // record. Read it off the word the directory names rather than discovering it at
+    // the end.
+    let stereo = last.is_some_and(|at| terminator_cell(word(at), cell) == Some(2 * cell));
+    let wide_openings = stereo && layout.splits_wide_openings();
 
     let mut records = Vec::new();
+    // Reused across records: one channel's words, gathered out of the stream.
+    let mut gathered: Vec<u8> = Vec::new();
     let mut fields = 0usize;
     let mut i = first_record;
     while i < words {
@@ -568,6 +578,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
                 first_record,
                 terminator: i,
                 cell: ends_here.then_some(count),
+                channels: if stereo { 2 } else { 1 },
             });
         }
         if over != 0
@@ -593,9 +604,33 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         // Fields start at the first bit after the header word; the alignment tail
         // is at the end of the segment.
         let base = (i + 1) * word_bits;
-        let values = (0..count)
-            .map(|k| read_field(stream, base + k * usize::from(width), width))
-            .collect();
+        let values = if !stereo {
+            (0..count)
+                .map(|k| read_field(stream, base + k * usize::from(width), width))
+                .collect()
+        } else if wide_openings {
+            // Each channel owns alternate words. Gather one channel's words into a
+            // run of its own and the fields fall out of it at the usual offsets.
+            let per = count / 2;
+            let channel_words = (per * usize::from(width)).div_ceil(word_bits);
+            let mut values = Vec::with_capacity(count);
+            for channel in 0..2 {
+                gathered.clear();
+                for k in 0..channel_words {
+                    let at = (i + 1 + 2 * k + channel) * word_len;
+                    gathered.extend_from_slice(&stream[at..at + word_len]);
+                }
+                values
+                    .extend((0..per).map(|k| read_field(&gathered, k * usize::from(width), width)));
+            }
+            values
+        } else {
+            // One run of fields, the channels taking turns within it.
+            let field = |k: usize| read_field(stream, base + k * usize::from(width), width);
+            (0..count)
+                .map(|k| field(2 * (k % (count / 2)) + k / (count / 2)))
+                .collect()
+        };
 
         records.push(Record {
             at: i,
@@ -620,9 +655,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
 /// `stroke_at` is the stroke payload's offset from the start of the body.
 pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, Unsupported> {
     let stream = walk(stroke, stroke_at, layout)?;
-    if stream.cell == Some(2 * layout.cell()) {
-        return Err(Unsupported::Stereo);
-    }
+    let channels = stream.channels;
     let shift = shift(stroke, layout)
         .ok_or(Unsupported::Short)?
         .clamp(-SHIFT_LIMIT, SHIFT_LIMIT);
@@ -632,7 +665,11 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
     // The predictor's whole state: the last MAX_ORDER field values, carried across
     // record boundaries and through skips. A stroke opens with a ramp-in that
     // settles on the content's own level, so there is nothing else to seed.
-    let mut history = [0i64; MAX_ORDER];
+    //
+    // ⚠️ **One history per channel.** A stereo stroke's two channels are two signals
+    // that happen to share a header; predicting one against the other's samples makes
+    // the integration diverge rather than merely sound wrong.
+    let mut history = [[0i64; MAX_ORDER]; 2];
     for record in &stream.records {
         // Only content records difference; the 1:1 regime always states values.
         let order = if record.one_to_one {
@@ -643,7 +680,16 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
         if order > 0 {
             differenced += record.values.len();
         }
+        // Values arrive channel-major, so the halves index their own channel and the
+        // output interleaves them back together.
+        let per = record.values.len() / channels;
         for (k, &residual) in record.values.iter().enumerate() {
+            let (channel, k) = if channels == 2 {
+                (k / per, k % per)
+            } else {
+                (0, k)
+            };
+            let history = &mut history[channel];
             let mut value = i64::from(residual);
             for j in 1..=order {
                 let term = binomial(order, j).saturating_mul(history[j - 1]);
@@ -656,7 +702,8 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
             history.copy_within(0..MAX_ORDER - 1, 1);
             history[0] = value;
 
-            let Some(slot) = samples.get_mut(record.first_field + k) else {
+            let at = record.first_field + k * channels + channel;
+            let Some(slot) = samples.get_mut(at) else {
                 continue;
             };
             let wide = if shift >= 0 {
@@ -672,6 +719,7 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
     }
     Ok(Audio {
         samples,
+        channels: channels as u16,
         clipped,
         differenced,
     })
@@ -767,6 +815,135 @@ mod tests {
         s.extend(std::iter::repeat_n(0u8, lead * word));
         s.extend_from_slice(&body);
         s.extend_from_slice(&terminator(layout));
+        s
+    }
+
+    /// A stereo stroke carrying one content record of `l` and `r`, laid out the way
+    /// `layout` lays a stereo stroke out: alternating fields on v2 and v3, a word
+    /// stream each on v4.
+    fn stereo_stroke(layout: Layout, width: u8, l: &[i32], r: &[i32]) -> Vec<u8> {
+        assert_eq!(l.len(), r.len());
+        let word = layout.word();
+        let bits = layout.word_bits();
+        let count = l.len() * 2;
+        let head = (u32::from(width - 1) << 19) | count as u32;
+
+        let mut body = head.to_be_bytes()[4 - word..].to_vec();
+        if layout.splits_wide_openings() {
+            // Pack each channel on its own, then take one word from each in turn.
+            let per = |v: &[i32]| {
+                let mut out = vec![0u8; (v.len() * usize::from(width)).div_ceil(bits) * word];
+                let mut at = 0;
+                for &x in v {
+                    for b in (0..width).rev() {
+                        if (x as u32) >> b & 1 != 0 {
+                            out[at / 8] |= 1 << (7 - at % 8);
+                        }
+                        at += 1;
+                    }
+                }
+                out
+            };
+            let (a, b) = (per(l), per(r));
+            for k in 0..a.len() / word {
+                body.extend_from_slice(&a[k * word..][..word]);
+                body.extend_from_slice(&b[k * word..][..word]);
+            }
+        } else {
+            let woven: Vec<i32> = l.iter().zip(r).flat_map(|(&a, &b)| [a, b]).collect();
+            body = block(layout, false, width, 0, &woven);
+        }
+
+        let mut s = vec![0u8; layout.header_len()];
+        s[STAT_A_EXP_AT] = exponent_for(1, 0);
+        s[PEAK_AT..PEAK_AT + 3].copy_from_slice(&1u32.to_be_bytes()[1..]);
+        let base = (layout.header_len() / word) as u16;
+        let end = base + (body.len() / word) as u16;
+        for (i, p) in [base, base, end, end].iter().enumerate() {
+            let o = SEEK_AT + SEEK_STRIDE * i;
+            s[o..o + 2].copy_from_slice(&p.to_be_bytes());
+        }
+        s.extend_from_slice(&body);
+        let term = (1u32 << 23) | (2 * layout.cell()) as u32;
+        s.extend_from_slice(&term.to_be_bytes()[4 - word..]);
+        s
+    }
+
+    #[test]
+    fn a_stereo_stroke_decodes_to_two_channels() {
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let per = layout.cell(); // one stereo cell is `cell` fields per channel
+            let l: Vec<i32> = (0..per as i32).map(|k| 100 + k).collect();
+            let r: Vec<i32> = (0..per as i32).map(|k| -100 - k).collect();
+            let s = stereo_stroke(layout, 11, &l, &r);
+
+            let stream = walk(&s, 0, layout).expect("the stereo stroke walks");
+            assert_eq!(stream.channels, 2, "{layout:?}");
+            assert_eq!(stream.cell, Some(2 * layout.cell()), "{layout:?}");
+
+            let audio = decode(&s, 0, layout).expect("the stereo stroke decodes");
+            assert_eq!(audio.channels, 2, "{layout:?}");
+            assert_eq!(audio.frames(), per, "{layout:?}");
+            let got_l: Vec<i32> = audio
+                .samples
+                .iter()
+                .step_by(2)
+                .map(|&v| i32::from(v))
+                .collect();
+            let got_r: Vec<i32> = audio.samples[1..]
+                .iter()
+                .step_by(2)
+                .map(|&v| i32::from(v))
+                .collect();
+            assert_eq!(got_l, l, "{layout:?}: left channel");
+            assert_eq!(got_r, r, "{layout:?}: right channel");
+        }
+    }
+
+    #[test]
+    fn a_stereo_stroke_predicts_each_channel_against_its_own_history() {
+        // Two ramps of opposite slope. Order 1 stores first differences, so reading
+        // them against one shared history integrates the wrong signal and the two
+        // channels come back as a runaway rather than as ramps.
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let per = layout.cell();
+            let l: Vec<i32> = (0..per as i32).map(|k| 10 * k).collect();
+            let r: Vec<i32> = (0..per as i32).map(|k| -7 * k).collect();
+            let diff = |v: &[i32]| -> Vec<i32> {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &x)| if i == 0 { x } else { x - v[i - 1] })
+                    .collect()
+            };
+            let s = stereo_stroke_ordered(layout, 11, &diff(&l), &diff(&r));
+            let audio = decode(&s, 0, layout).expect("decodes");
+            let got_l: Vec<i32> = audio
+                .samples
+                .iter()
+                .step_by(2)
+                .map(|&v| i32::from(v))
+                .collect();
+            let got_r: Vec<i32> = audio.samples[1..]
+                .iter()
+                .step_by(2)
+                .map(|&v| i32::from(v))
+                .collect();
+            assert_eq!(got_l, l, "{layout:?}: left ramp");
+            assert_eq!(got_r, r, "{layout:?}: right ramp");
+        }
+    }
+
+    /// [`stereo_stroke`] with the record's order set to 1.
+    fn stereo_stroke_ordered(layout: Layout, width: u8, l: &[i32], r: &[i32]) -> Vec<u8> {
+        let mut s = stereo_stroke(layout, width, l, r);
+        let at = layout.header_len();
+        let word = layout.word();
+        let mut head = 0u32;
+        for &b in &s[at..at + word] {
+            head = (head << 8) | u32::from(b);
+        }
+        head |= 1 << 14;
+        s[at..at + word].copy_from_slice(&head.to_be_bytes()[4 - word..]);
         s
     }
 

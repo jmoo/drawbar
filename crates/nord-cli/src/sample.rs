@@ -306,7 +306,7 @@ fn decode_file(
                     let file = dir.join(format!("{stem}-zone{n}.wav"));
                     std::fs::write(
                         &file,
-                        nord_format::wav::mono_pcm16(&audio.samples, codec::FIELD_RATE),
+                        nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels),
                     )
                     .map_err(|e| format!("{}: {e}", file.display()))?;
                     row.push_str(&format!("  -> {}", file.display()));
