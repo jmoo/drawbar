@@ -11,8 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use nord_format::cbin::Cbin;
-use nord_format::formats::nsmp::{codec, encode, Sample};
+use nord_format::formats::nsmp::{codec, encode};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -21,7 +20,6 @@ use crate::editors::{self, SampleEditor};
 use crate::note;
 use crate::slot::Target;
 use crate::ui::Ui;
-use crate::wav;
 
 #[derive(Args)]
 pub struct EditArgs {
@@ -125,7 +123,7 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
 
 #[derive(Args)]
 pub struct DecodeArgs {
-    /// The `.nsmp` files to decode.
+    /// The sample instruments to decode: `.nsmp`, `.nsmp3` or `.nsmp4`.
     #[arg(required = true, value_name = "FILE")]
     pub files: Vec<PathBuf>,
 
@@ -172,7 +170,7 @@ pub struct EncodeArgs {
 
 #[derive(Args)]
 pub struct VerifyArgs {
-    /// The `.nsmp` files to check.
+    /// The sample instruments to check: `.nsmp`, `.nsmp3` or `.nsmp4`.
     #[arg(required = true, value_name = "FILE")]
     pub files: Vec<PathBuf>,
 
@@ -222,16 +220,12 @@ impl Coverage {
     }
 }
 
-/// The v2 body of a file, or why this command cannot reach one.
-fn v2(path: &Path) -> Result<Cbin<Sample>, String> {
+/// One zone: what it plays, where, and the stream that holds it.
+/// The sample body of a file, or why this command cannot reach one.
+fn body(path: &Path) -> Result<nord_format::Sample, String> {
     let entity = nord_format::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
     match entity {
-        Entity::Sample(nord_format::Sample::V2(sample)) => Ok(sample),
-        Entity::Sample(nord_format::Sample::V3(_)) => Err(format!(
-            "{}: nsmp3/nsmp4 content — the codec constants for those generations are \
-             not ported, so the audio stays encoded",
-            path.display()
-        )),
+        Entity::Sample(sample) => Ok(sample),
         other => Err(format!(
             "{}: a {} file, not a sample instrument",
             path.display(),
@@ -272,25 +266,22 @@ fn decode_file(
     out: Option<&Path>,
     coverage: &mut Coverage,
 ) -> Result<(), String> {
-    let sample = v2(path)?;
-    let zones = sample.zones().map_err(|e| e.to_string())?;
+    let body = body(path)?;
+    let layout = body.layout();
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "sample".into());
 
-    let strokes = sample.strokes().map_err(|e| e.to_string())?;
-
-    for (index, (zone, meta)) in zones.iter().zip(&strokes).enumerate() {
+    for (index, zone) in body.zones().map_err(|e| e.to_string())?.iter().enumerate() {
         coverage.zones += 1;
         let n = index + 1;
-        let (at, stroke) = sample.zone_stream(index).map_err(|e| e.to_string())?;
         let head = format!(
             "  zone{n:<2} root {:<4} top {:<4}",
-            note::name(meta.root_key),
+            note::name(zone.root_key),
             note::name(zone.top_note),
         );
-        match codec::decode(stroke, at) {
+        match codec::decode(zone.stream, zone.at, layout) {
             Ok(audio) => {
                 coverage.decoded += 1;
                 coverage.fields += audio.samples.len();
@@ -313,8 +304,11 @@ fn decode_file(
                 );
                 if let Some(dir) = out {
                     let file = dir.join(format!("{stem}-zone{n}.wav"));
-                    std::fs::write(&file, wav::mono_pcm16(&audio.samples, codec::FIELD_RATE))
-                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    std::fs::write(
+                        &file,
+                        nord_format::wav::mono_pcm16(&audio.samples, codec::FIELD_RATE),
+                    )
+                    .map_err(|e| format!("{}: {e}", file.display()))?;
                     row.push_str(&format!("  -> {}", file.display()));
                 }
                 ui.out(row);
@@ -345,7 +339,8 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     }
 
     let bytes = std::fs::read(&args.wav).map_err(|e| format!("{}: {e}", args.wav.display()))?;
-    let source = wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", args.wav.display()))?;
+    let source =
+        nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", args.wav.display()))?;
     if source.rate != codec::SOURCE_RATE {
         return Err(format!(
             "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
@@ -385,15 +380,15 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
     let (at, stroke) = instrument.stroke_streams()[0];
-    let stream = codec::walk(stroke, at).map_err(|e| e.to_string())?;
-    let audio = codec::decode(stroke, at).map_err(|e| e.to_string())?;
+    let stream = codec::walk(stroke, at, codec::Layout::V2).map_err(|e| e.to_string())?;
+    let audio = codec::decode(stroke, at, codec::Layout::V2).map_err(|e| e.to_string())?;
     ui.out(format!(
         "{} frames -> {} fields ({:.3} s), shift {}, peak {}, {} record(s)",
         source.frames(),
         stream.fields,
         audio.seconds(),
-        codec::shift(stroke).unwrap_or_default(),
-        codec::peak(stroke).unwrap_or_default(),
+        codec::shift(stroke, codec::Layout::V2).unwrap_or_default(),
+        codec::peak(stroke, codec::Layout::V2).unwrap_or_default(),
         stream.records.len(),
     ));
     ui.out(ui.dim(if audio.differenced == 0 {
@@ -472,25 +467,34 @@ pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
 /// The directory is written by the encoder and read by nothing else here, so
 /// agreement between it and an independent walk is a real check on both.
 fn deep(path: &Path) -> Result<String, String> {
-    let sample = v2(path)?;
-    let streams = sample.stroke_streams();
+    let body = body(path)?;
+    let layout = body.layout();
+    let streams = body.stroke_streams();
     let mut records = 0usize;
+    let mut marked = 0usize;
     for (index, (at, stroke)) in streams.iter().enumerate() {
-        let stream = codec::walk(stroke, *at).map_err(|e| format!("stroke {index}: {e}"))?;
+        let stream =
+            codec::walk(stroke, *at, layout).map_err(|e| format!("stroke {index}: {e}"))?;
         records += stream.records.len();
+        marked += stream.records.iter().filter(|r| r.mark).count();
         // The walk already had to land exactly on the record the directory names,
         // so what is left to check is the one pointer it does not consume.
         let directory = codec::Directory::read(stroke)
             .ok_or_else(|| format!("stroke {index} is too short for its word directory"))?;
-        let resync = codec::Directory::resolve(directory.resync, *at);
+        let resync = codec::Directory::resolve(directory.resync, *at, layout);
         if !stream.records.iter().any(|r| r.at == resync) {
             return Err(format!(
                 "stroke {index}: the resync pointer lands at word {resync}, which is not a record"
             ));
         }
     }
-    Ok(format!(
-        "{} stroke(s), {records} record(s), directory agrees",
+    let mut note = format!(
+        "{}, {} stroke(s), {records} record(s), directory agrees",
+        body.generation(),
         streams.len()
-    ))
+    );
+    if marked > 0 {
+        note.push_str(&format!(", {marked} marked"));
+    }
+    Ok(note)
 }

@@ -24,12 +24,15 @@
 //!
 //! Everything here is inferred from specimens; not confirmed on hardware.
 
-use super::codec::{HEADER_LEN, PITCH_DEN, PITCH_NUM, WRAP};
+use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
 use super::section::{self, Section};
 use super::{Sample, MAX_NAME_LEN};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
+
+/// This writes v2 only, so the stroke header is always the narrow one.
+const HEADER_LEN: usize = codec::Layout::V2.header_len();
 
 /// Content version of the Sample Library 2.0 layout this writes.
 const VERSION: u32 = 200;
@@ -820,7 +823,7 @@ mod tests {
             let plan = Plan::new(source.len()).unwrap();
             let q = quantise(&source, &plan);
 
-            let audio = codec::decode(stroke, at).unwrap();
+            let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
             assert_eq!(
                 audio.differenced, 0,
                 "a plain stream states every field outright"
@@ -840,7 +843,7 @@ mod tests {
         let source = sine(440.0, 20_000.0, 44_100);
         let file = encoded(&source, Predictor::Plain);
         let (at, stroke) = file.stroke_streams()[0];
-        let audio = codec::decode(stroke, at).unwrap();
+        let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
         // Well inside the source, away from the ends the kernel rings at.
         let window = &audio.samples[10_000..20_000];
         let peak = window.iter().map(|&v| i32::from(v).abs()).max().unwrap();
@@ -883,17 +886,14 @@ mod tests {
             );
         }
         // And the reader agrees about where the values are.
-        let mut stroke = vec![0u8; codec::HEADER_LEN];
+        let mut stroke = vec![0u8; HEADER_LEN];
         stroke.extend_from_slice(&words);
         stroke.extend_from_slice(&[0x80, 0x00, 0x18]);
-        let end = (codec::HEADER_LEN / 3 + spec.span()) as u16;
-        for (i, p) in [codec::HEADER_LEN as u16 / 3, 0, end, end]
-            .iter()
-            .enumerate()
-        {
+        let end = (HEADER_LEN / 3 + spec.span()) as u16;
+        for (i, p) in [HEADER_LEN as u16 / 3, 0, end, end].iter().enumerate() {
             stroke[20 + 9 * i..22 + 9 * i].copy_from_slice(&p.to_be_bytes());
         }
-        let walked = codec::walk(&stroke, 0).unwrap();
+        let walked = codec::walk(&stroke, 0, codec::Layout::V2).unwrap();
         assert_eq!(walked.records[0].values, values);
     }
 
@@ -922,17 +922,17 @@ mod tests {
     fn the_directory_names_the_records_the_walk_finds() {
         let file = encoded(&sine(300.0, 9000.0, 50_000), Predictor::Plain);
         let (at, stroke) = file.stroke_streams()[0];
-        let stream = codec::walk(stroke, at).unwrap();
+        let stream = codec::walk(stroke, at, codec::Layout::V2).unwrap();
         let directory = codec::Directory::read(stroke).unwrap();
         assert_eq!(
-            codec::Directory::resolve(directory.first_record, at),
+            codec::Directory::resolve(directory.first_record, at, codec::Layout::V2),
             stream.first_record
         );
         assert_eq!(
-            codec::Directory::resolve(directory.terminator[0], at),
+            codec::Directory::resolve(directory.terminator, at, codec::Layout::V2),
             stream.terminator
         );
-        let resync = codec::Directory::resolve(directory.resync, at);
+        let resync = codec::Directory::resolve(directory.resync, at, codec::Layout::V2);
         let record = stream.records.iter().find(|r| r.at == resync).unwrap();
         assert!(record.one_to_one);
         assert_eq!(record.first_field, Plan::new(50_000).unwrap().resync_at);
@@ -947,8 +947,15 @@ mod tests {
             let q = quantise(&source, &plan);
             let file = encoded(&source, Predictor::Plain);
             let (_, stroke) = file.stroke_streams()[0];
-            assert_eq!(codec::shift(stroke), Some(q.shift), "amplitude {amplitude}");
-            assert_eq!(codec::peak(stroke), Some(q.peak));
+            assert_eq!(
+                codec::shift(stroke, codec::Layout::V2),
+                Some(q.shift),
+                "amplitude {amplitude}"
+            );
+            assert_eq!(
+                codec::peak(stroke, codec::Layout::V2),
+                i32::try_from(q.peak).ok()
+            );
             assert!(q.shift >= 0);
         }
     }
@@ -1059,7 +1066,11 @@ mod tests {
                 let mut stroke = vec![0u8; HEADER_LEN];
                 stroke[12] = exponent;
                 stroke[13..16].copy_from_slice(&peak.to_be_bytes()[1..]);
-                assert_eq!(codec::shift(&stroke), Some(shift), "peak {peak}");
+                assert_eq!(
+                    codec::shift(&stroke, codec::Layout::V2),
+                    Some(shift),
+                    "peak {peak}"
+                );
                 assert!((1 << 19..1 << 20).contains(&mantissa) || peak == 0);
             }
         }
@@ -1093,14 +1104,14 @@ mod tests {
     fn silence_codes_at_the_draft_width_throughout() {
         let file = encoded(&vec![0i16; 44_100], Predictor::Plain);
         let (at, stroke) = file.stroke_streams()[0];
-        let stream = codec::walk(stroke, at).unwrap();
+        let stream = codec::walk(stroke, at, codec::Layout::V2).unwrap();
         assert!(stream.records.iter().all(|r| r.width == MIN_WIDTH));
         assert!(stream
             .records
             .iter()
             .all(|r| r.values.iter().all(|&v| v == 0)));
-        assert_eq!(codec::peak(stroke), Some(0));
-        assert!(codec::decode(stroke, at)
+        assert_eq!(codec::peak(stroke, codec::Layout::V2), Some(0));
+        assert!(codec::decode(stroke, at, codec::Layout::V2)
             .unwrap()
             .samples
             .iter()

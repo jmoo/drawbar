@@ -24,8 +24,9 @@ In brief:
   named, pinned by hardware sweeps); the Stage 2, 3 and 4 programs and presets
   (every documented parameter placed; values raw except where the community
   maps enumerate them).
-- **Structurally decoded** — sample instruments (`nsmp`: rename, retune, remap;
-  the audio stays encoded), piano libraries (`npno`: the CNSP prefix) and
+- **Structurally decoded** — sample instruments (`nsmp`, `nsmp3`, `nsmp4`:
+  rename, retune, remap, and the encoded audio decoded back to samples in every
+  generation), piano libraries (`npno`: the CNSP prefix) and
   Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
   strokes and audio files read and edited, new projects written).
 - **Container-verified stubs** — every other corpus format: 60+ CBIN tags
