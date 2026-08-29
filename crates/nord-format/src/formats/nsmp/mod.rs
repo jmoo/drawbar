@@ -141,8 +141,8 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error>
 /// `meta`, in that order, in both container generations. Inferred from
 /// specimens; not confirmed on hardware.
 ///
-/// The stroke payloads are the encoded audio, and [`Self::stroke_streams`] hands
-/// them to [`codec`] at [`codec::Layout::V3`].
+/// The stroke payloads are the encoded audio. The enclosing content version selects
+/// [`codec::Layout::V3`] or [`codec::Layout::V4`] through [`codec::Layout::from_version`].
 #[derive(Debug)]
 pub struct SampleV3 {
     pub sections: Vec<section::Section4>,
@@ -247,7 +247,8 @@ impl Cbin<SampleV3> {
     ///
     /// The offset is the base the stroke's own [`codec::Directory`] is written
     /// against, so a caller checking those pointers needs this pairing rather than
-    /// the payload alone. The streams are [`codec::Layout::V3`].
+    /// the payload alone. Decode the streams with
+    /// [`codec::Layout::from_version(self.header.version)`](codec::Layout::from_version).
     pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
         let mut at = 0;
         let mut out = Vec::new();
@@ -260,8 +261,8 @@ impl Cbin<SampleV3> {
         out
     }
 
-    /// One zone's encoded stream, in [`Self::zones`] order, ready for
-    /// [`codec::decode`] at [`codec::Layout::V3`].
+    /// One zone's encoded stream, in [`Self::zones`] order. Decode it with
+    /// [`codec::Layout::from_version(self.header.version)`](codec::Layout::from_version).
     ///
     /// Paired by the global id the zone record names, so it is safe on library
     /// content whose strokes are not in zone order.

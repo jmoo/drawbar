@@ -425,8 +425,12 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         let order = ((v >> 14) & 0x7) as u8;
         let count = (v & COUNT_MASK) as usize;
 
-        let ends_here = terminator_cell(raw, cell).is_some();
+        let terminal_cell = terminator_cell(raw, cell);
+        let ends_here = terminal_cell.is_some();
         if Some(i) == last || ends_here {
+            if terminal_cell == Some(2 * cell) && !stereo {
+                return Err(Unsupported::Malformed { word: i });
+            }
             return Ok(Stream {
                 records,
                 fields,
@@ -766,6 +770,21 @@ mod tests {
             assert_eq!(got_l, l, "{layout:?}: left channel");
             assert_eq!(got_r, r, "{layout:?}: right channel");
         }
+    }
+
+    #[test]
+    fn a_stereo_terminator_needs_a_valid_directory_pointer() {
+        let layout = Layout::V2;
+        let fields = vec![0; layout.cell()];
+        let mut s = stereo_stroke(layout, 1, &fields, &fields);
+        let at = SEEK_AT + 3 * SEEK_STRIDE;
+        s[at..at + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+        let terminator = (s.len() - layout.header_len()) / layout.word() - 1;
+
+        assert_eq!(
+            walk(&s, 0, layout),
+            Err(Unsupported::Malformed { word: terminator })
+        );
     }
 
     #[test]
