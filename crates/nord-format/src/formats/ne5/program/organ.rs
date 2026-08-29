@@ -395,6 +395,7 @@ macro_rules! model_index {
 
         impl Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
             type Error = ::core::convert::Infallible;
 
@@ -482,6 +483,7 @@ impl Drawbars {
 
 impl Packed for Drawbars {
     const MAX_BITS: u32 = 4 * Drawbars::BARS as u32;
+    const DECODE_BITS: u32 = Self::MAX_BITS;
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Drawbar;
     type Error = ::core::convert::Infallible;
 

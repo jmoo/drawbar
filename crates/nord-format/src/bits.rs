@@ -50,6 +50,7 @@ pub const fn bits_for(max: u64) -> u32 {
 
 impl Packed for bool {
     const MAX_BITS: u32 = 1;
+    const DECODE_BITS: u32 = u64::BITS;
     const CONTROL: ControlKind = ControlKind::Toggle;
     type Error = Infallible;
 
@@ -66,6 +67,7 @@ macro_rules! impl_packed_uint {
     ($($t:ty),* $(,)?) => { $(
         impl Packed for $t {
             const MAX_BITS: u32 = <$t>::BITS;
+            const DECODE_BITS: u32 = <$t>::BITS;
             type Error = Infallible;
 
             fn from_bits(bits: u64) -> Result<Self, Infallible> {
@@ -107,6 +109,27 @@ fn splice(raw: &mut [u8], lo: u32, hi: u32, bits: u64) {
 ///
 /// Never instantiated — it names a position plus a conversion, used as
 /// `MyField::get(&raw)` / `MyField::set(&mut raw, v)`.
+///
+/// ```compile_fail
+/// use nord_format::bits::Field;
+/// let _ = Field::<u8, 0, 15>::read(&[0; 2]);
+/// ```
+///
+/// A [`Packed`] implementation cannot advertise more value bits than it can decode:
+///
+/// ```compile_fail
+/// use nord_format::bits::{Field, Packed};
+/// use std::convert::Infallible;
+/// struct Invalid;
+/// impl Packed for Invalid {
+///     const MAX_BITS: u32 = 2;
+///     const DECODE_BITS: u32 = 1;
+///     type Error = Infallible;
+///     fn from_bits(_: u64) -> Result<Self, Infallible> { Ok(Self) }
+///     fn to_bits(&self) -> u64 { 0 }
+/// }
+/// let _ = Field::<Invalid, 0, 1>::get::<1>(&[0]);
+/// ```
 pub struct Field<T, const LO: u32, const HI: u32>(PhantomData<fn() -> T>);
 
 /// Compile-time check that a field lies inside the panel it is applied to.
@@ -138,6 +161,12 @@ impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
          carries its range",
     );
 
+    /// Compile-time check that the type's advertised limits are coherent.
+    const COHERENT: () = assert!(
+        T::MAX_BITS <= T::DECODE_BITS,
+        "this type claims more value bits than it can decode",
+    );
+
     /// Compile-time check that decoding cannot truncate the field before `T` sees it.
     const READS: () = assert!(
         Self::WIDTH <= T::DECODE_BITS,
@@ -146,6 +175,7 @@ impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
 
     /// Decode the field out of `raw`.
     pub fn get<const N: usize>(raw: &[u8; N]) -> Result<T, T::Error> {
+        let () = Self::COHERENT;
         let () = Self::READS;
         let () = SpanFits::<N, HI>::OK;
         T::from_bits(extract(raw, LO, HI))
@@ -156,6 +186,8 @@ impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
     /// Only compiles when no value of `T` can overrun the field: a `u8` in a 7-bit slot
     /// is a compile error.
     pub fn set<const N: usize>(raw: &mut [u8; N], value: T) {
+        let () = Self::COHERENT;
+        let () = Self::READS;
         let () = Self::FITS;
         let () = SpanFits::<N, HI>::OK;
         splice(raw, LO, HI, value.to_bits());
@@ -182,6 +214,7 @@ mod tests {
 
     impl<const BITS: u32> Packed for Small<BITS> {
         const MAX_BITS: u32 = BITS;
+        const DECODE_BITS: u32 = u8::BITS;
         type Error = Infallible;
 
         fn from_bits(bits: u64) -> Result<Self, Infallible> {

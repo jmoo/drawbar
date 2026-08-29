@@ -3,12 +3,20 @@
 
 use nord_format::formats::nsmp;
 use nord_format::{Entity, Live, Program, Sample};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
+#[path = "support/format_table.rs"]
+mod format_table;
 #[path = "support/scan.rs"]
 mod scan;
 
+use format_table::formats;
 use scan::{corpus, named, Specimen};
+
+fn cbins() -> impl Iterator<Item = &'static Specimen> {
+    corpus().iter().filter(|s| s.bytes.starts_with(b"CBIN"))
+}
 
 fn ne5_programs() -> impl Iterator<
     Item = (
@@ -51,6 +59,221 @@ fn v2_named(name: &str) -> nord_format::cbin::Cbin<nsmp::Sample> {
         Entity::Sample(Sample::V2(sample)) => sample,
         other => panic!("{name} decoded as {other:?}"),
     }
+}
+
+#[test]
+fn cbin_aux_words_have_documented_shapes() {
+    const BOTH_HALVES: &[&str] = &["ns3y", "nsmp", "nd2p"];
+    let mut seen = 0;
+    let mut failures = Vec::new();
+    for specimen in cbins() {
+        let tag = String::from_utf8_lossy(&specimen.bytes[8..12]).replace('\0', "");
+        let aux = u32::from_le_bytes(specimen.bytes[0x10..0x14].try_into().unwrap());
+        if aux != u32::MAX && (aux >> 16) != 0 && !BOTH_HALVES.contains(&tag.as_str()) {
+            failures.push(format!(
+                "{}: {tag} aux {aux:#010x}",
+                specimen.path.display()
+            ));
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no CBIN specimen");
+    assert!(
+        failures.is_empty(),
+        "undocumented aux shapes:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn cbin_body_lengths_match_format_constants() {
+    let expected: BTreeMap<&str, u64> = formats()
+        .into_iter()
+        .map(|(tag, len, _)| (tag, len))
+        .collect();
+    let mut checked = 0;
+    for specimen in cbins() {
+        let info = nord_format::cbin::inspect(&mut Cursor::new(&specimen.bytes)).unwrap();
+        let tag = String::from_utf8_lossy(&info.header.tag);
+        if let Some(&want) = expected.get(tag.as_ref()) {
+            assert_eq!(info.body_len, want, "{}: {tag}", specimen.path.display());
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no stub-format specimen");
+}
+
+#[test]
+fn ns4_program_body_echoes_header_version() {
+    let mut checked = 0;
+    for specimen in corpus() {
+        let (Entity::Program(Program::Stage4(program)) | Entity::Live(Live::Stage4(program))) =
+            &specimen.entity
+        else {
+            continue;
+        };
+        assert_eq!(
+            program.version_echo as u32,
+            program.header.version & 0xff,
+            "{}",
+            specimen.path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no Stage 4 program");
+}
+
+#[test]
+fn ns4_program_routes_a_keyboard_section() {
+    let mut checked = 0;
+    for specimen in corpus() {
+        let (Entity::Program(Program::Stage4(program)) | Entity::Live(Live::Stage4(program))) =
+            &specimen.entity
+        else {
+            continue;
+        };
+        assert!(
+            program.organ_section_enabled
+                || program.piano_section_enabled
+                || program.synth_section_enabled,
+            "{}: no section is routed to the keyboard",
+            specimen.path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no Stage 4 program");
+}
+
+#[test]
+fn ns4_octave_shifts_stay_in_panel_range() {
+    use nord_format::{OrganPreset, PianoPreset, Synth};
+    let in_range = |value: i8| (-2..=2).contains(&value);
+    let mut seen = BTreeSet::new();
+    for specimen in corpus() {
+        let where_ = specimen.path.display();
+        match &specimen.entity {
+            Entity::Program(Program::Stage4(p)) | Entity::Live(Live::Stage4(p)) => {
+                assert!(in_range(p.organ_a.octave_shift.octaves()), "{where_}");
+                seen.insert("program");
+            }
+            Entity::OrganPreset(OrganPreset::Stage4(p)) => {
+                assert!(in_range(p.organ_a_octave_shift.octaves()), "{where_}");
+                seen.insert("organ preset");
+            }
+            Entity::PianoPreset(PianoPreset::Stage4(p)) => {
+                assert!(in_range(p.piano_a_octave_shift.octaves()), "{where_}");
+                seen.insert("piano preset");
+            }
+            Entity::Synth(Synth::Stage4(p)) => {
+                assert!(in_range(p.synth_a_octave_shift.octaves()), "{where_}");
+                seen.insert("synth preset");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from(["organ preset", "piano preset", "program", "synth preset"])
+    );
+}
+
+#[test]
+fn ns4_selectors_stay_in_panel_range() {
+    use nord_format::{OrganPreset, PianoPreset, Synth};
+    let mut seen = BTreeSet::new();
+    for specimen in corpus() {
+        let where_ = specimen.path.display();
+        match &specimen.entity {
+            Entity::Program(Program::Stage4(p)) | Entity::Live(Live::Stage4(p)) => {
+                assert!(p.organ_a.model.raw() <= 5, "{where_}");
+                assert!(p.organ_b.model.raw() <= 5, "{where_}");
+                assert!(p.piano_a.piano_type.raw() <= 5, "{where_}");
+                assert!(p.piano_b.piano_type.raw() <= 5, "{where_}");
+                assert!(p.synth_a_voice.filter_type.raw() <= 5, "{where_}");
+                assert!(p.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
+                assert!(p.synth_a_performance.voice_priority.raw() <= 2, "{where_}");
+                assert!(p.organ_fx.reverb_type.raw() <= 11, "{where_}");
+                seen.insert("program");
+            }
+            Entity::OrganPreset(OrganPreset::Stage4(p)) => {
+                assert!(p.organ_a_model.raw() <= 5, "{where_}");
+                assert!(p.organ_b_model.raw() <= 5, "{where_}");
+                assert!(p.organ_fx.reverb_type.raw() <= 11, "{where_}");
+                seen.insert("organ preset");
+            }
+            Entity::PianoPreset(PianoPreset::Stage4(p)) => {
+                assert!(p.piano_a_type.raw() <= 5, "{where_}");
+                assert!(p.piano_b_type.raw() <= 5, "{where_}");
+                assert!(p.piano_a_fx.reverb_type.raw() <= 11, "{where_}");
+                seen.insert("piano preset");
+            }
+            Entity::Synth(Synth::Stage4(p)) => {
+                assert!(p.synth_a_voice.filter_type.raw() <= 5, "{where_}");
+                assert!(p.synth_b_voice.filter_type.raw() <= 5, "{where_}");
+                assert!(p.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
+                assert!(p.synth_a_voice_priority.raw() <= 2, "{where_}");
+                assert!(p.synth_a_fx.reverb_type.raw() <= 11, "{where_}");
+                seen.insert("synth preset");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from(["organ preset", "piano preset", "program", "synth preset"])
+    );
+}
+
+#[test]
+fn drum_banks_have_the_expected_member_count() {
+    use nord_format::Bundle;
+    let mut banks = 0;
+    for specimen in corpus() {
+        match &specimen.entity {
+            Entity::Bundle(Bundle::Drum2Bank(bank)) => {
+                assert_eq!(bank.programs.len(), 50, "{}", specimen.path.display());
+                assert!(bank.programs.iter().all(|(name, _)| !name.is_empty()));
+            }
+            Entity::Bundle(Bundle::Drum3KitBank(bank)) => {
+                assert_eq!(bank.kits.len(), 50, "{}", specimen.path.display());
+                assert!(bank.kits.iter().all(|(name, _)| !name.is_empty()));
+            }
+            _ => continue,
+        }
+        banks += 1;
+    }
+    assert!(banks > 0, "no drum bank");
+}
+
+#[test]
+fn v3_samples_decode_names_and_strokes() {
+    let mut paired = 0;
+    let mut samples = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        samples += 1;
+        let where_ = specimen.path.display();
+        assert!(!sample.name().unwrap().is_empty(), "{where_}: empty name");
+        assert!(sample.stroke_count() > 0, "{where_}: no strokes");
+        match sample.zones() {
+            // Unexplained: some vendor zone maps do not have one entry per stroke.
+            Err(_) => {}
+            Ok(zones) => {
+                assert_eq!(zones.len(), sample.stroke_count(), "{where_}");
+                for zone in zones {
+                    assert!(zone.top_note <= 127 && zone.root_key <= 127, "{where_}");
+                    if let Some(low) = zone.low_note {
+                        assert!(low <= zone.top_note, "{where_}: low above top");
+                    }
+                }
+                paired += 1;
+            }
+        }
+    }
+    assert!(samples > 0, "no v3 sample");
+    assert!(paired > 0, "no v3 zone map paired with its strokes");
 }
 
 /// Confirmed on hardware: a live slot and a stored program use the same body.

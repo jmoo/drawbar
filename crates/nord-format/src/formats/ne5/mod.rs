@@ -52,7 +52,7 @@ impl Instrument {
 
 impl crate::bits::Packed for Instrument {
     const MAX_BITS: u32 = 2;
-    const DECODE_BITS: u32 = 3;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
     type Error = crate::error::ParseError;
 

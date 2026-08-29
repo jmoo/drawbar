@@ -70,7 +70,14 @@ pub async fn info<T: Transport, C>(
     let resp = session
         .request(Service::Program, 10, cmd::INFO, &args)
         .await?;
-    ProgramInfo::decode(&resp)
+    let info = ProgramInfo::decode(&resp)?;
+    if info.location != at {
+        return Err(Error::UnexpectedLocation {
+            requested: at,
+            reported: info.location,
+        });
+    }
+    Ok(info)
 }
 
 /// Read one program off the instrument, returning the bytes of a `.ne5p` file.
@@ -121,31 +128,49 @@ const READ_CHUNK: u32 = 32720;
 /// max transfer; an oversized frame wedges the instrument until a power cycle.
 const WRITE_CHUNK: usize = 32720;
 
-/// Probe overrides for the transfer chunk sizes; the defaults are the captured values.
-#[cfg(feature = "fault-injection")]
-fn read_chunk() -> u32 {
-    std::env::var("NORD_READ_CHUNK")
+/// Fault-injection overrides; absent variables keep captured sizes, invalid values fail.
+#[cfg(any(feature = "fault-injection", test))]
+fn parse_chunk(name: &str, value: Option<&str>, default: u64) -> Result<u64> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    value
+        .parse()
         .ok()
-        .and_then(|v| v.parse().ok())
         .filter(|&size| size > 0)
-        .unwrap_or(READ_CHUNK)
-}
-#[cfg(not(feature = "fault-injection"))]
-fn read_chunk() -> u32 {
-    READ_CHUNK
+        .ok_or_else(|| Error::InvalidArgument(format!("{name} must be a positive integer")))
 }
 
 #[cfg(feature = "fault-injection")]
-fn write_chunk() -> usize {
-    std::env::var("NORD_WRITE_CHUNK")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&size| size > 0)
-        .unwrap_or(WRITE_CHUNK)
+fn chunk_override(name: &str, default: u64) -> Result<u64> {
+    match std::env::var(name) {
+        Ok(value) => parse_chunk(name, Some(&value), default),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(Error::InvalidArgument(format!("{name} must be UTF-8")))
+        }
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+fn read_chunk() -> Result<u32> {
+    let size = chunk_override("NORD_READ_CHUNK", READ_CHUNK.into())?;
+    u32::try_from(size).map_err(|_| Error::InvalidArgument("NORD_READ_CHUNK exceeds u32".into()))
 }
 #[cfg(not(feature = "fault-injection"))]
-fn write_chunk() -> usize {
-    WRITE_CHUNK
+fn read_chunk() -> Result<u32> {
+    Ok(READ_CHUNK)
+}
+
+#[cfg(feature = "fault-injection")]
+fn write_chunk() -> Result<usize> {
+    let size = chunk_override("NORD_WRITE_CHUNK", WRITE_CHUNK as u64)?;
+    usize::try_from(size)
+        .map_err(|_| Error::InvalidArgument("NORD_WRITE_CHUNK exceeds usize".into()))
+}
+#[cfg(not(feature = "fault-injection"))]
+fn write_chunk() -> Result<usize> {
+    Ok(WRITE_CHUNK)
 }
 
 /// Bytes per storage block in a library partition — the unit `STATUS`'s free/used
@@ -164,6 +189,7 @@ async fn transfer_out<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<(ProgramInfo, Vec<u8>)> {
+    let chunk_size = read_chunk()?;
     let meta = info(session, at).await?;
 
     session.notify(&ui::label("Uploading...")?).await?;
@@ -179,7 +205,7 @@ async fn transfer_out<T: Transport, C>(
     let mut painted = None;
     while (body.len() as u32) < meta.body_len {
         let offset = body.len() as u32;
-        let want = read_chunk().min(meta.body_len - offset);
+        let want = chunk_size.min(meta.body_len - offset);
 
         let mut req = args.clone();
         req.extend_from_slice(&offset.to_be_bytes());
@@ -302,6 +328,7 @@ pub async fn write<T: Transport>(
 ) -> Result<()> {
     let file = envelope::unwrap(file)?;
     let body = &file.body.0;
+    let chunk_size = write_chunk()?;
     let body_len = u32::try_from(body.len())
         .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
     let name_len = u32::try_from(name.len())
@@ -334,7 +361,7 @@ pub async fn write<T: Transport>(
     let mut offset = 0usize;
     let mut painted = None;
     while offset < body.len() {
-        let end = offset.saturating_add(write_chunk()).min(body.len());
+        let end = offset.saturating_add(chunk_size).min(body.len());
         let chunk = &body[offset..end];
         let mut data = Vec::new();
         at.write_to(&mut data);
@@ -763,5 +790,15 @@ mod tests {
 
         payload[3] ^= 1;
         assert!(read_payload(&payload, at, 40, 3).is_err());
+    }
+
+    #[test]
+    fn invalid_chunk_overrides_are_refused() {
+        assert!(parse_chunk("NORD_READ_CHUNK", Some("0"), READ_CHUNK.into()).is_err());
+        assert!(parse_chunk("NORD_WRITE_CHUNK", Some("bad"), WRITE_CHUNK as u64).is_err());
+        assert_eq!(
+            parse_chunk("NORD_READ_CHUNK", None, READ_CHUNK.into()).unwrap(),
+            READ_CHUNK.into()
+        );
     }
 }

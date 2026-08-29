@@ -193,6 +193,14 @@ impl<T: Transport, C> Session<'_, T, C> {
     }
 
     async fn read_frame_with_limit(&mut self, limit: Duration) -> Result<Option<Message>> {
+        self.read_frame_as(limit, Message::decode_response).await
+    }
+
+    async fn read_frame_as(
+        &mut self,
+        limit: Duration,
+        decode: fn(&[u8]) -> Result<Message>,
+    ) -> Result<Option<Message>> {
         let transport = self
             .transport
             .as_mut()
@@ -205,7 +213,7 @@ impl<T: Transport, C> Session<'_, T, C> {
             Some(raw) => raw,
             None => return Ok(None),
         };
-        Message::decode_response(&raw).map(Some)
+        decode(&raw).map(Some)
     }
 
     /// Send an arbitrary command and return whatever comes back, enforcing nothing.
@@ -215,6 +223,7 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// status, because on an undocumented command both are results rather than faults —
     /// a device that does not implement one still answers, with a status saying so.
     /// `Ok(None)` means it said nothing within `limit`.
+    /// Call [`Self::commit_with_read_limit`] with the same limit to bound cleanup too.
     ///
     /// Queued [`cmd::CHANGED`] notifications are drained as in `Session::request`, so a
     /// front-panel STORE cannot be mistaken for the probe's answer.
@@ -241,7 +250,7 @@ impl<T: Transport, C> Session<'_, T, C> {
 
         let mut drained = 0;
         loop {
-            let Some(resp) = self.read_frame_with_limit(limit).await? else {
+            let Some(resp) = self.read_probe_frame_with_limit(limit).await? else {
                 return Ok(None);
             };
             if resp.command == cmd::CHANGED && resp.command != response && drained < DRAIN_CAP {
@@ -251,6 +260,10 @@ impl<T: Transport, C> Session<'_, T, C> {
             }
             return Ok(Some(resp));
         }
+    }
+
+    async fn read_probe_frame_with_limit(&mut self, limit: Duration) -> Result<Option<Message>> {
+        self.read_frame_as(limit, Message::decode_probe).await
     }
 
     /// Send one request and read its response, enforcing the framing invariants: the
@@ -383,6 +396,13 @@ impl<T: Transport, C> Session<'_, T, C> {
         self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
             .await?;
         Ok(())
+    }
+
+    /// Commit with a bounded close for exploratory probes.
+    /// The consumed session's ordinary read behavior is unchanged.
+    pub async fn commit_with_read_limit(mut self, limit: Duration) -> Result<()> {
+        self.read_limit = limit;
+        self.commit().await
     }
 
     /// Abandon the transaction without running the closing exchanges.

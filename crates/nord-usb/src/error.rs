@@ -1,5 +1,7 @@
 use thiserror::Error as ThisError;
 
+use crate::wire::Location;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(ThisError, Debug)]
@@ -19,6 +21,12 @@ pub enum Error {
 
     #[error("expected a response to command {expected:#x}, got {got:#x}")]
     UnexpectedResponse { expected: u32, got: u32 },
+
+    #[error("device reported location {reported:?} for the requested location {requested:?}")]
+    UnexpectedLocation {
+        requested: Location,
+        reported: Location,
+    },
 
     /// The byte pipe itself failed — a USB transfer error, a missing device, a claim
     /// refusal. Nothing about message *content* belongs here.
@@ -57,6 +65,7 @@ impl Error {
         match self {
             Error::DeviceStatus(code) => format!("device-status {code:#x}"),
             Error::UnexpectedResponse { .. } => "unexpected-response".into(),
+            Error::UnexpectedLocation { .. } => "unexpected-location".into(),
             Error::Replay(_) => "replay".into(),
             _ => "transport".into(),
         }

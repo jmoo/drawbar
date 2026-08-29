@@ -30,8 +30,8 @@ web = [
 # Drive the protocol from committed captures, with no hardware.
 replay = []
 
-# Deliberate protocol faults for RE: currently `NORD_PROTOCOL_VERSION`. Off by default —
-# a wrong value here can stall the instrument's bulk endpoints.
+# Deliberate protocol and transfer-shape faults for reverse engineering. Off by default:
+# a wrong value can stall the instrument's bulk endpoints.
 fault-injection = []
 
 # Block on the async API from synchronous callers (the CLI). Tiny; not a runtime.

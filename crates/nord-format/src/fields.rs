@@ -251,8 +251,11 @@ pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, Fiel
         }
     } else if let Some(bits) = stored_value(&wanted) {
         // Wide fields use stored bits; for a drawbar block the hex digits are its bars.
-        if let Ok(v) = T::from_bits(bits) {
-            return Ok(v);
+        // Check before decoding: storage-backed implementations may cast and truncate.
+        if width >= 64 || bits < (1u64 << width) {
+            if let Ok(v) = T::from_bits(bits) {
+                return Ok(v);
+            }
         }
     }
     Err(FieldError::BadValue {
@@ -347,6 +350,16 @@ mod tests {
         for no in ["false", "off", "no", "0"] {
             assert!(!parse_field::<bool>(1, no).unwrap(), "{no}");
         }
+    }
+
+    #[test]
+    fn a_wide_numeric_value_must_fit_its_declared_width() {
+        assert!(parse_field::<u16>(16, "70000").is_err());
+        assert!(parse_field::<u32>(32, "4294967296").is_err());
+        assert_eq!(
+            parse_field::<u64>(64, "18446744073709551615").unwrap(),
+            u64::MAX
+        );
     }
 
     /// A wide numeric field enumerates, so `--fields` can still say what it takes.

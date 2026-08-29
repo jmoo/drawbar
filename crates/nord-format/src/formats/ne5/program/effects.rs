@@ -138,6 +138,7 @@ impl Routing {
 
 impl Packed for Routing {
     const MAX_BITS: u32 = 2;
+    const DECODE_BITS: u32 = 2;
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
     type Error = std::convert::Infallible;
 

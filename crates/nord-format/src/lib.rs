@@ -466,6 +466,7 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
 /// manifest), or a Drum bank (members are all one CBIN format).
 #[cfg(feature = "bundle")]
 fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
+    let start = reader.stream_position()?;
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
         let names: Vec<&str> = zip.file_names().collect();
@@ -492,7 +493,7 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
             "members"
         }
     };
-    reader.seek(std::io::SeekFrom::Start(0))?;
+    reader.seek(std::io::SeekFrom::Start(start))?;
 
     Ok(Entity::Bundle(match kind {
         "nd2" => Bundle::Drum2Bank(nd2::bank::read_from(reader)?),
@@ -620,6 +621,20 @@ mod bundle_tests {
         let a = member("ns3f");
         let bytes = archive(&[("One.ns3f", &a), ("readme.txt", b"hello")]);
         assert!(from_stream(&mut Cursor::new(bytes)).is_err());
+    }
+
+    #[test]
+    fn a_zip_is_read_from_the_callers_current_position() {
+        let member = member("ns3f");
+        let bytes = archive(&[("Bank A/One.ns3f", &member)]);
+        let prefix_len = 7;
+        let mut prefixed = vec![0xa5; prefix_len];
+        prefixed.extend(bytes);
+        let mut reader = Cursor::new(prefixed);
+        reader.set_position(prefix_len as u64);
+
+        let entity = from_stream(&mut reader).unwrap();
+        assert!(matches!(entity, Entity::Bundle(Bundle::Members(_))));
     }
 }
 

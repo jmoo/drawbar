@@ -92,6 +92,7 @@ impl<const FULL: u8> Packed for LevelOf<FULL> {
         let () = Self::VALID;
         bits_for(FULL as u64)
     };
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Knob(Unit::Panel10);
     type Error = ParseError;
 
@@ -177,6 +178,7 @@ macro_rules! knob {
 
         impl Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
             const CONTROL: ControlKind = $control;
             type Error = ParseError;
 
@@ -326,6 +328,7 @@ impl<const LIMIT: i16> TryFrom<u8> for Bipolar<LIMIT> {
 
 impl<const LIMIT: i16> Packed for Bipolar<LIMIT> {
     const MAX_BITS: u32 = 7;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Bipolar(Unit::Decibels);
     type Error = ParseError;
 
@@ -415,6 +418,7 @@ impl<const BITS: u32> Packed for MorphOf<BITS> {
         let () = Self::VALID;
         BITS
     };
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Morph;
     type Error = ::core::convert::Infallible;
 
@@ -489,6 +493,7 @@ impl<const BITS: u32> Packed for WideSelector<BITS> {
         let () = Self::VALID;
         BITS
     };
+    const DECODE_BITS: u32 = u16::BITS;
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ::core::convert::Infallible;
 
@@ -551,6 +556,7 @@ impl Drawbar {
 
 impl Packed for Drawbar {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Drawbar;
     type Error = ::core::convert::Infallible;
 
@@ -602,6 +608,7 @@ impl OctaveShiftNibble {
 
 impl Packed for OctaveShiftNibble {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = 4;
     const CONTROL: ControlKind = ControlKind::Shift(Unit::Octaves);
     type Error = ::core::convert::Infallible;
 
@@ -666,6 +673,7 @@ impl<const BITS: u32> Packed for Selector<BITS> {
         let () = Self::VALID;
         BITS
     };
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ::core::convert::Infallible;
 
@@ -760,6 +768,7 @@ impl Debug for PartMix {
 
 impl Packed for PartMix {
     const MAX_BITS: u32 = 7;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Bipolar(Unit::None);
     type Error = ParseError;
 
@@ -832,6 +841,7 @@ impl TryFrom<u8> for SplitPoint73 {
 
 impl Packed for SplitPoint73 {
     const MAX_BITS: u32 = 3;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ParseError;
 
@@ -886,6 +896,7 @@ impl StageTranspose {
 
 impl Packed for StageTranspose {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Shift(Unit::Semitones);
     type Error = ParseError;
 
@@ -930,6 +941,7 @@ impl MasterTempo {
 
 impl Packed for MasterTempo {
     const MAX_BITS: u32 = 8;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Knob(Unit::Bpm);
     type Error = ParseError;
 
@@ -1007,6 +1019,7 @@ macro_rules! sparse_enum {
 
         impl $crate::bits::Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
             type Error = ::core::convert::Infallible;
 
@@ -1075,6 +1088,7 @@ macro_rules! switch {
 
         impl $crate::bits::Packed for $name {
             const MAX_BITS: u32 = 1;
+            const DECODE_BITS: u32 = u64::BITS;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Toggle;
             type Error = ::core::convert::Infallible;
 
@@ -1150,6 +1164,7 @@ impl ArpPattern {
 
 impl Packed for ArpPattern {
     const MAX_BITS: u32 = 32;
+    const DECODE_BITS: u32 = u32::BITS;
     const CONTROL: ControlKind = ControlKind::Pattern;
     type Error = ::core::convert::Infallible;
 
@@ -1213,6 +1228,7 @@ impl LibraryRef {
 
 impl Packed for LibraryRef {
     const MAX_BITS: u32 = 32;
+    const DECODE_BITS: u32 = u32::BITS;
     const CONTROL: ControlKind = ControlKind::Reference;
     type Error = ::core::convert::Infallible;
 

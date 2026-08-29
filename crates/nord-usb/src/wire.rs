@@ -691,6 +691,14 @@ impl Message {
         Ok(m)
     }
 
+    /// Decode an exploratory reply without requiring the ordinary status word.
+    /// A short frame is an observation, not a typed operation failure.
+    pub fn decode_probe(buf: &[u8]) -> Result<Self> {
+        let mut m = Self::decode(buf)?;
+        m.is_response = true;
+        Ok(m)
+    }
+
     /// Decode bytes without asserting a direction; treated as a request.
     /// Prefer [`Self::decode_response`] for anything read off the wire.
     pub fn decode(buf: &[u8]) -> Result<Self> {

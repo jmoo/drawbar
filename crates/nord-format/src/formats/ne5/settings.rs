@@ -508,6 +508,7 @@ impl MidiChannel {
 
 impl crate::bits::Packed for MidiChannel {
     const MAX_BITS: u32 = 5;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
     type Error = std::convert::Infallible;
 
@@ -577,6 +578,7 @@ impl Default for CtrlPedalGain {
 
 impl crate::bits::Packed for CtrlPedalGain {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: crate::fields::ControlKind =
         crate::fields::ControlKind::Knob(crate::fields::Unit::None);
     type Error = ParseError;

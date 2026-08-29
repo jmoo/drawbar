@@ -1508,7 +1508,7 @@ pub fn probe(
                 )
                 .await?
             {
-                Some(raw) => nord_usb::Message::decode_response(&raw).map(Some),
+                Some(raw) => nord_usb::Message::decode_probe(&raw).map(Some),
                 None => Ok(None),
             }
         })
@@ -1533,7 +1533,9 @@ pub fn probe(
             )
             .await;
         let changed = s.instrument_changed();
-        let closed = s.commit().await;
+        let closed = s
+            .commit_with_read_limit(std::time::Duration::from_secs(wait))
+            .await;
         // Preserve a probe reply even if that unknown command made the close fail.
         r.map(|reply| (reply, changed, closed.err()))
     })

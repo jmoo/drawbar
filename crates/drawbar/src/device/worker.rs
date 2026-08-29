@@ -9,6 +9,7 @@
 //! how that happens, so each operation below holds the result, commits, and only then
 //! reports.
 
+use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -574,7 +575,7 @@ async fn scan_bank<T: Transport>(
 /// One bank a walk will read.
 struct Planned {
     /// The bank number the panel labels it with.
-    bank: u32,
+    bank: NonZeroU32,
     /// Slots the device says it holds. `None` where it reported the unbounded sentinel,
     /// or where nobody asked it and the guess stands in.
     slots: Option<u32>,
@@ -668,7 +669,7 @@ async fn scan_class<T: Transport>(
                 items += slots.iter().filter(|slot| slot.is_some()).count();
                 emit.send(DeviceEvent::BankScanned {
                     class,
-                    bank: planned.bank,
+                    bank: planned.bank.get(),
                     slots,
                 });
             }
@@ -677,8 +678,8 @@ async fn scan_class<T: Transport>(
 
         for planned in &plan {
             let slots = match planned.slots {
-                Some(capacity) => walk_bank(&mut s, planned.bank, capacity).await?,
-                None => walk_open_bank(&mut s, planned.bank).await?,
+                Some(capacity) => walk_bank(&mut s, planned.bank.get(), capacity).await?,
+                None => walk_open_bank(&mut s, planned.bank.get()).await?,
             };
             // Without geometry, a refused bank marks the end; an empty known bank does not.
             if slots.is_empty() && !ends_known {
@@ -691,7 +692,7 @@ async fn scan_class<T: Transport>(
             items += slots.iter().filter(|slot| slot.is_some()).count();
             emit.send(DeviceEvent::BankScanned {
                 class,
-                bank: planned.bank,
+                bank: planned.bank.get(),
                 slots,
             });
             // A short bank marks the end only when the device supplied no geometry.
@@ -709,7 +710,11 @@ fn planned(geometry: &[Bank]) -> Vec<Planned> {
     geometry
         .iter()
         .map(|bank| Planned {
-            bank: bank.index + 1,
+            bank: bank
+                .index
+                .checked_add(1)
+                .and_then(NonZeroU32::new)
+                .expect("a decoded bank index fits its panel number"),
             slots: bank.is_bounded().then_some(bank.slots),
         })
         .collect()
@@ -719,7 +724,7 @@ fn planned(geometry: &[Bank]) -> Vec<Planned> {
 fn guessed(banks: u32, per_bank: u32) -> Vec<Planned> {
     (1..=banks)
         .map(|bank| Planned {
-            bank,
+            bank: NonZeroU32::new(bank).expect("guessed banks start at one"),
             slots: Some(per_bank),
         })
         .collect()
@@ -773,7 +778,7 @@ async fn occupied<T: Transport, C>(
 /// have to agree: a folder that gains or loses trailing rows depending on which one read
 /// it is one the operator cannot drag into with any confidence.
 fn shape(found: &[(Location, ProgramInfo)], planned: &Planned) -> Vec<Option<ProgramInfo>> {
-    let bank = planned.bank - 1;
+    let bank = planned.bank.get() - 1;
     let mine: Vec<&(Location, ProgramInfo)> =
         found.iter().filter(|(at, _)| at.bank == bank).collect();
     let past = mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0);
