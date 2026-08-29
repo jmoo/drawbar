@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.2.1"
+version = "0.3.0"
 
 [lib]
 name = "nord_usb"
@@ -41,7 +41,7 @@ blocking = ["dep:pollster"]
 corpus = ["replay"]
 
 [dependencies]
-nord-format = { path = "../nord-format", version = "0.2.0" }
+nord-format = { path = "../nord-format", version = "0.3.0" }
 thiserror = "2"
 pollster = { version = "0.4", optional = true }
 
