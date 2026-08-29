@@ -217,7 +217,7 @@ impl Sample {
     pub fn layout(&self) -> nsmp::codec::Layout {
         match self {
             Sample::V2(_) => nsmp::codec::Layout::V2,
-            Sample::V3(_) => nsmp::codec::Layout::V3,
+            Sample::V3(s) => nsmp::codec::Layout::from_version(s.header.version),
         }
     }
 

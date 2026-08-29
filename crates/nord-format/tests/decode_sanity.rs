@@ -83,7 +83,11 @@ fn sample_streams() -> impl Iterator<
 > {
     corpus().iter().filter_map(|s| match &s.entity {
         Entity::Sample(Sample::V2(v)) => Some((s, nsmp::codec::Layout::V2, v.stroke_streams())),
-        Entity::Sample(Sample::V3(v)) => Some((s, nsmp::codec::Layout::V3, v.stroke_streams())),
+        Entity::Sample(Sample::V3(v)) => Some((
+            s,
+            nsmp::codec::Layout::from_version(v.header.version),
+            v.stroke_streams(),
+        )),
         _ => None,
     })
 }

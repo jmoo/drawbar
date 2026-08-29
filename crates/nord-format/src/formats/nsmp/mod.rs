@@ -50,6 +50,11 @@ pub const FORMAT: &str = "nsmp";
 /// stores 300 and up, `.nsmp4` 400 and up.
 pub const V3_FROM_VERSION: u32 = 300;
 
+/// The content version at which the wide chain becomes v4. Same chain and the same
+/// stream units as v3 — what changes is the codec, so the number matters to
+/// [`codec::Layout`] rather than to the reader.
+pub const V4_FROM_VERSION: u32 = 400;
+
 /// Content version of the first Sample Library whose v2 layout this reader decodes.
 ///
 /// The number tracks the *library release*, not the codec, so the versions below this
