@@ -147,6 +147,59 @@ grep -q '^slot1 ' fields.txt || {
 echo "ok: a set list's four slots edit and round-trip"
 
 echo
+echo "== nord live edit and nord settings edit =="
+# The live buffer is the program body under another tag, so the two nouns have to
+# offer one field list, not two that drifted apart.
+run program edit --fields >program-fields.txt 2>err.txt
+run live edit --fields >live-fields.txt 2>err.txt || {
+  echo "live --fields failed:"
+  cat err.txt
+  exit 1
+}
+awk 'NR > 1 {print $1}' program-fields.txt | sort >program-paths.txt
+awk 'NR > 1 {print $1}' live-fields.txt | sort >live-paths.txt
+diff program-paths.txt live-paths.txt >fields.diff || {
+  echo "live and program no longer offer the same fields:"
+  cat fields.diff
+  exit 1
+}
+
+run live edit --set center_panel.gain=96 -o live.ne5l >live.txt 2>err.txt || {
+  echo "writing an edited default live slot failed:"
+  cat err.txt
+  exit 1
+}
+run verify live.ne5l >verified.txt 2>err.txt || {
+  echo "a written live slot did not round-trip:"
+  cat verified.txt err.txt
+  exit 1
+}
+cat verified.txt
+
+run settings edit --set fine_tune=3 --set startup_live_slot=Live2 -o settings.ne5s \
+  >settings.txt 2>err.txt || {
+  echo "writing edited default settings failed:"
+  cat err.txt
+  exit 1
+}
+run verify settings.ne5s >verified.txt 2>err.txt || {
+  echo "written settings did not round-trip:"
+  cat verified.txt err.txt
+  exit 1
+}
+cat verified.txt
+
+run inspect settings.ne5s >decoded.txt 2>err.txt
+for want in '+3 cent' 'live 2'; do
+  grep -q "$want" decoded.txt || {
+    echo "a settings edit did not land in the decode (missing '$want'):"
+    cat decoded.txt
+    exit 1
+  }
+done
+echo "ok: live and settings share the program field list, edit and round-trip"
+
+echo
 echo "== nord edit: a Sample Editor project =="
 cp "$POC_PROJECT" proj.nsmpproj
 run verify proj.nsmpproj >verified.txt 2>err.txt || {

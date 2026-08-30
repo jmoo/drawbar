@@ -19,10 +19,11 @@ are optional features.
 
 The wire protocol is decoded and validated. Implemented and hardware-verified on
 macOS: inventory, object info, dependencies, program read/write, the slot
-organization set (move, delete, rename, duplicate, select), and reads of the
-live slots (class 6) and the settings singleton (class 7). Writes of those two
-classes are unproven — whether either survives the delete-then-write sequence is
-unconfirmed on hardware, so nothing here has attempted one.
+organization set (move, delete, rename, duplicate, select), and read/write of the
+live slots (class 6) and the settings singleton (class 7). Those two classes
+overwrite an occupied slot in place (`ObjectClass::overwrites_in_place`), so a
+caller must not compose their write out of delete-then-write — deleting either
+has never been attempted.
 
 The WebUSB backend is hardware-verified for the read-only path (Chrome on macOS:
 inventory and object info, via `drawbar`); its writes and multi-chunk bulk

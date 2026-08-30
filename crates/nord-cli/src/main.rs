@@ -296,18 +296,17 @@ enum SampleAction {
 ///
 /// The live buffer is the panel as it stands, not a library — there is nothing to name,
 /// nothing to delete, and `select` is what the *other* classes do to it. What is left is
-/// the read-only subset, spelled exactly as [`SlotAction`] spells it, plus `edit`,
-/// whose output stops at a file.
+/// the read-only subset, spelled exactly as [`SlotAction`] spells it, plus `edit`.
 #[derive(Subcommand)]
 enum LiveAction {
     #[command(flatten)]
     Slot(LiveSlotAction),
 
-    /// Change fields inside a live slot, in a `.ne5l` file.
+    /// Change fields inside a live slot, in a `.ne5l` file or in a slot.
     ///
     /// The live buffer is the program body under another tag, so the fields are exactly
-    /// `nord program edit`'s. A slot target is read off the instrument but never
-    /// written back — the edit needs `-o`.
+    /// `nord program edit`'s. Slots are 1:1 to 1:3, and the instrument overwrites one in
+    /// place, so nothing is deleted to make room.
     Edit(EditArgs),
 }
 
@@ -316,11 +315,14 @@ enum LiveAction {
 /// verbs remain reachable as `raw --class 7`.
 #[derive(Subcommand)]
 enum SettingsAction {
-    /// Change fields inside the global settings, in a `.ne5s` file.
+    /// Change fields inside the global settings, in a `.ne5s` file or on the instrument.
     ///
     /// Fields are the menu settings plus the `startup_*` state the instrument restores
-    /// at power-up; `--fields` lists them. A slot target is read off the instrument but
-    /// never written back — the edit needs `-o`.
+    /// at power-up; `--fields` lists them. The singleton is addressed as slot `1:1`, and
+    /// the instrument overwrites it in place.
+    ///
+    /// ⚠️ A settings write reloads the selected program, losing panel state that has
+    /// not been stored.
     Edit(EditArgs),
 }
 
