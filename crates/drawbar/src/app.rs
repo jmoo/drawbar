@@ -305,6 +305,11 @@ impl eframe::App for DrawbarApp {
             .close_views(|id| self.tabs.holds(id), &mut self.log);
         self.take_dropped_files(ctx);
         drop_hint(ctx);
+        // Raised by a New → Sample Editor project pick, and answered before anything
+        // else this frame draws: it is a modal over the whole window.
+        if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
+            self.tabs.open(made, &self.workspace);
+        }
 
         egui::TopBottomPanel::top("title").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -340,6 +345,7 @@ impl eframe::App for DrawbarApp {
             self.tabs.ui(ui, &self.workspace);
             ui.separator();
             let Some(id) = self.tabs.active() else {
+                self.document.leave();
                 ui.label(
                     egui::RichText::new("Double-click something in the sidebar to open it.")
                         .weak()

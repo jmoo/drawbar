@@ -7,6 +7,7 @@
 
 use eframe::egui;
 use nord_format::fields::Field;
+use nord_format::formats::nsmp::codec;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::dot;
@@ -18,6 +19,7 @@ use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
 mod controls;
+mod encode;
 mod panel;
 mod project;
 mod sample;
@@ -25,6 +27,8 @@ mod setlist;
 
 use advanced::Advanced;
 use controls::{Ctx, Sets};
+
+pub use sample::note_picker;
 
 /// The body's own scroll id — see [`crate::tabs::SCROLL`].
 pub const SCROLL: &str = "document_body";
@@ -42,6 +46,13 @@ struct Header {
     revert: bool,
     save: bool,
     send: Option<SendBack>,
+}
+
+/// What the Basic view asked for that cannot be done while the asset is borrowed to
+/// draw it: audio, or a new asset made out of this one.
+enum Asked {
+    Zone(sample::Ask),
+    Encode,
 }
 
 /// Which face of a document is showing.
@@ -76,6 +87,12 @@ pub struct Document {
     /// One read per document: the button is what asks for another.
     fetched_deps: bool,
     advanced: Advanced,
+    /// Zone audio decoded on request, dropped when the bytes under it change.
+    audio: sample::Cache,
+    /// Which zone is sounding, and the one backend that makes it sound.
+    player: crate::audio::Player,
+    /// The encode panel over a WAV, and the read of the WAV it works from.
+    wav: Option<(encode::Draft, encode::Source)>,
 }
 
 impl Document {
@@ -112,6 +129,25 @@ impl Document {
                 })
                 .unwrap_or_default();
             self.paths.clear();
+            // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
+            // another document is a sound with nothing on screen to stop it.
+            self.player.stop();
+            // Reading a WAV copies every sample, so it happens on arrival and never per
+            // frame — the panel works from what is read here.
+            self.wav = match decoded.is_none() && encode::is_wav(&entity.bytes) {
+                true => Some((
+                    encode::Draft::new(&entity.name),
+                    encode::Source::read(&entity.bytes),
+                )),
+                false => None,
+            };
+        }
+        // Decoded audio belongs to one set of bytes; an edit re-encodes all of them.
+        self.audio.follow(id, entity.stamp);
+        self.player.settle();
+        if self.player.playing().is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
         }
 
         let faces = faces(entity, registry.as_deref());
@@ -140,6 +176,7 @@ impl Document {
 
         let mut details = None;
         let mut typed = false;
+        let mut asked = None;
         let mut piano = piano_lookup(entity, registry.as_deref(), device);
         egui::ScrollArea::vertical()
             .id_salt(SCROLL)
@@ -149,7 +186,7 @@ impl Document {
                 // format, so every control also answers to the document id.
                 ui.push_id(id, |ui| match view {
                     View::Basic => {
-                        self.body(ui, entity, registry.as_deref(), &mut piano, &mut sets)
+                        asked = self.body(ui, entity, registry.as_deref(), &mut piano, &mut sets)
                     }
                     View::Advanced => {
                         if let Some(fields) = registry.as_deref() {
@@ -165,6 +202,9 @@ impl Document {
             for cmd in advanced::commands(details) {
                 device.send(cmd, log);
             }
+        }
+        if let Some(asked) = asked {
+            self.answer(id, asked, workspace, log);
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
             if piano.asked || self.owes_deps(&piano, at, device) {
@@ -205,6 +245,15 @@ impl Document {
         }
         let detail = &device.state.detail;
         !(detail.at == Some(at) && detail.deps.is_some())
+    }
+
+    /// Nothing is open any more.
+    ///
+    /// ⚠️ A zone goes on sounding until something stops it, and the control that would
+    /// stop it is on the document. With no document there is nothing to click.
+    pub fn leave(&mut self) {
+        self.target = None;
+        self.player.stop();
     }
 
     /// Mark the open document as owed to the instrument, or say why it is not.
@@ -280,53 +329,150 @@ impl Document {
         registry: Option<&[Field]>,
         piano: &mut panel::PianoLookup,
         sets: &mut Sets,
-    ) {
+    ) -> Option<Asked> {
         let Some(decoded) = &entity.entity else {
+            return self.wav_body(ui);
+        };
+        if sample::is_sample(decoded) {
+            return self.sample_body(ui, decoded, sets).map(Asked::Zone);
+        }
+        if project::is_project(decoded) {
+            self.project_body(ui, decoded, sets);
+            return None;
+        }
+        if let Some(fields) = registry {
+            if fields::is_electro5_panel(decoded) {
+                panel::program(ui, &self.ctx, fields, piano, sets);
+            } else if fields::is_electro5_settings(decoded) {
+                panel::settings(ui, &self.ctx, fields, sets);
+            } else {
+                panel::plain(ui, &self.ctx, fields, sets);
+            }
+            return None;
+        }
+        setlist::ui(ui, decoded, sets);
+        None
+    }
+
+    /// Bytes that did not decode: the encode panel where they are a WAV, and the plain
+    /// report where they are anything else.
+    fn wav_body(&mut self, ui: &mut egui::Ui) -> Option<Asked> {
+        let Some((draft, source)) = &mut self.wav else {
             ui.label(
                 egui::RichText::new(
                     "This file did not decode, so there is nothing to show but its bytes.",
                 )
                 .weak(),
             );
-            return;
+            return None;
         };
-        if sample::is_sample(decoded) {
-            return self.sample_body(ui, decoded, sets);
-        }
-        if project::is_project(decoded) {
-            return self.project_body(ui, decoded, sets);
-        }
-        if let Some(fields) = registry {
-            if fields::is_electro5_panel(decoded) {
-                return panel::program(ui, &self.ctx, fields, piano, sets);
-            }
-            if fields::is_electro5_settings(decoded) {
-                return panel::settings(ui, &self.ctx, fields, sets);
-            }
-            return panel::plain(ui, &self.ctx, fields, sets);
-        }
-        setlist::ui(ui, decoded, sets);
+        encode::ui(ui, draft, source).then_some(Asked::Encode)
     }
 
-    fn sample_body(&mut self, ui: &mut egui::Ui, decoded: &nord_format::Entity, sets: &mut Sets) {
-        match sample::snapshot(decoded) {
-            Some(Ok(snapshot)) => {
-                let editable = sample::is_editable(decoded);
-                sample::ui(ui, &snapshot, &mut self.name, editable, sets);
-            }
-            Some(Err(why)) => {
+    fn sample_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        decoded: &nord_format::Entity,
+        sets: &mut Sets,
+    ) -> Option<sample::Ask> {
+        let snapshot = match sample::snapshot(decoded)? {
+            Ok(snapshot) => snapshot,
+            Err(why) => {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
+                return None;
             }
-            None => sample::ui(
-                ui,
-                &sample::Snapshot {
-                    name: String::new(),
-                    zones: Vec::new(),
-                },
-                &mut self.name,
-                false,
-                sets,
-            ),
+        };
+        let sounding = self.player.playing();
+        let target = self.target;
+        let sounds: Vec<sample::Sound> = (0..snapshot.zones.len())
+            .map(|index| sample::Sound {
+                decoded: self.audio.get(index),
+                playing: sounding == target.map(|id| (id, index)),
+            })
+            .collect();
+        sample::ui(
+            ui,
+            &snapshot,
+            &mut self.name,
+            sample::is_editable(decoded),
+            &sounds,
+            sets,
+        )
+    }
+
+    /// Do what the Basic view asked for, now that nothing is borrowing the asset.
+    fn answer(&mut self, id: u64, asked: Asked, workspace: &mut Workspace, log: &mut Log) {
+        match asked {
+            Asked::Zone(sample::Ask::Decode(zone)) => {
+                if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
+                    self.audio.decode(decoded, zone);
+                }
+            }
+            Asked::Zone(sample::Ask::Play(zone)) => {
+                let Some(Ok(decoded)) = self.audio.get(zone) else {
+                    return;
+                };
+                if let Err(why) = self.player.toggle((id, zone), &decoded.audio) {
+                    log.error(why);
+                    log.trouble("This computer would not play that zone.");
+                }
+            }
+            Asked::Zone(sample::Ask::Save(zone)) => {
+                let Some(Ok(decoded)) = self.audio.get(zone) else {
+                    return;
+                };
+                let audio = &decoded.audio;
+                match nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels) {
+                    Ok(bytes) => workspace.save_bytes(
+                        crate::workspace::zone_wav_name(
+                            &self.instrument_name(id, workspace),
+                            zone + 1,
+                        ),
+                        bytes,
+                    ),
+                    Err(e) => {
+                        log.error(e.to_string());
+                        log.trouble("That zone could not be written as a WAV.");
+                    }
+                }
+            }
+            Asked::Encode => self.encode(id, workspace, log),
+        }
+    }
+
+    /// What a zone's WAV is named after: the instrument's own name, or the asset's
+    /// where the instrument carries none.
+    fn instrument_name(&self, id: u64, workspace: &Workspace) -> String {
+        let entity = workspace.get(id);
+        entity
+            .and_then(|e| e.entity.as_ref())
+            .and_then(sample::snapshot)
+            .and_then(Result::ok)
+            .map(|snapshot| snapshot.name)
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| entity.map(|e| e.name.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Build an instrument out of the open WAV. The WAV is left as it is: what comes out
+    /// is another asset, not a replacement for the one it was made from.
+    fn encode(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
+        let Some((draft, source)) = &self.wav else {
+            return;
+        };
+        match encode::instrument(draft, source) {
+            Ok(bytes) => {
+                let name = format!("{}.{}", draft.name, nord_format::formats::nsmp::FORMAT);
+                self.error = None;
+                workspace.ingest(name, crate::workspace::Origin::Fresh, bytes, log);
+            }
+            Err(why) => {
+                log.error(format!(
+                    "encode {}: {why}",
+                    workspace.get(id).map_or("", |e| &e.name)
+                ));
+                self.error = Some(why);
+            }
         }
     }
 
@@ -400,12 +546,17 @@ impl Document {
 /// beside nothing reads as an abbreviation of something missing.
 fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<(View, &'static str)> {
     let mut faces = Vec::new();
-    let friendly = entity.entity.as_ref().is_some_and(|e| {
-        fields::has_registry(e)
-            || fields::is_set_list(e)
-            || sample::is_sample(e)
-            || project::is_project(e)
-    });
+    let friendly = match &entity.entity {
+        Some(e) => {
+            fields::has_registry(e)
+                || fields::is_set_list(e)
+                || sample::is_sample(e)
+                || project::is_project(e)
+        }
+        // A WAV decodes into nothing, but it is the one thing this app can make an
+        // instrument out of, so it gets a panel rather than only a byte record.
+        None => encode::is_wav(&entity.bytes),
+    };
     if friendly {
         faces.push((View::Basic, "Basic"));
     }
@@ -1012,5 +1163,139 @@ mod tests {
                 document.ui(ui, id, &[], &mut workspace, &mut device, &mut log);
             });
         });
+    }
+
+    /// One second of 44.1 kHz mono — long enough for the encoder's shortest stroke.
+    fn wav_bytes() -> Vec<u8> {
+        let samples: Vec<i16> = (0..codec::SOURCE_RATE as usize)
+            .map(|i| ((i as f64 / 40.0).sin() * 12_000.0) as i16)
+            .collect();
+        nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
+    }
+
+    /// A WAV opened here is not a Nord file, but it is the one thing this app can make
+    /// one out of — so it gets a panel, and Encode adds an instrument beside it rather
+    /// than replacing it.
+    #[test]
+    fn a_wav_offers_an_encode_and_leaves_itself_alone() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut document = Document::default();
+
+        let bytes = wav_bytes();
+        let id = workspace.ingest(
+            "Marimba hit.wav".into(),
+            Origin::File("Marimba hit.wav".into()),
+            bytes.clone(),
+            &mut log,
+        );
+        assert_eq!(
+            faces(workspace.get(id).unwrap(), None)
+                .iter()
+                .map(|(_, label)| *label)
+                .collect::<Vec<_>>(),
+            ["Basic", "Meta"],
+        );
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                document.ui(ui, id, &bytes, &mut workspace, &mut device, &mut log);
+            });
+        });
+        document.answer(id, Asked::Encode, &mut workspace, &mut log);
+
+        assert!(document.error.is_none(), "{:?}", document.error);
+        assert_eq!(workspace.get(id).unwrap().bytes, bytes, "the WAV is intact");
+        let made = workspace
+            .entities()
+            .iter()
+            .find(|e| e.id != id)
+            .expect("an instrument was added");
+        assert_eq!(made.name, "Marimba hit.nsmp");
+        let snapshot = sample::snapshot(made.entity.as_ref().expect("it decoded"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.name, "Marimba hit");
+        assert_eq!(snapshot.zones.len(), 1);
+    }
+
+    /// A zone is decoded once, on request, and the WAV it exports is named after the
+    /// instrument rather than the file the asset arrived as.
+    #[test]
+    fn a_zone_decodes_on_request_and_exports_under_the_instruments_name() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut document = Document::default();
+
+        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
+        let options = nord_format::formats::nsmp::encode::Options::new("Marimba").root_key(48);
+        let bytes = nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let id = workspace.ingest(
+            "whatever-it-was-called.nsmp".into(),
+            Origin::File("whatever-it-was-called.nsmp".into()),
+            bytes,
+            &mut log,
+        );
+        document.target = Some(id);
+        document.audio.follow(id, workspace.get(id).unwrap().stamp);
+
+        assert!(document.audio.get(0).is_none(), "nothing decodes unasked");
+        document.answer(
+            id,
+            Asked::Zone(sample::Ask::Decode(0)),
+            &mut workspace,
+            &mut log,
+        );
+        let decoded = document.audio.get(0).expect("asked for").as_ref().unwrap();
+        assert!(decoded.audio.seconds() > 0.5);
+        assert_eq!(decoded.audio.channels, 1);
+        assert!(!decoded.envelope.is_empty());
+
+        // With a zone open the document paints its envelope, which nothing else does.
+        let opened = workspace.get(id).unwrap().bytes.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
+            });
+        });
+
+        assert_eq!(document.instrument_name(id, &workspace), "Marimba");
+        assert_eq!(
+            crate::workspace::zone_wav_name(&document.instrument_name(id, &workspace), 1),
+            "Marimba-zone1.wav",
+        );
+
+        // Editing the instrument replaces its bytes, so what was decoded from the old
+        // ones is dropped rather than kept beside a file it no longer describes.
+        let edited = sample::apply(
+            &workspace.get(id).unwrap().bytes,
+            &[("name".into(), "Vibes".into())],
+        )
+        .unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        document.audio.follow(id, workspace.get(id).unwrap().stamp);
+        assert!(document.audio.get(0).is_none(), "decoded from stale bytes");
+        assert_eq!(document.instrument_name(id, &workspace), "Vibes");
+    }
+
+    /// The sample document paints, and so does the encode panel over a WAV.
+    #[test]
+    fn a_sample_document_paints() {
+        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
+        let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
+        let bytes = nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        render_file("Marimba.nsmp", bytes.clone(), View::Basic);
+        render_file("Marimba.nsmp", bytes, View::Meta);
+        render_file("Marimba hit.wav", wav_bytes(), View::Basic);
     }
 }
