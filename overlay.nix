@@ -503,7 +503,11 @@ in
           port="''${DRAWBAR_PORT:-8080}"
           url="http://127.0.0.1:$port/"
 
+          # ⚠️ Store paths carry epoch mtimes, so without this the browser's heuristic
+          # freshness keeps a stale bundle for years and the glue no longer matches
+          # the wasm. `no-cache` forces revalidation; the ETag still answers 304.
           miniserve --index index.html --interfaces 127.0.0.1 --port "$port" \
+            --header "Cache-Control: no-cache" \
             ${final.nord.drawbar-web} &
           server=$!
           trap 'kill "$server" 2>/dev/null || true' EXIT
