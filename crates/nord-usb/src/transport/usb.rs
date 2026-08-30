@@ -10,7 +10,7 @@ use nusb::transfer::{Control, ControlType, Queue, RequestBuffer};
 use nusb::{DeviceInfo, Interface};
 
 use super::record::Recorder;
-use super::{Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
+use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::deadline::with_timeout;
 use crate::error::{Error, Result};
 
@@ -55,6 +55,10 @@ pub fn list() -> Result<Vec<DeviceInfo>> {
 
 pub struct UsbTransport {
     interface: Interface,
+    /// `wMaxPacketSize` for [`EP_OUT`], read from the interface descriptor rather than
+    /// assumed: it decides which frames need a terminating zero-length packet, and it
+    /// is 64 only because this link is full speed.
+    out_packet: usize,
     /// What the device descriptor calls itself, kept for the recorder's header.
     product: Option<String>,
     /// Set to mirror every frame into a replay script. `None` is the normal case.
@@ -93,13 +97,38 @@ impl UsbTransport {
              Manager, or a WebUSB page — will block this)",
         ))?;
 
+        let out_packet = interface
+            .descriptors()
+            .find_map(|alt| {
+                alt.endpoints()
+                    .find(|ep| ep.address() == EP_OUT)
+                    .map(|ep| ep.max_packet_size())
+            })
+            .filter(|size| *size > 0)
+            .ok_or_else(|| {
+                Error::Transport(format!(
+                    "the vendor interface reports no bulk OUT endpoint at {EP_OUT:#04x}"
+                ))
+            })?;
+
         let read_queue = interface.bulk_in_queue(EP_IN);
         Ok(Self {
             interface,
+            out_packet,
             product: info.product_string().map(str::to_owned),
             record: None,
             read_queue,
         })
+    }
+
+    /// End a frame the device would otherwise still be reading — see
+    /// [`needs_terminator`].
+    async fn terminate(&mut self, written: usize) -> Result<()> {
+        if !needs_terminator(written, self.out_packet) {
+            return Ok(());
+        }
+        let completion = self.interface.bulk_out(EP_OUT, Vec::new()).await;
+        completion.status.map_err(map_err("bulk write terminator"))
     }
 
     /// Mirror every frame this transport carries into a replay script at `path`.
@@ -276,6 +305,9 @@ impl Transport for UsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
         completion.status.map_err(map_err("bulk write"))?;
+        self.terminate(buf.len()).await?;
+        // The terminator is a packet, not a frame: recording it would put a length word
+        // in the script that no message has.
         if let Some(r) = self.record.as_mut() {
             r.out(buf);
         }
@@ -297,6 +329,7 @@ impl Transport for UsbTransport {
         match with_timeout(self.interface.bulk_out(EP_OUT, buf.to_vec()), limit).await {
             Some(completion) => {
                 completion.status.map_err(map_err("bulk write"))?;
+                self.terminate(buf.len()).await?;
                 if let Some(r) = self.record.as_mut() {
                     r.out(buf);
                 }

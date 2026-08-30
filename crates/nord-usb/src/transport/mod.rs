@@ -49,6 +49,21 @@ pub const EP_OUT: u8 = 0x03;
 /// device's choice, not a USB constraint (the link is Full Speed, 64-byte packets).
 pub const READ_BUFFER: usize = 49152;
 
+/// Whether a frame of `written` bytes leaves the device waiting for the rest of a
+/// message that has already finished.
+///
+/// ⚠️ Confirmed on hardware: the firmware reads a message until a **short** packet ends
+/// it, so a frame that is a whole number of packets is never answered and the session
+/// stays open. A `RENAME` carrying a 34-character name is exactly 64 bytes on the
+/// full-speed link and gets no reply; at 33 characters, one byte shorter, the same
+/// command answers normally. It repeats at 128, and it is not particular to a command
+/// or a class — `BEGIN_WRITE` at 64 bytes hangs the same way on Live and Settings.
+///
+/// A zero-length frame needs no terminator: it is one.
+pub(crate) fn needs_terminator(written: usize, packet: usize) -> bool {
+    written != 0 && written.is_multiple_of(packet)
+}
+
 /// A bidirectional byte pipe to the device.
 ///
 /// # Why this shape
@@ -72,6 +87,11 @@ pub const READ_BUFFER: usize = 49152;
 #[allow(async_fn_in_trait)]
 pub trait Transport {
     /// Write one message to the OUT endpoint.
+    ///
+    /// ⚠️ The device reads a message until a **short** packet ends it, so a backend
+    /// that moves real packets must terminate a frame whose length is a whole multiple
+    /// of the endpoint's `wMaxPacketSize`. Leaving one unterminated does not fail: the
+    /// device simply never answers, and the session stays open.
     async fn write(&mut self, buf: &[u8]) -> Result<()>;
 
     /// Read up to `max` bytes from the IN endpoint.
@@ -118,3 +138,38 @@ pub trait Transport {
 /// Deliberately *not* a supertrait of [`Transport`] — see the note there.
 pub trait SendTransport: Transport + Send {}
 impl<T: Transport + Send> SendTransport for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_terminator;
+
+    /// The boundary measured on the instrument: 63 bytes is answered, 64 is not, and it
+    /// repeats at every multiple. Getting this wrong either strands a session forever or
+    /// injects an empty message the device will try to parse.
+    #[test]
+    fn a_frame_that_fills_whole_packets_needs_terminating() {
+        const FULL_SPEED: usize = 64;
+        for answered in [1, 33, 63, 65, 127, 129] {
+            assert!(!needs_terminator(answered, FULL_SPEED), "{answered}");
+        }
+        for stranded in [64, 128, 192, 32_768] {
+            assert!(needs_terminator(stranded, FULL_SPEED), "{stranded}");
+        }
+    }
+
+    /// A high-speed link would put the boundary at 512, so the rule has to come from the
+    /// endpoint's own `wMaxPacketSize` rather than from the 64 this instrument uses.
+    #[test]
+    fn the_boundary_follows_the_endpoints_packet_size() {
+        assert!(needs_terminator(512, 512));
+        assert!(!needs_terminator(64, 512));
+        assert!(!needs_terminator(576, 512));
+    }
+
+    /// Writing nothing already ends a message; terminating it would send a second one.
+    #[test]
+    fn an_empty_write_is_its_own_terminator() {
+        assert!(!needs_terminator(0, 64));
+        assert!(!needs_terminator(0, 512));
+    }
+}
