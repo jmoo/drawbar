@@ -32,13 +32,18 @@ pub type Transpose<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OF
 /// milliseconds, a filter cutoff in hertz, an equalizer band in decibels either side of a
 /// centre — see [`Time`], [`Frequency`], [`Rate`] and [`Bipolar`]. Typing one of those as a
 /// `Level` makes the panel reading wrong rather than merely absent.
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LevelOf<const FULL: u8> {
     inner: u8,
 }
 
 impl<const FULL: u8> LevelOf<FULL> {
-    pub const MAX: u8 = FULL;
+    const VALID: () = assert!(FULL > 0, "a level needs a nonzero full-scale value");
+
+    pub const MAX: u8 = {
+        let () = Self::VALID;
+        FULL
+    };
 
     pub fn new(value: u8) -> Result<Self, ParseError> {
         value.try_into()
@@ -46,6 +51,7 @@ impl<const FULL: u8> LevelOf<FULL> {
 
     /// The stored value, `0..=FULL`.
     pub fn as_u8(&self) -> u8 {
+        let () = Self::VALID;
         self.inner
     }
 
@@ -54,7 +60,15 @@ impl<const FULL: u8> LevelOf<FULL> {
     /// Confirmed on hardware: reverb wet reads `43` in the file and the panel shows
     /// 3.4, and `43 / 127 * 10 = 3.39`.
     pub fn as_panel(&self) -> f32 {
+        let () = Self::VALID;
         f32::from(self.inner) / f32::from(FULL) * 10.0
+    }
+}
+
+impl<const FULL: u8> Default for LevelOf<FULL> {
+    fn default() -> Self {
+        let () = Self::VALID;
+        Self { inner: 0 }
     }
 }
 
@@ -62,6 +76,7 @@ impl<const FULL: u8> TryFrom<u8> for LevelOf<FULL> {
     type Error = ParseError;
 
     fn try_from(value: u8) -> Result<Self, ParseError> {
+        let () = Self::VALID;
         if value > FULL {
             return Err(ParseError::OutOfBounds {
                 value: format!("{value}"),
@@ -73,7 +88,11 @@ impl<const FULL: u8> TryFrom<u8> for LevelOf<FULL> {
 }
 
 impl<const FULL: u8> Packed for LevelOf<FULL> {
-    const MAX_BITS: u32 = bits_for(FULL as u64);
+    const MAX_BITS: u32 = {
+        let () = Self::VALID;
+        bits_for(FULL as u64)
+    };
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Knob(Unit::Panel10);
     type Error = ParseError;
 
@@ -159,6 +178,7 @@ macro_rules! knob {
 
         impl Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
             const CONTROL: ControlKind = $control;
             type Error = ParseError;
 
@@ -308,6 +328,7 @@ impl<const LIMIT: i16> TryFrom<u8> for Bipolar<LIMIT> {
 
 impl<const LIMIT: i16> Packed for Bipolar<LIMIT> {
     const MAX_BITS: u32 = 7;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Bipolar(Unit::Decibels);
     type Error = ParseError;
 
@@ -353,28 +374,29 @@ pub type EqBand = Bipolar<15>;
 /// `BITS` is the slot's width, which tracks the parent's: eight beside a `0..=127` knob,
 /// five beside a drawbar, three beside a switch.
 ///
-/// ⚠️ **The encoding is not established.** Over the Stage 4 factory programs the eight-bit
-/// slots use the whole byte — 0..=255 — with 78.6% of them holding exactly 127. That
-/// reads as a neutral centre, so the slot is plausibly a signed delta biased by 127, or a
-/// destination at twice the parent's resolution. Inferred from specimens; not confirmed
-/// on hardware. Until it is, [`Self::is_neutral`] is the only claim made, and `Debug`
-/// prints the stored value rather than a reading nothing has confirmed.
+/// ⚠️ **The encoding is not established.** Stage 4 specimens use the whole byte,
+/// with 127 predominant. It may be a signed delta biased by 127 or a destination at
+/// twice the parent's resolution. Inferred from specimens; not confirmed on hardware.
+/// [`Self::is_neutral`] is the only interpretation exposed.
 ///
 /// The experiment that settles it: assign one morph at a known depth, store, and diff the
 /// slot against its parent's value.
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MorphOf<const BITS: u32> {
     inner: u8,
 }
 
 impl<const BITS: u32> MorphOf<BITS> {
-    /// The slot's midpoint — 127 in eight bits, which is where the corpus piles up.
-    ///
-    /// ⚠️ Only the eight-bit slots show that mode. For the narrower ones this is the
-    /// midpoint by construction and not an observation.
-    pub const NEUTRAL: u8 = ((1u16 << BITS) / 2 - 1) as u8;
+    const VALID: () = assert!(BITS > 0 && BITS <= 8, "a morph must fit in a byte");
+
+    /// The slot's midpoint. Only the eight-bit value is confirmed by specimens.
+    pub const NEUTRAL: u8 = {
+        let () = Self::VALID;
+        ((1u16 << BITS) / 2 - 1) as u8
+    };
 
     pub fn as_u8(&self) -> u8 {
+        let () = Self::VALID;
         self.inner
     }
 
@@ -384,12 +406,24 @@ impl<const BITS: u32> MorphOf<BITS> {
     }
 }
 
+impl<const BITS: u32> Default for MorphOf<BITS> {
+    fn default() -> Self {
+        let () = Self::VALID;
+        Self { inner: 0 }
+    }
+}
+
 impl<const BITS: u32> Packed for MorphOf<BITS> {
-    const MAX_BITS: u32 = BITS;
+    const MAX_BITS: u32 = {
+        let () = Self::VALID;
+        BITS
+    };
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Morph;
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
+        let () = Self::VALID;
         Ok(MorphOf { inner: bits as u8 })
     }
 
@@ -432,24 +466,39 @@ pub type DrawbarMorph = MorphOf<5>;
 pub type SwitchMorph = MorphOf<3>;
 
 /// A [`Selector`] over a list too long for a byte — a waveform, a sample slot.
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WideSelector<const BITS: u32> {
     inner: u16,
 }
 
 impl<const BITS: u32> WideSelector<BITS> {
+    const VALID: () = assert!(BITS > 0 && BITS <= 16, "a wide selector must fit in a u16");
+
     /// The stored index.
     pub fn raw(&self) -> u16 {
+        let () = Self::VALID;
         self.inner
     }
 }
 
+impl<const BITS: u32> Default for WideSelector<BITS> {
+    fn default() -> Self {
+        let () = Self::VALID;
+        Self { inner: 0 }
+    }
+}
+
 impl<const BITS: u32> Packed for WideSelector<BITS> {
-    const MAX_BITS: u32 = BITS;
+    const MAX_BITS: u32 = {
+        let () = Self::VALID;
+        BITS
+    };
+    const DECODE_BITS: u32 = u16::BITS;
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
+        let () = Self::VALID;
         Ok(WideSelector { inner: bits as u16 })
     }
 
@@ -507,6 +556,7 @@ impl Drawbar {
 
 impl Packed for Drawbar {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Drawbar;
     type Error = ::core::convert::Infallible;
 
@@ -558,6 +608,7 @@ impl OctaveShiftNibble {
 
 impl Packed for OctaveShiftNibble {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = 4;
     const CONTROL: ControlKind = ControlKind::Shift(Unit::Octaves);
     type Error = ::core::convert::Infallible;
 
@@ -593,32 +644,41 @@ impl PartialEq<i8> for OctaveShiftNibble {
 
 /// A selector whose positions are known to be a fixed set, but whose table is not.
 ///
-/// The honest middle between an integer and a `sparse_enum!`. A caller building an
-/// interface needs to know a field is a *selector* — a discrete list, drawn as a row of
-/// positions rather than a knob — before it needs to know what each position is called,
-/// and on the Stage 4 that is exactly the state of things: the placements came from an
-/// external offset table and were confirmed against the corpus, but no specimen names a
-/// value. This carries the shape without laundering a guess into a label.
-///
-/// Give a field a `sparse_enum!` the moment the table is known; that is strictly better.
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// This preserves the control shape without inventing labels for positions that are not
+/// yet identified. Use `sparse_enum!` once the value table is known.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Selector<const BITS: u32> {
     inner: u8,
 }
 
 impl<const BITS: u32> Selector<BITS> {
+    const VALID: () = assert!(BITS > 0 && BITS <= 8, "a selector must fit in a byte");
+
     /// The stored index.
     pub fn raw(&self) -> u8 {
+        let () = Self::VALID;
         self.inner
     }
 }
 
+impl<const BITS: u32> Default for Selector<BITS> {
+    fn default() -> Self {
+        let () = Self::VALID;
+        Self { inner: 0 }
+    }
+}
+
 impl<const BITS: u32> Packed for Selector<BITS> {
-    const MAX_BITS: u32 = BITS;
+    const MAX_BITS: u32 = {
+        let () = Self::VALID;
+        BITS
+    };
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
+        let () = Self::VALID;
         Ok(Selector { inner: bits as u8 })
     }
 
@@ -708,6 +768,7 @@ impl Debug for PartMix {
 
 impl Packed for PartMix {
     const MAX_BITS: u32 = 7;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Bipolar(Unit::None);
     type Error = ParseError;
 
@@ -780,6 +841,7 @@ impl TryFrom<u8> for SplitPoint73 {
 
 impl Packed for SplitPoint73 {
     const MAX_BITS: u32 = 3;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ParseError;
 
@@ -834,6 +896,7 @@ impl StageTranspose {
 
 impl Packed for StageTranspose {
     const MAX_BITS: u32 = 4;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Shift(Unit::Semitones);
     type Error = ParseError;
 
@@ -878,6 +941,7 @@ impl MasterTempo {
 
 impl Packed for MasterTempo {
     const MAX_BITS: u32 = 8;
+    const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Knob(Unit::Bpm);
     type Error = ParseError;
 
@@ -955,6 +1019,7 @@ macro_rules! sparse_enum {
 
         impl $crate::bits::Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
             type Error = ::core::convert::Infallible;
 
@@ -1023,6 +1088,7 @@ macro_rules! switch {
 
         impl $crate::bits::Packed for $name {
             const MAX_BITS: u32 = 1;
+            const DECODE_BITS: u32 = u64::BITS;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Toggle;
             type Error = ::core::convert::Infallible;
 
@@ -1098,6 +1164,7 @@ impl ArpPattern {
 
 impl Packed for ArpPattern {
     const MAX_BITS: u32 = 32;
+    const DECODE_BITS: u32 = u32::BITS;
     const CONTROL: ControlKind = ControlKind::Pattern;
     type Error = ::core::convert::Infallible;
 
@@ -1161,6 +1228,7 @@ impl LibraryRef {
 
 impl Packed for LibraryRef {
     const MAX_BITS: u32 = 32;
+    const DECODE_BITS: u32 = u32::BITS;
     const CONTROL: ControlKind = ControlKind::Reference;
     type Error = ::core::convert::Infallible;
 
@@ -1228,11 +1296,8 @@ sparse_enum!(
     /// synth zone slots hold only values inside this table, with `oooo` dominating, so all
     /// three sections share it.
     ///
-    /// ⚠️ The Stage 4 reaches a stored **10**, which this table does not name — see
-    /// `organ_a.kb_zones` and `synth_c_performance.kb_zones` in the Stage 4 decode
-    /// snapshot. Either the Stage 4 offers an eleventh combination or the value means
-    /// something else there; it decodes to `Unknown(10)` and rides through verbatim
-    /// rather than being folded into a neighbor.
+    /// Unexplained: Stage 4 specimens reach stored value 10. It decodes as `Unknown(10)`
+    /// and survives verbatim.
     KbZone4, 4, {
         0 => V0, "o---";
         1 => V1, "-o--";
@@ -1405,8 +1470,7 @@ mod tests {
         assert_eq!(Level::new(96).unwrap().to_string(), "96 (7.6)");
     }
 
-    /// The Stage 4 stores octave shift in two's complement, where the Stage 2 and 3 store
-    /// it biased. Corpus: the Stage 4 factory banks hold only 0, 1, 2, 14 and 15.
+    /// Stage 4 octave shift is two's complement; Stage 2 and 3 use biased values.
     #[test]
     fn the_stage4_octave_shift_wraps_where_the_others_bias() {
         let read = |bits| OctaveShiftNibble::from_bits(bits).unwrap().octaves();
@@ -1421,9 +1485,7 @@ mod tests {
         }
     }
 
-    /// Every eight-bit pattern is a morph value, and 127 is the one the corpus piles up
-    /// on. The reading is unconfirmed, so `Debug` stays numeric and only `Display` says
-    /// anything.
+    /// Every pattern survives; the specimen mode at 127 is displayed as neutral.
     #[test]
     fn a_morph_slot_names_its_neutral_and_keeps_the_rest() {
         assert_eq!(MorphTarget::NEUTRAL, 127);
@@ -1441,8 +1503,7 @@ mod tests {
         }
     }
 
-    /// Sixteen steps of two bits, lowest bits first — the reading that makes the corpus
-    /// values fall out as music.
+    /// Sixteen two-bit steps decode lowest bits first.
     #[test]
     fn an_arp_pattern_reads_as_steps() {
         // Accent on every fourth step.

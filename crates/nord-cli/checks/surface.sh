@@ -22,10 +22,8 @@ cd "$scratch"
 
 echo
 echo "== the command surface =="
-# Clap lists each command as two spaces, the name, then its description.
-# Continuation lines are indented further, so they do not match.
-# POSIX BRE only — this also runs under macOS's BSD sed, where `\+` is a
-# literal and silently matches nothing.
+# Clap commands have exactly two leading spaces; continuation lines have more.
+# Use POSIX BRE: macOS BSD sed treats `\+` as a literal and silently finds nothing.
 commands() { sed -n 's/^  \([a-z][a-z-]*\)  .*/\1/p' "$1" | tr '\n' ' '; }
 
 while IFS=: read -r noun want; do
@@ -54,9 +52,7 @@ while IFS=: read -r noun want; do
   }
 done < <(grep -v '^#' "$here/surface.txt")
 
-# The escape hatch is reachable but unadvertised: hidden is not deprecated, it
-# is the escape hatch class-generalisation earns, and it has to stay tested to
-# stay usable.
+# The raw escape hatch must remain reachable but absent from advertised commands.
 if grep -q ' raw ' surface-top.txt; then
   echo "nord raw is meant to be hidden from the top-level help"
   exit 1

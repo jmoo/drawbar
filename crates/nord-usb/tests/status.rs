@@ -132,8 +132,7 @@ fn derives_slots_only_for_fixed_size_classes() {
 
 /// The file a read rebuilds is a real `.ne5p`, not just the right bytes.
 ///
-/// `tests/scripts/program/read_prog_bank8_loc14.script` pins the reconstruction against
-/// the file NSM saved for that slot, byte for byte; this says what those bytes are —
+/// The replay compares reconstruction with the file saved for that slot; this checks it is
 /// a container whose header carries the format tag and the address the wire never
 /// transmits together.
 #[test]
@@ -151,8 +150,7 @@ fn a_rebuilt_file_is_a_container_the_envelope_reads_back() {
 /// A body larger than one `READ` arrives across several requests, and the offsets must
 /// advance by exactly what was asked for.
 ///
-/// The framing is built rather than captured — `read_prog_bank8_loc14.script` already
-/// pins the captured bytes. What this pins is the chunking: three exchanges at offsets
+/// The framing is built rather than captured. The test checks three exchanges at offsets
 /// 0 / 32720 / 65440 with lengths 32720 / 32720 / 777, in that order, under an
 /// exact-match transport. A single whole-body request, a wrong offset, or a dropped
 /// final chunk all fail it.
@@ -227,9 +225,7 @@ fn a_large_body_is_read_in_chunks() {
         response(cmd::BEGIN_READ + 1, &slot),
     ];
 
-    // The bar after each chunk: 32720/66217 = 49.4%, 65440/66217 = 98.8%, then done.
-    // Written out rather than recomputed, so a wrong formula fails instead of agreeing
-    // with itself.
+    // Expected progress is independent of the production calculation.
     for (offset, want, pct) in [
         (0, CHUNK, 49u16),
         (CHUNK, CHUNK, 98),

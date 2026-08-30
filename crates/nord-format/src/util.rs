@@ -51,74 +51,84 @@ fn unknown(file_type: FileType) -> Peek {
 
 /// Identify a file by its magic, leaving the stream where it started.
 pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
-    let mut head = [0u8; 1];
-    reader.read_exact(&mut head)?;
-    reader.seek(SeekFrom::Start(0))?;
+    let start = reader.stream_position()?;
+    let result = (|| {
+        let mut head = [0u8; 1];
+        reader.read_exact(&mut head)?;
+        reader.seek(SeekFrom::Start(start))?;
 
-    let result = match head[0] {
-        // 'P' — a ZIP local-file header, checked in full so a stray P (or a bare
-        // central directory) is not called an archive.
-        0x50 => {
-            let mut head = [0u8; 4];
-            reader.read_exact(&mut head)?;
-            if &head == b"PK\x03\x04" {
-                Ok(unknown(FileType::Zip))
-            } else {
-                Err(ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned()).into())
+        match head[0] {
+            // 'P' — a ZIP local-file header, checked in full so a stray P (or a bare
+            // central directory) is not called an archive.
+            0x50 => {
+                let mut head = [0u8; 4];
+                reader.read_exact(&mut head)?;
+                if &head == b"PK\x03\x04" {
+                    Ok(unknown(FileType::Zip))
+                } else {
+                    Err(
+                        ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned())
+                            .into(),
+                    )
+                }
             }
-        }
 
-        0x3c => Ok(unknown(FileType::Xml)),
+            0x3c => Ok(unknown(FileType::Xml)),
 
-        // 'S' — a Sample Editor project, checked in full so a stray S is not one.
-        0x53 => {
-            let mut head = vec![0u8; nsmpproj::MAGIC.len()];
-            reader.read_exact(&mut head)?;
-            if head == nsmpproj::MAGIC {
-                Ok(unknown(FileType::SampleProject))
-            } else {
-                Err(ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned()).into())
+            // 'S' — a Sample Editor project, checked in full so a stray S is not one.
+            0x53 => {
+                let mut head = vec![0u8; nsmpproj::MAGIC.len()];
+                reader.read_exact(&mut head)?;
+                if head == nsmpproj::MAGIC {
+                    Ok(unknown(FileType::SampleProject))
+                } else {
+                    Err(
+                        ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned())
+                            .into(),
+                    )
+                }
             }
-        }
 
-        0xf0 => Ok(unknown(FileType::Sysex)),
+            0xf0 => Ok(unknown(FileType::Sysex)),
 
-        // 'M' — `MThd`, checked in full so a stray M is not called MIDI.
-        0x4d => {
-            let mut head = [0u8; 4];
-            reader.read_exact(&mut head)?;
-            if &head == midi::MAGIC {
-                Ok(unknown(FileType::Midi))
-            } else {
-                // Through `result`, never a bare return: the rewind below is what
-                // makes this function leave the stream where it found it.
-                Err(ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned()).into())
+            // 'M' — `MThd`, checked in full so a stray M is not called MIDI.
+            0x4d => {
+                let mut head = [0u8; 4];
+                reader.read_exact(&mut head)?;
+                if &head == midi::MAGIC {
+                    Ok(unknown(FileType::Midi))
+                } else {
+                    Err(
+                        ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned())
+                            .into(),
+                    )
+                }
             }
-        }
 
-        // 'C' — CBIN, or the Electro 2 library's CNE3.
-        0x43 => {
-            let mut head = [0u8; 12];
-            reader.read_exact(&mut head)?;
-            if &head[0..4] == cbin::MAGIC {
-                Ok(Peek {
-                    format: String::from_utf8_lossy(&head[8..12]).into_owned(),
-                    file_type: FileType::Cbin,
-                })
-            } else if &head[0..4] == cn3::MAGIC {
-                Ok(unknown(FileType::Cne3))
-            } else {
-                Err(
-                    ParseError::UnknownFormat(String::from_utf8_lossy(&head[0..4]).into_owned())
-                        .into(),
-                )
+            // 'C' — CBIN, or the Electro 2 library's CNE3.
+            0x43 => {
+                let mut head = [0u8; 12];
+                reader.read_exact(&mut head)?;
+                if &head[0..4] == cbin::MAGIC {
+                    Ok(Peek {
+                        format: String::from_utf8_lossy(&head[8..12]).into_owned(),
+                        file_type: FileType::Cbin,
+                    })
+                } else if &head[0..4] == cn3::MAGIC {
+                    Ok(unknown(FileType::Cne3))
+                } else {
+                    Err(ParseError::UnknownFormat(
+                        String::from_utf8_lossy(&head[0..4]).into_owned(),
+                    )
+                    .into())
+                }
             }
+
+            b => Err(ParseError::UnknownFormat(format!("first_byte = {b:0x}")).into()),
         }
+    })();
 
-        b => Err(ParseError::UnknownFormat(format!("first_byte = {b:0x}")).into()),
-    };
-
-    reader.seek(SeekFrom::Start(0))?;
+    reader.seek(SeekFrom::Start(start))?;
 
     result
 }
@@ -128,13 +138,28 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// A refusal still rewinds: a caller that falls back to another reader after
-    /// `peek` says no must find the stream at byte 0, not mid-header.
     #[test]
-    fn a_c_that_is_not_cbin_is_refused_with_the_stream_rewound() {
-        let mut reader = Cursor::new(b"CRUD\0\0\0\0abcdefgh".to_vec());
+    fn a_refusal_restores_the_starting_position() {
+        let mut reader = Cursor::new(b"skipCRUD\0\0\0\0abcdefgh".to_vec());
+        reader.set_position(4);
         assert!(peek(&mut reader).is_err());
-        assert_eq!(reader.stream_position().unwrap(), 0);
+        assert_eq!(reader.stream_position().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_short_header_restores_the_starting_position() {
+        let mut reader = Cursor::new(b"skipMTh".to_vec());
+        reader.set_position(4);
+        assert!(peek(&mut reader).is_err());
+        assert_eq!(reader.stream_position().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_match_restores_the_starting_position() {
+        let mut reader = Cursor::new(b"skipMThd\0\0\0\x06\0\0\0\0\0".to_vec());
+        reader.set_position(4);
+        assert_eq!(peek(&mut reader).unwrap().file_type.as_str(), "midi");
+        assert_eq!(reader.stream_position().unwrap(), 4);
     }
 
     #[test]

@@ -1,9 +1,8 @@
 //! A recording tap over a live transport: every frame in either direction is appended
 //! to a script file in the format [`crate::transport::replay`] reads back.
 //!
-//! Frames are written whole and in wire order, because a golden replay is only worth
-//! having if it is byte-exact. A bulk body read therefore contributes one line per
-//! chunk, so recording a large object yields a large script.
+//! Frames are written byte-exactly in wire order. Bulk reads contribute one line per
+//! chunk.
 //!
 //! Writes are unbuffered: a session that wedges or is killed still leaves everything
 //! that reached the wire on disk, which is the case the recording usually exists for.

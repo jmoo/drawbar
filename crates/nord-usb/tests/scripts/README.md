@@ -97,7 +97,7 @@ nothing.
 `nord … --record <path>` writes all of this itself: the header, an `intent` at every
 transaction it opens, and an `expect` under one that failed — the empty slot a pre-check
 names before a `put`, or a rename the library classes refuse. A capture made that way is a
-finished golden, whichever way it went; drop it in a directory here or in the corpus and
+complete replay, whichever way it went; drop it in a directory here or in the corpus and
 it is a trial.
 
 The hand-built ones under `session/` cover paths no instrument produces on request: a

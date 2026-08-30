@@ -12,25 +12,13 @@ pub const RECORDS_AT: usize = COUNT_AT + 1;
 /// Bytes per zone record.
 pub const RECORD_LEN: usize = 15;
 
-/// Within a record: which stroke plays this zone, by the global id the stroke carries
-/// in its own first four bytes.
-///
-/// ⚠️ **Not a positional index.** Instruments the editor builds in one pass number
-/// their strokes `n…1` in file order, so this byte reads as a countdown and pairing
-/// zones with strokes by position appears to work. It is a coincidence of how those
-/// files were made: the vendor library ships ids like `13 12 6 9 5 25`, in an order
-/// that matches nothing, and pairing by position there hands every zone the wrong
-/// sample. Same idea as the v3/v4 table, one generation earlier — see [`ZoneV3`].
+/// Stroke global ID, not a positional index.
 const STROKE_ID: usize = 2;
 
 /// Within a record: the highest MIDI note this zone answers to.
 const TOP_NOTE: usize = 9;
 
-/// A keyboard zone.
-///
-/// Zones are stored **high to low**: the first record covers the top of the keyboard.
-/// Only the top note is stored — a zone's bottom note is one above the next record's top
-/// note, and the last record reaches down to the bottom of the keyboard.
+/// A high-to-low keyboard zone storing only its upper bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     /// Highest MIDI note this zone answers to.
@@ -68,10 +56,7 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
         .collect())
 }
 
-/// Sets one zone's top note in place.
-///
-/// Nothing else moves: the top note is an isolated byte, and the encoded audio does not
-/// depend on the key range a zone covers, so remapping never needs a re-encode.
+/// Set one zone's isolated top-note byte without re-encoding audio.
 pub fn set_top_note(map: &mut [u8], index: usize, note: u8) -> Result<(), ParseError> {
     let n = count(map)?;
     if index >= n {
@@ -83,27 +68,8 @@ pub fn set_top_note(map: &mut [u8], index: usize, note: u8) -> Result<(), ParseE
     Ok(())
 }
 
-/// A v3/v4 keyboard zone, from the record table at the tail of the wide
-/// chain's `map` section.
-///
-/// Layouts by `map` section version — derived from the corpus, where every
-/// record names a real stroke and carries that stroke's root key at byte 0:
-///
-/// | map | record | gid at | low note | stored order |
-/// |---|---|---|---|---|
-/// | 12 | 11 B | +5 | tiled, not stored | high → low |
-/// | 14 | 16 B | +8 | at +2 | low → high |
-/// | 21 | 16 B | +8 | at +2 | high → low |
-///
-/// A one-byte zone count sits immediately before the records, and equals the
-/// stroke count on every specimen. Inferred from specimens; not confirmed on
-/// hardware. (A `map` version 13 is reported to share the 16-byte layout, but
-/// no specimen shows it, so it is refused rather than assumed.)
-///
-/// ⚠️ **What follows the table is not modelled, and is not a fixed size even
-/// within one version.** v12 ends on the last record and v14 leaves one byte,
-/// but v21 leaves two on library content and six on what the editor writes. So
-/// [`read_v3`] *finds* the table instead of assuming where it ends.
+/// Wide-generation zone paired to a stroke GID and duplicated root key.
+/// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneV3 {
     /// The referenced stroke's global id — the u32 its `stk` payload leads with.
@@ -117,21 +83,10 @@ pub struct ZoneV3 {
     pub low_note: Option<u8>,
 }
 
-/// Bytes past the zone table this reader will look through for it.
-///
-/// The table sits at the end of `map` under something whose size is not modelled —
-/// six bytes at most across the corpus, and version 21 shows two sizes on its own.
+/// Maximum unmodelled suffix searched after a wide zone table.
 const MAX_TAIL: usize = 8;
 
-/// Reads the v3/v4 zone table. `strokes` is the body's `(gid, root key)` list,
-/// used to size the table and to verify every record against the stroke it
-/// names — a misaligned read cannot pass it.
-///
-/// Because the bytes after the table are not a fixed size, the read walks back from
-/// the end of the section and takes the first placement where the count byte and
-/// *every* record's `(gid, root key)` agree with the body's own strokes. That is the
-/// same verification either way; only the search is new, and no misalignment
-/// survives it.
+/// Find and validate a wide zone table against `(stroke GID, root key)` pairs.
 pub fn read_v3(
     map_version: u32,
     map: &[u8],
@@ -149,9 +104,13 @@ pub fn read_v3(
 
     let n = strokes.len();
     let table = |tail: usize| -> Result<Vec<ZoneV3>, ParseError> {
+        let table_len = n
+            .checked_mul(record_len)
+            .and_then(|bytes| bytes.checked_add(tail))
+            .ok_or_else(|| ParseError::AssertFail("zone table size overflow".into()))?;
         let start = map
             .len()
-            .checked_sub(tail + n * record_len)
+            .checked_sub(table_len)
             .filter(|&s| s >= 1)
             .ok_or_else(|| {
                 ParseError::AssertFail(format!(
@@ -202,24 +161,21 @@ pub fn read_v3(
         .unwrap_or_else(|| ParseError::AssertFail(format!("map section is {} bytes", map.len()))))
 }
 
-/// The key ranges the editor lays out for a set of root keys, high to low.
-///
-/// The top zone reaches `root + 24`; every zone below stops one short of the midpoint
-/// between its root and the root above.
-///
-/// ⚠️ **A default, not a rule.** The top note is genuinely stored and can be moved off
-/// this layout — the editor exposes it as the zone's upper key. Use this to fill in a
-/// table when building an instrument, never to recompute one while reading.
+/// Derive the editor's default high-to-low top notes from root keys.
+/// This builds new maps; readers must preserve stored top notes.
 pub fn derive_top_notes(roots_high_to_low: &[u8]) -> Vec<u8> {
     roots_high_to_low
         .iter()
         .enumerate()
         .map(|(i, &root)| {
             if i == 0 {
-                root.saturating_add(24)
+                root.saturating_add(24).min(127)
             } else {
                 let above = roots_high_to_low[i - 1];
-                (u16::from(root) + u16::from(above)).div_ceil(2) as u8 - 1
+                (u16::from(root) + u16::from(above))
+                    .div_ceil(2)
+                    .saturating_sub(1)
+                    .min(127) as u8
             }
         })
         .collect()
@@ -256,9 +212,6 @@ mod tests {
         assert_eq!(zones[2].stroke_id, 1);
     }
 
-    /// The vendor library's own ids: unordered, not a countdown, and nowhere near the
-    /// zone count. A reader treating the byte as a position would accept these and
-    /// silently pair every zone with the wrong stroke.
     #[test]
     fn stroke_ids_need_not_be_a_countdown() {
         let zones = read(&table_with_ids(
@@ -310,5 +263,12 @@ mod tests {
     fn derived_ranges_handle_an_odd_gap() {
         // Adjacent semitones leave no room between them.
         assert_eq!(derive_top_notes(&[61, 60]), vec![85, 60]);
+    }
+
+    #[test]
+    fn derived_ranges_stay_in_the_midi_domain() {
+        assert_eq!(derive_top_notes(&[127]), vec![127]);
+        assert_eq!(derive_top_notes(&[0, 0]), vec![24, 0]);
+        assert_eq!(derive_top_notes(&[255, 255]), vec![127, 127]);
     }
 }

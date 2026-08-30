@@ -1,45 +1,5 @@
 #![cfg(feature = "corpus")]
-//! Read coverage, as a snapshot per body type: which body bits anything reads.
-//!
-//! The write-side sweep in `tests/corpus` starts from a field and asks whether the
-//! bytes follow. This asks the other question — **which bits does the instrument
-//! write that no decode reads** — and it is the one a new model's first decode is
-//! mostly made of.
-//!
-//! Three measurements per bit, none of them naming a model or a file:
-//!
-//! - **varies** — OR against AND of every corpus body. A bit that ever differs is
-//!   one the instrument writes. All-ones bodies are excluded: an unwritten slot
-//!   holds no evidence, the same exemption the sweep makes. So are the committed
-//!   fixtures, which this crate's own writers produced over a zeroed body — their
-//!   unclaimed bits are evidence of nothing. They still baseline flips.
-//! - **claimed** — the registry path that declares the bit, from [`BodyLayout`],
-//!   recursively through nested bodies. Intent, not reads: a private field claims
-//!   bits it never reports.
-//! - **answers** — flip the bit, restamp the container, re-parse, and diff
-//!   `field_values()` against the unflipped baseline. The set of paths that moved,
-//!   or `refused` where the parser rejected the mutated file — which is a read too.
-//!
-//! The two lists the file ends with are the point. **vary, unread** is the blind
-//! spot: the instrument writes it and nothing here looks. **claimed, unanswered**
-//! is the other failure — a declaration no flip can move, so it is dead or aimed at
-//! the wrong bits.
-//!
-//! ⚠️ The flip is per bit. A two-bit encoding where either bit alone is an illegal
-//! value reads as `refused` twice rather than as the field it belongs to.
-//!
-//! A body joins by being a `#[bitbody]` behind `with_registry!`, and a specimen by
-//! being in the sweep. Nothing below is per model, so there is no test code to write
-//! for the next one — only a snapshot to read.
-//!
-//! ```sh
-//! NORD_CORPUS_ROOT=/path/to/nord-corpus \
-//!   cargo test --release -p nord-format --features corpus --test coverage
-//! ```
-//!
-//! Regenerate with `UPDATE_SNAPSHOTS=1`, and **read the diff**.
-//!
-//! [`BodyLayout`]: nord_format::layout::BodyLayout
+//! Check that instrument-written bits have answers, and keep known blind debt small.
 
 #[path = "support/registry.rs"]
 mod registry;
@@ -47,99 +7,62 @@ mod registry;
 mod scan;
 #[path = "support/sidecar.rs"]
 mod sidecar;
-#[path = "support/snapshot.rs"]
-mod snapshot;
 
 use nord_format::cbin;
 use nord_format::layout::LayoutField;
 use nord_format::Entity;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::fs;
 use std::io::Cursor;
 
-/// How the answer set renders before it is summarized by count. Past it a line
-/// prints `N [first few, …]`, so a change past the cut still moves the count.
-const SHOWN: usize = 4;
-
-/// The parser rejecting a mutated file. Not a path, and deliberately spelled like
-/// one: refusing to decode is a way of reading a bit.
-const REFUSED: &str = "refused";
-
-/// What the specimens of one body type say about one of its bits.
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default)]
 struct Bit {
-    /// The registry path declaring it, from the layout walk.
     claimed: Option<String>,
-    /// Whether that path reports a value. A private field claims without reporting.
     registered: bool,
     varies: bool,
-    /// Registry paths a flip moved, plus [`REFUSED`].
     answers: BTreeSet<String>,
+    rejected: bool,
 }
-
 impl Bit {
-    /// The instrument writes it and nothing reads it — the one that matters.
     fn blind(&self) -> bool {
-        self.varies && self.answers.is_empty()
+        self.varies && self.answers.is_empty() && !self.rejected
     }
 
-    fn verdict(&self) -> &'static str {
-        if self.answers.len() == 1 && self.answers.contains(REFUSED) {
-            "refused"
-        } else if !self.answers.is_empty() {
-            "read"
-        } else if self.varies {
-            "BLIND"
-        } else if self.claimed.is_some() {
-            "unanswered"
-        } else {
-            "spare"
-        }
+    fn refusal_only(&self) -> bool {
+        self.rejected && self.answers.is_empty()
+    }
+
+    fn owned_by(&self, owner: &str) -> bool {
+        self.answers.len() == 1 && self.answers.contains(owner)
     }
 }
 
-/// One body type's specimens and what they measure.
 struct Body {
-    bits: usize,
-    /// Every instrument body OR'd, and AND'd: they differ exactly where a bit varies.
+    facts: Vec<Bit>,
     ones: Vec<u8>,
     zeros: Vec<u8>,
-    /// Instrument specimens weighed, and specimens flipped. Not nested sets — a
-    /// fixture is flipped without being evidence of what an instrument writes.
     weighed: usize,
     flipped: usize,
-    facts: Vec<Bit>,
 }
 
-/// One specimen of the sweep's population, with the sampling verdict the sweep
-/// would give it.
 struct Pick {
     specimen: &'static scan::Specimen,
     sampled: bool,
-    /// Whether an instrument wrote these bytes. ⚠️ The fixtures are this crate's
-    /// own writers' output over a zeroed body, so their unclaimed bits say nothing
-    /// about what the instrument writes: they baseline flips, never `varies`.
     instrument: bool,
 }
 
-/// Every specimen the sweep reads, in its order, each marked with whether the sweep
-/// would mutate it: every fixture, every specimen carrying an oracle sidecar, and
-/// the first of each container shape among the rest.
 fn population() -> Vec<Pick> {
-    let mut out: Vec<Pick> = scan::fixtures()
+    let mut out = scan::fixtures()
         .iter()
         .map(|specimen| Pick {
             specimen,
             sampled: true,
             instrument: false,
         })
-        .collect();
-
+        .collect::<Vec<_>>();
     let mut shapes = BTreeSet::new();
     for specimen in scan::corpus() {
         let sampled = sidecar::sidecar_of(&specimen.path).exists()
-            || scan::shape(&specimen.path).is_none_or(|s| shapes.insert(s));
+            || scan::shape(&specimen.path).is_none_or(|shape| shapes.insert(shape));
         out.push(Pick {
             specimen,
             sampled,
@@ -149,8 +72,6 @@ fn population() -> Vec<Pick> {
     out
 }
 
-/// Every bit's claiming path, from the declared layout. Nested bodies contribute
-/// their own layouts at their own offsets, under a dotted path.
 fn claims(fields: &'static [LayoutField], base: u32, prefix: &str, out: &mut [Bit]) {
     for field in fields {
         let path = if prefix.is_empty() {
@@ -162,101 +83,97 @@ fn claims(fields: &'static [LayoutField], base: u32, prefix: &str, out: &mut [Bi
             Some(nested) => claims(nested(), base + field.lo, &path, out),
             None => {
                 for bit in base + field.lo..=base + field.hi {
-                    out[bit as usize].claimed = Some(path.clone());
+                    let fact = &mut out[bit as usize];
+                    assert!(
+                        fact.claimed.is_none(),
+                        "bit {bit} is claimed by both {} and {path}",
+                        fact.claimed.as_deref().unwrap_or_default()
+                    );
+                    fact.claimed = Some(path.clone());
                 }
             }
         }
     }
 }
 
-/// Flip every bit of one specimen's body in turn and record which registry paths
-/// notice. The container is rewritten each time, so both generations' checksums are
-/// restamped and the mutated file is one the reader would accept.
+/// Rejection is tracked separately: it is not an answer from the claimed field.
 fn answers(bytes: &[u8], entity: &Entity, facts: &mut [Bit]) {
-    let baseline: Vec<String> = registry::field_values(entity)
+    let baseline = registry::field_values(entity)
         .expect("a body with a registry")
         .into_iter()
-        .map(|f| f.value)
-        .collect();
-    let mut file = cbin::read_raw(&mut Cursor::new(bytes)).expect("a container the sweep read");
+        .map(|field| field.value)
+        .collect::<Vec<_>>();
+    let mut file = cbin::read_raw(&mut Cursor::new(bytes)).expect("a parsed container");
     let mut out = Cursor::new(Vec::with_capacity(bytes.len()));
-
     for (bit, fact) in facts.iter_mut().enumerate() {
-        let mask = 1u8 << (7 - bit % 8);
-        file.body.0[bit / 8] ^= mask;
+        file.body.0[bit / 8] ^= 1 << (7 - bit % 8);
         out.get_mut().clear();
         out.set_position(0);
         file.write_to(&mut out).expect("a raw body re-encodes");
-
         match nord_format::from_stream(&mut Cursor::new(out.get_ref())) {
-            Err(_) => {
-                fact.answers.insert(REFUSED.to_string());
-            }
-            // The registry is a property of the body type, which a body-bit flip
-            // cannot change; losing it would be a change worth reporting anyway.
-            Ok(flipped) => match registry::field_values(&flipped) {
-                None => {
-                    fact.answers.insert(REFUSED.to_string());
-                }
-                Some(values) => {
-                    for (was, now) in baseline.iter().zip(values) {
-                        if *was != now.value {
-                            fact.answers.insert(now.name);
-                        }
+            Err(_) => fact.rejected = true,
+            Ok(flipped) => {
+                let values = registry::field_values(&flipped)
+                    .expect("a body-bit mutation retains its registry");
+                for (was, now) in baseline.iter().zip(values) {
+                    if *was != now.value {
+                        fact.answers.insert(now.name);
                     }
                 }
-            },
+            }
         }
-
-        file.body.0[bit / 8] ^= mask;
+        file.body.0[bit / 8] ^= 1 << (7 - bit % 8);
     }
 }
 
-/// Every registry body the sweep's specimens reach, measured.
 fn measure() -> BTreeMap<String, Body> {
-    let mut bodies: BTreeMap<String, Body> = BTreeMap::new();
-
+    let mut bodies = BTreeMap::new();
     for pick in population() {
         let (bytes, entity) = (&pick.specimen.bytes, &pick.specimen.entity);
         let Some(key) = registry::body_type(entity) else {
             continue;
         };
-        let file = cbin::read_raw(&mut Cursor::new(bytes)).expect("a CBIN the sweep read");
-        let body = file.body.0;
-        // An unwritten slot: every field there is out of table and every bit is a
-        // difference that means nothing.
-        if !body.is_empty() && body.iter().all(|&b| b == 0xff) {
+        let body = cbin::read_raw(&mut Cursor::new(bytes))
+            .expect("a parsed CBIN")
+            .body
+            .0;
+        if !body.is_empty() && body.iter().all(|&byte| byte == 0xff) {
             continue;
         }
-
         let entry = bodies.entry(key).or_insert_with(|| {
-            let bits = body.len() * 8;
-            let mut facts: Vec<Bit> = (0..bits).map(|_| Bit::default()).collect();
+            let mut facts = (0..body.len() * 8)
+                .map(|_| Bit::default())
+                .collect::<Vec<_>>();
             claims(
                 registry::layout(entity).expect("a registry body declares a layout"),
                 0,
                 "",
                 &mut facts,
             );
-            let reported: BTreeSet<String> = registry::field_values(entity)
+            let reported = registry::field_values(entity)
                 .expect("a body with a registry")
                 .into_iter()
-                .map(|f| f.name)
-                .collect();
-            for fact in facts.iter_mut() {
-                fact.registered = fact.claimed.as_ref().is_some_and(|p| reported.contains(p));
+                .map(|field| field.name)
+                .collect::<BTreeSet<_>>();
+            for fact in &mut facts {
+                fact.registered = fact
+                    .claimed
+                    .as_ref()
+                    .is_some_and(|path| reported.contains(path));
             }
             Body {
-                bits,
-                ones: vec![0x00; body.len()],
+                facts,
+                ones: vec![0; body.len()],
                 zeros: vec![0xff; body.len()],
                 weighed: 0,
                 flipped: 0,
-                facts,
             }
         });
-        assert_eq!(entry.bits, body.len() * 8, "one body type, two lengths");
-
+        assert_eq!(
+            entry.facts.len(),
+            body.len() * 8,
+            "one body type, two lengths"
+        );
         if pick.instrument {
             for (at, byte) in body.iter().enumerate() {
                 entry.ones[at] |= byte;
@@ -264,235 +181,295 @@ fn measure() -> BTreeMap<String, Body> {
             }
             entry.weighed += 1;
         }
-
         if pick.sampled {
             entry.flipped += 1;
             answers(bytes, entity, &mut entry.facts);
         }
     }
-
-    for body in bodies.values_mut() {
-        // A body only the fixtures reach has no evidence either way, and an
-        // all-ones `zeros` against an all-zero `ones` would read as every bit
-        // varying.
-        if body.weighed == 0 {
-            continue;
-        }
+    for body in bodies.values_mut().filter(|body| body.weighed > 0) {
         for (bit, fact) in body.facts.iter_mut().enumerate() {
-            let mask = 1u8 << (7 - bit % 8);
-            fact.varies = (body.ones[bit / 8] ^ body.zeros[bit / 8]) & mask != 0;
+            fact.varies = (body.ones[bit / 8] ^ body.zeros[bit / 8]) & (1 << (7 - bit % 8)) != 0;
         }
     }
     bodies
 }
 
-/// A run of bits as a hex dump locates it: a partial leading byte, the whole bytes
-/// between as a half-open byte range, then a partial trailing byte.
-fn at(lo: usize, hi: usize) -> String {
-    let mut parts = Vec::new();
-    let mut first = lo;
+// Ranges are body-relative and come from the last full-corpus measurement.
+const KNOWN_BLIND: &[(&str, &[(usize, usize)])] = &[
+    (
+        "ne5-Program",
+        &[(422, 422), (426, 426), (764, 764), (925, 938)],
+    ),
+    ("ne5-Settings", &[]),
+    ("ne5-Song", &[]),
+    (
+        "ns2-Program",
+        &[(14, 15), (170, 183), (1295, 1297), (3287, 3289)],
+    ),
+    (
+        "ns3-Program",
+        &[
+            (82, 95),
+            (273, 273),
+            (356, 547),
+            (549, 579),
+            (581, 643),
+            (2460, 2651),
+            (2653, 2683),
+            (2685, 2747),
+        ],
+    ),
+    ("ns3-SynthPreset", &[]),
+    (
+        "ns4-OrganPreset",
+        &[
+            (43, 43),
+            (109, 114),
+            (124, 130),
+            (154, 155),
+            (162, 168),
+            (900, 902),
+            (1082, 1084),
+        ],
+    ),
+    (
+        "ns4-PianoPreset",
+        &[
+            (40, 40),
+            (43, 43),
+            (114, 114),
+            (556, 558),
+            (737, 740),
+            (1177, 1177),
+            (1179, 1179),
+        ],
+    ),
+    (
+        "ns4-Program",
+        &[
+            (67, 78),
+            (86, 123),
+            (127, 201),
+            (203, 315),
+            (324, 324),
+            (333, 333),
+            (338, 338),
+            (341, 341),
+            (344, 346),
+            (400, 400),
+            (403, 403),
+            (469, 471),
+            (473, 474),
+            (491, 492),
+            (494, 494),
+            (496, 496),
+            (498, 499),
+            (501, 502),
+            (504, 504),
+            (511, 511),
+            (1259, 1262),
+            (1281, 1287),
+            (1441, 1444),
+            (1480, 1480),
+            (1483, 1483),
+            (1553, 1554),
+            (1995, 1998),
+            (2017, 2023),
+            (2048, 2053),
+            (2177, 2180),
+            (2435, 2438),
+            (2457, 2463),
+            (2488, 2493),
+            (2617, 2620),
+            (2656, 2657),
+            (2661, 2662),
+            (2765, 2765),
+            (2796, 2796),
+            (2827, 2827),
+            (2852, 2852),
+            (2854, 2854),
+            (2859, 2861),
+            (2971, 2972),
+            (3028, 3028),
+            (3379, 3380),
+            (3436, 3436),
+            (3787, 3788),
+            (3844, 3844),
+            (4189, 4190),
+            (4573, 4574),
+            (4957, 4958),
+            (5499, 5502),
+            (5521, 5527),
+            (5681, 5684),
+            (5939, 5942),
+            (5961, 5967),
+            (6121, 6124),
+            (6379, 6382),
+            (6401, 6407),
+            (6561, 6564),
+        ],
+    ),
+    (
+        "ns4-SynthPreset",
+        &[
+            (40, 41),
+            (45, 46),
+            (149, 149),
+            (180, 180),
+            (211, 211),
+            (239, 239),
+            (244, 245),
+            (355, 356),
+            (412, 412),
+            (763, 764),
+            (820, 820),
+            (1171, 1172),
+            (1228, 1228),
+            (1573, 1574),
+            (1957, 1958),
+            (2341, 2342),
+            (2883, 2886),
+            (2905, 2911),
+            (3065, 3068),
+            (3323, 3325),
+            (3345, 3351),
+            (3505, 3507),
+            (3763, 3765),
+            (3785, 3791),
+            (3945, 3947),
+        ],
+    ),
+];
 
-    if !first.is_multiple_of(8) {
-        let byte = first / 8;
-        let end = hi.min(byte * 8 + 7);
-        parts.push(within(byte, first, end));
-        first = end + 1;
-        if first > hi {
-            return parts.join("+");
-        }
-    }
+// Sparse values can make a one-bit trial invalid; these are explicit debt, not answers.
+const KNOWN_REJECTIONS: &[(&str, &[usize])] = &[("ne5-Program", &[16, 19, 22, 26])];
 
-    let tail = (!(hi + 1).is_multiple_of(8)).then_some(hi / 8);
-    let (start, end) = (first / 8, tail.unwrap_or((hi + 1) / 8));
-    if end > start {
-        parts.push(if end - start == 1 {
-            format!("{start:#04x}")
-        } else {
-            format!("{start:#04x}..{end:#04x}")
-        });
-    }
-    if let Some(byte) = tail {
-        parts.push(within(byte, byte * 8, hi));
-    }
-    parts.join("+")
+fn known_blind(key: &str) -> Option<&'static [(usize, usize)]> {
+    KNOWN_BLIND
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, ranges)| *ranges)
 }
-
-/// One byte's slice of a run, numbered the way the format notes number bits:
-/// LSB-first, high end first — `0x51[3:2]`.
-fn within(byte: usize, lo: usize, hi: usize) -> String {
-    let (high, low) = (7 - lo % 8, 7 - hi % 8);
-    if high == low {
-        format!("{byte:#04x}[{high}]")
-    } else {
-        format!("{byte:#04x}[{high}:{low}]")
-    }
+fn known_rejections(key: &str) -> &'static [usize] {
+    KNOWN_REJECTIONS
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map_or(&[], |(_, bits)| *bits)
 }
-
-/// `center_panel.transpose` or `3 [a, b, c, …]` — bare while the set is short,
-/// counted once it is not, so a change past the cut still moves the line.
-fn summarize(paths: &BTreeSet<String>) -> String {
-    if paths.is_empty() {
-        return "—".to_string();
-    }
-    if paths.len() <= SHOWN {
-        return paths.iter().cloned().collect::<Vec<_>>().join(", ");
-    }
-    let head: Vec<_> = paths.iter().take(SHOWN).cloned().collect();
-    format!("{} [{}, …]", paths.len(), head.join(", "))
-}
-
-/// One body type's report: the run table, then the two lists that are the point.
-fn render(key: &str, body: &Body) -> String {
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for bit in 0..body.bits {
-        match runs.last() {
-            Some(&(start, _)) if body.facts[bit] == body.facts[start] => {
-                runs.last_mut().unwrap().1 = bit;
-            }
-            _ => runs.push((bit, bit)),
+fn runs(bits: impl Iterator<Item = usize>) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for bit in bits {
+        match out.last_mut() {
+            Some((_, hi)) if *hi + 1 == bit => *hi = bit,
+            _ => out.push((bit, bit)),
         }
     }
-
-    let mut out = String::new();
-    let _ = write!(
-        out,
-        "# {key} — read coverage over the specimen sweep. Runs of bits sharing a verdict.\n\
-         #\n\
-         # varies   an instrument writes this bit two ways (OR against AND over every\n\
-         #          corpus specimen of this body; all-ones bodies excluded). ⚠️ The\n\
-         #          committed fixtures are left out of this column: they are this\n\
-         #          crate's own writers' output over a zeroed body, so their unclaimed\n\
-         #          bits are evidence of nothing.\n\
-         # claimed  the path declaring it, from the layout — intent, not a read. A path\n\
-         #          marked (unregistered) is declared but reports no value.\n\
-         # answers  registry paths whose value moved when the bit was flipped and the\n\
-         #          file re-parsed, over the sampled specimens; `refused` is the parser\n\
-         #          rejecting the mutated file, which is a read too.\n\
-         #\n\
-         # Offsets are body-relative — a hex dump of the file adds the container's body\n\
-         # start, 0x2c on a type-1 header and 0x18 on a type-0. Bits inside a byte are\n\
-         # numbered LSB-first: `0x51[3:2]`.\n\
-         #\n\
-         # {} bits; varies over {} corpus specimens, answers over {} flipped.\n\n",
-        body.bits, body.weighed, body.flipped,
-    );
-    let _ = writeln!(
-        out,
-        "{:<14} {:<34} {:<44} {:<7} {:<10} answers",
-        "bits", "at", "claimed by", "varies", "verdict"
-    );
-
-    for &(lo, hi) in &runs {
-        let fact = &body.facts[lo];
-        let claimed = match &fact.claimed {
-            Some(path) if fact.registered => path.clone(),
-            Some(path) => format!("{path} (unregistered)"),
-            None => "—".to_string(),
-        };
-        let _ = writeln!(
-            out,
-            "{:<14} {:<34} {:<44} {:<7} {:<10} {}",
-            format!("{lo}..={hi}"),
-            at(lo, hi),
-            claimed,
-            if fact.varies { "yes" } else { "no" },
-            fact.verdict(),
-            summarize(&fact.answers),
-        );
-    }
-
-    let mut blind = 0;
-    let mut lines = String::new();
-    for &(lo, hi) in &runs {
-        if body.facts[lo].blind() {
-            blind += hi - lo + 1;
-            let _ = writeln!(lines, "  {:<14} {}", format!("{lo}..={hi}"), at(lo, hi));
-        }
-    }
-    let _ = write!(
-        out,
-        "\n## vary, unread — {blind} bits\n\
-         ## The instrument writes these and nothing reads them.\n"
-    );
-    out.push_str(if lines.is_empty() { "  none\n" } else { &lines });
-
-    let mut dead = 0;
-    let mut lines = String::new();
-    for &(lo, hi) in &runs {
-        let fact = &body.facts[lo];
-        if fact.claimed.is_some() && fact.answers.is_empty() {
-            dead += hi - lo + 1;
-            let path = fact.claimed.as_deref().unwrap_or_default();
-            let mark = if fact.registered {
-                ""
-            } else {
-                " (unregistered)"
-            };
-            let _ = writeln!(
-                lines,
-                "  {:<14} {:<34} {path}{mark}",
-                format!("{lo}..={hi}"),
-                at(lo, hi),
-            );
-        }
-    }
-    let _ = write!(
-        out,
-        "\n## claimed, unanswered — {dead} bits\n\
-         ## Declared, but no flip moves a value: dead, or aimed at the wrong bits.\n"
-    );
-    out.push_str(if lines.is_empty() { "  none\n" } else { &lines });
     out
 }
+fn show(ranges: &[(usize, usize)]) -> String {
+    ranges
+        .iter()
+        .map(|&(lo, hi)| {
+            if lo == hi {
+                lo.to_string()
+            } else {
+                format!("{lo}..={hi}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
-/// One test over every body, so a first run reports every mismatch at once rather
-/// than one per invocation.
 #[test]
-fn coverage() {
+fn blind_and_claimed_bits_match_the_reviewed_contracts() {
     let bodies = measure();
     assert!(!bodies.is_empty(), "no specimen decodes to a registry body");
-
     let mut failures = Vec::new();
     for (key, body) in &bodies {
-        let blind = body.facts.iter().filter(|f| f.blind()).count();
-        println!(
-            "{key}: {} bits over {} corpus specimens, {} flipped, {blind} vary but read \
-             by nothing",
-            body.bits, body.weighed, body.flipped,
+        if body.weighed == 0 {
+            failures.push(format!(
+                "{key}: no instrument specimen supplied variation evidence"
+            ));
+        }
+        if body.flipped == 0 {
+            failures.push(format!(
+                "{key}: no sampled specimen supplied mutation answers"
+            ));
+        }
+        let blind = runs(
+            body.facts
+                .iter()
+                .enumerate()
+                .filter(|(_, fact)| fact.blind())
+                .map(|(bit, _)| bit),
         );
-        if let Err(report) =
-            snapshot::check(&format!("coverage/{key}.snapshot"), &render(key, body))
-        {
-            failures.push(report);
+        match known_blind(key) {
+            Some(expected) if blind != expected => failures.push(format!(
+                "{key}: blind bits changed: expected [{}], got [{}]",
+                show(expected),
+                show(&blind)
+            )),
+            None => failures.push(format!("{key}: no reviewed blind-bit contract")),
+            _ => {}
+        }
+        let refusal_only = body
+            .facts
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| fact.refusal_only())
+            .map(|(bit, _)| bit)
+            .collect::<Vec<_>>();
+        let expected_refusals = known_rejections(key);
+        if refusal_only != expected_refusals {
+            failures.push(format!(
+                "{key}: refusal-only bits changed: expected {expected_refusals:?}, got {refusal_only:?}"
+            ));
+        }
+        let missing = body
+            .facts
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| fact.claimed.is_some() && !fact.registered)
+            .map(|(bit, fact)| format!("{bit} ({})", fact.claimed.as_deref().unwrap_or_default()))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            failures.push(format!(
+                "{key}: claimed bits without readers: {}",
+                missing.join(", ")
+            ));
+        }
+        let unanswered = body
+            .facts
+            .iter()
+            .enumerate()
+            .filter(|(bit, fact)| {
+                let Some(owner) = fact.claimed.as_ref() else {
+                    return false;
+                };
+                fact.registered
+                    && !(fact.refusal_only() && known_rejections(key).contains(bit))
+                    && !fact.owned_by(owner)
+            })
+            .map(|(bit, fact)| {
+                format!(
+                    "{bit} (owner={}, rejected={}, answers={:?})",
+                    fact.claimed.as_deref().unwrap_or_default(),
+                    fact.rejected,
+                    fact.answers,
+                )
+            })
+            .collect::<Vec<_>>();
+        if !unanswered.is_empty() {
+            failures.push(format!(
+                "{key}: claimed bits without their owner's answer: {}",
+                unanswered.join(", ")
+            ));
         }
     }
-
-    // A snapshot whose body no specimen reaches any more is a decode that stopped
-    // happening, not a leftover file.
-    if let Ok(entries) = fs::read_dir(snapshot::path("coverage")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(key) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(".snapshot"))
-            else {
-                continue;
-            };
-            if bodies.contains_key(key) {
-                continue;
-            }
-            if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
-                fs::remove_file(&path).unwrap();
-                println!("removed {}", path.display());
-            } else {
-                failures.push(format!(
-                    "{}, whose body no specimen decodes any more",
-                    path.display()
-                ));
-            }
+    for (key, _) in KNOWN_BLIND {
+        if !bodies.contains_key(*key) {
+            failures.push(format!("{key}: blind-bit contract has no measured body"));
         }
     }
-
-    assert!(failures.is_empty(), "\n\n{}", failures.join("\n\n"));
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

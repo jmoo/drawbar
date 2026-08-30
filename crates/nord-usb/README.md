@@ -70,7 +70,7 @@ carries a `Drop` assertion to catch the mistake in debug builds.
 |---|:--:|---|
 | `nusb` | ✅ | Desktop backend — macOS (IOKit), Linux (usbfs), Windows (WinUSB). Pure Rust. |
 | `web` | | Browser backend over WebUSB. Chrome/Edge only — Firefox and Safari declined the spec. |
-| `replay` | | Drive the protocol from committed captures, no hardware. Used by the golden tests. |
+| `replay` | | Drive the protocol from committed captures, no hardware. |
 | `blocking` | | Block on the async API from synchronous callers (the CLI). Tiny; not a runtime. |
 | `corpus` | | Corpus-backed tests (`NORD_CORPUS_ROOT`), implies `replay`. |
 
@@ -129,7 +129,7 @@ The protocol is testable without hardware, which is the whole point of the split
 
 ## Testing
 
-The golden tests replay real captures through the whole stack and assert the
+The integration tests replay real captures through the whole stack and assert the
 bytes this crate emits are **the bytes NSM sent** — not merely self-consistent
 with its own encoder. No hardware, no platform dependency.
 
@@ -138,7 +138,7 @@ cargo test -p nord-usb --features replay
 ```
 
 ⚠️ `replay` is not a default feature, so a bare `cargo test -p nord-usb` compiles
-the golden tests out and reports a pass having verified none of the wire encoding.
+the replay tests out and reports a pass having verified none of the wire encoding.
 The Nix build enables it via `[package.metadata.nix] testFeatures` in `Cargo.toml`.
 
 ### The replay sweep
@@ -163,7 +163,7 @@ O 0000001200000006000000010000000006a1
 ```
 
 `nord … --record <path>` writes that header itself, so a capture made with the CLI
-is a finished golden. The full vocabulary — header keys, the `expect` values, and
+is a complete replay script. The full vocabulary — header keys, the `expect` values, and
 the intent → operation table — is in
 [`tests/scripts/README.md`](tests/scripts/README.md).
 

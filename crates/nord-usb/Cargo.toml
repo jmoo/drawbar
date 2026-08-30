@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.2.1"
+version = "0.3.0"
 
 [lib]
 name = "nord_usb"
@@ -27,22 +27,21 @@ web = [
   "dep:js-sys",
 ]
 
-# Drive the protocol from committed corpus captures, with no hardware. Used by
-# the golden-shape tests; platform-independent, so it runs on wasm32 too.
+# Drive the protocol from committed captures, with no hardware.
 replay = []
 
-# Deliberate protocol faults for RE: currently `NORD_PROTOCOL_VERSION`. Off by default —
-# a wrong value here can stall the instrument's bulk endpoints.
+# Deliberate protocol and transfer-shape faults for reverse engineering. Off by default:
+# a wrong value can stall the instrument's bulk endpoints.
 fault-injection = []
 
 # Block on the async API from synchronous callers (the CLI). Tiny; not a runtime.
 blocking = ["dep:pollster"]
 
-# Corpus-backed golden shape tests (NORD_CORPUS_ROOT), mirroring nord-format.
+# Corpus-backed replay tests (NORD_CORPUS_ROOT), mirroring nord-format.
 corpus = ["replay"]
 
 [dependencies]
-nord-format = { path = "../nord-format", version = "0.2.0" }
+nord-format = { path = "../nord-format", version = "0.3.0" }
 thiserror = "2"
 pollster = { version = "0.4", optional = true }
 

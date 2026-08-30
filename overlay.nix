@@ -44,7 +44,6 @@ let
         && (
           crane.filterCargoSources path type
           || hasSuffix ".script" path
-          || hasSuffix ".snapshot" path
           # The committed specimens and replay scripts, whatever their extensions.
           || hasInfix "/tests/fixtures/" path
           || hasInfix "/tests/scripts/" path
@@ -54,9 +53,7 @@ let
     strictDeps = true;
   };
 
-  # One dependency build, shared by every crate that follows. `drawbar` is left out on
-  # purpose: it is the only crate carrying a GUI stack, and building `nord-format`
-  # should not mean compiling eframe first.
+  # Share one dependency build, excluding drawbar so library builds do not compile its GUI stack.
   cargoArtifacts = crane.buildDepsOnly (
     commonArgs
     // {
@@ -77,9 +74,8 @@ let
     ) members
   );
 
-  # Test-only Cargo features are declared by the crate itself, under
-  # `[package.metadata.nix] testFeatures = [ … ]`, so adding a crate needs no wiring
-  # here — only a `members` entry in the workspace manifest.
+  # Crates declare test-only features in `package.metadata.nix.testFeatures`, so new
+  # workspace members need no overlay wiring.
   testFeaturesFor = name: manifests.${name}.metadata.nix.testFeatures or [ ];
 
   featureArgs =
@@ -100,11 +96,8 @@ let
     )
   );
 
-  # ⚠️ winit, glutin and xkbcommon reach for these with `dlopen`, so nothing in the
-  # build records a dependency on them: an unwrapped binary links and installs
-  # cleanly, then dies at startup with `NoWaylandLib`. Anything that runs the
-  # native `drawbar` — the package, the dev shell — has to put them on the loader's
-  # path itself.
+  # ⚠️ winit, glutin and xkbcommon `dlopen` these: builds succeed without them, then
+  # die with `NoWaylandLib`. Packages and the dev shell must set the loader path.
   guiLibs = optionals final.stdenv.hostPlatform.isLinux (
     with final;
     [
@@ -197,9 +190,8 @@ let
   # CARGO_TARGET_<TRIPLE>_LINKER wants the triple upper-cased with underscores.
   envTriple = triple: toUpper (builtins.replaceStrings [ "-" ] [ "_" ] triple);
 
-  # ⚠️ rustc drives a real linker for the ELF and PE targets, and its own lld for the
-  # wasm ones. Hand a wasm target the cross set's clang instead and it chokes on lld's
-  # arguments — "no such file or directory: 'wasm'" — rather than saying so.
+  # ⚠️ ELF and PE need the cross linker; wasm needs rustc's lld. Cross clang rejects
+  # wasm's lld arguments with the misleading error `no such file or directory: wasm`.
   needsLinker = spec: spec ? crossPkgs && !hasPrefix "wasm" (tripleOf spec);
 
   # Where a target needs a linker or extra static libs, cargo learns about it through
@@ -215,9 +207,8 @@ let
         "${cc}/bin/${cc.targetPrefix}cc";
     }
     // optionalAttrs (spec ? libs) {
-      # Put the target's static libs on rustc's search path directly. Going through
-      # buildInputs would leave it to the cc wrapper, which does not reliably reach
-      # rustc's own `-l:` requests.
+      # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
+      # `-l:` requests.
       "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatMapStringsSep " " (
         l: "-L native=${l}/lib"
       ) spec.libs;
@@ -231,9 +222,7 @@ let
   mkCross =
     crate: name: spec:
     let
-      # Cargo is target-agnostic; rustc is not. Swapping only rustc keeps the build
-      # native — the sandbox's own coreutils, no cross stdenv — while giving it a
-      # compiler that holds the target's std.
+      # Swap only rustc: sandbox tools stay native while the compiler supplies target std.
       crossLib = crane.overrideScope (
         _: _: { rustc = if spec ? crossPkgs then spec.crossPkgs.buildPackages.rustc else final.rustc; }
       );
@@ -273,17 +262,11 @@ let
         // {
           cargoArtifacts = crossLib.buildDepsOnly args;
 
-          # crane installs what cargo's build log calls a binary or a cdylib, and an
-          # rlib is neither: left to it, the lib-only cross builds install nothing
-          # and pass. Install by hand instead, and assert that something arrived.
+          # Crane skips rlibs; install lib-only cross artifacts manually and require output.
           doNotPostBuildInstallCargoBinaries = true;
 
-          # ⚠️ The inherited dependency artifacts were produced from crane's dummy
-          # stand-ins for this workspace's own crates, so the target directory
-          # already holds a file under the name this build is about to write. Only
-          # workspace members land at that level — dependencies stay in `deps/` —
-          # so clearing it costs nothing and keeps the install below from passing
-          # on a stand-in.
+          # ⚠️ Dependency artifacts include dummy workspace outputs at the target root.
+          # Clear them so installation cannot pass on a stand-in; dependencies stay in `deps/`.
           preBuild = ''
             find "target/${tripleOf spec}/release" -maxdepth 1 -type f -delete
           '';
@@ -292,10 +275,8 @@ let
             mkdir -p "$out"
             rel="target/${tripleOf spec}/release"
 
-            # Keep real artifacts, drop cargo's bookkeeping and intermediates.
-            # Unix executables have no extension, so match by mode as well as by
-            # name — matching only on extension silently produced an empty output
-            # for the darwin/linux CLI builds, which then "passed".
+            # Keep real artifacts, not Cargo bookkeeping. Match mode too, because Unix
+            # executables have no extension and an empty cross-build output can otherwise pass.
             find "$rel" -maxdepth 1 -type f \
               \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.a' -o -name '*.wasm' \
                  -o -name '*.exe' -o -name '*.dll' -o -name '*.so' -o -name '*.dylib' \
@@ -320,10 +301,8 @@ let
         }
       );
     in
-    # The end-to-end run, on the only crate that produces a binary and only where
-    # something here can execute it. `overrideAttrs`, so the deps build derived
-    # from `args` above cannot inherit the check — the binary it installs is a
-    # stub crane stood in for the workspace's crates, and answers nothing.
+    # Add the executable check only where a runner exists. `overrideAttrs` keeps it
+    # off the dependency build, whose workspace binary is Crane's inert stand-in.
     if crate == "nord-cli" && emulators ? ${name} then
       pkg.overrideAttrs (pocInstallCheck {
         bin = if spec.crossPkgs.stdenv.hostPlatform.isWindows then "nord.exe" else "nord";
@@ -332,40 +311,24 @@ let
     else
       pkg;
 
-  # Which crates get cross-built where: the applications, because a real binary
-  # is the artifact worth shipping and a much stronger signal than an rlib that
-  # the toolchain and linker are genuinely wired up — every library they depend
-  # on is compiled for the target along the way. A library keeps a target of its
-  # own only where it yields coverage no application build does: wasip1 is the
-  # one place `nord-usb`'s own suite executes on a wasm VM.
+  # Cross-build applications to exercise their whole dependency stack. `nord-usb`
+  # also keeps wasip1 because its own suite executes there in a wasm VM.
   crateTargets = {
     # A CLI has no wasi story.
     nord-cli = filter (t: t != "wasip1") (attrNames targets);
     nord-usb = [ "wasip1" ];
   };
 
-  # The browser build of drawbar, which is also what covers `nord-usb`'s WebUSB
-  # backend: the application's wasm library, bound for the web by wasm-bindgen,
-  # beside the page that loads it. The output is what a static file server
-  # serves. Built by the native toolchain — nixpkgs has no cross set for bare
-  # wasm32, there being no libc to build a stdenv from, and the ordinary rustc
-  # ships that target's std. (`pkgsCross.wasi32` is a *different* target, not
-  # this one under another name.)
-  #
-  # ⚠️ `wasm-bindgen-cli` must be the exact version of the workspace's
-  # `wasm-bindgen` pin — the CLI refuses a module built by any other. The pin is
-  # held at nixpkgs' CLI version, so if this build fails on a version mismatch,
-  # move the pin in drawbar's Cargo.toml to what the CLI reports.
+  # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
+  # ⚠️ Its CLI must match the crate pin; move the Cargo pin when they diverge.
   drawbar-web =
     let
       args = commonArgs // {
         CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
         # The size-tuned profile from the workspace manifest.
         CARGO_PROFILE = "web";
-        # ⚠️ `--lib` is load-bearing: the crate also has a binary target of the
-        # same name, both write `drawbar.wasm`, and cargo does not define which
-        # survives — when it is the binary's stub main, wasm-bindgen emits a
-        # package that exports nothing.
+        # ⚠️ `--lib` prevents the same-named binary stub from winning `drawbar.wasm`
+        # and producing a package with no exports.
         cargoExtraArgs = "--locked -p drawbar --lib";
         # A wasm module runs in a browser, not here.
         doCheck = false;
@@ -382,10 +345,8 @@ let
         cargoArtifacts = crane.buildDepsOnly args;
         nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
 
-        # ⚠️ The inherited target directory holds a `drawbar.wasm` built from
-        # crane's dummy stand-in for the crate. The real build overwrites it,
-        # but if it ever did not, wasm-bindgen would bind the stub without
-        # complaint — so clear it, leaving the real module the only candidate.
+        # ⚠️ Dependency artifacts contain a dummy `drawbar.wasm`; clear it before
+        # binding so only the real module can satisfy the install.
         preBuild = ''
           find "target/wasm32-unknown-unknown/web" -maxdepth 1 -type f -delete
         '';
@@ -408,11 +369,8 @@ let
       }
     );
 
-  # One package per crate/target pair, named `<crate>-<target>` and exposed at the
-  # top level beside the crates themselves. Which pairs exist depends on the host —
-  # only a Mac can produce the Intel Mac binaries, only Linux the aarch64 Linux ones —
-  # so a consumer takes the set rather than naming its members. The web bundle,
-  # which every host builds, rides along.
+  # Expose each host-supported `<crate>-<target>` package in one set, alongside
+  # the host-independent web bundle.
   crossed =
     concatMapAttrs (
       crate: names:
@@ -429,12 +387,8 @@ let
   # An editor-written Sample Editor project, for the file-verb edit check.
   pocProject = ./crates/nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj;
 
-  # The nord-cli end-to-end run, as the package's own install check. The scripts
-  # live with the CLI — crates/nord-cli/checks — and run against any built
-  # binary; this shim only wires in the store paths and, for a foreign binary,
-  # the emulator that can execute it here. Cross-compiling only proves the
-  # binary linked; this proves it executes and behaves, Windows entirely under
-  # Wine.
+  # Run CLI checks against the installed binary, through an emulator when foreign.
+  # This proves execution and behavior rather than linking alone.
   pocInstallCheck =
     {
       bin,
@@ -453,20 +407,15 @@ let
       '';
     };
 
-  # The specimen corpus, and the suites that need it.
-  #
-  # ⚠️ The corpus is a private repo, so evaluating this overlay at all needs read
-  # access to it.
+  # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
 
   corpusTree = builtins.fetchGit {
     rev = "3d3e4f139d49a324f3df9fcf64a934921815ef69";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
-  # The corpus repo is the package, so what lands here is what that repo asserts
-  # about itself: a model directory per instrument, its committed tier filtered
-  # against `library.json`. `full` projects the R2 tier in on top — the vendor
-  # sample pool, the untrimmed captures, the bundle archives.
+  # The corpus package supplies its library-filtered committed tier; `full` adds
+  # the R2 vendor samples, untrimmed captures and bundles.
   corpus = final.callPackage corpusTree { };
   corpusFull = corpus.override { full = true; };
 
@@ -477,9 +426,8 @@ let
     "nord-usb"
   ];
 
-  # One suite per corpus crate: the crate's own package — `final`'s, so a later
-  # overlay changing a crate changes its suite — re-run by `.override` with the
-  # specimens named and the feature that compiles the sweeps in.
+  # Override `final` crates with the corpus root and feature so later overlays
+  # still flow into their suites.
   committed = genAttrs corpusCrates (
     name:
     final.nord.crates.${name}.override {
@@ -500,18 +448,15 @@ let
 
 in
 {
-  # One flat scope: every package by name — the crates, the cross builds, the
-  # corpus suites — beside the roll-ups and the few non-package attrs the flake
-  # reads.
+  # Crates, cross builds, corpus suites, roll-ups and flake metadata share one scope.
   nord =
     crates
     // crossed
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
     // {
-      # Everything this host builds without reaching for the corpus. The corpus
-      # roll-ups stay out: they are their own builds, and the R2 tier needs
-      # credentials that `all` cannot assume.
+      # `all` excludes corpus roll-ups; the R2 tier needs credentials this build
+      # cannot assume.
       all = final.linkFarm "all" (crates // crossed);
 
       # Clippy over every crate and target, with each crate's test features on so the
@@ -531,9 +476,8 @@ in
 
       all-corpus = final.linkFarm "all-corpus" committed;
 
-      # ⚠️ Not among the checks: the R2 tier is a private bucket, so building this
-      # needs either R2 credentials in the builder or a store seeded by
-      # `corpus nix-add`, and `nix flake check` has to stay runnable with neither.
+      # ⚠️ R2 stays outside checks because it needs credentials or a store seeded
+      # by `corpus nix-add`.
       all-corpus-full = final.linkFarm "all-corpus-full" full;
 
       # The corpus assemblies themselves.
@@ -543,9 +487,8 @@ in
       # The workspace's own crates, keyed by the name cargo knows them by.
       inherit crates;
 
-      # The `dlopen`ed display and GL libraries the native `drawbar` needs on the
-      # loader's path; empty off Linux. The package wraps itself with them, the dev
-      # shell exports them, so `cargo run -p drawbar` behaves like the package.
+      # Native drawbar's `dlopen`ed display/GL libraries, empty off Linux. Package
+      # wrapping and the dev shell give `cargo run` the same loader path.
       inherit guiLibs;
 
       # The cross builds as a set, because their names are host-dependent and a

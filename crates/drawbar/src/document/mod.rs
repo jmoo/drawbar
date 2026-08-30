@@ -145,11 +145,8 @@ impl Document {
             .id_salt(SCROLL)
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                // ⚠️ Everything below answers to an id of this document's own. A control
-                // is otherwise remembered by the field path it is on, and two tabs of the
-                // same format declare all the same paths — so a knob's half-typed number
-                // and an open picker were shared between them, and committing one landed
-                // on whichever document was in front.
+                // ⚠️ Widget state keyed only by field path leaks between tabs of the same
+                // format, so every control also answers to the document id.
                 ui.push_id(id, |ui| match view {
                     View::Basic => {
                         self.body(ui, entity, registry.as_deref(), &mut piano, &mut sets)
@@ -457,9 +454,8 @@ fn piano_lookup(
     let models = registry
         .map(|fields| piano_models(fields, device))
         .unwrap_or_default();
-    // The dependency reply is the identity; the scan is a position. Where both answer
-    // and disagree, the position mapping is what is wrong, and saying so beats silently
-    // showing two different names in one section.
+    // Dependency ids are authoritative; disagreement means the scanned position mapping
+    // is wrong.
     let scan_disagrees = match (&name, registry) {
         (Some(named), Some(fields)) => current_model(fields)
             .and_then(|n| models.iter().find(|(i, _)| *i == n))

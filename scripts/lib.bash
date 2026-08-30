@@ -41,10 +41,8 @@ dependents_of() {
 # Newest `<crate>-v*` tag, or nothing when the crate has never been released.
 latest_tag() { git -C "$repo" tag --list "$1-v*" --sort=-v:refname | head -n1; }
 
-# Conventional commits touching the crate since `$2` (a tag; empty means all
-# history) and up to `$3` (default HEAD), newest first, one per line:
-#   <sha>\t<type>\t<breaking 0|1>\t<scope>\t<description>
-# A subject that is not a Conventional Commit gets type `other`.
+# Conventional commits touching `$1` since `$2` through `$3` (HEAD by default).
+# Output: sha, type, breaking flag, scope, description; unmatched subjects are `other`.
 conventional='^([a-z]+)(\(([^)]+)\))?(!)?:[[:space:]]+(.*)$'
 commits_for() {
   local crate=$1 since=${2:-} until=${3:-HEAD} range

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.2.0"
+version = "0.3.0"
 
 # The binary is just `nord`; the crate/package is `nord-cli`.
 [[bin]]
@@ -33,10 +33,10 @@ clap = { version = "4", features = ["derive"] }
 # password/editor/fuzzy prompts are all unused.
 dialoguer = { version = "0.12", default-features = false }
 # Pull in the `bundle` feature so `nord inspect` can also open ZIP backup bundles.
-nord-format = { path = "../nord-format", version = "0.2.0", features = [
+nord-format = { path = "../nord-format", version = "0.3.0", features = [
   "bundle",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.2.1", features = [
+nord-usb = { path = "../nord-usb", version = "0.3.0", features = [
   "blocking",
   "replay",
 ] }

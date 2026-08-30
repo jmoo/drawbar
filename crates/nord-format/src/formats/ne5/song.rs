@@ -41,15 +41,15 @@ pub type Bank = bank::Bank<Cbin<Song>, Location>;
 #[nord_bits_derive::bitbody(18)]
 pub struct Song {
     #[bits(0..=15)]
-    version: u16,
+    pub version: u16,
     #[bits(16..=24)]
-    a: program::Location,
+    pub a: program::Location,
     #[bits(25..=33)]
-    b: program::Location,
+    pub b: program::Location,
     #[bits(34..=42)]
-    c: program::Location,
+    pub c: program::Location,
     #[bits(43..=51)]
-    d: program::Location,
+    pub d: program::Location,
 }
 
 impl Song {

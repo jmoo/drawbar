@@ -166,7 +166,7 @@ impl UsbTransport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     /// Firmware version as the device reports it, in hundredths: `204` is 2.04. The
-    /// same value the USB descriptor carries as `bcdDevice`, which is what pins the
+    /// same value the USB descriptor carries as `bcdDevice`, which confirms the
     /// scaling.
     pub firmware: u16,
     /// Largest transfer the device will accept or produce, in bytes, framing included.
@@ -293,9 +293,7 @@ impl Transport for UsbTransport {
     }
 
     async fn write_timeout(&mut self, buf: &[u8], limit: Duration) -> Result<bool> {
-        // `bulk_out` owns its transfer, so there is no queue to cancel: dropping the
-        // future is the cancellation, and nothing later reads from this endpoint in a way
-        // an abandoned OUT could desynchronise.
+        // `bulk_out` owns its transfer, so dropping the future cancels it.
         match with_timeout(self.interface.bulk_out(EP_OUT, buf.to_vec()), limit).await {
             Some(completion) => {
                 completion.status.map_err(map_err("bulk write"))?;
@@ -319,14 +317,11 @@ impl Transport for UsbTransport {
             return Ok(Some(completion.data));
         }
 
-        // The submitted transfer is still the OS's; dropping the future did not recall
-        // it. Cancel, then collect the completion it produces — leaving it queued would
-        // hand it to the next read as if it were that request's reply.
+        // Cancel and reap the OS-owned transfer before any later read can consume it.
         self.read_queue.cancel_all();
         match with_timeout(self.read_queue.next_complete(), REAP_LIMIT).await {
             Some(_) => Ok(None),
-            // Cancellation itself did not complete, so the queue's state is unknown and
-            // no later read on this transport can be trusted to be in step.
+            // An unreaped cancellation leaves the response queue out of step.
             None => Err(Error::Transport(
                 "read timed out and the transfer could not be cancelled; \
                  the connection is out of step and the instrument needs a power cycle"

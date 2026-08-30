@@ -130,9 +130,7 @@ fn matches(want: &str, spellings: &[String], slack: Option<f64>) -> bool {
 /// know is an error, so the vocabulary cannot drift.
 fn check_trait(name: &str, entity: &Entity, wrong: &mut Vec<String>) {
     match name {
-        // b3+bass preset 1 keeps its two bass drawbars outside the nine-nibble
-        // block, and the nibbles they shadow there hold stale leftovers — so
-        // the accessor genuinely reading elsewhere is the claim to check.
+        // B3+bass preset 1 must read its separate bass drawbars, not stale nibbles.
         "b3_bass_manual" => {
             let organ = match entity {
                 Entity::Program(Program::Electro5(p)) | Entity::Live(Live::Electro5(p)) => {

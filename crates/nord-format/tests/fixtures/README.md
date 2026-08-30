@@ -14,12 +14,5 @@ being readable, and `<file>.oracle.json` beside one says what was set.
   zone, three, and three with the middle zone retuned and its range moved,
   each pinned by its sidecar.
 
-The files are golden: `tests/fixtures.rs` regenerates the same bytes and
-compares, so a writer change shows up as a byte diff in git rather than moving
-silently with the code. After an intentional writer change:
-
-```sh
-UPDATE_FIXTURES=1 cargo test -p nord-format --test fixtures
-```
-
-and read the diff.
+The corpus sweep checks their checksums, decoding, exact round trips, field
+isolation, and oracle sidecars.

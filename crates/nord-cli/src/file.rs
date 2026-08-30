@@ -122,7 +122,12 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let format = nord_usb::envelope::tag(&read.header);
     check(path, &format, class)?;
     let at = nord_usb::envelope::location(&read.header);
-    let body_len = read.body.0.len() as u32;
+    let body_len = u32::try_from(read.body.0.len()).map_err(|_| {
+        format!(
+            "{}: body length does not fit the file format",
+            path.display()
+        )
+    })?;
     let (crc_label, crc_value) = crc(&read.header, &file);
 
     let row = |label: &str, value: String| {
@@ -219,7 +224,7 @@ mod tests {
     use nord_usb::wire::Location;
 
     /// The header a wrapped file gives back carries the version `wrap` stamped into it,
-    /// and its CRC tracks the body — which pins both reads to the right header offsets.
+    /// and its CRC tracks the body, exercising both header layouts.
     #[test]
     fn the_header_fields_come_back_out_of_a_wrapped_file() {
         let at = Location::from_user(7, 4);

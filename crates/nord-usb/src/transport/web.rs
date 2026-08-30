@@ -55,10 +55,7 @@ fn map_err(what: &str) -> impl FnOnce(JsValue) -> Error + '_ {
 fn check_status(status: UsbTransferStatus, what: &str) -> Result<()> {
     match status {
         UsbTransferStatus::Ok => Ok(()),
-        // A stalled endpoint stays stalled: every later transfer on it fails until
-        // `clearHalt()` runs, which this transport deliberately never does — a stall
-        // mid-transaction means the device and this code disagree, and clearing it
-        // would carry that disagreement into the next operation's framing.
+        // A mid-transaction stall is a desync; clearing it would preserve bad framing.
         UsbTransferStatus::Stall => Err(Error::Transport(format!(
             "{what}: endpoint stalled; the device must be reconnected or clearHalt() called"
         ))),
@@ -107,11 +104,7 @@ impl WebUsbTransport {
             .await
             .map_err(map_err("opening the device"))?;
 
-        // A device the OS has not configured reports `configuration == null`, and its
-        // interfaces cannot be listed until one is selected. Value 1 is the first
-        // configuration on every USB device that has only one; not confirmed on
-        // hardware for this instrument — on the confirmed macOS run the OS had already
-        // configured the device, so this branch did not execute.
+        // Inferred, not confirmed on hardware: an unconfigured device uses configuration 1.
         if device.configuration().is_none() {
             JsFuture::from(device.select_configuration(1))
                 .await
@@ -125,9 +118,7 @@ impl WebUsbTransport {
         let interface_number = configuration
             .interfaces()
             .iter()
-            // `alternate()` is the currently selected setting; the vendor interface has
-            // exactly one on this instrument (inferred from the descriptors the desktop
-            // backend walks, not confirmed through WebUSB).
+            // Inferred from desktop descriptors; not confirmed through WebUSB.
             .find(|iface| iface.alternate().interface_class() == CLASS_VENDOR_SPECIFIC)
             .map(|iface| iface.interface_number())
             .ok_or_else(|| {
@@ -174,10 +165,7 @@ impl WebUsbTransport {
 
 impl Transport for WebUsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        // ⚠️ The copy into a JS-owned `Uint8Array` is load-bearing. `transferOut` reads
-        // the buffer asynchronously, and the alternative — `transfer_out_with_u8_slice`,
-        // a view over wasm linear memory — is invalidated by any allocation that grows
-        // that memory while the transfer is in flight.
+        // ⚠️ WebUSB reads asynchronously; a view into growable wasm memory can be invalidated.
         let data = Uint8Array::from(buf);
         let transfer = self
             .device
@@ -188,8 +176,7 @@ impl Transport for WebUsbTransport {
             .map_err(map_err("bulk write"))?;
 
         check_status(result.status(), "bulk write")?;
-        // A short write would truncate a framed message, and the next read would then
-        // be answering a request the device never fully received.
+        // A short write truncates a frame and desynchronizes the next response.
         let written = result.bytes_written() as usize;
         if written != buf.len() {
             return Err(Error::Transport(format!(
@@ -201,31 +188,20 @@ impl Transport for WebUsbTransport {
     }
 
     async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
-        // ⚠️ One transfer must return one whole protocol message, which holds only
-        // because a bulk IN completes at the first short packet. Confirmed on hardware
-        // for the small session/STATUS/INFO replies; a device message whose length is
-        // an exact multiple of the 64-byte Full Speed packet size, sent without a
-        // terminating zero-length packet, would leave this transfer waiting — and
-        // WebUSB has no timeout to break it. Not observed, and the same shape of
-        // assumption the `nusb` backend already runs on.
-        //
-        // `max` is [`super::READ_BUFFER`] (49152 = 64 × 768) in practice. Keeping it a
-        // multiple of the packet size is what avoids a babble error on the last packet.
+        // ⚠️ WebUSB has no timeout, so this relies on each message ending with a
+        // short packet. Confirmed on hardware; `READ_BUFFER` is packet-aligned.
         let result = JsFuture::from(self.device.transfer_in(endpoint_number(EP_IN), max as u32))
             .await
             .map_err(map_err("bulk read"))?;
 
         check_status(result.status(), "bulk read")?;
 
-        // `data` is absent on a zero-length transfer, which is not an error but also
-        // never a message this protocol can decode.
+        // A zero-length transfer has no decodable protocol message.
         let view = result
             .data()
             .ok_or_else(|| Error::Transport("bulk read returned no data".into()))?;
 
-        // The DataView is a window into the browser's own buffer, so the offset matters:
-        // copying from the start of `buffer()` would silently read the wrong bytes if
-        // the browser ever hands back a non-zero offset.
+        // Copy the DataView window, not its entire backing buffer.
         Ok(Uint8Array::new_with_byte_offset_and_length(
             &view.buffer(),
             view.byte_offset() as u32,

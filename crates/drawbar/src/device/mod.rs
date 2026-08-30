@@ -720,10 +720,7 @@ impl Device {
     }
 
     fn dispatch(&mut self, cmd: DeviceCmd) {
-        // A mutation makes the names the browser is showing wrong, so they are dropped
-        // now rather than quietly kept — a stale name is what a confirmation would go on
-        // to quote back at the operator. Only the banks it touches can have changed, so
-        // only those are dropped and read again.
+        // Drop affected banks before a mutation so confirmations never quote stale names.
         self.rescan = match &cmd {
             DeviceCmd::Delete { class, at }
             | DeviceCmd::Rename { class, at, .. }
@@ -736,6 +733,7 @@ impl Device {
                     .iter()
                     .map(|item| (*class, item.at.bank + 1))
                     .collect();
+                banks.sort_unstable_by_key(|(class, bank)| (class.to_raw(), *bank));
                 banks.dedup();
                 banks
             }
@@ -744,9 +742,7 @@ impl Device {
         for (class, bank) in &self.rescan {
             self.state.forget_bank(*class, *bank);
         }
-        // Writing into the slot the instrument has loaded leaves the panel playing the
-        // buffer it read before the write; only a fresh SELECT reloads it. Confirmed on
-        // hardware.
+        // Confirmed on hardware: writing the loaded slot requires SELECT to reload it.
         let loaded = |state: &DeviceState, class: &ObjectClass, at: &Location| {
             state
                 .selected
@@ -853,8 +849,7 @@ impl Device {
                     self.state.connection = Connection::Connected(card);
                     self.state.forget_everything();
                     self.pending.clear();
-                    // One walk per class, each its own session. Nothing is asked ahead
-                    // of them: a class's counters are read at the head of its own walk.
+                    // Each class reads its counters and walks in one session.
                     self.resync();
                 }
                 DeviceEvent::ConnectFailed(why) => {
@@ -862,9 +857,7 @@ impl Device {
                     log.trouble("No instrument could be opened.");
                     self.state.connection = Connection::Disconnected;
                 }
-                // ⚠️ Nothing on this computer is touched. What was waiting to be sent is
-                // still waiting: the instrument coming back is the point of keeping it,
-                // and a badge cleared here would be an edit silently given up on.
+                // ⚠️ Disconnection must not clear local edits waiting for the instrument.
                 DeviceEvent::Disconnected { lost } => {
                     match lost {
                         true => log.trouble("The instrument went away — reconnect when it's back."),
@@ -942,9 +935,7 @@ impl Device {
                     bytes,
                     open,
                 } => {
-                    // A double-click opens a view: a working copy with a tab and a
-                    // document, which nothing lists and which goes when the tab does.
-                    // Copying is the same read, kept.
+                    // A view belongs to its tab; a copied read becomes a local entity.
                     let id = match open {
                         true => workspace.view(name, origin, bytes, log),
                         false => workspace.ingest(name, origin, bytes, log),
@@ -984,9 +975,7 @@ impl Device {
                         None => log.trouble("Something went wrong. The details are below."),
                     }
                 }
-                // Something changed outside our session, so every cached name may now be
-                // wrong. They are dropped and read again rather than flagged: a name the
-                // user is about to drag is one a dialog would go on to quote back.
+                // External changes invalidate every cached name used by later dialogs.
                 DeviceEvent::InstrumentChanged => {
                     log.warn("the instrument changed under us — every cached name is dropped");
                     log.say("Something changed on the instrument. Reading it again…");

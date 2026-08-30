@@ -263,6 +263,282 @@ pub fn bitbody(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+#[derive(Copy, Clone)]
+struct Placement {
+    lo: u32,
+    hi: u32,
+    nested: bool,
+}
+
+fn placement(field: &syn::Field) -> syn::Result<Placement> {
+    let bits = field.attrs.iter().find(|attr| attr.path().is_ident("bits"));
+    let at = field.attrs.iter().find(|attr| attr.path().is_ident("at"));
+    match (bits, at) {
+        (Some(attr), None) => {
+            let Bits { lo, hi } = attr.parse_args()?;
+            Ok(Placement {
+                lo,
+                hi,
+                nested: false,
+            })
+        }
+        (None, Some(attr)) => {
+            let At { start, end } = attr.parse_args()?;
+            let lo = start.checked_mul(8).ok_or_else(|| {
+                syn::Error::new_spanned(attr, "the nested byte range is too large")
+            })?;
+            let hi = end
+                .checked_mul(8)
+                .and_then(|bit| bit.checked_sub(1))
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(attr, "the nested byte range is too large")
+                })?;
+            Ok(Placement {
+                lo,
+                hi,
+                nested: true,
+            })
+        }
+        (Some(_), Some(and)) => Err(syn::Error::new_spanned(
+            and,
+            "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body",
+        )),
+        (None, None) => Err(syn::Error::new_spanned(
+            field,
+            "every field needs a placement: `#[bits(LO..=HI)]` for a leaf, \
+             `#[at(LO..HI)]` for a nested body",
+        )),
+    }
+}
+
+fn claim(
+    field: &syn::Field,
+    ident: &Ident,
+    placement: Placement,
+    span_bits: u32,
+    bytes: usize,
+    claimed: &mut Vec<(u32, u32, Ident)>,
+) -> syn::Result<()> {
+    let Placement { lo, hi, .. } = placement;
+    if hi >= span_bits {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!(
+                "bit {hi} is past the end of a {bytes}-byte body, whose last bit is {}",
+                span_bits - 1,
+            ),
+        ));
+    }
+    if let Some((other_lo, other_hi, other)) = claimed
+        .iter()
+        .find(|&&(lo2, hi2, _)| lo <= hi2 && lo2 <= hi)
+    {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!("bits {lo}..={hi} overlap `{other}`, at {other_lo}..={other_hi}"),
+        ));
+    }
+    claimed.push((lo, hi, ident.clone()));
+    Ok(())
+}
+
+#[derive(Default)]
+struct GeneratedFields {
+    claimed: Vec<(u32, u32, Ident)>,
+    rows: Vec<MapRow>,
+    fields: Vec<TokenStream2>,
+    decode: Vec<TokenStream2>,
+    encode: Vec<TokenStream2>,
+    debug: Vec<TokenStream2>,
+    values: Vec<TokenStream2>,
+    specs: Vec<TokenStream2>,
+    setters: Vec<TokenStream2>,
+    routes: Vec<TokenStream2>,
+    layout: Vec<TokenStream2>,
+}
+
+fn common_field(
+    generated: &mut GeneratedFields,
+    field: &syn::Field,
+    placement: Placement,
+    ty_str: &str,
+) {
+    let ident = field.ident.as_ref().expect("named fields");
+    let ty = &field.ty;
+    let Placement { lo, hi, nested } = placement;
+    generated.rows.push(MapRow {
+        lo,
+        hi,
+        field: Some((ident.to_string(), ty_str.to_string())),
+    });
+
+    let kept = field
+        .attrs
+        .iter()
+        .filter(|attr| !attr.path().is_ident("bits") && !attr.path().is_ident("at"));
+    let placement_doc = if nested {
+        format!("Bytes {:#04x}..{:#04x}.", lo / 8, (hi + 1) / 8)
+    } else {
+        breakdown(lo, hi)
+    };
+    let field_vis = &field.vis;
+    generated.fields.push(quote! {
+        #(#kept)*
+        #[doc = ""]
+        #[doc = #placement_doc]
+        #field_vis #ident: #ty
+    });
+    generated
+        .debug
+        .push(quote! { .field(stringify!(#ident), &self.#ident) });
+}
+
+fn nested_field(
+    generated: &mut GeneratedFields,
+    field: &syn::Field,
+    placement: Placement,
+    ty_str: &str,
+) {
+    let ident = field.ident.as_ref().expect("named fields");
+    let ty = &field.ty;
+    let (start, end) = (
+        (placement.lo / 8) as usize,
+        ((placement.hi + 1) / 8) as usize,
+    );
+    let n = end - start;
+    generated.decode.push(quote! {
+        #ident: <#ty as ::core::convert::TryFrom<[u8; #n]>>::try_from({
+            let mut b = [0u8; #n];
+            b.copy_from_slice(&raw[#start..#end]);
+            b
+        })?
+    });
+    generated.encode.push(quote! {
+        raw[#start..#end].copy_from_slice(&<[u8; #n]>::from(&p.#ident));
+    });
+    let Placement { lo, hi, .. } = placement;
+    generated.layout.push(quote! {
+        crate::layout::LayoutField {
+            path: stringify!(#ident),
+            ty: #ty_str,
+            lo: #lo,
+            hi: #hi,
+            nested: ::core::option::Option::Some(
+                <#ty as crate::layout::BodyLayout>::layout,
+            ),
+        }
+    });
+
+    if matches!(field.vis, syn::Visibility::Public(_)) {
+        let prefix = format!("{ident}.");
+        generated.values.push(quote! {
+            out.extend(self.#ident.field_values().into_iter().map(|mut v| {
+                v.name.insert_str(0, #prefix);
+                v
+            }));
+        });
+        generated.specs.push(quote! {
+            out.extend(<#ty>::field_specs().into_iter().map(|mut s| {
+                s.name.insert_str(0, #prefix);
+                s
+            }));
+        });
+        generated.routes.push(quote! {
+            stringify!(#ident) => return self.#ident.set_field(rest, value),
+        });
+    }
+}
+
+fn leaf_field(
+    generated: &mut GeneratedFields,
+    field: &syn::Field,
+    placement: Placement,
+    ty_str: &str,
+) {
+    let ident = field.ident.as_ref().expect("named fields");
+    let ty = &field.ty;
+    let Placement { lo, hi, .. } = placement;
+    let accessor = quote! { crate::bits::Field::<#ty, #lo, #hi> };
+    generated
+        .decode
+        .push(quote! { #ident: #accessor::get(&raw)? });
+    generated
+        .encode
+        .push(quote! { #accessor::set(&mut raw, p.#ident); });
+
+    let path = ident.to_string();
+    generated.layout.push(quote! {
+        crate::layout::LayoutField {
+            path: #path,
+            ty: #ty_str,
+            lo: #lo,
+            hi: #hi,
+            nested: ::core::option::Option::None,
+        }
+    });
+    if !matches!(field.vis, syn::Visibility::Public(_)) {
+        return;
+    }
+
+    let placement = format!("{lo}..={hi}");
+    let width = hi - lo + 1;
+    generated.values.push(quote! {
+        out.push(crate::fields::FieldValue {
+            name: #path.to_string(),
+            placement: #placement,
+            raw: crate::bits::Field::<u64, #lo, #hi>::read(&self.raw),
+            bits: <#ty as crate::bits::Packed>::to_bits(&self.#ident),
+            value: ::std::format!("{:?}", &self.#ident),
+        });
+    });
+    generated.specs.push(quote! {
+        out.push(crate::fields::FieldSpec {
+            name: #path.to_string(),
+            placement: #placement,
+            width: #width,
+            legal: || crate::fields::legal_values::<#ty>(#width),
+            control: <#ty as crate::bits::Packed>::CONTROL,
+        });
+    });
+    // The type rejects values it cannot hold instead of clamping them into the slot.
+    generated.setters.push(quote! {
+        #path => {
+            self.#ident = crate::fields::parse_field::<#ty>(#width, value)
+                .map_err(|e| e.at(#path))?;
+            return Ok(());
+        }
+    });
+}
+
+fn generate_fields(
+    named: &syn::FieldsNamed,
+    span_bits: u32,
+    bytes: usize,
+) -> syn::Result<GeneratedFields> {
+    let mut generated = GeneratedFields::default();
+    for field in &named.named {
+        let ident = field.ident.as_ref().expect("named fields");
+        let placement = placement(field)?;
+        claim(
+            field,
+            ident,
+            placement,
+            span_bits,
+            bytes,
+            &mut generated.claimed,
+        )?;
+        let ty = &field.ty;
+        let ty_str = quote!(#ty).to_string().replace(' ', "");
+        common_field(&mut generated, field, placement, &ty_str);
+        if placement.nested {
+            nested_field(&mut generated, field, placement, &ty_str);
+        } else {
+            leaf_field(&mut generated, field, placement, &ty_str);
+        }
+    }
+    Ok(generated)
+}
+
 fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let len: LitInt = syn::parse2(attr.clone()).map_err(|_| {
         syn::Error::new(
@@ -274,7 +550,10 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     if bytes == 0 {
         return Err(syn::Error::new_spanned(&len, "a body needs a byte"));
     }
-    let span_bits = (bytes * 8) as u32;
+    let span_bits = bytes
+        .checked_mul(8)
+        .and_then(|bits| u32::try_from(bits).ok())
+        .ok_or_else(|| syn::Error::new_spanned(&len, "the body is too large to index with u32"))?;
 
     let body: ItemStruct = syn::parse2(item)?;
     let name = &body.ident;
@@ -288,194 +567,25 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         ));
     };
 
-    let mut claimed: Vec<(u32, u32, &Ident)> = Vec::new();
-    let mut rows: Vec<MapRow> = Vec::new();
-
-    let mut fields = Vec::new();
-    let mut decode = Vec::new();
-    let mut encode = Vec::new();
-    let mut debug = Vec::new();
-    let mut values = Vec::new();
-    let mut specs = Vec::new();
-    let mut setters = Vec::new();
-    let mut routes = Vec::new();
-    let mut layout = Vec::new();
-
-    for field in &named.named {
-        let ident = field.ident.as_ref().expect("named fields");
-        let ty = &field.ty;
-        let ty_str = quote!(#ty).to_string().replace(' ', "");
-        let public = matches!(field.vis, syn::Visibility::Public(_));
-
-        let bits_attr = field.attrs.iter().find(|a| a.path().is_ident("bits"));
-        let at_attr = field.attrs.iter().find(|a| a.path().is_ident("at"));
-
-        // The bit span this field claims, and the placement doc, either way.
-        let (lo, hi) = match (&bits_attr, &at_attr) {
-            (Some(attr), None) => {
-                let Bits { lo, hi } = attr.parse_args()?;
-                (lo, hi)
-            }
-            (None, Some(attr)) => {
-                let At { start, end } = attr.parse_args()?;
-                (start * 8, end * 8 - 1)
-            }
-            (Some(_), Some(and)) => {
-                return Err(syn::Error::new_spanned(
-                    and,
-                    "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body",
-                ));
-            }
-            (None, None) => {
-                return Err(syn::Error::new_spanned(
-                    field,
-                    "every field needs a placement: `#[bits(LO..=HI)]` for a leaf, \
-                     `#[at(LO..HI)]` for a nested body",
-                ));
-            }
-        };
-
-        if hi >= span_bits {
-            return Err(syn::Error::new_spanned(
-                field,
-                format!(
-                    "bit {hi} is past the end of a {bytes}-byte body, whose last bit is {}",
-                    span_bits - 1,
-                ),
-            ));
-        }
-        if let Some(&(olo, ohi, other)) = claimed.iter().find(|&&(l, h, _)| lo <= h && l <= hi) {
-            return Err(syn::Error::new_spanned(
-                field,
-                format!("bits {lo}..={hi} overlap `{other}`, at {olo}..={ohi}"),
-            ));
-        }
-        claimed.push((lo, hi, ident));
-        rows.push(MapRow {
-            lo,
-            hi,
-            field: Some((ident.to_string(), ty_str.clone())),
-        });
-
-        // Keep everything but the placement, which has served its purpose.
-        let kept: Vec<_> = field
-            .attrs
-            .iter()
-            .filter(|a| !a.path().is_ident("bits") && !a.path().is_ident("at"))
-            .collect();
-        let placement_doc = if at_attr.is_some() {
-            format!("Bytes {:#04x}..{:#04x}.", lo / 8, (hi + 1) / 8)
-        } else {
-            breakdown(lo, hi)
-        };
-        let field_vis = &field.vis;
-        fields.push(quote! {
-            #(#kept)*
-            #[doc = ""]
-            #[doc = #placement_doc]
-            #field_vis #ident: #ty
-        });
-        debug.push(quote! { .field(stringify!(#ident), &self.#ident) });
-
-        if at_attr.is_some() {
-            // ── a nested body, placed by its own [u8; N] conversions ──
-            let (start, end) = ((lo / 8) as usize, ((hi + 1) / 8) as usize);
-            let n = end - start;
-            decode.push(quote! {
-                #ident: <#ty as ::core::convert::TryFrom<[u8; #n]>>::try_from({
-                    let mut b = [0u8; #n];
-                    b.copy_from_slice(&raw[#start..#end]);
-                    b
-                })?
-            });
-            encode.push(quote! {
-                raw[#start..#end].copy_from_slice(&<[u8; #n]>::from(&p.#ident));
-            });
-            layout.push(quote! {
-                crate::layout::LayoutField {
-                    path: stringify!(#ident),
-                    ty: #ty_str,
-                    lo: #lo,
-                    hi: #hi,
-                    nested: ::core::option::Option::Some(
-                        <#ty as crate::layout::BodyLayout>::layout,
-                    ),
-                }
-            });
-            if public {
-                let prefix = format!("{ident}.");
-                values.push(quote! {
-                    out.extend(self.#ident.field_values().into_iter().map(|mut v| {
-                        v.name.insert_str(0, #prefix);
-                        v
-                    }));
-                });
-                specs.push(quote! {
-                    out.extend(<#ty>::field_specs().into_iter().map(|mut s| {
-                        s.name.insert_str(0, #prefix);
-                        s
-                    }));
-                });
-                routes.push(quote! {
-                    stringify!(#ident) => return self.#ident.set_field(rest, value),
-                });
-            }
-            continue;
-        }
-
-        // ── a leaf ──
-        let f = quote! { crate::bits::Field::<#ty, #lo, #hi> };
-        decode.push(quote! { #ident: #f::get(&raw)? });
-        encode.push(quote! { #f::set(&mut raw, p.#ident); });
-
-        let path = ident.to_string();
-        layout.push(quote! {
-            crate::layout::LayoutField {
-                path: #path,
-                ty: #ty_str,
-                lo: #lo,
-                hi: #hi,
-                nested: ::core::option::Option::None,
-            }
-        });
-
-        if !public {
-            continue;
-        }
-        let placement = format!("{lo}..={hi}");
-        let width = hi - lo + 1;
-
-        values.push(quote! {
-            out.push(crate::fields::FieldValue {
-                name: #path.to_string(),
-                placement: #placement,
-                raw: crate::bits::Field::<u64, #lo, #hi>::read(&self.raw),
-                bits: <#ty as crate::bits::Packed>::to_bits(&self.#ident),
-                value: ::std::format!("{:?}", &self.#ident),
-            });
-        });
-        specs.push(quote! {
-            out.push(crate::fields::FieldSpec {
-                name: #path.to_string(),
-                placement: #placement,
-                width: #width,
-                legal: || crate::fields::legal_values::<#ty>(#width),
-                control: <#ty as crate::bits::Packed>::CONTROL,
-            });
-        });
-        // The parse is the type's, so a value it cannot hold fails here rather
-        // than being clamped into the slot.
-        setters.push(quote! {
-            #path => {
-                self.#ident = crate::fields::parse_field::<#ty>(#width, value)
-                    .map_err(|e| e.at(#path))?;
-                return Ok(());
-            }
-        });
-    }
+    let GeneratedFields {
+        claimed,
+        mut rows,
+        fields,
+        decode,
+        encode,
+        debug,
+        values,
+        specs,
+        setters,
+        routes,
+        layout,
+    } = generate_fields(named, span_bits, bytes)?;
 
     let gaps = unclaimed(
-        &claimed.iter().map(|&(l, h, _)| (l, h)).collect::<Vec<_>>(),
+        &claimed
+            .iter()
+            .map(|(lo, hi, _)| (*lo, *hi))
+            .collect::<Vec<_>>(),
         span_bits,
     );
     let gap_doc = if gaps.is_empty() {
@@ -677,5 +787,21 @@ mod tests {
         assert_eq!(unclaimed(&[(0, 2), (5, 9)], 16), vec![(3, 4), (10, 15)]);
         assert_eq!(unclaimed(&[(0, 7)], 8), vec![]);
         assert_eq!(unclaimed(&[(4, 7)], 8), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn oversized_bodies_and_ranges_are_diagnostics() {
+        let body = quote!(
+            struct Huge {
+                #[bits(0..=0)]
+                bit: bool,
+            }
+        );
+        assert!(expand(quote!(536870912), body).is_err());
+
+        let nested = quote! {
+            struct HugeRange { #[at(0xfffffffe..0xffffffff)] child: Child }
+        };
+        assert!(expand(quote!(1), nested).is_err());
     }
 }

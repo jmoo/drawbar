@@ -68,11 +68,8 @@ pub struct OrganPanel {
     pub b3_preset2_vib: bool,
     #[bits(149..=149)]
     pub b3_preset2_perc: bool,
-    // Bits 150..=157 mirror the preset-1 bass pair above for preset 2, but the
-    // firmware neither reads nor writes them: injected values play nothing in
-    // b3+bass preset 2 (the bass manual follows the preset-1 field) and survive
-    // a panel store untouched. Confirmed on hardware. Fresh programs hold 8,8
-    // there. Left unclaimed so the field rides through re-encode verbatim.
+    // Bits 150..=157 survive panel stores but do not affect preset-2 bass.
+    // Confirmed on hardware; left unclaimed for verbatim round-trip.
 
     // ── Vox, 0x65..=0x74 ───────────────────────────────────────────────────────
     /// Shared across presets.
@@ -106,11 +103,8 @@ pub struct OrganPanel {
     #[bits(412..=412)]
     pub farfisa_preset2_vib: bool,
 
-    // ── Pipe, 0x85..=0x92. No vibrato, no percussion. ──────────────────────────
-    // Bit 492 — where the other models keep their preset-1 vib-on — is set in
-    // nearly every real program, but the vib button does not respond while Pipe
-    // is selected, so the panel cannot reach it. Confirmed on hardware. It rides
-    // through unclaimed like the preset-2 bass pair above.
+    // Pipe has no vibrato or percussion. Bit 492 survives panel stores but is
+    // unreachable while Pipe is selected; confirmed on hardware and left unclaimed.
     #[bits(441..=441)]
     pub pipe_preset2_selected: bool,
     #[bits(456..=491)]
@@ -401,6 +395,7 @@ macro_rules! model_index {
 
         impl Packed for $name {
             const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
             type Error = ::core::convert::Infallible;
 
@@ -488,6 +483,7 @@ impl Drawbars {
 
 impl Packed for Drawbars {
     const MAX_BITS: u32 = 4 * Drawbars::BARS as u32;
+    const DECODE_BITS: u32 = Self::MAX_BITS;
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Drawbar;
     type Error = ::core::convert::Infallible;
 

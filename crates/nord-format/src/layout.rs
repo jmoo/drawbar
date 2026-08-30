@@ -96,9 +96,7 @@ mod tests {
     #[test]
     fn the_codec_is_the_declaration() {
         let raw = <[u8; 6]>::from(&body());
-        // word rewritten; inner: flag clear (bit 0 of 0x0f), level 0x55 over bits
-        // 4..=11, inner's unclaimed bits 1..=3 kept from 0x0f; byte 4 unclaimed
-        // at the outer level, kept verbatim; the outer leaf rewritten.
+        // Claimed fields change; inner and outer unclaimed bits remain verbatim.
         assert_eq!(raw, [0x01, 0x02, 0x05, 0x50, 0xff, 0x07]);
         let back = Outer::try_from(raw).unwrap();
         assert_eq!(back.word, 0x0102);

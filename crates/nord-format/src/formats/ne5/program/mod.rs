@@ -58,7 +58,7 @@ pub type Bank = bank::Bank<Cbin<Program>, Location>;
 pub struct Program {
     /// Every specimen echoes the header's schema version.
     #[bits(0..=15)]
-    program_version: u16,
+    pub program_version: u16,
 
     #[at(0x02..0x09)]
     pub center_panel: CenterPanel,

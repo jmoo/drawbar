@@ -1,15 +1,12 @@
-//! Golden tests for the enumeration walk, driven by recorded exchanges.
+//! Enumeration walks driven by recorded exchanges.
 //!
 //! The walk is the one hardware-verified surface a replay could not cover, because no
 //! capture of it existed: `ReplayTransport` needed a script and NSM never performs a
 //! bare enumeration. These scripts are `nord`'s own traffic, taken with `--record`
 //! against the instrument.
 //!
-//! The transport is exact-match, so the walk has to re-emit the same requests in the
-//! same order it made them on hardware. What that pins down is the **bank-boundary
-//! logic** — where a bank ends, when the walk steps to the next one, and when it stops —
-//! which differs per class and is the part most likely to break first on another model.
-//! All four addressable classes are covered because all four have different geometry.
+//! The exact-match transport checks bank boundaries, transitions, and termination for
+//! each addressable class.
 //!
 //! Corpus-gated: the scripts carry slot names, so they live in the private corpus rather
 //! than in this repo.
@@ -68,28 +65,6 @@ fn script(name: &str) -> Vec<Step> {
         .collect()
 }
 
-/// Minimal executor — the crate is runtime-agnostic and a replayed exchange never
-/// actually pends, so a busy-poll is sufficient and keeps tokio out of the tree.
-fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-    fn vtable() -> &'static RawWakerVTable {
-        &RawWakerVTable::new(
-            |_| RawWaker::new(std::ptr::null(), vtable()),
-            |_| {},
-            |_| {},
-            |_| {},
-        )
-    }
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), vtable())) };
-    let mut cx = Context::from_waker(&waker);
-    let mut fut = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
-    loop {
-        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
-            return v;
-        }
-    }
-}
-
 /// The runaway guard the recordings were made under. It is a bound on a walk that
 /// fails to advance, not an item count: a walk that stops *at* the count never issues
 /// the probe that discovers the bank has no more occupied slots, and would diverge from
@@ -100,12 +75,10 @@ const CAP: usize = 1024;
 ///
 /// The recordings are of `nord <noun> list`, which is the walk followed by an `info`
 /// per slot found, all inside one session — so the replay has to do both to consume the
-/// script. The `info` sweep is what pins the walk's *results*: each address it yields is
-/// used to address the device, so a walk that invented a slot would ask for one the
-/// recording never answered.
+/// script. Reading `info` for every result makes an invented address fail the replay.
 fn walk(name: &str, class: ObjectClass) -> Vec<nord_usb::Location> {
     let mut t = ReplayTransport::new(script(name));
-    block_on(async {
+    pollster::block_on(async {
         let mut s = Session::open(&mut t, class).await.unwrap();
         let found = op::occupied_slots(&mut s, CAP).await.unwrap();
         for at in &found {

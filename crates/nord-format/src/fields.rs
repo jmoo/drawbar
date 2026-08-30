@@ -1,15 +1,7 @@
 //! Field-level introspection over a `#[bitbody]`'s fields.
 //!
-//! The generated registry lets a caller walk a body's fields without naming any of
-//! them, which is what the decode snapshot needs: a new field appears in the output
-//! by being declared, not by anyone remembering to add it. `set_field` is the same
-//! idea in the write direction — a field becomes settable by being declared, so a
-//! CLI cannot fall behind the library.
-//!
-//! Both halves of the snapshot's view of a [`FieldValue`] matter. `raw` is the field's
-//! bits with no type applied, so it pins the placement — move a range by one bit and it
-//! changes on nearly every specimen. `value` is the decoded rendering, so it pins the
-//! interpretation. A change to either is visible, and they fail in different places.
+//! Generated registries let callers inspect and edit declared fields without a
+//! second, manually synchronized list of names.
 
 use std::fmt::{self, Debug, Display, Formatter};
 
@@ -258,11 +250,12 @@ pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, Fiel
             }
         }
     } else if let Some(bits) = stored_value(&wanted) {
-        // A field too wide to walk is spelled by its stored bits. For the nine-nibble
-        // drawbar blocks that is the readable form anyway: `0x087654321` is the nine
-        // positions in order.
-        if let Ok(v) = T::from_bits(bits) {
-            return Ok(v);
+        // Wide fields use stored bits; for a drawbar block the hex digits are its bars.
+        // Check before decoding: storage-backed implementations may cast and truncate.
+        if width >= 64 || bits < (1u64 << width) {
+            if let Ok(v) = T::from_bits(bits) {
+                return Ok(v);
+            }
         }
     }
     Err(FieldError::BadValue {
@@ -357,6 +350,16 @@ mod tests {
         for no in ["false", "off", "no", "0"] {
             assert!(!parse_field::<bool>(1, no).unwrap(), "{no}");
         }
+    }
+
+    #[test]
+    fn a_wide_numeric_value_must_fit_its_declared_width() {
+        assert!(parse_field::<u16>(16, "70000").is_err());
+        assert!(parse_field::<u32>(32, "4294967296").is_err());
+        assert_eq!(
+            parse_field::<u64>(64, "18446744073709551615").unwrap(),
+            u64::MAX
+        );
     }
 
     /// A wide numeric field enumerates, so `--fields` can still say what it takes.
