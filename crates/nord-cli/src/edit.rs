@@ -101,10 +101,10 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
                 None,
                 None,
             ),
-            // ⚠️ Delete/write is not hardware-confirmed for live slots or settings.
+            // ⚠️ These classes take a write in place; a delete of either is untried.
             _ => Err(format!(
-                "writing {} back over USB is unproven; give -o a path to save the edit \
-                 as a .{} file",
+                "writing {} back over USB deletes first, which is untried for this \
+                 class; give -o a path to save the edit as a .{} file",
                 class.label(),
                 crate::file::tag(class).unwrap_or("bin"),
             )),
