@@ -108,7 +108,9 @@ pub enum Field {
 ///
 /// Every record opens `[root][top]`; what the version decides is the record
 /// width, where the stroke's global id sits inside it, and whether a low note
-/// follows the top. Inferred from specimens; not confirmed on hardware.
+/// follows the top.
+///
+/// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wide {
     /// 11-byte records; zones tile, so no low note is stored.
@@ -186,8 +188,9 @@ impl Wide {
 /// The gain is linear with `0x100000` for unity; it is an authored per-key
 /// curve that no zone layout predicts, and the three bytes behind it are where
 /// a per-note detune lands. Both are carried across an edit untouched. Only the
-/// quad follows from the zones, by [`partners`]. Inferred from specimens; not
-/// confirmed on hardware.
+/// quad follows from the zones, by [`partners`].
+///
+/// Inferred from specimens; not confirmed on hardware.
 const KEY_TABLE_AT: usize = 6;
 const KEY_STRIDE: usize = 10;
 const KEY_QUAD_AT: usize = 6;
@@ -704,8 +707,6 @@ mod tests {
         assert!(Wide::from_version(0).is_err());
     }
 
-    /// Each wide setter moves the one byte it names and nothing else, whatever
-    /// the record width.
     #[test]
     fn wide_setters_move_exactly_one_byte() {
         for version in [12, 14, 21] {
@@ -724,8 +725,6 @@ mod tests {
         }
     }
 
-    /// A layout that stores no low note refuses one rather than writing a byte
-    /// that means something else.
     #[test]
     fn a_low_note_is_refused_where_zones_tile() {
         let zones = [(9u32, 60u8, 84u8, 0u8)];
@@ -751,8 +750,6 @@ mod tests {
         assert!(table.set(&mut map, 1, Field::Top, 60).is_err());
     }
 
-    /// A retune has to move both copies of the root key: the table stops reading
-    /// when the record and the stroke disagree.
     #[test]
     fn a_record_disagreeing_with_its_stroke_is_refused() {
         let zones = [(9u32, 60u8, 84u8, 48u8)];
@@ -763,8 +760,6 @@ mod tests {
         assert!(read_v3(14, &map, &[(9, 48)]).is_ok());
     }
 
-    /// Only v21 carries per-key records, and a table every record of which
-    /// names its own key is the neutral one the sample editor writes.
     #[test]
     fn a_neutral_key_map_is_told_from_a_populated_one() {
         let zones = [(9u32, 60u8, 84u8, 48u8)];
@@ -783,8 +778,6 @@ mod tests {
         }
     }
 
-    /// A neutral table is left neutral: the sample editor writes it whatever the
-    /// zone layout, so an edit must not start populating one.
     #[test]
     fn a_neutral_key_map_survives_an_edit() {
         let zones = [(9u32, 60u8, 84u8, 48u8), (22, 72, 108, 85)];
@@ -829,8 +822,8 @@ mod tests {
         ]
     }
 
-    /// Partners taken off the Kalimba, whose table the vendor builder populated.
-    /// A hand-checked oracle: the file states these, and the law has to agree.
+    // Inferred from specimens; not confirmed on hardware.
+    // Expected partners are a hand-checked oracle from the populated Kalimba table.
     #[test]
     fn the_partner_law_matches_a_populated_table() {
         let zs = kalimba();
@@ -859,8 +852,6 @@ mod tests {
         }
     }
 
-    /// When `a` lands above the root the second partner reaches back across it,
-    /// even though a nearer root sits on the same side.
     #[test]
     fn the_second_partner_straddles_the_root() {
         let zs = vec![(61, 17, 62), (64, 63, 65), (66, 66, 68), (71, 69, 73)];
@@ -869,8 +860,6 @@ mod tests {
         assert_eq!(partners(&zs, 64), (66, 61));
     }
 
-    /// A zone with no eligible partner at all gives the identity, which is why a
-    /// one-zone instrument's table is the neutral one.
     #[test]
     fn a_lone_zone_names_nobody() {
         let zs = vec![(60, 17, 84)];
@@ -879,8 +868,6 @@ mod tests {
         }
     }
 
-    /// The span runs from the floor, not from a bottom zone that claims to start
-    /// below it, and stops on the highest zone's top.
     #[test]
     fn the_span_starts_at_the_floor() {
         let zs = vec![(47, 0, 49), (51, 50, 53)];
@@ -890,7 +877,6 @@ mod tests {
         assert_eq!(partners(&zs, 54), (54, 54));
     }
 
-    /// A `map` too short to hold the records is refused rather than guessed at.
     #[test]
     fn a_truncated_key_map_is_refused() {
         let zones = [(9u32, 60u8, 84u8, 48u8)];

@@ -360,8 +360,6 @@ mod tests {
         Sample::V3(body)
     }
 
-    /// A populated keyboard map is recomputed from the zones as they move, so
-    /// its zone paths are listed like any other instrument's.
     #[test]
     fn a_populated_key_map_still_lists_its_zones() {
         let mut sample = sample_with_key_map();
@@ -374,8 +372,6 @@ mod tests {
         assert!(paths.contains(&"zone1.root_key".to_string()), "{paths:?}");
     }
 
-    /// An instrument whose zones cannot be read lists its name and stops there,
-    /// rather than failing the listing outright.
     #[test]
     fn uneditable_zone_paths_are_not_listed() {
         let mut sample = sample_with_unreadable_map();

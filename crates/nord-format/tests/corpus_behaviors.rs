@@ -507,8 +507,6 @@ fn zones_of(bytes: &[u8]) -> Vec<(u8, u8, Option<u8>)> {
         .collect()
 }
 
-/// Renaming a wide instrument moves the name field and nothing else — not the
-/// sub-name that shares the `hdr` section with it.
 #[test]
 fn nsmp_wide_rename_touches_only_the_name_field() {
     for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_12, V4_KEY_MAP] {
@@ -536,8 +534,6 @@ fn nsmp_wide_rename_touches_only_the_name_field() {
     }
 }
 
-/// The whole main-name field is writable — what bounds it is the sub-name that
-/// starts where it ends, and that field survives a name filling the one before it.
 #[test]
 fn nsmp_wide_rename_stops_at_the_sub_name() {
     let long = "x".repeat(nsmp::MAX_NAME_V3_LEN);
@@ -556,8 +552,6 @@ fn nsmp_wide_rename_stops_at_the_sub_name() {
     assert!(sample.set_name(&format!("{long}x")).is_err());
 }
 
-/// Retuning a wide zone moves the stroke's root key and the copy the zone record
-/// duplicates — two bytes, and the audio is not one of them.
 #[test]
 fn nsmp_wide_retune_moves_both_copies_of_the_root_key() {
     for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
@@ -575,7 +569,6 @@ fn nsmp_wide_retune_moves_both_copies_of_the_root_key() {
     }
 }
 
-/// Remapping a wide zone moves the one boundary byte it names.
 #[test]
 fn nsmp_wide_remap_moves_one_boundary_byte() {
     for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
@@ -610,12 +603,6 @@ fn nsmp_wide_remap_moves_one_boundary_byte() {
     }
 }
 
-/// Recomputing a populated per-key table from the layout it already describes
-/// reproduces it exactly: the partner law is what the vendor's builder ran.
-///
-/// The records outside the zones' span are part of the claim — two builders
-/// write `[0][0][0][key]` there rather than the identity, and those are carried
-/// across rather than normalised.
 #[test]
 fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
     let mut populated = 0;
@@ -654,13 +641,6 @@ fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
     assert!(neutral > 0, "no neutral per-key table in the corpus");
 }
 
-/// A populated per-key table is recomputed from the zone layout, and an edit
-/// that puts the layout back where it was reproduces the file byte for byte.
-///
-/// The partner law is the whole claim here: the 5 vendor instruments that carry
-/// a populated table are the only specimens that exercise it, and 24 of their
-/// records sit outside the zones' span where two builders write `[0][0][0][key]`
-/// rather than the identity. Those are carried across untouched.
 #[test]
 fn nsmp_v4_populated_key_map_survives_a_round_trip() {
     let mut seen = 0;
@@ -696,8 +676,6 @@ fn nsmp_v4_populated_key_map_survives_a_round_trip() {
     assert!(seen > 0, "no multi-zone wide sample in the corpus");
 }
 
-/// Retuning a multi-zone v4 instrument moves the two copies of the root key and
-/// the per-key records the partner law reassigns — and nothing else.
 #[test]
 fn nsmp_v4_retune_carries_the_key_map_with_it() {
     let before = &named(V4_KEY_MAP).bytes;
@@ -723,8 +701,6 @@ fn nsmp_v4_retune_carries_the_key_map_with_it() {
     assert_eq!(levels(before), levels(&after), "the per-key levels moved");
 }
 
-/// Every wide specimen's zones survive a retune to a new root and back, which is
-/// the pairing the zone record and its stroke have to keep.
 #[test]
 fn nsmp_wide_retune_round_trips_across_the_corpus() {
     let mut seen = 0;
