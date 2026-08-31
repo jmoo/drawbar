@@ -164,10 +164,10 @@ that bring it back are in Keyboard & split, which leads because it never goes.
   *Ask the instrument* is there for a read that found nothing. Without an instrument the
   id is shown and says as much.
 - **The Model dial is a list of pianos** once the instrument's Pianos folder has been
-  read: the scanned names of the document's category, each at its dial position. The
-  bank ↔ category reading is inferred rather than hardware-confirmed, so where the
-  dependency reply and the list disagree, the document says so and trusts the
-  instrument. Unscanned or unattached, the dial stays a number.
+  read: the scanned names of the document's category, each at its dial position. Where
+  the dependency reply and the list disagree the document says so and trusts the
+  instrument — a stored category and model are slot coordinates, and go stale when the
+  library is reorganized. Unscanned or unattached, the dial stays a number.
 - A picker offers only values the library can name. A file holding one it cannot reads
   as *unrecognized value (6)* and keeps it in the list, so changing away from it can be
   undone.

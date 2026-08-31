@@ -13,8 +13,10 @@
 //!                                           with u32 status  preceding bytes
 //! ```
 //!
-//! Inferred from captured traffic; frame lengths and CRCs are checked across the
-//! capture corpus.
+//! Derived from captured traffic and confirmed on hardware: this framing carries every
+//! operation the crate performs, and two platforms emit byte-identical request frames
+//! for the same verb. What an individual command *means* is a separate question, and
+//! several below are still open.
 //!
 //! A response to a request is `command + 1` and inserts a `u32` status (0 = success)
 //! ahead of the echoed arguments. The unsolicited [`cmd::CHANGED`] notification is
@@ -736,8 +738,12 @@ impl Message {
 /// What kind of object a session is about.
 ///
 /// `SESSION_OPEN` carries one of these, and [`cmd::STATUS`] then reports on that class
-/// alone. Names are inferred from captured inventory and backup traffic; an
-/// unrecognized numeric class is preserved.
+/// alone. Confirmed on hardware: **the class code is the device's partition index**,
+/// and the partition table names each one. An unrecognized numeric class is preserved.
+///
+/// The gaps at `0` and `2` are the `Piano (Native)` and `Samp Lib (Native)` partitions
+/// — a second view of the same objects in storage order rather than by category. Both
+/// are readable and neither is modelled here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectClass {
     Piano,

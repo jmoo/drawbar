@@ -553,10 +553,10 @@ pub const MAX_BANKS: u32 = 32;
 /// Slots per bank, per class, where the device will not say.
 ///
 /// ⚠️ These are the Electro 5's divisions — 50 programs and 50 set lists to a bank,
-/// three live slots, one settings singleton — inferred from the corpus and the panel's
-/// own labels, not read off the device. The walk asks the device for its real banks
-/// first and only falls back here; either way it is not held to the number, because the
-/// device answers status 3 past the end of its slot space.
+/// three live slots, one settings singleton — which its own bank list reports, confirmed
+/// on hardware. They are a fallback because another instrument's need not match: the
+/// walk asks the device for its real banks first, and either way is not held to the
+/// number, because the device answers status 3 past the end of its slot space.
 pub fn slots_per_bank(class: ObjectClass) -> u32 {
     match class {
         ObjectClass::Live => 3,
