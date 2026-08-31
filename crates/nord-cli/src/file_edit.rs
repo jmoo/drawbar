@@ -51,7 +51,7 @@ pub fn editable(entity: &Entity) -> bool {
         || matches!(
             entity,
             Entity::Song(nord_format::Song::Electro5(_))
-                | Entity::Sample(nord_format::Sample::V2(_))
+                | Entity::Sample(_)
                 | Entity::SampleProject(_)
         )
 }
@@ -78,13 +78,8 @@ pub fn run(ui: &Ui, args: FileEditArgs) -> Result<(), String> {
             Entity::Song(nord_format::Song::Electro5(song)) => {
                 editors::stage(ui, args.fields, &args.set, &mut SongEditor(song))?
             }
-            Entity::Sample(nord_format::Sample::V2(sample)) => {
+            Entity::Sample(sample) => {
                 editors::stage(ui, args.fields, &args.set, &mut SampleEditor(sample))?
-            }
-            Entity::Sample(nord_format::Sample::V3(_)) => {
-                return Err(
-                    "this instrument is nsmp3/nsmp4 content; only v2 (.nsmp) can be edited".into(),
-                )
             }
             Entity::SampleProject(project) => {
                 editors::stage(ui, args.fields, &args.set, &mut ProjectEditor(project))?

@@ -6,8 +6,8 @@
 
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5::{program, song, Song};
-use nord_format::formats::nsmp::{Sample, MAX_NAME_LEN};
 use nord_format::formats::nsmpproj::Project;
+use nord_format::Sample;
 
 use crate::note;
 use crate::ui::Ui;
@@ -94,9 +94,11 @@ fn indexed(part: &str, label: &str) -> Option<usize> {
         .filter(|&n| n >= 1)
 }
 
-/// The sample instrument: the name, and each zone's root key and top note —
-/// what the format can patch in place without touching a stroke.
-pub struct SampleEditor<'a>(pub &'a mut Cbin<Sample>);
+/// The sample instrument, in any generation: the name, and each zone's root key
+/// and boundaries — what the format can patch in place without touching a
+/// stroke. `low_note` is listed only where the generation stores one; elsewhere
+/// zones tile and a zone's bottom follows from the one below it.
+pub struct SampleEditor<'a>(pub &'a mut Sample);
 
 impl Fields for SampleEditor<'_> {
     fn rows(&self) -> Result<Vec<Row>, String> {
@@ -104,15 +106,18 @@ impl Fields for SampleEditor<'_> {
         let mut out = vec![Row {
             path: "name".into(),
             value: sample.name().map_err(|e| e.to_string())?,
-            accepts: format!("up to {MAX_NAME_LEN} bytes"),
+            accepts: format!("up to {} bytes", sample.max_name_len()),
         }];
-        let zones = sample.zones().map_err(|e| e.to_string())?;
-        let strokes = sample.strokes().map_err(|e| e.to_string())?;
-        for (i, (zone, stroke)) in zones.iter().zip(&strokes).enumerate() {
+        for (i, zone) in sample
+            .zones()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .enumerate()
+        {
             let n = i + 1;
             out.push(Row {
                 path: format!("zone{n}.root_key"),
-                value: note::name(stroke.root_key),
+                value: note::name(zone.root_key),
                 accepts: NOTE_ACCEPTS.into(),
             });
             out.push(Row {
@@ -120,6 +125,13 @@ impl Fields for SampleEditor<'_> {
                 value: note::name(zone.top_note),
                 accepts: NOTE_ACCEPTS.into(),
             });
+            if let Some(low) = zone.low_note {
+                out.push(Row {
+                    path: format!("zone{n}.low_note"),
+                    value: note::name(low),
+                    accepts: NOTE_ACCEPTS.into(),
+                });
+            }
         }
         Ok(out)
     }
@@ -141,6 +153,7 @@ impl Fields for SampleEditor<'_> {
         match field {
             "root_key" => sample.set_root_key(index - 1, value),
             "top_note" => sample.set_zone_top_note(index - 1, value),
+            "low_note" => sample.set_zone_low_note(index - 1, value),
             _ => return Err(unknown(path)),
         }
         .map_err(|e| e.to_string())
