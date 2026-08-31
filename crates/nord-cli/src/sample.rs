@@ -370,9 +370,9 @@ fn experimental(acknowledged: bool) -> Result<(), String> {
     }
     Err(
         "encoding is experimental: the file it writes is structurally sound and \
-         decodes back exactly, and single-zone output plays on an Electro 5, but it \
-         is not byte-identical to the editor's output and its strokes do not loop. \
-         Pass --experimental to write it anyway."
+         decodes back exactly, and single-zone unlooped output plays on an Electro 5, \
+         but it is not byte-identical to the editor's output. Pass --experimental to \
+         write it anyway."
             .into(),
     )
 }
