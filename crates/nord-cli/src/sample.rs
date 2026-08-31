@@ -593,7 +593,8 @@ fn project_frames(frames: usize, rate: u32) -> Result<u64, String> {
     u64::try_from(frames)
         .ok()
         .and_then(|f| f.checked_mul(PROJECT_RATE))
-        .map(|scaled| (scaled + rate / 2) / rate)
+        .and_then(|scaled| scaled.checked_add(rate / 2))
+        .map(|rounded| rounded / rate)
         .ok_or_else(|| format!("{frames} frames at {rate} Hz overflows a frame count"))
 }
 
@@ -730,6 +731,13 @@ mod tests {
             "rounded, not floored"
         );
         assert!(project_frames(1, 0).is_err());
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_frame_count_refuses_rounding_that_would_overflow() {
+        let frames = (u64::MAX / PROJECT_RATE) as usize;
+        assert!(project_frames(frames, u32::MAX).is_err());
     }
 
     #[test]
