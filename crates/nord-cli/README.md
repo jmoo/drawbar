@@ -206,6 +206,10 @@ instrument refuses to overwrite in place. `nord` reads the occupant first and
 puts it back if the write fails; if the restore fails too, the bytes are written
 to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
 
+`live` and `settings` are the exception: the instrument accepts a write at one of
+their occupied slots, so nothing is deleted to make room. The occupant is still
+read back first and put back if the write fails.
+
 ## Editing an object
 
 `edit` is the only verb that changes what is *inside* an object, and it exists on
@@ -228,10 +232,18 @@ A file and a slot are the same command; the slot form is a read-modify-write ove
 USB, so it asks before writing. Editing a file in place asks too — pass `-o` to
 write somewhere else instead.
 
-For `live` and `settings` the slot form reads off the instrument but **refuses to
-write back**: the instrument takes a write in place for both, but this writes by
-deleting first, and a delete of either class is untried on hardware. An edited slot
-of either class stops at a file, via `-o`.
+`live` and `settings` edit their slots as well. Live slots are `1:1` to `1:3`
+and the settings singleton is `1:1`; neither class stores a name, so an edit
+changes the body and nothing else:
+
+```sh
+nord live edit 1:2 --set center_panel.gain=96 --yes
+nord settings edit 1:1 --set fine_tune=0 --dry-run
+```
+
+> [!WARNING]
+> A settings write reloads the selected program on the instrument. Panel state
+> that has not been stored is lost, so re-`select` and re-apply afterwards.
 
 **A value is spelled the way `nord inspect` and `--fields` print it**, and one
 the field cannot hold is rejected before anything is written:

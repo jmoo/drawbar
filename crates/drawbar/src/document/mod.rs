@@ -250,17 +250,13 @@ impl Document {
                 .clicked();
             act.save = ui.button("Export…").clicked();
             if let Some((class, at)) = entity.origin.slot() {
-                let refusal = crate::device::put_refusal(class);
-                let sendable = refusal.is_none() && !crate::device::read_only(class);
                 let label = format!("Send to {}", strings::place(class, at));
-                let button = ui.add_enabled(sendable, egui::Button::new(label));
-                let button = match refusal {
-                    Some(why) => button.on_disabled_hover_text(why),
-                    None => button.on_disabled_hover_text(format!(
+                let button = ui
+                    .add_enabled(crate::device::sendable(class), egui::Button::new(label))
+                    .on_disabled_hover_text(format!(
                         "{} are installed on the instrument, not sent to it",
                         strings::folder(class)
-                    )),
-                };
+                    ));
                 if button.clicked() {
                     act.send = Some(SendBack {
                         id: entity.id,

@@ -803,6 +803,32 @@ impl ObjectClass {
             ObjectClass::Unknown(v) => format!("class {v}"),
         }
     }
+
+    /// Whether a write into an *occupied* slot of this class lands without deleting it
+    /// first.
+    ///
+    /// Confirmed on hardware.
+    ///
+    /// Live and Settings accept the ordinary `BEGIN_WRITE` → `WRITE_DATA` →
+    /// `END_TRANSFER` sequence at their occupied slots and the body
+    /// reads back as what was sent, where every other class answers status `0x4` until
+    /// the slot is empty. Their delete has never been attempted, so composing a write
+    /// out of delete-then-write there is both unnecessary and untested.
+    pub fn overwrites_in_place(self) -> bool {
+        matches!(self, ObjectClass::Live | ObjectClass::Settings)
+    }
+
+    /// Whether the device stores a name for the objects of this class.
+    ///
+    /// Confirmed on hardware.
+    ///
+    /// Live and Settings hold fixed names (`Live 1`, `Settings`) — they answer
+    /// `0x1c` rename with success and change nothing, and they carry `BEGIN_WRITE`'s
+    /// name argument and discard it. Partition record word 3, the slot-family name
+    /// length, is `0` for both.
+    pub fn names_its_slots(self) -> bool {
+        !matches!(self, ObjectClass::Live | ObjectClass::Settings)
+    }
 }
 
 /// What [`cmd::STATUS`] reports, for whichever [`ObjectClass`] the session opened.
@@ -939,6 +965,25 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn only_the_buffer_classes_overwrite_in_place_and_hold_no_name() {
+        for class in [ObjectClass::Live, ObjectClass::Settings] {
+            assert!(class.overwrites_in_place(), "{}", class.label());
+            assert!(!class.names_its_slots(), "{}", class.label());
+        }
+        let storage = [
+            ObjectClass::Piano,
+            ObjectClass::Sample,
+            ObjectClass::Program,
+            ObjectClass::SetList,
+            ObjectClass::Unknown(9),
+        ];
+        for class in storage {
+            assert!(!class.overwrites_in_place(), "{}", class.label());
+            assert!(class.names_its_slots(), "{}", class.label());
+        }
     }
 
     #[test]

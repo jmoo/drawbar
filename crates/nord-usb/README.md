@@ -21,13 +21,12 @@ The wire protocol is decoded and validated. Implemented and hardware-verified on
 macOS and Linux: inventory, object info, dependencies, program read/write, the
 slot organization set (move, delete, rename, duplicate, select), and reads of the
 live slots (class 6) and the settings singleton (class 7). Linux emits
-byte-identical request frames to macOS for every verb.
+byte-identical request frames to macOS for every verb. Writes of the live and
+settings slots are additionally hardware-verified on macOS.
 
-Those two classes take a write **in place**, at an occupied slot, which no other
-class does — confirmed on hardware by driving the sequence directly. `op::write`
-has no in-place branch, so it still composes a write as delete-then-write and
-refuses class 6 and 7 rather than delete them; whether either survives a delete of
-its own class is unconfirmed on hardware.
+Those two classes overwrite an occupied slot in place
+(`ObjectClass::overwrites_in_place`), so a caller must not compose their write out
+of delete-then-write — deleting either has never been attempted.
 
 The WebUSB backend is hardware-verified for reads and writes (Chrome on macOS,
 via `drawbar`). Three transport paths that only the browser takes are not:
