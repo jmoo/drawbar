@@ -553,10 +553,10 @@ pub const MAX_BANKS: u32 = 32;
 /// Slots per bank, per class, where the device will not say.
 ///
 /// ⚠️ These are the Electro 5's divisions — 50 programs and 50 set lists to a bank,
-/// three live slots, one settings singleton — inferred from the corpus and the panel's
-/// own labels, not read off the device. The walk asks the device for its real banks
-/// first and only falls back here; either way it is not held to the number, because the
-/// device answers status 3 past the end of its slot space.
+/// three live slots, one settings singleton — which its own bank list reports, confirmed
+/// on hardware. They are a fallback because another instrument's need not match: the
+/// walk asks the device for its real banks first, and either way is not held to the
+/// number, because the device answers status 3 past the end of its slot space.
 pub fn slots_per_bank(class: ObjectClass) -> u32 {
     match class {
         ObjectClass::Live => 3,
@@ -593,14 +593,15 @@ pub fn sendable(class: ObjectClass) -> bool {
 
 /// Whether a class accepts a write.
 ///
-/// ⚠️ A write is a delete followed by a write, and whether the live buffer or the
-/// settings singleton survives a delete of its own class is unconfirmed on hardware.
-/// Until it is, an edit of either stops at a file.
+/// ⚠️ The live buffer and the settings singleton take a write **in place**, confirmed
+/// on hardware — but this app writes through a delete followed by a write, and whether
+/// either survives a delete of its own class is unconfirmed. Until the in-place path
+/// exists, an edit of either stops at a file.
 pub fn put_refusal(class: ObjectClass) -> Option<String> {
     match class {
         ObjectClass::Live | ObjectClass::Settings => Some(format!(
-            "writing {} back over USB is unproven on hardware; save the object as a \
-             file instead",
+            "this app writes {} by deleting first, which is untried on hardware for \
+             this class; save the object as a file instead",
             class.label(),
         )),
         _ => None,
@@ -990,13 +991,13 @@ impl Device {
 mod tests {
     use super::*;
 
-    /// The two classes whose write path is unproven must refuse by name, and the rest
-    /// must not.
+    /// The two classes this app has no in-place write for must refuse by name, and the
+    /// rest must not.
     #[test]
     fn only_live_and_settings_refuse_a_put() {
         for class in [ObjectClass::Live, ObjectClass::Settings] {
             let why = put_refusal(class).expect("must refuse");
-            assert!(why.contains("unproven on hardware"), "{why}");
+            assert!(why.contains("deleting first"), "{why}");
         }
         for class in ObjectClass::INVENTORY {
             assert!(put_refusal(class).is_none(), "{}", class.label());

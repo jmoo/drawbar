@@ -159,7 +159,7 @@ pub struct EncodeArgs {
     #[arg(long)]
     pub predict: bool,
 
-    /// Acknowledge that this codec tier is unproven on hardware. Required.
+    /// Acknowledge that this is not a vendor-identical encode. Required.
     #[arg(long)]
     pub experimental: bool,
 }
@@ -324,10 +324,10 @@ fn decode_file(
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     if !args.experimental {
         return Err(
-            "encoding is experimental: the file it writes is structurally sound and \
-             decodes back exactly, but it is not byte-identical to the editor's output \
-             and no instrument has been shown to play one. Pass --experimental to write \
-             it anyway."
+            "encoding is experimental: the file it writes is structurally sound, \
+             decodes back exactly and plays on an Electro 5, but it is not \
+             byte-identical to the editor's output and its stroke does not loop. \
+             Pass --experimental to write it anyway."
                 .into(),
         );
     }

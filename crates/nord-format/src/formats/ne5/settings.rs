@@ -109,9 +109,9 @@ pub struct Settings {
     pub output_routing: OutputRouting,
     #[bits(68..=71)]
     pub global_transpose: GlobalTranspose,
-    /// Only `-50`, `0` and `+50` appear in the sweep; the bias and the width come from
-    /// those three plus the default of `+5`. Values between them are inferred from
-    /// specimens; not confirmed on hardware.
+    /// Confirmed on hardware at `-50`, `0` and `+5`: written over USB, each moves the
+    /// instrument's pitch by its own value in cents. The values between are inferred
+    /// from specimens; not confirmed on hardware.
     #[bits(55..=61)]
     pub fine_tune: FineTune,
 
@@ -163,9 +163,6 @@ pub struct Settings {
     pub rotary_horn_speed: RotaryRate,
     #[bits(88..=90)]
     pub rotary_horn_acceleration: RotaryRate,
-    /// The sweep's `low` specimen is byte-identical to its `high` one, so only `normal`
-    /// and `high` are confirmed here; `low` is inferred from the three sibling rate
-    /// fields, which share this encoding and do reach it.
     #[bits(85..=87)]
     pub rotary_rotor_speed: RotaryRate,
     #[bits(91..=93)]
