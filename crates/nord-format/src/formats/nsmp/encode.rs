@@ -1525,8 +1525,6 @@ mod tests {
         }
     }
 
-    /// A zone reaches the stroke it names, whatever order the ids run in: three zones
-    /// keep their own root keys, top notes and audio through a read-back.
     #[test]
     fn every_zone_reads_back_paired_to_its_own_stroke() {
         let high = sine(880.0, 12_000.0, 12_000);
@@ -1576,9 +1574,6 @@ mod tests {
         }
     }
 
-    /// A zone's audio does not depend on the company it keeps: the same source in a
-    /// three-zone instrument decodes to what it decodes to on its own, even though the
-    /// zone table moved its stream and rewrote its directory.
     #[test]
     fn a_zone_decodes_the_same_alone_as_in_a_crowd() {
         let source = sine(330.0, 18_000.0, 20_000);
@@ -1603,8 +1598,6 @@ mod tests {
         );
     }
 
-    /// Encoded audio starts at a fixed offset, so a zone table takes its bytes out of
-    /// the first stroke's header rather than pushing the packets along.
     #[test]
     fn every_stroke_is_its_own_header_length_plus_whole_packets() {
         let source = sine(440.0, 12_000.0, 12_000);
