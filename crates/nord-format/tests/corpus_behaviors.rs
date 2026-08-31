@@ -461,6 +461,7 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
                         root_key: *root_key,
                         top_note: *top_note,
                         global_id: *global_id,
+                        loops: None,
                     },
                 )
                 .collect::<Vec<_>>(),
@@ -559,6 +560,7 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
                         root_key: *root_key,
                         top_note: *top_note,
                         global_id: *global_id,
+                        loops: None,
                     },
                 )
                 .collect::<Vec<_>>(),
