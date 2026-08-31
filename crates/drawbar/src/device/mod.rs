@@ -594,8 +594,10 @@ pub fn sendable(class: ObjectClass) -> bool {
 /// What a write into this class disturbs beyond the slot it lands in, for the question
 /// asked before it happens.
 ///
-/// Confirmed on hardware: a settings write makes the instrument reload the selected
-/// program, so panel state the player has not stored is gone.
+/// Confirmed on hardware.
+///
+/// A settings write makes the instrument reload the selected program, so panel state
+/// the player has not stored is gone.
 pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
     match class {
         ObjectClass::Settings => Some(
@@ -999,8 +1001,6 @@ mod tests {
         assert!(!sendable(ObjectClass::Piano));
     }
 
-    /// A settings write costs the player their un-stored panel state, so the question
-    /// asked beforehand has to say so — no other class disturbs anything but its slot.
     #[test]
     fn a_settings_write_warns_that_the_panel_reloads() {
         let why = write_warning(ObjectClass::Settings).expect("must warn");

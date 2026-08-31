@@ -1498,9 +1498,6 @@ mod wire_tests {
         );
     }
 
-    /// ⚠️ The buffer classes take a write at an occupied slot, and deleting one has
-    /// never been attempted on the instrument. A put into Live must reach `BEGIN_WRITE`
-    /// with nothing in front of it, where a program's put still clears the slot first.
     #[test]
     fn a_put_into_a_buffer_class_never_deletes_the_slot() {
         let at = Location { bank: 0, slot: 2 };
@@ -1527,8 +1524,6 @@ mod wire_tests {
         );
     }
 
-    /// ⚠️ Live and Settings answer a rename with success and change nothing, so sending
-    /// one would have this app report a naming that never happened.
     #[test]
     fn a_class_that_stores_no_name_is_not_renamed_after_a_write() {
         let at = Location { bank: 0, slot: 2 };
