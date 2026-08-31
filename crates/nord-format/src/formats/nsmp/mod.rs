@@ -10,15 +10,18 @@
 //! chain is the same.
 //!
 //! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
-//! and can retune, rename and remap them without touching a byte of audio. The [`codec`]
-//! decodes that audio to samples in every generation — it is one codec in three sets of
-//! units, so a caller only picks the right [`codec::Layout`]. [`encode`] builds a new
-//! instrument from PCM, v2 only.
+//! and can retune, rename and remap them without touching a byte of audio, in either
+//! chain. The [`codec`] decodes that audio to samples in every generation — it is one
+//! codec in three sets of units, so a caller only picks the right [`codec::Layout`].
+//! [`encode`] builds a new instrument from PCM, v2 only.
 
 /// A zone and the stroke stream that plays it, ready for [`codec::decode`].
 pub struct ZoneAudio<'a> {
     pub root_key: u8,
     pub top_note: u8,
+    /// Lowest note, where the generation stores one. `None` where zones tile and
+    /// a zone's bottom is one above the next-lower zone's top.
+    pub low_note: Option<u8>,
     /// The stream's offset from the start of the body, which is the base its own
     /// word directory was written against.
     pub at: usize,
@@ -135,7 +138,8 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error>
 
 /// A v3/v4 body: the wide-section (`NSMP`) chain, held in file order including
 /// repeats — `stk` appears once per stroke. Sections are preserved verbatim, so
-/// a file round-trips byte-exactly; nothing edits one yet.
+/// a file round-trips byte-exactly, and the name, zone boundaries and root keys
+/// patch in place without touching the audio.
 ///
 /// Every corpus specimen chains `NSMP`, `hdr`, `cat`, `map`, N × `stk`, `sty`,
 /// `meta`, in that order, in both container generations. Inferred from
@@ -171,6 +175,12 @@ const NAME_V3_AT: usize = 10;
 /// `Bass Clarinet 2_KG  mono 3.11`. Inferred from specimens; not confirmed on
 /// hardware.
 const NAME_V3_SUB_AT: usize = 76;
+
+/// Longest main name this writer will emit on the wide chain.
+///
+/// The whole field is writable here, unlike [`MAX_NAME_LEN`]: what follows it is
+/// the sub-name rather than unmapped bytes, so the bound is the field itself.
+pub const MAX_NAME_V3_LEN: usize = NAME_V3_SUB_AT - NAME_V3_AT;
 
 impl Cbin<SampleV3> {
     fn hdr(&self) -> Result<&section::Section4, Error> {
@@ -233,13 +243,138 @@ impl Cbin<SampleV3> {
     /// Keyboard zones, in stored order — high to low except `map` v14, which
     /// stores low to high. Each zone is verified against the stroke it names.
     pub fn zones(&self) -> Result<Vec<ZoneV3>, Error> {
-        let map = section::find4(&self.body.sections, section::MAP4)
-            .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
+        let map = self.map()?;
         Ok(zone::read_v3(
             map.version,
             &map.payload,
             &self.stroke_ids()?,
         )?)
+    }
+
+    fn map(&self) -> Result<&section::Section4, Error> {
+        section::find4(&self.body.sections, section::MAP4)
+            .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
+    }
+
+    fn map_mut(&mut self) -> Result<&mut section::Section4, Error> {
+        section::find_mut4(&mut self.body.sections, section::MAP4)
+            .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
+    }
+
+    /// The zone table, located the same way [`Self::zones`] locates it.
+    ///
+    /// Carries the record layout and, through [`zone::Table::key_map`], what the
+    /// `map`'s per-key table holds.
+    pub fn zone_table(&self) -> Result<zone::Table, Error> {
+        let map = self.map()?;
+        Ok(zone::Table::locate(
+            map.version,
+            &map.payload,
+            &self.stroke_ids()?,
+        )?)
+    }
+
+    /// Renames in place, NUL-padding the rest of the main-name field. The
+    /// sub-name is a separate field and is left alone.
+    pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        if name.len() > MAX_NAME_V3_LEN {
+            return Err(ParseError::OutOfBounds {
+                value: format!("{name:?} ({} bytes)", name.len()),
+                bound: format!("a name of at most {MAX_NAME_V3_LEN} bytes"),
+            }
+            .into());
+        }
+        let hdr = section::find_mut4(&mut self.body.sections, section::HDR4)
+            .ok_or_else(|| ParseError::AssertFail("no hdr section".into()))?;
+        let field = hdr
+            .payload
+            .get_mut(NAME_V3_AT..NAME_V3_SUB_AT)
+            .ok_or_else(|| ParseError::AssertFail("hdr section is too short for a name".into()))?;
+        field.fill(0);
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        Ok(())
+    }
+
+    /// Whether this body's zones can be retuned and remapped.
+    ///
+    /// True wherever the zone table reads and, if the `map` also describes the
+    /// keyboard note by note, that table can be recomputed from the layout.
+    pub fn zones_are_editable(&self) -> bool {
+        match (self.zone_table(), self.map(), self.zones()) {
+            (Ok(table), Ok(map), Ok(zones)) => table.validate_key_map(&map.payload, &zones).is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Apply one zone-record edit, keeping the `map`'s per-key table in step.
+    ///
+    /// The layout the edit produces is worked out and the table planned from it
+    /// before any byte moves, so a layout the partner law cannot read refuses
+    /// rather than half-applying.
+    fn edit_zone(&mut self, index: usize, field: zone::Field, note: u8) -> Result<(), Error> {
+        let table = self.zone_table()?;
+        let mut zones = self.zones()?;
+        let map = self.map()?;
+        table.validate_key_map(&map.payload, &zones)?;
+        let zone = zones
+            .get_mut(index)
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
+        match field {
+            zone::Field::Root => zone.root_key = note,
+            zone::Field::Top => zone.top_note = note,
+            zone::Field::Low => zone.low_note = Some(note),
+        }
+        let plan = table.plan_key_map(&map.payload, &zones)?;
+        let map = self.map_mut()?;
+        table.set(&mut map.payload, index, field, note)?;
+        for (at, quad) in plan {
+            map.payload[at..at + quad.len()].copy_from_slice(&quad);
+        }
+        Ok(())
+    }
+
+    /// Sets one zone's top note, in [`Self::zones`] order. The strokes are untouched.
+    pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        self.edit_zone(index, zone::Field::Top, note)
+    }
+
+    /// Sets one zone's lowest note, on the layouts that store one.
+    pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        self.edit_zone(index, zone::Field::Low, note)
+    }
+
+    /// Retunes one zone by moving the note its sample plays untransposed at.
+    ///
+    /// ⚠️ The root key is stored twice — once in the stroke, once duplicated into
+    /// the zone record — and the table stops reading if the two disagree, so both
+    /// move here or neither does.
+    pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        let gid = self
+            .zones()?
+            .get(index)
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?
+            .stroke_gid;
+        // Both copies are located before either moves: a half-written pair is a
+        // file whose zone table no longer reads.
+        let at = self
+            .body
+            .sections
+            .iter()
+            .position(|s| {
+                s.is(section::STK4)
+                    && s.payload
+                        .get(0..4)
+                        .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+                        == Some(gid)
+            })
+            .ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "zone {index} names stroke {gid}, which the file does not contain"
+                ))
+            })?;
+        self.edit_zone(index, zone::Field::Root, note)?;
+        stroke::set_root_key(&mut self.body.sections[at].payload, note)?;
+        Ok(())
     }
 
     /// Every stroke's encoded stream with its offset from the start of the body, in
@@ -359,6 +494,7 @@ impl Cbin<Sample> {
 
     /// Sets one zone's top note. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        self.require_known_layout()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
         zone::set_top_note(&mut map.payload, index, note)?;
@@ -544,5 +680,20 @@ impl fmt::Debug for Sample {
         f.debug_struct("Sample")
             .field("sections", &self.sections)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_v2_layout_cannot_use_the_modern_zone_setter() {
+        let mut sample = Cbin {
+            header: Header::new(FORMAT, (0, 0), LIBRARY_2_VERSION - 1),
+            body: Sample { sections: vec![] },
+        };
+        let error = sample.set_zone_top_note(0, 60).unwrap_err().to_string();
+        assert!(error.contains("predates Sample Library 2.0"), "{error}");
     }
 }

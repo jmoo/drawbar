@@ -259,6 +259,10 @@ pub fn find4<'a>(sections: &'a [Section4], tag: &[u8; 4]) -> Option<&'a Section4
     sections.iter().find(|s| s.is(tag))
 }
 
+pub fn find_mut4<'a>(sections: &'a mut [Section4], tag: &[u8; 4]) -> Option<&'a mut Section4> {
+    sections.iter_mut().find(|s| s.is(tag))
+}
+
 impl std::fmt::Debug for Section4 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Section4")

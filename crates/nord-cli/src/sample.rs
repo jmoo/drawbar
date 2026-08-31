@@ -3,7 +3,8 @@
 //! `edit` mirrors `nord program edit`, but the fields come from
 //! [`editors::SampleEditor`]'s accessors rather than a declarative panel: a
 //! sample is mostly encoded audio, and only what the format crate can patch in
-//! place is settable — the name, and each zone's root key and top note.
+//! place is settable — always the name, plus each zone's root key and boundaries
+//! when its keyboard map can be read and recomputed.
 //! `decode` turns the audio back into WAV, and `verify --deep` walks the
 //! encoded stream rather than only the container. Both take a slot wherever
 //! they take a file; reading a slot is a read-only transaction, so neither
@@ -69,13 +70,7 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
     let sample = match &mut entity {
-        Entity::Sample(nord_format::Sample::V2(sample)) => sample,
-        // Editing needs the v2 zone/stroke accessors; the v3/v4 chain is read-only.
-        Entity::Sample(nord_format::Sample::V3(_)) => {
-            return Err(
-                "this instrument is nsmp3/nsmp4 content; only v2 (.nsmp) can be edited".into(),
-            )
-        }
+        Entity::Sample(sample) => sample,
         Entity::SampleProject(_) => {
             return Err(
                 "this is a Sample Editor project, not a sample instrument — try `nord edit`".into(),

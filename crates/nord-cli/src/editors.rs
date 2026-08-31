@@ -6,8 +6,8 @@
 
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5::{program, song, Song};
-use nord_format::formats::nsmp::{Sample, MAX_NAME_LEN};
 use nord_format::formats::nsmpproj::Project;
+use nord_format::Sample;
 
 use crate::note;
 use crate::ui::Ui;
@@ -94,9 +94,11 @@ fn indexed(part: &str, label: &str) -> Option<usize> {
         .filter(|&n| n >= 1)
 }
 
-/// The sample instrument: the name, and each zone's root key and top note —
-/// what the format can patch in place without touching a stroke.
-pub struct SampleEditor<'a>(pub &'a mut Cbin<Sample>);
+/// The sample instrument: its name, plus each zone's root key and boundaries
+/// where the keyboard layout can be edited without leaving another map stale.
+/// `low_note` is listed only where the generation stores one; elsewhere zones
+/// tile and a zone's bottom follows from the one below it.
+pub struct SampleEditor<'a>(pub &'a mut Sample);
 
 impl Fields for SampleEditor<'_> {
     fn rows(&self) -> Result<Vec<Row>, String> {
@@ -104,15 +106,21 @@ impl Fields for SampleEditor<'_> {
         let mut out = vec![Row {
             path: "name".into(),
             value: sample.name().map_err(|e| e.to_string())?,
-            accepts: format!("up to {MAX_NAME_LEN} bytes"),
+            accepts: format!("up to {} bytes", sample.max_name_len()),
         }];
-        let zones = sample.zones().map_err(|e| e.to_string())?;
-        let strokes = sample.strokes().map_err(|e| e.to_string())?;
-        for (i, (zone, stroke)) in zones.iter().zip(&strokes).enumerate() {
+        if !sample.zones_are_editable() {
+            return Ok(out);
+        }
+        for (i, zone) in sample
+            .zones()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .enumerate()
+        {
             let n = i + 1;
             out.push(Row {
                 path: format!("zone{n}.root_key"),
-                value: note::name(stroke.root_key),
+                value: note::name(zone.root_key),
                 accepts: NOTE_ACCEPTS.into(),
             });
             out.push(Row {
@@ -120,6 +128,13 @@ impl Fields for SampleEditor<'_> {
                 value: note::name(zone.top_note),
                 accepts: NOTE_ACCEPTS.into(),
             });
+            if let Some(low) = zone.low_note {
+                out.push(Row {
+                    path: format!("zone{n}.low_note"),
+                    value: note::name(low),
+                    accepts: NOTE_ACCEPTS.into(),
+                });
+            }
         }
         Ok(out)
     }
@@ -141,6 +156,7 @@ impl Fields for SampleEditor<'_> {
         match field {
             "root_key" => sample.set_root_key(index - 1, value),
             "top_note" => sample.set_zone_top_note(index - 1, value),
+            "low_note" => sample.set_zone_low_note(index - 1, value),
             _ => return Err(unknown(path)),
         }
         .map_err(|e| e.to_string())
@@ -253,7 +269,9 @@ impl Fields for ProjectEditor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nord_format::cbin::Header;
     use nord_format::formats::ne5;
+    use nord_format::formats::nsmp::{section, SampleV3};
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project() -> Project {
@@ -276,6 +294,90 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    fn sample_with_key_map() -> Sample {
+        let mut map = vec![0u8; 12 + 128 * 10 + 1 + 2 * 16 + 2];
+        for key in 0..128 {
+            map[12 + key * 10..][..4].fill(key as u8);
+        }
+        let record = 12 + 128 * 10 + 1;
+        map[record - 1] = 2;
+        for key in 48..=60 {
+            map[12 + key * 10..][..3].fill(62);
+        }
+        for key in 61..=84 {
+            map[12 + key * 10..][..3].fill(60);
+        }
+        for (i, (root, top, low, gid)) in [(60, 60, 48, 9u32), (62, 84, 61, 10)]
+            .into_iter()
+            .enumerate()
+        {
+            let at = record + i * 16;
+            map[at] = root;
+            map[at + 1] = top;
+            map[at + 2] = low;
+            map[at + 8..at + 12].copy_from_slice(&gid.to_be_bytes());
+        }
+
+        Sample::V3(Cbin {
+            header: Header::new("nsmp", (0, 0), 400),
+            body: SampleV3 {
+                sections: vec![
+                    section::Section4 {
+                        tag: *section::HDR4,
+                        version: 1,
+                        payload: vec![0; 76],
+                    },
+                    section::Section4 {
+                        tag: *section::MAP4,
+                        version: 21,
+                        payload: map,
+                    },
+                    section::Section4 {
+                        tag: *section::STK4,
+                        version: 1,
+                        payload: vec![0, 0, 0, 9, 0, 60],
+                    },
+                    section::Section4 {
+                        tag: *section::STK4,
+                        version: 1,
+                        payload: vec![0, 0, 0, 10, 0, 62],
+                    },
+                ],
+            },
+        })
+    }
+
+    /// A wide sample whose `map` is too short to hold a zone table.
+    fn sample_with_unreadable_map() -> Sample {
+        let Sample::V3(mut body) = sample_with_key_map() else {
+            unreachable!()
+        };
+        section::find_mut4(&mut body.body.sections, section::MAP4)
+            .unwrap()
+            .payload = vec![0; 8];
+        Sample::V3(body)
+    }
+
+    #[test]
+    fn a_populated_key_map_still_lists_its_zones() {
+        let mut sample = sample_with_key_map();
+        let paths: Vec<String> = SampleEditor(&mut sample)
+            .rows()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert!(paths.contains(&"zone1.root_key".to_string()), "{paths:?}");
+    }
+
+    #[test]
+    fn uneditable_zone_paths_are_not_listed() {
+        let mut sample = sample_with_unreadable_map();
+        let rows = SampleEditor(&mut sample).rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "name");
     }
 
     /// The paths a listing prints are the paths `set` takes, ids included.
