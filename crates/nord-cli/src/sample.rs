@@ -945,8 +945,6 @@ mod tests {
         }
     }
 
-    /// The project's loop points count in the audio file's frames, so a trimmed zone
-    /// moves them; whichever loop is switched on maps onto the one the container holds.
     #[test]
     fn a_projects_loop_maps_onto_the_one_the_container_holds() {
         let long = stroke_with(|s| s.loop_enabled = true);
@@ -968,8 +966,6 @@ mod tests {
         assert_eq!(zone_loop("zone1", &off, 0, 88_200).unwrap().0, None);
     }
 
-    /// A loop setting the instrument cannot carry is named: refused when it would
-    /// change the audio, reported when the editor drops it too.
     #[test]
     fn loop_settings_with_nowhere_to_go_are_named() {
         let refused = |edit: fn(&mut Stroke)| {

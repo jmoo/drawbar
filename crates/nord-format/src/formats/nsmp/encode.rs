@@ -452,7 +452,9 @@ struct Quantised {
 /// loop's opening past its end.
 ///
 /// The ramp is linear across the crossfade, which is what the editor's own crossfade
-/// ladder measures out. Inferred from specimens; not confirmed on hardware.
+/// ladder measures out.
+///
+/// Inferred from specimens; not confirmed on hardware.
 fn bake_loop(raw: &mut [i64], fields: usize, points: &Looped) {
     let end = fields - points.lead;
     let length = fields - points.at;
@@ -1665,8 +1667,6 @@ mod tests {
         assert!(pair([84, 53], [2, 1]).is_ok());
     }
 
-    /// The lattice a looped stroke lays down is still a partition: the pre-roll's runs
-    /// and cells, then the loop's own, and nothing left over or counted twice.
     #[test]
     fn a_looped_plan_covers_every_field_exactly_once() {
         for (frames, start, end) in [
@@ -1692,8 +1692,6 @@ mod tests {
         }
     }
 
-    /// The loop's length is what the file states, so it survives the trip: the fields
-    /// between the mark and the terminator come back as the frames that were asked for.
     #[test]
     fn a_loop_comes_back_the_length_it_asked_for() {
         let source = sine(220.0, 18_000.0, 88_200);
@@ -1721,9 +1719,6 @@ mod tests {
         }
     }
 
-    /// The loop's own record is the one the directory's third pointer names, it is the
-    /// only marked one, and the words it covers are whole packets — which is what puts
-    /// the loop's audio at the start of one.
     #[test]
     fn the_loop_starts_a_packet_and_the_directory_says_so() {
         let source = sine(330.0, 14_000.0, 60_000);
@@ -1756,8 +1751,6 @@ mod tests {
         }
     }
 
-    /// A stroke that does not loop says so the way the format says it: the third
-    /// pointer aimed at the terminator, and no record marked.
     #[test]
     fn an_unlooped_stroke_marks_nothing() {
         let file = encoded(&sine(440.0, 9_000.0, 44_100), Predictor::Plain);
@@ -1771,8 +1764,6 @@ mod tests {
             .all(|r| !r.mark));
     }
 
-    /// The fields past the loop end repeat the loop's own opening, so playing to the
-    /// terminator and jumping back covers the loop exactly once.
     #[test]
     fn the_tail_repeats_the_loops_opening() {
         let source = sine(200.0, 20_000.0, 88_200);
@@ -1785,8 +1776,6 @@ mod tests {
         );
     }
 
-    /// The crossfade is a linear ramp from the loop's tail into the material one loop
-    /// length behind it — the shape the editor's own crossfade ladder measures out.
     #[test]
     fn the_crossfade_ramps_linearly_into_the_material_before_the_loop() {
         let source = sine(150.0, 22_000.0, 88_200);
@@ -1819,7 +1808,6 @@ mod tests {
         }
     }
 
-    /// A loop the format cannot state is refused rather than moved to somewhere it can.
     #[test]
     fn a_loop_the_format_cannot_state_is_refused() {
         let frames = 44_100;
@@ -1844,8 +1832,6 @@ mod tests {
         assert!(Plan::looped(4_000, Loop::new(100, 3_000)).is_err());
     }
 
-    /// A loop changes what the audio is, not whether it survives: every field still
-    /// reads back exactly, under either predictor.
     #[test]
     fn a_looped_stroke_round_trips_through_the_decoder_exactly() {
         let source = sine(180.0, 16_000.0, 60_000);
@@ -1872,10 +1858,8 @@ mod tests {
         }
     }
 
-    /// Whatever the loop, the encoder either places it on a packet boundary or refuses
-    /// it. Broadband material at full scale is the case that runs the padding out of
-    /// room: three spare bits per field is all [`MAX_WIDTH`] leaves, and a short enough
-    /// loop cannot reach the next boundary on them.
+    // Full-scale broadband material can exhaust the three spare bits per field before
+    // a short loop reaches the next packet boundary.
     #[test]
     fn a_loop_lands_on_a_packet_boundary_or_is_refused() {
         let mut source = Vec::with_capacity(60_000);
