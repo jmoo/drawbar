@@ -807,8 +807,10 @@ impl ObjectClass {
     /// Whether a write into an *occupied* slot of this class lands without deleting it
     /// first.
     ///
-    /// Confirmed on hardware: Live and Settings accept the ordinary `BEGIN_WRITE` →
-    /// `WRITE_DATA` → `END_TRANSFER` sequence at their occupied slots and the body
+    /// Confirmed on hardware.
+    ///
+    /// Live and Settings accept the ordinary `BEGIN_WRITE` → `WRITE_DATA` →
+    /// `END_TRANSFER` sequence at their occupied slots and the body
     /// reads back as what was sent, where every other class answers status `0x4` until
     /// the slot is empty. Their delete has never been attempted, so composing a write
     /// out of delete-then-write there is both unnecessary and untested.
@@ -818,10 +820,12 @@ impl ObjectClass {
 
     /// Whether the device stores a name for the objects of this class.
     ///
-    /// Confirmed on hardware: Live and Settings hold fixed names (`Live 1`, `Settings`)
-    /// — they answer `0x1c` rename with success and change nothing, and they carry
-    /// `BEGIN_WRITE`'s name argument and discard it. Partition record word 3, the
-    /// slot-family name length, is `0` for both.
+    /// Confirmed on hardware.
+    ///
+    /// Live and Settings hold fixed names (`Live 1`, `Settings`) — they answer
+    /// `0x1c` rename with success and change nothing, and they carry `BEGIN_WRITE`'s
+    /// name argument and discard it. Partition record word 3, the slot-family name
+    /// length, is `0` for both.
     pub fn names_its_slots(self) -> bool {
         !matches!(self, ObjectClass::Live | ObjectClass::Settings)
     }
@@ -963,9 +967,6 @@ mod tests {
             .collect()
     }
 
-    /// The write path a caller composes is decided by these two predicates, and getting
-    /// either wrong on a buffer class runs a delete that has never been attempted on the
-    /// instrument, or reports a naming the device threw away.
     #[test]
     fn only_the_buffer_classes_overwrite_in_place_and_hold_no_name() {
         for class in [ObjectClass::Live, ObjectClass::Settings] {

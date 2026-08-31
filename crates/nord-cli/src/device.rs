@@ -1759,10 +1759,6 @@ mod tests {
         assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
     }
 
-    /// The report after a failed write is the operator's only account of the slot, and
-    /// the two write paths leave it in different states: the delete-first composition
-    /// empties the slot, an in-place class leaves whatever the interrupted write put
-    /// there. Saying "empty" for the second invites a restore that was never needed.
     #[test]
     fn a_failed_write_says_what_it_left_in_the_slot() {
         let at = Location { bank: 0, slot: 1 };
