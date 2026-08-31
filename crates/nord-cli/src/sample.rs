@@ -6,12 +6,17 @@
 //! place is settable — the name, and each zone's root key and top note.
 //! `decode` turns the audio back into WAV, and `verify --deep` walks the
 //! encoded stream rather than only the container.
+//!
+//! `encode` builds a one-zone instrument from a WAV; `build` builds a whole one
+//! from a Sample Editor project, which is where the zones, root keys, top notes
+//! and trim points come from instead of the command line.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{codec, encode};
+use nord_format::formats::nsmpproj::Project;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -154,6 +159,30 @@ pub struct EncodeArgs {
     /// The highest note the zone covers. Defaults to two octaves above the root.
     #[arg(long, value_name = "NOTE")]
     pub top_note: Option<String>,
+
+    /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
+    #[arg(long)]
+    pub predict: bool,
+
+    /// Acknowledge that this codec tier is unproven on hardware. Required.
+    #[arg(long)]
+    pub experimental: bool,
+}
+
+#[derive(Args)]
+pub struct BuildArgs {
+    /// A Nord Sample Editor project (`.nsmpproj`). The audio paths inside it
+    /// resolve from the project's own directory.
+    #[arg(value_name = "PROJECT")]
+    pub project: PathBuf,
+
+    /// Where to write the instrument. Defaults to the project's path with `.nsmp`.
+    #[arg(short, long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+
+    /// Instrument name, up to 14 bytes. Defaults to the project's own.
+    #[arg(long)]
+    pub name: Option<String>,
 
     /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
     #[arg(long)]
@@ -320,26 +349,30 @@ fn decode_file(
     Ok(())
 }
 
-/// `nord sample encode`: a WAV into a one-zone v2 instrument.
-pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
-    if !args.experimental {
-        return Err(
-            "encoding is experimental: the file it writes is structurally sound and \
-             decodes back exactly, but it is not byte-identical to the editor's output \
-             and no instrument has been shown to play one. Pass --experimental to write \
-             it anyway."
-                .into(),
-        );
+/// The gate every writing verb in this module sits behind.
+fn experimental(acknowledged: bool) -> Result<(), String> {
+    if acknowledged {
+        return Ok(());
     }
+    Err(
+        "encoding is experimental: the file it writes is structurally sound and \
+         decodes back exactly, but it is not byte-identical to the editor's output \
+         and no instrument has been shown to play one. Pass --experimental to write \
+         it anyway."
+            .into(),
+    )
+}
 
-    let bytes = std::fs::read(&args.wav).map_err(|e| format!("{}: {e}", args.wav.display()))?;
+/// One WAV as the encoder needs it: mono 16-bit at [`codec::SOURCE_RATE`].
+fn mono_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let source =
-        nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", args.wav.display()))?;
+        nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     if source.rate != codec::SOURCE_RATE {
         return Err(format!(
             "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
              own resampler is not decoded, so resample the WAV first",
-            args.wav.display(),
+            path.display(),
             source.rate,
             codec::SOURCE_RATE,
         ));
@@ -348,10 +381,41 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
         return Err(format!(
             "{}: {} channels — only mono is encoded; a stroke pair under one header is \
              how the format carries stereo and that layout is not written yet",
-            args.wav.display(),
+            path.display(),
             source.channels,
         ));
     }
+    Ok(source)
+}
+
+fn predictor(minimising: bool) -> encode::Predictor {
+    if minimising {
+        encode::Predictor::Minimising
+    } else {
+        encode::Predictor::Plain
+    }
+}
+
+/// What one encoded stroke came out as, for the report.
+fn stroke_line(stream: &[u8], at: usize) -> Result<String, String> {
+    let layout = codec::Layout::V2;
+    let walk = codec::walk(stream, at, layout).map_err(|e| e.to_string())?;
+    let audio = codec::decode(stream, at, layout).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{:>8} fields  {:>7.3} s  shift {}, peak {}, {} record(s), {}% predicted",
+        walk.fields,
+        audio.seconds(),
+        codec::shift(stream, layout).unwrap_or_default(),
+        codec::peak(stream, layout).unwrap_or_default(),
+        walk.records.len(),
+        100 * audio.differenced / audio.samples.len().max(1),
+    ))
+}
+
+/// `nord sample encode`: a WAV into a one-zone v2 instrument.
+pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
+    experimental(args.experimental)?;
+    let source = mono_source(&args.wav)?;
 
     let stem = args
         .wav
@@ -361,11 +425,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let name = args.name.unwrap_or_else(|| stem.clone());
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
-        .predictor(if args.predict {
-            encode::Predictor::Minimising
-        } else {
-            encode::Predictor::Plain
-        });
+        .predictor(predictor(args.predict));
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
     }
@@ -374,30 +434,188 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
     let (at, stroke) = instrument.stroke_streams()[0];
-    let stream = codec::walk(stroke, at, codec::Layout::V2).map_err(|e| e.to_string())?;
-    let audio = codec::decode(stroke, at, codec::Layout::V2).map_err(|e| e.to_string())?;
     ui.out(format!(
-        "{} frames -> {} fields ({:.3} s), shift {}, peak {}, {} record(s)",
+        "{} frames -> {}",
         source.frames(),
-        stream.fields,
-        audio.seconds(),
-        codec::shift(stroke, codec::Layout::V2).unwrap_or_default(),
-        codec::peak(stroke, codec::Layout::V2).unwrap_or_default(),
-        stream.records.len(),
+        stroke_line(stroke, at)?
     ));
-    ui.out(ui.dim(if audio.differenced == 0 {
-        "every field is stated outright: no record differences its own".to_string()
-    } else {
-        format!(
-            "{}% of fields came through the predictor",
-            100 * audio.differenced / audio.samples.len().max(1),
-        )
-    }));
 
     let path = args
         .out
         .unwrap_or_else(|| args.wav.with_file_name(format!("{stem}.nsmp")));
     write_file(ui, &path, &out)
+}
+
+/// One zone of a project, resolved: the audio region it plays and where on the
+/// keyboard it plays it.
+struct ProjectZone {
+    global_id: u32,
+    root_key: u8,
+    top_note: u8,
+    samples: Vec<i16>,
+    source: PathBuf,
+}
+
+/// `nord sample build`: a Sample Editor project into the instrument it describes.
+pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
+    experimental(args.experimental)?;
+
+    let project = match nord_format::from_path(&args.project)
+        .map_err(|e| format!("{}: {e}", args.project.display()))?
+    {
+        Entity::SampleProject(project) => project,
+        other => {
+            return Err(format!(
+                "{}: a {} file, not a Sample Editor project",
+                args.project.display(),
+                other.identity().format
+            ))
+        }
+    };
+
+    let dir = args.project.parent().unwrap_or_else(|| Path::new("."));
+    let resolved = project_zones(&project, dir)?;
+    let name = match args.name {
+        Some(name) => name,
+        None => project.name().map_err(|e| e.to_string())?,
+    };
+
+    let zones: Vec<encode::NewZone> = resolved
+        .iter()
+        .map(|z| encode::NewZone {
+            source: &z.samples,
+            root_key: z.root_key,
+            top_note: z.top_note,
+            global_id: z.global_id,
+        })
+        .collect();
+    let instrument =
+        encode::multi_zone(&zones, &name, predictor(args.predict)).map_err(|e| e.to_string())?;
+    let out = instrument.to_bytes().map_err(|e| e.to_string())?;
+
+    ui.out(format!("{} — {} zone(s)", ui.bold(&name), zones.len()));
+    for (index, zone) in resolved.iter().enumerate() {
+        let (at, stream) = instrument.zone_stream(index).map_err(|e| e.to_string())?;
+        ui.out(format!(
+            "  zone{:<2} root {:<4} top {:<4} {}",
+            index + 1,
+            note::name(zone.root_key),
+            note::name(zone.top_note),
+            stroke_line(stream, at)?,
+        ));
+        ui.out(ui.dim(format!(
+            "         stroke {} from {}",
+            zone.global_id,
+            zone.source.display()
+        )));
+    }
+
+    let path = args
+        .out
+        .unwrap_or_else(|| args.project.with_extension("nsmp"));
+    write_file(ui, &path, &out)
+}
+
+/// Resolve a project's zones, highest first, into audio and keyboard placement.
+///
+/// Everything the editor can express that this writer does not lay out is refused by
+/// name here rather than dropped: the file it would otherwise produce would be a
+/// silent reinterpretation of the project.
+fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, String> {
+    let say = |e: nord_format::error::ParseError| e.to_string();
+    let files = project.audio_files().map_err(say)?;
+    let strokes = project.strokes().map_err(say)?;
+    let zones = project.zones().map_err(say)?;
+
+    zones
+        .iter()
+        .enumerate()
+        .map(|(index, zone)| {
+            let at = format!("zone{}", index + 1);
+            if !zone.enabled {
+                return Err(format!(
+                    "{at} is switched off in the project; turn it on or remove it — an \
+                     instrument has no way to carry a zone that does not sound"
+                ));
+            }
+            let [layer] = zone.strokes.as_slice() else {
+                return Err(format!(
+                    "{at} plays {} strokes, which is a velocity split or a round robin; \
+                     one stroke per zone is the layout this writer lays down",
+                    zone.strokes.len()
+                ));
+            };
+            if !layer.enabled {
+                return Err(format!("{at}'s only stroke is switched off"));
+            }
+            if layer.gain != 1.0 || layer.detune != 0 || layer.velocity != (0, 127) {
+                return Err(format!(
+                    "{at} sets gain {}, detune {} and velocity {}..={} on its stroke; \
+                     where the instrument applies those is not decoded, so nothing here \
+                     reproduces them",
+                    layer.gain, layer.detune, layer.velocity.0, layer.velocity.1
+                ));
+            }
+            let stroke = strokes
+                .iter()
+                .find(|s| s.global_id == layer.global_id)
+                .ok_or_else(|| {
+                    format!(
+                        "{at} names stroke {}, which the project does not hold",
+                        layer.global_id
+                    )
+                })?;
+            if stroke.loop_enabled {
+                return Err(format!(
+                    "{at}'s stroke loops; a looping zone carries loop fields in its zone \
+                     record that are not decoded, so it cannot be written"
+                ));
+            }
+            let file = files
+                .iter()
+                .find(|f| f.id == stroke.file_id)
+                .ok_or_else(|| {
+                    format!(
+                        "{at} plays audio file {}, which the project does not hold",
+                        stroke.file_id
+                    )
+                })?;
+
+            let path = dir.join(&file.path);
+            let source = mono_source(&path)?;
+            let frames = source.frames();
+            let start = frame(&at, "start", stroke.start, frames)?;
+            let stop = frame(&at, "stop", stroke.stop, frames)?;
+            if start >= stop {
+                return Err(format!(
+                    "{at} plays frames {start}..{stop} of {}, which is nothing",
+                    path.display()
+                ));
+            }
+            Ok(ProjectZone {
+                global_id: layer.global_id,
+                root_key: zone.root_key,
+                top_note: zone.top_note,
+                samples: source.samples[start..stop].to_vec(),
+                source: path,
+            })
+        })
+        .collect()
+}
+
+/// A project's frame position as an index into the file it points at.
+///
+/// Positions are `%f` decimals counted at 44 100 Hz whatever the file's own rate says.
+/// Inferred from the editor's field counts: a zone encodes `start..stop`, not the
+/// whole `begin..end` extent.
+fn frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<usize, String> {
+    let rounded = value.round();
+    if !(0.0..=frames as f64).contains(&rounded) {
+        return Err(format!(
+            "{zone}'s {label} is at frame {value}, outside the {frames} frames its audio holds"
+        ));
+    }
+    Ok(rounded as usize)
 }
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
