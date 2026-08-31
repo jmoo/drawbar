@@ -34,6 +34,12 @@ via `drawbar`). Three transport paths that only the browser takes are not:
 `select_configuration` on a device the OS left unconfigured, multi-chunk bulk
 reads, and a `transferIn` whose payload is an exact multiple of the packet size.
 
+Frames are terminated: the instrument reads a message until a **short** packet
+ends it, so a frame whose length is a whole multiple of the OUT endpoint's
+`wMaxPacketSize` is followed by a zero-length packet. Without it the device
+never answers and the session is stranded — a `RENAME` carrying a 34-character
+name is exactly 64 bytes on this full-speed link, and 33 characters is not.
+
 Not implemented: bundle and backup transfer, firmware update, and the piano/sample
 library as first-class objects. Windows builds and passes the replay tests but has
 not been run against hardware.
