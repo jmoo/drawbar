@@ -1,7 +1,7 @@
 #![cfg(feature = "corpus")]
 //! Behavioral checks against files produced by the instrument and sample editor.
 
-use nord_format::formats::nsmp;
+use nord_format::formats::{nsmp, nsmpproj};
 use nord_format::{Entity, Live, Program, Sample};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
@@ -409,4 +409,200 @@ fn nsmp_bad_checksum_is_refused() {
     let mut bytes = named("D1-one-zone.nsmp").bytes.clone();
     *bytes.last_mut().unwrap() ^= 0xff;
     assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
+}
+
+fn project_named(name: &str) -> &'static nsmpproj::Project {
+    match &named(name).entity {
+        Entity::SampleProject(project) => project,
+        other => panic!("{name} decoded as {other:?}"),
+    }
+}
+
+/// A project's zones, each with audio of the length the project gives it.
+///
+/// The editor's own WAVs are not corpus material, so the audio is generated. Only the
+/// frame count reaches anything asserted below: a stroke's field count comes from its
+/// length, and every other field compared is metadata.
+fn built_zones(project: &nsmpproj::Project) -> Vec<(u32, u8, u8, Vec<i16>)> {
+    let strokes = project.strokes().unwrap();
+    project
+        .zones()
+        .unwrap()
+        .iter()
+        .map(|zone| {
+            let layer = &zone.strokes[0];
+            let stroke = strokes
+                .iter()
+                .find(|s| s.global_id == layer.global_id)
+                .unwrap_or_else(|| panic!("no stroke {}", layer.global_id));
+            let frames = (stroke.stop - stroke.start) as usize;
+            let audio = (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect();
+            (layer.global_id, zone.root_key, zone.top_note, audio)
+        })
+        .collect()
+}
+
+/// The editor's project/instrument twins are the specification for `multi_zone`:
+/// building a project must land on everything but the audio that the editor's own
+/// instrument holds — container header, section chain, name, categories, and every
+/// byte of the zone table, including the stroke ids the zones name and the top notes
+/// a hand edit moved.
+#[test]
+fn nsmp_building_a_project_reproduces_its_editor_twin() {
+    for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
+        let project = project_named(&format!("{name}.nsmpproj"));
+        let zones = built_zones(project);
+        let built = nsmp::encode::multi_zone(
+            &zones
+                .iter()
+                .map(
+                    |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
+                        source: audio,
+                        root_key: *root_key,
+                        top_note: *top_note,
+                        global_id: *global_id,
+                    },
+                )
+                .collect::<Vec<_>>(),
+            &project.name().unwrap(),
+            nsmp::encode::Predictor::Minimising,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        let twin = v2_named(&format!("{name}.nsmp"));
+        let ours = built.to_bytes().unwrap();
+        assert_eq!(
+            &ours[..0x18],
+            &named(&format!("{name}.nsmp")).bytes[..0x18],
+            "{name}: container header"
+        );
+
+        let sections = |body: &nsmp::Sample| -> Vec<(String, u8, usize)> {
+            body.sections
+                .iter()
+                .map(|s| (s.tag_str(), s.version, s.payload.len()))
+                .collect()
+        };
+        let theirs = sections(&twin.body);
+        let mine = sections(&built.body);
+        assert_eq!(
+            theirs.iter().map(|s| (&s.0, s.1)).collect::<Vec<_>>(),
+            mine.iter().map(|s| (&s.0, s.1)).collect::<Vec<_>>(),
+            "{name}: section chain"
+        );
+        for tag in [nsmp::section::HDR, nsmp::section::CAT, nsmp::section::MAP] {
+            assert_eq!(
+                nsmp::section::find(&built.body.sections, tag).map(|s| &s.payload),
+                nsmp::section::find(&twin.body.sections, tag).map(|s| &s.payload),
+                "{name}: {} section",
+                String::from_utf8_lossy(tag)
+            );
+        }
+
+        assert_eq!(built.name().unwrap(), twin.name().unwrap(), "{name}: name");
+        assert_eq!(
+            built.zones().unwrap(),
+            twin.zones().unwrap(),
+            "{name}: zone table"
+        );
+        assert_eq!(
+            built
+                .strokes()
+                .unwrap()
+                .iter()
+                .map(|s| s.root_key)
+                .collect::<Vec<_>>(),
+            twin.strokes()
+                .unwrap()
+                .iter()
+                .map(|s| s.root_key)
+                .collect::<Vec<_>>(),
+            "{name}: root keys"
+        );
+    }
+}
+
+/// A zone's stream is as long as the editor made it, which is what pins down the
+/// region a project encodes: the editor codes `start..stop`, not the whole
+/// `begin..end` extent, and the two differ by a frame on these projects.
+#[test]
+fn nsmp_a_built_zone_is_as_long_as_the_editors() {
+    for name in ["D1-one-zone", "D3-2zones", "D4-3zones", "D8-2zones-hi"] {
+        let project = project_named(&format!("{name}.nsmpproj"));
+        let twin = v2_named(&format!("{name}.nsmp"));
+        for (index, (_, _, _, audio)) in built_zones(project).iter().enumerate() {
+            let (at, stream) = twin.zone_stream(index).unwrap();
+            let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2).unwrap();
+            assert_eq!(
+                nsmp::encode::Plan::new(audio.len()).unwrap().fields,
+                editor.samples.len(),
+                "{name} zone {index}: {} frames",
+                audio.len()
+            );
+        }
+    }
+}
+
+/// Every stroke of a built instrument is packed where the preamble law says, and its
+/// own word directory names the records a walk finds — the check `verify --deep` runs.
+#[test]
+fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
+    for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
+        let project = project_named(&format!("{name}.nsmpproj"));
+        let zones = built_zones(project);
+        let built = nsmp::encode::multi_zone(
+            &zones
+                .iter()
+                .map(
+                    |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
+                        source: audio,
+                        root_key: *root_key,
+                        top_note: *top_note,
+                        global_id: *global_id,
+                    },
+                )
+                .collect::<Vec<_>>(),
+            &project.name().unwrap(),
+            nsmp::encode::Predictor::Minimising,
+        )
+        .unwrap();
+
+        let map_len = nsmp::section::find(&built.body.sections, nsmp::section::MAP)
+            .unwrap()
+            .payload
+            .len();
+        let cat_len = nsmp::section::find(&built.body.sections, nsmp::section::CAT)
+            .unwrap()
+            .payload
+            .len();
+        for (index, (at, stream)) in built.stroke_streams().iter().enumerate() {
+            let head = nsmp::stroke::header_len(index, cat_len, map_len);
+            assert_eq!(
+                (stream.len() - head) % nsmp::stroke::PACKET_LEN,
+                0,
+                "{name} stroke {index}: {} bytes over a {head}-byte header",
+                stream.len()
+            );
+            let walk = nsmp::codec::walk(stream, *at, nsmp::codec::Layout::V2)
+                .unwrap_or_else(|e| panic!("{name} stroke {index}: {e}"));
+            let directory = nsmp::codec::Directory::read(stream).unwrap();
+            let resolve = |p| nsmp::codec::Directory::resolve(p, *at, nsmp::codec::Layout::V2);
+            assert_eq!(
+                resolve(directory.first_record),
+                walk.first_record,
+                "{name} stroke {index}: first record"
+            );
+            assert_eq!(
+                resolve(directory.terminator),
+                walk.terminator,
+                "{name} stroke {index}: terminator"
+            );
+            assert!(
+                walk.records
+                    .iter()
+                    .any(|r| r.at == resolve(directory.resync)),
+                "{name} stroke {index}: resync names no record"
+            );
+        }
+    }
 }
