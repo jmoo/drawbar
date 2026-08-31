@@ -52,12 +52,14 @@ pub const READ_BUFFER: usize = 49152;
 /// Whether a frame of `written` bytes leaves the device waiting for the rest of a
 /// message that has already finished.
 ///
-/// ⚠️ Confirmed on hardware: the firmware reads a message until a **short** packet ends
-/// it, so a frame that is a whole number of packets is never answered and the session
-/// stays open. A `RENAME` carrying a 34-character name is exactly 64 bytes on the
-/// full-speed link and gets no reply; at 33 characters, one byte shorter, the same
-/// command answers normally. It repeats at 128, and it is not particular to a command
-/// or a class — `BEGIN_WRITE` at 64 bytes hangs the same way on Live and Settings.
+/// Confirmed on hardware.
+///
+/// ⚠️ The firmware reads a message until a **short** packet ends it, so a frame that is
+/// a whole number of packets is never answered and the session stays open. A `RENAME`
+/// carrying a 34-character name is exactly 64 bytes on the full-speed link and gets no
+/// reply; at 33 characters, one byte shorter, the same command answers normally. It
+/// repeats at 128, and it is not particular to a command or a class — `BEGIN_WRITE` at
+/// 64 bytes hangs the same way on Live and Settings.
 ///
 /// A zero-length frame needs no terminator: it is one.
 pub(crate) fn needs_terminator(written: usize, packet: usize) -> bool {
@@ -143,9 +145,6 @@ impl<T: Transport + Send> SendTransport for T {}
 mod tests {
     use super::needs_terminator;
 
-    /// The boundary measured on the instrument: 63 bytes is answered, 64 is not, and it
-    /// repeats at every multiple. Getting this wrong either strands a session forever or
-    /// injects an empty message the device will try to parse.
     #[test]
     fn a_frame_that_fills_whole_packets_needs_terminating() {
         const FULL_SPEED: usize = 64;
@@ -157,8 +156,6 @@ mod tests {
         }
     }
 
-    /// A high-speed link would put the boundary at 512, so the rule has to come from the
-    /// endpoint's own `wMaxPacketSize` rather than from the 64 this instrument uses.
     #[test]
     fn the_boundary_follows_the_endpoints_packet_size() {
         assert!(needs_terminator(512, 512));
@@ -166,7 +163,6 @@ mod tests {
         assert!(!needs_terminator(576, 512));
     }
 
-    /// Writing nothing already ends a message; terminating it would send a second one.
     #[test]
     fn an_empty_write_is_its_own_terminator() {
         assert!(!needs_terminator(0, 64));
