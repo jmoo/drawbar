@@ -2,8 +2,8 @@
 //!
 //! A sample is mostly encoded audio, so what is settable is what the format can patch in
 //! place without touching a stroke: the name, and each zone's root key and boundaries.
-//! Every generation edits; where a container also describes the keyboard key by key the
-//! zones are shown but held, and only the name moves.
+//! Every generation edits. Where a container also describes the keyboard note by note,
+//! that description is recomputed from the zones as they move.
 //!
 //! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
 //! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when the
@@ -284,8 +284,8 @@ pub fn ui(
     if !snapshot.zones.is_empty() && !snapshot.zones_editable {
         ui.label(
             egui::RichText::new(
-                "This instrument's map names a zone for every key, and what fills that \
-                 table has not been worked out — so its zones are shown, not changed.",
+                "This instrument's keyboard map cannot be read, so its zones are shown \
+                 rather than changed. The name is still yours to set.",
             )
             .weak(),
         );

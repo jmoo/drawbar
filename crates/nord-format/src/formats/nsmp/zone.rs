@@ -92,6 +92,17 @@ const WIDE_TOP: usize = 1;
 /// Within a wide zone record: the lowest, on the layouts that store one.
 const WIDE_LOW: usize = 2;
 
+/// Which byte of a zone record an edit names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    /// The stroke's root key, duplicated from the stroke.
+    Root,
+    /// The highest MIDI note this zone answers to.
+    Top,
+    /// The lowest, on the layouts that store one.
+    Low,
+}
+
 /// A wide `map`'s zone-record layout, selected by the section's own version
 /// rather than by the file's content version.
 ///
@@ -105,7 +116,8 @@ pub enum Wide {
     /// 16-byte records with a low note. ⚠️ Stored low to high, the opposite of
     /// every other layout here.
     V14,
-    /// [`Wide::V14`]'s records, behind a per-key table that names zones.
+    /// [`Wide::V14`]'s records, behind a per-key table naming the zones
+    /// around each note.
     V21,
 }
 
@@ -140,49 +152,152 @@ impl Wide {
         matches!(self, Wide::V14 | Wide::V21)
     }
 
-    /// Where the per-key records start, on the layout that carries them.
-    const fn key_map_at(self) -> Option<usize> {
-        match self {
-            Wide::V21 => Some(KEY_MAP_AT),
-            Wide::V12 | Wide::V14 => None,
+    /// Offset of a field within a zone record, `None` where the layout stores
+    /// no such field.
+    const fn field_at(self, field: Field) -> Option<usize> {
+        match field {
+            Field::Root => Some(WIDE_ROOT),
+            Field::Top => Some(WIDE_TOP),
+            Field::Low if self.stores_low() => Some(WIDE_LOW),
+            Field::Low => None,
         }
+    }
+
+    /// Whether the layout carries a per-key table ahead of its zone records.
+    pub const fn has_key_map(self) -> bool {
+        matches!(self, Wide::V21)
     }
 }
 
-/// Start of the v21 per-key records, one per MIDI note, ahead of the zone table.
-const KEY_MAP_AT: usize = 12;
-
-/// Bytes per per-key record. It opens `[a][b][a][key]`; the rest is unmapped and
-/// holds the same six bytes the earlier layouts give a key outright.
-const KEY_MAP_STRIDE: usize = 10;
-
-/// One per-key record per MIDI note.
-const KEY_MAP_KEYS: usize = 128;
-
-/// Whether the `map`'s per-key records name zones rather than standing at rest.
+/// The v21 `map`'s per-key table: one record per MIDI note, ahead of the zone
+/// records, and a six-byte unit of the same shape at offset 0 holding the
+/// instrument's own gain.
 ///
-/// A v21 `map` opens each per-key record with `[a][b][a][key]`. Where a single
-/// zone claims the keyboard every record holds its own key number four times;
-/// where several do, `a` and `b` hold other zones' root keys, and no rule
-/// producing them has been derived from specimens. A retune or a remap would
-/// leave those stale, so callers refuse the edit rather than write a file whose
-/// two accounts of the keyboard disagree.
+/// ⚠️ **The level comes first.** A record is
 ///
-/// A `map` too short to hold the records counts as naming them: the layout is
-/// not the one this was derived from, so nothing here can vouch for an edit.
-pub fn key_map_names_zones(wide: Wide, map: &[u8]) -> bool {
-    let Some(at) = wide.key_map_at() else {
-        return false;
+/// ```text
+/// 6 + 10 × key:  [gain u24 BE][detune ×3][a][b][a][key]
+/// ```
+///
+/// Framing it the other way round — quad first, level behind — puts key k+1's
+/// level in key k's record, and lands the vendor level curve's slope changes
+/// and its stop a key below the zone span they sit on.
+///
+/// The gain is linear with `0x100000` for unity; it is an authored per-key
+/// curve that no zone layout predicts, and the three bytes behind it are where
+/// a per-note detune lands. Both are carried across an edit untouched. Only the
+/// quad follows from the zones, by [`partners`]. Inferred from specimens; not
+/// confirmed on hardware.
+const KEY_TABLE_AT: usize = 6;
+const KEY_STRIDE: usize = 10;
+const KEY_QUAD_AT: usize = 6;
+const KEYS: usize = 128;
+
+/// The lowest key the per-key table ever describes, and the floor the editor's
+/// project file counts its note list from. The editor writes it into the bottom
+/// zone's `low`; the vendor library writes 0 there and means this.
+const KEY_FLOOR: u8 = 17;
+
+/// How far a partner root below a zone's own may be pitched up to cover it: a
+/// minor third. Pitching down is unrestricted as far as any specimen shows.
+const PARTNER_UP: u8 = 3;
+
+/// What a `map`'s per-key table holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMap {
+    /// This layout carries no per-key table.
+    Absent,
+    /// Every record names its own key. The sample editor writes this whatever
+    /// the zone layout, and it is also what [`partners`] gives an instrument no
+    /// zone of which has an eligible partner.
+    Neutral,
+    /// Partner roots, filled in from the zone layout by the vendor's builder.
+    Populated,
+}
+
+/// Zones as `(root, low, top)` ascending by root, which is the order the
+/// partner law reads them in.
+fn ladder(zones: &[ZoneV3]) -> Result<Vec<(u8, u8, u8)>, ParseError> {
+    let mut out = zones
+        .iter()
+        .map(|z| {
+            let low = z.low_note.ok_or_else(|| {
+                ParseError::AssertFail(
+                    "a per-key table needs each zone's low note, and this layout stores none"
+                        .into(),
+                )
+            })?;
+            Ok((z.root_key, low, z.top_note))
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    out.sort_by_key(|&(root, _, _)| root);
+    Ok(out)
+}
+
+/// The keys a layout covers: from [`KEY_FLOOR`] — or the bottom zone's own low,
+/// whichever is higher — up to the highest zone's top.
+fn span(ladder: &[(u8, u8, u8)]) -> Option<(u8, u8)> {
+    Some((ladder.first()?.1.max(KEY_FLOOR), ladder.last()?.2))
+}
+
+/// The partner roots one key names, or the identity where none is eligible.
+///
+/// Take the zone that claims the key and let `R` be its root. Eligible are the
+/// roots below `R` within [`PARTNER_UP`] semitones and every root above it.
+/// `a` is the nearest of those to `R`, ties going to the lower root. `b` is the
+/// nearest of the rest when `a` is below `R`; when `a` is above, `b` reaches
+/// back *across* `R` for the highest eligible root below it, and only when
+/// nothing is below does it take the next root above `a`.
+///
+/// Outside the span the record is the identity, `a = b = key`. Inferred from
+/// specimens; not confirmed on hardware.
+fn partners(ladder: &[(u8, u8, u8)], key: u8) -> (u8, u8) {
+    let identity = (key, key);
+    let Some((lo, hi)) = span(ladder) else {
+        return identity;
     };
-    (0..KEY_MAP_KEYS).any(|key| {
-        match map
-            .get(at + key * KEY_MAP_STRIDE..)
-            .and_then(|r| r.get(..4))
-        {
-            Some(head) => head != [key as u8; 4],
-            None => true,
-        }
-    })
+    if !(lo..=hi).contains(&key) {
+        return identity;
+    }
+    // The bottom zone reaches down to the floor whatever its own record says.
+    let Some(claim) = ladder
+        .iter()
+        .enumerate()
+        .filter(|&(j, z)| if j == 0 { lo } else { z.1 } <= key)
+        .map(|(j, _)| j)
+        .max()
+    else {
+        return identity;
+    };
+    let root = ladder[claim].0;
+
+    let mut roots: Vec<u8> = ladder.iter().map(|&(r, _, _)| r).collect();
+    roots.dedup();
+    let below: Vec<u8> = roots
+        .iter()
+        .copied()
+        .filter(|&r| r < root && root - r <= PARTNER_UP)
+        .collect();
+    let above: Vec<u8> = roots.iter().copied().filter(|&r| r > root).collect();
+    let nearest = |set: &[u8]| set.iter().copied().min_by_key(|&r| (r.abs_diff(root), r));
+    let eligible: Vec<u8> = below.iter().chain(&above).copied().collect();
+    let Some(a) = nearest(&eligible) else {
+        return identity;
+    };
+    let b = if a < root {
+        let rest: Vec<u8> = eligible.iter().copied().filter(|&r| r != a).collect();
+        nearest(&rest).unwrap_or(a)
+    } else if let Some(&highest_below) = below.last() {
+        highest_below
+    } else {
+        above
+            .iter()
+            .copied()
+            .filter(|&r| r != a)
+            .min_by_key(|&r| r - root)
+            .unwrap_or(a)
+    };
+    (a, b)
 }
 
 /// Maximum unmodelled suffix searched after a wide zone table.
@@ -296,8 +411,18 @@ impl Table {
             })
     }
 
-    /// Write one byte of one record, checked against the located table.
-    fn set(&self, map: &mut [u8], index: usize, at: usize, note: u8) -> Result<(), ParseError> {
+    /// Write one field of one record, checked against the located table.
+    ///
+    /// ⚠️ A root key is stored twice — here and in the stroke — and the table
+    /// stops reading if the two disagree, so a caller writing this one owes the
+    /// other.
+    pub fn set(
+        &self,
+        map: &mut [u8],
+        index: usize,
+        field: Field,
+        note: u8,
+    ) -> Result<(), ParseError> {
         self.fits(map)?;
         if index >= self.count {
             return Err(ParseError::AssertFail(format!(
@@ -305,30 +430,83 @@ impl Table {
                 self.count
             )));
         }
+        let at = self.wide.field_at(field).ok_or_else(|| {
+            ParseError::AssertFail(
+                "this map layout stores no low note: a zone reaches down to one above \
+                 the next-lower zone's top"
+                    .into(),
+            )
+        })?;
         map[self.at + index * self.wide.record_len() + at] = note;
         Ok(())
     }
 
-    /// Write the root key duplicated into a record. The stroke holds the other
-    /// copy, and the two must move together or the table stops reading.
-    pub fn set_root_key(&self, map: &mut [u8], index: usize, note: u8) -> Result<(), ParseError> {
-        self.set(map, index, WIDE_ROOT, note)
-    }
-
-    pub fn set_top_note(&self, map: &mut [u8], index: usize, note: u8) -> Result<(), ParseError> {
-        self.set(map, index, WIDE_TOP, note)
-    }
-
-    /// Write a zone's lowest note, on the layouts that store one.
-    pub fn set_low_note(&self, map: &mut [u8], index: usize, note: u8) -> Result<(), ParseError> {
-        if !self.wide.stores_low() {
-            return Err(ParseError::AssertFail(
-                "this map layout stores no low note: a zone reaches down to one above \
-                 the next-lower zone's top"
-                    .into(),
-            ));
+    /// What the per-key table ahead of the records holds.
+    pub fn key_map(&self, map: &[u8]) -> Result<KeyMap, ParseError> {
+        if !self.wide.has_key_map() {
+            return Ok(KeyMap::Absent);
         }
-        self.set(map, index, WIDE_LOW, note)
+        let mut neutral = true;
+        for key in 0..KEYS {
+            let at = KEY_TABLE_AT + key * KEY_STRIDE + KEY_QUAD_AT;
+            let quad = map.get(at..at + 4).ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "map section is {} bytes, too short for a per-key table",
+                    map.len()
+                ))
+            })?;
+            neutral &= quad == [key as u8; 4];
+        }
+        Ok(if neutral {
+            KeyMap::Neutral
+        } else {
+            KeyMap::Populated
+        })
+    }
+
+    /// The per-key quads `zones` calls for, as `(offset, bytes)` writes.
+    ///
+    /// Empty unless the table is [`KeyMap::Populated`]: the sample editor leaves
+    /// it neutral whatever the layout, so a neutral table stays neutral and only
+    /// the vendor builder's is recomputed.
+    ///
+    /// Every key is planned from the layout alone, so the result does not depend
+    /// on what the table held — except outside the zones' span, where the law is
+    /// the identity and two vendor builders write `[0][0][0][key]` instead. That
+    /// is a wider idea of the playable keyboard which nothing in the layout
+    /// distinguishes, so a record already carrying it is left as it came.
+    ///
+    /// Nothing is written here: a layout the law cannot read refuses before the
+    /// caller moves a byte.
+    pub fn plan_key_map(
+        &self,
+        map: &[u8],
+        zones: &[ZoneV3],
+    ) -> Result<Vec<(usize, [u8; 4])>, ParseError> {
+        if self.key_map(map)? != KeyMap::Populated {
+            return Ok(Vec::new());
+        }
+        let ladder = ladder(zones)?;
+        let Some((lo, hi)) = span(&ladder) else {
+            return Ok(Vec::new());
+        };
+        let mut plan = Vec::new();
+        for key in 0..KEYS {
+            let k = key as u8;
+            let at = KEY_TABLE_AT + key * KEY_STRIDE + KEY_QUAD_AT;
+            let quad = map.get(at..at + 4).ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "map section is {} bytes, too short for a per-key table",
+                    map.len()
+                ))
+            })?;
+            if !(lo..=hi).contains(&k) && quad == [0, 0, 0, k] {
+                continue;
+            }
+            let (a, b) = partners(&ladder, k);
+            plan.push((at, [a, b, a, k]));
+        }
+        Ok(plan)
     }
 }
 
@@ -457,13 +635,15 @@ mod tests {
     fn wide_map(version: u32, zones: &[(u32, u8, u8, u8)], tail: usize) -> Vec<u8> {
         let wide = Wide::from_version(version).unwrap();
         let preamble = match wide {
-            Wide::V21 => KEY_MAP_AT + KEY_MAP_KEYS * KEY_MAP_STRIDE,
+            Wide::V21 => KEY_TABLE_AT + KEYS * KEY_STRIDE + 6 + 26,
             Wide::V12 | Wide::V14 => 6 + 128 * 6,
         };
         let mut m = vec![0u8; preamble + 1 + zones.len() * wide.record_len() + tail];
-        if let Some(at) = wide.key_map_at() {
-            for key in 0..KEY_MAP_KEYS {
-                m[at + key * KEY_MAP_STRIDE..][..4].fill(key as u8);
+        if wide.has_key_map() {
+            for key in 0..KEYS {
+                let r = KEY_TABLE_AT + key * KEY_STRIDE;
+                m[r..r + 3].copy_from_slice(&[0x10, 0, 0]);
+                m[r + KEY_QUAD_AT..][..4].fill(key as u8);
             }
         }
         m[preamble] = zones.len() as u8;
@@ -520,19 +700,13 @@ mod tests {
             let before = wide_map(version, &zones, 1);
             let table = Table::locate(version, &before, &strokes(&zones)).unwrap();
 
-            for (what, apply) in [
-                (
-                    "top_note",
-                    Table::set_top_note as fn(&Table, &mut [u8], usize, u8) -> _,
-                ),
-                ("root_key", Table::set_root_key),
-            ] {
+            for field in [Field::Top, Field::Root] {
                 let mut after = before.clone();
-                apply(&table, &mut after, 1, 55).unwrap();
+                table.set(&mut after, 1, field, 55).unwrap();
                 let moved: Vec<_> = (0..before.len())
                     .filter(|&i| before[i] != after[i])
                     .collect();
-                assert_eq!(moved.len(), 1, "map v{version} {what}: {moved:?}");
+                assert_eq!(moved.len(), 1, "map v{version} {field:?}: {moved:?}");
             }
         }
     }
@@ -544,12 +718,12 @@ mod tests {
         let zones = [(9u32, 60u8, 84u8, 0u8)];
         let mut map = wide_map(12, &zones, 0);
         let table = Table::locate(12, &map, &strokes(&zones)).unwrap();
-        assert!(table.set_low_note(&mut map, 0, 48).is_err());
+        assert!(table.set(&mut map, 0, Field::Low, 48).is_err());
 
         let zones = [(9u32, 60u8, 84u8, 48u8)];
         let mut map = wide_map(14, &zones, 1);
         let table = Table::locate(14, &map, &strokes(&zones)).unwrap();
-        table.set_low_note(&mut map, 0, 50).unwrap();
+        table.set(&mut map, 0, Field::Low, 50).unwrap();
         assert_eq!(
             read_v3(14, &map, &strokes(&zones)).unwrap()[0].low_note,
             Some(50)
@@ -561,7 +735,7 @@ mod tests {
         let zones = [(9u32, 60u8, 84u8, 48u8)];
         let mut map = wide_map(21, &zones, 2);
         let table = Table::locate(21, &map, &strokes(&zones)).unwrap();
-        assert!(table.set_top_note(&mut map, 1, 60).is_err());
+        assert!(table.set(&mut map, 1, Field::Top, 60).is_err());
     }
 
     /// A retune has to move both copies of the root key: the table stops reading
@@ -571,31 +745,133 @@ mod tests {
         let zones = [(9u32, 60u8, 84u8, 48u8)];
         let mut map = wide_map(14, &zones, 1);
         let table = Table::locate(14, &map, &strokes(&zones)).unwrap();
-        table.set_root_key(&mut map, 0, 48).unwrap();
+        table.set(&mut map, 0, Field::Root, 48).unwrap();
         assert!(read_v3(14, &map, &strokes(&zones)).is_err());
         assert!(read_v3(14, &map, &[(9, 48)]).is_ok());
     }
 
-    /// Only v21 carries per-key records, and only ones naming something other
-    /// than their own key stand in the way of an edit.
+    /// Only v21 carries per-key records, and a table every record of which
+    /// names its own key is the neutral one the sample editor writes.
     #[test]
-    fn a_key_map_naming_zones_is_recognised() {
+    fn a_neutral_key_map_is_told_from_a_populated_one() {
         let zones = [(9u32, 60u8, 84u8, 48u8)];
         let mut map = wide_map(21, &zones, 2);
-        assert!(!key_map_names_zones(Wide::V21, &map));
+        let table = Table::locate(21, &map, &strokes(&zones)).unwrap();
+        assert_eq!(table.key_map(&map).unwrap(), KeyMap::Neutral);
 
-        map[KEY_MAP_AT + 40 * KEY_MAP_STRIDE] = 55;
-        assert!(key_map_names_zones(Wide::V21, &map));
+        map[KEY_TABLE_AT + 40 * KEY_STRIDE + KEY_QUAD_AT] = 55;
+        assert_eq!(table.key_map(&map).unwrap(), KeyMap::Populated);
 
-        // The earlier layouts have no such table to disagree with.
-        assert!(!key_map_names_zones(Wide::V12, &wide_map(12, &zones, 0)));
-        assert!(!key_map_names_zones(Wide::V14, &wide_map(14, &zones, 1)));
+        // The earlier layouts have no such table.
+        for version in [12, 14] {
+            let map = wide_map(version, &zones, if version == 12 { 0 } else { 1 });
+            let table = Table::locate(version, &map, &strokes(&zones)).unwrap();
+            assert_eq!(table.key_map(&map).unwrap(), KeyMap::Absent);
+        }
     }
 
-    /// A `map` too short to hold the records cannot be vouched for, so it counts
-    /// as naming them.
+    /// A neutral table is left neutral: the sample editor writes it whatever the
+    /// zone layout, so an edit must not start populating one.
     #[test]
-    fn a_truncated_key_map_blocks_an_edit() {
-        assert!(key_map_names_zones(Wide::V21, &[0u8; 32]));
+    fn a_neutral_key_map_survives_an_edit() {
+        let zones = [(9u32, 60u8, 84u8, 48u8), (22, 72, 108, 85)];
+        let map = wide_map(21, &zones, 2);
+        let table = Table::locate(21, &map, &strokes(&zones)).unwrap();
+        let read = table.read(&map, &strokes(&zones)).unwrap();
+        assert!(table.plan_key_map(&map, &read).unwrap().is_empty());
+    }
+
+    /// The Kalimba's sixteen roots, whose four- and five-semitone spacing is what
+    /// pins the minor-third ceiling: nothing is ever eligible below, so every one
+    /// of its zones names the two roots above it.
+    fn kalimba() -> Vec<(u8, u8, u8)> {
+        vec![
+            (47, 0, 49),
+            (51, 50, 53),
+            (55, 54, 57),
+            (59, 58, 60),
+            (62, 61, 64),
+            (66, 65, 68),
+            (71, 69, 73),
+            (75, 74, 77),
+            (80, 78, 82),
+            (84, 83, 86),
+            (88, 87, 90),
+            (92, 91, 94),
+            (96, 95, 97),
+            (99, 98, 100),
+            (102, 101, 103),
+            (105, 104, 108),
+        ]
+    }
+
+    /// Partners taken off the Kalimba, whose table the vendor builder populated.
+    /// A hand-checked oracle: the file states these, and the law has to agree.
+    #[test]
+    fn the_partner_law_matches_a_populated_table() {
+        let zs = kalimba();
+        for (key, want) in [
+            // Below the bottom zone's own low but inside the span, which starts
+            // at the floor: the bottom zone claims it.
+            (17, (51, 55)),
+            (49, (51, 55)),
+            // Four semitones up puts nothing within a minor third below, so both
+            // partners come from above.
+            (50, (55, 59)),
+            (58, (62, 66)),
+            // Three semitones below 62 is eligible, so `a` drops below the root
+            // and `b` takes the next nearest — which is above it.
+            (61, (59, 66)),
+            (64, (59, 66)),
+            // At the top there is nothing above, so both partners come from below.
+            (104, (102, 102)),
+            // Outside the span the record is the identity.
+            (16, (16, 16)),
+            (109, (109, 109)),
+            (0, (0, 0)),
+            (127, (127, 127)),
+        ] {
+            assert_eq!(partners(&zs, key), want, "key {key}");
+        }
+    }
+
+    /// When `a` lands above the root the second partner reaches back across it,
+    /// even though a nearer root sits on the same side.
+    #[test]
+    fn the_second_partner_straddles_the_root() {
+        let zs = vec![(61, 17, 62), (64, 63, 65), (66, 66, 68), (71, 69, 73)];
+        // 66 is two semitones up and 61 is three down: `a` takes the nearer 66,
+        // and `b` then takes 61 rather than 71.
+        assert_eq!(partners(&zs, 64), (66, 61));
+    }
+
+    /// A zone with no eligible partner at all gives the identity, which is why a
+    /// one-zone instrument's table is the neutral one.
+    #[test]
+    fn a_lone_zone_names_nobody() {
+        let zs = vec![(60, 17, 84)];
+        for key in [17, 60, 84] {
+            assert_eq!(partners(&zs, key), (key, key), "key {key}");
+        }
+    }
+
+    /// The span runs from the floor, not from a bottom zone that claims to start
+    /// below it, and stops on the highest zone's top.
+    #[test]
+    fn the_span_starts_at_the_floor() {
+        let zs = vec![(47, 0, 49), (51, 50, 53)];
+        assert_eq!(span(&zs), Some((KEY_FLOOR, 53)));
+        assert_eq!(partners(&zs, 16), (16, 16));
+        assert_eq!(partners(&zs, 17), (51, 51));
+        assert_eq!(partners(&zs, 54), (54, 54));
+    }
+
+    /// A `map` too short to hold the records is refused rather than guessed at.
+    #[test]
+    fn a_truncated_key_map_is_refused() {
+        let zones = [(9u32, 60u8, 84u8, 48u8)];
+        let map = wide_map(21, &zones, 2);
+        let table = Table::locate(21, &map, &strokes(&zones)).unwrap();
+        assert!(table.key_map(&[0u8; 32]).is_err());
     }
 }

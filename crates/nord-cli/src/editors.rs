@@ -332,9 +332,36 @@ mod tests {
         })
     }
 
+    /// A wide sample whose `map` is too short to hold a zone table.
+    fn sample_with_unreadable_map() -> Sample {
+        let Sample::V3(mut body) = sample_with_key_map() else {
+            unreachable!()
+        };
+        section::find_mut4(&mut body.body.sections, section::MAP4)
+            .unwrap()
+            .payload = vec![0; 8];
+        Sample::V3(body)
+    }
+
+    /// A populated keyboard map is recomputed from the zones as they move, so
+    /// its zone paths are listed like any other instrument's.
+    #[test]
+    fn a_populated_key_map_still_lists_its_zones() {
+        let mut sample = sample_with_key_map();
+        let paths: Vec<String> = SampleEditor(&mut sample)
+            .rows()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert!(paths.contains(&"zone1.root_key".to_string()), "{paths:?}");
+    }
+
+    /// An instrument whose zones cannot be read lists its name and stops there,
+    /// rather than failing the listing outright.
     #[test]
     fn uneditable_zone_paths_are_not_listed() {
-        let mut sample = sample_with_key_map();
+        let mut sample = sample_with_unreadable_map();
         let rows = SampleEditor(&mut sample).rows().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, "name");

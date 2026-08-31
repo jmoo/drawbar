@@ -262,7 +262,10 @@ impl Cbin<SampleV3> {
     }
 
     /// The zone table, located the same way [`Self::zones`] locates it.
-    fn table(&self) -> Result<zone::Table, Error> {
+    ///
+    /// Carries the record layout and, through [`zone::Table::key_map`], what the
+    /// `map`'s per-key table holds.
+    pub fn zone_table(&self) -> Result<zone::Table, Error> {
         let map = self.map()?;
         Ok(zone::Table::locate(
             map.version,
@@ -292,46 +295,50 @@ impl Cbin<SampleV3> {
         Ok(())
     }
 
-    /// Whether the zone table is the only account of the keyboard in this body.
+    /// Whether this body's zones can be retuned and remapped.
     ///
-    /// A v21 `map` carries one record per MIDI note naming the zones around it,
-    /// and no rule producing those has been derived from specimens. Where they
-    /// stand at rest an edit leaves them correct; where they name zones it would
-    /// not, and a file whose two accounts of the keyboard disagree is worse than
-    /// a refused edit. The name is unaffected either way.
+    /// True wherever the zone table reads and, if the `map` also describes the
+    /// keyboard note by note, that table can be recomputed from the layout.
     pub fn zones_are_editable(&self) -> bool {
-        // Zones that will not read will not be set either; the setter is where
-        // that gets a message worth reading.
-        self.editable_table().is_ok()
+        match (self.zone_table(), self.map(), self.zones()) {
+            (Ok(table), Ok(map), Ok(zones)) => table.plan_key_map(&map.payload, &zones).is_ok(),
+            _ => false,
+        }
     }
 
-    /// The located table, refused when the `map` also describes the keyboard
-    /// key by key.
-    fn editable_table(&self) -> Result<zone::Table, Error> {
-        let table = self.table()?;
-        if zone::key_map_names_zones(table.wide, &self.map()?.payload) {
-            return Err(ParseError::AssertFail(
-                "this instrument's map names a zone for every key, and what fills that \
-                 table is not derived from specimens; retuning or remapping it would \
-                 leave the two accounts of the keyboard disagreeing. Its name is still \
-                 settable"
-                    .into(),
-            )
-            .into());
+    /// Apply one zone-record edit, keeping the `map`'s per-key table in step.
+    ///
+    /// The layout the edit produces is worked out and the table planned from it
+    /// before any byte moves, so a layout the partner law cannot read refuses
+    /// rather than half-applying.
+    fn edit_zone(&mut self, index: usize, field: zone::Field, note: u8) -> Result<(), Error> {
+        let table = self.zone_table()?;
+        let mut zones = self.zones()?;
+        let zone = zones
+            .get_mut(index)
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
+        match field {
+            zone::Field::Root => zone.root_key = note,
+            zone::Field::Top => zone.top_note = note,
+            zone::Field::Low => zone.low_note = Some(note),
         }
-        Ok(table)
+        let plan = table.plan_key_map(&self.map()?.payload, &zones)?;
+        let map = self.map_mut()?;
+        table.set(&mut map.payload, index, field, note)?;
+        for (at, quad) in plan {
+            map.payload[at..at + quad.len()].copy_from_slice(&quad);
+        }
+        Ok(())
     }
 
     /// Sets one zone's top note, in [`Self::zones`] order. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        let table = self.editable_table()?;
-        Ok(table.set_top_note(&mut self.map_mut()?.payload, index, note)?)
+        self.edit_zone(index, zone::Field::Top, note)
     }
 
     /// Sets one zone's lowest note, on the layouts that store one.
     pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        let table = self.editable_table()?;
-        Ok(table.set_low_note(&mut self.map_mut()?.payload, index, note)?)
+        self.edit_zone(index, zone::Field::Low, note)
     }
 
     /// Retunes one zone by moving the note its sample plays untransposed at.
@@ -340,7 +347,6 @@ impl Cbin<SampleV3> {
     /// the zone record — and the table stops reading if the two disagree, so both
     /// move here or neither does.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        let table = self.editable_table()?;
         let gid = self
             .zones()?
             .get(index)
@@ -364,7 +370,7 @@ impl Cbin<SampleV3> {
                     "zone {index} names stroke {gid}, which the file does not contain"
                 ))
             })?;
-        table.set_root_key(&mut self.map_mut()?.payload, index, note)?;
+        self.edit_zone(index, zone::Field::Root, note)?;
         stroke::set_root_key(&mut self.body.sections[at].payload, note)?;
         Ok(())
     }

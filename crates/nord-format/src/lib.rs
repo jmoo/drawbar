@@ -266,8 +266,9 @@ impl Sample {
     /// Whether this instrument's zones can be retuned and remapped. Its name
     /// always can.
     ///
-    /// False where the container also describes the keyboard key by key in terms
-    /// this crate cannot rebuild; the setters say so at length.
+    /// False where the zone table does not read, or where a `map` that also
+    /// describes the keyboard note by note cannot be recomputed from the layout.
+    /// The setters say which at length.
     pub fn zones_are_editable(&self) -> bool {
         match self {
             Sample::V2(s) => s.zones().is_ok() && s.strokes().is_ok(),

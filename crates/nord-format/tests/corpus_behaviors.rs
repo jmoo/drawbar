@@ -610,26 +610,117 @@ fn nsmp_wide_remap_moves_one_boundary_byte() {
     }
 }
 
-/// A v4 `map` that names a zone for every key is left alone: the rule filling
-/// those records is not derived, so a retune or a remap would leave the file
-/// with two accounts of the keyboard. The name is still settable.
+/// Recomputing a populated per-key table from the layout it already describes
+/// reproduces it exactly: the partner law is what the vendor's builder ran.
+///
+/// The records outside the zones' span are part of the claim — two builders
+/// write `[0][0][0][key]` there rather than the identity, and those are carried
+/// across rather than normalised.
 #[test]
-fn nsmp_v4_key_map_holds_the_zones_but_not_the_name() {
-    let (before, unchanged) = edited(V4_KEY_MAP, |s| {
-        assert!(!s.zones_are_editable());
-        assert!(s.set_root_key(0, 48).is_err());
-        assert!(s.set_zone_top_note(0, 96).is_err());
-        assert!(s.set_zone_low_note(0, 40).is_err());
-    });
-    assert_eq!(before, unchanged.as_slice());
+fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
+    let mut populated = 0;
+    let mut neutral = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let (Ok(table), Ok(zones)) = (sample.zone_table(), sample.zones()) else {
+            continue;
+        };
+        let map = nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4).unwrap();
+        let name = specimen.path.display();
+        match table.key_map(&map.payload).unwrap() {
+            nsmp::zone::KeyMap::Absent => continue,
+            nsmp::zone::KeyMap::Neutral => {
+                // The sample editor writes the neutral table whatever the zone
+                // layout, so nothing may start populating one.
+                assert!(
+                    table.plan_key_map(&map.payload, &zones).unwrap().is_empty(),
+                    "{name}: a neutral table was planned over"
+                );
+                neutral += 1;
+            }
+            nsmp::zone::KeyMap::Populated => {
+                let mut after = map.payload.clone();
+                for (at, quad) in table.plan_key_map(&map.payload, &zones).unwrap() {
+                    after[at..at + quad.len()].copy_from_slice(&quad);
+                }
+                assert_eq!(after, map.payload, "{name}: the law did not reproduce it");
+                populated += 1;
+            }
+        }
+    }
+    assert!(populated > 0, "no populated per-key table in the corpus");
+    assert!(neutral > 0, "no neutral per-key table in the corpus");
+}
 
-    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
-        let entity = nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap();
-        let Entity::Sample(sample) = &entity else {
+/// A populated per-key table is recomputed from the zone layout, and an edit
+/// that puts the layout back where it was reproduces the file byte for byte.
+///
+/// The partner law is the whole claim here: the 5 vendor instruments that carry
+/// a populated table are the only specimens that exercise it, and 24 of their
+/// records sit outside the zones' span where two builders write `[0][0][0][key]`
+/// rather than the identity. Those are carried across untouched.
+#[test]
+fn nsmp_v4_populated_key_map_survives_a_round_trip() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        if !sample.zones_are_editable() {
+            continue;
+        }
+        let Ok(zones) = sample.zones() else { continue };
+        if zones.len() < 2 {
+            continue;
+        }
+        let name = specimen.path.display();
+        let roots: Vec<u8> = zones.iter().map(|z| z.root_key).collect();
+        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes)).unwrap();
+        let Entity::Sample(edited) = &mut entity else {
             unreachable!()
         };
-        assert!(sample.zones_are_editable(), "{name}");
+        // Move every root away and back. The table is recomputed each time, so
+        // a byte-identical result is the law reproducing what the builder wrote.
+        for (i, root) in roots.iter().enumerate() {
+            edited.set_root_key(i, root.saturating_sub(1)).unwrap();
+        }
+        for (i, root) in roots.iter().enumerate() {
+            edited.set_root_key(i, *root).unwrap();
+        }
+        let after = nord_format::to_bytes(&entity).unwrap();
+        assert_eq!(specimen.bytes, after, "{name}");
+        seen += 1;
     }
+    assert!(seen > 0, "no multi-zone wide sample in the corpus");
+}
+
+/// Retuning a multi-zone v4 instrument moves the two copies of the root key and
+/// the per-key records the partner law reassigns — and nothing else.
+#[test]
+fn nsmp_v4_retune_carries_the_key_map_with_it() {
+    let before = &named(V4_KEY_MAP).bytes;
+    let zones = zones_of(before);
+    let (root, _, _) = zones[0];
+
+    let (_, after) = edited(V4_KEY_MAP, |s| s.set_root_key(0, root - 1).unwrap());
+    assert_eq!(zones_of(&after)[0].0, root - 1);
+    assert_eq!(audio(before), audio(&after), "retune moved audio");
+
+    // The gains and the three bytes behind them are an authored curve that no
+    // layout predicts, so every one of them has to survive the recompute.
+    let levels = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+        let Entity::Sample(Sample::V3(sample)) = &entity else {
+            panic!("not a wide sample")
+        };
+        let map = nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4).unwrap();
+        (0..128)
+            .map(|k| map.payload[6 + k * 10..][..6].to_vec())
+            .collect()
+    };
+    assert_eq!(levels(before), levels(&after), "the per-key levels moved");
 }
 
 /// Every wide specimen's zones survive a retune to a new root and back, which is
