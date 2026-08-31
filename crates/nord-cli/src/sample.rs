@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{codec, encode};
-use nord_format::formats::nsmpproj::{Project, Zone, LOWEST_NOTE};
+use nord_format::formats::nsmpproj::{Project, Stroke, Zone, LOWEST_NOTE};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -159,6 +159,20 @@ pub struct EncodeArgs {
     /// The highest note the zone covers. Defaults to two octaves above the root.
     #[arg(long, value_name = "NOTE")]
     pub top_note: Option<String>,
+
+    /// Loop over `START:END`, in frames of the WAV. The audio after END is not
+    /// encoded, and the loop's crossfade is applied to the samples themselves.
+    #[arg(long = "loop", value_name = "START:END")]
+    pub loop_points: Option<String>,
+
+    /// Frames of the loop's tail to fade into the frames before its start.
+    #[arg(
+        long,
+        value_name = "FRAMES",
+        default_value_t = 0,
+        requires = "loop_points"
+    )]
+    pub loop_crossfade: usize,
 
     /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
     #[arg(long)]
@@ -401,7 +415,7 @@ fn stroke_line(stream: &[u8], at: usize) -> Result<String, String> {
     let layout = codec::Layout::V2;
     let walk = codec::walk(stream, at, layout).map_err(|e| e.to_string())?;
     let audio = codec::decode(stream, at, layout).map_err(|e| e.to_string())?;
-    Ok(format!(
+    let mut line = format!(
         "{:>8} fields  {:>7.3} s  shift {}, peak {}, {} record(s), {}% predicted",
         walk.fields,
         audio.seconds(),
@@ -409,7 +423,28 @@ fn stroke_line(stream: &[u8], at: usize) -> Result<String, String> {
         codec::peak(stream, layout).unwrap_or_default(),
         walk.records.len(),
         100 * audio.differenced / audio.samples.len().max(1),
-    ))
+    );
+    if let Some(record) = walk.records.iter().find(|r| r.mark) {
+        let fields = walk.fields - record.first_field;
+        line.push_str(&format!(
+            ", loops the last {fields} field(s) ({:.3} s)",
+            fields as f64 / f64::from(codec::FIELD_RATE),
+        ));
+    }
+    Ok(line)
+}
+
+/// `START:END` in source frames.
+fn loop_points(text: &str, crossfade: usize) -> Result<encode::Loop, String> {
+    let number = |part: &str, label: &str| {
+        part.trim()
+            .parse::<usize>()
+            .map_err(|_| format!("--loop wants START:END in frames; its {label} reads {part:?}"))
+    };
+    let (start, end) = text
+        .split_once(':')
+        .ok_or_else(|| format!("--loop wants START:END in frames, not {text:?}"))?;
+    Ok(encode::Loop::new(number(start, "start")?, number(end, "end")?).crossfade(crossfade))
 }
 
 /// `nord sample encode`: a WAV into a one-zone v2 instrument.
@@ -428,6 +463,9 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
         .predictor(predictor(args.predict));
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
+    }
+    if let Some(points) = &args.loop_points {
+        options = options.loops(loop_points(points, args.loop_crossfade)?);
     }
 
     let instrument = encode::instrument(&source.samples, &options).map_err(|e| e.to_string())?;
@@ -454,6 +492,10 @@ struct ProjectZone {
     top_note: u8,
     samples: Vec<i16>,
     source: PathBuf,
+    loops: Option<encode::Loop>,
+    /// Loop settings the project carries that the instrument has no field for, named
+    /// so a build says what it dropped rather than dropping it quietly.
+    dropped: Vec<String>,
 }
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
@@ -487,6 +529,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             root_key: z.root_key,
             top_note: z.top_note,
             global_id: z.global_id,
+            loops: z.loops,
         })
         .collect();
     let instrument =
@@ -508,6 +551,13 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             zone.global_id,
             zone.source.display()
         )));
+        if !zone.dropped.is_empty() {
+            ui.warn(format!(
+                "zone{} sets {}, which the instrument has nowhere to hold",
+                index + 1,
+                zone.dropped.join(", ")
+            ));
+        }
     }
 
     let path = args
@@ -526,6 +576,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
     let files = project.audio_files().map_err(say)?;
     let strokes = project.strokes().map_err(say)?;
     let zones = project.zones().map_err(say)?;
+    let instrument_decay = project.loop_decay_enabled().map_err(say)?;
     validate_key_ranges(&zones)?;
 
     zones
@@ -566,12 +617,6 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                         layer.global_id
                     )
                 })?;
-            if stroke.loop_enabled {
-                return Err(format!(
-                    "{at}'s stroke loops; a looping zone carries loop fields in its zone \
-                     record that are not decoded, so it cannot be written"
-                ));
-            }
             let file = files
                 .iter()
                 .find(|f| f.id == stroke.file_id)
@@ -593,15 +638,99 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                     path.display()
                 ));
             }
+            let (loops, mut dropped) = zone_loop(&at, stroke, start, stop)?;
+            if loops.is_some() && instrument_decay {
+                dropped.push("the instrument's own m_loopDecayEnabled".into());
+            }
             Ok(ProjectZone {
                 global_id: layer.global_id,
                 root_key: zone.root_key,
                 top_note: zone.top_note,
                 samples: source.samples[start..stop].to_vec(),
                 source: path,
+                loops,
+                dropped,
             })
         })
         .collect()
+}
+
+/// One stroke's loop as the encoder states it, and the loop settings that reach no
+/// instrument.
+///
+/// The project's loop points count in the audio file's own frames, so they move with
+/// the trim. Whichever loop is switched on maps onto the one loop the container holds:
+/// a short loop is the same start with the short length, and nothing in the file says
+/// which of the two it was.
+fn zone_loop(
+    at: &str,
+    stroke: &Stroke,
+    start: usize,
+    stop: usize,
+) -> Result<(Option<encode::Loop>, Vec<String>), String> {
+    if !stroke.loop_enabled {
+        return Ok((None, Vec::new()));
+    }
+    let short = stroke.short_loop_enabled;
+    let length = if short {
+        stroke.loop_length_short
+    } else {
+        stroke.loop_length
+    };
+    let named = if short {
+        "m_loopLengthShort"
+    } else {
+        "m_loopLengthLong"
+    };
+    let loop_start = frame(at, "loop start", stroke.loop_start, stop)?;
+    if !length.is_finite() || length <= 0.0 {
+        return Err(format!("{at}'s {named} is {length}, which is not a loop"));
+    }
+    let end = frame(at, "loop end", stroke.loop_start + length, stop)?;
+    if loop_start < start {
+        return Err(format!(
+            "{at} loops from frame {loop_start} but its audio is trimmed to start at \
+             {start}; the loop would begin before the sample does"
+        ));
+    }
+
+    // Mode 1 rewrites the loop's tail some way this crate has not decoded, and the
+    // short crossfade's unit is not frames, so neither can be reproduced.
+    if stroke.loop_crossfade_mode != 0 {
+        return Err(format!(
+            "{at} sets m_loopXFModeLong = {}; only the linear fade (mode 0) is decoded, \
+             and the fade is baked into the audio, so this one cannot be written",
+            stroke.loop_crossfade_mode
+        ));
+    }
+    if short && stroke.loop_crossfade_short != 0 {
+        return Err(format!(
+            "{at} sets m_loopXFadeShort = {}, whose unit is not frames and is not \
+             decoded; the fade is baked into the audio, so it cannot be written",
+            stroke.loop_crossfade_short
+        ));
+    }
+    let crossfade = if short {
+        0
+    } else {
+        frame(at, "loop crossfade", stroke.loop_crossfade, stop)?
+    };
+
+    // These reach no instrument: the editor writes the same bytes whatever they hold.
+    let mut dropped = Vec::new();
+    if stroke.loop_detune != 0 {
+        dropped.push(format!("m_loopDetune = {}", stroke.loop_detune));
+    }
+    if stroke.loop_decay_enabled {
+        dropped.push(format!("m_loopDecay = {}", stroke.loop_decay));
+    }
+    if short && !stroke.short_loop_uses_pitch {
+        dropped.push("m_shortLoopUsesPitch = 0".into());
+    }
+    Ok((
+        Some(encode::Loop::new(loop_start - start, end - start).crossfade(crossfade)),
+        dropped,
+    ))
 }
 
 fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
@@ -749,6 +878,16 @@ fn deep(path: &Path) -> Result<String, String> {
                 "stroke {index}: marked record disagrees with the directory"
             ));
         }
+        // A loop opens a fresh packet, so the words it covers divide by one. The wide
+        // generations pack to their own size and are not checked against this one.
+        if let (codec::Layout::V2, Some(record)) = (layout, actual.first()) {
+            let words = terminator - record.at;
+            if !words.is_multiple_of(nord_format::formats::nsmp::stroke::PACKET_LEN / 3) {
+                return Err(format!(
+                    "stroke {index}: the loop covers {words} words, which is not whole packets"
+                ));
+            }
+        }
     }
     let mut note = format!(
         "{}, {} stroke(s), {records} record(s), directory agrees",
@@ -789,6 +928,98 @@ mod tests {
 
         let raised_floor = [zone(60, LOWEST_NOTE + 1, 84)];
         assert!(validate_key_ranges(&raised_floor).is_err());
+    }
+
+    #[test]
+    fn loop_points_read_as_frames_around_a_colon() {
+        let points = loop_points("16384:32768", 1024).unwrap();
+        assert_eq!(points, encode::Loop::new(16_384, 32_768).crossfade(1_024));
+        assert_eq!(loop_points(" 8 : 9 ", 0).unwrap(), encode::Loop::new(8, 9));
+        for bad in ["16384", "16384:", "a:b", "16384:32768:1", "-1:5"] {
+            assert!(loop_points(bad, 0).is_err(), "{bad}");
+        }
+    }
+
+    /// The project's loop points count in the audio file's frames, so a trimmed zone
+    /// moves them; whichever loop is switched on maps onto the one the container holds.
+    #[test]
+    fn a_projects_loop_maps_onto_the_one_the_container_holds() {
+        let long = stroke_with(|s| s.loop_enabled = true);
+        let (points, dropped) = zone_loop("zone1", &long, 1_000, 88_200).unwrap();
+        assert_eq!(points, Some(encode::Loop::new(15_384, 31_768)));
+        assert!(dropped.is_empty());
+
+        let short = stroke_with(|s| {
+            s.loop_enabled = true;
+            s.short_loop_enabled = true;
+            s.loop_length_short = 1_024.0;
+            s.loop_crossfade_short = 0;
+        });
+        let (points, _) = zone_loop("zone1", &short, 0, 88_200).unwrap();
+        assert_eq!(points, Some(encode::Loop::new(16_384, 17_408)));
+
+        let off = stroke_with(|_| {});
+        assert_eq!(zone_loop("zone1", &off, 0, 88_200).unwrap().0, None);
+    }
+
+    /// A loop setting the instrument cannot carry is named: refused when it would
+    /// change the audio, reported when the editor drops it too.
+    #[test]
+    fn loop_settings_with_nowhere_to_go_are_named() {
+        let refused = |edit: fn(&mut Stroke)| {
+            let mut s = stroke_with(|s| s.loop_enabled = true);
+            edit(&mut s);
+            zone_loop("zone1", &s, 0, 88_200).unwrap_err()
+        };
+        assert!(refused(|s| s.loop_crossfade_mode = 1).contains("m_loopXFModeLong"));
+        assert!(refused(|s| {
+            s.short_loop_enabled = true;
+            s.loop_length_short = 1_024.0;
+            s.loop_crossfade_short = 10;
+        })
+        .contains("m_loopXFadeShort"));
+        assert!(refused(|s| s.loop_length = 0.0).contains("m_loopLengthLong"));
+        assert!(refused(|s| s.loop_length = 90_000.0).contains("loop end"));
+
+        // A trim that starts after the loop does leaves the loop nowhere to begin.
+        let trimmed = stroke_with(|s| s.loop_enabled = true);
+        assert!(zone_loop("zone1", &trimmed, 20_000, 88_200).is_err());
+
+        let mut noisy = stroke_with(|s| s.loop_enabled = true);
+        noisy.loop_detune = -50;
+        noisy.loop_decay_enabled = true;
+        let (points, dropped) = zone_loop("zone1", &noisy, 0, 88_200).unwrap();
+        assert!(points.is_some());
+        assert_eq!(dropped.len(), 2, "{dropped:?}");
+        assert!(dropped[0].contains("m_loopDetune"));
+        assert!(dropped[1].contains("m_loopDecay"));
+    }
+
+    /// The canonical LP rung, whose loop the editor stores at 16384..32768.
+    fn stroke_with(edit: impl FnOnce(&mut Stroke)) -> Stroke {
+        let mut stroke = Stroke {
+            zone_id: 129,
+            global_id: 1,
+            file_id: 1,
+            begin: 0.0,
+            end: 88_200.0,
+            start: 0.0,
+            stop: 88_200.0,
+            loop_enabled: false,
+            short_loop_enabled: false,
+            loop_start: 16_384.0,
+            loop_length: 16_384.0,
+            loop_length_short: 0.0,
+            loop_crossfade: 0.0,
+            loop_crossfade_mode: 0,
+            loop_crossfade_short: 10,
+            short_loop_uses_pitch: true,
+            loop_detune: 0,
+            loop_decay_enabled: false,
+            loop_decay: 20.0,
+        };
+        edit(&mut stroke);
+        stroke
     }
 
     #[test]
