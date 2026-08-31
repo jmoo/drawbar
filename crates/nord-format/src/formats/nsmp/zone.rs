@@ -508,6 +508,19 @@ impl Table {
         }
         Ok(plan)
     }
+
+    /// Check that a populated per-key table follows the derived partner law.
+    pub fn validate_key_map(&self, map: &[u8], zones: &[ZoneV3]) -> Result<(), ParseError> {
+        for (at, expected) in self.plan_key_map(map, zones)? {
+            let found = &map[at..at + expected.len()];
+            if found != expected {
+                return Err(ParseError::AssertFail(format!(
+                    "per-key record at byte {at} does not match the zone layout"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Find and validate a wide zone table against `(stroke GID, root key)` pairs.
@@ -779,6 +792,17 @@ mod tests {
         let table = Table::locate(21, &map, &strokes(&zones)).unwrap();
         let read = table.read(&map, &strokes(&zones)).unwrap();
         assert!(table.plan_key_map(&map, &read).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_populated_key_map_is_refused() {
+        let zones = [(9u32, 60u8, 84u8, 48u8)];
+        let mut map = wide_map(21, &zones, 2);
+        let table = Table::locate(21, &map, &strokes(&zones)).unwrap();
+        let read = table.read(&map, &strokes(&zones)).unwrap();
+        map[KEY_TABLE_AT + 40 * KEY_STRIDE + KEY_QUAD_AT] = 55;
+
+        assert!(table.validate_key_map(&map, &read).is_err());
     }
 
     /// The Kalimba's sixteen roots, whose four- and five-semitone spacing is what

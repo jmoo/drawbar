@@ -301,7 +301,7 @@ impl Cbin<SampleV3> {
     /// keyboard note by note, that table can be recomputed from the layout.
     pub fn zones_are_editable(&self) -> bool {
         match (self.zone_table(), self.map(), self.zones()) {
-            (Ok(table), Ok(map), Ok(zones)) => table.plan_key_map(&map.payload, &zones).is_ok(),
+            (Ok(table), Ok(map), Ok(zones)) => table.validate_key_map(&map.payload, &zones).is_ok(),
             _ => false,
         }
     }
@@ -314,6 +314,8 @@ impl Cbin<SampleV3> {
     fn edit_zone(&mut self, index: usize, field: zone::Field, note: u8) -> Result<(), Error> {
         let table = self.zone_table()?;
         let mut zones = self.zones()?;
+        let map = self.map()?;
+        table.validate_key_map(&map.payload, &zones)?;
         let zone = zones
             .get_mut(index)
             .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
@@ -322,7 +324,7 @@ impl Cbin<SampleV3> {
             zone::Field::Top => zone.top_note = note,
             zone::Field::Low => zone.low_note = Some(note),
         }
-        let plan = table.plan_key_map(&self.map()?.payload, &zones)?;
+        let plan = table.plan_key_map(&map.payload, &zones)?;
         let map = self.map_mut()?;
         table.set(&mut map.payload, index, field, note)?;
         for (at, quad) in plan {

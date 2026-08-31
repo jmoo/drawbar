@@ -297,16 +297,28 @@ mod tests {
     }
 
     fn sample_with_key_map() -> Sample {
-        let mut map = vec![0u8; 12 + 128 * 10 + 1 + 16 + 2];
+        let mut map = vec![0u8; 12 + 128 * 10 + 1 + 2 * 16 + 2];
         for key in 0..128 {
             map[12 + key * 10..][..4].fill(key as u8);
         }
-        map[12 + 40 * 10] = 60;
         let record = 12 + 128 * 10 + 1;
-        map[record - 1] = 1;
-        map[record] = 60;
-        map[record + 1] = 84;
-        map[record + 8..record + 12].copy_from_slice(&9u32.to_be_bytes());
+        map[record - 1] = 2;
+        for key in 48..=60 {
+            map[12 + key * 10..][..3].fill(62);
+        }
+        for key in 61..=84 {
+            map[12 + key * 10..][..3].fill(60);
+        }
+        for (i, (root, top, low, gid)) in [(60, 60, 48, 9u32), (62, 84, 61, 10)]
+            .into_iter()
+            .enumerate()
+        {
+            let at = record + i * 16;
+            map[at] = root;
+            map[at + 1] = top;
+            map[at + 2] = low;
+            map[at + 8..at + 12].copy_from_slice(&gid.to_be_bytes());
+        }
 
         Sample::V3(Cbin {
             header: Header::new("nsmp", (0, 0), 400),
@@ -326,6 +338,11 @@ mod tests {
                         tag: *section::STK4,
                         version: 1,
                         payload: vec![0, 0, 0, 9, 0, 60],
+                    },
+                    section::Section4 {
+                        tag: *section::STK4,
+                        version: 1,
+                        payload: vec![0, 0, 0, 10, 0, 62],
                     },
                 ],
             },
