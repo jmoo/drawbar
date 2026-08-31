@@ -272,12 +272,13 @@ enum SampleAction {
     /// lists them.
     Edit(sample::EditArgs),
 
-    /// Decode a v2 instrument's audio to WAV, one file per zone.
+    /// Decode an instrument's audio to WAV, one file per zone, from a file or a slot.
     ///
     /// The audio comes out on its own lattice — about 35 kHz — because the rate the
     /// instrument plays it back at is a property of its interpolator, which is not
     /// decoded. Anything the stream grammar cannot walk is reported as unsupported
-    /// with a reason, and the run ends in a coverage count.
+    /// with a reason, and the run ends in a coverage count. A slot is only read, so
+    /// this never needs `--yes`; its WAVs are named after the instrument.
     Decode(sample::DecodeArgs),
 
     /// EXPERIMENTAL: build a one-zone v2 instrument from a 44.1 kHz mono 16-bit WAV.
@@ -289,8 +290,28 @@ enum SampleAction {
     /// acknowledge that and write anything.
     Encode(sample::EncodeArgs),
 
-    /// Round-trip a sample instrument, and with `--deep` also walk its audio stream.
+    /// Round-trip a sample instrument, in a file or a slot, and with `--deep` also
+    /// walk its audio stream. Reading a slot is all this does to the instrument.
     Verify(sample::VerifyArgs),
+
+    /// Sample Editor projects (`.nsmpproj`) — the save file the editor generates an
+    /// instrument from. `nord edit` changes one; this builds one.
+    Project {
+        #[command(subcommand)]
+        action: SampleProjectAction,
+    },
+}
+
+/// `nord sample project`: the editor's own save file, which no object class holds.
+#[derive(Subcommand)]
+enum SampleProjectAction {
+    /// Build a project from WAV files, one zone per `--zone WAV=NOTE`.
+    ///
+    /// Key ranges, zone ids and loop points are derived the way the editor derives
+    /// them for a fresh import. A WAV is stored by the path given, made relative to
+    /// the project's own directory when it lies under it, and at whatever rate it
+    /// carries — the frame counts a project holds are stated at 44.1 kHz regardless.
+    New(sample::ProjectNewArgs),
 }
 
 /// `nord live`: the verbs that mean anything for the live buffer.
@@ -648,6 +669,9 @@ fn main() -> ExitCode {
             SampleAction::Decode(args) => sample::decode(&ui, args),
             SampleAction::Encode(args) => sample::encode(&ui, args),
             SampleAction::Verify(args) => sample::verify(&ui, args),
+            SampleAction::Project { action } => match action {
+                SampleProjectAction::New(args) => sample::project_new(&ui, args),
+            },
         },
         Command::Setlist { action } => match action {
             SetlistAction::Slot(action) => slot_action(&ui, action, ObjectClass::SetList),

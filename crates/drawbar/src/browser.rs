@@ -200,6 +200,9 @@ pub enum Act {
     Disconnect,
     OpenFiles,
     New(Fresh),
+    /// Pick the WAVs a new Sample Editor project is laid out from. The project itself
+    /// is made once the dialog has each file's root key — see [`crate::newproject`].
+    NewProject,
     /// Read the whole instrument again — every class, its geometry and its focus.
     Resync,
     ReadAgain(ObjectClass),
@@ -660,6 +663,7 @@ impl Browser {
     ) {
         let mut open_files = false;
         let mut fresh = None;
+        let mut new_project = false;
         let mut new_folder = false;
         let mut connect = false;
         let attached = device.state.connected();
@@ -680,6 +684,20 @@ impl Browser {
                             }
                         }
                     });
+                }
+                ui.separator();
+                // Not a family: a project is laid out from audio files rather than
+                // started from a default, so it asks for them before it exists.
+                if ui
+                    .button("Sample Editor project…")
+                    .on_hover_text(
+                        "pick the WAVs it plays; the project stores their names and the \
+                         editor looks for them beside it",
+                    )
+                    .clicked()
+                {
+                    new_project = true;
+                    ui.close();
                 }
             });
             new_folder = ui
@@ -714,6 +732,9 @@ impl Browser {
         }
         if let Some(kind) = fresh {
             acts.push(Act::New(kind));
+        }
+        if new_project {
+            acts.push(Act::NewProject);
         }
         if new_folder {
             acts.push(Act::NewFolder);
@@ -1800,6 +1821,7 @@ pub fn apply(
                     tabs.open(id, workspace);
                 }
             }
+            Act::NewProject => workspace.pick_wavs(),
             Act::Resync => {
                 device.resync();
                 log.say("Reading the instrument again…");

@@ -177,15 +177,15 @@ pub fn ui(
             );
             ui.label("root key");
             if let Some(note) = note_picker(ui, ("proj_root", id as usize), zone.root_key) {
-                sets.push((format!("zone{id}.root_key"), note));
+                sets.push((format!("zone{id}.root_key"), note::name(note)));
             }
             ui.label("bottom");
             if let Some(note) = note_picker(ui, ("proj_btm", id as usize), zone.bottom_note) {
-                sets.push((format!("zone{id}.bottom_note"), note));
+                sets.push((format!("zone{id}.bottom_note"), note::name(note)));
             }
             ui.label("top");
             if let Some(note) = note_picker(ui, ("proj_top", id as usize), zone.top_note) {
-                sets.push((format!("zone{id}.top_note"), note));
+                sets.push((format!("zone{id}.top_note"), note::name(note)));
             }
         });
     }

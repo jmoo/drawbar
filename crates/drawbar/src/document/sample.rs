@@ -2,12 +2,20 @@
 //!
 //! A sample is mostly encoded audio, so what is settable is what the format can patch in
 //! place without touching a stroke: the name, and each zone's root key and top note.
-//! The v3/v4 generations decode read-only and are carried verbatim.
+//! The v3/v4 generations decode read-only and are carried verbatim — they are still
+//! shown, because a name, a zone map and playable audio are most of what an instrument
+//! is, and none of that depends on being able to edit it.
+//!
+//! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
+//! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when the
+//! operator asks for it, and kept in a [`Cache`] until the bytes under it change.
 
+use std::collections::HashMap;
 use std::io::Cursor;
 
 use eframe::egui;
 use nord_format::cbin::Cbin;
+use nord_format::formats::nsmp::codec::{self, Audio};
 use nord_format::formats::nsmp::{self, Sample};
 use nord_format::Entity;
 
@@ -22,9 +30,9 @@ pub fn is_sample(entity: &Entity) -> bool {
     matches!(entity, Entity::Sample(_))
 }
 
-fn sample(entity: &Entity) -> Option<&Cbin<Sample>> {
+fn sample(entity: &Entity) -> Option<&nord_format::Sample> {
     match entity {
-        Entity::Sample(nord_format::Sample::V2(sample)) => Some(sample),
+        Entity::Sample(sample) => Some(sample),
         _ => None,
     }
 }
@@ -41,18 +49,29 @@ fn sample_mut(entity: &mut Entity) -> Option<&mut Cbin<Sample>> {
 pub struct Zone {
     pub root_key: u8,
     pub top_note: u8,
+    /// The bottom of the range where the file states one outright. The v2 table does
+    /// not, so there it is worked out from the zone below.
+    pub low_note: Option<u8>,
 }
 
-/// Everything settable, in one read.
+/// Everything the document shows about an instrument, in one read.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub name: String,
+    /// The v3/v4 second name — what follows the `_` in the vendor's filenames. Empty
+    /// on a v2 instrument, which has one name.
+    pub sub_name: String,
+    /// `v2`, `v3` or `v4`, taken from the content version rather than the filename.
+    pub generation: &'static str,
+    pub categories: Vec<String>,
     pub zones: Vec<Zone>,
 }
 
 pub fn snapshot(entity: &Entity) -> Option<Result<Snapshot, String>> {
-    let sample = sample(entity)?;
-    Some(read(sample))
+    Some(match sample(entity)? {
+        nord_format::Sample::V2(sample) => read(sample),
+        nord_format::Sample::V3(sample) => read_v3(sample),
+    })
 }
 
 fn read(sample: &Cbin<Sample>) -> Result<Snapshot, String> {
@@ -60,12 +79,38 @@ fn read(sample: &Cbin<Sample>) -> Result<Snapshot, String> {
     let strokes = sample.strokes().map_err(|e| e.to_string())?;
     Ok(Snapshot {
         name: sample.name().map_err(|e| e.to_string())?,
+        sub_name: String::new(),
+        generation: "v2",
+        categories: sample.categories(),
         zones: zones
             .iter()
             .zip(&strokes)
             .map(|(zone, stroke)| Zone {
                 root_key: stroke.root_key,
                 top_note: zone.top_note,
+                low_note: None,
+            })
+            .collect(),
+    })
+}
+
+fn read_v3(sample: &Cbin<nsmp::SampleV3>) -> Result<Snapshot, String> {
+    let zones = sample.zones().map_err(|e| e.to_string())?;
+    Ok(Snapshot {
+        name: sample.name().map_err(|e| e.to_string())?,
+        sub_name: sample.sub_name().map_err(|e| e.to_string())?,
+        generation: match sample.header.version >= nsmp::V4_FROM_VERSION {
+            true => "v4",
+            false => "v3",
+        },
+        // The wide chain carries no `cat` section this reader decodes.
+        categories: Vec::new(),
+        zones: zones
+            .iter()
+            .map(|zone| Zone {
+                root_key: zone.root_key,
+                top_note: zone.top_note,
+                low_note: zone.low_note,
             })
             .collect(),
     })
@@ -114,31 +159,135 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<Vec<u8>, String>
 /// The range a zone covers, in plain words.
 ///
 /// Zones are stored high to low and the panel numbers them from 1 at the top of the
-/// keyboard; a zone's bottom is one note above the next record's top.
+/// keyboard; a zone's bottom is one note above the next record's top, except where the
+/// file states the bottom itself.
 pub fn range(zones: &[Zone], index: usize) -> String {
     let top = note::name(zones[index].top_note);
-    match zones.get(index + 1) {
-        Some(below) => format!(
-            "{} up to {top}",
-            note::name(below.top_note.saturating_add(1))
-        ),
+    let low = zones[index].low_note.or_else(|| {
+        zones
+            .get(index + 1)
+            .map(|below| below.top_note.saturating_add(1))
+    });
+    match low {
+        Some(low) => format!("{} up to {top}", note::name(low)),
         None => format!("up to {top}"),
     }
 }
 
-/// The name and the zone map. Everything else about a sample is audio.
+/// What the sample view asked the document to do about one zone's audio.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ask {
+    /// Decode this zone, because the operator opened it.
+    Decode(usize),
+    /// Start it, or stop it if it is the one sounding.
+    Play(usize),
+    Save(usize),
+}
+
+/// Decoded zone audio, kept only while the bytes it came from are the current ones.
+///
+/// ⚠️ Keyed by the asset's [`stamp`](crate::workspace::LocalEntity::stamp) as well as
+/// its id: an edit re-encodes the whole file, and audio decoded from what it held
+/// before is audio from another instrument.
+#[derive(Default)]
+pub struct Cache {
+    of: Option<(u64, u64)>,
+    zones: HashMap<usize, Result<Decoded, String>>,
+}
+
+/// One zone's audio, and the envelope drawn from it.
+pub struct Decoded {
+    pub audio: Audio,
+    /// Min and max per column, in `-1.0..=1.0`. Drawn once and stretched to whatever
+    /// width the panel has, because rebuilding it on a window drag is another pass over
+    /// every sample.
+    pub envelope: Vec<(f32, f32)>,
+}
+
+/// Columns an envelope is reduced to. Wide enough that a wide panel has no gaps in it,
+/// small enough that the whole thing is a few kilobytes whatever the zone holds.
+const COLUMNS: usize = 512;
+
+impl Cache {
+    /// Drop everything decoded from bytes that are no longer what `id` holds.
+    pub fn follow(&mut self, id: u64, stamp: u64) {
+        if self.of != Some((id, stamp)) {
+            self.of = Some((id, stamp));
+            self.zones.clear();
+        }
+    }
+
+    pub fn get(&self, zone: usize) -> Option<&Result<Decoded, String>> {
+        self.zones.get(&zone)
+    }
+
+    /// Decode one zone, once. A refusal is remembered like a success: the operator gets
+    /// the codec's own reason, and clicking again would only produce it a second time.
+    pub fn decode(&mut self, entity: &Entity, zone: usize) {
+        if self.zones.contains_key(&zone) {
+            return;
+        }
+        self.zones.insert(zone, decode(entity, zone));
+    }
+}
+
+fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
+    let sample = sample(entity).ok_or("this is not a sample instrument")?;
+    let layout = sample.layout();
+    let zones = sample.zones().map_err(|e| e.to_string())?;
+    let zone = zones
+        .get(index)
+        .ok_or_else(|| format!("there is no zone {}", index + 1))?;
+    let audio = codec::decode(zone.stream, zone.at, layout).map_err(|e| e.to_string())?;
+    let envelope = envelope(&audio.samples, audio.channels, COLUMNS);
+    Ok(Decoded { audio, envelope })
+}
+
+/// The min and max of each of `columns` equal slices of the audio, scaled to
+/// `-1.0..=1.0`.
+///
+/// Frames rather than samples, so a stereo zone draws one envelope over both channels
+/// instead of two half-width ones. A column with no frames in it — more columns than
+/// frames — is flat, which is what a zone shorter than the widget should look like.
+pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32)> {
+    let channels = usize::from(channels).max(1);
+    let frames = samples.len() / channels;
+    if columns == 0 || frames == 0 {
+        return Vec::new();
+    }
+    let scale = |v: i16| f32::from(v) / 32768.0;
+    // ⚠️ In 64-bit: a long zone times the column count overflows a 32-bit `usize`, and
+    // wasm is a 32-bit target. Every result is at most `frames`, so the cast back is safe.
+    let edge = |column: usize| (column as u64 * frames as u64 / columns as u64) as usize;
+    (0..columns)
+        .map(|column| {
+            let from = edge(column);
+            let to = edge(column + 1).max(from + 1).min(frames);
+            let span = &samples[from * channels..to * channels];
+            let low = span.iter().copied().min().unwrap_or(0);
+            let high = span.iter().copied().max().unwrap_or(0);
+            (scale(low), scale(high))
+        })
+        .collect()
+}
+
+/// The name, the zone map, and each zone's audio once it has been asked for.
 pub fn ui(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
     name: &mut String,
     editable: bool,
+    sounds: &[Sound],
     sets: &mut Sets,
-) {
+) -> Option<Ask> {
+    let mut ask = None;
     if !editable {
         ui.label(
-            egui::RichText::new(
-                "This sample is carried as it came: only version 2 content can be changed here.",
-            )
+            egui::RichText::new(format!(
+                "This instrument is {} content: it is carried as it came, and only \
+                 version 2 can be changed here.",
+                snapshot.generation
+            ))
             .weak(),
         );
     }
@@ -160,34 +309,168 @@ pub fn ui(
                 sets.push(("name".to_string(), name.clone()));
             }
         });
+    });
+    if !snapshot.sub_name.is_empty() {
+        labelled(ui, "Sub name", &snapshot.sub_name);
+    }
+    if !snapshot.categories.is_empty() {
+        labelled(ui, "Categories", &snapshot.categories.join(", "));
+    }
 
-        for (i, zone) in snapshot.zones.iter().enumerate() {
-            let n = i + 1;
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [120.0, ui.spacing().interact_size.y],
-                    egui::Label::new(format!("Zone {n}")).halign(egui::Align::LEFT),
-                );
-                ui.label(
-                    egui::RichText::new(range(&snapshot.zones, i))
-                        .small()
-                        .weak(),
-                );
+    for (i, zone) in snapshot.zones.iter().enumerate() {
+        let n = i + 1;
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [120.0, ui.spacing().interact_size.y],
+                egui::Label::new(format!("Zone {n}")).halign(egui::Align::LEFT),
+            );
+            ui.label(
+                egui::RichText::new(range(&snapshot.zones, i))
+                    .small()
+                    .weak(),
+            );
+            ui.add_enabled_ui(editable, |ui| {
                 ui.label("root key");
                 if let Some(note) = note_picker(ui, ("root", n), zone.root_key) {
-                    sets.push((format!("zone{n}.root_key"), note));
+                    sets.push((format!("zone{n}.root_key"), note::name(note)));
                 }
                 ui.label("top note");
                 if let Some(note) = note_picker(ui, ("top", n), zone.top_note) {
-                    sets.push((format!("zone{n}.top_note"), note));
+                    sets.push((format!("zone{n}.top_note"), note::name(note)));
                 }
             });
+        });
+        if let Some(sound) = sounds.get(i) {
+            if let Some(asked) = zone_audio(ui, i, sound) {
+                ask = Some(asked);
+            }
         }
+    }
+    ask
+}
+
+/// A read-only fact, laid out under the same label column the controls use.
+fn labelled(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.add_sized(
+            [120.0, ui.spacing().interact_size.y],
+            egui::Label::new(label).halign(egui::Align::LEFT),
+        );
+        ui.label(egui::RichText::new(value).weak());
     });
 }
 
+/// What the document knows about one zone's audio while it draws the zone.
+pub struct Sound<'a> {
+    pub decoded: Option<&'a Result<Decoded, String>>,
+    pub playing: bool,
+}
+
+fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
+    let mut ask = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(120.0);
+        match sound.decoded {
+            None => {
+                if ui
+                    .small_button("Show audio")
+                    .on_hover_text("decode this zone's stroke — a long one takes a moment")
+                    .clicked()
+                {
+                    ask = Some(Ask::Decode(index));
+                }
+            }
+            Some(Err(why)) => {
+                ui.label(
+                    egui::RichText::new(format!("not decoded: {why}"))
+                        .small()
+                        .color(crate::app::bad(ui.visuals())),
+                );
+            }
+            Some(Ok(decoded)) => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:.3} s  {}",
+                        decoded.audio.seconds(),
+                        match decoded.audio.channels {
+                            1 => "mono".to_string(),
+                            n => format!("{n} channels"),
+                        },
+                    ))
+                    .small()
+                    .weak(),
+                );
+                let label = match sound.playing {
+                    true => "Stop",
+                    false => "Play",
+                };
+                if ui.small_button(label).clicked() {
+                    ask = Some(Ask::Play(index));
+                }
+                if ui.small_button("Save WAV…").clicked() {
+                    ask = Some(Ask::Save(index));
+                }
+            }
+        }
+    });
+    if let Some(Ok(decoded)) = sound.decoded {
+        ui.horizontal(|ui| {
+            ui.add_space(120.0);
+            waveform(ui, &decoded.envelope, sound.playing);
+        });
+    }
+    ask
+}
+
+/// Height of the drawn envelope.
+const WAVE_HEIGHT: f32 = 44.0;
+
+/// Draw an envelope across whatever width is left.
+///
+/// Painted from the theme's own colours rather than fixed ones: the trough is the panel's
+/// extreme fill, the wave is the instrument's red while it is sounding and the body text
+/// colour when it is not, so both themes stay legible.
+fn waveform(ui: &mut egui::Ui, envelope: &[(f32, f32)], playing: bool) {
+    let width = ui.available_width().max(64.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, WAVE_HEIGHT), egui::Sense::hover());
+    let visuals = ui.visuals();
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
+    let middle = rect.center().y;
+    painter.hline(
+        rect.x_range(),
+        middle,
+        egui::Stroke::new(1.0_f32, crate::app::unlit(visuals)),
+    );
+    if envelope.is_empty() {
+        return;
+    }
+    let ink = match playing {
+        true => crate::app::accent(visuals),
+        false => visuals.text_color(),
+    };
+    // The envelope has a fixed column count and the panel does not, so a column is as
+    // wide as its share of the rect — never thinner than the pixel it has to cover.
+    let column = (rect.width() / envelope.len() as f32).max(1.0);
+    let half = rect.height() / 2.0 - 1.0;
+    for (i, (low, high)) in envelope.iter().enumerate() {
+        let x = rect.left() + rect.width() * i as f32 / envelope.len() as f32;
+        let top = middle - high.clamp(-1.0, 1.0) * half;
+        let bottom = middle - low.clamp(-1.0, 1.0) * half;
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x, top),
+                egui::pos2(x + column, bottom.max(top + 1.0)),
+            ),
+            0.0,
+            ink,
+        );
+    }
+}
+
 /// A MIDI note as a name: `C4` is middle C. Typing a number works too.
-pub(crate) fn note_picker(ui: &mut egui::Ui, id: (&str, usize), note: u8) -> Option<String> {
+pub fn note_picker(ui: &mut egui::Ui, id: (&str, usize), note: u8) -> Option<u8> {
     let mut value = note as f64;
     let response = ui.push_id(id, |ui| {
         ui.add(
@@ -199,7 +482,7 @@ pub(crate) fn note_picker(ui: &mut egui::Ui, id: (&str, usize), note: u8) -> Opt
         )
     });
     let picked = value.round() as u8;
-    (response.inner.changed() && picked != note).then(|| note::name(picked))
+    (response.inner.changed() && picked != note).then_some(picked)
 }
 
 #[cfg(test)]
@@ -221,29 +504,126 @@ mod tests {
             Zone {
                 root_key: 72,
                 top_note: 96,
+                low_note: None,
             },
             Zone {
                 root_key: 60,
                 top_note: 71,
+                low_note: None,
             },
         ];
         // Zone 2 tops out at B4, so zone 1 starts one key above it.
         assert_eq!(range(&zones, 0), "C5 up to C7");
         assert_eq!(range(&zones, 1), "up to B4");
+
+        // A file that states its own bottom is believed rather than derived.
+        let stated = vec![Zone {
+            root_key: 60,
+            top_note: 71,
+            low_note: Some(48),
+        }];
+        assert_eq!(range(&stated, 0), "C3 up to B4");
+    }
+
+    #[test]
+    fn an_envelope_reduces_the_audio_to_one_pair_per_column() {
+        // Four frames of mono, two columns: each column covers two frames.
+        let mono = [i16::MAX, 0, -8192, 8192];
+        let pairs = envelope(&mono, 1, 2);
+        assert_eq!(pairs.len(), 2);
+        assert!((pairs[0].1 - 0.999_97).abs() < 1e-4, "{:?}", pairs[0]);
+        assert_eq!(pairs[0].0, 0.0);
+        assert_eq!(pairs[1], (-0.25, 0.25));
+
+        // Stereo: one envelope over both channels, not two half-width ones.
+        let stereo = [0, i16::MIN, 0, 0];
+        assert_eq!(envelope(&stereo, 2, 1), vec![(-1.0, 0.0)]);
+
+        // Fewer frames than columns: every column still gets a pair, and none is empty.
+        let short = [1000i16, -1000];
+        assert_eq!(envelope(&short, 1, 8).len(), 8);
+        // Degenerate asks answer with nothing rather than an empty span or a divide.
+        assert!(envelope(&mono, 1, 0).is_empty());
+        assert!(envelope(&[], 1, 4).is_empty());
     }
 
     /// Only v2 content has the in-place patches this editor makes; a v3/v4 instrument
-    /// is carried and shown, not edited.
+    /// is read and shown, not edited.
     #[test]
-    fn a_later_generation_is_carried_rather_than_edited() {
-        let entity = Entity::Sample(nord_format::Sample::V3(Cbin {
-            header: nord_format::cbin::Header::new("nsmp", (0, 0), 300),
-            body: nsmp::SampleV3 {
-                sections: Vec::new(),
-            },
-        }));
+    fn a_later_generation_is_read_rather_than_edited() {
+        let entity = Entity::Sample(nord_format::Sample::V3(v3_sample(300)));
         assert!(is_sample(&entity));
         assert!(!is_editable(&entity));
-        assert!(snapshot(&entity).is_none());
+
+        let snapshot = snapshot(&entity).expect("a sample").expect("it reads");
+        assert_eq!(snapshot.name, "Bass Clarinet");
+        assert_eq!(snapshot.sub_name, "KG  mono");
+        assert_eq!(snapshot.generation, "v3");
+        let zones: Vec<(u8, u8, Option<u8>)> = snapshot
+            .zones
+            .iter()
+            .map(|zone| (zone.root_key, zone.top_note, zone.low_note))
+            .collect();
+        assert_eq!(zones, [(72, 96, Some(61)), (60, 60, Some(17))]);
+        assert_eq!(range(&snapshot.zones, 0), "C#4 up to C7");
+    }
+
+    #[test]
+    fn a_v4_instrument_says_so() {
+        let entity = Entity::Sample(nord_format::Sample::V3(v3_sample(400)));
+        let snapshot = snapshot(&entity).unwrap().unwrap();
+        assert_eq!(snapshot.generation, "v4");
+    }
+
+    /// A two-zone v3 body, hand-built to the layout `map` v14 stores: the zone count,
+    /// then one 16-byte record per zone high to low, each holding root, top and low
+    /// notes and naming its stroke by global id at offset 8.
+    fn v3_sample(version: u32) -> Cbin<nsmp::SampleV3> {
+        use nord_format::formats::nsmp::section::{Section4, HDR4, MAP4, STK4};
+
+        // `hdr`: the main name at 10, the sub name from 76.
+        let mut hdr = vec![0u8; 140];
+        hdr[10..23].copy_from_slice(b"Bass Clarinet");
+        hdr[76..84].copy_from_slice(b"KG  mono");
+
+        let mut map = vec![2u8];
+        for (gid, root, top, low) in [(2u32, 72u8, 96u8, 61u8), (1, 60, 60, 17)] {
+            let mut record = vec![0u8; 16];
+            record[0] = root;
+            record[1] = top;
+            record[2] = low;
+            record[8..12].copy_from_slice(&gid.to_be_bytes());
+            map.extend(record);
+        }
+
+        let stroke = |gid: u32, root: u8| {
+            let mut payload = vec![0u8; 68];
+            payload[0..4].copy_from_slice(&gid.to_be_bytes());
+            payload[5] = root;
+            Section4 {
+                tag: *STK4,
+                version: 9,
+                payload,
+            }
+        };
+        Cbin {
+            header: nord_format::cbin::Header::new(nsmp::FORMAT, (0, 0), version),
+            body: nsmp::SampleV3 {
+                sections: vec![
+                    Section4 {
+                        tag: *HDR4,
+                        version: 9,
+                        payload: hdr,
+                    },
+                    Section4 {
+                        tag: *MAP4,
+                        version: 14,
+                        payload: map,
+                    },
+                    stroke(2, 72),
+                    stroke(1, 60),
+                ],
+            },
+        }
     }
 }

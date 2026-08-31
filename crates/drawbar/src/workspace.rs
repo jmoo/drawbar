@@ -16,6 +16,7 @@ use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Son
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
+use crate::newproject::Draft;
 
 /// Where an entity came from.
 #[derive(Clone)]
@@ -158,10 +159,16 @@ pub struct LocalEntity {
     /// way — but it is not in the local list and goes when its tab does. Only
     /// [`Workspace::keep`] promotes one.
     pub kept: bool,
+    /// Distinct for every set of bytes this id has held, so anything caching a decode
+    /// of them can tell it is looking at the old ones.
+    ///
+    /// It is the list revision at the moment the bytes landed, so a rename or a send
+    /// does not spend one.
+    pub stamp: u64,
 }
 
 impl LocalEntity {
-    fn new(id: u64, name: String, origin: Origin, bytes: Vec<u8>) -> LocalEntity {
+    fn new(id: u64, name: String, origin: Origin, bytes: Vec<u8>, stamp: u64) -> LocalEntity {
         let container = Container::read(&bytes);
         let (entity, parse_error) =
             match nord_format::from_stream(&mut std::io::Cursor::new(&bytes)) {
@@ -184,6 +191,7 @@ impl LocalEntity {
             dirty: false,
             pending: false,
             kept: true,
+            stamp,
         }
     }
 
@@ -228,6 +236,19 @@ fn export_filename(name: &str, bytes: &[u8]) -> String {
         true => stem,
         false => format!("{stem}.{}", format_tag(bytes)),
     }
+}
+
+/// The filename a decoded zone's WAV suggests: the instrument's own name, made
+/// path-safe, and the zone numbered the way the document numbers it.
+///
+/// The same spelling `nord sample decode --out` writes, so a zone exported from either
+/// tool lands under one name.
+pub fn zone_wav_name(instrument: &str, zone: usize) -> String {
+    let stem = match filename_stem(instrument) {
+        s if s.is_empty() => "unnamed".to_string(),
+        s => s,
+    };
+    format!("{stem}-zone{zone}.wav")
 }
 
 /// A verbatim name reduced to what a path can carry: whitespace runs and path
@@ -525,7 +546,13 @@ pub struct Saved {
 
 /// What a background task hands back to the UI thread.
 enum Incoming {
-    Opened { name: String, bytes: Vec<u8> },
+    Opened {
+        name: String,
+        bytes: Vec<u8>,
+    },
+    /// Everything one *New → Sample Editor project* pick came back with, together:
+    /// the draft is one question about the whole set, not one per file.
+    Wavs(Vec<(String, Vec<u8>)>),
     Note(String),
     Failed(String),
 }
@@ -540,6 +567,9 @@ pub struct Workspace {
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
+    /// The WAVs a New → Sample Editor project pick came back with, waiting on their
+    /// root keys. See [`crate::newproject`].
+    draft: Option<Draft>,
 }
 
 impl Workspace {
@@ -553,6 +583,7 @@ impl Workspace {
             ctx,
             tx,
             rx,
+            draft: None,
         }
     }
 
@@ -703,7 +734,7 @@ impl Workspace {
     pub fn ingest(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let entity = LocalEntity::new(id, name, origin, bytes);
+        let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
         match (&entity.parse_error, &entity.verify) {
             (Some(e), _) => {
                 log.error(format!("{}: {e}", entity.name));
@@ -737,8 +768,13 @@ impl Workspace {
         }
         self.entities.push(entity);
         self.selected = Some(id);
-        self.revision += 1;
         id
+    }
+
+    /// Spend one revision, and hand it out as the stamp on a set of bytes.
+    fn stamp(&mut self) -> u64 {
+        self.revision += 1;
+        self.revision
     }
 
     /// Drain whatever the pickers finished with. Call once per frame.
@@ -748,6 +784,7 @@ impl Workspace {
                 Incoming::Opened { name, bytes } => {
                     self.ingest(name.clone(), Origin::File(name), bytes, log);
                 }
+                Incoming::Wavs(files) => self.draft = Draft::plan(files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
             }
@@ -773,6 +810,36 @@ impl Workspace {
         });
     }
 
+    /// Pick the WAVs a new Sample Editor project is built out of.
+    pub fn pick_wavs(&self) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Pick the WAVs for a Sample Editor project")
+                .add_filter("WAV", &["wav"])
+                .pick_files()
+                .await;
+            let mut files = Vec::new();
+            for handle in picked.unwrap_or_default() {
+                let bytes = handle.read().await;
+                files.push((handle.file_name(), bytes));
+            }
+            let _ = tx.send(Incoming::Wavs(files));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The picked WAVs waiting on their root keys, for the dialog to edit.
+    pub fn draft_mut(&mut self) -> Option<&mut Draft> {
+        self.draft.as_mut()
+    }
+
+    /// Take the draft away, whether it is about to be made or abandoned.
+    pub fn take_draft(&mut self) -> Option<Draft> {
+        self.draft.take()
+    }
+
     /// The filename an export suggests.
     ///
     /// ⚠️ The one place a name becomes a filename — and the one place a name is made
@@ -792,7 +859,14 @@ impl Workspace {
             Some(name) => name,
             None => return,
         };
-        let bytes = entity.bytes.clone();
+        self.save_bytes(name, entity.bytes.clone());
+    }
+
+    /// Hand any bytes to the user under `name`, through whichever save this target has.
+    ///
+    /// What an export of a whole asset uses, and what a per-zone WAV uses: the bytes
+    /// being offered are the only difference between them.
+    pub fn save_bytes(&self, name: String, bytes: Vec<u8>) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         spawn(async move {
@@ -804,17 +878,17 @@ impl Workspace {
     /// Put back the bytes a tab opened with. The asset is unchanged again, so the dirty
     /// mark goes with them.
     pub fn restore_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+        if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
+            return;
+        }
+        let stamp = self.stamp();
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return;
         };
-        if entity.bytes == bytes {
-            return;
-        }
         *entity = LocalEntity {
             kept: entity.kept,
-            ..LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes)
+            ..LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp)
         };
-        self.revision += 1;
         log.say(format!("“{}” is back as it was opened.", entity.name));
     }
 
@@ -823,10 +897,15 @@ impl Workspace {
     /// The decode and the verify are re-run: an editor's output is bytes like any other,
     /// and it earns its badge the same way a file off disk does.
     pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+        if self.get(id).is_none() {
+            return;
+        }
+        let stamp = self.stamp();
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return;
         };
-        let replaced = LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes);
+        let replaced =
+            LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
         let verify = replaced.verify.clone();
         *entity = LocalEntity {
             dirty: true,
@@ -834,7 +913,6 @@ impl Workspace {
             kept: entity.kept,
             ..replaced
         };
-        self.revision += 1;
         if let VerifyState::Ok = verify {
             return;
         }
@@ -882,7 +960,8 @@ impl Workspace {
             bytes,
         } in saved
         {
-            let entity = LocalEntity::new(id, name, origin, bytes);
+            let stamp = self.stamp();
+            let entity = LocalEntity::new(id, name, origin, bytes, stamp);
             if let Some(e) = &entity.parse_error {
                 log.warn(format!("{}: {e}", entity.name));
             }
@@ -987,7 +1066,7 @@ mod tests {
     use super::*;
 
     fn ingest(name: &str, bytes: Vec<u8>) -> LocalEntity {
-        LocalEntity::new(1, name.into(), Origin::Fresh, bytes)
+        LocalEntity::new(1, name.into(), Origin::Fresh, bytes, 0)
     }
 
     #[test]
@@ -1241,6 +1320,44 @@ mod tests {
             export_filename("Big strings", b"no header"),
             "Big-strings.bin",
         );
+    }
+
+    #[test]
+    fn a_zone_wav_is_named_after_its_instrument_and_number() {
+        assert_eq!(zone_wav_name("Bass Clarinet", 2), "Bass-Clarinet-zone2.wav");
+        assert_eq!(zone_wav_name("../../etc/passwd", 1), "etc-passwd-zone1.wav");
+        assert_eq!(zone_wav_name("  ", 1), "unnamed-zone1.wav");
+    }
+
+    #[test]
+    fn bytes_carry_a_stamp_that_changes_only_when_they_do() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let opened = workspace.get(id).unwrap().bytes.clone();
+        let stamp = |workspace: &Workspace| workspace.get(id).unwrap().stamp;
+        let first = stamp(&workspace);
+
+        workspace.rename(id, "Africa-Split".into());
+        workspace.mark_pending(id, true);
+        assert_eq!(stamp(&workspace), first, "the bytes did not move");
+
+        let (_, edited) =
+            crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        let second = stamp(&workspace);
+        assert_ne!(second, first);
+
+        workspace.restore_bytes(id, opened.clone(), &mut log);
+        let third = stamp(&workspace);
+        assert_ne!(third, second);
+        assert_ne!(third, first, "back to the same bytes is still a new decode");
+
+        // Putting back what is already there is not a change and spends nothing.
+        workspace.restore_bytes(id, opened, &mut log);
+        assert_eq!(stamp(&workspace), third);
     }
 
     /// A project is text, so nothing at the CBIN tag offset means anything —
