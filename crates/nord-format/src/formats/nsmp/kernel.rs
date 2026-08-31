@@ -7,11 +7,17 @@
 //! — and every phase has **unity DC gain**, which is why a field is already a sample
 //! in the source's own units and dequantising is a shift and nothing more.
 //!
-//! ⚠️ **The taps here are an approximation.** Measured against a specimen sweep the
-//! bank is a Hamming-windowed sinc to about 4e-4 per tap, which is what [`taps`]
-//! evaluates; the instrument's own values are not known to the last bit. Audio
-//! encoded through this is right to roughly −50 dBFS of the encoder's, not
-//! bit-identical to it. Inferred from specimens; not confirmed on hardware.
+//! ⚠️ **The taps are an approximation, and so is the lattice under them.** [`taps`]
+//! evaluates a Hamming-windowed sinc, which fits a specimen sweep to about 4e-4 per
+//! tap but is not the shape the instrument uses: that kernel is a stored table, read
+//! at 512 phases of `frac(22050·f / 17501)`. [`PITCH_NUM`]/[`PITCH_DEN`] is that
+//! ratio's penultimate convergent — indistinguishable from it over a short window,
+//! and 1.6e-7 fast over a long one. Inferred from specimens; not confirmed on
+//! hardware.
+//!
+//! Audio encoded through this is right to roughly −50 dBFS of the encoder's, not
+//! bit-identical to it. Confirmed on hardware: the Electro 5 plays it at the pitch
+//! this renders.
 
 use super::codec::{PITCH_DEN, PITCH_NUM};
 use std::sync::OnceLock;

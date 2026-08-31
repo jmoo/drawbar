@@ -3,9 +3,8 @@
 //!
 //! A project is plain text: one `SMACEditorProject { … }` [`tree`] of
 //! `key = value` fields and nested blocks, which this module reads and writes
-//! byte-exactly and exposes through typed views. Everything here is inferred
-//! from projects the editor saved; nothing is confirmed against the editor's
-//! own reader beyond what it wrote.
+//! byte-exactly and exposes through typed views. The layout is inferred from
+//! projects the editor saved, and the editor loads what [`Project::new`] writes.
 //!
 //! The tree, from the root down:
 //!
