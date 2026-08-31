@@ -426,3 +426,238 @@ fn nsmp_body_without_its_container_section_says_which_tag_was_expected() {
         "the body does not open with the NWS container section; found \\x00\\x00\\x00"
     );
 }
+
+/// A one-zone v3 and a one-zone v4 instrument, and the multi-zone vendor files
+/// whose `map` layouts differ from theirs. Named so a failure says which
+/// generation and which zone layout broke.
+const V3_ONE_ZONE: &str = "Q-base.nsmp3";
+const V4_ONE_ZONE: &str = "Q-base.nsmp4";
+const V3_MAP_14: &str = "Bass Clarinet 2_KG  mono 3.11 [ne6].nsmp3";
+const V3_MAP_12: &str = "Ashbory Bass Finger_BS mono 3.0 [ne6].nsmp3";
+const V4_KEY_MAP: &str = "Kalimba_KG 4.1 [ne7].nsmp4";
+
+/// Load a specimen, edit it through the generation-neutral accessors, and
+/// re-encode.
+fn edited(name: &str, edit: impl FnOnce(&mut Sample)) -> (&'static [u8], Vec<u8>) {
+    let before = &named(name).bytes;
+    let mut entity = nord_format::from_stream(&mut Cursor::new(before)).unwrap();
+    let Entity::Sample(sample) = &mut entity else {
+        panic!("{name} is not a sample instrument");
+    };
+    edit(sample);
+    let after = nord_format::to_bytes(&entity).unwrap();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "{name}: the edit resized the file"
+    );
+    // Reading the result back is what proves the container checksum was
+    // recomputed: a stale one is refused.
+    nord_format::from_stream(&mut Cursor::new(&after))
+        .unwrap_or_else(|e| panic!("{name} does not read back after the edit: {e}"));
+    (before, after)
+}
+
+/// Which bytes an edit moved, less the container checksum's own word — that
+/// moves whenever anything else does and says nothing about scope.
+fn moved(before: &[u8], after: &[u8]) -> Vec<usize> {
+    const CHECKSUM: std::ops::Range<usize> = 0x18..0x1c;
+    (0..before.len())
+        .filter(|&i| before[i] != after[i] && !CHECKSUM.contains(&i))
+        .collect()
+}
+
+/// Every zone's decoded audio, which no edit here is allowed to disturb.
+fn audio(bytes: &[u8]) -> Vec<Vec<i16>> {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+    let Entity::Sample(sample) = &entity else {
+        panic!("not a sample instrument");
+    };
+    let layout = sample.layout();
+    sample
+        .zones()
+        .unwrap()
+        .iter()
+        .map(|zone| {
+            nsmp::codec::decode(zone.stream, zone.at, layout)
+                .unwrap()
+                .samples
+        })
+        .collect()
+}
+
+fn name_of(bytes: &[u8]) -> String {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+    let Entity::Sample(sample) = &entity else {
+        panic!("not a sample instrument");
+    };
+    sample.name().unwrap()
+}
+
+fn zones_of(bytes: &[u8]) -> Vec<(u8, u8, Option<u8>)> {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+    let Entity::Sample(sample) = &entity else {
+        panic!("not a sample instrument");
+    };
+    sample
+        .zones()
+        .unwrap()
+        .iter()
+        .map(|z| (z.root_key, z.top_note, z.low_note))
+        .collect()
+}
+
+/// Renaming a wide instrument moves the name field and nothing else — not the
+/// sub-name that shares the `hdr` section with it.
+#[test]
+fn nsmp_wide_rename_touches_only_the_name_field() {
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_12, V4_KEY_MAP] {
+        let old = name_of(&named(name).bytes);
+        let (before, after) = edited(name, |s| s.set_name("Retitled").unwrap());
+        let moved = moved(before, after.as_slice());
+        // Writing one name over another moves at most the longer of the two —
+        // the shorter one's tail is NUL-filled — and never leaves the field.
+        assert!(!moved.is_empty(), "{name}: rename moved nothing");
+        assert!(
+            moved.len() <= old.len().max("Retitled".len()),
+            "{name}: rename moved {moved:?} over a {}-byte name",
+            old.len()
+        );
+        assert!(
+            moved[moved.len() - 1] - moved[0] < nsmp::MAX_NAME_V3_LEN,
+            "{name}: rename reached outside the name field: {moved:?}"
+        );
+        let reread = nord_format::from_stream(&mut Cursor::new(&after)).unwrap();
+        let Entity::Sample(sample) = &reread else {
+            unreachable!()
+        };
+        assert_eq!(sample.name().unwrap(), "Retitled", "{name}");
+        assert_eq!(audio(before), audio(&after), "{name}: rename moved audio");
+    }
+}
+
+/// The whole main-name field is writable — what bounds it is the sub-name that
+/// starts where it ends, and that field survives a name filling the one before it.
+#[test]
+fn nsmp_wide_rename_stops_at_the_sub_name() {
+    let long = "x".repeat(nsmp::MAX_NAME_V3_LEN);
+    let (_, after) = edited(V3_MAP_14, |s| s.set_name(&long).unwrap());
+    let reread = nord_format::from_stream(&mut Cursor::new(&after)).unwrap();
+    let Entity::Sample(Sample::V3(sample)) = &reread else {
+        panic!("not a wide sample")
+    };
+    assert_eq!(sample.name().unwrap(), long);
+    assert_eq!(sample.sub_name().unwrap(), "KG  mono");
+
+    let mut entity = nord_format::from_stream(&mut Cursor::new(&named(V3_MAP_14).bytes)).unwrap();
+    let Entity::Sample(sample) = &mut entity else {
+        unreachable!()
+    };
+    assert!(sample.set_name(&format!("{long}x")).is_err());
+}
+
+/// Retuning a wide zone moves the stroke's root key and the copy the zone record
+/// duplicates — two bytes, and the audio is not one of them.
+#[test]
+fn nsmp_wide_retune_moves_both_copies_of_the_root_key() {
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
+        let was = zones_of(&named(name).bytes)[0].0;
+        let note = if was == 48 { 55 } else { 48 };
+        let (before, after) = edited(name, |s| s.set_root_key(0, note).unwrap());
+        assert_eq!(
+            moved(before, after.as_slice()).len(),
+            2,
+            "{name}: retune moved {:?}",
+            moved(before, after.as_slice())
+        );
+        assert_eq!(zones_of(&after)[0].0, note, "{name}");
+        assert_eq!(audio(before), audio(&after), "{name}: retune moved audio");
+    }
+}
+
+/// Remapping a wide zone moves the one boundary byte it names.
+#[test]
+fn nsmp_wide_remap_moves_one_boundary_byte() {
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
+        let (root, top, low) = zones_of(&named(name).bytes)[0];
+        let want = if top == 96 { 95 } else { 96 };
+        let (before, after) = edited(name, |s| s.set_zone_top_note(0, want).unwrap());
+        assert_eq!(
+            moved(before, after.as_slice()).len(),
+            1,
+            "{name}: top note moved {:?}",
+            moved(before, after.as_slice())
+        );
+        assert_eq!(zones_of(&after)[0], (root, want, low), "{name}");
+        assert_eq!(audio(before), audio(&after), "{name}: remap moved audio");
+
+        let Some(low) = low else {
+            // This layout stores no low note, and says so rather than writing a
+            // byte that means something else.
+            let (_, unchanged) = edited(name, |s| assert!(s.set_zone_low_note(0, 40).is_err()));
+            assert_eq!(before, unchanged.as_slice(), "{name}");
+            continue;
+        };
+        let want = if low == 40 { 41 } else { 40 };
+        let (before, after) = edited(name, |s| s.set_zone_low_note(0, want).unwrap());
+        assert_eq!(
+            moved(before, after.as_slice()).len(),
+            1,
+            "{name}: low note moved {:?}",
+            moved(before, after.as_slice())
+        );
+        assert_eq!(zones_of(&after)[0].2, Some(want), "{name}");
+    }
+}
+
+/// A v4 `map` that names a zone for every key is left alone: the rule filling
+/// those records is not derived, so a retune or a remap would leave the file
+/// with two accounts of the keyboard. The name is still settable.
+#[test]
+fn nsmp_v4_key_map_holds_the_zones_but_not_the_name() {
+    let (before, unchanged) = edited(V4_KEY_MAP, |s| {
+        assert!(!s.zones_are_editable());
+        assert!(s.set_root_key(0, 48).is_err());
+        assert!(s.set_zone_top_note(0, 96).is_err());
+        assert!(s.set_zone_low_note(0, 40).is_err());
+    });
+    assert_eq!(before, unchanged.as_slice());
+
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
+        let entity = nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap();
+        let Entity::Sample(sample) = &entity else {
+            unreachable!()
+        };
+        assert!(sample.zones_are_editable(), "{name}");
+    }
+}
+
+/// Every wide specimen's zones survive a retune to a new root and back, which is
+/// the pairing the zone record and its stroke have to keep.
+#[test]
+fn nsmp_wide_retune_round_trips_across_the_corpus() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(_)) = &specimen.entity else {
+            continue;
+        };
+        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes)).unwrap();
+        let Entity::Sample(sample) = &mut entity else {
+            unreachable!()
+        };
+        if !sample.zones_are_editable() {
+            continue;
+        }
+        let was: Vec<_> = sample.zones().unwrap().iter().map(|z| z.root_key).collect();
+        for (i, root) in was.iter().enumerate() {
+            sample.set_root_key(i, root ^ 1).unwrap();
+        }
+        for (i, root) in was.iter().enumerate() {
+            sample.set_root_key(i, *root).unwrap();
+        }
+        let after = nord_format::to_bytes(&entity).unwrap();
+        assert_eq!(specimen.bytes, after, "{}", specimen.path.display());
+        seen += 1;
+    }
+    assert!(seen > 0, "no editable wide sample in the corpus");
+}
