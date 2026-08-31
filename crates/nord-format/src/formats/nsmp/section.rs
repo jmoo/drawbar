@@ -70,6 +70,13 @@ fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
     ))
 }
 
+fn missing_opener(expected: &[u8]) -> ParseError {
+    ParseError::AssertFail(format!(
+        "the body does not open with the {} container section; found end of body",
+        expected.escape_ascii(),
+    ))
+}
+
 /// Walks the chain from the reader's position to its end.
 ///
 /// The chain must open with [`CONTAINER`] and land exactly on the end of the body. Both
@@ -82,6 +89,7 @@ pub fn read_chain(r: &mut impl std::io::Read) -> Result<Vec<Section>, ParseError
     loop {
         let head = match read_head(r, pos)? {
             Some(head) => head,
+            None if pos == 0 => return Err(missing_opener(CONTAINER)),
             None => return Ok(sections),
         };
         if pos == 0 && &head[..3] != CONTAINER {
@@ -194,7 +202,11 @@ pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseErr
     loop {
         let mut head = [0u8; HEADER4_LEN];
         if !read_exact_or_end(r, &mut head, pos)? {
-            return Ok(sections);
+            return if pos == 0 {
+                Err(missing_opener(CONTAINER4))
+            } else {
+                Ok(sections)
+            };
         }
         if pos == 0 && &head[..4] != CONTAINER4 {
             return Err(wrong_opener(CONTAINER4, &head[..4]));
@@ -355,6 +367,18 @@ mod tests {
         assert_eq!(
             read_chain4(&mut bytes.as_slice()).unwrap_err().to_string(),
             "the body does not open with the NSMP container section; found \\x00hdr"
+        );
+    }
+
+    #[test]
+    fn an_empty_body_reports_its_missing_container() {
+        assert_eq!(
+            read_chain(&mut [].as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NWS container section; found end of body"
+        );
+        assert_eq!(
+            read_chain4(&mut [].as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NSMP container section; found end of body"
         );
     }
 
