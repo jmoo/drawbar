@@ -529,9 +529,23 @@ impl Project {
 
     pub fn set_velocity_defaults(&mut self, v: VelocityDefaults) -> Result<(), ParseError> {
         let attrs = self.attrs_mut()?;
-        attrs.set_field("m_atkVelocityAmount", v.attack_amount.to_string())?;
-        attrs.set_field("m_velAmpl", v.amplitude.to_string())?;
-        attrs.set_field("m_velTimbre", v.timbre.to_string())
+        let fields = [
+            ("m_atkVelocityAmount", v.attack_amount.to_string()),
+            ("m_velAmpl", v.amplitude.to_string()),
+            ("m_velTimbre", v.timbre.to_string()),
+        ];
+        for (key, _) in &fields {
+            if attrs.field(key).is_none() {
+                return Err(ParseError::AssertFail(format!(
+                    "{} has no {key}",
+                    attrs.name
+                )));
+            }
+        }
+        for (key, value) in fields {
+            attrs.set_field(key, value)?;
+        }
+        Ok(())
     }
 
     /// The `common_stroke` and `map_stroke` a global id names.
@@ -1137,6 +1151,26 @@ mod tests {
         // The whole file still parses back to itself.
         let text = project.render();
         assert_eq!(Project::parse(&text).unwrap().render(), text);
+    }
+
+    #[test]
+    fn missing_velocity_defaults_leave_the_project_unchanged() {
+        let mut project = three_zones();
+        project
+            .attrs_mut()
+            .unwrap()
+            .entries
+            .retain(|entry| !matches!(entry, Entry::Field { key, .. } if key == "m_velTimbre"));
+        let before = project.render();
+
+        assert!(project
+            .set_velocity_defaults(VelocityDefaults {
+                attack_amount: 64,
+                amplitude: 0,
+                timbre: 1,
+            })
+            .is_err());
+        assert_eq!(project.render(), before);
     }
 
     #[test]
