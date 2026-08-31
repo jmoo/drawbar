@@ -59,19 +59,42 @@ impl Section {
     }
 }
 
+/// A chain whose first section is not the container that opens it — the leading
+/// sections are missing, or the bytes are not a chain at all. Raised before the first
+/// declared length is trusted; on a corrupt opener that length is arbitrary.
+fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
+    ParseError::AssertFail(format!(
+        "the body does not open with the {} container section; found {}",
+        expected.escape_ascii(),
+        found.escape_ascii(),
+    ))
+}
+
+fn missing_opener(expected: &[u8]) -> ParseError {
+    ParseError::AssertFail(format!(
+        "the body does not open with the {} container section; found end of body",
+        expected.escape_ascii(),
+    ))
+}
+
 /// Walks the chain from the reader's position to its end.
 ///
-/// The chain must land exactly on the end of the body. It is a strong integrity check —
-/// a wrong length anywhere puts every later section at the wrong offset — so a short or
-/// overrunning walk is an error rather than a truncated result.
+/// The chain must open with [`CONTAINER`] and land exactly on the end of the body. Both
+/// are strong integrity checks — a wrong length anywhere puts every later section at the
+/// wrong offset — so a short or overrunning walk is an error rather than a truncated
+/// result.
 pub fn read_chain(r: &mut impl std::io::Read) -> Result<Vec<Section>, ParseError> {
     let mut sections = Vec::new();
     let mut pos: u64 = 0;
     loop {
         let head = match read_head(r, pos)? {
             Some(head) => head,
+            None if pos == 0 => return Err(missing_opener(CONTAINER)),
             None => return Ok(sections),
         };
+        if pos == 0 && &head[..3] != CONTAINER {
+            return Err(wrong_opener(CONTAINER, &head[..3]));
+        }
         let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
         let mut payload = vec![0u8; len];
         r.read_exact(&mut payload).map_err(|_| {
@@ -172,14 +195,21 @@ impl Section4 {
 }
 
 /// Walks a v3/v4 chain from the reader's position to its end, under the same
-/// land-exactly rule as [`read_chain`].
+/// open-with-[`CONTAINER4`] and land-exactly rules as [`read_chain`].
 pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseError> {
     let mut sections = Vec::new();
     let mut pos: u64 = 0;
     loop {
         let mut head = [0u8; HEADER4_LEN];
         if !read_exact_or_end(r, &mut head, pos)? {
-            return Ok(sections);
+            return if pos == 0 {
+                Err(missing_opener(CONTAINER4))
+            } else {
+                Ok(sections)
+            };
+        }
+        if pos == 0 && &head[..4] != CONTAINER4 {
+            return Err(wrong_opener(CONTAINER4, &head[..4]));
         }
         let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
         let mut payload = vec![0u8; len];
@@ -294,26 +324,72 @@ mod tests {
         assert_eq!(out, bytes);
     }
 
+    /// The empty `NWS` section every v2 body opens with.
+    fn opener() -> Vec<u8> {
+        section(CONTAINER, 11, &[])
+    }
+
     #[test]
     fn length_is_big_endian() {
         // 0x00000102 = 258 read big-endian; little-endian would be 0x02010000.
-        let bytes = section(HDR, 1, &[0; 258]);
+        let mut bytes = opener();
+        bytes.extend(section(HDR, 1, &[0; 258]));
         let chain = read_chain(&mut bytes.as_slice()).unwrap();
-        assert_eq!(chain[0].payload.len(), 258);
+        assert_eq!(chain[1].payload.len(), 258);
     }
 
     #[test]
     fn overrunning_length_is_an_error() {
-        let mut bytes = section(HDR, 1, &[7; 4]);
-        bytes[8] = 200; // claim 200 payload bytes where 4 exist
+        let mut hdr = section(HDR, 1, &[7; 4]);
+        hdr[8] = 200; // claim 200 payload bytes where 4 exist
+        let mut bytes = opener();
+        bytes.extend(hdr);
         assert!(read_chain(&mut bytes.as_slice()).is_err());
     }
 
     #[test]
     fn trailing_bytes_are_an_error() {
-        let mut bytes = section(HDR, 1, &[7; 4]);
+        let mut bytes = opener();
+        bytes.extend(section(HDR, 1, &[7; 4]));
         bytes.extend_from_slice(&[0, 0, 0]); // not enough for another header
         assert!(read_chain(&mut bytes.as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_chain_not_opening_with_its_container_names_the_expected_tag() {
+        let bytes = section(HDR, 1, &[7; 4]);
+        assert_eq!(
+            read_chain(&mut bytes.as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NWS container section; found hdr"
+        );
+
+        let bytes = section4(HDR4, 1, &[7; 4]);
+        assert_eq!(
+            read_chain4(&mut bytes.as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NSMP container section; found \\x00hdr"
+        );
+    }
+
+    #[test]
+    fn an_empty_body_reports_its_missing_container() {
+        assert_eq!(
+            read_chain(&mut [].as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NWS container section; found end of body"
+        );
+        assert_eq!(
+            read_chain4(&mut [].as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NSMP container section; found end of body"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_opener_is_reported_before_its_length() {
+        // A garbage tag's "length" is arbitrary: big-endian 0xfeffff3e here.
+        let bytes = [0x00, 0x00, 0x00, 0x00, 0xff, 0xfe, 0xff, 0xff, 0x3e];
+        assert_eq!(
+            read_chain(&mut bytes.as_slice()).unwrap_err().to_string(),
+            "the body does not open with the NWS container section; found \\x00\\x00\\x00"
+        );
     }
 
     fn section4(tag: &[u8; 4], version: u32, payload: &[u8]) -> Vec<u8> {
@@ -345,24 +421,30 @@ mod tests {
 
     #[test]
     fn chain4_overrun_and_truncation_are_errors() {
-        let mut bytes = section4(HDR4, 1, &[7; 4]);
-        bytes[11] = 200; // claim 200 payload bytes where 4 exist
+        let opener4 = || section4(CONTAINER4, 30, &[0, 2, 0, 0x0c]);
+
+        let mut hdr = section4(HDR4, 1, &[7; 4]);
+        hdr[11] = 200; // claim 200 payload bytes where 4 exist
+        let mut bytes = opener4();
+        bytes.extend(hdr);
         assert!(read_chain4(&mut bytes.as_slice()).is_err());
 
-        let mut bytes = section4(HDR4, 1, &[7; 4]);
+        let mut bytes = opener4();
+        bytes.extend(section4(HDR4, 1, &[7; 4]));
         bytes.extend_from_slice(&[0; 5]); // not enough for another header
         assert!(read_chain4(&mut bytes.as_slice()).is_err());
     }
 
     #[test]
     fn repeated_tags_are_all_kept() {
-        let mut bytes = section(STK, 9, &[1]);
+        let mut bytes = opener();
+        bytes.extend(section(STK, 9, &[1]));
         bytes.extend(section(STK, 9, &[2]));
         bytes.extend(section(STK, 9, &[3]));
         let chain = read_chain(&mut bytes.as_slice()).unwrap();
-        assert_eq!(chain.len(), 3);
+        assert_eq!(chain.len(), 4);
         assert_eq!(
-            chain.iter().map(|s| s.payload[0]).collect::<Vec<_>>(),
+            chain[1..].iter().map(|s| s.payload[0]).collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
     }

@@ -410,3 +410,19 @@ fn nsmp_bad_checksum_is_refused() {
     *bytes.last_mut().unwrap() ^= 0xff;
     assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
 }
+
+/// A device read whose leading body bytes arrived as foreign buffer content, so the
+/// `NWS` container and the sections after it are gone. Named `.skip.`, which keeps the
+/// sweep off it, so it is opened by path rather than through [`named`].
+#[test]
+fn nsmp_body_without_its_container_section_says_which_tag_was_expected() {
+    let path = scan::root().join("ne5/audio-oracle/2026-08-30/stereo77.skip.nsmp");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let err = nord_format::from_stream(&mut Cursor::new(&bytes))
+        .expect_err("a body missing its container section must not parse")
+        .to_string();
+    assert_eq!(
+        err,
+        "the body does not open with the NWS container section; found \\x00\\x00\\x00"
+    );
+}
