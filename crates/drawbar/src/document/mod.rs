@@ -477,10 +477,11 @@ fn piano_lookup(
 /// The Pianos folder's names for the document's current category, by Model dial
 /// position — what turns the Model dial into a list of pianos.
 ///
-/// Bank ↔ category and slot order ↔ dial position: inferred from the panel addressing
-/// the library by position, and from the categories being the folder's own divisions;
-/// not confirmed on hardware. The dependency name is the standing check — see the
-/// mismatch note where this is used.
+/// Bank ↔ category and slot order ↔ dial position are confirmed on hardware: the
+/// device's own bank list names the piano banks after the panel's categories, in the
+/// panel's order, and a program's stored category and model read back as the bank and
+/// slot the instrument reports for the piano it depends on. The dependency name stays
+/// the standing check — see the mismatch note where this is used.
 fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
     let Some(category) = fields
         .iter()
@@ -845,8 +846,7 @@ mod tests {
     }
 
     /// The Model dial lists the scanned pianos of the document's category — and only
-    /// when the scan can answer. Bank ↔ category is the inferred mapping under test;
-    /// the fallback is the numeric dial, never a guessed name.
+    /// when the scan can answer. The fallback is the numeric dial, never a guessed name.
     #[test]
     fn the_model_dial_lists_the_scanned_pianos_of_the_current_category() {
         use nord_usb::ObjectClass;

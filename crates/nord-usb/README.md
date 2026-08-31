@@ -18,20 +18,24 @@ are optional features.
 ## Status
 
 The wire protocol is decoded and validated. Implemented and hardware-verified on
-macOS: inventory, object info, dependencies, program read/write, the slot
-organization set (move, delete, rename, duplicate, select), and read/write of the
-live slots (class 6) and the settings singleton (class 7). Those two classes
-overwrite an occupied slot in place (`ObjectClass::overwrites_in_place`), so a
-caller must not compose their write out of delete-then-write — deleting either
-has never been attempted.
+macOS and Linux: inventory, object info, dependencies, program read/write, the
+slot organization set (move, delete, rename, duplicate, select), and reads of the
+live slots (class 6) and the settings singleton (class 7). Linux emits
+byte-identical request frames to macOS for every verb. Writes of the live and
+settings slots are additionally hardware-verified on macOS.
 
-The WebUSB backend is hardware-verified for the read-only path (Chrome on macOS:
-inventory and object info, via `drawbar`); its writes and multi-chunk bulk
-reads have not been exercised.
+Those two classes overwrite an occupied slot in place
+(`ObjectClass::overwrites_in_place`), so a caller must not compose their write out
+of delete-then-write — deleting either has never been attempted.
+
+The WebUSB backend is hardware-verified for reads and writes (Chrome on macOS,
+via `drawbar`). Three transport paths that only the browser takes are not:
+`select_configuration` on a device the OS left unconfigured, multi-chunk bulk
+reads, and a `transferIn` whose payload is an exact multiple of the packet size.
 
 Not implemented: bundle and backup transfer, firmware update, and the piano/sample
-library as first-class objects. Linux and Windows build and pass the replay tests
-but have not been run against hardware.
+library as first-class objects. Windows builds and passes the replay tests but has
+not been run against hardware.
 
 ## Usage
 
