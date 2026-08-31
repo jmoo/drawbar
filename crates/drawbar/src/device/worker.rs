@@ -290,6 +290,7 @@ async fn put<T: Transport>(
     if let Ok(Some(why)) = op::check_address(s, at).await {
         return Ok(Err(format!("{}: {why}", shown(at))));
     }
+    let class = s.class();
     let timestamp = unix_now()?;
 
     let existing = match op::info(s, at).await {
@@ -313,7 +314,9 @@ async fn put<T: Transport>(
         None => None,
     };
 
-    if backup.is_some() {
+    // ⚠️ Deleting a class that overwrites in place has never been attempted on the
+    // instrument, and its acceptance of a write at an occupied slot makes it needless.
+    if backup.is_some() && !class.overwrites_in_place() {
         emit.send(DeviceEvent::Note(format!(
             "deleting {} to make room",
             shown(at)
@@ -337,8 +340,8 @@ async fn put<T: Transport>(
         // which is carried along and reported once the slot is whole again.
         (Err(e), Some(backup)) => {
             emit.send(DeviceEvent::OpFailed(format!(
-                "the write failed and {} is now empty; putting the original back",
-                shown(at)
+                "the write failed and {}; putting the original back",
+                aftermath(class, at)
             )));
             match op::write(s, at, &backup, "0", timestamp).await {
                 Ok(()) => Err(format!(
@@ -354,15 +357,27 @@ async fn put<T: Transport>(
                         bytes: backup,
                     });
                     Err(format!(
-                        "{e} (restoring failed as well: {restore}); {} is EMPTY, and its \
-                         former contents are now in the local list as a rescued entity — \
+                        "{e} (restoring failed as well: {restore}); {}, and its former \
+                         contents are now in the local list as a rescued entity — \
                          put it back",
-                        shown(at)
+                        aftermath(class, at)
                     ))
                 }
             }
         }
     })
+}
+
+/// What a failed write left in the slot, for the line that reports it.
+///
+/// The delete-first composition leaves the slot genuinely empty; a class that
+/// overwrites in place leaves whatever the interrupted write put there. Naming the
+/// wrong one sends the operator to the wrong next step.
+fn aftermath(class: ObjectClass, at: Location) -> String {
+    match class.overwrites_in_place() {
+        true => format!("{} may hold a partly written body", shown(at)),
+        false => format!("{} is empty", shown(at)),
+    }
 }
 
 /// Rename a newly written slot before commit; writes do not carry the local label.
@@ -375,6 +390,11 @@ async fn name_slot<T: Transport>(
     gone: &mut bool,
 ) -> String {
     let wrote = format!("wrote {what} -> {}", shown(at));
+    // ⚠️ A class that stores no name answers the rename with success and changes
+    // nothing, so sending one would report a naming that never happened.
+    if !s.class().names_its_slots() {
+        return wrote;
+    }
     let Some(label) = slot_label(what) else {
         return wrote;
     };
@@ -1317,6 +1337,19 @@ mod wire_tests {
                         None => Some((1, words(&[from.bank, op::SLOT_BOUNDARY]))),
                     }
                 }
+                // Enough of a body to be read back: the occupant of a slot has to be
+                // recoverable before a replace will touch it, so a puppet that cannot
+                // serve a read cannot exercise a replace at all.
+                cmd::READ => {
+                    let (offset, want) = (
+                        u32::from_be_bytes(msg.args[8..12].try_into().unwrap()),
+                        u32::from_be_bytes(msg.args[12..16].try_into().unwrap()),
+                    );
+                    let at = at();
+                    let mut p = words(&[at.bank, at.slot, offset, want]);
+                    p.resize(p.len() + want as usize, 0);
+                    Some((0, p))
+                }
                 cmd::INFO => {
                     let at = at();
                     // Status 3 marks the address-space boundary for geometry-free walks.
@@ -1462,6 +1495,59 @@ mod wire_tests {
         assert!(
             order(cmd::RENAME) > order(cmd::BEGIN_WRITE),
             "{commands:x?}"
+        );
+    }
+
+    /// ⚠️ The buffer classes take a write at an occupied slot, and deleting one has
+    /// never been attempted on the instrument. A put into Live must reach `BEGIN_WRITE`
+    /// with nothing in front of it, where a program's put still clears the slot first.
+    #[test]
+    fn a_put_into_a_buffer_class_never_deletes_the_slot() {
+        let at = Location { bank: 0, slot: 2 };
+        let put = |class| DeviceCmd::Put {
+            id: 1,
+            class,
+            at,
+            name: "Africa-Split.ne5p".into(),
+            bytes: a_program(),
+        };
+
+        let mut live = Puppet::stocked(&[("Live", 3)], &[(at, "Live 3")]);
+        let (flow, _) = drive(&mut live, put(ObjectClass::Live));
+        assert!(flow == Flow::Continue, "the instrument is still there");
+        assert_eq!(counted(&live, cmd::DELETE), 0, "nothing was emptied");
+        assert_eq!(counted(&live, cmd::BEGIN_WRITE), 1, "and the bytes went");
+
+        let mut program = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Africa")]);
+        drive(&mut program, put(ObjectClass::Program));
+        assert_eq!(
+            counted(&program, cmd::DELETE),
+            1,
+            "a class that refuses an occupied slot still makes room"
+        );
+    }
+
+    /// ⚠️ Live and Settings answer a rename with success and change nothing, so sending
+    /// one would have this app report a naming that never happened.
+    #[test]
+    fn a_class_that_stores_no_name_is_not_renamed_after_a_write() {
+        let at = Location { bank: 0, slot: 2 };
+        let mut device = Puppet::stocked(&[("Live", 3)], &[(at, "Live 3")]);
+        let (flow, _) = drive(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Live,
+                at,
+                name: "Africa-Split.ne5l".into(),
+                bytes: a_program(),
+            },
+        );
+        assert!(flow == Flow::Continue);
+        assert!(device.first(cmd::WRITE_DATA).is_some(), "the bytes went");
+        assert!(
+            device.first(cmd::RENAME).is_none(),
+            "the device would have said yes and done nothing"
         );
     }
 

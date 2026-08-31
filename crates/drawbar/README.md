@@ -106,8 +106,13 @@ and does not invent one.
   in place. The occupant is read into memory first and written back if the write
   fails; if the restore fails too, its bytes land on This computer as a rescued
   entity rather than being lost.
-- **Live and settings refuse a write.** Whether either survives a delete of its
-  own class is unconfirmed on hardware, so an edit of either stops at a file.
+- **Live and settings are the exception: they overwrite in place**, so nothing is
+  deleted to make room. Confirmed on hardware. The occupant is still read back
+  first and restored the same way. Neither stores a name, so a write into one
+  changes the body and leaves the slot called what it was called.
+- **Writing settings reloads the selected program**, losing panel state that has
+  not been stored. Confirmed on hardware, and the question asked before the write
+  says so.
 - **Every session closes, including on the error path.** An abandoned transaction
   strands the instrument on its progress screen with no way out but a power
   cycle.

@@ -588,21 +588,20 @@ pub fn read_only(class: ObjectClass) -> bool {
 
 /// Whether this app will write into a class at all.
 pub fn sendable(class: ObjectClass) -> bool {
-    put_refusal(class).is_none() && !read_only(class)
+    !read_only(class)
 }
 
-/// Whether a class accepts a write.
+/// What a write into this class disturbs beyond the slot it lands in, for the question
+/// asked before it happens.
 ///
-/// ⚠️ A write is a delete followed by a write, and whether the live buffer or the
-/// settings singleton survives a delete of its own class is unconfirmed on hardware.
-/// Until it is, an edit of either stops at a file.
-pub fn put_refusal(class: ObjectClass) -> Option<String> {
+/// Confirmed on hardware: a settings write makes the instrument reload the selected
+/// program, so panel state the player has not stored is gone.
+pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
     match class {
-        ObjectClass::Live | ObjectClass::Settings => Some(format!(
-            "writing {} back over USB is unproven on hardware; save the object as a \
-             file instead",
-            class.label(),
-        )),
+        ObjectClass::Settings => Some(
+            "Writing settings reloads the selected program on the instrument. \
+             Panel changes that have not been stored will be lost.",
+        ),
         _ => None,
     }
 }
@@ -990,16 +989,24 @@ impl Device {
 mod tests {
     use super::*;
 
-    /// The two classes whose write path is unproven must refuse by name, and the rest
-    /// must not.
+    /// The buffer classes take a write like any other slot; only a library the
+    /// instrument installs for itself is off limits.
     #[test]
-    fn only_live_and_settings_refuse_a_put() {
-        for class in [ObjectClass::Live, ObjectClass::Settings] {
-            let why = put_refusal(class).expect("must refuse");
-            assert!(why.contains("unproven on hardware"), "{why}");
+    fn every_browsed_class_but_pianos_can_be_written() {
+        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Piano) {
+            assert!(sendable(*class), "{}", folder(*class));
         }
-        for class in ObjectClass::INVENTORY {
-            assert!(put_refusal(class).is_none(), "{}", class.label());
+        assert!(!sendable(ObjectClass::Piano));
+    }
+
+    /// A settings write costs the player their un-stored panel state, so the question
+    /// asked beforehand has to say so — no other class disturbs anything but its slot.
+    #[test]
+    fn a_settings_write_warns_that_the_panel_reloads() {
+        let why = write_warning(ObjectClass::Settings).expect("must warn");
+        assert!(why.contains("reloads the selected program"), "{why}");
+        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Settings) {
+            assert!(write_warning(*class).is_none(), "{}", folder(*class));
         }
     }
 
