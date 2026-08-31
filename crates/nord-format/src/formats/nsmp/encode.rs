@@ -9,9 +9,10 @@
 //! editor uses to pick a quantiser shift is not known, and the encoder's own choice
 //! of predictor order per record is reproduced only under [`Predictor::Minimising`].
 //!
-//! So two claims, and only two: a file from here **round-trips through this crate's
-//! own decoder exactly** under either predictor, and it obeys every structural law
-//! the format is known to have. Instrument playback remains a hardware question.
+//! So three claims: a file from here **round-trips through this crate's own decoder
+//! exactly** under either predictor, it obeys every structural law the format is known
+//! to have, and — confirmed on hardware — **the Electro 5 loads and plays one**, under
+//! either predictor, at the pitch the decoder renders.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -31,8 +32,6 @@
 //! which is the whole of what the container stores about looping: the crossfade is
 //! baked into the audio here, and loop detune, loop decay and the short loop's
 //! pitch-tracking flag reach the file nowhere at all.
-//!
-//! Everything here is inferred from specimens; not confirmed on hardware.
 
 use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;

@@ -118,7 +118,6 @@ impl WebUsbTransport {
         let interface_number = configuration
             .interfaces()
             .iter()
-            // Inferred from desktop descriptors; not confirmed through WebUSB.
             .find(|iface| iface.alternate().interface_class() == CLASS_VENDOR_SPECIFIC)
             .map(|iface| iface.interface_number())
             .ok_or_else(|| {

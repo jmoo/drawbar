@@ -282,10 +282,11 @@ enum SampleAction {
 
     /// EXPERIMENTAL: build a one-zone v2 instrument from a 44.1 kHz mono 16-bit WAV.
     ///
-    /// The file this writes obeys every structural law the format is known to have and
-    /// decodes back through `nord sample decode` exactly, but it is not byte-identical
-    /// to what Nord Sample Editor would emit, and no instrument has yet played one.
-    /// Pass `--experimental` to acknowledge that and write anything.
+    /// The file this writes obeys every structural law the format is known to have,
+    /// decodes back through `nord sample decode` exactly, and plays on an Electro 5 —
+    /// but it is not byte-identical to what Nord Sample Editor would emit, and its
+    /// stroke plays once where vendor content loops. Pass `--experimental` to
+    /// acknowledge that and write anything.
     Encode(sample::EncodeArgs),
 
     /// EXPERIMENTAL: build a v2 instrument from a Nord Sample Editor project.

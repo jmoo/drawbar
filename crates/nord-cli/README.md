@@ -229,9 +229,9 @@ USB, so it asks before writing. Editing a file in place asks too — pass `-o` t
 write somewhere else instead.
 
 For `live` and `settings` the slot form reads off the instrument but **refuses to
-write back**: writing is a delete followed by a write, and whether the live
-buffer or the settings singleton survives that is unconfirmed on hardware. An
-edited slot of either class stops at a file, via `-o`.
+write back**: the instrument takes a write in place for both, but this writes by
+deleting first, and a delete of either class is untried on hardware. An edited slot
+of either class stops at a file, via `-o`.
 
 **A value is spelled the way `nord inspect` and `--fields` print it**, and one
 the field cannot hold is rejected before anything is written:
