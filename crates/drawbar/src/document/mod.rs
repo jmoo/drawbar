@@ -1173,9 +1173,6 @@ mod tests {
         nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
     }
 
-    /// A WAV opened here is not a Nord file, but it is the one thing this app can make
-    /// one out of — so it gets a panel, and Encode adds an instrument beside it rather
-    /// than replacing it.
     #[test]
     fn a_wav_offers_an_encode_and_leaves_itself_alone() {
         let ctx = egui::Context::default();
@@ -1221,8 +1218,6 @@ mod tests {
         assert_eq!(snapshot.zones.len(), 1);
     }
 
-    /// A zone is decoded once, on request, and the WAV it exports is named after the
-    /// instrument rather than the file the asset arrived as.
     #[test]
     fn a_zone_decodes_on_request_and_exports_under_the_instruments_name() {
         let ctx = egui::Context::default();
@@ -1285,7 +1280,6 @@ mod tests {
         assert_eq!(document.instrument_name(id, &workspace), "Vibes");
     }
 
-    /// The sample document paints, and so does the encode panel over a WAV.
     #[test]
     fn a_sample_document_paints() {
         let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();

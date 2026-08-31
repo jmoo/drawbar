@@ -1322,8 +1322,6 @@ mod tests {
         );
     }
 
-    /// A zone's WAV is named after the instrument and the zone the document shows,
-    /// through the same sanitisation an export uses.
     #[test]
     fn a_zone_wav_is_named_after_its_instrument_and_number() {
         assert_eq!(zone_wav_name("Bass Clarinet", 2), "Bass-Clarinet-zone2.wav");
@@ -1331,8 +1329,6 @@ mod tests {
         assert_eq!(zone_wav_name("  ", 1), "unnamed-zone1.wav");
     }
 
-    /// Anything caching a decode has to be able to tell one set of bytes from the next,
-    /// and a rename or a send must not look like a new set.
     #[test]
     fn bytes_carry_a_stamp_that_changes_only_when_they_do() {
         let ctx = egui::Context::default();

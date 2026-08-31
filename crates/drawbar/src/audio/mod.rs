@@ -86,7 +86,6 @@ impl Player {
 mod tests {
     use super::*;
 
-    /// One voice: the sounding zone toggles off, and any other zone takes it over.
     #[test]
     fn only_one_zone_ever_sounds() {
         let first = (7, 0);

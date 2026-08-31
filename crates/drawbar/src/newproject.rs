@@ -320,8 +320,6 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
 mod tests {
     use super::*;
 
-    /// The project counts frames at 44 100 Hz whatever the file says, so a second of
-    /// audio is a second's worth of frames at any rate.
     #[test]
     fn frames_are_counted_at_the_source_rate() {
         assert_eq!(at_source_rate(44_100, 44_100), Some(44_100));
@@ -339,8 +337,6 @@ mod tests {
         assert_eq!(at_source_rate(u64::MAX, 44_100), None, "no wrapping");
     }
 
-    /// A run of files named after the key they were played at is taken at its word;
-    /// anything less is a chromatic run the operator can correct.
     #[test]
     fn root_keys_are_read_off_the_names_or_counted_from_middle_c() {
         let named = ["Marimba-C3.wav", "Marimba-C4.wav", "Marimba_F#4.wav"].map(String::from);
@@ -359,7 +355,6 @@ mod tests {
         assert_eq!(trailing_note("hit-Bb2.wav"), Some(46));
     }
 
-    /// A chromatic run is pulled down rather than piling up on the highest key.
     #[test]
     fn the_default_run_fits_under_the_highest_key_a_project_maps() {
         let many: Vec<String> = (0..MOST_ZONES).map(|i| format!("{i}.wav")).collect();
@@ -375,8 +370,6 @@ mod tests {
         nord_format::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
     }
 
-    /// What comes back from the picker becomes a draft that says what each file is,
-    /// and a project whose zones are those files.
     #[test]
     fn a_draft_becomes_a_project_over_the_picked_files() {
         let draft = Draft::plan(vec![
@@ -418,14 +411,11 @@ mod tests {
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), bytes);
     }
 
-    /// Nothing picked is nothing to ask about.
     #[test]
     fn a_cancelled_pick_raises_no_dialog() {
         assert!(Draft::plan(Vec::new()).is_none());
     }
 
-    /// A file the reader will not take, and two files on one key, are both said out
-    /// loud rather than turning into a refusal from the format crate.
     #[test]
     fn a_draft_says_why_it_cannot_be_made() {
         let unreadable = Draft::plan(vec![("notes.txt".into(), b"not a wav".to_vec())]).unwrap();

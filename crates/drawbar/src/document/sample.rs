@@ -525,8 +525,6 @@ mod tests {
         assert_eq!(range(&stated, 0), "C3 up to B4");
     }
 
-    /// An envelope is one pair per column, taken over frames rather than samples, and
-    /// scaled so full deflection is 1.
     #[test]
     fn an_envelope_reduces_the_audio_to_one_pair_per_column() {
         // Four frames of mono, two columns: each column covers two frames.
@@ -570,7 +568,6 @@ mod tests {
         assert_eq!(range(&snapshot.zones, 0), "C#4 up to C7");
     }
 
-    /// The generation the document names is the content version's, not the filename's.
     #[test]
     fn a_v4_instrument_says_so() {
         let entity = Entity::Sample(nord_format::Sample::V3(v3_sample(400)));

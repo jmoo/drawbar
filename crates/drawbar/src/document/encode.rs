@@ -234,8 +234,6 @@ mod tests {
         nord_format::wav::pcm16(&samples, rate, channels).unwrap()
     }
 
-    /// A WAV is recognised by its container, so the panel is offered even for one this
-    /// encoder will go on to refuse.
     #[test]
     fn a_riff_wave_container_is_what_offers_the_panel() {
         assert!(is_wav(&wav(44_100, 1, 8)));
@@ -244,8 +242,6 @@ mod tests {
         assert!(!is_wav(&[]));
     }
 
-    /// Each of the encoder's three limits is named where it bites, and a file inside
-    /// all of them is not refused.
     #[test]
     fn every_refusal_says_which_limit_it_hit() {
         let refused = |bytes: Vec<u8>| refusal(&Source::read(&bytes));
@@ -268,8 +264,6 @@ mod tests {
         assert!(!unreadable.is_empty());
     }
 
-    /// What the panel makes decodes as a sample instrument holding the zone it was
-    /// asked for, and re-saves byte for byte.
     #[test]
     fn an_encode_makes_the_instrument_the_panel_describes() {
         let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
@@ -291,15 +285,12 @@ mod tests {
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), bytes);
     }
 
-    /// A refused file is refused by the encode too, not only by the panel's label.
     #[test]
     fn a_refused_wav_is_not_encoded_anyway() {
         let source = Source::read(&wav(48_000, 1, encode::MIN_FRAMES));
         assert!(instrument(&Draft::new("x.wav"), &source).is_err());
     }
 
-    /// A name longer than the field is cut to what the format will take rather than
-    /// opening the panel on a value the encoder refuses.
     #[test]
     fn a_long_filename_opens_the_panel_on_a_name_that_fits() {
         let draft = Draft::new("an extremely long marimba name.wav");

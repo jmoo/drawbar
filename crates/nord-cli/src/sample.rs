@@ -719,7 +719,6 @@ mod tests {
         }
     }
 
-    /// The module doc's own example: 0.1 s is 4410 frames at every rate.
     #[test]
     fn a_frame_count_is_stated_at_the_project_rate_whatever_the_wav_says() {
         assert_eq!(project_frames(4410, 44_100).unwrap(), 4410);
@@ -822,7 +821,6 @@ mod tests {
         assert!(destination(None, None).is_err());
     }
 
-    /// A slot has no filename to borrow, so the WAVs are named off the body.
     #[test]
     fn a_decoded_slot_names_its_wavs_after_the_instrument() {
         let at = crate::slot::parse("2:7").unwrap();
@@ -837,7 +835,6 @@ mod tests {
         );
     }
 
-    /// Neither reading of a target worked, so the line has to name both.
     #[test]
     fn verifying_a_target_that_is_neither_a_file_nor_a_slot_names_both_readings() {
         let line = verify_target("no-such-instrument.nsmp", false).unwrap_err();
