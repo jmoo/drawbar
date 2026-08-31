@@ -87,39 +87,75 @@ pub struct Specimen {
     pub entity: Entity,
 }
 
+/// What one tree yielded: the specimens that parsed, and the files the reader
+/// recognized but could not parse, each with its error.
+struct Tree {
+    specimens: Vec<Specimen>,
+    unparsed: Vec<(PathBuf, String)>,
+}
+
 /// Every specimen under `root`, read and parsed. A file that fails to parse
-/// panics here; the sweep in `tests/corpus` is where it is reported by name.
-fn read_tree(root: &Path) -> Vec<Specimen> {
+/// lands in `unparsed` rather than ending the run: the sweep in `tests/corpus`
+/// is where a parse failure is a failing trial, named. An empty tree is still
+/// fatal — that is a broken `root`, not a broken specimen.
+fn read_tree(root: &Path) -> Tree {
     let (paths, _) = walk(root);
     assert!(!paths.is_empty(), "no specimen under {}", root.display());
-    paths
-        .into_iter()
-        .map(|path| {
-            let bytes = fs::read(&path).unwrap();
-            let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            Specimen {
+    let mut tree = Tree {
+        specimens: Vec::new(),
+        unparsed: Vec::new(),
+    };
+    for path in paths {
+        let bytes = fs::read(&path).unwrap();
+        match nord_format::from_stream(&mut Cursor::new(&bytes)) {
+            Ok(entity) => tree.specimens.push(Specimen {
                 path,
                 bytes,
                 entity,
-            }
-        })
-        .collect()
+            }),
+            Err(e) => tree.unparsed.push((path, e.to_string())),
+        }
+    }
+    tree
+}
+
+/// The specimens under `root`, with anything that did not parse named on
+/// stderr. The suites that call this run on what parsed; the sweep is what
+/// fails on what did not.
+fn parsed(root: &Path) -> Vec<Specimen> {
+    let tree = read_tree(root);
+    if !tree.unparsed.is_empty() {
+        // ⚠️ libtest captures the print macros per test, so a direct write is
+        // what reaches the terminal when the suite goes on to pass.
+        use std::io::Write;
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "warning: {} of {} files under {} did not parse and are left out of this suite; \
+             `--test corpus` reports each one as a failing trial",
+            tree.unparsed.len(),
+            tree.unparsed.len() + tree.specimens.len(),
+            root.display()
+        );
+        for (path, error) in &tree.unparsed {
+            let _ = writeln!(err, "  {}: {error}", path.display());
+        }
+    }
+    tree.specimens
 }
 
 /// The whole corpus, parsed once per test binary and shared by every test in it.
 pub fn corpus() -> &'static [Specimen] {
     static CORPUS: OnceLock<Vec<Specimen>> = OnceLock::new();
-    CORPUS.get_or_init(|| read_tree(&root()))
+    CORPUS.get_or_init(|| parsed(&root()))
 }
 
 /// The committed fixtures, the tree that is there in any checkout, parsed once
 /// per test binary.
 pub fn fixtures() -> &'static [Specimen] {
     static FIXTURES: OnceLock<Vec<Specimen>> = OnceLock::new();
-    FIXTURES.get_or_init(|| {
-        read_tree(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
-    })
+    FIXTURES
+        .get_or_init(|| parsed(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")))
 }
 
 /// The one specimen with this file name.
@@ -132,4 +168,59 @@ pub fn named(name: &str) -> &'static Specimen {
         .unwrap_or_else(|| panic!("no specimen named {name}"));
     assert!(hits.next().is_none(), "more than one specimen named {name}");
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn name(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("nord-scan-{label}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_specimen_that_does_not_parse_is_collected_and_the_rest_are_read() {
+        let dir = scratch("unparsed");
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cbin/npsy.g0.cbin");
+        fs::copy(&fixture, dir.join("readable.cbin")).unwrap();
+        // A CBIN container carrying a tag no reader claims: the sniffer takes
+        // the file, `from_stream` refuses it.
+        fs::write(dir.join("garbage.cbin"), b"CBIN\0\0\0\0zzzz\0\0\0\0").unwrap();
+
+        let tree = read_tree(&dir);
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            tree.specimens
+                .iter()
+                .map(|s| name(&s.path))
+                .collect::<Vec<_>>(),
+            ["readable.cbin"]
+        );
+        assert_eq!(
+            tree.unparsed
+                .iter()
+                .map(|(p, _)| name(p))
+                .collect::<Vec<_>>(),
+            ["garbage.cbin"]
+        );
+        assert!(
+            tree.unparsed[0].1.contains("zzzz"),
+            "an unparsed file carries the reader's error, got {:?}",
+            tree.unparsed[0].1
+        );
+    }
 }
