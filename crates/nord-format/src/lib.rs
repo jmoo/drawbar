@@ -270,7 +270,7 @@ impl Sample {
     /// this crate cannot rebuild; the setters say so at length.
     pub fn zones_are_editable(&self) -> bool {
         match self {
-            Sample::V2(_) => true,
+            Sample::V2(s) => s.zones().is_ok() && s.strokes().is_ok(),
             Sample::V3(s) => s.zones_are_editable(),
         }
     }

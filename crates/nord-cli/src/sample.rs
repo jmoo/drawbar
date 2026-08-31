@@ -3,8 +3,8 @@
 //! `edit` mirrors `nord program edit`, but the fields come from
 //! [`editors::SampleEditor`]'s accessors rather than a declarative panel: a
 //! sample is mostly encoded audio, and only what the format crate can patch in
-//! place is settable — the name, and each zone's root key and boundaries, in
-//! every generation.
+//! place is settable — always the name, plus each zone's root key and boundaries
+//! when its keyboard map can be updated safely.
 //! `decode` turns the audio back into WAV, and `verify --deep` walks the
 //! encoded stream rather than only the container. Both take a slot wherever
 //! they take a file; reading a slot is a read-only transaction, so neither

@@ -486,6 +486,7 @@ impl Cbin<Sample> {
 
     /// Sets one zone's top note. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        self.require_known_layout()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
         zone::set_top_note(&mut map.payload, index, note)?;
@@ -671,5 +672,20 @@ impl fmt::Debug for Sample {
         f.debug_struct("Sample")
             .field("sections", &self.sections)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_v2_layout_cannot_use_the_modern_zone_setter() {
+        let mut sample = Cbin {
+            header: Header::new(FORMAT, (0, 0), LIBRARY_2_VERSION - 1),
+            body: Sample { sections: vec![] },
+        };
+        let error = sample.set_zone_top_note(0, 60).unwrap_err().to_string();
+        assert!(error.contains("predates Sample Library 2.0"), "{error}");
     }
 }

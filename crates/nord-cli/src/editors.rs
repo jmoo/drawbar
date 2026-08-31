@@ -94,10 +94,10 @@ fn indexed(part: &str, label: &str) -> Option<usize> {
         .filter(|&n| n >= 1)
 }
 
-/// The sample instrument, in any generation: the name, and each zone's root key
-/// and boundaries — what the format can patch in place without touching a
-/// stroke. `low_note` is listed only where the generation stores one; elsewhere
-/// zones tile and a zone's bottom follows from the one below it.
+/// The sample instrument: its name, plus each zone's root key and boundaries
+/// where the keyboard layout can be edited without leaving another map stale.
+/// `low_note` is listed only where the generation stores one; elsewhere zones
+/// tile and a zone's bottom follows from the one below it.
 pub struct SampleEditor<'a>(pub &'a mut Sample);
 
 impl Fields for SampleEditor<'_> {
@@ -108,6 +108,9 @@ impl Fields for SampleEditor<'_> {
             value: sample.name().map_err(|e| e.to_string())?,
             accepts: format!("up to {} bytes", sample.max_name_len()),
         }];
+        if !sample.zones_are_editable() {
+            return Ok(out);
+        }
         for (i, zone) in sample
             .zones()
             .map_err(|e| e.to_string())?
@@ -266,7 +269,9 @@ impl Fields for ProjectEditor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nord_format::cbin::Header;
     use nord_format::formats::ne5;
+    use nord_format::formats::nsmp::{section, SampleV3};
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project() -> Project {
@@ -289,6 +294,50 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    fn sample_with_key_map() -> Sample {
+        let mut map = vec![0u8; 12 + 128 * 10 + 1 + 16 + 2];
+        for key in 0..128 {
+            map[12 + key * 10..][..4].fill(key as u8);
+        }
+        map[12 + 40 * 10] = 60;
+        let record = 12 + 128 * 10 + 1;
+        map[record - 1] = 1;
+        map[record] = 60;
+        map[record + 1] = 84;
+        map[record + 8..record + 12].copy_from_slice(&9u32.to_be_bytes());
+
+        Sample::V3(Cbin {
+            header: Header::new("nsmp", (0, 0), 400),
+            body: SampleV3 {
+                sections: vec![
+                    section::Section4 {
+                        tag: *section::HDR4,
+                        version: 1,
+                        payload: vec![0; 76],
+                    },
+                    section::Section4 {
+                        tag: *section::MAP4,
+                        version: 21,
+                        payload: map,
+                    },
+                    section::Section4 {
+                        tag: *section::STK4,
+                        version: 1,
+                        payload: vec![0, 0, 0, 9, 0, 60],
+                    },
+                ],
+            },
+        })
+    }
+
+    #[test]
+    fn uneditable_zone_paths_are_not_listed() {
+        let mut sample = sample_with_key_map();
+        let rows = SampleEditor(&mut sample).rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "name");
     }
 
     /// The paths a listing prints are the paths `set` takes, ids included.
