@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{codec, encode};
-use nord_format::formats::nsmpproj::Project;
+use nord_format::formats::nsmpproj::{Project, Zone, LOWEST_NOTE};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -526,6 +526,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
     let files = project.audio_files().map_err(say)?;
     let strokes = project.strokes().map_err(say)?;
     let zones = project.zones().map_err(say)?;
+    validate_key_ranges(&zones)?;
 
     zones
         .iter()
@@ -603,19 +604,51 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
         .collect()
 }
 
+fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
+    for (index, zone) in zones.iter().enumerate() {
+        let at = format!("zone{}", index + 1);
+        if !(zone.bottom_note..=zone.top_note).contains(&zone.root_key) {
+            return Err(format!(
+                "{at}'s root note {} is outside its range {}..={}",
+                zone.root_key, zone.bottom_note, zone.top_note
+            ));
+        }
+        let encoded_bottom = match zones.get(index + 1) {
+            Some(below) => {
+                let below_at = index + 2;
+                below.top_note.checked_add(1).ok_or_else(|| {
+                    format!(
+                        "zone{below_at} reaches note {}, leaving no range for {at}",
+                        below.top_note
+                    )
+                })?
+            }
+            None => LOWEST_NOTE,
+        };
+        if zone.bottom_note != encoded_bottom {
+            return Err(format!(
+                "{at} starts at note {}, but its encoded range would start at \
+                 {encoded_bottom}; v2 stores only top notes, so that gap or overlap \
+                 cannot be reproduced",
+                zone.bottom_note
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A project's frame position as an index into the file it points at.
 ///
 /// Positions are `%f` decimals counted at 44 100 Hz whatever the file's own rate says.
 /// Inferred from the editor's field counts: a zone encodes `start..stop`, not the
 /// whole `begin..end` extent.
 fn frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<usize, String> {
-    let rounded = value.round();
-    if !(0.0..=frames as f64).contains(&rounded) {
+    if !value.is_finite() || !(0.0..=frames as f64).contains(&value) {
         return Err(format!(
             "{zone}'s {label} is at frame {value}, outside the {frames} frames its audio holds"
         ));
     }
-    Ok(rounded as usize)
+    Ok(value.round() as usize)
 }
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
@@ -726,4 +759,43 @@ fn deep(path: &Path) -> Result<String, String> {
         note.push_str(&format!(", {marked} marked"));
     }
     Ok(note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zone(root_key: u8, bottom_note: u8, top_note: u8) -> Zone {
+        Zone {
+            zone_id: 0,
+            root_key,
+            enabled: true,
+            bottom_note,
+            top_note,
+            strokes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_project_key_map_must_be_representable_by_top_notes() {
+        let valid = [zone(72, 61, 84), zone(48, LOWEST_NOTE, 60)];
+        assert!(validate_key_ranges(&valid).is_ok());
+
+        let gap = [zone(72, 62, 84), zone(48, LOWEST_NOTE, 60)];
+        assert!(validate_key_ranges(&gap).is_err());
+
+        let misplaced_root = [zone(60, 61, 84), zone(48, LOWEST_NOTE, 60)];
+        assert!(validate_key_ranges(&misplaced_root).is_err());
+
+        let raised_floor = [zone(60, LOWEST_NOTE + 1, 84)];
+        assert!(validate_key_ranges(&raised_floor).is_err());
+    }
+
+    #[test]
+    fn a_frame_position_is_checked_before_rounding() {
+        assert_eq!(frame("zone1", "start", 0.4, 10).unwrap(), 0);
+        for value in [-0.4, 10.4, f64::NAN, f64::INFINITY] {
+            assert!(frame("zone1", "start", value, 10).is_err(), "{value}");
+        }
+    }
 }
