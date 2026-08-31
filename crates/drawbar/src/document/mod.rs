@@ -386,14 +386,7 @@ impl Document {
                 playing: sounding == target.map(|id| (id, index)),
             })
             .collect();
-        sample::ui(
-            ui,
-            &snapshot,
-            &mut self.name,
-            sample::is_editable(decoded),
-            &sounds,
-            sets,
-        )
+        sample::ui(ui, &snapshot, &mut self.name, &sounds, sets)
     }
 
     /// Do what the Basic view asked for, now that nothing is borrowing the asset.

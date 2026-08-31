@@ -1,10 +1,9 @@
 //! The sample-instrument document.
 //!
 //! A sample is mostly encoded audio, so what is settable is what the format can patch in
-//! place without touching a stroke: the name, and each zone's root key and top note.
-//! The v3/v4 generations decode read-only and are carried verbatim — they are still
-//! shown, because a name, a zone map and playable audio are most of what an instrument
-//! is, and none of that depends on being able to edit it.
+//! place without touching a stroke: the name, and each zone's root key and boundaries.
+//! Every generation edits; where a container also describes the keyboard key by key the
+//! zones are shown but held, and only the name moves.
 //!
 //! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
 //! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when the
@@ -14,37 +13,31 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use eframe::egui;
-use nord_format::cbin::Cbin;
 use nord_format::formats::nsmp::codec::{self, Audio};
-use nord_format::formats::nsmp::{self, Sample};
-use nord_format::Entity;
+use nord_format::{Entity, Sample};
 
 use super::controls::Sets;
 use crate::note;
-
-pub fn is_editable(entity: &Entity) -> bool {
-    matches!(entity, Entity::Sample(nord_format::Sample::V2(_)))
-}
 
 pub fn is_sample(entity: &Entity) -> bool {
     matches!(entity, Entity::Sample(_))
 }
 
-fn sample(entity: &Entity) -> Option<&nord_format::Sample> {
+fn sample(entity: &Entity) -> Option<&Sample> {
     match entity {
         Entity::Sample(sample) => Some(sample),
         _ => None,
     }
 }
 
-fn sample_mut(entity: &mut Entity) -> Option<&mut Cbin<Sample>> {
+fn sample_mut(entity: &mut Entity) -> Option<&mut Sample> {
     match entity {
-        Entity::Sample(nord_format::Sample::V2(sample)) => Some(sample),
+        Entity::Sample(sample) => Some(sample),
         _ => None,
     }
 }
 
-/// One zone, numbered the way the panel numbers them: from 1, top of the keyboard first.
+/// One zone, numbered the way the panel numbers them: from 1, in stored order.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Zone {
     pub root_key: u8,
@@ -58,6 +51,7 @@ pub struct Zone {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub name: String,
+    pub max_name_len: usize,
     /// The v3/v4 second name — what follows the `_` in the vendor's filenames. Empty
     /// on a v2 instrument, which has one name.
     pub sub_name: String,
@@ -65,47 +59,30 @@ pub struct Snapshot {
     pub generation: &'static str,
     pub categories: Vec<String>,
     pub zones: Vec<Zone>,
+    /// Whether the zone controls do anything. The name is always settable.
+    pub zones_editable: bool,
 }
 
 pub fn snapshot(entity: &Entity) -> Option<Result<Snapshot, String>> {
-    Some(match sample(entity)? {
-        nord_format::Sample::V2(sample) => read(sample),
-        nord_format::Sample::V3(sample) => read_v3(sample),
-    })
+    Some(read(sample(entity)?))
 }
 
-fn read(sample: &Cbin<Sample>) -> Result<Snapshot, String> {
-    let zones = sample.zones().map_err(|e| e.to_string())?;
-    let strokes = sample.strokes().map_err(|e| e.to_string())?;
+fn read(sample: &Sample) -> Result<Snapshot, String> {
+    // Only the wide chain carries a second name, and the `cat` section this reader
+    // decodes is the narrow one's.
+    let (sub_name, categories) = match sample {
+        Sample::V2(body) => (String::new(), body.categories()),
+        Sample::V3(body) => (body.sub_name().map_err(|e| e.to_string())?, Vec::new()),
+    };
     Ok(Snapshot {
         name: sample.name().map_err(|e| e.to_string())?,
-        sub_name: String::new(),
-        generation: "v2",
-        categories: sample.categories(),
-        zones: zones
-            .iter()
-            .zip(&strokes)
-            .map(|(zone, stroke)| Zone {
-                root_key: stroke.root_key,
-                top_note: zone.top_note,
-                low_note: None,
-            })
-            .collect(),
-    })
-}
-
-fn read_v3(sample: &Cbin<nsmp::SampleV3>) -> Result<Snapshot, String> {
-    let zones = sample.zones().map_err(|e| e.to_string())?;
-    Ok(Snapshot {
-        name: sample.name().map_err(|e| e.to_string())?,
-        sub_name: sample.sub_name().map_err(|e| e.to_string())?,
-        generation: match sample.header.version >= nsmp::V4_FROM_VERSION {
-            true => "v4",
-            false => "v3",
-        },
-        // The wide chain carries no `cat` section this reader decodes.
-        categories: Vec::new(),
-        zones: zones
+        max_name_len: sample.max_name_len(),
+        sub_name,
+        generation: sample.generation(),
+        categories,
+        zones: sample
+            .zones()
+            .map_err(|e| e.to_string())?
             .iter()
             .map(|zone| Zone {
                 root_key: zone.root_key,
@@ -113,12 +90,13 @@ fn read_v3(sample: &Cbin<nsmp::SampleV3>) -> Result<Snapshot, String> {
                 low_note: zone.low_note,
             })
             .collect(),
+        zones_editable: sample.zones_are_editable(),
     })
 }
 
 /// Apply one `path = value`. Paths are the CLI's: `name`, `zone1.root_key`,
-/// `zone1.top_note`.
-fn set(sample: &mut Cbin<Sample>, path: &str, value: &str) -> Result<(), String> {
+/// `zone1.top_note`, `zone1.low_note`.
+fn set(sample: &mut Sample, path: &str, value: &str) -> Result<(), String> {
     if path == "name" {
         return sample.set_name(value).map_err(|e| e.to_string());
     }
@@ -139,6 +117,7 @@ fn set(sample: &mut Cbin<Sample>, path: &str, value: &str) -> Result<(), String>
     match field {
         "root_key" => sample.set_root_key(index - 1, note),
         "top_note" => sample.set_zone_top_note(index - 1, note),
+        "low_note" => sample.set_zone_low_note(index - 1, note),
         _ => return Err(unknown()),
     }
     .map_err(|e| e.to_string())
@@ -149,7 +128,7 @@ fn set(sample: &mut Cbin<Sample>, path: &str, value: &str) -> Result<(), String>
 pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<Vec<u8>, String> {
     let mut entity =
         nord_format::from_stream(&mut Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let sample = sample_mut(&mut entity).ok_or("not a v2 sample instrument")?;
+    let sample = sample_mut(&mut entity).ok_or("not a sample instrument")?;
     for (path, value) in sets {
         set(sample, path, value)?;
     }
@@ -276,45 +255,40 @@ pub fn ui(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
     name: &mut String,
-    editable: bool,
     sounds: &[Sound],
     sets: &mut Sets,
 ) -> Option<Ask> {
     let mut ask = None;
-    if !editable {
-        ui.label(
-            egui::RichText::new(format!(
-                "This instrument is {} content: it is carried as it came, and only \
-                 version 2 can be changed here.",
-                snapshot.generation
-            ))
-            .weak(),
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [120.0, ui.spacing().interact_size.y],
+            egui::Label::new("Name").halign(egui::Align::LEFT),
         );
-    }
-    ui.add_enabled_ui(editable, |ui| {
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [120.0, ui.spacing().interact_size.y],
-                egui::Label::new("Name").halign(egui::Align::LEFT),
-            );
-            let response = ui.add(
-                egui::TextEdit::singleline(name)
-                    .desired_width(200.0)
-                    .char_limit(nsmp::MAX_NAME_LEN),
-            );
-            // Not committed per keystroke: half a name is a name the format would take.
-            let done =
-                response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
-            if done && *name != snapshot.name {
-                sets.push(("name".to_string(), name.clone()));
-            }
-        });
+        let response = ui.add(
+            egui::TextEdit::singleline(name)
+                .desired_width(200.0)
+                .char_limit(snapshot.max_name_len),
+        );
+        // Not committed per keystroke: half a name is a name the format would take.
+        let done = response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        if done && *name != snapshot.name {
+            sets.push(("name".to_string(), name.clone()));
+        }
     });
     if !snapshot.sub_name.is_empty() {
         labelled(ui, "Sub name", &snapshot.sub_name);
     }
     if !snapshot.categories.is_empty() {
         labelled(ui, "Categories", &snapshot.categories.join(", "));
+    }
+    if !snapshot.zones.is_empty() && !snapshot.zones_editable {
+        ui.label(
+            egui::RichText::new(
+                "This instrument's map names a zone for every key, and what fills that \
+                 table has not been worked out — so its zones are shown, not changed.",
+            )
+            .weak(),
+        );
     }
 
     for (i, zone) in snapshot.zones.iter().enumerate() {
@@ -330,7 +304,7 @@ pub fn ui(
                     .small()
                     .weak(),
             );
-            ui.add_enabled_ui(editable, |ui| {
+            ui.add_enabled_ui(snapshot.zones_editable, |ui| {
                 ui.label("root key");
                 if let Some(note) = note_picker(ui, ("root", n), zone.root_key) {
                     sets.push((format!("zone{n}.root_key"), note::name(note)));
@@ -339,8 +313,15 @@ pub fn ui(
                 if let Some(note) = note_picker(ui, ("top", n), zone.top_note) {
                     sets.push((format!("zone{n}.top_note"), note::name(note)));
                 }
+                if let Some(low) = zone.low_note {
+                    ui.label("low note");
+                    if let Some(note) = note_picker(ui, ("low", n), low) {
+                        sets.push((format!("zone{n}.low_note"), note::name(note)));
+                    }
+                }
             });
         });
+        // Outside the enable gate: audio plays whether or not the zones can be moved.
         if let Some(sound) = sounds.get(i) {
             if let Some(asked) = zone_audio(ui, i, sound) {
                 ask = Some(asked);
@@ -487,6 +468,9 @@ pub fn note_picker(ui: &mut egui::Ui, id: (&str, usize), note: u8) -> Option<u8>
 
 #[cfg(test)]
 mod tests {
+    use nord_format::cbin::Cbin;
+    use nord_format::formats::nsmp;
+
     use super::*;
 
     /// A note is spelled the way the document shows it, and the round trip is exact.
@@ -547,18 +531,18 @@ mod tests {
         assert!(envelope(&[], 1, 4).is_empty());
     }
 
-    /// Only v2 content has the in-place patches this editor makes; a v3/v4 instrument
-    /// is read and shown, not edited.
+    /// A wide-chain instrument reads its own name, sub-name and generation, and its
+    /// zones are editable where the `map` layout does not name every key.
     #[test]
-    fn a_later_generation_is_read_rather_than_edited() {
-        let entity = Entity::Sample(nord_format::Sample::V3(v3_sample(300)));
+    fn a_later_generation_reads_and_edits() {
+        let entity = Entity::Sample(Sample::V3(v3_sample(300)));
         assert!(is_sample(&entity));
-        assert!(!is_editable(&entity));
 
         let snapshot = snapshot(&entity).expect("a sample").expect("it reads");
         assert_eq!(snapshot.name, "Bass Clarinet");
         assert_eq!(snapshot.sub_name, "KG  mono");
         assert_eq!(snapshot.generation, "v3");
+        assert!(snapshot.zones_editable);
         let zones: Vec<(u8, u8, Option<u8>)> = snapshot
             .zones
             .iter()
@@ -570,7 +554,7 @@ mod tests {
 
     #[test]
     fn a_v4_instrument_says_so() {
-        let entity = Entity::Sample(nord_format::Sample::V3(v3_sample(400)));
+        let entity = Entity::Sample(Sample::V3(v3_sample(400)));
         let snapshot = snapshot(&entity).unwrap().unwrap();
         assert_eq!(snapshot.generation, "v4");
     }
