@@ -696,7 +696,7 @@ fn zone_loop(
 
     // Mode 1 rewrites the loop's tail some way this crate has not decoded, and the
     // short crossfade's unit is not frames, so neither can be reproduced.
-    if stroke.loop_crossfade_mode != 0 {
+    if !short && stroke.loop_crossfade_mode != 0 {
         return Err(format!(
             "{at} sets m_loopXFModeLong = {}; only the linear fade (mode 0) is decoded, \
              and the fade is baked into the audio, so this one cannot be written",
@@ -839,6 +839,10 @@ pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
 /// Walks every stroke and verifies all four directory landmarks.
 fn deep(path: &Path) -> Result<String, String> {
     let body = body(path)?;
+    deep_body(&body)
+}
+
+fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
     let layout = body.layout();
     let streams = body.stroke_streams();
     let mut records = 0usize;
@@ -867,19 +871,20 @@ fn deep(path: &Path) -> Result<String, String> {
         {
             return Err(format!("stroke {index}: resync does not name a record"));
         }
-        if !names(directory.mark, stream.terminator)
-            && !stream.records.iter().any(|r| names(directory.mark, r.at))
-        {
-            return Err(format!("stroke {index}: mark does not name a record"));
-        }
         let actual: Vec<_> = stream.records.iter().filter(|r| r.mark).collect();
-        if actual.len() > 1 || actual.first().is_some_and(|r| !names(directory.mark, r.at)) {
+        let mark_is_terminator = names(directory.mark, stream.terminator);
+        let mark_agrees = match actual.as_slice() {
+            [] => mark_is_terminator,
+            [record] => !mark_is_terminator && names(directory.mark, record.at),
+            _ => false,
+        };
+        if !mark_agrees {
             return Err(format!(
                 "stroke {index}: marked record disagrees with the directory"
             ));
         }
-        // A loop opens a fresh packet, so the words it covers divide by one. The wide
-        // generations pack to their own size and are not checked against this one.
+        // A loop opens a fresh packet, so the words it covers form whole packets. The
+        // wide generations pack to their own size and are not checked against this one.
         if let (codec::Layout::V2, Some(record)) = (layout, actual.first()) {
             let words = terminator - record.at;
             if !words.is_multiple_of(nord_format::formats::nsmp::stroke::PACKET_LEN / 3) {
@@ -954,6 +959,7 @@ mod tests {
             s.short_loop_enabled = true;
             s.loop_length_short = 1_024.0;
             s.loop_crossfade_short = 0;
+            s.loop_crossfade_mode = 1;
         });
         let (points, _) = zone_loop("zone1", &short, 0, 88_200).unwrap();
         assert_eq!(points, Some(encode::Loop::new(16_384, 17_408)));
@@ -1028,5 +1034,26 @@ mod tests {
         for value in [-0.4, 10.4, f64::NAN, f64::INFINITY] {
             assert!(frame("zone1", "start", value, 10).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn a_directory_cannot_claim_an_unmarked_record_as_a_loop() {
+        let mut file = encode::instrument(
+            &vec![0; encode::MIN_FRAMES],
+            &encode::Options::new("Unmarked"),
+        )
+        .unwrap();
+        let stroke = nord_format::formats::nsmp::section::find_mut(
+            &mut file.body.sections,
+            nord_format::formats::nsmp::section::STK,
+        )
+        .unwrap();
+        let first = stroke.payload[20..22].to_vec();
+        stroke.payload[38..40].copy_from_slice(&first);
+
+        let sample = nord_format::Sample::V2(file);
+        assert!(deep_body(&sample)
+            .unwrap_err()
+            .contains("marked record disagrees"));
     }
 }
