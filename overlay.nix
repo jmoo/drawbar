@@ -111,13 +111,21 @@ let
     ]
   );
 
+  audioArgs = optionalAttrs final.stdenv.hostPlatform.isLinux {
+    buildInputs = [ final.alsa-lib ];
+    nativeBuildInputs = [ final.pkg-config ];
+  };
+
   crates = mapAttrs (name: _: mkCrate { crate = name; }) manifests // {
     drawbar =
       let
-        pkg = mkCrate {
-          crate = "drawbar";
-          meta.mainProgram = "drawbar";
-        };
+        pkg = mkCrate (
+          {
+            crate = "drawbar";
+            meta.mainProgram = "drawbar";
+          }
+          // audioArgs
+        );
       in
       if guiLibs == [ ] then
         pkg
@@ -463,6 +471,7 @@ in
       # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
       clippy = crane.cargoClippy (
         commonArgs
+        // audioArgs
         // {
           inherit cargoArtifacts;
           pname = "workspace-clippy";
