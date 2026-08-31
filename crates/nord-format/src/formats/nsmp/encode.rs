@@ -21,11 +21,18 @@
 //! std::fs::write("test.nsmp", instrument.to_bytes().unwrap()).unwrap();
 //! ```
 //!
+//! [`multi_zone`] is the same builder across a keyboard: one `stk` per zone, highest
+//! zone first, each zone's record naming its stroke by the global id the caller gives
+//! it. Zone counts move where a stroke's audio may start, so the allocation each stroke
+//! is packed into comes from [`stroke::header_len`](super::stroke::header_len) rather
+//! than from a constant.
+//!
 //! Everything here is inferred from specimens; not confirmed on hardware.
 
 use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
 use super::section::{self, Section};
+use super::stroke::PACKET_LEN;
 use super::{Sample, MAX_NAME_LEN};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
@@ -68,11 +75,12 @@ const MIN_WIDTH: u8 = 2;
 /// Absolute field ceiling imposed by the stream directory and minimum width.
 const MAX_FIELDS: usize = MAX_STREAM_WORDS * 24 / MIN_WIDTH as usize;
 
-/// Words of stream the allocation starts from, before any packet.
-const SLACK_WORDS: usize = 38;
+/// Zones one instrument may hold, from the `map` section's single count byte.
+const MAX_ZONES: usize = u8::MAX as usize;
 
-/// Words a packet adds: `PACKET_LEN / 3`.
-const PACKET_WORDS: usize = 127;
+/// The widest stroke id a zone record can name: the field is one byte, and zero is
+/// not an id the editor issues.
+const MAX_STROKE_ID: u32 = u8::MAX as u32;
 
 /// Source samples the kernel is allowed to ring out past the end of the input.
 const RING_OUT: usize = 160;
@@ -426,11 +434,38 @@ struct Stream {
     terminator: usize,
 }
 
-/// Right-align records in the smallest `38 + 127·P`-word allocation.
-fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, Error> {
+/// Right-align records in the allocation the preamble law gives this stroke:
+/// `preamble` bytes of payload, then whole packets until the chain fits.
+///
+/// `preamble` is [`stroke::header_len`](super::stroke::header_len), which a zone table
+/// can drive below [`HEADER_LEN`] — the first packet then starts inside what would
+/// otherwise be header, and the loop repays the difference.
+fn pack(
+    specs: &[Spec],
+    values: &[i32],
+    resync_record: usize,
+    preamble: usize,
+) -> Result<Stream, Error> {
     let chain: usize = specs.iter().map(Spec::span).sum::<usize>() + 1;
-    let packets = chain.saturating_sub(SLACK_WORDS).div_ceil(PACKET_WORDS);
-    let total = SLACK_WORDS + PACKET_WORDS * packets;
+    let need = chain
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(HEADER_LEN))
+        .ok_or_else(|| ParseError::OutOfBounds {
+            value: format!("a chain of {chain} words"),
+            bound: "a stroke payload of addressable length".into(),
+        })?;
+    let mut payload = preamble;
+    while payload < need {
+        payload += PACKET_LEN;
+    }
+    if !(payload - HEADER_LEN).is_multiple_of(3) {
+        return Err(ParseError::AssertFail(format!(
+            "a {preamble}-byte preamble puts the word stream off a word boundary; the \
+             sections in front of the stroke are not whole words"
+        ))
+        .into());
+    }
+    let total = (payload - HEADER_LEN) / 3;
     if total > MAX_STREAM_WORDS {
         return Err(ParseError::OutOfBounds {
             value: format!("a stream of {total} words"),
@@ -535,12 +570,19 @@ fn stroke_header(id: u32, root_key: u8, q: &Quantised, stream: &Stream, body_at:
     head
 }
 
-/// Encode one zone's stroke at body offset `body_at`.
-pub fn stroke(
+/// Encode one zone's stroke at body offset `body_at`, packed into `preamble` bytes
+/// plus whole packets.
+///
+/// Both placements come from the sections already sized in front of this stroke, so
+/// only [`multi_zone`] can supply them: `body_at` is the base the word directory is
+/// written against, and a wrong one produces a file whose directory names records
+/// that are not there.
+fn stroke(
     source: &[i16],
     root_key: u8,
     id: u32,
     body_at: usize,
+    preamble: usize,
     predictor: Predictor,
 ) -> Result<Vec<u8>, Error> {
     midi_note("root key", root_key)?;
@@ -557,7 +599,7 @@ pub fn stroke(
         .iter()
         .position(|s| s.first == plan.resync_at)
         .unwrap_or(0);
-    let stream = pack(&specs, &q.values, resync_record)?;
+    let stream = pack(&specs, &q.values, resync_record, preamble)?;
 
     let mut payload = stroke_header(id, root_key, &q, &stream, body_at);
     payload.extend_from_slice(&stream.words);
@@ -600,7 +642,9 @@ fn cat() -> Section {
 }
 
 /// Build the unexplained fixed keyboard map and zone table.
-fn map(zones: &[(u32, u8)]) -> Section {
+///
+/// `zones` is `(stroke id, top note)` per zone, already high to low.
+fn map(zones: &[(u8, u8)]) -> Section {
     let mut payload = vec![0u8; super::zone::RECORDS_AT + super::zone::RECORD_LEN * zones.len()];
     payload[0] = 0x10;
     for note in 0..128 {
@@ -610,7 +654,9 @@ fn map(zones: &[(u32, u8)]) -> Section {
     // Zones are stored high to low by top note.
     for (index, &(id, top_note)) in zones.iter().enumerate() {
         let at = super::zone::RECORDS_AT + super::zone::RECORD_LEN * index;
-        payload[at + 2] = id as u8;
+        payload[at + 2] = id;
+        // A looping zone holds 0x11 here and fills the two bytes after it; nothing
+        // written from PCM loops, so the flag stays plain and they stay zero.
         payload[at + 3] = 0x10;
         payload[at + 9] = top_note;
         payload[at + 11] = 0x01;
@@ -631,26 +677,86 @@ fn sty() -> Section {
     }
 }
 
+/// One zone to build: its audio, where it sits on the keyboard, and the id its
+/// record names its stroke by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewZone<'a> {
+    /// Mono PCM at [`codec::SOURCE_RATE`], already trimmed to what the zone plays.
+    pub source: &'a [i16],
+    /// The note this sample plays untransposed at.
+    pub root_key: u8,
+    /// Highest note this zone answers to. Stored as given — the file keeps top notes,
+    /// it does not derive them from the root keys.
+    pub top_note: u8,
+    /// The stroke's global id, 1 through [`MAX_STROKE_ID`]. Zones name their strokes
+    /// by it rather than by position, so it need not run parallel to the sections.
+    pub global_id: u32,
+}
+
 /// Build a one-zone v2 instrument from mono PCM at [`codec::SOURCE_RATE`].
 /// Refuses unmodelled lengths, invalid metadata, and streams past the directory limit.
 pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Error> {
-    const ID: u32 = 1;
-
     midi_note("root key", options.root_key)?;
-    let top_note = options.resolved_top_note();
-    midi_note("top note", top_note)?;
-    let hdr = hdr(&options.name)?;
-    let cat = cat();
-    let map = map(&[(ID, top_note)]);
+    multi_zone(
+        &[NewZone {
+            source,
+            root_key: options.root_key,
+            top_note: options.resolved_top_note(),
+            global_id: 1,
+        }],
+        &options.name,
+        options.predictor,
+    )
+}
 
-    // The directory the stroke carries counts words from the start of the body, so the
-    // sections in front of it have to be sized before its stream can be written.
-    let body_at = section::HEADER_LEN
-        + hdr.encoded_len()
-        + cat.encoded_len()
-        + map.encoded_len()
-        + section::HEADER_LEN;
-    let payload = stroke(source, options.root_key, ID, body_at, options.predictor)?;
+/// Build a v2 instrument that spans the keyboard: one `stk` per zone, in the order
+/// given, which must be highest zone first.
+///
+/// Refuses an empty or overlapping zone list, a duplicate or unnameable stroke id,
+/// and everything [`instrument`] refuses about one zone's audio.
+pub fn multi_zone(
+    zones: &[NewZone<'_>],
+    name: &str,
+    predictor: Predictor,
+) -> Result<Cbin<Sample>, Error> {
+    let table = zone_table(zones)?;
+    let hdr = hdr(name)?;
+    let cat = cat();
+    let map = map(&table);
+    // The directory a stroke carries counts words from the start of the body, and these
+    // two decide where the first packet may start, so both are sized before any stream
+    // is written.
+    let cat_len = cat.payload.len();
+    let map_len = map.payload.len();
+
+    let mut sections = vec![
+        Section {
+            tag: *section::CONTAINER,
+            version: CONTAINER_VERSION,
+            payload: Vec::new(),
+        },
+        hdr,
+        cat,
+        map,
+    ];
+    let mut body_at: usize = sections.iter().map(Section::encoded_len).sum();
+    for (index, zone) in zones.iter().enumerate() {
+        let payload = stroke(
+            zone.source,
+            zone.root_key,
+            zone.global_id,
+            body_at + section::HEADER_LEN,
+            super::stroke::header_len(index, cat_len, map_len),
+            predictor,
+        )?;
+        body_at += section::HEADER_LEN + payload.len();
+        sections.push(Section {
+            tag: *section::STK,
+            version: STK_VERSION,
+            payload,
+        });
+    }
+    sections.push(sty());
 
     Ok(Cbin {
         header: Header {
@@ -660,25 +766,50 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Err
             aux: AUX,
             version: VERSION,
         },
-        body: Sample {
-            sections: vec![
-                Section {
-                    tag: *section::CONTAINER,
-                    version: CONTAINER_VERSION,
-                    payload: Vec::new(),
-                },
-                hdr,
-                cat,
-                map,
-                Section {
-                    tag: *section::STK,
-                    version: STK_VERSION,
-                    payload,
-                },
-                sty(),
-            ],
-        },
+        body: Sample { sections },
     })
+}
+
+/// Validate the zone list and reduce it to the `(stroke id, top note)` pairs the
+/// `map` section stores.
+fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<(u8, u8)>, Error> {
+    if zones.is_empty() || zones.len() > MAX_ZONES {
+        return Err(ParseError::OutOfBounds {
+            value: format!("{} zones", zones.len()),
+            bound: format!("1 through {MAX_ZONES}, the map section's own count byte"),
+        }
+        .into());
+    }
+    let mut table = Vec::with_capacity(zones.len());
+    for (index, zone) in zones.iter().enumerate() {
+        midi_note("root key", zone.root_key)?;
+        midi_note("top note", zone.top_note)?;
+        if !(1..=MAX_STROKE_ID).contains(&zone.global_id) {
+            return Err(ParseError::OutOfBounds {
+                value: format!("stroke id {}", zone.global_id),
+                bound: format!("1 through {MAX_STROKE_ID}, what a zone record can name"),
+            }
+            .into());
+        }
+        let id = zone.global_id as u8;
+        if table.iter().any(|&(seen, _)| seen == id) {
+            return Err(ParseError::AssertFail(format!(
+                "two zones claim stroke id {id}, and a zone record names its stroke by id"
+            ))
+            .into());
+        }
+        if index > 0 && zone.top_note >= zones[index - 1].top_note {
+            return Err(ParseError::AssertFail(format!(
+                "zone {index} reaches up to note {} but the zone before it stops at {}; \
+                 zones are stored highest first and may not overlap",
+                zone.top_note,
+                zones[index - 1].top_note
+            ))
+            .into());
+        }
+        table.push((id, zone.top_note));
+    }
+    Ok(table)
 }
 
 fn midi_note(name: &str, note: u8) -> Result<(), Error> {
@@ -762,18 +893,25 @@ mod tests {
         let source = vec![0i16; MIN_FRAMES];
         assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
         assert!(instrument(&source, &Options::new("Test").top_note(255)).is_err());
-        assert!(stroke(&source, 128, 1, 0, Predictor::Plain).is_err());
+        assert!(stroke(&source, 128, 1, 0, 165, Predictor::Plain).is_err());
     }
 
-    /// The allocation is `38 + 127·P` words with the chain right-aligned, so a
-    /// single-zone stroke is `51 + 114 + 381·P` bytes.
+    /// Encoded audio begins where the preamble law puts it: a stroke payload is its
+    /// own header length plus whole packets, and the chain sits at the end of it.
     #[test]
     fn the_allocation_is_whole_packets_with_the_chain_at_the_end() {
         let file = encoded(&sine(440.0, 8000.0, 44_100), Predictor::Plain);
+        let map_len = section::find(&file.body.sections, section::MAP)
+            .unwrap()
+            .payload
+            .len();
+        let cat_len = section::find(&file.body.sections, section::CAT)
+            .unwrap()
+            .payload
+            .len();
         let stroke = section::find(&file.body.sections, section::STK).unwrap();
-        let words = (stroke.payload.len() - HEADER_LEN) / 3;
-        assert_eq!((stroke.payload.len() - HEADER_LEN) % 3, 0);
-        assert_eq!((words - SLACK_WORDS) % PACKET_WORDS, 0);
+        let head = super::super::stroke::header_len(0, cat_len, map_len);
+        assert_eq!((stroke.payload.len() - head) % PACKET_LEN, 0);
         assert_eq!(&stroke.payload[stroke.payload.len() - 3..], &[0x80, 0, 24]);
     }
 
@@ -1059,6 +1197,157 @@ mod tests {
         for gap in [23..29, 32..38, 41..47] {
             assert!(head[gap.clone()].iter().all(|&b| b == 0), "{gap:?}");
         }
+    }
+
+    fn zone(source: &[i16], root_key: u8, top_note: u8, global_id: u32) -> NewZone<'_> {
+        NewZone {
+            source,
+            root_key,
+            top_note,
+            global_id,
+        }
+    }
+
+    /// A zone reaches the stroke it names, whatever order the ids run in: three zones
+    /// keep their own root keys, top notes and audio through a read-back.
+    #[test]
+    fn every_zone_reads_back_paired_to_its_own_stroke() {
+        let high = sine(880.0, 12_000.0, 12_000);
+        let mid = sine(440.0, 12_000.0, 9_000);
+        let low = sine(220.0, 12_000.0, 15_000);
+        let file = multi_zone(
+            &[
+                zone(&high, 72, 96, 7),
+                zone(&mid, 60, 65, 3),
+                zone(&low, 48, 53, 9),
+            ],
+            "Three",
+            Predictor::Plain,
+        )
+        .unwrap();
+
+        let read = super::super::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(read.name().unwrap(), "Three");
+        let zones = read.zones().unwrap();
+        assert_eq!(
+            zones.iter().map(|z| z.top_note).collect::<Vec<_>>(),
+            [96, 65, 53]
+        );
+        assert_eq!(
+            zones.iter().map(|z| z.stroke_id).collect::<Vec<_>>(),
+            [7, 3, 9]
+        );
+        assert_eq!(
+            read.strokes()
+                .unwrap()
+                .iter()
+                .map(|s| s.root_key)
+                .collect::<Vec<_>>(),
+            [72, 60, 48]
+        );
+
+        for (index, source) in [&high, &mid, &low].iter().enumerate() {
+            let (at, stream) = read.zone_stream(index).unwrap();
+            let audio = codec::decode(stream, at, codec::Layout::V2).unwrap();
+            let plan = Plan::new(source.len()).unwrap();
+            let q = quantise(source, &plan);
+            let gain = 1i32 << q.shift;
+            assert_eq!(audio.samples.len(), plan.fields, "zone {index}");
+            for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
+                assert_eq!(i32::from(got), want * gain, "zone {index} field {f}");
+            }
+        }
+    }
+
+    /// A zone's audio does not depend on the company it keeps: the same source in a
+    /// three-zone instrument decodes to what it decodes to on its own, even though the
+    /// zone table moved its stream and rewrote its directory.
+    #[test]
+    fn a_zone_decodes_the_same_alone_as_in_a_crowd() {
+        let source = sine(330.0, 18_000.0, 20_000);
+        let alone = instrument(&source, &Options::new("One").root_key(60)).unwrap();
+        let crowd = multi_zone(
+            &[
+                zone(&sine(880.0, 9000.0, 8000), 72, 96, 3),
+                zone(&source, 60, 65, 2),
+                zone(&sine(110.0, 9000.0, 8000), 48, 53, 1),
+            ],
+            "Three",
+            Predictor::Plain,
+        )
+        .unwrap();
+
+        let one = alone.zone_stream(0).unwrap();
+        let many = crowd.zone_stream(1).unwrap();
+        assert_ne!(one.1, many.1, "the streams differ; only the audio must not");
+        assert_eq!(
+            codec::decode(one.1, one.0, codec::Layout::V2).unwrap(),
+            codec::decode(many.1, many.0, codec::Layout::V2).unwrap()
+        );
+    }
+
+    /// Encoded audio starts at a fixed offset, so a zone table takes its bytes out of
+    /// the first stroke's header rather than pushing the packets along.
+    #[test]
+    fn every_stroke_is_its_own_header_length_plus_whole_packets() {
+        let source = sine(440.0, 12_000.0, 12_000);
+        for count in 1..=6usize {
+            let zones: Vec<NewZone> = (0..count)
+                .map(|i| zone(&source, 60, 120 - 10 * i as u8, i as u32 + 1))
+                .collect();
+            let file = multi_zone(&zones, "Ladder", Predictor::Plain).unwrap();
+            let cat_len = section::find(&file.body.sections, section::CAT)
+                .unwrap()
+                .payload
+                .len();
+            let map_len = section::find(&file.body.sections, section::MAP)
+                .unwrap()
+                .payload
+                .len();
+            for (index, section) in file
+                .body
+                .sections
+                .iter()
+                .filter(|s| s.is(section::STK))
+                .enumerate()
+            {
+                let head = super::super::stroke::header_len(index, cat_len, map_len);
+                assert_eq!(
+                    (section.payload.len() - head) % PACKET_LEN,
+                    0,
+                    "{count} zones, stroke {index}: {} bytes over a {head}-byte header",
+                    section.payload.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_zone_list_the_format_cannot_store_is_refused() {
+        let source = vec![0i16; MIN_FRAMES];
+        let one =
+            |root, top, id| multi_zone(&[zone(&source, root, top, id)], "x", Predictor::Plain);
+        assert!(multi_zone(&[], "x", Predictor::Plain).is_err());
+        assert!(one(60, 84, 0).is_err(), "id zero names no stroke");
+        assert!(one(60, 84, 256).is_err(), "id past the record's one byte");
+        assert!(one(60, 128, 1).is_err());
+        assert!(one(128, 84, 1).is_err());
+        assert!(one(60, 84, 1).is_ok());
+
+        let pair = |tops: [u8; 2], ids: [u32; 2]| {
+            multi_zone(
+                &[
+                    zone(&source, 60, tops[0], ids[0]),
+                    zone(&source, 48, tops[1], ids[1]),
+                ],
+                "x",
+                Predictor::Plain,
+            )
+        };
+        assert!(pair([84, 53], [1, 1]).is_err(), "duplicate stroke id");
+        assert!(pair([53, 84], [2, 1]).is_err(), "zones out of order");
+        assert!(pair([84, 84], [2, 1]).is_err(), "zones overlap");
+        assert!(pair([84, 53], [2, 1]).is_ok());
     }
 
     /// Silence is silence: nothing promotes, so every content record is the width-2
