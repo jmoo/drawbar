@@ -736,8 +736,6 @@ fn projects() -> impl Iterator<Item = (&'static Specimen, &'static nsmpproj::Pro
     })
 }
 
-/// On the editor's own projects, every stroke field rewrites its own line and
-/// leaves the rest of the file byte-identical.
 #[test]
 fn nsmpproj_stroke_fields_move_alone() {
     use nsmpproj::StrokeField as F;
@@ -788,7 +786,6 @@ fn nsmpproj_stroke_fields_move_alone() {
     assert!(seen > 0, "no sample-editor project in the corpus");
 }
 
-/// The instrument's three velocity defaults are the only lines they move.
 #[test]
 fn nsmpproj_velocity_defaults_move_alone() {
     for (specimen, project) in projects() {

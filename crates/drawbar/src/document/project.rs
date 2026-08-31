@@ -437,8 +437,6 @@ mod tests {
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), out);
     }
 
-    /// The loop, gain and velocity paths reach the fields the tree keeps in two
-    /// separate blocks, and the snapshot reads them back.
     #[test]
     fn stroke_and_velocity_edits_land_and_read_back() {
         let bytes = project_bytes();

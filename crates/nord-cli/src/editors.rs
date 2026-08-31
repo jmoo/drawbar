@@ -522,8 +522,6 @@ mod tests {
         assert_eq!(project.audio_files().unwrap()[0].path, "verylow.wav");
     }
 
-    /// Every path the listing prints takes its own printed value back, and
-    /// nothing moves — the listing and the setter cannot drift apart.
     #[test]
     fn every_project_path_the_listing_prints_is_settable() {
         let mut project = project();
@@ -540,8 +538,6 @@ mod tests {
         assert_eq!(values(&after), values(&rows));
     }
 
-    /// The loop, trim, gain and velocity paths reach the fields the tree keeps
-    /// in two different blocks.
     #[test]
     fn stroke_paths_reach_both_blocks() {
         let mut project = project();

@@ -133,9 +133,10 @@ pub struct ZoneStroke {
 
 /// The instrument's velocity defaults, from `samplib_attrs`.
 ///
-/// Inferred from specimens; not confirmed on hardware. Each is carried
-/// verbatim: nothing observed distinguishes a flag from a depth, so a rewrite
-/// must not collapse one to 0 or 1.
+/// Inferred from specimens; not confirmed on hardware.
+///
+/// Each value is carried verbatim: nothing observed distinguishes a flag from a depth,
+/// so a rewrite must not collapse one to 0 or 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VelocityDefaults {
     /// `m_atkVelocityAmount`.
@@ -1064,7 +1065,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Each stroke field lands where the tree puts it, and rewrites one line.
     #[test]
     fn a_stroke_field_moves_only_its_own_line() {
         let mut project = three_zones();
@@ -1103,7 +1103,6 @@ mod tests {
         assert_eq!(zone_stroke(&project, 3).gain, 1.0);
     }
 
-    /// The rest of the loop group, and the instrument's velocity defaults.
     #[test]
     fn the_loop_group_and_velocity_defaults_round_trip() {
         let mut project = three_zones();
