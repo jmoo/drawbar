@@ -91,7 +91,22 @@ pub struct Stroke {
     pub stop: f64,
     pub loop_enabled: bool,
     pub loop_start: f64,
+    /// `m_loopLengthLong`.
     pub loop_length: f64,
+    /// `m_loopXFadeLengthLong`, frames.
+    pub loop_crossfade: f64,
+    /// `m_loopXFModeLong`. The mode numbering is not decoded.
+    pub loop_crossfade_mode: u32,
+    pub loop_decay_enabled: bool,
+    pub loop_decay: f64,
+    pub loop_detune: i32,
+    pub short_loop_enabled: bool,
+    /// `m_loopLengthShort`.
+    pub short_loop_length: f64,
+    /// `m_loopXFadeShort`. An integer, where the frame positions around it are
+    /// `%f` decimals; the unit is not decoded.
+    pub short_loop_crossfade: u32,
+    pub short_loop_uses_pitch: bool,
 }
 
 /// One `map_zone`: a root key, the key range it answers to, and its strokes.
@@ -116,6 +131,131 @@ pub struct ZoneStroke {
     pub velocity: (u8, u8),
 }
 
+/// The instrument's velocity defaults, from `samplib_attrs`.
+///
+/// Inferred from specimens; not confirmed on hardware. Each is carried
+/// verbatim: nothing observed distinguishes a flag from a depth, so a rewrite
+/// must not collapse one to 0 or 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VelocityDefaults {
+    /// `m_atkVelocityAmount`.
+    pub attack_amount: u8,
+    /// `m_velAmpl`.
+    pub amplitude: u8,
+    /// `m_velTimbre`.
+    pub timbre: u8,
+}
+
+/// The highest velocity a window end may name.
+pub const MAX_VELOCITY: u8 = 127;
+
+/// One field of one stroke, with the value to give it.
+///
+/// The trim and loop points sit in the `common_zone`'s `common_stroke`; gain
+/// and the velocity window in the `map_zone`'s `map_stroke`. Both blocks name
+/// the stroke by the same `m_globalID`, so one id reaches either.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StrokeField {
+    /// `m_start`: where playback begins, frames into the file.
+    Start(f64),
+    /// `m_stop`: where it ends.
+    Stop(f64),
+    LoopEnabled(bool),
+    LoopStart(f64),
+    /// `m_loopLengthLong`.
+    LoopLength(f64),
+    /// `m_loopXFadeLengthLong`, frames.
+    LoopCrossfade(f64),
+    /// `m_loopXFModeLong`.
+    LoopCrossfadeMode(u32),
+    LoopDecayEnabled(bool),
+    LoopDecay(f64),
+    LoopDetune(i32),
+    ShortLoopEnabled(bool),
+    /// `m_loopLengthShort`.
+    ShortLoopLength(f64),
+    /// `m_loopXFadeShort`.
+    ShortLoopCrossfade(u32),
+    ShortLoopUsesPitch(bool),
+    /// `m_gain`, a linear factor — the editor writes 1 for untouched.
+    Gain(f64),
+    /// `m_velocityMin`. Not checked against the window's other end: an
+    /// inverted window silences the stroke, which is a thing to store.
+    VelocityMin(u8),
+    /// `m_velocityMax`, under the same rule as [`StrokeField::VelocityMin`].
+    VelocityMax(u8),
+}
+
+/// Which of the two blocks naming a stroke holds a field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Common,
+    Map,
+}
+
+impl StrokeField {
+    /// One `field = value` in the vocabulary [`Stroke`] and [`ZoneStroke`]
+    /// spell, so a CLI, a UI and a script name a stroke's fields the same way.
+    /// Flags take `on`/`off`, `yes`/`no`, `true`/`false` or `1`/`0`.
+    pub fn parse(field: &str, value: &str) -> Result<StrokeField, ParseError> {
+        use StrokeField::*;
+        Ok(match field {
+            "start" => Start(number(field, value)?),
+            "stop" => Stop(number(field, value)?),
+            "gain" => Gain(number(field, value)?),
+            "velocity_min" => VelocityMin(number(field, value)?),
+            "velocity_max" => VelocityMax(number(field, value)?),
+            "loop_enabled" => LoopEnabled(truth(field, value)?),
+            "loop_start" => LoopStart(number(field, value)?),
+            "loop_length" => LoopLength(number(field, value)?),
+            "loop_crossfade" => LoopCrossfade(number(field, value)?),
+            "loop_crossfade_mode" => LoopCrossfadeMode(number(field, value)?),
+            "loop_decay_enabled" => LoopDecayEnabled(truth(field, value)?),
+            "loop_decay" => LoopDecay(number(field, value)?),
+            "loop_detune" => LoopDetune(number(field, value)?),
+            "short_loop_enabled" => ShortLoopEnabled(truth(field, value)?),
+            "short_loop_length" => ShortLoopLength(number(field, value)?),
+            "short_loop_crossfade" => ShortLoopCrossfade(number(field, value)?),
+            "short_loop_uses_pitch" => ShortLoopUsesPitch(truth(field, value)?),
+            _ => {
+                return Err(ParseError::AssertFail(format!(
+                    "a stroke has no field named {field:?}"
+                )))
+            }
+        })
+    }
+
+    /// The block, key and text this field writes, or why the value cannot be
+    /// written at all.
+    fn placement(self) -> Result<(Block, &'static str, String), ParseError> {
+        use Block::{Common, Map};
+        use StrokeField::*;
+        Ok(match self {
+            Start(v) => (Common, "m_start", frames(v)?),
+            Stop(v) => (Common, "m_stop", frames(v)?),
+            LoopEnabled(v) => (Common, "m_loopEnabled", bit(v)),
+            LoopStart(v) => (Common, "m_loopStart", frames(v)?),
+            LoopLength(v) => (Common, "m_loopLengthLong", frames(v)?),
+            LoopCrossfade(v) => (Common, "m_loopXFadeLengthLong", frames(v)?),
+            LoopCrossfadeMode(v) => (Common, "m_loopXFModeLong", v.to_string()),
+            LoopDecayEnabled(v) => (Common, "m_loopDecayEnabled", bit(v)),
+            LoopDecay(v) => (
+                Common,
+                "m_loopDecay",
+                positive(v, "a decay at or above zero")?,
+            ),
+            LoopDetune(v) => (Common, "m_loopDetune", v.to_string()),
+            ShortLoopEnabled(v) => (Common, "m_shortLoopEnabled", bit(v)),
+            ShortLoopLength(v) => (Common, "m_loopLengthShort", frames(v)?),
+            ShortLoopCrossfade(v) => (Common, "m_loopXFadeShort", v.to_string()),
+            ShortLoopUsesPitch(v) => (Common, "m_shortLoopUsesPitch", bit(v)),
+            Gain(v) => (Map, "m_gain", positive(v, "a gain at or above zero")?),
+            VelocityMin(v) => (Map, "m_velocityMin", velocity(v)?),
+            VelocityMax(v) => (Map, "m_velocityMax", velocity(v)?),
+        })
+    }
+}
+
 /// What [`Project::new`] needs for one zone: a WAV and the key it was
 /// recorded at.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +276,53 @@ fn flag(node: &Node, key: &str) -> Result<bool, ParseError> {
 /// `%f`: six decimals, the way the editor writes every real number.
 fn real(v: f64) -> String {
     format!("{v:.6}")
+}
+
+fn bit(v: bool) -> String {
+    if v { "1" } else { "0" }.to_string()
+}
+
+fn positive(v: f64, bound: &str) -> Result<String, ParseError> {
+    if !v.is_finite() || v < 0.0 {
+        return Err(ParseError::OutOfBounds {
+            value: v.to_string(),
+            bound: bound.into(),
+        });
+    }
+    Ok(real(v))
+}
+
+fn frames(v: f64) -> Result<String, ParseError> {
+    positive(v, "a frame position at or above zero")
+}
+
+fn number<T: std::str::FromStr>(field: &str, value: &str) -> Result<T, ParseError> {
+    value.parse().map_err(|_| {
+        ParseError::AssertFail(format!(
+            "{field} = {value:?} is not a {}",
+            std::any::type_name::<T>()
+        ))
+    })
+}
+
+fn truth(field: &str, value: &str) -> Result<bool, ParseError> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Ok(true),
+        "false" | "off" | "no" | "0" => Ok(false),
+        _ => Err(ParseError::AssertFail(format!(
+            "{field} = {value:?} is not on or off"
+        ))),
+    }
+}
+
+fn velocity(v: u8) -> Result<String, ParseError> {
+    if v > MAX_VELOCITY {
+        return Err(ParseError::OutOfBounds {
+            value: v.to_string(),
+            bound: format!("0..={MAX_VELOCITY}"),
+        });
+    }
+    Ok(v.to_string())
 }
 
 impl Project {
@@ -222,6 +409,15 @@ impl Project {
                     loop_enabled: flag(s, "m_loopEnabled")?,
                     loop_start: s.get("m_loopStart")?,
                     loop_length: s.get("m_loopLengthLong")?,
+                    loop_crossfade: s.get("m_loopXFadeLengthLong")?,
+                    loop_crossfade_mode: s.get("m_loopXFModeLong")?,
+                    loop_decay_enabled: flag(s, "m_loopDecayEnabled")?,
+                    loop_decay: s.get("m_loopDecay")?,
+                    loop_detune: s.get("m_loopDetune")?,
+                    short_loop_enabled: flag(s, "m_shortLoopEnabled")?,
+                    short_loop_length: s.get("m_loopLengthShort")?,
+                    short_loop_crossfade: s.get("m_loopXFadeShort")?,
+                    short_loop_uses_pitch: flag(s, "m_shortLoopUsesPitch")?,
                 });
             }
         }
@@ -277,12 +473,15 @@ impl Project {
             .collect()
     }
 
-    fn map_zone_mut(&mut self, zone_id: u32) -> Result<&mut Node, ParseError> {
-        let map = self
-            .instrument_mut()?
+    fn map_info_mut(&mut self) -> Result<&mut Node, ParseError> {
+        self.instrument_mut()?
             .blocks_mut("map_info")
             .next()
-            .ok_or_else(|| ParseError::AssertFail("instrument has no map_info block".into()))?;
+            .ok_or_else(|| ParseError::AssertFail("instrument has no map_info block".into()))
+    }
+
+    fn map_zone_mut(&mut self, zone_id: u32) -> Result<&mut Node, ParseError> {
+        let map = self.map_info_mut()?;
         map.blocks_mut("map_zone")
             .find(|z| z.field("m_zoneId") == Some(zone_id.to_string().as_str()))
             .ok_or_else(|| ParseError::AssertFail(format!("no zone with id {zone_id}")))
@@ -305,6 +504,57 @@ impl Project {
         let zone = self.map_zone_mut(zone_id)?;
         zone.set_field("m_btmNote", bottom.to_string())?;
         zone.set_field("m_topNote", top.to_string())
+    }
+
+    /// The instrument's `samplib_attrs` block.
+    fn attrs(&self) -> Result<&Node, ParseError> {
+        self.instrument()?.require("samplib_attrs")
+    }
+
+    fn attrs_mut(&mut self) -> Result<&mut Node, ParseError> {
+        self.instrument_mut()?
+            .blocks_mut("samplib_attrs")
+            .next()
+            .ok_or_else(|| ParseError::AssertFail("instrument has no samplib_attrs block".into()))
+    }
+
+    pub fn velocity_defaults(&self) -> Result<VelocityDefaults, ParseError> {
+        let attrs = self.attrs()?;
+        Ok(VelocityDefaults {
+            attack_amount: attrs.get("m_atkVelocityAmount")?,
+            amplitude: attrs.get("m_velAmpl")?,
+            timbre: attrs.get("m_velTimbre")?,
+        })
+    }
+
+    pub fn set_velocity_defaults(&mut self, v: VelocityDefaults) -> Result<(), ParseError> {
+        let attrs = self.attrs_mut()?;
+        attrs.set_field("m_atkVelocityAmount", v.attack_amount.to_string())?;
+        attrs.set_field("m_velAmpl", v.amplitude.to_string())?;
+        attrs.set_field("m_velTimbre", v.timbre.to_string())
+    }
+
+    /// The `common_stroke` and `map_stroke` a global id names.
+    fn stroke_mut(&mut self, global_id: u32, block: Block) -> Result<&mut Node, ParseError> {
+        let want = global_id.to_string();
+        let (zones, inner) = match block {
+            Block::Common => (self.root.blocks_mut("common_zone"), "common_stroke"),
+            Block::Map => (self.map_info_mut()?.blocks_mut("map_zone"), "map_stroke"),
+        };
+        zones
+            .flat_map(|zone| Node::blocks_mut(zone, inner))
+            .find(|s| s.field("m_globalID") == Some(want.as_str()))
+            .ok_or_else(|| ParseError::AssertFail(format!("no {inner} with global id {global_id}")))
+    }
+
+    /// Move one field of one stroke, leaving every other byte where it was.
+    pub fn set_stroke_field(
+        &mut self,
+        global_id: u32,
+        field: StrokeField,
+    ) -> Result<(), ParseError> {
+        let (block, key, value) = field.placement()?;
+        self.stroke_mut(global_id, block)?.set_field(key, value)
     }
 
     pub fn set_audio_path(&mut self, file_id: u32, path: &str) -> Result<(), ParseError> {
@@ -779,6 +1029,138 @@ mod tests {
         assert!(project.set_root_key(200, 60).is_err());
         assert!(project.set_audio_path(9, "x").is_err());
         assert!(project.set_key_range(131, 70, 60).is_err());
+    }
+
+    fn stroke(project: &Project, global_id: u32) -> Stroke {
+        project
+            .strokes()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.global_id == global_id)
+            .unwrap()
+    }
+
+    fn zone_stroke(project: &Project, global_id: u32) -> ZoneStroke {
+        project
+            .zones()
+            .unwrap()
+            .into_iter()
+            .flat_map(|z| z.strokes)
+            .find(|s| s.global_id == global_id)
+            .unwrap()
+    }
+
+    /// Each stroke field lands where the tree puts it, and rewrites one line.
+    #[test]
+    fn a_stroke_field_moves_only_its_own_line() {
+        let mut project = three_zones();
+        let before = project.render();
+        for field in [
+            StrokeField::LoopEnabled(true),
+            StrokeField::LoopStart(1000.0),
+            StrokeField::LoopLength(500.0),
+            StrokeField::Gain(0.5),
+            StrokeField::VelocityMax(100),
+        ] {
+            project.set_stroke_field(2, field).unwrap();
+        }
+        let after = project.render();
+
+        let s = stroke(&project, 2);
+        assert!(s.loop_enabled);
+        assert_eq!((s.loop_start, s.loop_length), (1000.0, 500.0));
+        let z = zone_stroke(&project, 2);
+        assert_eq!(z.gain, 0.5);
+        assert_eq!(z.velocity, (0, 100));
+
+        // Real numbers keep the editor's six decimals.
+        assert!(after.contains("m_loopStart = 1000.000000\n"), "{after}");
+        assert!(after.contains("m_gain = 0.500000\n"), "{after}");
+
+        let changed = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(changed, 5);
+        assert_eq!(before.lines().count(), after.lines().count());
+        // Only the addressed stroke moved.
+        assert!(!stroke(&project, 1).loop_enabled);
+        assert_eq!(zone_stroke(&project, 3).gain, 1.0);
+    }
+
+    /// The rest of the loop group, and the instrument's velocity defaults.
+    #[test]
+    fn the_loop_group_and_velocity_defaults_round_trip() {
+        let mut project = three_zones();
+        for field in [
+            StrokeField::Start(2.0),
+            StrokeField::Stop(4000.0),
+            StrokeField::LoopCrossfade(120.0),
+            StrokeField::LoopCrossfadeMode(1),
+            StrokeField::LoopDecayEnabled(true),
+            StrokeField::LoopDecay(3.5),
+            StrokeField::LoopDetune(-7),
+            StrokeField::ShortLoopEnabled(true),
+            StrokeField::ShortLoopLength(64.0),
+            StrokeField::ShortLoopCrossfade(4),
+            StrokeField::ShortLoopUsesPitch(false),
+            StrokeField::VelocityMin(20),
+        ] {
+            project.set_stroke_field(1, field).unwrap();
+        }
+        project
+            .set_velocity_defaults(VelocityDefaults {
+                attack_amount: 64,
+                amplitude: 0,
+                timbre: 1,
+            })
+            .unwrap();
+
+        let s = stroke(&project, 1);
+        assert_eq!((s.start, s.stop), (2.0, 4000.0));
+        assert_eq!((s.loop_crossfade, s.loop_crossfade_mode), (120.0, 1));
+        assert!(s.loop_decay_enabled);
+        assert_eq!((s.loop_decay, s.loop_detune), (3.5, -7));
+        assert!(s.short_loop_enabled && !s.short_loop_uses_pitch);
+        assert_eq!((s.short_loop_length, s.short_loop_crossfade), (64.0, 4));
+        assert_eq!(zone_stroke(&project, 1).velocity, (20, 127));
+        assert_eq!(
+            project.velocity_defaults().unwrap(),
+            VelocityDefaults {
+                attack_amount: 64,
+                amplitude: 0,
+                timbre: 1,
+            }
+        );
+
+        // The whole file still parses back to itself.
+        let text = project.render();
+        assert_eq!(Project::parse(&text).unwrap().render(), text);
+    }
+
+    #[test]
+    fn a_stroke_field_refuses_what_the_file_cannot_hold() {
+        let mut project = three_zones();
+        let before = project.render();
+        for bad in [
+            StrokeField::LoopStart(-1.0),
+            StrokeField::LoopStart(f64::NAN),
+            StrokeField::LoopStart(f64::INFINITY),
+            StrokeField::Gain(-0.5),
+            StrokeField::LoopDecay(-1.0),
+            StrokeField::VelocityMin(200),
+            StrokeField::VelocityMax(128),
+        ] {
+            assert!(project.set_stroke_field(1, bad).is_err(), "{bad:?}");
+        }
+        assert!(project
+            .set_stroke_field(99, StrokeField::LoopEnabled(true))
+            .is_err());
+        assert!(project
+            .set_stroke_field(99, StrokeField::Gain(1.0))
+            .is_err());
+        assert_eq!(project.render(), before);
     }
 
     #[test]

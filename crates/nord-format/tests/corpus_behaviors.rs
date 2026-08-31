@@ -1,7 +1,7 @@
 #![cfg(feature = "corpus")]
 //! Behavioral checks against files produced by the instrument and sample editor.
 
-use nord_format::formats::nsmp;
+use nord_format::formats::{nsmp, nsmpproj};
 use nord_format::{Entity, Live, Program, Sample};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
@@ -727,4 +727,86 @@ fn nsmp_wide_retune_round_trips_across_the_corpus() {
         seen += 1;
     }
     assert!(seen > 0, "no editable wide sample in the corpus");
+}
+
+fn projects() -> impl Iterator<Item = (&'static Specimen, &'static nsmpproj::Project)> {
+    corpus().iter().filter_map(|s| match &s.entity {
+        Entity::SampleProject(p) => Some((s, p)),
+        _ => None,
+    })
+}
+
+/// On the editor's own projects, every stroke field rewrites its own line and
+/// leaves the rest of the file byte-identical.
+#[test]
+fn nsmpproj_stroke_fields_move_alone() {
+    use nsmpproj::StrokeField as F;
+    let fields = [
+        ("start", F::Start(3.0)),
+        ("stop", F::Stop(4000.0)),
+        ("gain", F::Gain(0.75)),
+        ("velocity_min", F::VelocityMin(10)),
+        ("velocity_max", F::VelocityMax(100)),
+        ("loop_enabled", F::LoopEnabled(true)),
+        ("loop_start", F::LoopStart(1234.5)),
+        ("loop_length", F::LoopLength(600.0)),
+        ("loop_crossfade", F::LoopCrossfade(90.0)),
+        ("loop_crossfade_mode", F::LoopCrossfadeMode(1)),
+        ("loop_decay_enabled", F::LoopDecayEnabled(true)),
+        ("loop_decay", F::LoopDecay(3.25)),
+        ("loop_detune", F::LoopDetune(-12)),
+        ("short_loop_enabled", F::ShortLoopEnabled(true)),
+        ("short_loop_length", F::ShortLoopLength(64.0)),
+        ("short_loop_crossfade", F::ShortLoopCrossfade(5)),
+        ("short_loop_uses_pitch", F::ShortLoopUsesPitch(false)),
+    ];
+
+    let mut seen = 0;
+    for (specimen, project) in projects() {
+        let at = specimen.path.display();
+        let before = project.render();
+        for stroke in project.strokes().unwrap() {
+            for (name, field) in fields {
+                let mut edited = project.clone();
+                edited.set_stroke_field(stroke.global_id, field).unwrap();
+                let after = edited.render();
+                let changed = before
+                    .lines()
+                    .zip(after.lines())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(changed, 1, "{at}: stroke {} {name}", stroke.global_id);
+                assert_eq!(
+                    before.lines().count(),
+                    after.lines().count(),
+                    "{at}: {name}"
+                );
+            }
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no sample-editor project in the corpus");
+}
+
+/// The instrument's three velocity defaults are the only lines they move.
+#[test]
+fn nsmpproj_velocity_defaults_move_alone() {
+    for (specimen, project) in projects() {
+        let before = project.render();
+        let mut edited = project.clone();
+        let defaults = nsmpproj::VelocityDefaults {
+            attack_amount: 64,
+            amplitude: 0,
+            timbre: 0,
+        };
+        edited.set_velocity_defaults(defaults).unwrap();
+        assert_eq!(edited.velocity_defaults().unwrap(), defaults);
+        let after = edited.render();
+        let changed = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(changed, 3, "{}", specimen.path.display());
+    }
 }
