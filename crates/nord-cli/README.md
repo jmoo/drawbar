@@ -310,13 +310,17 @@ class, so it reaches every format `nord-format` can set: the Electro 5 bodies
 above, the Stage 2/3/4 programs, the Stage 3/4 synth presets, the Stage 4
 organ and piano presets — any body with a generated field registry — plus set
 lists, sample instruments, and Nord Sample Editor projects (`.nsmpproj`: the
-instrument name, each zone's root key and key range, and each audio file's
-path, addressed by the ids `inspect` prints).
+instrument name and velocity defaults, each zone's root key and key range,
+each stroke's trim, loop, gain and velocity window, and each audio file's
+path — zones and files under the ids `inspect` prints, a stroke under its
+global id).
 
 ```sh
 nord edit stage.ns3f --fields
 nord edit stage.ns3f --set split_enabled=true -o out.ns3f
 nord edit project.nsmpproj --set name=Marimba --set zone129.root_key=C3 --yes
+nord edit project.nsmpproj --set stroke1.loop_enabled=on \
+  --set stroke1.loop_start=1500 --set stroke1.gain=0.5 --yes
 ```
 
 ## Build & run
