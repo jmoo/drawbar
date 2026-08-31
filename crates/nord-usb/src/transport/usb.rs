@@ -131,6 +131,12 @@ impl UsbTransport {
         completion.status.map_err(map_err("bulk write terminator"))
     }
 
+    async fn write_frame(&mut self, buf: &[u8]) -> Result<()> {
+        let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
+        completion.status.map_err(map_err("bulk write"))?;
+        self.terminate(buf.len()).await
+    }
+
     /// Mirror every frame this transport carries into a replay script at `path`.
     ///
     /// The script is written as it goes, so it stays useful even if the run ends badly.
@@ -303,9 +309,7 @@ impl UsbTransport {
 
 impl Transport for UsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
-        completion.status.map_err(map_err("bulk write"))?;
-        self.terminate(buf.len()).await?;
+        self.write_frame(buf).await?;
         // The terminator is a packet, not a frame: recording it would put a length word
         // in the script that no message has.
         if let Some(r) = self.record.as_mut() {
@@ -325,11 +329,10 @@ impl Transport for UsbTransport {
     }
 
     async fn write_timeout(&mut self, buf: &[u8], limit: Duration) -> Result<bool> {
-        // `bulk_out` owns its transfer, so dropping the future cancels it.
-        match with_timeout(self.interface.bulk_out(EP_OUT, buf.to_vec()), limit).await {
-            Some(completion) => {
-                completion.status.map_err(map_err("bulk write"))?;
-                self.terminate(buf.len()).await?;
+        // Each `bulk_out` owns its transfer, so dropping the future cancels it.
+        match with_timeout(self.write_frame(buf), limit).await {
+            Some(result) => {
+                result?;
                 if let Some(r) = self.record.as_mut() {
                     r.out(buf);
                 }

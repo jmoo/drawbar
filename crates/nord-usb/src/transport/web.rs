@@ -160,18 +160,18 @@ impl WebUsbTransport {
                 )
             })?;
 
+        let out_packet = out_packet(&device).ok_or_else(|| {
+            Error::Transport(format!(
+                "the vendor interface reports no bulk OUT endpoint at {EP_OUT:#04x}"
+            ))
+        })?;
+
         JsFuture::from(device.claim_interface(interface_number))
             .await
             .map_err(map_err(
                 "claiming the vendor interface (another application holding it — \
                  Nord Sound Manager — will block this)",
             ))?;
-
-        let out_packet = out_packet(&device).ok_or_else(|| {
-            Error::Transport(format!(
-                "the vendor interface reports no bulk OUT endpoint at {EP_OUT:#04x}"
-            ))
-        })?;
 
         Ok(Self {
             device,
