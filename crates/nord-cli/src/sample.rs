@@ -188,7 +188,7 @@ pub struct BuildArgs {
     #[arg(long)]
     pub predict: bool,
 
-    /// Acknowledge that this codec tier is unproven on hardware. Required.
+    /// Acknowledge that this is not a vendor-identical encode. Required.
     #[arg(long)]
     pub experimental: bool,
 }

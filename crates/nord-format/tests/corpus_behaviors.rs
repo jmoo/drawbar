@@ -442,13 +442,9 @@ fn built_zones(project: &nsmpproj::Project) -> Vec<(u32, u8, u8, Vec<i16>)> {
         .collect()
 }
 
-/// The editor's project/instrument twins are the specification for `multi_zone`:
-/// building a project must land on everything but the audio that the editor's own
-/// instrument holds — container header, section chain, name, categories, and every
-/// byte of the zone table, including the stroke ids the zones name and the top notes
-/// a hand edit moved.
 #[test]
 fn nsmp_building_a_project_reproduces_its_editor_twin() {
+    // Expected bytes come from paired Sample Editor project/instrument fixtures.
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
@@ -522,11 +518,9 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
     }
 }
 
-/// A zone's stream is as long as the editor made it, which is what pins down the
-/// region a project encodes: the editor codes `start..stop`, not the whole
-/// `begin..end` extent, and the two differ by a frame on these projects.
 #[test]
 fn nsmp_a_built_zone_is_as_long_as_the_editors() {
+    // Expected lengths come from the Sample Editor instrument fixtures.
     for name in ["D1-one-zone", "D3-2zones", "D4-3zones", "D8-2zones-hi"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let twin = v2_named(&format!("{name}.nsmp"));
@@ -543,8 +537,6 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     }
 }
 
-/// Every stroke of a built instrument is packed where the preamble law says, and its
-/// own word directory names the records a walk finds — the check `verify --deep` runs.
 #[test]
 fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
