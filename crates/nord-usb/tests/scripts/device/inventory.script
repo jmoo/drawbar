@@ -1,10 +1,8 @@
 # nord-usb replay script: a full read-only inventory sweep.
 # One transaction per object class: UI hello, SESSION_OPEN(class),
 # STATUS(class), SESSION_CLOSE, UI goodbye.
-# Generated from the protocol spec; counters are real Electro 5 values.
-# Programs and set lists were read on 2026-07-26; the two library classes on
-# 2026-08-24, the probe that decoded STATUS's fourth and fifth words, so their
-# dirty pools are the ones a real instrument reported.
+# Generated from the protocol spec; counters are real Electro 5 values, including
+# the library classes' fourth and fifth STATUS words.
 # Format: '<O|I> <hex>' -- O = host->device, I = device->host.
 # source: synthetic
 # intent: device status

@@ -1,17 +1,5 @@
-//! Finding the set lists a program move will rewrite.
-//!
-//! Moving a program is not a local operation: the instrument rewrites every set list
-//! that points at the slot, and a version-0 set list is migrated to version 1 on the way
-//! — which moving the program back does not undo. Nothing in the move request or its
-//! reply mentions any of it, so the only honest pre-flight is a scan of the set list
-//! class beforehand, and these are the assertions about what that scan must find.
-//!
-//! The exchanges are constructed to the confirmed frame shapes rather than captured: no
-//! recording of this walk exists, because it is a sequence nothing but this pre-flight
-//! ever sends. Each script is replayed through the exact-match transport, so a scan that
-//! asks a different question fails rather than quietly returning the right answer.
-//!
-//! No hardware, no platform dependency: this runs anywhere the crate compiles.
+//! Synthetic replay tests for the set-list scan used before program moves.
+//! Inferred from specimens; not confirmed on hardware.
 
 #![cfg(feature = "replay")]
 
@@ -20,7 +8,6 @@ use nord_usb::transport::{Direction, ReplayTransport, Step};
 use nord_usb::wire::{cmd, ui, Message, ObjectClass, Service};
 use nord_usb::{Location, Session};
 
-/// The three set lists every script here holds, at panel 1:1, 1:2 and 1:3.
 fn set_list(slot: u32) -> Location {
     Location { bank: 0, slot }
 }
@@ -36,7 +23,6 @@ fn request(command: u32, args: &[u8]) -> Step {
     out(Message::new(Service::Program, 10, command, args.to_vec()).encode())
 }
 
-/// A reply carrying the success status word ahead of its arguments.
 fn response(command: u32, rest: &[u8]) -> Step {
     Step {
         direction: Direction::In,
@@ -50,7 +36,6 @@ fn response(command: u32, rest: &[u8]) -> Step {
     }
 }
 
-/// A refusal: the same frame with a non-zero status and no arguments.
 fn refusal(command: u32, status: u32) -> Step {
     Step {
         direction: Direction::In,
@@ -100,7 +85,6 @@ fn deps_reply(at: Location, programs: &[Location]) -> Step {
     response(cmd::DEPENDENCIES + 1, &args)
 }
 
-/// Opening and closing frames, so each script is a whole transaction.
 fn session_open() -> Vec<Step> {
     vec![
         out(Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO, Vec::new()).encode()),
@@ -173,7 +157,6 @@ fn walk_of_three() -> Vec<Step> {
     steps
 }
 
-/// Drive one script and return what the scan found.
 fn scan(steps: Vec<Step>, targets: &[Location]) -> (Vec<op::Referrer>, bool) {
     let mut t = ReplayTransport::new(steps);
     let found = pollster::block_on(async {
@@ -187,11 +170,6 @@ fn scan(steps: Vec<Step>, targets: &[Location]) -> (Vec<op::Referrer>, bool) {
     (found, exhausted)
 }
 
-/// The whole point: name the set lists, and shout about the version-0 one.
-///
-/// Three set lists, two of which reference the program being moved. One of those is
-/// version 0 — the case the pre-flight exists for, because the rewrite migrates it
-/// irreversibly.
 #[test]
 fn a_move_names_every_set_list_that_points_at_either_slot() {
     let moved = Location { bank: 0, slot: 6 }; // panel 1:7
@@ -200,8 +178,6 @@ fn a_move_names_every_set_list_that_points_at_either_slot() {
 
     let mut steps = session_open();
     steps.extend(walk_of_three());
-    // 1:1 holds the moved program; 1:2 holds neither; 1:3 holds the destination's
-    // occupant, which the swap relocates just as surely.
     steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(0))));
     steps.push(deps_reply(set_list(0), &[moved, untouched]));
     steps.push(request(cmd::INFO, &slot_args(set_list(0))));
@@ -223,18 +199,14 @@ fn a_move_names_every_set_list_that_points_at_either_slot() {
     assert_eq!(found[0].at, set_list(0));
     assert_eq!(found[0].name, "Factory Set");
     assert_eq!(found[0].programs, vec![moved]);
-    // The one a warning has to single out: version 0 migrates to 1 and stays there.
     assert_eq!(found[0].version, 0);
 
-    // The destination's occupant is moved too, so its referrers are rewritten as well —
-    // scanning only the source slot would miss this one entirely.
     assert_eq!(found[1].at, set_list(2));
     assert_eq!(found[1].name, "Friday");
     assert_eq!(found[1].programs, vec![destination]);
     assert_eq!(found[1].version, 1);
 }
 
-/// A set list holding the same program twice must be named once, not twice.
 #[test]
 fn a_repeated_reference_is_reported_once() {
     let moved = Location { bank: 0, slot: 6 };
@@ -257,7 +229,6 @@ fn a_repeated_reference_is_reported_once() {
     assert_eq!(found[0].programs, vec![moved]);
 }
 
-/// No referrer is a real, reportable answer — and it still costs the full walk.
 #[test]
 fn a_program_nothing_references_reports_an_empty_list() {
     let moved = Location { bank: 7, slot: 49 };
@@ -278,26 +249,22 @@ fn a_program_nothing_references_reports_an_empty_list() {
     assert!(found.is_empty(), "{found:#?}");
 }
 
-/// A row the device reports but the object does not depend on must not produce a name.
-///
-/// An unrouted row (`flag` 0) and a live row addressing nothing both look like
-/// dependencies at a glance. Treating either as one puts a set list in front of the
-/// operator that the move will not touch — and a pre-flight that cries wolf is one
-/// nobody reads.
 #[test]
 fn rows_that_are_not_dependencies_are_not_referrers() {
     let moved = Location { bank: 0, slot: 6 };
 
     let mut deps = slot_args(set_list(0));
-    deps.extend_from_slice(&2u32.to_be_bytes());
-    // An unrouted row that still names the moved program.
+    deps.extend_from_slice(&3u32.to_be_bytes());
     deps.push(0);
     for w in [0u32, ObjectClass::Program.to_raw(), 0, 0, 1, 0, 6] {
         deps.extend_from_slice(&w.to_be_bytes());
     }
-    // A live row with nothing assigned: no id, no location.
     deps.push(1);
     for w in [0u32, ObjectClass::Program.to_raw(), 0, 0, 0, 0, 0] {
+        deps.extend_from_slice(&w.to_be_bytes());
+    }
+    deps.push(1);
+    for w in [0u32, ObjectClass::Sample.to_raw(), 0, 0, 1, 0, 6] {
         deps.extend_from_slice(&w.to_be_bytes());
     }
 
@@ -316,11 +283,6 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
     assert!(found.is_empty(), "{found:#?}");
 }
 
-/// A refused walk must fail the scan, not report that nothing is affected.
-///
-/// `0x11` is the cursor refusing a malformed-for-this-state request. Swallowing it would
-/// turn "I could not find out" into "nothing will be rewritten", which is the one wrong
-/// answer a pre-flight must never give.
 #[test]
 fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
     let mut steps = session_open();
@@ -350,7 +312,6 @@ fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
     );
 }
 
-/// Nothing to look for means no traffic at all — the walk is the expensive part.
 #[test]
 fn an_empty_target_list_sends_nothing() {
     let mut t = ReplayTransport::new(session_open().into_iter().chain(session_close()).collect());

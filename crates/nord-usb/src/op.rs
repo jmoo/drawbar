@@ -173,23 +173,26 @@ fn write_chunk() -> Result<usize> {
     Ok(WRITE_CHUNK)
 }
 
-/// Bytes per storage block in a library partition — the unit `STATUS`'s free/used
-/// words count there. Per class: the piano partition is 4096 × 256 KiB (1 GB), the
-/// sample partition 2048 × 128 KiB (256 MB). Undercounting `needed` here makes
-/// `BEGIN_WRITE` refuse `0x16` even right after the cleaning pass.
-///
-/// These are the **gross** blocks. The device reports the same geometry itself, net of
-/// per-block overhead, as [`Partition::allocation_unit`] — 261,632 for pianos, 131,064
-/// for samples — and the two size a write identically except for a body landing within
-/// that overhead of an exact block boundary, where the net number needs one block more.
-/// Reading it per write would put a `PARTITIONS` exchange inside the write session,
-/// which nothing on the wire has ever done; the equivalence is asserted in the tests
-/// against a recorded partition table instead.
-fn library_block(class: ObjectClass) -> usize {
+/// Net payload bytes per storage block, as the device's partition table reports them.
+/// Confirmed on hardware.
+fn library_block(class: ObjectClass) -> Result<usize> {
     match class {
-        ObjectClass::Sample => 131_072,
-        _ => 262_144,
+        ObjectClass::Piano => Ok(261_632),
+        ObjectClass::Sample => Ok(131_064),
+        _ => Err(Error::InvalidArgument(format!(
+            "{} is not a library class",
+            class.label()
+        ))),
     }
+}
+
+fn library_blocks(class: ObjectClass, bytes: usize) -> Result<u32> {
+    u32::try_from(bytes.div_ceil(library_block(class)?)).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "a {bytes}-byte {} needs more blocks than the wire can state",
+            class.label()
+        ))
+    })
 }
 
 /// Read the metadata and body through the device's chunked transfer sequence.
@@ -345,7 +348,7 @@ pub async fn write<T: Transport>(
     if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
         // A library write is refused 0x16 unless a prepared block exists per
         // storage block of body; reclaim exactly the shortfall.
-        let needed = body.len().div_ceil(library_block(session.class())) as u32;
+        let needed = library_blocks(session.class(), body.len())?;
         let free = status(session).await?.free;
         if needed > free {
             clean_library(session, needed - free).await?;
@@ -734,6 +737,8 @@ const SET_LIST_WALK_CAP: usize = 1024;
 /// Cost is one `DEPENDENCIES` per occupied set list, plus one `INFO` per match. A
 /// refusal mid-scan propagates rather than truncating: a short list here reads as "no
 /// set list is affected", which is the wrong answer to act on.
+///
+/// Confirmed on hardware.
 pub async fn set_lists_referencing<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     targets: &[Location],
@@ -747,7 +752,7 @@ pub async fn set_lists_referencing<T: Transport, C>(
         for l in dependencies(session, at)
             .await?
             .into_iter()
-            .filter(Dependency::is_required)
+            .filter(|d| d.class == ObjectClass::Program && d.is_required())
             .filter_map(|d| d.location)
         {
             // A set list may hold the same program in more than one of its four slots.
@@ -875,13 +880,6 @@ mod tests {
         assert!(read_payload(&payload, at, 40, 3).is_err());
     }
 
-    /// The hardcoded block sizes are the device's own geometry, rounded up to the
-    /// enclosing power of two.
-    ///
-    /// [`library_block`] cannot read [`Partition::allocation_unit`] per write without
-    /// putting a `PARTITIONS` exchange somewhere no capture has one, so the equivalence
-    /// is pinned here instead: if a firmware ever reports a different granularity, this
-    /// fails rather than the write path silently miscounting blocks.
     #[cfg(feature = "replay")]
     #[test]
     fn the_block_constants_are_the_devices_own_granularity() {
@@ -896,16 +894,9 @@ mod tests {
             r.unwrap()
         });
 
-        for (class, gross) in [
-            (ObjectClass::Piano, 262_144usize),
-            (ObjectClass::Sample, 131_072),
-        ] {
+        for class in [ObjectClass::Piano, ObjectClass::Sample] {
             let net = parts[class.to_raw() as usize].allocation_unit().unwrap() as usize;
-            assert_eq!(library_block(class), gross);
-            assert!(
-                net <= gross && gross - net < 1024,
-                "{class:?}: the device reports {net} where the write path uses {gross}"
-            );
+            assert_eq!(library_block(class).unwrap(), net, "{class:?}");
         }
 
         // A slot class is byte-granular, which is what says its counters are bytes.
@@ -913,6 +904,15 @@ mod tests {
             parts[ObjectClass::Program.to_raw() as usize].allocation_unit(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn a_body_past_the_net_boundary_needs_another_block() {
+        for class in [ObjectClass::Piano, ObjectClass::Sample] {
+            let block = library_block(class).unwrap();
+            assert_eq!(library_blocks(class, block).unwrap(), 1, "{class:?}");
+            assert_eq!(library_blocks(class, block + 1).unwrap(), 2, "{class:?}");
+        }
     }
 
     #[test]

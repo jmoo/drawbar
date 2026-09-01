@@ -433,6 +433,8 @@ impl Partition {
     /// ⚠️ Net, not gross. Sizing a write off the enclosing power-of-two block instead
     /// differs only for a body within the overhead of an exact block boundary, but it
     /// differs by a whole block when it does.
+    ///
+    /// Confirmed on hardware.
     pub fn allocation_unit(&self) -> Option<u32> {
         self.fields
             .get(..4)
@@ -855,8 +857,8 @@ impl ObjectClass {
 /// **The unit differs by class family.** The slot-addressed classes (program, set list,
 /// live, settings) count **bytes**: a program costs 141 = 121 body + 16 name + 4 CRC, a
 /// set list 38 = 18 + 16 + 4. The library classes (piano, sample) count **storage
-/// blocks** of [`Partition::allocation_unit`] bytes each — 256 KiB for pianos, 128 KiB
-/// for samples on an Electro 5.
+/// blocks** of [`Partition::allocation_unit`] net payload bytes each — just under 256
+/// KiB for pianos and 128 KiB for samples on an Electro 5.
 ///
 /// ⚠️ **`free + used` is not the capacity.** A delete moves its space into
 /// [`Self::dirty`], not into `free`, so a report built from those two words shrinks
@@ -865,6 +867,8 @@ impl ObjectClass {
 /// `free` now, plus whatever the cleaning pass can reclaim out of `dirty`.
 ///
 /// `dirty` and `spare` read `0` outside the library partitions.
+///
+/// Confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {
     pub class: ObjectClass,
