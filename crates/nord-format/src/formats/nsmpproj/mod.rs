@@ -110,7 +110,11 @@ pub struct Stroke {
     pub short_loop_enabled: bool,
     /// `m_loopLengthShort`.
     pub short_loop_length: f64,
-    /// `m_loopXFadeShort`, an integer whose unit is not frames and is not decoded.
+    /// `m_loopXFadeShort` — the short loop's crossfade as a **percentage of
+    /// [`short_loop_length`](Stroke::short_loop_length)**, where the long loop's
+    /// [`loop_crossfade`](Stroke::loop_crossfade) is a frame count outright. Values above
+    /// 100 fade for longer than the loop lasts; the editor does not clamp them.
+    /// Inferred from specimens; not confirmed on hardware.
     pub short_loop_crossfade: u32,
     /// `m_shortLoopUsesPitch`. Reaches the instrument nowhere.
     pub short_loop_uses_pitch: bool,

@@ -493,7 +493,7 @@ fn stroke_line(stream: &[u8], at: usize) -> Result<String, String> {
 }
 
 /// `START:END` in source frames.
-fn loop_points(text: &str, crossfade: usize) -> Result<encode::Loop, String> {
+fn loop_points(text: &str, crossfade: f64) -> Result<encode::Loop, String> {
     let number = |part: &str, label: &str| {
         part.trim()
             .parse::<usize>()
@@ -523,7 +523,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
         options = options.top_note(note::parse(top)?);
     }
     if let Some(points) = &args.loop_points {
-        options = options.loops(loop_points(points, args.loop_crossfade)?);
+        options = options.loops(loop_points(points, args.loop_crossfade as f64)?);
     }
 
     let instrument = encode::instrument(&source.samples, &options).map_err(|e| e.to_string())?;
@@ -719,7 +719,11 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
 /// The project's loop points count in the audio file's own frames, so they move with
 /// the trim. Whichever loop is switched on maps onto the one loop the container holds:
 /// a short loop is the same start with the short length, and nothing in the file says
-/// which of the two it was.
+/// which of the two it was. The two loops state their crossfades differently — the
+/// long one in frames, the short one as a percentage of its own length — and the
+/// switched-on loop's fade is the only one that reaches the audio.
+///
+/// Inferred from specimens; not confirmed on hardware.
 fn zone_loop(
     at: &str,
     stroke: &Stroke,
@@ -752,8 +756,10 @@ fn zone_loop(
         ));
     }
 
-    // Mode 1 rewrites the loop's tail some way this crate has not decoded, and the
-    // short crossfade's unit is not frames, so neither can be reproduced.
+    // Mode 1 rewrites the long loop's tail some way this crate has not decoded. It
+    // governs that fade only: with the short loop switched on the editor writes the
+    // same bytes whatever the enum holds.
+    // Inferred from specimens; not confirmed on hardware.
     if !short && stroke.loop_crossfade_mode != 0 {
         return Err(format!(
             "{at} sets m_loopXFModeLong = {}; only the linear fade (mode 0) is decoded, \
@@ -761,17 +767,17 @@ fn zone_loop(
             stroke.loop_crossfade_mode
         ));
     }
-    if short && stroke.short_loop_crossfade != 0 {
-        return Err(format!(
-            "{at} sets m_loopXFadeShort = {}, whose unit is not frames and is not \
-             decoded; the fade is baked into the audio, so it cannot be written",
-            stroke.short_loop_crossfade
-        ));
-    }
+    // The short loop's crossfade is a percentage of its own length, where the long
+    // loop's is a frame count outright.
     let crossfade = if short {
-        0
+        exact_frame(
+            at,
+            "short loop crossfade",
+            f64::from(stroke.short_loop_crossfade) / 100.0 * length,
+            stop,
+        )?
     } else {
-        frame(at, "loop crossfade", stroke.loop_crossfade, stop)?
+        exact_frame(at, "loop crossfade", stroke.loop_crossfade, stop)?
     };
 
     // These reach no instrument: the editor writes the same bytes whatever they hold.
@@ -784,6 +790,15 @@ fn zone_loop(
     }
     if short && !stroke.short_loop_uses_pitch {
         dropped.push("m_shortLoopUsesPitch = 0".into());
+    }
+    if short && stroke.loop_crossfade != 0.0 {
+        dropped.push(format!(
+            "m_loopXFadeLengthLong = {} — the short loop is the one encoded",
+            stroke.loop_crossfade
+        ));
+    }
+    if short && stroke.loop_crossfade_mode != 0 {
+        dropped.push(format!("m_loopXFModeLong = {}", stroke.loop_crossfade_mode));
     }
     Ok((
         Some(encode::Loop::new(loop_start - start, end - start).crossfade(crossfade)),
@@ -827,15 +842,22 @@ fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
 /// A project's frame position as an index into the file it points at.
 ///
 /// Positions are `%f` decimals counted at 44 100 Hz whatever the file's own rate says.
-/// Inferred from the editor's field counts: a zone encodes `start..stop`, not the
-/// whole `begin..end` extent.
+/// A zone encodes `start..stop`, not the whole `begin..end` extent.
+/// Inferred from specimens; not confirmed on hardware.
 fn frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<usize, String> {
+    Ok(exact_frame(zone, label, value, frames)?.round() as usize)
+}
+
+/// The same bound, for a value the encoder wants unrounded — a crossfade a project
+/// states as a percentage, which lands between two frames and moves a field if it is
+/// rounded before it reaches the field lattice.
+fn exact_frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<f64, String> {
     if !value.is_finite() || !(0.0..=frames as f64).contains(&value) {
         return Err(format!(
             "{zone}'s {label} is at frame {value}, outside the {frames} frames its audio holds"
         ));
     }
-    Ok(value.round() as usize)
+    Ok(value)
 }
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
@@ -1260,11 +1282,14 @@ mod tests {
 
     #[test]
     fn loop_points_read_as_frames_around_a_colon() {
-        let points = loop_points("16384:32768", 1024).unwrap();
-        assert_eq!(points, encode::Loop::new(16_384, 32_768).crossfade(1_024));
-        assert_eq!(loop_points(" 8 : 9 ", 0).unwrap(), encode::Loop::new(8, 9));
+        let points = loop_points("16384:32768", 1024.0).unwrap();
+        assert_eq!(points, encode::Loop::new(16_384, 32_768).crossfade(1_024.0));
+        assert_eq!(
+            loop_points(" 8 : 9 ", 0.0).unwrap(),
+            encode::Loop::new(8, 9)
+        );
         for bad in ["16384", "16384:", "a:b", "16384:32768:1", "-1:5"] {
-            assert!(loop_points(bad, 0).is_err(), "{bad}");
+            assert!(loop_points(bad, 0.0).is_err(), "{bad}");
         }
     }
 
@@ -1279,10 +1304,31 @@ mod tests {
             s.loop_enabled = true;
             s.short_loop_enabled = true;
             s.short_loop_length = 1_024.0;
-            s.short_loop_crossfade = 0;
+            s.short_loop_crossfade = 25;
+            s.loop_crossfade = 4_096.0;
             s.loop_crossfade_mode = 1;
         });
-        let (points, _) = zone_loop("zone1", &short, 0, 88_200).unwrap();
+        let (points, dropped) = zone_loop("zone1", &short, 0, 88_200).unwrap();
+        assert_eq!(
+            points,
+            Some(encode::Loop::new(16_384, 17_408).crossfade(256.0))
+        );
+        assert!(
+            dropped.iter().any(|d| d.contains("m_loopXFadeLengthLong")),
+            "{dropped:?}"
+        );
+        assert!(
+            dropped.iter().any(|d| d.contains("m_loopXFModeLong")),
+            "{dropped:?}"
+        );
+
+        let unfaded = stroke_with(|s| {
+            s.loop_enabled = true;
+            s.short_loop_enabled = true;
+            s.short_loop_length = 1_024.0;
+            s.short_loop_crossfade = 0;
+        });
+        let (points, _) = zone_loop("zone1", &unfaded, 0, 88_200).unwrap();
         assert_eq!(points, Some(encode::Loop::new(16_384, 17_408)));
 
         let off = stroke_with(|_| {});
@@ -1297,12 +1343,6 @@ mod tests {
             zone_loop("zone1", &s, 0, 88_200).unwrap_err()
         };
         assert!(refused(|s| s.loop_crossfade_mode = 1).contains("m_loopXFModeLong"));
-        assert!(refused(|s| {
-            s.short_loop_enabled = true;
-            s.short_loop_length = 1_024.0;
-            s.short_loop_crossfade = 10;
-        })
-        .contains("m_loopXFadeShort"));
         assert!(refused(|s| s.loop_length = 0.0).contains("m_loopLengthLong"));
         assert!(refused(|s| s.loop_length = 90_000.0).contains("loop end"));
 

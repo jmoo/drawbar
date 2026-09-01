@@ -216,6 +216,7 @@ const WHOLE: &str = "a whole number";
 const STORED: &str = "a whole number, 0-255";
 const GAIN: &str = "a gain, 0 or more";
 const DECAY: &str = "a decay, 0 or more";
+const PERCENT: &str = "a percentage of the loop's length";
 
 /// The Sample Editor project: the instrument name, each zone's root key and
 /// key range, each stroke's trim, loop, gain and velocity window, the
@@ -301,7 +302,7 @@ impl Fields for ProjectEditor<'_> {
                 (
                     "short_loop_crossfade",
                     s.short_loop_crossfade.to_string(),
-                    WHOLE,
+                    PERCENT,
                 ),
                 (
                     "short_loop_uses_pitch",
