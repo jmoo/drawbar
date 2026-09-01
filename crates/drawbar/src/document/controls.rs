@@ -19,7 +19,7 @@ use eframe::egui;
 use nord_format::fields::Field;
 
 use crate::fields::Control;
-use crate::{drawbar_widget, knob, led, strings, visibility};
+use crate::{drawbar_widget, knob, led, strings};
 
 /// What every row needs and none of them should compute twice.
 ///
@@ -113,6 +113,60 @@ pub fn cell(ui: &mut egui::Ui, ctx: &Ctx, field: &Field, sets: &mut Sets) {
     });
 }
 
+/// A parameter with the performance controls that morph it underneath.
+///
+/// ⚠️ A morph target is the value the parameter is driven *to*, not a setting of its own —
+/// drawn beside its parameter it reads as a second knob for the same thing. The
+/// declaration says which parameter each slot moves; nothing here matches names.
+pub fn morphed(ui: &mut egui::Ui, ctx: &Ctx, field: &Field, morphs: &[&Field], sets: &mut Sets) {
+    if morphs.is_empty() {
+        return cell(ui, ctx, field, sets);
+    }
+    let span = width(ctx.control(field)).max(MORPH_W * morphs.len() as f32);
+    ui.allocate_ui(egui::vec2(span, 0.0), |ui| {
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            if let Some(value) = control(ui, ctx, field) {
+                sets.push((field.path.clone(), value));
+            }
+            caption(ui, &field.path);
+            strip(ui, |ui| {
+                for slot in morphs {
+                    ui.allocate_ui(egui::vec2(MORPH_W, 0.0), |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            if let Some(value) = control(ui, ctx, slot) {
+                                sets.push((slot.path.clone(), value));
+                            }
+                            ui.label(egui::RichText::new(morph_label(&slot.path)).small().weak());
+                        });
+                    });
+                }
+            });
+        });
+    });
+}
+
+/// How wide one morph target's cell is — narrower than a control of its own, because it
+/// is a reading of the parameter above it.
+const MORPH_W: f32 = 56.0;
+
+/// The performance control a morph slot belongs to, off the suffix the declaration binds
+/// on. A slot spelled some other way reads as its own leaf name.
+fn morph_label(path: &str) -> &str {
+    let leaf = path.rsplit('.').next().unwrap_or(path);
+    for (suffix, word) in [
+        ("_wheel", "wheel"),
+        ("_aftertouch", "after"),
+        ("_ctrl_pedal", "pedal"),
+    ] {
+        if leaf.ends_with(suffix) {
+            return word;
+        }
+    }
+    leaf
+}
+
 /// A cell whose control is the caller's — for the two that are not one field each.
 ///
 /// `path` names the caption; an unmapped one still gets the prettified fallback, so a
@@ -176,10 +230,43 @@ fn toggle(ui: &mut egui::Ui, field: &Field) -> Option<String> {
     led::ui(ui, on, "").map(|want| want.to_string())
 }
 
+/// The values a picker offers.
+///
+/// A value the library could not name is never something to choose. If the file holds one
+/// it stays in the list all the same, so a change away from it can be put back.
+fn choices(path: &str, legal: &[String], current: &str) -> Vec<String> {
+    let mut out: Vec<String> = legal
+        .iter()
+        .filter(|value| offerable(path, value))
+        .cloned()
+        .collect();
+    if !out.iter().any(|value| value == current) {
+        out.push(current.to_string());
+    }
+    out
+}
+
+/// Whether a value is one a player would pick.
+///
+/// ⚠️ `Routing::Unknown` is a named variant rather than an unrecognised number, but it is
+/// how older firmware spelled *off* and it presents as off — confirmed on hardware. Two
+/// entries both meaning off is a puzzle, not a choice, so only the current one is ever
+/// shown.
+fn offerable(path: &str, value: &str) -> bool {
+    if strings::unrecognised(value).is_some() {
+        return false;
+    }
+    !(value == "Unknown"
+        && matches!(
+            path,
+            "effects_panel.fx1" | "effects_panel.fx2" | "effects_panel.fx3" | "effects_panel.fx4"
+        ))
+}
+
 /// A named-value picker. Shows the panel's word for each value and sets the library's.
 fn choice(ui: &mut egui::Ui, ctx: &Ctx, field: &Field) -> Option<String> {
     let entry = ctx.entry(field);
-    let offered = visibility::choices(&field.path, &entry.legal, &field.value);
+    let offered = choices(&field.path, &entry.legal, &field.value);
     let mut picked = None;
     egui::ComboBox::from_id_salt(&field.path)
         .selected_text(
@@ -246,20 +333,48 @@ pub fn bars(
     moved
 }
 
-/// A lamp with its own word beside it, for the switches that sit inside a preset.
-pub fn switch(ui: &mut egui::Ui, field: Option<&Field>, word: &str, sets: &mut Sets) {
-    let Some(field) = field else {
-        return;
-    };
-    let on = field.value == "true";
-    if let Some(want) = led::ui(ui, on, word) {
-        sets.push((field.path.clone(), want.to_string()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unrecognised value is not offered, but a file holding one keeps it reachable.
+    #[test]
+    fn an_unrecognised_value_is_kept_but_never_offered() {
+        let legal: Vec<String> = ["B3", "B3Bass", "Pipe", "unknown (6)"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(
+            choices("center_panel.organ_type", &legal, "B3"),
+            ["B3", "B3Bass", "Pipe"]
+        );
+        // Holding one: it is the last entry, so changing away from it can be undone.
+        assert_eq!(
+            choices("center_panel.organ_type", &legal, "unknown (6)"),
+            ["B3", "B3Bass", "Pipe", "unknown (6)"]
+        );
+    }
+
+    /// Two spellings of off would read as two different settings.
+    #[test]
+    fn the_older_spelling_of_off_is_not_offered_alongside_off() {
+        let legal: Vec<String> = ["Off", "Unknown", "Lower", "Upper"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            choices("effects_panel.fx1", &legal, "Off"),
+            ["Off", "Lower", "Upper"]
+        );
+        // A file holding it keeps it, spelled for what it is.
+        assert_eq!(
+            choices("effects_panel.fx1", &legal, "Unknown"),
+            ["Off", "Lower", "Upper", "Unknown"]
+        );
+        // The same variant name elsewhere is a real choice.
+        assert!(offerable("some_other_field", "Unknown"));
+    }
 
     /// ⚠️ A field is asked for its values when something draws it and not before, and
     /// then never again. A Stage body declares hundreds of fields, and walking every one

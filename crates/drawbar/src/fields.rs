@@ -8,7 +8,7 @@ use std::io::Cursor;
 use std::ops::Range;
 
 use nord_format::fields::{ControlKind, Field};
-use nord_format::{Entity, Live, Program, Settings, Song};
+use nord_format::{Entity, Settings, Song};
 
 use crate::drawbar_widget;
 
@@ -24,15 +24,6 @@ pub fn fields_of(entity: &Entity) -> Option<Vec<Field>> {
 /// Whether the body carries the generated registry, and so has a friendly view at all.
 pub fn has_registry(entity: &Entity) -> bool {
     entity.registry().is_some()
-}
-
-/// Whether the body is an Electro 5 panel — the one the document knows section by
-/// section. Everything else with a registry falls back to a plain field list.
-pub fn is_electro5_panel(entity: &Entity) -> bool {
-    matches!(
-        entity,
-        Entity::Program(Program::Electro5(_)) | Entity::Live(Live::Electro5(_))
-    )
 }
 
 pub fn is_electro5_settings(entity: &Entity) -> bool {
@@ -317,6 +308,7 @@ pub mod blank {
 mod tests {
     use super::*;
     use nord_format::formats::ne5;
+    use nord_format::Program;
 
     fn program() -> Vec<u8> {
         let entity = Entity::Program(Program::Electro5(ne5::program::new(

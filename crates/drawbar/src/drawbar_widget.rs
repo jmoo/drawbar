@@ -22,8 +22,6 @@ const FOOTAGE: [&str; BARS] = ["16", "5⅓", "8", "4", "2⅔", "2", "1⅗", "1�
 
 /// Every rank, in register order.
 pub const ALL_RANKS: [usize; BARS] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-/// The bass manual's two ranks, 16′ and 8′ — not the register's first two.
-pub const BASS_RANKS: [usize; 2] = [0, 2];
 
 fn stop_colour(bar: usize) -> egui::Color32 {
     match bar {
