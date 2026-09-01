@@ -6,7 +6,7 @@
 
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5::{program, song, Song};
-use nord_format::formats::nsmpproj::Project;
+use nord_format::formats::nsmpproj::{Project, StrokeField, MAX_VELOCITY};
 use nord_format::Sample;
 
 use crate::note;
@@ -60,7 +60,7 @@ pub fn stage(
         if b.value != a.value {
             changed += 1;
             ui.out(format!(
-                "{:<24} {} -> {}",
+                "{:<30} {} -> {}",
                 a.path,
                 b.value,
                 ui.bold(&a.value)
@@ -71,10 +71,10 @@ pub fn stage(
 }
 
 fn list(ui: &Ui, editor: &dyn Fields) -> Result<(), String> {
-    ui.out(format!("{:<24} {:<40} {}", "path", "value", "accepts"));
+    ui.out(format!("{:<30} {:<40} {}", "path", "value", "accepts"));
     for row in editor.rows()? {
         ui.out(format!(
-            "{:<24} {:<40} {}",
+            "{:<30} {:<40} {}",
             row.path, row.value, row.accepts
         ));
     }
@@ -92,6 +92,19 @@ fn indexed(part: &str, label: &str) -> Option<usize> {
     part.strip_prefix(label)
         .and_then(|n| n.parse().ok())
         .filter(|&n| n >= 1)
+}
+
+/// The truth words the registry fields take, so one vocabulary spans both.
+const SWITCH_ACCEPTS: &str = "on or off";
+
+fn switch(v: bool) -> String {
+    v.to_string()
+}
+
+fn number<T: std::str::FromStr>(path: &str, value: &str, accepts: &str) -> Result<T, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{path}: expected {accepts}, got {value:?}"))
 }
 
 /// The sample instrument: its name, plus each zone's root key and boundaries
@@ -198,9 +211,18 @@ impl Fields for SongEditor<'_> {
     }
 }
 
+const FRAMES: &str = "a position in frames";
+const WHOLE: &str = "a whole number";
+const STORED: &str = "a whole number, 0-255";
+const GAIN: &str = "a gain, 0 or more";
+const DECAY: &str = "a decay, 0 or more";
+
 /// The Sample Editor project: the instrument name, each zone's root key and
-/// key range, and each audio file's path. Zones and files are addressed by the
-/// ids `nord inspect` prints.
+/// key range, each stroke's trim, loop, gain and velocity window, the
+/// instrument's velocity defaults, and each audio file's path.
+///
+/// Zones and files are addressed by the ids `nord inspect` prints; a stroke by
+/// the global id both blocks holding it name it with.
 pub struct ProjectEditor<'a>(pub &'a mut Project);
 
 impl Fields for ProjectEditor<'_> {
@@ -232,6 +254,81 @@ impl Fields for ProjectEditor<'_> {
                 accepts: "a path the editor resolves from the project's directory".into(),
             });
         }
+
+        // The trim and loop points come from the `common_stroke`, gain and the
+        // velocity window from the `map_stroke` under the same global id.
+        let played: Vec<_> = project
+            .zones()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .flat_map(|z| z.strokes)
+            .collect();
+        let velocity = format!("0-{MAX_VELOCITY}");
+        for s in project.strokes().map_err(|e| e.to_string())? {
+            let id = s.global_id;
+            let map = played
+                .iter()
+                .find(|z| z.global_id == id)
+                .ok_or_else(|| format!("stroke {id} is in no zone's map"))?;
+            for (field, value, accepts) in [
+                ("start", s.start.to_string(), FRAMES),
+                ("stop", s.stop.to_string(), FRAMES),
+                ("gain", map.gain.to_string(), GAIN),
+                ("velocity_min", map.velocity.0.to_string(), &velocity),
+                ("velocity_max", map.velocity.1.to_string(), &velocity),
+                ("loop_enabled", switch(s.loop_enabled), SWITCH_ACCEPTS),
+                ("loop_start", s.loop_start.to_string(), FRAMES),
+                ("loop_length", s.loop_length.to_string(), FRAMES),
+                ("loop_crossfade", s.loop_crossfade.to_string(), FRAMES),
+                (
+                    "loop_crossfade_mode",
+                    s.loop_crossfade_mode.to_string(),
+                    WHOLE,
+                ),
+                (
+                    "loop_decay_enabled",
+                    switch(s.loop_decay_enabled),
+                    SWITCH_ACCEPTS,
+                ),
+                ("loop_decay", s.loop_decay.to_string(), DECAY),
+                ("loop_detune", s.loop_detune.to_string(), WHOLE),
+                (
+                    "short_loop_enabled",
+                    switch(s.short_loop_enabled),
+                    SWITCH_ACCEPTS,
+                ),
+                ("short_loop_length", s.short_loop_length.to_string(), FRAMES),
+                (
+                    "short_loop_crossfade",
+                    s.short_loop_crossfade.to_string(),
+                    WHOLE,
+                ),
+                (
+                    "short_loop_uses_pitch",
+                    switch(s.short_loop_uses_pitch),
+                    SWITCH_ACCEPTS,
+                ),
+            ] {
+                out.push(Row {
+                    path: format!("stroke{id}.{field}"),
+                    value,
+                    accepts: accepts.into(),
+                });
+            }
+        }
+
+        let defaults = project.velocity_defaults().map_err(|e| e.to_string())?;
+        for (field, value) in [
+            ("attack_amount", defaults.attack_amount),
+            ("amplitude", defaults.amplitude),
+            ("timbre", defaults.timbre),
+        ] {
+            out.push(Row {
+                path: format!("velocity.{field}"),
+                value: value.to_string(),
+                accepts: STORED.into(),
+            });
+        }
         Ok(out)
     }
 
@@ -247,6 +344,24 @@ impl Fields for ProjectEditor<'_> {
             }
             return project
                 .set_audio_path(id as u32, value)
+                .map_err(|e| e.to_string());
+        }
+        if let Some(id) = indexed(block, "stroke") {
+            let field = StrokeField::parse(field, value).map_err(|e| format!("{path}: {e}"))?;
+            return project
+                .set_stroke_field(id as u32, field)
+                .map_err(|e| e.to_string());
+        }
+        if block == "velocity" {
+            let mut defaults = project.velocity_defaults().map_err(|e| e.to_string())?;
+            match field {
+                "attack_amount" => defaults.attack_amount = number(path, value, STORED)?,
+                "amplitude" => defaults.amplitude = number(path, value, STORED)?,
+                "timbre" => defaults.timbre = number(path, value, STORED)?,
+                _ => return Err(unknown(path)),
+            }
+            return project
+                .set_velocity_defaults(defaults)
                 .map_err(|e| e.to_string());
         }
         let id = indexed(block, "zone").ok_or_else(|| unknown(path))? as u32;
@@ -405,6 +520,81 @@ mod tests {
         let edited = zones.iter().find(|z| z.zone_id == 129).unwrap();
         assert_eq!(edited.root_key, 36);
         assert_eq!(project.audio_files().unwrap()[0].path, "verylow.wav");
+    }
+
+    #[test]
+    fn every_project_path_the_listing_prints_is_settable() {
+        let mut project = project();
+        let rows = ProjectEditor(&mut project).rows().unwrap();
+        assert!(rows.iter().any(|r| r.path == "stroke1.loop_start"));
+        assert!(rows.iter().any(|r| r.path == "velocity.attack_amount"));
+        for row in &rows {
+            ProjectEditor(&mut project)
+                .set(&row.path, &row.value)
+                .unwrap_or_else(|e| panic!("{} = {}: {e}", row.path, row.value));
+        }
+        let after = ProjectEditor(&mut project).rows().unwrap();
+        let values = |rows: &[Row]| rows.iter().map(|r| r.value.clone()).collect::<Vec<_>>();
+        assert_eq!(values(&after), values(&rows));
+    }
+
+    #[test]
+    fn stroke_paths_reach_both_blocks() {
+        let mut project = project();
+        {
+            let mut editor = ProjectEditor(&mut project);
+            for (path, value) in [
+                ("stroke1.loop_enabled", "on"),
+                ("stroke1.loop_start", "1000"),
+                ("stroke1.loop_length", "500"),
+                ("stroke1.start", "2"),
+                ("stroke1.gain", "0.25"),
+                ("stroke1.velocity_max", "90"),
+                ("velocity.attack_amount", "64"),
+            ] {
+                editor
+                    .set(path, value)
+                    .unwrap_or_else(|e| panic!("{path}: {e}"));
+            }
+        }
+        let stroke = project
+            .strokes()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.global_id == 1)
+            .unwrap();
+        assert!(stroke.loop_enabled);
+        assert_eq!((stroke.loop_start, stroke.loop_length), (1000.0, 500.0));
+        assert_eq!(stroke.start, 2.0);
+
+        let played = project
+            .zones()
+            .unwrap()
+            .into_iter()
+            .flat_map(|z| z.strokes)
+            .find(|z| z.global_id == 1)
+            .unwrap();
+        assert_eq!(played.gain, 0.25);
+        assert_eq!(played.velocity, (0, 90));
+        assert_eq!(project.velocity_defaults().unwrap().attack_amount, 64);
+    }
+
+    #[test]
+    fn a_bad_stroke_assignment_is_refused() {
+        let mut project = project();
+        let mut editor = ProjectEditor(&mut project);
+        for (path, value) in [
+            ("stroke1.loop_enabled", "maybe"),
+            ("stroke1.loop_start", "-1"),
+            ("stroke1.loop_start", "soon"),
+            ("stroke1.velocity_max", "200"),
+            ("stroke1.gain", "-1"),
+            ("stroke1.nope", "1"),
+            ("stroke9.gain", "1"),
+            ("velocity.nope", "1"),
+        ] {
+            assert!(editor.set(path, value).is_err(), "{path}={value}");
+        }
     }
 
     /// Setting one end of a key range keeps the other end where it was.
