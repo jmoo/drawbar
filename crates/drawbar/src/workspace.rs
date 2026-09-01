@@ -952,6 +952,12 @@ impl Workspace {
     /// Every asset is decoded and re-checked on the way in: bytes out of a store have
     /// been sitting somewhere this app does not control and get no more trust than bytes
     /// off a disk.
+    ///
+    /// ⚠️ That check is a decode *and* a re-encode per asset, run for the whole list
+    /// before the first frame. wasm has one thread and no way to yield out of this, so
+    /// the tab is unresponsive for its duration; the ceiling is the store's own budget
+    /// rather than anything here. Deliberate — an asset admitted unchecked is one whose
+    /// badge lies about whether it still round trips.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) {
         for Saved {
             id,
