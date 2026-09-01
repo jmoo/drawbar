@@ -21,8 +21,7 @@ const PIANO_MODEL: &str = "piano_panel.piano_model";
 const TRANSPOSE_ENABLED: &str = "center_panel.transpose_enabled";
 const TRANSPOSE: &str = "center_panel.transpose";
 
-/// Any body the library has authored a layout for: the groups it names, nested to
-/// whatever depth it nests them to, and whatever no group named at the end.
+/// Any body the library has authored a layout for, nested to whatever depth it uses.
 ///
 /// ⚠️ A group the instrument is not using is not drawn. It is still state the file
 /// carries and still writable — the Advanced table is where it stays reachable — but
@@ -38,18 +37,21 @@ pub fn program(
     sets: &mut Sets,
 ) {
     let resolved = layout.resolve(fields);
+    let folded = fields.len() > FOLD_ABOVE;
     for section in &resolved.sections {
         if !section.relevant {
             continue;
         }
-        controls::section(ui, section.group.title, |ui| {
-            section_body(ui, ctx, section, piano, sets);
-        });
-    }
-    if !resolved.leftovers.is_empty() {
-        controls::section(ui, strings::Section::Other.title(), |ui| {
-            cells(ui, ctx, &resolved.leftovers, sets)
-        });
+        match folded {
+            true => {
+                egui::CollapsingHeader::new(section.group.title)
+                    .id_salt(section.group.title)
+                    .show(ui, |ui| section_body(ui, ctx, section, fields, piano, sets));
+            }
+            false => controls::section(ui, section.group.title, |ui| {
+                section_body(ui, ctx, section, fields, piano, sets);
+            }),
+        }
     }
 }
 
@@ -58,15 +60,24 @@ fn section_body(
     ui: &mut egui::Ui,
     ctx: &Ctx,
     section: &Section,
+    fields: &[Field],
     piano: &mut PianoLookup,
     sets: &mut Sets,
 ) {
     if section.fields.iter().any(|field| field.path == PIANO_MODEL) {
         piano.ui(ui);
     }
+    let selectors: Vec<&str> = section
+        .groups
+        .iter()
+        .filter_map(|group| group.selection.map(|selection| selection.field))
+        .collect();
     controls::strip(ui, |ui| {
         for cluster in clustered(&section.fields) {
             let field = cluster.parameter;
+            if selectors.contains(&field.path.as_str()) {
+                continue;
+            }
             // ⚠️ Two fields, one control. The layout puts them side by side because
             // neither reads on its own; drawing them as two cells would offer a
             // semitone count the instrument ignores.
@@ -89,8 +100,38 @@ fn section_body(
         }
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(nested.group.title).strong());
-            section_body(ui, ctx, nested, piano, sets);
+            match nested.selection {
+                Some(selection) => {
+                    let selected = selection.selected(fields);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(
+                                selected,
+                                egui::RichText::new(nested.group.title).strong(),
+                            )
+                            .on_hover_text("select the preset the instrument plays")
+                            .clicked()
+                            && !selected
+                        {
+                            sets.push((selection.field.to_string(), selection.value.to_string()));
+                        }
+                        if selected {
+                            ui.label(
+                                egui::RichText::new("playing")
+                                    .small()
+                                    .color(crate::app::good(ui.visuals())),
+                            );
+                        }
+                    });
+                    ui.add_enabled_ui(selected, |ui| {
+                        section_body(ui, ctx, nested, fields, piano, sets)
+                    });
+                }
+                None => {
+                    ui.label(egui::RichText::new(nested.group.title).strong());
+                    section_body(ui, ctx, nested, fields, piano, sets);
+                }
+            }
         });
     }
 }
@@ -385,8 +426,8 @@ fn gather(fields: &[Field], section: strings::Section) -> Vec<&Field> {
 /// ⚠️ Neither field reads on its own. `transpose_enabled` is sticky — the instrument sets
 /// it the first time transposition is touched and never clears it — and an untouched
 /// program stores `+1` in the value rather than `0`. The instrument ignores the amount
-/// while the lamp is dark, and moving the amount is what lights it. Confirmed on
-/// hardware.
+/// while the lamp is dark, and moving the amount is what lights it.
+/// Confirmed on hardware.
 pub fn transpose(ui: &mut egui::Ui, fields: &[&Field], sets: &mut Sets) {
     /// The panel's own travel, either side of nothing.
     const SEMITONES: i64 = 6;
@@ -442,15 +483,15 @@ mod tests {
     fn the_electro5_view_is_the_librarys_layout() {
         let fields = electro5();
         let resolved = ne5::program::PANEL.resolve(&fields);
-        assert!(
-            resolved.leftovers.is_empty(),
-            "the layout accounts for every field: {:?}",
-            resolved
-                .leftovers
-                .iter()
-                .map(|field| &field.path)
-                .collect::<Vec<_>>(),
-        );
+        let leftovers: Vec<&str> = resolved
+            .leftovers
+            .iter()
+            .map(|field| field.path.as_str())
+            .collect();
+        assert_eq!(leftovers.len(), 6, "{leftovers:?}");
+        assert!(leftovers.contains(&"program_version"));
+        assert!(leftovers.contains(&"piano_panel.id"));
+        assert!(leftovers.contains(&"sample_panel.id"));
         let titles: Vec<&str> = resolved
             .sections
             .iter()

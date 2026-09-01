@@ -248,10 +248,10 @@ fn choices(path: &str, legal: &[String], current: &str) -> Vec<String> {
 
 /// Whether a value is one a player would pick.
 ///
-/// ⚠️ `Routing::Unknown` is a named variant rather than an unrecognised number, but it is
-/// how older firmware spelled *off* and it presents as off — confirmed on hardware. Two
-/// entries both meaning off is a puzzle, not a choice, so only the current one is ever
-/// shown.
+/// `Routing::Unknown` is a named variant rather than an unrecognised number, but it is
+/// how older firmware spelled *off* and it presents as off. Two entries both meaning off
+/// are not offered together.
+/// Confirmed on hardware.
 fn offerable(path: &str, value: &str) -> bool {
     if strings::unrecognised(value).is_some() {
         return false;
