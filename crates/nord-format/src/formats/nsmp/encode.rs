@@ -35,6 +35,8 @@
 //! caller's to work out — a project states the long loop's in frames and the short
 //! loop's as a percentage of its length — and it arrives here already in frames,
 //! fraction and all.
+//!
+//! Inferred from specimens; not confirmed on hardware.
 
 use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
@@ -154,6 +156,7 @@ pub struct Loop {
     /// The fade is applied to the samples here, because that is where the instrument
     /// reads it from. Fractional, because a project can state it as a percentage of the
     /// loop rather than a frame count, and dropping the fraction moves the fade a field.
+    /// Inferred from specimens; not confirmed on hardware.
     pub crossfade: f64,
 }
 
@@ -312,13 +315,20 @@ impl Plan {
         // length. Rounding its two ends separately can cost it a field.
         let span = points.end - points.start;
         let length = fields_of(span).ok_or_else(|| size_error(points.end))?;
-        let end = start + length;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| size_error(points.end))?;
         // Ahead of the mark the stream still has to open and resync, so a loop that
         // starts too early is pushed off the front by repeating more of itself.
         let lead = LOOP_LEAD.max(MIN_PRE_LOOP.saturating_sub(start));
-        let (at, fields) = (start + lead, end + lead);
+        let at = start
+            .checked_add(lead)
+            .ok_or_else(|| size_error(points.start))?;
+        let fields = end
+            .checked_add(lead)
+            .ok_or_else(|| size_error(points.end))?;
         let warmup = band(length);
-        if length < warmup + CELL {
+        if length < warmup.saturating_add(CELL) {
             return Err(ParseError::OutOfBounds {
                 value: format!("a {length}-field loop"),
                 bound: format!(
@@ -328,24 +338,41 @@ impl Plan {
             }
             .into());
         }
-        if !(0.0..=(points.start.min(span)) as f64).contains(&points.crossfade) {
+        if !(0.0..=points.start as f64).contains(&points.crossfade) {
             return Err(ParseError::OutOfBounds {
                 value: format!("a {} frame crossfade", points.crossfade),
                 bound: format!(
-                    "the {} frames in front of the loop and the {span} frames in it — the \
-                     fade mixes the loop's tail with the material before its start",
+                    "the {} frames before the loop starts — the fade compares \
+                     each frame with the material one loop length behind it",
                     points.start,
                 ),
             }
             .into());
         }
-        // The fade opens at a frame position inside the loop, so that position goes on
-        // the lattice the way the loop's own landmarks do and the span is the difference
-        // of the two. Putting the fade's length on the lattice directly is a field out
-        // wherever the two roundings disagree, and so is rounding the fade to a whole
-        // frame before converting.
-        let opens = lattice(span as f64 - points.crossfade).ok_or_else(|| size_error(span))?;
-        let crossfade = length - opens;
+        // Put the fade's opening on the loop-relative lattice. Above 100% it begins
+        // before the loop start, so its distance is added to the loop length.
+        let crossfade = if points.crossfade <= span as f64 {
+            let opens = lattice(span as f64 - points.crossfade).ok_or_else(|| size_error(span))?;
+            length.checked_sub(opens).ok_or_else(|| size_error(span))?
+        } else {
+            let before =
+                lattice(points.crossfade - span as f64).ok_or_else(|| size_error(points.start))?;
+            length
+                .checked_add(before)
+                .ok_or_else(|| size_error(points.end))?
+        };
+        if crossfade > start {
+            return Err(ParseError::OutOfBounds {
+                value: format!("a {} frame crossfade", points.crossfade),
+                bound: format!(
+                    "the {} frames before the loop starts — the field lattice \
+                     leaves no earlier material to compare",
+                    points.start,
+                ),
+            }
+            .into());
+        }
+        let midpoint = fields_of(points.start / 2).ok_or_else(|| size_error(points.start))?;
         Plan::lay_out(
             frames,
             fields,
@@ -356,7 +383,7 @@ impl Plan {
                 warmup,
                 cells: (length - warmup) / CELL,
             }),
-            fields_of(points.start / 2).unwrap_or(0),
+            midpoint,
         )
     }
 
@@ -1794,6 +1821,8 @@ mod tests {
     /// crossfade ladder, whose unit is a frame count outright. Both are the same rule.
     ///
     /// `(loop length, crossfade frames, fields the ramp covers)`.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
     const MEASURED_FADES: &[(usize, f64, usize)] = &[
         // XFS: the percentage ladder at one length. 25 % and 75 % are the two rungs
         // that separate this rule from putting the fade's own length on the lattice.
@@ -1871,6 +1900,20 @@ mod tests {
     }
 
     #[test]
+    fn a_crossfade_may_begin_before_the_loop_start() {
+        let source = sine(150.0, 22_000.0, 60_000);
+        let points = Loop::new(16_384, 24_576).crossfade(16_384.0);
+        let plan = Plan::looped(source.len(), points).unwrap();
+        let looped = plan.looped.unwrap();
+
+        assert!(looped.crossfade > fields_of(points.end - points.start).unwrap());
+        assert!(looped.crossfade <= fields_of(points.start).unwrap());
+        let file = instrument(&source, &Options::new("Long fade").loops(points)).unwrap();
+        let (at, stroke) = file.stroke_streams()[0];
+        assert!(codec::decode(stroke, at, codec::Layout::V2).is_ok());
+    }
+
+    #[test]
     fn a_loop_the_format_cannot_state_is_refused() {
         let frames = 44_100;
         let looped = |points| Plan::looped(frames, points);
@@ -1888,7 +1931,7 @@ mod tests {
         );
         assert!(
             looped(Loop::new(8_192, 40_000).crossfade(40_000.0)).is_err(),
-            "a fade longer than the loop"
+            "not enough material before the fade"
         );
         // Below the modelled opening, whatever the loop says.
         assert!(Plan::looped(4_000, Loop::new(100, 3_000)).is_err());

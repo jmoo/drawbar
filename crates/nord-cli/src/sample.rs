@@ -722,6 +722,8 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
 /// which of the two it was. The two loops state their crossfades differently — the
 /// long one in frames, the short one as a percentage of its own length — and the
 /// switched-on loop's fade is the only one that reaches the audio.
+///
+/// Inferred from specimens; not confirmed on hardware.
 fn zone_loop(
     at: &str,
     stroke: &Stroke,
@@ -757,6 +759,7 @@ fn zone_loop(
     // Mode 1 rewrites the long loop's tail some way this crate has not decoded. It
     // governs that fade only: with the short loop switched on the editor writes the
     // same bytes whatever the enum holds.
+    // Inferred from specimens; not confirmed on hardware.
     if !short && stroke.loop_crossfade_mode != 0 {
         return Err(format!(
             "{at} sets m_loopXFModeLong = {}; only the linear fade (mode 0) is decoded, \
@@ -839,8 +842,8 @@ fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
 /// A project's frame position as an index into the file it points at.
 ///
 /// Positions are `%f` decimals counted at 44 100 Hz whatever the file's own rate says.
-/// Inferred from the editor's field counts: a zone encodes `start..stop`, not the
-/// whole `begin..end` extent.
+/// A zone encodes `start..stop`, not the whole `begin..end` extent.
+/// Inferred from specimens; not confirmed on hardware.
 fn frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<usize, String> {
     Ok(exact_frame(zone, label, value, frames)?.round() as usize)
 }
@@ -1297,8 +1300,6 @@ mod tests {
         assert_eq!(points, Some(encode::Loop::new(15_384, 31_768)));
         assert!(dropped.is_empty());
 
-        // The short loop's crossfade is a percentage of its own length; the long loop's
-        // frame count and the long loop's fade mode both reach nothing from here.
         let short = stroke_with(|s| {
             s.loop_enabled = true;
             s.short_loop_enabled = true;
