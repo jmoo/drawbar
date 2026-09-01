@@ -870,7 +870,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "drawbar"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "js-sys",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "nord-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "dialoguer",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "nord-format"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crcxx",
  "libtest-mimic",
@@ -1956,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "nord-usb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "js-sys",
  "libtest-mimic",
