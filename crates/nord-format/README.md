@@ -80,6 +80,37 @@ read-only views over them, so `parse → write` is byte-identical even where the
 semantics are incomplete. Every newly decoded field is a safe, incremental
 refinement — never a risk to the write path.
 
+## Reading and editing a body without naming its fields
+
+Every `#[bitbody]` also generates a **registry**: `fields()` lists every declared
+field under a dotted path with its placement, its current value and the values it
+accepts, and `set_field(path, value)` writes one back through the type's own parse
+— so a field becomes readable and editable by being declared, and no consumer can
+fall behind the library.
+
+A field's type says what *kind* of control it is (`fields::ControlKind`): a knob
+with a unit, a bipolar knob, a selector, a drawbar with its position in the
+register and how the register is packed, a morph slot with the parameter it
+moves, a pattern grid with its step shape, a library reference with the
+catalogue that resolves it. So a UI picks a
+widget from the registry rather than from a table of field names of its own.
+
+What placement cannot say — which controls sit together, in what order, and which
+of them the instrument is *using* for the state a file holds — is declared per
+format as data, in `panel`:
+
+```rust
+let entity = nord_format::from_path("patch.ne5p")?;
+if let Some(panel) = nord_format::panel::of(&entity) {
+    // Groups are ordered, nestable, and each may carry a condition over the
+    // body's own values: an organ registration for a model that is not selected
+    // is state the file keeps, not a control the instrument is offering.
+}
+```
+
+Layouts exist for the Electro 5 and Stage 4 programs so far; `of` answers `None`
+elsewhere, and a caller falls back to the flat field list.
+
 ## Features
 
 - **`bundle`** — ZIP-based backup bundles (pulls in the `zip` stack). Off by
