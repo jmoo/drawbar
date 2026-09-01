@@ -2,8 +2,8 @@
 //!
 //! Nothing decodes a WAV, so one opened here has no document of its own — it is bytes
 //! with an error beside them. What it does have is a use: `nord_format`'s sample encoder
-//! builds a one-zone v2 instrument out of 44.1 kHz mono 16-bit PCM, and that is the panel
-//! this module draws.
+//! builds a one-zone v2 instrument out of 44.1 kHz mono or stereo 16-bit PCM, and that is
+//! the panel this module draws.
 //!
 //! ⚠️ The encoder is a reconstruction. What it writes is structurally sound and decodes
 //! back through that crate's own codec exactly, but it is **not** byte-identical to what
@@ -155,6 +155,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
                 pcm.rate,
                 match pcm.channels {
                     1 => "mono".to_string(),
+                    2 => "stereo".to_string(),
                     n => format!("{n} channels"),
                 },
                 pcm.frames(),

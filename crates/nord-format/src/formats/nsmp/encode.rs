@@ -11,8 +11,10 @@
 //!
 //! So three claims: a file from here **round-trips through this crate's own decoder
 //! exactly** under either predictor, it obeys every structural law the format is known
-//! to have, and — confirmed on hardware — **the Electro 5 loads and plays one**, under
-//! either predictor, at the pitch the decoder renders.
+//! to have, and **the Electro 5 loads and plays one** under either predictor, at the pitch
+//! the decoder renders.
+//!
+//! Confirmed on hardware.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -33,8 +35,9 @@
 //! landmark — the field total, the resync position, both 1:1 runs — is exactly its mono
 //! value doubled. So the whole of stereo, on the plan side, is a channel count: cells
 //! are `2*24` fields, 1:1 records reach `2*32`, the terminator states `2*24`, and the
-//! predictor keeps a history per channel. Validated over every stereo stroke the vendor
-//! pool holds (`nord-corpus`, `tools/nsmp-p4 stereo`).
+//! predictor keeps a history per channel.
+//!
+//! Inferred from specimens; not confirmed on hardware.
 //!
 //! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
 //! which is the whole of what the container stores about looping: the crossfade is
@@ -55,7 +58,8 @@ const HEADER_LEN: usize = codec::Layout::V2.header_len();
 /// Content version of the Sample Library 2.0 layout this writes.
 const VERSION: u32 = 200;
 
-/// Unexplained v2 sample-instrument `aux` value.
+/// The v2 sample-instrument `aux` value.
+/// Unexplained: real programs hold this, and the panel cannot produce it.
 const AUX: u32 = 0x000f_0000;
 
 /// Section schema versions, which do not track the content version.
@@ -118,7 +122,8 @@ const RING_OUT: usize = 160;
 /// project's own number.
 ///
 /// Any position works: what makes a stroke legal is `W = band(R1)`, and the header
-/// states everything a reader needs. Confirmed on hardware at this ratio.
+/// states everything a reader needs. This ratio produces a playable stroke.
+/// Confirmed on hardware.
 const RHO_NUM: u64 = 63;
 const RHO_DEN: u64 = 634;
 
@@ -350,21 +355,28 @@ impl Plan {
         }
         // Everything below is laid out per channel and scaled at the end, because that
         // is what the encoder does: one plan, interleaved.
-        let lattice = |n: usize| fields_of(n).map(|f| f * channels);
+        let lattice = |n: usize| fields_of(n).and_then(|f| f.checked_mul(channels));
         let start = lattice(points.start).ok_or_else(|| size_error(points.start))?;
         // The loop's length is what has to survive, so it is put on the lattice as a
         // length. Rounding its two ends separately can cost it a field.
         let length = lattice(points.end - points.start).ok_or_else(|| size_error(points.end))?;
-        let end = start + length;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| size_error(points.end))?;
         let crossfade = lattice(points.crossfade).ok_or_else(|| size_error(points.crossfade))?;
         // Ahead of the mark the stream still has to open and resync, so a loop that
         // starts too early is pushed off the front by repeating more of itself.
         let cell = CELL * channels;
         let chunk = CHUNK * channels;
         let lead = (LOOP_LEAD * channels).max((MIN_PRE_LOOP * channels).saturating_sub(start));
-        let (at, fields) = (start + lead, end + lead);
+        let at = start
+            .checked_add(lead)
+            .ok_or_else(|| size_error(points.start))?;
+        let fields = end
+            .checked_add(lead)
+            .ok_or_else(|| size_error(points.end))?;
         let warmup = band(length, cell, chunk);
-        if length < warmup + cell {
+        if length < warmup.saturating_add(cell) {
             return Err(ParseError::OutOfBounds {
                 value: format!("a {length}-field loop"),
                 bound: format!(
@@ -386,6 +398,7 @@ impl Plan {
             }
             .into());
         }
+        let midpoint = lattice(points.start / 2).ok_or_else(|| size_error(points.start))?;
         Plan::lay_out(
             frames,
             channels,
@@ -397,7 +410,7 @@ impl Plan {
                 warmup,
                 cells: (length - warmup) / cell,
             }),
-            lattice(points.start / 2).unwrap_or(0),
+            midpoint,
         )
     }
 
@@ -1009,7 +1022,7 @@ fn stroke_header(
     let mut head = vec![0u8; HEADER_LEN];
     head[0..4].copy_from_slice(&id.to_be_bytes());
     head[5] = root_key;
-    // Unexplained: constant on every corpus stroke.
+    // Unexplained: real programs hold this, and the panel cannot produce it.
     head[6..8].copy_from_slice(&[0x88, 0xba]);
     // The channel count, stated a second time — the terminator's cell size says it too,
     // and a reader takes the terminator because that is what the record sizes follow.
@@ -1033,8 +1046,7 @@ fn stroke_header(
     for (i, p) in directory.iter().enumerate() {
         let at = 20 + 9 * i;
         head[at..at + 2].copy_from_slice(&p.to_be_bytes());
-        // Unexplained: a `0x80` trails the first three pointers and not the fourth,
-        // which is the last field in the header.
+        // Unexplained: real programs hold this, and the panel cannot produce it.
         if i < 3 {
             head[at + 2] = 0x80;
         }
@@ -1095,7 +1107,7 @@ fn hdr(name: &str) -> Result<Section, Error> {
         .into());
     }
     let mut payload = vec![0u8; 111];
-    // Unexplained: constant on every corpus specimen.
+    // Unexplained: real programs hold this, and the panel cannot produce it.
     payload[0..6].copy_from_slice(&[0x00, 0x01, 0xb4, 0x00, 0x06, 0x50]);
     payload[12..12 + name.len()].copy_from_slice(name.as_bytes());
     Ok(Section {
@@ -1147,7 +1159,8 @@ fn map(zones: &[(u8, u8)]) -> Section {
     }
 }
 
-/// The `sty` section. Unexplained: nine constant bytes, never seen to vary.
+/// The `sty` section: nine constant bytes.
+/// Unexplained: real programs hold this, and the panel cannot produce it.
 fn sty() -> Section {
     Section {
         tag: *section::STY,
@@ -2097,7 +2110,6 @@ mod tests {
         assert!(placed > 40, "{placed} placed, {refused} refused");
     }
 
-    /// Two channels at `hz` and `hz * ratio`, interleaved.
     fn stereo(hz: f64, ratio: f64, amplitude: f64, frames: usize) -> Vec<i16> {
         let left = sine(hz, amplitude, frames);
         let right = sine(hz * ratio, amplitude * 0.6, frames);
@@ -2107,8 +2119,6 @@ mod tests {
             .collect()
     }
 
-    /// The whole stereo count law in one assertion: a stereo plan is the mono plan for
-    /// the same frame count, doubled.
     #[test]
     fn a_stereo_plan_is_the_mono_plan_doubled() {
         for frames in [4096, 4409, 8192, 10_000, 44_100, 100_000, 441_000] {
@@ -2118,7 +2128,6 @@ mod tests {
             assert_eq!(both.resync_at, 2 * mono.resync_at, "{frames} frames: R1");
             assert_eq!(both.warmup, 2 * mono.warmup, "{frames} frames: W");
             assert_eq!(both.resync, 2 * mono.resync, "{frames} frames: R");
-            // Cells are counted in stereo cells, so those numbers do not move.
             assert_eq!(both.cells_before, mono.cells_before, "{frames} frames");
             assert_eq!(both.cells_after, mono.cells_after, "{frames} frames");
             assert_eq!(
@@ -2132,9 +2141,6 @@ mod tests {
         }
     }
 
-    /// A stereo stroke says so in its terminator, and every channel comes back the audio
-    /// it went in as — which is what an interleave the decoder reads the other way round
-    /// would not do.
     #[test]
     fn a_stereo_stroke_round_trips_through_the_decoder_exactly() {
         for predictor in [Predictor::Plain, Predictor::Minimising] {
@@ -2163,9 +2169,6 @@ mod tests {
         }
     }
 
-    /// The predictor runs per channel. Opposing ramps make a shared history diverge:
-    /// left rises while right falls, so a stereo-blind encoder stores the *sum* of two
-    /// slopes and the decode comes back as neither.
     #[test]
     fn each_channel_predicts_against_its_own_history() {
         let frames = 20_000;
@@ -2194,8 +2197,6 @@ mod tests {
         }
     }
 
-    /// Resampling is per channel, so one channel's content cannot leak into the other:
-    /// a hard-panned source decodes to silence on the side it was not on.
     #[test]
     fn the_channels_are_resampled_apart() {
         let frames = 12_000;
@@ -2220,7 +2221,6 @@ mod tests {
         assert_eq!(walk.channels, 2);
         let mark = walk.records.iter().find(|r| r.mark).unwrap();
         assert_eq!((walk.terminator - mark.at) % PACKET_WORDS, 0);
-        // The loop's length in source frames survives the doubling.
         let frames = (walk.fields - mark.first_field) as f64 / 2.0 * f64::from(codec::SOURCE_RATE)
             / f64::from(codec::FIELD_RATE);
         assert!(
@@ -2243,16 +2243,12 @@ mod tests {
         assert!(Plan::new(MIN_FRAMES, 0).is_err());
         assert!(Plan::new(MIN_FRAMES, 3).is_err());
         assert!(instrument(&source, &Options::new("x").channels(3)).is_err());
-        // Interleaved PCM that is not whole frames names the mismatch rather than
-        // silently dropping the odd sample.
         assert!(instrument(
             &vec![0i16; 2 * MIN_FRAMES + 1],
             &Options::new("x").channels(2)
         )
         .is_err());
         assert!(instrument(&vec![0i16; 2 * MIN_FRAMES], &Options::new("x").channels(2)).is_ok());
-        // Half the frames, so the same buffer read as stereo can fall below the modelled
-        // opening while it passes as mono.
         let short = vec![0i16; MIN_FRAMES];
         assert!(instrument(&short, &Options::new("x")).is_ok());
         assert!(instrument(&short, &Options::new("x").channels(2)).is_err());

@@ -1,5 +1,6 @@
 #![cfg(feature = "corpus")]
 //! Cross-specimen codec contracts that the per-file corpus sweep cannot express.
+//! Inferred from specimens; not confirmed on hardware.
 
 use nord_format::formats::nsmp;
 use nord_format::{Entity, Sample};
@@ -309,13 +310,6 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     assert_eq!(differing, [0x18, 0x19, 0x1a, 0x1b, 0x410, 0x47d, 0x47e]);
 }
 
-/// The stereo count law over a length ladder, against the editor's own renders.
-///
-/// `SL2` is eight lengths of stereo silence. `nord-corpus`'s own emitter rebuilds every
-/// word of all eight from `(frames, m_startSecondary, ch = 2)`; this checks the same
-/// thing from the encoder's side — that [`Plan::new`] with two channels lands on the
-/// landmarks the editor chose, at every rung and not just the one length the older
-/// corpus had.
 #[test]
 fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
     for frames in [
@@ -356,12 +350,6 @@ fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
     }
 }
 
-/// The interleave and the channel order, from the editor's own plaintext.
-///
-/// `SI-imp` carries interleaved impulse trains — left at 1000 + 2000k source frames,
-/// right at 2000 + 2000k — so a decoded channel says which channel it is and where its
-/// content sat, with no correlation argument in it. `SI-Lonly` and `SI-Ronly` are the
-/// mirror pair that pins the order on its own.
 #[test]
 fn a_stereo_strokes_channels_decode_to_the_signals_they_were_authored_from() {
     let channels = |name: &str| -> [Vec<i16>; 2] {
@@ -376,19 +364,16 @@ fn a_stereo_strokes_channels_decode_to_the_signals_they_were_authored_from() {
     };
     let peak = |v: &[i16]| v.iter().map(|s| i32::from(*s).abs()).max().unwrap_or(0);
 
-    // The order: one file lights the left channel, its mirror the right.
     let [left, right] = channels("SI-Lonly.nsmp");
     assert!(peak(&left) > 10_000 && peak(&right) == 0, "SI-Lonly");
     let [left, right] = channels("SI-Ronly.nsmp");
     assert!(peak(&left) == 0 && peak(&right) > 10_000, "SI-Ronly");
 
-    // The positions: each channel's impulses land on the frames they were written at.
     let [left, right] = channels("SI-imp.nsmp");
     let hits = |v: &[i16]| -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         for (f, &s) in v.iter().enumerate() {
             if i32::from(s).abs() > 4_000 && out.last().is_none_or(|&last| f - last > 8) {
-                // The field lattice runs at FIELD_RATE; report the source frame.
                 out.push(f);
             }
         }
@@ -409,13 +394,6 @@ fn a_stereo_strokes_channels_decode_to_the_signals_they_were_authored_from() {
     near(&hits(&right), &[2_000, 4_000, 6_000, 8_000, 10_000]);
 }
 
-/// The stereo count law, against the editor's own stereo renders: every landmark of a
-/// stereo stroke is exactly its mono twin's doubled — the field total, the resync
-/// position, and both 1:1 runs. `C-44k-16-stL` and `-stLR` are the same 4,409-frame
-/// source as `C-44k-16-mono`, rendered stereo.
-///
-/// This is the whole claim the encoder's stereo plan rests on, checked without needing
-/// rho: whatever the editor decided about that source, it decided once and interleaved.
 #[test]
 fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
     let landmarks = |name: &str| {
@@ -464,7 +442,6 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
         }
     }
 
-    // And the encoder's plan doubles the same way, so the two statements meet.
     let mono = nsmp::encode::Plan::new(4_409, 1).unwrap();
     let both = nsmp::encode::Plan::new(4_409, 2).unwrap();
     assert_eq!(both.fields, 2 * mono.fields);
@@ -506,12 +483,6 @@ fn count_laws_reproduce_editor_landmarks() {
     }
 }
 
-/// Stereo silence is **byte-identical to the editor's own render**, checksum included.
-///
-/// The `SL2` ladder is eight lengths of two-channel silence. There is no frame-0 marker
-/// to excuse — the one word the mono `T-sil` case cannot reproduce — so this is the
-/// whole file: container, sections, stroke header, count laws, allocation and every word
-/// of the stream, from the frame count and the channel count alone.
 #[test]
 fn a_stereo_silence_reproduces_the_editors_render_exactly() {
     for frames in [

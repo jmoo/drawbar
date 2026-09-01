@@ -141,7 +141,7 @@ pub struct DecodeArgs {
 
 #[derive(Args)]
 pub struct EncodeArgs {
-    /// A 44.1 kHz mono 16-bit PCM WAV.
+    /// A 44.1 kHz mono or stereo 16-bit PCM WAV.
     #[arg(value_name = "WAV")]
     pub wav: PathBuf,
 
