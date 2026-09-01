@@ -111,13 +111,21 @@ let
     ]
   );
 
+  audioArgs = optionalAttrs final.stdenv.hostPlatform.isLinux {
+    buildInputs = [ final.alsa-lib ];
+    nativeBuildInputs = [ final.pkg-config ];
+  };
+
   crates = mapAttrs (name: _: mkCrate { crate = name; }) manifests // {
     drawbar =
       let
-        pkg = mkCrate {
-          crate = "drawbar";
-          meta.mainProgram = "drawbar";
-        };
+        pkg = mkCrate (
+          {
+            crate = "drawbar";
+            meta.mainProgram = "drawbar";
+          }
+          // audioArgs
+        );
       in
       if guiLibs == [ ] then
         pkg
@@ -410,7 +418,7 @@ let
   # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
 
   corpusTree = builtins.fetchGit {
-    rev = "3d3e4f139d49a324f3df9fcf64a934921815ef69";
+    rev = "1f372401fe16decf08793172e07bc7a7f2f9d680";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
@@ -463,6 +471,7 @@ in
       # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
       clippy = crane.cargoClippy (
         commonArgs
+        // audioArgs
         // {
           inherit cargoArtifacts;
           pname = "workspace-clippy";
@@ -503,7 +512,11 @@ in
           port="''${DRAWBAR_PORT:-8080}"
           url="http://127.0.0.1:$port/"
 
+          # ⚠️ Store paths carry epoch mtimes, so without this the browser's heuristic
+          # freshness keeps a stale bundle for years and the glue no longer matches
+          # the wasm. `no-cache` forces revalidation; the ETag still answers 304.
           miniserve --index index.html --interfaces 127.0.0.1 --port "$port" \
+            --header "Cache-Control: no-cache" \
             ${final.nord.drawbar-web} &
           server=$!
           trap 'kill "$server" 2>/dev/null || true' EXIT

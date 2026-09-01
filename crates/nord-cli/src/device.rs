@@ -584,10 +584,13 @@ macro_rules! one_shot {
 /// Send an already-validated file into a slot, describing the target first. Shared with
 /// `edit`, which arrives with bytes rather than a path.
 ///
-/// ⚠️ **An occupied destination is replaced, not overwritten.** The instrument answers
-/// status 4 to a write aimed at a slot that already holds something, so this reads the
-/// occupant, deletes it, writes, and puts the occupant back if the write fails — the slot
-/// is genuinely empty in between, and the only copy of its contents is in this process.
+/// ⚠️ **On most classes an occupied destination is replaced, not overwritten.** The
+/// instrument answers status 4 to a write aimed at a slot that already holds something,
+/// so this reads the occupant, deletes it, writes, and puts the occupant back if the
+/// write fails — the slot is genuinely empty in between, and the only copy of its
+/// contents is in this process. The classes that
+/// [overwrite in place](ObjectClass::overwrites_in_place) skip the delete and keep the
+/// same backup-and-restore guard.
 #[allow(clippy::too_many_arguments)]
 pub fn send(
     ui: &Ui,
@@ -649,6 +652,7 @@ pub fn send(
         Err(e) => return Err(explain(e, at)),
     };
 
+    let in_place = class.overwrites_in_place();
     match &existing {
         Some(info) => {
             ui.note(format!(
@@ -657,21 +661,46 @@ pub fn send(
                 shown(at),
                 info.name,
             ));
-            // The operator is consenting to the slot being empty for a moment, not just
-            // to a write, so the delete has to be part of the question.
+            let room = match in_place {
+                true => format!(
+                    "the instrument overwrites {} in place, so nothing is deleted.",
+                    shown(at)
+                ),
+                // The operator is consenting to the slot being empty for a moment, not
+                // just to a write, so the delete has to be part of the question.
+                false => format!(
+                    "{} the instrument will not overwrite in place, so {} is deleted first.",
+                    ui.danger("note:"),
+                    shown(at),
+                ),
+            };
             ui.note(format!(
-                "  {} the instrument will not overwrite in place, so {} is deleted first. \
-                 Its {} bytes are read back beforehand and put back if the write fails.",
-                ui.danger("note:"),
-                shown(at),
+                "  {room} Its {} bytes are read back beforehand and put back if the \
+                 write fails.",
                 info.body_len,
             ));
         }
         None => ui.note(format!("{} is empty; writing {what}", shown(at))),
     }
-    // The write carries the slot's name, so say it up front.
-    if let Some(name) = name.filter(|n| !n.is_empty()) {
-        ui.note(format!("the slot will be named {name:?}"));
+    // The write carries the slot's name, so say it up front — and say when the device
+    // will drop it, rather than reporting a naming that never happens.
+    match name.filter(|n| !n.is_empty()) {
+        Some(name) if class.names_its_slots() => {
+            ui.note(format!("the slot will be named {name:?}"))
+        }
+        Some(_) => ui.note(format!(
+            "{} keeps its fixed name: this class stores none, so the device discards \
+             the write's name argument",
+            shown(at),
+        )),
+        None => {}
+    }
+    if class == ObjectClass::Settings {
+        // Confirmed on hardware.
+        ui.warn(
+            "a settings write reloads the selected program: panel state that has not \
+             been stored is lost, so re-select and re-apply afterwards",
+        );
     }
     ui.confirm(confirmed)?;
 
@@ -699,7 +728,7 @@ pub fn send(
         None => None,
     };
 
-    if existing.is_some() {
+    if existing.is_some() && !in_place {
         ui.note(format!("deleting {} to make room", shown(at)));
         transact(
             &mut t,
@@ -716,8 +745,8 @@ pub fn send(
         .unwrap_or_default();
 
     let written = if fail_after_delete() {
-        // The slot is deleted and the backup is in memory: exactly the state the restore
-        // path exists for, reached without needing a real transport failure.
+        // The backup is in hand and the write never happens: exactly the state the
+        // restore path exists for, reached without needing a real transport failure.
         Err(nord_usb::Error::Transport(
             "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
         ))
@@ -747,8 +776,8 @@ pub fn send(
         // is carried along and reported once the slot is whole again.
         (Err(e), Some(backup)) => {
             ui.warn(format!(
-                "the write failed and {} is now empty; putting the original back",
-                shown(at)
+                "the write failed and {}; putting the original back",
+                aftermath(class, at)
             ));
             // Restoring puts back what the slot was called, not what the caller wanted
             // the replacement named.
@@ -786,6 +815,7 @@ pub fn send(
                 Err(restore) => Err(rescue(
                     ui,
                     at,
+                    class,
                     &backup,
                     &e.to_string(),
                     &restore.to_string(),
@@ -812,7 +842,14 @@ fn fail_after_delete() -> bool {
 
 /// Last resort: the write failed, the restore failed, and the slot's former contents
 /// exist only in memory. Spill them next to the operator rather than exiting with them.
-fn rescue(ui: &Ui, at: Location, backup: &[u8], write: &str, restore: &str) -> String {
+fn rescue(
+    ui: &Ui,
+    at: Location,
+    class: ObjectClass,
+    backup: &[u8],
+    write: &str,
+    restore: &str,
+) -> String {
     let path = std::env::current_dir()
         .unwrap_or_default()
         .join(rescue_name(at, backup));
@@ -823,18 +860,31 @@ fn rescue(ui: &Ui, at: Location, backup: &[u8], write: &str, restore: &str) -> S
                 path.display()
             ));
             format!(
-                "{write} (restoring failed as well: {restore}) {} is empty; \
+                "{write} (restoring failed as well: {restore}) {}; \
                  its former contents were saved to {} — put it back with `nord put`",
-                shown(at),
+                aftermath(class, at),
                 path.display(),
             )
         }
         Err(io) => format!(
-            "{write} (restoring failed as well: {restore}) {} is EMPTY and its former \
+            "{write} (restoring failed as well: {restore}) {} and its former \
              contents could not be saved either ({io}); {} bytes are lost",
-            shown(at),
+            aftermath(class, at),
             backup.len(),
         ),
+    }
+}
+
+/// What a failed write left in the slot, for the line that reports it.
+///
+/// The two write paths fail differently: the delete-first composition leaves the slot
+/// genuinely empty, while a class that overwrites in place leaves whatever the
+/// interrupted write put there. Naming the wrong one tells the operator to take the
+/// wrong next step.
+fn aftermath(class: ObjectClass, at: Location) -> String {
+    match class.overwrites_in_place() {
+        true => format!("{} may hold a partly written body", shown(at)),
+        false => format!("{} is empty", shown(at)),
     }
 }
 
@@ -1707,6 +1757,23 @@ mod tests {
         let at = Location { bank: 6, slot: 49 };
         // Wire is zero-indexed, the instrument's labels are not.
         assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
+    }
+
+    #[test]
+    fn a_failed_write_says_what_it_left_in_the_slot() {
+        let at = Location { bank: 0, slot: 1 };
+        assert_eq!(
+            aftermath(ObjectClass::Program, at),
+            "bank 1 slot 2 is empty"
+        );
+        assert_eq!(
+            aftermath(ObjectClass::Live, at),
+            "bank 1 slot 2 may hold a partly written body"
+        );
+        assert_eq!(
+            aftermath(ObjectClass::Settings, at),
+            "bank 1 slot 2 may hold a partly written body"
+        );
     }
 
     /// A set list must not land with a program's extension.

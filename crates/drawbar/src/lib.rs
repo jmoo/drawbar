@@ -5,6 +5,7 @@
 //!
 
 pub mod app;
+pub mod audio;
 pub mod base64;
 pub mod browser;
 pub mod device;
@@ -14,6 +15,7 @@ pub mod fields;
 pub mod knob;
 pub mod led;
 pub mod log;
+pub mod newproject;
 pub mod note;
 pub mod store;
 pub mod strings;

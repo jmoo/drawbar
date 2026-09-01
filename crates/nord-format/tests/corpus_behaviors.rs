@@ -411,6 +411,403 @@ fn nsmp_bad_checksum_is_refused() {
     assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
 }
 
+/// A device read whose leading body bytes arrived as foreign buffer content, so the
+/// `NWS` container and the sections after it are gone. Named `.skip.`, which keeps the
+/// sweep off it, so it is opened by path rather than through [`named`].
+#[test]
+fn nsmp_body_without_its_container_section_says_which_tag_was_expected() {
+    let path = scan::root().join("ne5/audio-oracle/2026-08-30/stereo77.skip.nsmp");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let err = nord_format::from_stream(&mut Cursor::new(&bytes))
+        .expect_err("a body missing its container section must not parse")
+        .to_string();
+    assert_eq!(
+        err,
+        "the body does not open with the NWS container section; found \\x00\\x00\\x00"
+    );
+}
+
+/// A one-zone v3 and a one-zone v4 instrument, and the multi-zone vendor files
+/// whose `map` layouts differ from theirs. Named so a failure says which
+/// generation and which zone layout broke.
+const V3_ONE_ZONE: &str = "Q-base.nsmp3";
+const V4_ONE_ZONE: &str = "Q-base.nsmp4";
+const V3_MAP_14: &str = "Bass Clarinet 2_KG  mono 3.11 [ne6].nsmp3";
+const V3_MAP_12: &str = "Ashbory Bass Finger_BS mono 3.0 [ne6].nsmp3";
+const V4_KEY_MAP: &str = "Kalimba_KG 4.1 [ne7].nsmp4";
+
+/// Load a specimen, edit it through the generation-neutral accessors, and
+/// re-encode.
+fn edited(name: &str, edit: impl FnOnce(&mut Sample)) -> (&'static [u8], Vec<u8>) {
+    let before = &named(name).bytes;
+    let mut entity = nord_format::from_stream(&mut Cursor::new(before)).unwrap();
+    let Entity::Sample(sample) = &mut entity else {
+        panic!("{name} is not a sample instrument");
+    };
+    edit(sample);
+    let after = nord_format::to_bytes(&entity).unwrap();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "{name}: the edit resized the file"
+    );
+    // Reading the result back is what proves the container checksum was
+    // recomputed: a stale one is refused.
+    nord_format::from_stream(&mut Cursor::new(&after))
+        .unwrap_or_else(|e| panic!("{name} does not read back after the edit: {e}"));
+    (before, after)
+}
+
+/// Which bytes an edit moved, less the container checksum's own word — that
+/// moves whenever anything else does and says nothing about scope.
+fn moved(before: &[u8], after: &[u8]) -> Vec<usize> {
+    const CHECKSUM: std::ops::Range<usize> = 0x18..0x1c;
+    (0..before.len())
+        .filter(|&i| before[i] != after[i] && !CHECKSUM.contains(&i))
+        .collect()
+}
+
+/// Every zone's decoded audio, which no edit here is allowed to disturb.
+fn audio(bytes: &[u8]) -> Vec<Vec<i16>> {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+    let Entity::Sample(sample) = &entity else {
+        panic!("not a sample instrument");
+    };
+    let layout = sample.layout();
+    sample
+        .zones()
+        .unwrap()
+        .iter()
+        .map(|zone| {
+            nsmp::codec::decode(zone.stream, zone.at, layout)
+                .unwrap()
+                .samples
+        })
+        .collect()
+}
+
+fn name_of(bytes: &[u8]) -> String {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+    let Entity::Sample(sample) = &entity else {
+        panic!("not a sample instrument");
+    };
+    sample.name().unwrap()
+}
+
+fn zones_of(bytes: &[u8]) -> Vec<(u8, u8, Option<u8>)> {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+    let Entity::Sample(sample) = &entity else {
+        panic!("not a sample instrument");
+    };
+    sample
+        .zones()
+        .unwrap()
+        .iter()
+        .map(|z| (z.root_key, z.top_note, z.low_note))
+        .collect()
+}
+
+#[test]
+fn nsmp_wide_rename_touches_only_the_name_field() {
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_12, V4_KEY_MAP] {
+        let old = name_of(&named(name).bytes);
+        let (before, after) = edited(name, |s| s.set_name("Retitled").unwrap());
+        let moved = moved(before, after.as_slice());
+        // Writing one name over another moves at most the longer of the two —
+        // the shorter one's tail is NUL-filled — and never leaves the field.
+        assert!(!moved.is_empty(), "{name}: rename moved nothing");
+        assert!(
+            moved.len() <= old.len().max("Retitled".len()),
+            "{name}: rename moved {moved:?} over a {}-byte name",
+            old.len()
+        );
+        assert!(
+            moved[moved.len() - 1] - moved[0] < nsmp::MAX_NAME_V3_LEN,
+            "{name}: rename reached outside the name field: {moved:?}"
+        );
+        let reread = nord_format::from_stream(&mut Cursor::new(&after)).unwrap();
+        let Entity::Sample(sample) = &reread else {
+            unreachable!()
+        };
+        assert_eq!(sample.name().unwrap(), "Retitled", "{name}");
+        assert_eq!(audio(before), audio(&after), "{name}: rename moved audio");
+    }
+}
+
+#[test]
+fn nsmp_wide_rename_stops_at_the_sub_name() {
+    let long = "x".repeat(nsmp::MAX_NAME_V3_LEN);
+    let (_, after) = edited(V3_MAP_14, |s| s.set_name(&long).unwrap());
+    let reread = nord_format::from_stream(&mut Cursor::new(&after)).unwrap();
+    let Entity::Sample(Sample::V3(sample)) = &reread else {
+        panic!("not a wide sample")
+    };
+    assert_eq!(sample.name().unwrap(), long);
+    assert_eq!(sample.sub_name().unwrap(), "KG  mono");
+
+    let mut entity = nord_format::from_stream(&mut Cursor::new(&named(V3_MAP_14).bytes)).unwrap();
+    let Entity::Sample(sample) = &mut entity else {
+        unreachable!()
+    };
+    assert!(sample.set_name(&format!("{long}x")).is_err());
+}
+
+#[test]
+fn nsmp_wide_retune_moves_both_copies_of_the_root_key() {
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
+        let was = zones_of(&named(name).bytes)[0].0;
+        let note = if was == 48 { 55 } else { 48 };
+        let (before, after) = edited(name, |s| s.set_root_key(0, note).unwrap());
+        assert_eq!(
+            moved(before, after.as_slice()).len(),
+            2,
+            "{name}: retune moved {:?}",
+            moved(before, after.as_slice())
+        );
+        assert_eq!(zones_of(&after)[0].0, note, "{name}");
+        assert_eq!(audio(before), audio(&after), "{name}: retune moved audio");
+    }
+}
+
+#[test]
+fn nsmp_wide_remap_moves_one_boundary_byte() {
+    for name in [V3_ONE_ZONE, V4_ONE_ZONE, V3_MAP_14, V3_MAP_12] {
+        let (root, top, low) = zones_of(&named(name).bytes)[0];
+        let want = if top == 96 { 95 } else { 96 };
+        let (before, after) = edited(name, |s| s.set_zone_top_note(0, want).unwrap());
+        assert_eq!(
+            moved(before, after.as_slice()).len(),
+            1,
+            "{name}: top note moved {:?}",
+            moved(before, after.as_slice())
+        );
+        assert_eq!(zones_of(&after)[0], (root, want, low), "{name}");
+        assert_eq!(audio(before), audio(&after), "{name}: remap moved audio");
+
+        let Some(low) = low else {
+            // This layout stores no low note, and says so rather than writing a
+            // byte that means something else.
+            let (_, unchanged) = edited(name, |s| assert!(s.set_zone_low_note(0, 40).is_err()));
+            assert_eq!(before, unchanged.as_slice(), "{name}");
+            continue;
+        };
+        let want = if low == 40 { 41 } else { 40 };
+        let (before, after) = edited(name, |s| s.set_zone_low_note(0, want).unwrap());
+        assert_eq!(
+            moved(before, after.as_slice()).len(),
+            1,
+            "{name}: low note moved {:?}",
+            moved(before, after.as_slice())
+        );
+        assert_eq!(zones_of(&after)[0].2, Some(want), "{name}");
+    }
+}
+
+#[test]
+fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
+    let mut populated = 0;
+    let mut neutral = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let (Ok(table), Ok(zones)) = (sample.zone_table(), sample.zones()) else {
+            continue;
+        };
+        let map = nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4).unwrap();
+        let name = specimen.path.display();
+        match table.key_map(&map.payload).unwrap() {
+            nsmp::zone::KeyMap::Absent => continue,
+            nsmp::zone::KeyMap::Neutral => {
+                // The sample editor writes the neutral table whatever the zone
+                // layout, so nothing may start populating one.
+                assert!(
+                    table.plan_key_map(&map.payload, &zones).unwrap().is_empty(),
+                    "{name}: a neutral table was planned over"
+                );
+                neutral += 1;
+            }
+            nsmp::zone::KeyMap::Populated => {
+                let mut after = map.payload.clone();
+                for (at, quad) in table.plan_key_map(&map.payload, &zones).unwrap() {
+                    after[at..at + quad.len()].copy_from_slice(&quad);
+                }
+                assert_eq!(after, map.payload, "{name}: the law did not reproduce it");
+                populated += 1;
+            }
+        }
+    }
+    assert!(populated > 0, "no populated per-key table in the corpus");
+    assert!(neutral > 0, "no neutral per-key table in the corpus");
+}
+
+#[test]
+fn nsmp_v4_populated_key_map_survives_a_round_trip() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        if !sample.zones_are_editable() {
+            continue;
+        }
+        let Ok(zones) = sample.zones() else { continue };
+        if zones.len() < 2 {
+            continue;
+        }
+        let name = specimen.path.display();
+        let roots: Vec<u8> = zones.iter().map(|z| z.root_key).collect();
+        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes)).unwrap();
+        let Entity::Sample(edited) = &mut entity else {
+            unreachable!()
+        };
+        // Move every root away and back. The table is recomputed each time, so
+        // a byte-identical result is the law reproducing what the builder wrote.
+        for (i, root) in roots.iter().enumerate() {
+            edited.set_root_key(i, root.saturating_sub(1)).unwrap();
+        }
+        for (i, root) in roots.iter().enumerate() {
+            edited.set_root_key(i, *root).unwrap();
+        }
+        let after = nord_format::to_bytes(&entity).unwrap();
+        assert_eq!(specimen.bytes, after, "{name}");
+        seen += 1;
+    }
+    assert!(seen > 0, "no multi-zone wide sample in the corpus");
+}
+
+#[test]
+fn nsmp_v4_retune_carries_the_key_map_with_it() {
+    let before = &named(V4_KEY_MAP).bytes;
+    let zones = zones_of(before);
+    let (root, _, _) = zones[0];
+
+    let (_, after) = edited(V4_KEY_MAP, |s| s.set_root_key(0, root - 1).unwrap());
+    assert_eq!(zones_of(&after)[0].0, root - 1);
+    assert_eq!(audio(before), audio(&after), "retune moved audio");
+
+    // The gains and the three bytes behind them are an authored curve that no
+    // layout predicts, so every one of them has to survive the recompute.
+    let levels = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+        let Entity::Sample(Sample::V3(sample)) = &entity else {
+            panic!("not a wide sample")
+        };
+        let map = nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4).unwrap();
+        (0..128)
+            .map(|k| map.payload[6 + k * 10..][..6].to_vec())
+            .collect()
+    };
+    assert_eq!(levels(before), levels(&after), "the per-key levels moved");
+}
+
+#[test]
+fn nsmp_wide_retune_round_trips_across_the_corpus() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(_)) = &specimen.entity else {
+            continue;
+        };
+        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes)).unwrap();
+        let Entity::Sample(sample) = &mut entity else {
+            unreachable!()
+        };
+        if !sample.zones_are_editable() {
+            continue;
+        }
+        let was: Vec<_> = sample.zones().unwrap().iter().map(|z| z.root_key).collect();
+        for (i, root) in was.iter().enumerate() {
+            sample.set_root_key(i, root ^ 1).unwrap();
+        }
+        for (i, root) in was.iter().enumerate() {
+            sample.set_root_key(i, *root).unwrap();
+        }
+        let after = nord_format::to_bytes(&entity).unwrap();
+        assert_eq!(specimen.bytes, after, "{}", specimen.path.display());
+        seen += 1;
+    }
+    assert!(seen > 0, "no editable wide sample in the corpus");
+}
+
+fn projects() -> impl Iterator<Item = (&'static Specimen, &'static nsmpproj::Project)> {
+    corpus().iter().filter_map(|s| match &s.entity {
+        Entity::SampleProject(p) => Some((s, p)),
+        _ => None,
+    })
+}
+
+#[test]
+fn nsmpproj_stroke_fields_move_alone() {
+    use nsmpproj::StrokeField as F;
+    let fields = [
+        ("start", F::Start(3.0)),
+        ("stop", F::Stop(4000.0)),
+        ("gain", F::Gain(0.75)),
+        ("velocity_min", F::VelocityMin(10)),
+        ("velocity_max", F::VelocityMax(100)),
+        ("loop_enabled", F::LoopEnabled(true)),
+        ("loop_start", F::LoopStart(1234.5)),
+        ("loop_length", F::LoopLength(600.0)),
+        ("loop_crossfade", F::LoopCrossfade(90.0)),
+        ("loop_crossfade_mode", F::LoopCrossfadeMode(1)),
+        ("loop_decay_enabled", F::LoopDecayEnabled(true)),
+        ("loop_decay", F::LoopDecay(3.25)),
+        ("loop_detune", F::LoopDetune(-12)),
+        ("short_loop_enabled", F::ShortLoopEnabled(true)),
+        ("short_loop_length", F::ShortLoopLength(64.0)),
+        ("short_loop_crossfade", F::ShortLoopCrossfade(5)),
+        ("short_loop_uses_pitch", F::ShortLoopUsesPitch(false)),
+    ];
+
+    let mut seen = 0;
+    for (specimen, project) in projects() {
+        let at = specimen.path.display();
+        let before = project.render();
+        for stroke in project.strokes().unwrap() {
+            for (name, field) in fields {
+                let mut edited = project.clone();
+                edited.set_stroke_field(stroke.global_id, field).unwrap();
+                let after = edited.render();
+                let changed = before
+                    .lines()
+                    .zip(after.lines())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(changed, 1, "{at}: stroke {} {name}", stroke.global_id);
+                assert_eq!(
+                    before.lines().count(),
+                    after.lines().count(),
+                    "{at}: {name}"
+                );
+            }
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no sample-editor project in the corpus");
+}
+
+#[test]
+fn nsmpproj_velocity_defaults_move_alone() {
+    for (specimen, project) in projects() {
+        let before = project.render();
+        let mut edited = project.clone();
+        let defaults = nsmpproj::VelocityDefaults {
+            attack_amount: 64,
+            amplitude: 0,
+            timbre: 0,
+        };
+        edited.set_velocity_defaults(defaults).unwrap();
+        assert_eq!(edited.velocity_defaults().unwrap(), defaults);
+        let after = edited.render();
+        let changed = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(changed, 3, "{}", specimen.path.display());
+    }
+}
+
 fn project_named(name: &str) -> &'static nsmpproj::Project {
     match &named(name).entity {
         Entity::SampleProject(project) => project,

@@ -212,6 +212,70 @@ pub enum Sample {
 }
 
 impl Sample {
+    pub fn name(&self) -> Result<String, Error> {
+        match self {
+            Sample::V2(s) => s.name(),
+            Sample::V3(s) => s.name(),
+        }
+    }
+
+    /// Longest name this generation's field takes.
+    pub fn max_name_len(&self) -> usize {
+        match self {
+            Sample::V2(_) => nsmp::MAX_NAME_LEN,
+            Sample::V3(_) => nsmp::MAX_NAME_V3_LEN,
+        }
+    }
+
+    pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        match self {
+            Sample::V2(s) => s.set_name(name),
+            Sample::V3(s) => s.set_name(name),
+        }
+    }
+
+    /// Move the note a zone's sample plays untransposed at.
+    pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        match self {
+            Sample::V2(s) => s.set_root_key(index, note),
+            Sample::V3(s) => s.set_root_key(index, note),
+        }
+    }
+
+    pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        match self {
+            Sample::V2(s) => s.set_zone_top_note(index, note),
+            Sample::V3(s) => s.set_zone_top_note(index, note),
+        }
+    }
+
+    /// Move a zone's lowest note, on the generations that store one — the rest
+    /// tile, and refuse.
+    pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        match self {
+            Sample::V2(_) => Err(ParseError::AssertFail(
+                "v2 zones tile: a zone reaches down to one above the next-lower zone's \
+                 top, so only the top note is stored"
+                    .into(),
+            )
+            .into()),
+            Sample::V3(s) => s.set_zone_low_note(index, note),
+        }
+    }
+
+    /// Whether this instrument's zones can be retuned and remapped. Its name
+    /// always can.
+    ///
+    /// False where the zone table does not read, or where a `map` that also
+    /// describes the keyboard note by note cannot be recomputed from the layout.
+    /// The setters say which at length.
+    pub fn zones_are_editable(&self) -> bool {
+        match self {
+            Sample::V2(s) => s.zones().is_ok() && s.strokes().is_ok(),
+            Sample::V3(s) => s.zones_are_editable(),
+        }
+    }
+
     /// Which generation's units this body's stroke streams are in.
     pub fn layout(&self) -> nsmp::codec::Layout {
         match self {
@@ -248,6 +312,7 @@ impl Sample {
                         Ok(nsmp::ZoneAudio {
                             root_key: stroke.root_key,
                             top_note: zone.top_note,
+                            low_note: None,
                             at,
                             stream,
                         })
@@ -264,6 +329,7 @@ impl Sample {
                         Ok(nsmp::ZoneAudio {
                             root_key: zone.root_key,
                             top_note: zone.top_note,
+                            low_note: zone.low_note,
                             at,
                             stream,
                         })

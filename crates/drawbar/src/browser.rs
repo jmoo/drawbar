@@ -13,7 +13,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::dot;
 use crate::device::{
-    occupancy, put_refusal, read_only, Connection, Device, DeviceCmd, Outgoing, BROWSED,
+    occupancy, read_only, write_warning, Connection, Device, DeviceCmd, Outgoing, BROWSED,
 };
 use crate::log::Log;
 use crate::strings::{folder, place, shown};
@@ -167,8 +167,6 @@ pub fn landing(carried: &Carried, onto: Onto) -> Landing {
         (Item::Local(_), Onto::Slot { class, .. }) => {
             if read_only(class) {
                 Landing::No("pianos are installed on the instrument, not moved into it")
-            } else if put_refusal(class).is_some() {
-                Landing::No("this folder cannot be written to over USB")
             } else if carried.kind.home() != Some(class) {
                 Landing::No("that folder holds a different kind of thing")
             } else {
@@ -202,6 +200,9 @@ pub enum Act {
     Disconnect,
     OpenFiles,
     New(Fresh),
+    /// Pick the WAVs a new Sample Editor project is laid out from. The project itself
+    /// is made once the dialog has each file's root key — see [`crate::newproject`].
+    NewProject,
     /// Read the whole instrument again — every class, its geometry and its focus.
     Resync,
     ReadAgain(ObjectClass),
@@ -662,6 +663,7 @@ impl Browser {
     ) {
         let mut open_files = false;
         let mut fresh = None;
+        let mut new_project = false;
         let mut new_folder = false;
         let mut connect = false;
         let attached = device.state.connected();
@@ -682,6 +684,20 @@ impl Browser {
                             }
                         }
                     });
+                }
+                ui.separator();
+                // Not a family: a project is laid out from audio files rather than
+                // started from a default, so it asks for them before it exists.
+                if ui
+                    .button("Sample Editor project…")
+                    .on_hover_text(
+                        "pick the WAVs it plays; the project stores their names and the \
+                         editor looks for them beside it",
+                    )
+                    .clicked()
+                {
+                    new_project = true;
+                    ui.close();
                 }
             });
             new_folder = ui
@@ -716,6 +732,9 @@ impl Browser {
         }
         if let Some(kind) = fresh {
             acts.push(Act::New(kind));
+        }
+        if new_project {
+            acts.push(Act::NewProject);
         }
         if new_folder {
             acts.push(Act::NewFolder);
@@ -1576,7 +1595,7 @@ impl Browser {
                 continue;
             };
             let where_ = place(class, at);
-            if let Some(warning) = foreign_format(&entity.tag(), &device.state.formats_in(class)) {
+            for warning in write_warnings(class, &entity.tag(), &device.state.formats_in(class)) {
                 if !warnings.contains(&warning) {
                     warnings.push(warning);
                 }
@@ -1802,6 +1821,7 @@ pub fn apply(
                     tabs.open(id, workspace);
                 }
             }
+            Act::NewProject => workspace.pick_wavs(),
             Act::Resync => {
                 device.resync();
                 log.say("Reading the instrument again…");
@@ -1960,9 +1980,30 @@ pub fn foreign_format(outgoing: &str, resident: &[String]) -> Option<String> {
     let held: Vec<&str> = resident.iter().map(|held| held.trim()).collect();
     Some(format!(
         "⚠️ This file is {outgoing}; everything read in that folder is {}. Sending it \
-         deletes what is there first.",
+         replaces what is there.",
         held.join(" or "),
     ))
+}
+
+/// Everything worth reading before a write into `class` lands: what the format
+/// comparison found, and what the class itself disturbs beyond the slot.
+fn write_warnings(
+    class: ObjectClass,
+    tag: &str,
+    resident: &[String],
+) -> impl Iterator<Item = String> {
+    [
+        foreign_format(tag, resident),
+        write_warning(class).map(str::to_string),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// The same set as one note, for the dialog that asks about a single slot.
+fn write_note(class: ObjectClass, tag: &str, resident: &[String]) -> Option<String> {
+    let note: Vec<String> = write_warnings(class, tag, resident).collect();
+    (!note.is_empty()).then(|| note.join("\n\n"))
 }
 
 /// Where an asset would be written back to, if anywhere: the slot it came off, and only
@@ -2010,7 +2051,7 @@ fn send(
             &occupant,
             &entity.name,
             place(class, at),
-            foreign_format(&entity.tag(), &device.state.formats_in(class)),
+            write_note(class, &entity.tag(), &device.state.formats_in(class)),
             Act::Replace { id, class, at },
         ),
         _ => device.send(
@@ -2100,13 +2141,19 @@ mod tests {
         }
     }
 
-    /// Pianos are listed and never written; live and settings have no proven write path.
+    /// A piano is a library the instrument installs and indexes for itself, and it is
+    /// the only folder a drop cannot land in. The buffer classes take one.
     #[test]
-    fn the_folders_that_cannot_be_written_refuse_a_drop() {
-        for class in [ObjectClass::Piano, ObjectClass::Live, ObjectClass::Settings] {
+    fn only_the_piano_folder_refuses_a_drop() {
+        assert!(!landing(
+            &local(Kind::from_class(ObjectClass::Piano)),
+            onto(ObjectClass::Piano, 0, 0)
+        )
+        .allowed());
+        for class in [ObjectClass::Live, ObjectClass::Settings] {
             let kind = Kind::from_class(class);
             assert!(
-                !landing(&local(kind), onto(class, 0, 0)).allowed(),
+                landing(&local(kind), onto(class, 0, 0)).allowed(),
                 "{}",
                 folder(class)
             );
@@ -2147,7 +2194,10 @@ mod tests {
     fn every_refusal_explains_itself() {
         let cases = [
             landing(&local(Kind::Program), Onto::Computer),
-            landing(&local(Kind::Live), onto(ObjectClass::Live, 0, 0)),
+            landing(
+                &local(Kind::from_class(ObjectClass::Piano)),
+                onto(ObjectClass::Piano, 0, 0),
+            ),
             landing(&local(Kind::Other), onto(ObjectClass::Program, 0, 0)),
             landing(
                 &slot(ObjectClass::Program, 0, 0),
@@ -2243,8 +2293,8 @@ mod tests {
             (ObjectClass::Program, 0),
             (ObjectClass::Program, 1),
             (ObjectClass::SetList, 0),
-            // Live refuses a write, so it must not reach the queue.
-            (ObjectClass::Live, 0),
+            // A piano is installed by the instrument, so it must not reach the queue.
+            (ObjectClass::Piano, 0),
         ] {
             let id = workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
@@ -2266,7 +2316,7 @@ mod tests {
             .find(|(class, _)| *class == ObjectClass::Program)
             .expect("programs are queued");
         assert_eq!(programs.1.len(), 2);
-        assert!(queued.iter().all(|(class, _)| *class != ObjectClass::Live));
+        assert!(queued.iter().all(|(class, _)| *class != ObjectClass::Piano));
     }
 
     /// A lone send names the asset it is sending, so the write can pay off that one
@@ -2694,8 +2744,10 @@ mod tests {
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),
-            // Live refuses a write, so it must not reach the queue.
+            // The live buffer takes a write like any other slot.
             (ObjectClass::Live, 0),
+            // A piano is installed by the instrument, so it must not reach the queue.
+            (ObjectClass::Piano, 0),
         ] {
             ids.push(workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
@@ -2712,10 +2764,18 @@ mod tests {
 
         let queued = grouped(&ids, &workspace);
         let classes: Vec<ObjectClass> = queued.iter().map(|(class, _)| *class).collect();
-        assert_eq!(classes, vec![ObjectClass::Program, ObjectClass::SetList]);
+        assert_eq!(
+            classes,
+            vec![
+                ObjectClass::Program,
+                ObjectClass::SetList,
+                ObjectClass::Live
+            ]
+        );
         assert!(queued.iter().all(|(_, items)| items.len() == 1));
-        // A folder holding nothing sendable queues nothing at all.
-        assert!(grouped(&ids[2..], &workspace).is_empty());
+        // A folder holding nothing sendable queues nothing at all: the piano, and the
+        // one that never came off an instrument.
+        assert!(grouped(&ids[3..], &workspace).is_empty());
     }
 
     /// A double-click on a slot opens a view: a tab and a document, and no new row in
@@ -2898,10 +2958,9 @@ mod tests {
         assert_eq!(device.queued().len(), 1);
     }
 
-    /// ⚠️ A write is a delete followed by a write, so a file the instrument turns out not
-    /// to want costs the occupant of the slot — and the New menu makes another model's
-    /// program one click away. It warns; it does not refuse, because nothing here has
-    /// watched an instrument refuse one.
+    /// ⚠️ A file the instrument turns out not to want costs the occupant of the slot —
+    /// and the New menu makes another model's program one click away. It warns; it does
+    /// not refuse, because nothing here has watched an instrument refuse one.
     #[test]
     fn a_file_of_another_model_is_warned_about_and_not_refused() {
         let held =
@@ -2911,7 +2970,7 @@ mod tests {
             warning.contains("ns4p") && warning.contains("ne5p"),
             "{warning}"
         );
-        assert!(warning.contains("deletes"), "{warning}");
+        assert!(warning.contains("replaces"), "{warning}");
 
         // What the folder is already holding raises nothing, whitespace and case included.
         assert_eq!(foreign_format("ne5p", &held(&["ne5p"])), None);

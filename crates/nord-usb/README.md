@@ -21,18 +21,23 @@ The wire protocol is decoded and validated. Implemented and hardware-verified on
 macOS and Linux: inventory, object info, dependencies, program read/write, the
 slot organization set (move, delete, rename, duplicate, select), and reads of the
 live slots (class 6) and the settings singleton (class 7). Linux emits
-byte-identical request frames to macOS for every verb.
+byte-identical request frames to macOS for every verb. Writes of the live and
+settings slots are additionally hardware-verified on macOS.
 
-Those two classes take a write **in place**, at an occupied slot, which no other
-class does — confirmed on hardware by driving the sequence directly. `op::write`
-has no in-place branch, so it still composes a write as delete-then-write and
-refuses class 6 and 7 rather than delete them; whether either survives a delete of
-its own class is unconfirmed on hardware.
+Those two classes overwrite an occupied slot in place
+(`ObjectClass::overwrites_in_place`), so a caller must not compose their write out
+of delete-then-write — deleting either has never been attempted.
 
 The WebUSB backend is hardware-verified for reads and writes (Chrome on macOS,
 via `drawbar`). Three transport paths that only the browser takes are not:
 `select_configuration` on a device the OS left unconfigured, multi-chunk bulk
 reads, and a `transferIn` whose payload is an exact multiple of the packet size.
+
+Frames are terminated: the instrument reads a message until a **short** packet
+ends it, so a frame whose length is a whole multiple of the OUT endpoint's
+`wMaxPacketSize` is followed by a zero-length packet. Without it the device
+never answers and the session is stranded — a `RENAME` carrying a 34-character
+name is exactly 64 bytes on this full-speed link, and 33 characters is not.
 
 Not implemented: bundle and backup transfer, firmware update, and the piano/sample
 library as first-class objects. Windows builds and passes the replay tests but has

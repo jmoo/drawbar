@@ -29,20 +29,15 @@ commands() { sed -n 's/^  \([a-z][a-z-]*\)  .*/\1/p' "$1" | tr '\n' ' '; }
 while IFS=: read -r noun want; do
   [ -n "$want" ] || continue
   want=${want# }
+  # A noun may be nested (`sample project`), so it is a word list, not a word.
+  read -r -a path <<<"$noun"
   out=surface-${noun:-top}.txt
-  if [ -n "$noun" ]; then
-    run "$noun" --help >"$out" 2>err.txt || {
-      echo "nord $noun --help failed:"
-      cat err.txt
-      exit 1
-    }
-  else
-    run --help >"$out" 2>err.txt || {
-      echo "nord --help failed:"
-      cat err.txt
-      exit 1
-    }
-  fi
+  out=${out// /-}
+  run ${path[@]+"${path[@]}"} --help >"$out" 2>err.txt || {
+    echo "nord ${noun:+$noun }--help failed:"
+    cat err.txt
+    exit 1
+  }
   got=$(commands "$out")
   [ "$got" = "$want " ] || {
     echo "nord $noun: command list drifted"

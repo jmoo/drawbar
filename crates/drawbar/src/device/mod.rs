@@ -588,22 +588,22 @@ pub fn read_only(class: ObjectClass) -> bool {
 
 /// Whether this app will write into a class at all.
 pub fn sendable(class: ObjectClass) -> bool {
-    put_refusal(class).is_none() && !read_only(class)
+    !read_only(class)
 }
 
-/// Whether a class accepts a write.
+/// What a write into this class disturbs beyond the slot it lands in, for the question
+/// asked before it happens.
 ///
-/// ⚠️ The live buffer and the settings singleton take a write **in place**, confirmed
-/// on hardware — but this app writes through a delete followed by a write, and whether
-/// either survives a delete of its own class is unconfirmed. Until the in-place path
-/// exists, an edit of either stops at a file.
-pub fn put_refusal(class: ObjectClass) -> Option<String> {
+/// Confirmed on hardware.
+///
+/// A settings write makes the instrument reload the selected program, so panel state
+/// the player has not stored is gone.
+pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
     match class {
-        ObjectClass::Live | ObjectClass::Settings => Some(format!(
-            "this app writes {} by deleting first, which is untried on hardware for \
-             this class; save the object as a file instead",
-            class.label(),
-        )),
+        ObjectClass::Settings => Some(
+            "Writing settings reloads the selected program on the instrument. \
+             Panel changes that have not been stored will be lost.",
+        ),
         _ => None,
     }
 }
@@ -991,16 +991,22 @@ impl Device {
 mod tests {
     use super::*;
 
-    /// The two classes this app has no in-place write for must refuse by name, and the
-    /// rest must not.
+    /// The buffer classes take a write like any other slot; only a library the
+    /// instrument installs for itself is off limits.
     #[test]
-    fn only_live_and_settings_refuse_a_put() {
-        for class in [ObjectClass::Live, ObjectClass::Settings] {
-            let why = put_refusal(class).expect("must refuse");
-            assert!(why.contains("deleting first"), "{why}");
+    fn every_browsed_class_but_pianos_can_be_written() {
+        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Piano) {
+            assert!(sendable(*class), "{}", folder(*class));
         }
-        for class in ObjectClass::INVENTORY {
-            assert!(put_refusal(class).is_none(), "{}", class.label());
+        assert!(!sendable(ObjectClass::Piano));
+    }
+
+    #[test]
+    fn a_settings_write_warns_that_the_panel_reloads() {
+        let why = write_warning(ObjectClass::Settings).expect("must warn");
+        assert!(why.contains("reloads the selected program"), "{why}");
+        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Settings) {
+            assert!(write_warning(*class).is_none(), "{}", folder(*class));
         }
     }
 

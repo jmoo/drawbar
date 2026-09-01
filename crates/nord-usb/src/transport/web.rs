@@ -21,9 +21,9 @@
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{UsbDevice, UsbTransferStatus};
+use web_sys::{UsbDevice, UsbDirection, UsbEndpoint, UsbTransferStatus};
 
-use super::{Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
+use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::error::{Error, Result};
 
 /// WebUSB addresses an endpoint by its *number*, without the direction bit that a
@@ -78,6 +78,32 @@ pub struct WebUsbTransport {
     /// `None` when the caller claimed the interface itself, in which case
     /// [`Self::close`] cannot release it on their behalf.
     interface_number: Option<u8>,
+    /// `packetSize` for [`EP_OUT`], deciding which frames need a terminating
+    /// zero-length packet — see [`Transport::write`].
+    out_packet: usize,
+}
+
+/// `packetSize` for the OUT endpoint of the device's vendor interface.
+///
+/// The browser exposes the descriptor the desktop backend reads directly, so both
+/// backends terminate on the device's own number rather than on the 64 that happens to
+/// be right for a full-speed link.
+fn out_packet(device: &UsbDevice) -> Option<usize> {
+    let endpoint = device
+        .configuration()?
+        .interfaces()
+        .iter()
+        .map(|iface| web_sys::UsbInterface::from(iface).alternate())
+        .filter(|alt| alt.interface_class() == CLASS_VENDOR_SPECIFIC)
+        .flat_map(|alt| alt.endpoints().iter().collect::<Vec<_>>())
+        .map(UsbEndpoint::from)
+        .find(|ep| {
+            ep.direction() == UsbDirection::Out && ep.endpoint_number() == endpoint_number(EP_OUT)
+        })?;
+    match endpoint.packet_size() as usize {
+        0 => None,
+        size => Some(size),
+    }
 }
 
 impl WebUsbTransport {
@@ -85,11 +111,19 @@ impl WebUsbTransport {
     ///
     /// ⚠️ [`Self::close`] will not release that interface — it does not know which one
     /// to release. Release it yourself, or use [`Self::open`].
-    pub fn new(device: UsbDevice) -> Self {
-        Self {
+    pub fn new(device: UsbDevice) -> Result<Self> {
+        let out_packet = out_packet(&device).ok_or_else(|| {
+            Error::Transport(
+                "the claimed interface reports no bulk OUT endpoint; claim the vendor \
+                 interface, or use `open`"
+                    .into(),
+            )
+        })?;
+        Ok(Self {
             device,
             interface_number: None,
-        }
+            out_packet,
+        })
     }
 
     /// Run the browser ceremony: open the device, configure it if the platform left it
@@ -126,6 +160,12 @@ impl WebUsbTransport {
                 )
             })?;
 
+        let out_packet = out_packet(&device).ok_or_else(|| {
+            Error::Transport(format!(
+                "the vendor interface reports no bulk OUT endpoint at {EP_OUT:#04x}"
+            ))
+        })?;
+
         JsFuture::from(device.claim_interface(interface_number))
             .await
             .map_err(map_err(
@@ -136,7 +176,28 @@ impl WebUsbTransport {
         Ok(Self {
             device,
             interface_number: Some(interface_number),
+            out_packet,
         })
+    }
+
+    /// End a frame the device would otherwise still be reading — see
+    /// [`needs_terminator`].
+    ///
+    /// The rule is confirmed on hardware through the desktop backend; that an empty
+    /// `transferOut` is the zero-length packet that satisfies it is inferred from the
+    /// WebUSB specification, not confirmed on hardware.
+    async fn terminate(&mut self, written: usize) -> Result<()> {
+        if !needs_terminator(written, self.out_packet) {
+            return Ok(());
+        }
+        let transfer = self
+            .device
+            .transfer_out_with_u8_array(endpoint_number(EP_OUT), &Uint8Array::new_with_length(0))
+            .map_err(map_err("bulk write terminator"))?;
+        let result = JsFuture::from(transfer)
+            .await
+            .map_err(map_err("bulk write terminator"))?;
+        check_status(result.status(), "bulk write terminator")
     }
 
     /// The wrapped device, for pages that want to read its descriptors.
@@ -183,7 +244,7 @@ impl Transport for WebUsbTransport {
                 buf.len()
             )));
         }
-        Ok(())
+        self.terminate(written).await
     }
 
     async fn read(&mut self, max: usize) -> Result<Vec<u8>> {

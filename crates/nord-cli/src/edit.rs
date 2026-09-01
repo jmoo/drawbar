@@ -42,13 +42,20 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
 
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
-    let staged = match (&mut entity, class) {
-        (Entity::Program(Program::Electro5(p)), ObjectClass::Program) => stage(ui, &args, p)?,
-        (Entity::Live(Live::Electro5(l)), ObjectClass::Live) => stage(ui, &args, l)?,
-        (Entity::Settings(Settings::Electro5(s)), ObjectClass::Settings) => stage(ui, &args, s)?,
-        (Entity::Song(Song::Electro5(s)), ObjectClass::SetList) => {
-            editors::stage(ui, args.fields, &args.set, &mut editors::SongEditor(s))?
+    let (staged, what) = match (&mut entity, class) {
+        (Entity::Program(Program::Electro5(p)), ObjectClass::Program) => {
+            (stage(ui, &args, p)?, "the edited program")
         }
+        (Entity::Live(Live::Electro5(l)), ObjectClass::Live) => {
+            (stage(ui, &args, l)?, "the edited live slot")
+        }
+        (Entity::Settings(Settings::Electro5(s)), ObjectClass::Settings) => {
+            (stage(ui, &args, s)?, "the edited settings")
+        }
+        (Entity::Song(Song::Electro5(s)), ObjectClass::SetList) => (
+            editors::stage(ui, args.fields, &args.set, &mut editors::SongEditor(s))?,
+            "the edited set list",
+        ),
         _ => return Err(mismatch(&entity, class)),
     };
     // `--fields` has listed them and is done.
@@ -80,35 +87,10 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
             ui.confirm(args.yes)?;
             write_file(ui, &path, &edited)
         }
-        (Some(Target::Slot(at)), None) => match class {
-            ObjectClass::Program => crate::device::send(
-                ui,
-                &edited,
-                at,
-                class,
-                args.yes,
-                "the edited program",
-                None,
-                None,
-            ),
-            ObjectClass::SetList => crate::device::send(
-                ui,
-                &edited,
-                at,
-                class,
-                args.yes,
-                "the edited set list",
-                None,
-                None,
-            ),
-            // ⚠️ These classes take a write in place; a delete of either is untried.
-            _ => Err(format!(
-                "writing {} back over USB deletes first, which is untried for this \
-                 class; give -o a path to save the edit as a .{} file",
-                class.label(),
-                crate::file::tag(class).unwrap_or("bin"),
-            )),
-        },
+        // The slot keeps whatever it is already called, so the write carries no name.
+        (Some(Target::Slot(at)), None) => {
+            crate::device::send(ui, &edited, at, class, args.yes, what, None, None)
+        }
         (None, None) => {
             Err("editing a fresh default needs -o: there is nothing to write back to".into())
         }
