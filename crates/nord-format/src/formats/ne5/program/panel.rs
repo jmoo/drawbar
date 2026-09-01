@@ -8,7 +8,7 @@
 //! part pickers decide which engine sections mean anything, and a picker that brings a
 //! section back must never be inside the section it brings back.
 
-use crate::panel::{Group, Match, Panel, Relevance};
+use crate::panel::{Group, Match, Panel, Relevance, Selection};
 
 /// Either part playing `instrument` — the condition an engine section hangs on.
 macro_rules! part_plays {
@@ -40,8 +40,9 @@ macro_rules! organ_is {
     };
 }
 
-/// One effect routed to a part. ⚠️ `Unknown` is how older firmware spelled *off* and
-/// presents as off, so it is not one of these — confirmed on hardware.
+/// One effect routed to a part. `Unknown` is how older firmware spelled *off* and
+/// presents as off, so it is not one of these.
+/// Confirmed on hardware.
 macro_rules! routed {
     ($field:expr) => {
         Some(Relevance {
@@ -65,7 +66,54 @@ macro_rules! switched_on {
 }
 
 pub const PANEL: Panel = Panel {
-    exhaustive: true,
+    exhaustive: false,
+    selections: &[
+        Selection {
+            member: "organ_panel.b3_preset1_drawbars",
+            field: "organ_panel.b3_preset2_selected",
+            value: "false",
+        },
+        Selection {
+            member: "organ_panel.b3_bass_bar1",
+            field: "organ_panel.b3_preset2_selected",
+            value: "false",
+        },
+        Selection {
+            member: "organ_panel.b3_preset2_drawbars",
+            field: "organ_panel.b3_preset2_selected",
+            value: "true",
+        },
+        Selection {
+            member: "organ_panel.vox_preset1_drawbars",
+            field: "organ_panel.vox_preset2_selected",
+            value: "false",
+        },
+        Selection {
+            member: "organ_panel.vox_preset2_drawbars",
+            field: "organ_panel.vox_preset2_selected",
+            value: "true",
+        },
+        Selection {
+            member: "organ_panel.farfisa_preset1_drawbars",
+            field: "organ_panel.farfisa_preset2_selected",
+            value: "false",
+        },
+        Selection {
+            member: "organ_panel.farfisa_preset2_drawbars",
+            field: "organ_panel.farfisa_preset2_selected",
+            value: "true",
+        },
+        Selection {
+            member: "organ_panel.pipe_preset1_drawbars",
+            field: "organ_panel.pipe_preset2_selected",
+            value: "false",
+        },
+        Selection {
+            member: "organ_panel.pipe_preset2_drawbars",
+            field: "organ_panel.pipe_preset2_selected",
+            value: "true",
+        },
+    ],
     groups: &[
         Group {
             title: "Keyboard & split",
@@ -147,15 +195,27 @@ pub const PANEL: Panel = Panel {
                 Group {
                     title: "Vox",
                     when: organ_is!("Vox"),
-                    members: &[
-                        "organ_panel.vox_vib",
-                        "organ_panel.vox_preset2_selected",
-                        "organ_panel.vox_preset1_drawbars",
-                        "organ_panel.vox_preset1_vib",
-                        "organ_panel.vox_preset2_drawbars",
-                        "organ_panel.vox_preset2_vib",
+                    members: &["organ_panel.vox_vib", "organ_panel.vox_preset2_selected"],
+                    groups: &[
+                        Group {
+                            title: "Preset 1",
+                            when: None,
+                            members: &[
+                                "organ_panel.vox_preset1_drawbars",
+                                "organ_panel.vox_preset1_vib",
+                            ],
+                            groups: &[],
+                        },
+                        Group {
+                            title: "Preset 2",
+                            when: None,
+                            members: &[
+                                "organ_panel.vox_preset2_drawbars",
+                                "organ_panel.vox_preset2_vib",
+                            ],
+                            groups: &[],
+                        },
                     ],
-                    groups: &[],
                 },
                 Group {
                     title: "Farfisa",
@@ -165,27 +225,50 @@ pub const PANEL: Panel = Panel {
                     members: &[
                         "organ_panel.farfisa_vib",
                         "organ_panel.farfisa_preset2_selected",
-                        "organ_panel.farfisa_preset1_drawbars",
-                        "organ_panel.farfisa_preset1_vib",
-                        "organ_panel.farfisa_preset2_drawbars",
-                        "organ_panel.farfisa_preset2_vib",
                     ],
-                    groups: &[],
+                    groups: &[
+                        Group {
+                            title: "Preset 1",
+                            when: None,
+                            members: &[
+                                "organ_panel.farfisa_preset1_drawbars",
+                                "organ_panel.farfisa_preset1_vib",
+                            ],
+                            groups: &[],
+                        },
+                        Group {
+                            title: "Preset 2",
+                            when: None,
+                            members: &[
+                                "organ_panel.farfisa_preset2_drawbars",
+                                "organ_panel.farfisa_preset2_vib",
+                            ],
+                            groups: &[],
+                        },
+                    ],
                 },
                 Group {
                     title: "Pipe",
                     // No vibrato and no percussion the panel can reach: the bit the other
                     // models use for preset-1 vib is set in nearly every real program,
                     // and the vib button does not respond while pipe is selected.
-                    // Confirmed on hardware — so it is unclaimed by the body, not merely
-                    // ungrouped here.
+                    // Confirmed on hardware.
                     when: organ_is!("Pipe"),
-                    members: &[
-                        "organ_panel.pipe_preset2_selected",
-                        "organ_panel.pipe_preset1_drawbars",
-                        "organ_panel.pipe_preset2_drawbars",
+                    members: &["organ_panel.pipe_preset2_selected"],
+                    groups: &[
+                        Group {
+                            title: "Preset 1",
+                            when: None,
+                            members: &["organ_panel.pipe_preset1_drawbars"],
+                            groups: &[],
+                        },
+                        Group {
+                            title: "Preset 2",
+                            when: None,
+                            members: &["organ_panel.pipe_preset2_drawbars"],
+                            groups: &[],
+                        },
                     ],
-                    groups: &[],
                 },
             ],
         },
@@ -201,9 +284,7 @@ pub const PANEL: Panel = Panel {
             ],
             groups: &[Group {
                 title: "Clavinet",
-                // Inferred: the panel's Clav Model buttons are the clavinet's own, and
-                // the stored value carries no reading for another category. Not
-                // confirmed on hardware.
+                // Inferred from specimens; not confirmed on hardware.
                 when: Some(Relevance {
                     any_of: &[Match {
                         field: "piano_panel.category",
@@ -313,29 +394,6 @@ pub const PANEL: Panel = Panel {
                 groups: &[],
             }],
         },
-        Group {
-            title: "Not on the panel",
-            // Fields the body carries that no control reaches. They are here rather than
-            // left out so the layout can claim to account for everything: leaving them
-            // unnamed and leaving them unexplained would look the same to a caller.
-            when: None,
-            members: &[
-                // The schema version the body echoes out of the header. Bookkeeping the
-                // instrument reads, not a control: a program plays the same either way.
-                "program_version",
-                // Zero in every specimen; not confirmed on hardware.
-                "center_panel.unknown_boolean1",
-                // No control on the panel is known to move these.
-                "center_panel.lower_enabled",
-                "center_panel.upper_enabled",
-                // Library dependencies, not settings: they name the piano and the sample
-                // this program needs, and are rewritten by relinking rather than by
-                // turning anything.
-                "piano_panel.id",
-                "sample_panel.id",
-            ],
-            groups: &[],
-        },
     ],
 };
 
@@ -374,7 +432,7 @@ mod tests {
         assert!(relevant("Organ", &fresh), "a fresh program plays organ");
         assert!(!relevant("Piano", &fresh));
         assert!(!relevant("Sample", &fresh));
-        for always in ["Keyboard & split", "Effects", "EQ", "Not on the panel"] {
+        for always in ["Keyboard & split", "Effects", "EQ"] {
             assert!(relevant(always, &fresh), "{always}");
         }
 

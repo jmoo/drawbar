@@ -71,12 +71,35 @@ use crate::{Entity, Live, Program};
 pub struct Panel {
     /// The sections, in the order a reader meets them.
     pub groups: &'static [Group],
+    /// Groups that act as alternatives, such as the two stored organ presets.
+    pub selections: &'static [Selection],
     /// Whether the groups account for every field the body registers.
     ///
     /// True is checked by this module's tests, so an exhaustive layout stays exhaustive
     /// as the body grows: a newly declared field fails the test until it is placed. False
     /// means [`Self::leftovers`] can be non-empty and a caller needs somewhere to put it.
     pub exhaustive: bool,
+}
+
+/// A group selected by writing one value to a field.
+#[derive(Debug)]
+pub struct Selection {
+    /// A member unique to the selectable group.
+    pub member: &'static str,
+    /// The field that chooses between the sibling groups.
+    pub field: &'static str,
+    /// The value that selects this group.
+    pub value: &'static str,
+}
+
+impl Selection {
+    /// Whether the body's current value selects this group.
+    pub fn selected(&self, fields: &[Field]) -> bool {
+        fields
+            .iter()
+            .find(|field| field.path == self.field)
+            .is_some_and(|field| field.value == self.value)
+    }
 }
 
 /// One run of controls under a title, and the state that makes them relevant.
@@ -248,6 +271,8 @@ impl Panel {
 /// One group with the fields it names, resolved against a body — what a caller draws.
 pub struct Section<'a> {
     pub group: &'a Group,
+    /// How this group is selected, when it is one of several stored alternatives.
+    pub selection: Option<&'a Selection>,
     /// Whether the instrument is using these controls: this group's own condition **and**
     /// every ancestor's. [`Group::is_relevant`] on `group` answers for this level alone,
     /// where a caller wants to tell "the section is off" from "this cluster is not the
@@ -281,7 +306,7 @@ impl Panel {
         let sections = self
             .groups
             .iter()
-            .map(|group| resolve_group(group, fields, &index, true, &mut claimed))
+            .map(|group| resolve_group(group, self.selections, fields, &index, true, &mut claimed))
             .collect();
         let leftovers = fields
             .iter()
@@ -302,6 +327,7 @@ impl Panel {
 
 fn resolve_group<'a>(
     group: &'a Group,
+    selections: &'a [Selection],
     fields: &'a [Field],
     index: &Index<'a>,
     parent_relevant: bool,
@@ -326,11 +352,14 @@ fn resolve_group<'a>(
     let groups = group
         .groups
         .iter()
-        .map(|nested| resolve_group(nested, fields, index, relevant, claimed))
+        .map(|nested| resolve_group(nested, selections, fields, index, relevant, claimed))
         .collect();
 
     Section {
         group,
+        selection: selections
+            .iter()
+            .find(|selection| group.members.contains(&selection.member)),
         relevant,
         fields: own,
         groups,
@@ -479,6 +508,42 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn every_selection_names_one_group_and_a_value_the_field_accepts() {
+        for authored in AUTHORED {
+            let specs = (authored.specs)();
+            for selection in authored.panel.selections {
+                let groups = authored
+                    .panel
+                    .walk()
+                    .into_iter()
+                    .filter(|group| group.members.contains(&selection.member))
+                    .count();
+                assert_eq!(
+                    groups, 1,
+                    "{}: {} identifies {groups} groups",
+                    authored.name, selection.member
+                );
+                let spec = specs
+                    .iter()
+                    .find(|spec| spec.name == selection.field)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: selection field {} is not registered",
+                            authored.name, selection.field
+                        )
+                    });
+                assert!(
+                    (spec.legal)().iter().any(|value| value == selection.value),
+                    "{}: {} does not accept {}",
+                    authored.name,
+                    selection.field,
+                    selection.value,
+                );
             }
         }
     }
