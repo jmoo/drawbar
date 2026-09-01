@@ -11,7 +11,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 
 use crate::bits::{bits_for, Packed};
 use crate::error::ParseError;
-use crate::fields::{ControlKind, Unit};
+use crate::fields::{ControlKind, Library, PackedOrder, Unit};
 use crate::types::RangedI8;
 
 /// Octave shift. The range and the storage bias are the model's business, so each
@@ -419,7 +419,10 @@ impl<const BITS: u32> Packed for MorphOf<BITS> {
         BITS
     };
     const DECODE_BITS: u32 = u8::BITS;
-    const CONTROL: ControlKind = ControlKind::Morph;
+    /// The parent is the declaration site's business, not the type's — every morph slot
+    /// shares this type and each names a different parameter — so `#[bitbody]` fills it
+    /// in from the field's name.
+    const CONTROL: ControlKind = ControlKind::Morph { of: None };
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
@@ -532,6 +535,12 @@ impl<const BITS: u32> PartialEq<u16> for WideSelector<BITS> {
 /// refused, on the same rule as [`crate::types::RangedU8`] — the bound is the slot's, not
 /// the instrument's.
 ///
+/// ⚠️ The two constructors therefore disagree on purpose. [`Self::new`] takes a
+/// *position* and refuses 9 and above; `from_bits` — and so `set_field`, which goes
+/// through the type's own parse — takes a *nibble* and accepts all sixteen, because a
+/// file holding one has to round-trip. A caller offering a bar to a player wants the
+/// former.
+///
 /// ⚠️ On the Stage 2's Farfisa the register is a *tab*, and the file stores a bit rather
 /// than a nibble, so those fields are `bool` and not this type.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -542,6 +551,18 @@ pub struct Drawbar {
 impl Drawbar {
     /// The highest position a drawbar can be pulled to.
     pub const MAX: u8 = 8;
+
+    /// A bar at `position`, `0..=8`. A higher one is refused — this takes a position,
+    /// where decoding takes a nibble.
+    pub fn new(position: u8) -> Result<Self, ParseError> {
+        if position > Self::MAX {
+            return Err(ParseError::OutOfBounds {
+                value: format!("{position}"),
+                bound: format!("0..={}", Self::MAX),
+            });
+        }
+        Ok(Drawbar { inner: position })
+    }
 
     /// The stored nibble, whatever it holds.
     pub fn raw(&self) -> u8 {
@@ -557,7 +578,15 @@ impl Drawbar {
 impl Packed for Drawbar {
     const MAX_BITS: u32 = 4;
     const DECODE_BITS: u32 = u8::BITS;
-    const CONTROL: ControlKind = ControlKind::Drawbar;
+    /// Which bar of the register this is comes from the declaration site — every bar
+    /// shares this type — so `#[bitbody]` fills the rank in from a `…_N` field name.
+    const CONTROL: ControlKind = ControlKind::Drawbar {
+        bars: 1,
+        rank: None,
+        bits_per_bar: Self::MAX_BITS as u8,
+        // One bar: there is no second value for the order to place.
+        order: PackedOrder::HighFirst,
+    };
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
@@ -1165,7 +1194,12 @@ impl ArpPattern {
 impl Packed for ArpPattern {
     const MAX_BITS: u32 = 32;
     const DECODE_BITS: u32 = u32::BITS;
-    const CONTROL: ControlKind = ControlKind::Pattern;
+    const CONTROL: ControlKind = ControlKind::Pattern {
+        steps: Self::STEPS as u8,
+        // The slot divided by its steps, so the two cannot drift apart.
+        bits_per_step: (Self::MAX_BITS / Self::STEPS as u32) as u8,
+        order: PackedOrder::LowFirst,
+    };
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
@@ -1208,14 +1242,19 @@ impl PartialEq<u32> for ArpPattern {
 
 /// An opaque id into one of the instrument's libraries — a piano model, a sample.
 ///
-/// The id is only meaningful against the library that holds it; the file carries the
-/// reference and nothing else, which is what [`ControlKind::Reference`] tells a caller.
+/// The id is only meaningful against the library that holds it, so the type names which:
+/// `LIBRARY` is a [`Library`] code, and the aliases below are the spellings to use.
+/// The file carries the reference and nothing else, which is what
+/// [`ControlKind::Reference`] tells a caller.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LibraryRef {
+pub struct LibraryRefOf<const LIBRARY: u8> {
     inner: u32,
 }
 
-impl LibraryRef {
+impl<const LIBRARY: u8> LibraryRefOf<LIBRARY> {
+    /// Which catalogue resolves this id.
+    pub const LIBRARY: Library = Library::expect_code(LIBRARY);
+
     /// The stored id. Zero is "nothing referenced" on every model in the corpus.
     pub fn id(&self) -> u32 {
         self.inner
@@ -1226,14 +1265,14 @@ impl LibraryRef {
     }
 }
 
-impl Packed for LibraryRef {
+impl<const LIBRARY: u8> Packed for LibraryRefOf<LIBRARY> {
     const MAX_BITS: u32 = 32;
     const DECODE_BITS: u32 = u32::BITS;
-    const CONTROL: ControlKind = ControlKind::Reference;
+    const CONTROL: ControlKind = ControlKind::Reference(Library::expect_code(LIBRARY));
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
-        Ok(LibraryRef { inner: bits as u32 })
+        Ok(LibraryRefOf { inner: bits as u32 })
     }
 
     fn to_bits(&self) -> u64 {
@@ -1241,14 +1280,14 @@ impl Packed for LibraryRef {
     }
 }
 
-impl Debug for LibraryRef {
+impl<const LIBRARY: u8> Debug for LibraryRefOf<LIBRARY> {
     /// Hex, matching how `nord program deps` reports the same id.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:#010x}", self.inner)
     }
 }
 
-impl Display for LibraryRef {
+impl<const LIBRARY: u8> Display for LibraryRefOf<LIBRARY> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if self.is_none() {
             f.write_str("none")
@@ -1258,11 +1297,17 @@ impl Display for LibraryRef {
     }
 }
 
-impl PartialEq<u32> for LibraryRef {
+impl<const LIBRARY: u8> PartialEq<u32> for LibraryRefOf<LIBRARY> {
     fn eq(&self, other: &u32) -> bool {
         self.inner == *other
     }
 }
+
+/// An id into the piano library (`.npno`).
+pub type PianoRef = LibraryRefOf<{ Library::Piano.code() }>;
+
+/// An id into the sample library (`.nsmp`).
+pub type SampleRef = LibraryRefOf<{ Library::Sample.code() }>;
 
 switch!(
     /// Which of the two delay lines is running.
@@ -1428,7 +1473,7 @@ sparse_enum!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fields::{ControlKind, Unit};
+    use crate::fields::{ControlKind, Library, PackedOrder, Unit};
 
     /// The whole point of the vocabulary: a field gets its control kind by choosing a
     /// type, so an interface never needs a table of field names of its own.
@@ -1443,10 +1488,42 @@ mod tests {
             <EqBand as Packed>::CONTROL,
             ControlKind::Bipolar(Unit::Decibels)
         );
-        assert_eq!(<MorphTarget as Packed>::CONTROL, ControlKind::Morph);
-        assert_eq!(<Drawbar as Packed>::CONTROL, ControlKind::Drawbar);
-        assert_eq!(<ArpPattern as Packed>::CONTROL, ControlKind::Pattern);
-        assert_eq!(<LibraryRef as Packed>::CONTROL, ControlKind::Reference);
+        // The shape a caller needs to draw the control is on the kind: how many bars,
+        // how many steps, which catalogue. What the *type* cannot know — which bar of
+        // the register, which parameter a morph slot belongs to — is left open here and
+        // filled in by `#[bitbody]` from the field's name.
+        assert_eq!(
+            <MorphTarget as Packed>::CONTROL,
+            ControlKind::Morph { of: None }
+        );
+        assert_eq!(
+            <Drawbar as Packed>::CONTROL,
+            ControlKind::Drawbar {
+                bars: 1,
+                rank: None,
+                bits_per_bar: 4,
+                order: PackedOrder::HighFirst,
+            }
+        );
+        // ⚠️ The two multi-value kinds pack from opposite ends, which is why each says
+        // so: a pattern's first step is in the lowest bits and an Electro 5 register's
+        // first bar is in the highest.
+        assert_eq!(
+            <ArpPattern as Packed>::CONTROL,
+            ControlKind::Pattern {
+                steps: 16,
+                bits_per_step: 2,
+                order: PackedOrder::LowFirst,
+            }
+        );
+        assert_eq!(
+            <PianoRef as Packed>::CONTROL,
+            ControlKind::Reference(Library::Piano)
+        );
+        assert_eq!(
+            <SampleRef as Packed>::CONTROL,
+            ControlKind::Reference(Library::Sample)
+        );
         assert_eq!(<KbZone4 as Packed>::CONTROL, ControlKind::Selector);
         assert_eq!(<bool as Packed>::CONTROL, ControlKind::Toggle);
         assert_eq!(

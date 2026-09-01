@@ -99,7 +99,7 @@ fn width(control: Control) -> f32 {
         Control::Choice => 156.0,
         Control::Stored => 140.0,
         Control::Register => 220.0,
-        Control::Bar => 44.0,
+        Control::Bar(_) => 44.0,
         _ => 78.0,
     }
 }
@@ -153,7 +153,7 @@ pub fn control(ui: &mut egui::Ui, ctx: &Ctx, field: &Field) -> Option<String> {
         Control::Toggle => toggle(ui, field),
         Control::Choice => choice(ui, ctx, field),
         Control::Number { min, max } => number(ui, field, min, max),
-        Control::Bar => bar(ui, field),
+        Control::Bar(rank) => bar(ui, field, rank),
         Control::Register => register(ui, field, true),
         // A field with no control here has only its stored value, and that is an
         // engineer's business — the Advanced table is where it is legible.
@@ -204,11 +204,11 @@ fn number(ui: &mut egui::Ui, field: &Field, min: i64, max: i64) -> Option<String
     knob::ui(ui, &field.path, value, min, max).map(|moved| moved.to_string())
 }
 
-/// One drawbar, for the bodies that give each bar its own field. Which rank it is comes
-/// off its name — see [`drawbar_widget::rank`].
-fn bar(ui: &mut egui::Ui, field: &Field) -> Option<String> {
+/// One drawbar, for the bodies that give each bar its own field. Which rank it is the
+/// field's own declaration says; a bar placed in no register draws claiming none.
+fn bar(ui: &mut egui::Ui, field: &Field, rank: Option<usize>) -> Option<String> {
     let position = field.value.trim().parse().ok()?;
-    let moved = drawbar_widget::ui_one(ui, drawbar_widget::rank(&field.path), position, true);
+    let moved = drawbar_widget::ui_one(ui, rank, position, true);
     moved.map(|moved| moved.to_string())
 }
 

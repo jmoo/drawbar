@@ -67,26 +67,6 @@ pub fn parse(text: &str) -> Option<u64> {
     }
 }
 
-/// One bar's nibble, and the whole registration's nine of them.
-///
-/// ⚠️ A field declares itself a drawbar without saying which of the two it is, so its
-/// width is what separates the Electro 5's packed registration from a Stage's single bar.
-pub const BAR_BITS: u32 = 4;
-pub const REGISTER_BITS: u32 = BAR_BITS * BARS as u32;
-
-/// Which rank of the registration a bar-per-field body's field is, read off the number
-/// its name ends with.
-///
-/// ⚠️ Decoration inferred from the name, not something the file states: the Stage bodies
-/// spell their bars `…drawbar_1` through `…drawbar_9`, and only the footage printed under
-/// the bar and the colour of its stop rest on it. A name ending in no such number has no
-/// rank, and the bar is drawn claiming none rather than claiming bar one's 16′.
-pub fn rank(path: &str) -> Option<usize> {
-    let trailing = path.rsplit(|c: char| !c.is_ascii_digit()).next()?;
-    let at: usize = trailing.parse().ok()?;
-    (1..=BARS).contains(&at).then(|| at - 1)
-}
-
 const STOP_H: f32 = 15.0;
 const BAR_W: f32 = 21.0;
 const TRACK_H: f32 = 104.0;
@@ -252,30 +232,10 @@ mod tests {
         assert_eq!(digits(&[4, 0]), "40");
     }
 
-    /// A packed registration is exactly the nine bars wide, which is what tells it from
-    /// the single nibble a Stage gives each bar.
+    /// A whole register is nine nibbles wide, which is the encoding this widget rests
+    /// on: nibble n is bar n in the printed order.
     #[test]
     fn a_register_is_nine_bars_of_nibble() {
-        assert_eq!(REGISTER_BITS, 36);
-        assert_eq!(bars(u64::MAX >> (64 - REGISTER_BITS)), [0xf; BARS]);
-    }
-
-    /// A bar-per-field body names the rank in the field, and the footage under the bar
-    /// has to follow it — nine bars all printed `16` is nine wrong claims.
-    #[test]
-    fn a_bars_rank_comes_off_the_number_its_name_ends_with() {
-        assert_eq!(rank("organ_a.drawbar_5"), Some(4));
-        assert_eq!(FOOTAGE[rank("organ_a.drawbar_5").unwrap()], "2⅔");
-        assert_eq!(rank("slot_b.organ_vox_preset_2_drawbar_1"), Some(0));
-        assert_eq!(rank("organ_b_drawbar_9"), Some(8));
-    }
-
-    /// A name that does not end in a rank claims none, rather than claiming bar one's.
-    #[test]
-    fn a_bar_with_no_rank_in_its_name_claims_no_footage() {
-        assert_eq!(rank("organ_panel.b3_preset1_drawbars"), None);
-        assert_eq!(rank("organ_a.drawbar_1_wheel"), None);
-        assert_eq!(rank("organ_a.drawbar_0"), None);
-        assert_eq!(rank("organ_a.drawbar_12"), None);
+        assert_eq!(bars(u64::MAX >> (64 - 4 * BARS as u32)), [0xf; BARS]);
     }
 }

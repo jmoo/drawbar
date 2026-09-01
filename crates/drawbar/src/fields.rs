@@ -88,8 +88,10 @@ pub enum Control {
         min: i64,
         max: i64,
     },
-    /// One organ drawbar, where the file gives each bar its own nibble.
-    Bar,
+    /// One organ drawbar, where the file gives each bar its own nibble. Carries the bar's
+    /// place in the register, `0`-based, or `None` where the declaration places it in no
+    /// register at all.
+    Bar(Option<usize>),
     /// A whole nine-bar organ register in one field.
     Register,
     /// No control: the stored value is the only reading this app has of it.
@@ -102,18 +104,24 @@ impl Control {
     /// `true`/`false` or names them.
     pub fn of(field: &Field, legal: &[String]) -> Control {
         match field.spec.control {
-            // ⚠️ Both a packed registration and one bar have Drawbar kind; width separates them.
-            ControlKind::Drawbar if field.spec.width == drawbar_widget::REGISTER_BITS => {
+            // The kind counts the bars, so a body that packs a whole register into one
+            // field and one that gives each bar its own are told apart by what they say
+            // rather than by how wide they happen to be.
+            ControlKind::Drawbar { bars, .. } if bars as usize == drawbar_widget::BARS => {
                 Control::Register
             }
-            ControlKind::Drawbar if field.spec.width == drawbar_widget::BAR_BITS => Control::Bar,
+            ControlKind::Drawbar { bars: 1, rank, .. } => {
+                Control::Bar(rank.map(|rank| rank as usize - 1))
+            }
+            // A register of some other length has no widget here.
+            ControlKind::Drawbar { .. } => Control::Stored,
             // Pattern and reference controls need UI data this app does not have.
-            ControlKind::Pattern | ControlKind::Reference => Control::Stored,
+            ControlKind::Pattern { .. } | ControlKind::Reference(_) => Control::Stored,
             ControlKind::Toggle if legal == ["false", "true"] => Control::Toggle,
             // A knob says so, so its values are travel however few of them there are.
             ControlKind::Bipolar(_)
             | ControlKind::Knob(_)
-            | ControlKind::Morph
+            | ControlKind::Morph { .. }
             | ControlKind::Shift(_) => turned(legal),
             // ⚠️ Number means unclassified; only a range too long to present as a list turns.
             _ => picked(legal),
@@ -423,12 +431,20 @@ mod tests {
     }
 
     /// ⚠️ Both spellings of a drawbar carry the one kind: the Electro 5 packs a whole
-    /// registration into one field and the Stage 4 gives each bar its own nibble. Reading
-    /// the width wrong puts nine bars where one belongs.
+    /// registration into one field and the Stage 4 gives each bar its own nibble. The
+    /// kind's bar count is what separates them, and a single bar brings its own place in
+    /// the register — nothing here reads either off the path or the width.
     #[test]
-    fn a_drawbar_is_a_register_or_a_bar_by_its_width() {
+    fn a_drawbar_is_a_register_or_a_bar_by_what_its_kind_counts() {
         let (stage4, _) = apply(&blank::stage4_program(), &[]).unwrap();
-        assert_eq!(control_of(&stage4, "organ_a.drawbar_1"), Control::Bar);
+        assert_eq!(
+            control_of(&stage4, "organ_a.drawbar_1"),
+            Control::Bar(Some(0))
+        );
+        assert_eq!(
+            control_of(&stage4, "organ_a.drawbar_9"),
+            Control::Bar(Some(8))
+        );
 
         let (electro5, _) = apply(&program(), &[]).unwrap();
         assert_eq!(

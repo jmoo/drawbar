@@ -5,7 +5,7 @@
 //! the other layers', a bit and 31 bits apart respectively, so they stay on the
 //! owning body. This block is the part that repeats at a whole-byte stride.
 
-use crate::components::{KbZone4, LibraryRef, OctaveShiftNibble, Selector};
+use crate::components::{KbZone4, OctaveShiftNibble, PianoRef, Selector};
 #[nord_bits_derive::bitbody(9)]
 pub struct PianoLayer {
     #[bits(0..=3)]
@@ -23,7 +23,7 @@ pub struct PianoLayer {
     #[bits(18..=19)]
     pub model_variation: Selector<2>,
     #[bits(20..=51)]
-    pub model_id: LibraryRef,
+    pub model_id: PianoRef,
     #[bits(52..=52)]
     pub soft_rel_enabled: bool,
     #[bits(53..=53)]

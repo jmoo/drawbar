@@ -56,6 +56,7 @@ impl std::fmt::Debug for LayoutField {
 mod tests {
     use super::*;
     use crate::cbin::{self, Cbin, Header};
+    use crate::fields::{ControlKind, Unit};
     use nord_bits_derive::bitbody;
     use std::io::Cursor;
 
@@ -141,6 +142,42 @@ mod tests {
         assert_eq!(b.level, 9);
         assert_eq!(b.inner.level, 3);
         assert!(b.set_field("word", "1").is_err(), "private is not a path");
+    }
+
+    /// A body whose names carry the two relations the derive binds: a morph slot beside
+    /// its parameter, a drawbar with a rank, and an orphan of each.
+    #[bitbody(4)]
+    struct Named {
+        #[bits(0..=6)]
+        pub volume: crate::components::Level,
+        #[bits(7..=14)]
+        pub volume_wheel: crate::components::MorphTarget,
+        #[bits(15..=22)]
+        pub absent_wheel: crate::components::MorphTarget,
+        #[bits(23..=26)]
+        pub drawbar_4: crate::components::Drawbar,
+        #[bits(27..=30)]
+        pub bar: crate::components::Drawbar,
+    }
+
+    /// The parameter is bound by name, and only where the body registers one; the rank
+    /// likewise. Neither reaches a field whose type has no use for it.
+    #[test]
+    fn a_name_binds_a_morph_slot_and_places_a_drawbar() {
+        let specs = Named::field_specs();
+        let of = |name: &str| specs.iter().find(|s| s.name == name).expect(name).control;
+
+        assert_eq!(
+            of("volume_wheel"),
+            ControlKind::Morph { of: Some("volume") }
+        );
+        // Nothing named `absent` in this body, so the slot stands alone.
+        assert_eq!(of("absent_wheel"), ControlKind::Morph { of: None });
+        let drawbar = <crate::components::Drawbar as crate::bits::Packed>::CONTROL;
+        assert_eq!(of("drawbar_4"), drawbar.ranked(4));
+        assert_eq!(of("bar"), drawbar);
+        // The knob a morph slot is named after is untouched by the binding.
+        assert_eq!(of("volume"), ControlKind::Knob(Unit::Panel10));
     }
 
     /// The layout publishes every placement — including the unregistered word —

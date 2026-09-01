@@ -296,10 +296,16 @@ fn control(kind: ControlKind) -> String {
         ControlKind::Knob(u) => format!("knob {}", unit(u)),
         ControlKind::Bipolar(u) => format!("bipolar {}", unit(u)),
         ControlKind::Shift(u) => format!("shift {}", unit(u)),
-        ControlKind::Drawbar => "drawbar".to_string(),
-        ControlKind::Morph => "morph".to_string(),
-        ControlKind::Pattern => "pattern".to_string(),
-        ControlKind::Reference => "library ref".to_string(),
+        // A whole register in one field reads as its bar count; a single bar reads as
+        // where in the register the declaration places it.
+        ControlKind::Drawbar { bars, rank, .. } => match (bars, rank) {
+            (1, Some(rank)) => format!("drawbar {rank}"),
+            (1, None) => "drawbar".to_string(),
+            (bars, _) => format!("{bars} drawbars"),
+        },
+        ControlKind::Morph { .. } => "morph".to_string(),
+        ControlKind::Pattern { steps, .. } => format!("pattern {steps}"),
+        ControlKind::Reference(library) => format!("{} ref", library.label()),
         ControlKind::Number => "number".to_string(),
     }
 }
@@ -385,5 +391,32 @@ mod tests {
         let mut out = std::io::Cursor::new(Vec::new());
         file.write_to(&mut out).unwrap();
         out.into_inner()
+    }
+
+    /// The control column is this listing's reading of the registry's vocabulary, and
+    /// what a kind carries has to reach the reader — a bar's place in the register, a
+    /// pattern's length, which library resolves an id.
+    #[test]
+    fn a_control_reads_as_what_the_field_registry_says_it_is() {
+        use nord_format::bits::Packed;
+        use nord_format::components::{ArpPattern, Drawbar, Level, PianoRef, SampleRef};
+        use nord_format::fields::Library;
+
+        let kind = |c: ControlKind| control(c);
+        assert_eq!(kind(<Level as Packed>::CONTROL), "knob 0-10");
+        assert_eq!(kind(<Drawbar as Packed>::CONTROL), "drawbar");
+        assert_eq!(kind(<Drawbar as Packed>::CONTROL.ranked(3)), "drawbar 3");
+        assert_eq!(kind(<ArpPattern as Packed>::CONTROL), "pattern 16");
+        assert_eq!(kind(<PianoRef as Packed>::CONTROL), "piano ref");
+        assert_eq!(kind(<SampleRef as Packed>::CONTROL), "sample ref");
+        assert_eq!(
+            kind(ControlKind::Reference(Library::SetList)),
+            "set list ref"
+        );
+        // A whole register in one field counts its bars rather than naming a position.
+        assert_eq!(
+            kind(<nord_format::formats::ne5::Drawbars as Packed>::CONTROL),
+            "9 drawbars"
+        );
     }
 }

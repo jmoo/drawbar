@@ -85,6 +85,9 @@ pub struct SynthVoice {
     pub filter_freq_aftertouch: MorphTarget,
     #[bits(236..=243)]
     pub filter_freq_ctrl_pedal: MorphTarget,
+    /// ⚠️ The three morph slots below name a `filter_resonance` this body does not
+    /// declare, so they bind to nothing. Either this field is that parameter under a name
+    /// two of them ran together, or the parameter is missing from the offset table.
     #[bits(244..=250)]
     pub filter_resonance_freq_hp: Level,
     #[bits(251..=258)]

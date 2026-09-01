@@ -16,7 +16,7 @@ use super::program::{
 };
 use crate::cbin::{self, Cbin};
 use crate::components::{
-    Frequency, Interval, Level, LibraryRef, MorphTarget, Rate, Time, WideSelector,
+    Frequency, Interval, Level, MorphTarget, Rate, SampleRef, Time, WideSelector,
 };
 use crate::error::Error;
 use std::io::{Read, Seek};
@@ -147,7 +147,7 @@ pub struct SynthPreset {
     #[bits(363..=364)]
     pub synth_amp_env_velocity: SynthAmpEnvVelocity,
     #[bits(365..=396)]
-    pub synth_sample_id: LibraryRef,
+    pub synth_sample_id: SampleRef,
     #[bits(397..=397)]
     pub synth_fast_attack: bool,
 }

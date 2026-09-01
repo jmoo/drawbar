@@ -11,8 +11,8 @@
 use super::program::*;
 use crate::components::{
     CompressorResponse, DelayCharacter, Drawbar, DrawbarMorph, Effect1Type, Effect2Type, EqBand,
-    Frequency, Interval, KbZone4, Level, LibraryRef, MorphTarget, Rate, ReverbType, Selector, Time,
-    WideSelector,
+    Frequency, Interval, KbZone4, Level, MorphTarget, PianoRef, Rate, ReverbType, SampleRef,
+    Selector, Time, WideSelector,
 };
 use crate::types::{RangedU16, RangedU8};
 
@@ -49,7 +49,7 @@ pub struct Panel {
     /// never was — the Stage 4 calls the same 32-bit reference `model_id`. The preset
     /// *name* is ASCII elsewhere in the body, read by
     /// [`super::program::synth_preset_name`].
-    pub piano_model_id: LibraryRef,
+    pub piano_model_id: PianoRef,
     #[bits(92..=92)]
     pub piano_soft_release: bool,
     #[bits(93..=93)]
@@ -193,7 +193,7 @@ pub struct Panel {
     #[bits(819..=820)]
     pub synth_amp_env_velocity: SynthAmpEnvVelocity,
     #[bits(821..=852)]
-    pub synth_sample_id: LibraryRef,
+    pub synth_sample_id: SampleRef,
     #[bits(853..=853)]
     pub synth_fast_attack: bool,
     #[bits(928..=928)]
@@ -410,6 +410,9 @@ pub struct Panel {
     pub extern_midi_cc_number: Level,
     #[bits(1455..=1461)]
     pub extern_midi_cc_value: Level,
+    /// ⚠️ The three morph slots below name an `extern_midi_cc` this body does not declare,
+    /// so they bind to nothing. `extern_midi_cc_value` is the parameter beside them and
+    /// the likely one they move; inferred from placement, not confirmed on hardware.
     #[bits(1462..=1469)]
     pub extern_midi_cc_wheel: MorphTarget,
     #[bits(1470..=1477)]

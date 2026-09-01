@@ -101,3 +101,50 @@ pub struct OrganLayer {
     #[bits(228..=228)]
     pub percussion_volume_soft_enabled: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fields::ControlKind;
+
+    /// Nine bars, each declaring which one it is, and each with its three morph slots
+    /// bound to it — the two relations a caller would otherwise have to read out of the
+    /// field names itself.
+    #[test]
+    fn every_bar_declares_its_rank_and_owns_its_morph_slots() {
+        let specs = OrganLayer::field_specs();
+        let spec = |name: &str| {
+            specs
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("no field {name}"))
+        };
+
+        for rank in 1..=9u8 {
+            assert!(
+                matches!(
+                    spec(&format!("drawbar_{rank}")).control,
+                    ControlKind::Drawbar {
+                        bars: 1,
+                        rank: Some(declared),
+                        ..
+                    } if declared == rank,
+                ),
+                "drawbar_{rank}",
+            );
+            for control in ["wheel", "aftertouch", "ctrl_pedal"] {
+                let slot = spec(&format!("drawbar_{rank}_{control}"));
+                assert_eq!(
+                    slot.morph_parent(),
+                    Some(format!("drawbar_{rank}")),
+                    "{}",
+                    slot.name,
+                );
+            }
+        }
+
+        // A field that is not a drawbar keeps what its type said, whatever its name ends
+        // in.
+        assert_eq!(spec("kb_zones").control, ControlKind::Selector);
+    }
+}

@@ -6,7 +6,7 @@
 //! owning body. This block is the part that repeats at a whole-byte stride.
 
 use crate::components::{
-    ArpPattern, KbZone4, Level, LibraryRef, MorphTarget, OctaveShiftNibble, Selector, Time,
+    ArpPattern, KbZone4, Level, MorphTarget, OctaveShiftNibble, SampleRef, Selector, Time,
 };
 use crate::types::{RangedU16, RangedU8};
 #[nord_bits_derive::bitbody(47)]
@@ -16,7 +16,7 @@ pub struct SynthPerformance {
     #[bits(6..=17)]
     pub sample_slot: RangedU16<4095>,
     #[bits(18..=49)]
-    pub sample_id: LibraryRef,
+    pub sample_id: SampleRef,
     #[bits(50..=53)]
     pub kb_zones: KbZone4,
     #[bits(54..=57)]
