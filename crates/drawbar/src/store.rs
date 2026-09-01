@@ -35,10 +35,8 @@ const BUDGET: usize = 3 * 1024 * 1024;
 /// local copy they never asked to keep; an edited one is the **only** copy there is, and
 /// quitting with its tab open must not be how it goes.
 ///
-/// ⚠️ The whole list is base64-encoded on every call — up to the whole budget below,
-/// because there is no per-asset dirty bit to write less. On wasm that is the one thread,
-/// so callers rate-limit rather than write from the frame that changed something: a drag
-/// changes the list every frame, and the encode is far longer than one.
+/// ⚠️ On wasm every call base64-encodes the whole list on the only thread. Callers
+/// must rate-limit writes because dragging mutates the list every frame.
 ///
 /// What is written comes back kept — see [`load`].
 pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, log: &mut Log) {

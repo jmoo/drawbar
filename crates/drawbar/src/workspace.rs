@@ -953,11 +953,8 @@ impl Workspace {
     /// been sitting somewhere this app does not control and get no more trust than bytes
     /// off a disk.
     ///
-    /// ⚠️ That check is a decode *and* a re-encode per asset, run for the whole list
-    /// before the first frame. wasm has one thread and no way to yield out of this, so
-    /// the tab is unresponsive for its duration; the ceiling is the store's own budget
-    /// rather than anything here. Deliberate — an asset admitted unchecked is one whose
-    /// badge lies about whether it still round trips.
+    /// ⚠️ Restore decodes and re-encodes every asset before the first wasm frame. The
+    /// tab cannot yield while checking up to the store budget.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) {
         for Saved {
             id,
