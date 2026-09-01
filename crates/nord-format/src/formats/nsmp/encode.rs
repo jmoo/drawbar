@@ -22,13 +22,21 @@
 //! std::fs::write("test.nsmp", instrument.to_bytes().unwrap()).unwrap();
 //! ```
 //!
-//! ⚠️ A stroke from here plays once and stops, where vendor content sustains: the
-//! format's loop points are not located, so sustained material is cut short. Confirmed
-//! on hardware.
+//! [`multi_zone`] is the same builder across a keyboard: one `stk` per zone, highest
+//! zone first, each zone's record naming its stroke by the global id the caller gives
+//! it. Zone counts move where a stroke's audio may start, so the allocation each stroke
+//! is packed into comes from [`stroke::header_len`](super::stroke::header_len) rather
+//! than from a constant.
+//!
+//! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
+//! which is the whole of what the container stores about looping: the crossfade is
+//! baked into the audio here, and loop detune, loop decay and the short loop's
+//! pitch-tracking flag reach the file nowhere at all.
 
 use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
 use super::section::{self, Section};
+use super::stroke::PACKET_LEN;
 use super::{Sample, MAX_NAME_LEN};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
@@ -64,6 +72,10 @@ const CHUNK: usize = 32;
 /// Widest emitted field; quantisation shifts values until they fit.
 const MAX_WIDTH: u8 = 13;
 
+/// Widest field a record header can declare, from its four-bit width. Padding stores
+/// values wider than they need, which sign-extend back to themselves.
+const MAX_STORED_WIDTH: u8 = 16;
+
 /// Narrowest field. Width 2 is the draft the encoder codes everything at before it
 /// promotes anything, and a width-1 flag-1 record is the terminator.
 const MIN_WIDTH: u8 = 2;
@@ -71,11 +83,12 @@ const MIN_WIDTH: u8 = 2;
 /// Absolute field ceiling imposed by the stream directory and minimum width.
 const MAX_FIELDS: usize = MAX_STREAM_WORDS * 24 / MIN_WIDTH as usize;
 
-/// Words of stream the allocation starts from, before any packet.
-const SLACK_WORDS: usize = 38;
+/// Zones one instrument may hold, from the `map` section's single count byte.
+const MAX_ZONES: usize = u8::MAX as usize;
 
-/// Words a packet adds: `PACKET_LEN / 3`.
-const PACKET_WORDS: usize = 127;
+/// The widest stroke id a zone record can name: the field is one byte, and zero is
+/// not an id the editor issues.
+const MAX_STROKE_ID: u32 = u8::MAX as u32;
 
 /// Source samples the kernel is allowed to ring out past the end of the input.
 const RING_OUT: usize = 160;
@@ -86,6 +99,18 @@ const RHO_DEN: u64 = 634;
 
 /// Shortest modelled input; shorter streams use an unresolved opening.
 pub const MIN_FRAMES: usize = 4096;
+
+/// Words in one packet. A looped stroke's loop region is a whole number of them.
+const PACKET_WORDS: usize = PACKET_LEN / 3;
+
+/// Fields a looped stroke carries past its loop end, repeating the loop's own opening
+/// so that playback is unchanged. The mark clears the loop start by the same amount,
+/// which is why the loop's length survives it.
+const LOOP_LEAD: usize = 5;
+
+/// Fields a loop's pre-roll needs before the mark: an opening 1:1 run and a resync run,
+/// both of which reach [`band`]'s widest.
+const MIN_PRE_LOOP: usize = 192;
 
 /// Longest input the stroke header's 16-bit word directory can address unambiguously.
 const MAX_STREAM_WORDS: usize = WRAP;
@@ -110,6 +135,40 @@ pub enum Predictor {
     Minimising,
 }
 
+/// A sustain loop, in source frames.
+///
+/// The container stores a loop as two things and nothing else: the stroke stops at
+/// [`end`](Loop::end), and the record the loop starts at carries the mark bit. Loop
+/// detune, loop decay, and whether the editor called this a short loop or a long one
+/// are not stored anywhere, so a caller that needs them cannot have them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loop {
+    /// First frame of the loop.
+    pub start: usize,
+    /// One past its last frame. Audio after it is not encoded.
+    pub end: usize,
+    /// Frames of the loop's tail that fade into the frames before [`start`](Loop::start).
+    /// The fade is applied to the samples here, because that is where the instrument
+    /// reads it from.
+    pub crossfade: usize,
+}
+
+impl Loop {
+    /// A loop over `start..end` with no crossfade.
+    pub fn new(start: usize, end: usize) -> Loop {
+        Loop {
+            start,
+            end,
+            crossfade: 0,
+        }
+    }
+
+    pub fn crossfade(mut self, frames: usize) -> Loop {
+        self.crossfade = frames;
+        self
+    }
+}
+
 /// What to build around the audio.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -117,17 +176,26 @@ pub struct Options {
     root_key: u8,
     top_note: Option<u8>,
     predictor: Predictor,
+    loops: Option<Loop>,
 }
 
 impl Options {
-    /// Defaults: the name given, root key C4, the editor's own top note, plain records.
+    /// Defaults: the name given, root key C4, the editor's own top note, plain records,
+    /// no loop.
     pub fn new(name: impl Into<String>) -> Options {
         Options {
             name: name.into(),
             root_key: 60,
             top_note: None,
             predictor: Predictor::Plain,
+            loops: None,
         }
+    }
+
+    /// Loop the stroke, which also truncates it at [`Loop::end`].
+    pub fn loops(mut self, points: Loop) -> Options {
+        self.loops = Some(points);
+        self
     }
 
     /// The MIDI note the sample plays untransposed at.
@@ -154,12 +222,29 @@ impl Options {
     }
 }
 
+/// Where a loop lands on the field lattice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Looped {
+    /// Field the marked record opens at.
+    pub at: usize,
+    /// Fields repeated past the loop end, which is also how far `at` clears the loop
+    /// start. See [`LOOP_LEAD`].
+    pub lead: usize,
+    /// Fields of the loop's tail the crossfade rewrites.
+    pub crossfade: usize,
+    /// Fields in the 1:1 run the loop opens with.
+    pub warmup: usize,
+    /// Content cells between that run and the terminator.
+    pub cells: usize,
+}
+
 /// Stroke landmarks derived from the source frame count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
     /// Source frames the stroke covers.
     pub frames: usize,
-    /// Fields in the stream — the source plus a ring-out past its end.
+    /// Fields in the stream — the source plus a ring-out past its end, or, when the
+    /// stroke loops, the source up to the loop end plus the repeated lead.
     pub fields: usize,
     /// Field the resync record starts at.
     pub resync_at: usize,
@@ -169,53 +254,154 @@ pub struct Plan {
     pub resync: usize,
     /// Content cells between the warmup and the resync.
     pub cells_before: usize,
-    /// Content cells between the resync and the terminator.
+    /// Content cells between the resync and the loop start, or the terminator.
     pub cells_after: usize,
+    /// The loop, once it is on the lattice.
+    pub looped: Option<Looped>,
+}
+
+/// Source frames onto the field lattice.
+fn fields_of(frames: usize) -> Option<usize> {
+    let frames = u64::try_from(frames).ok()?;
+    frames
+        .checked_mul(u64::from(PITCH_DEN))
+        .and_then(|n| round_ratio(n, u64::from(PITCH_NUM)))
 }
 
 impl Plan {
-    /// The layout for `frames` source samples.
+    /// The layout for `frames` source samples with no loop.
     pub fn new(frames: usize) -> Result<Plan, Error> {
-        if frames < MIN_FRAMES {
+        Plan::modelled(frames)?;
+        let fields = frames
+            .checked_add(RING_OUT)
+            .and_then(fields_of)
+            .ok_or_else(|| size_error(frames))?;
+        Plan::lay_out(frames, fields, None, fields / 2)
+    }
+
+    /// The layout for a stroke that loops: `frames` source samples truncated at
+    /// [`Loop::end`], with the loop's own opening repeated past it.
+    ///
+    /// Refuses a loop the format cannot state — one outside the audio, one shorter than
+    /// the run it has to open with, or a crossfade with no material in front of the loop
+    /// to fade from.
+    pub fn looped(frames: usize, points: Loop) -> Result<Plan, Error> {
+        Plan::modelled(points.end)?;
+        if points.start >= points.end || points.end > frames {
             return Err(ParseError::OutOfBounds {
-                value: format!("{frames} frames"),
+                value: format!("a loop over frames {}..{}", points.start, points.end),
+                bound: format!("a non-empty region of the {frames} frames given"),
+            }
+            .into());
+        }
+        let start = fields_of(points.start).ok_or_else(|| size_error(points.start))?;
+        // The loop's length is what has to survive, so it is put on the lattice as a
+        // length. Rounding its two ends separately can cost it a field.
+        let length = fields_of(points.end - points.start).ok_or_else(|| size_error(points.end))?;
+        let end = start + length;
+        let crossfade = fields_of(points.crossfade).ok_or_else(|| size_error(points.crossfade))?;
+        // Ahead of the mark the stream still has to open and resync, so a loop that
+        // starts too early is pushed off the front by repeating more of itself.
+        let lead = LOOP_LEAD.max(MIN_PRE_LOOP.saturating_sub(start));
+        let (at, fields) = (start + lead, end + lead);
+        let warmup = band(length);
+        if length < warmup + CELL {
+            return Err(ParseError::OutOfBounds {
+                value: format!("a {length}-field loop"),
                 bound: format!(
-                    "the modelled range: at least {MIN_FRAMES} frames, below which the \
-                     stream opens a way this crate has not modelled"
+                    "a loop long enough for the {warmup}-field 1:1 run it opens with and \
+                     one {CELL}-field cell after it"
                 ),
             }
             .into());
         }
-        let frames = u64::try_from(frames).map_err(|_| size_error(frames))?;
-        let fields = frames
-            .checked_add(RING_OUT as u64)
-            .and_then(|n| n.checked_mul(u64::from(PITCH_DEN)))
-            .and_then(|n| round_ratio(n, u64::from(PITCH_NUM)))
-            .ok_or_else(|| size_error(frames as usize))?;
-        if fields > MAX_FIELDS {
-            return Err(size_error(frames as usize).into());
+        if crossfade > start || crossfade > length {
+            return Err(ParseError::OutOfBounds {
+                value: format!("a {} frame crossfade", points.crossfade),
+                bound: format!(
+                    "the {} frames in front of the loop and the {} frames in it — the \
+                     fade mixes the loop's tail with the material before its start",
+                    points.start,
+                    points.end - points.start
+                ),
+            }
+            .into());
         }
-        let resync_at = frames
-            .checked_mul(RHO_NUM)
+        Plan::lay_out(
+            frames,
+            fields,
+            Some(Looped {
+                at,
+                lead,
+                crossfade,
+                warmup,
+                cells: (length - warmup) / CELL,
+            }),
+            fields_of(points.start / 2).unwrap_or(0),
+        )
+    }
+
+    fn modelled(frames: usize) -> Result<(), Error> {
+        if frames >= MIN_FRAMES {
+            return Ok(());
+        }
+        Err(ParseError::OutOfBounds {
+            value: format!("{frames} frames"),
+            bound: format!(
+                "the modelled range: at least {MIN_FRAMES} frames, below which the \
+                 stream opens a way this crate has not modelled"
+            ),
+        }
+        .into())
+    }
+
+    /// Place the warmup, the resync and the cells between them across everything ahead
+    /// of the loop — or across the whole stream when there is none.
+    fn lay_out(
+        frames: usize,
+        fields: usize,
+        looped: Option<Looped>,
+        midpoint: usize,
+    ) -> Result<Plan, Error> {
+        if fields > MAX_FIELDS {
+            return Err(size_error(frames).into());
+        }
+        let head = looped.map_or(fields, |l| l.at);
+        let natural = u64::try_from(frames)
+            .ok()
+            .and_then(|n| n.checked_mul(RHO_NUM))
             .and_then(|n| round_ratio(n, RHO_DEN))
-            .ok_or_else(|| size_error(frames as usize))?;
+            .ok_or_else(|| size_error(frames))?;
+        let fits = |at: usize| {
+            at >= band(at)
+                && head
+                    .checked_sub(band(at))
+                    .is_some_and(|rest| head >= at + band(rest))
+        };
+        // A loop that truncates the stream ahead of ρ leaves no room for the resync
+        // there, and it goes to the middle of the audio in front of the loop instead.
+        let resync_at = [natural, midpoint, head / 2]
+            .into_iter()
+            .find(|&at| fits(at))
+            .unwrap_or(natural);
         let warmup = band(resync_at);
-        let resync = band(fields - warmup);
-        if resync_at < warmup || fields < resync_at + resync {
+        let resync = band(head - warmup);
+        if !fits(resync_at) {
             return Err(ParseError::AssertFail(format!(
-                "{frames} frames put the resync at field {resync_at} of {fields}, which \
+                "{frames} frames put the resync at field {resync_at} of {head}, which \
                  leaves no room for the 1:1 runs around it"
             ))
             .into());
         }
         Ok(Plan {
-            frames: frames as usize,
+            frames,
             fields,
             resync_at,
             warmup,
             resync,
             cells_before: (resync_at - warmup) / CELL,
-            cells_after: (fields - resync_at - resync) / CELL,
+            cells_after: (head - resync_at - resync) / CELL,
+            looped,
         })
     }
 }
@@ -262,10 +448,37 @@ struct Quantised {
     peak: u32,
 }
 
+/// Ramp the loop's tail into the material one loop length behind it, then repeat the
+/// loop's opening past its end.
+///
+/// The ramp is linear across the crossfade, which is what the editor's own crossfade
+/// ladder measures out.
+///
+/// Inferred from specimens; not confirmed on hardware.
+fn bake_loop(raw: &mut [i64], fields: usize, points: &Looped) {
+    let end = fields - points.lead;
+    let length = fields - points.at;
+    let span = points.crossfade as i64;
+    for k in 0..points.crossfade {
+        let f = end - points.crossfade + k;
+        let (near, far) = (raw[f], raw[f - length]);
+        let step = (far - near) * k as i64;
+        raw[f] = near + (2 * step + span * step.signum()) / (2 * span);
+    }
+    // The repeated fields are the loop's own opening, so the loop plays the same region
+    // however far the mark clears its start.
+    for k in 0..points.lead {
+        raw[end + k] = raw[points.at - points.lead + k];
+    }
+}
+
 /// Resample and choose the smallest nonnegative shift that fits [`MAX_WIDTH`].
 /// The instrument's shift-selection rule remains unknown.
 fn quantise(source: &[i16], plan: &Plan) -> Quantised {
-    let raw: Vec<i64> = (0..plan.fields).map(|f| kernel::field(source, f)).collect();
+    let mut raw: Vec<i64> = (0..plan.fields).map(|f| kernel::field(source, f)).collect();
+    if let Some(points) = &plan.looped {
+        bake_loop(&mut raw, plan.fields, points);
+    }
     let low = raw.iter().copied().min().unwrap_or(0);
     let high = raw.iter().copied().max().unwrap_or(0);
 
@@ -276,8 +489,11 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
 
     // Statistic B is taken at a fixed shift of two and over content fields only, which
     // is why a value the 1:1 regime carries never sets it.
-    let content =
-        |f: usize| (f >= plan.warmup && f < plan.resync_at) || f >= plan.resync_at + plan.resync;
+    let opening = plan.looped.map(|l| l.at..l.at + l.warmup);
+    let content = |f: usize| {
+        ((f >= plan.warmup && f < plan.resync_at) || f >= plan.resync_at + plan.resync)
+            && !opening.as_ref().is_some_and(|run| run.contains(&f))
+    };
     let peak = raw
         .iter()
         .enumerate()
@@ -305,11 +521,13 @@ fn width_of(low: i64, high: i64) -> u8 {
 }
 
 /// One record, before it becomes words.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Spec {
     one_to_one: bool,
     width: u8,
     order: u8,
+    /// Set on the record a loop starts at, and on no other.
+    mark: bool,
     first: usize,
     count: usize,
 }
@@ -365,7 +583,10 @@ fn best_order(values: &[i32], first: usize, predictor: Predictor) -> (u8, u8) {
 }
 
 /// Partition 1:1 values and like-coded content cells into records.
-fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Vec<Spec> {
+///
+/// A loop appends a third regime — its own 1:1 run, marked, and the content after it —
+/// grown to a whole number of packets by [`pad_to_packet`].
+fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec>, Error> {
     let mut out = Vec::new();
     let mut at = 0usize;
 
@@ -381,6 +602,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Vec<Spec> {
                 one_to_one: true,
                 width: width_of(low, high),
                 order: 0,
+                mark: false,
                 first: *at,
                 count,
             });
@@ -403,6 +625,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Vec<Spec> {
                 one_to_one: false,
                 width,
                 order,
+                mark: false,
                 first: *at + cell * CELL,
                 count: run * CELL,
             });
@@ -416,9 +639,88 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Vec<Spec> {
     let resync_record = out.len();
     one_to_one(&mut out, &mut at, plan.resync);
     content(&mut out, &mut at, plan.cells_after);
+    if let Some(points) = &plan.looped {
+        let opening = out.len();
+        one_to_one(&mut out, &mut at, points.warmup);
+        out[opening].mark = true;
+        content(&mut out, &mut at, points.cells);
+        pad_to_packet(&mut out, opening)?;
+    }
     debug_assert_eq!(at, plan.fields);
     debug_assert!(resync_record < out.len());
-    out
+    Ok(out)
+}
+
+/// Grow the loop region until it is a whole number of packets.
+///
+/// The terminator ends the stream, so the words between the marked record and it are
+/// what has to divide — the loop start lands on a packet boundary by being that far
+/// back from one. Two things pay for the difference, and neither changes a decoded
+/// value: a field stored wider than it needs sign-extends to itself, and a content run
+/// splits at any cell boundary for the cost of one header word. Widening is taken first
+/// where it fits, and the splits carry the last words one at a time.
+///
+/// A loud, short loop can run out of both: [`MAX_WIDTH`] leaves only three spare bits
+/// per field, so a loop of a few hundred fields is refused rather than misplaced.
+fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize) -> Result<(), Error> {
+    let words = |specs: &[Spec]| specs.iter().map(Spec::span).sum::<usize>();
+    let mut pad = (PACKET_WORDS - words(&specs[opening..]) % PACKET_WORDS) % PACKET_WORDS;
+
+    // The opening 1:1 run pays a word or two per bit, so it is spent first; a content
+    // cell pays exactly one, which is the granularity the last words need.
+    for spec in specs[opening..].iter_mut().take_while(|s| s.one_to_one) {
+        while spec.width < MAX_STORED_WIDTH {
+            let grown = Spec {
+                width: spec.width + 1,
+                ..*spec
+            }
+            .span()
+                - spec.span();
+            if grown > pad {
+                break;
+            }
+            pad -= grown;
+            spec.width += 1;
+        }
+    }
+
+    let mut at = specs.len() - 1;
+    while pad > 0 {
+        let spec = specs[at];
+        let wider = Spec {
+            width: spec.width + 1,
+            ..spec
+        };
+        if spec.width < MAX_STORED_WIDTH && wider.span() - spec.span() <= pad {
+            pad -= wider.span() - spec.span();
+            specs[at].width += 1;
+        } else if !spec.one_to_one && spec.count > CELL {
+            specs.insert(
+                at + 1,
+                Spec {
+                    first: spec.first + spec.count - CELL,
+                    count: CELL,
+                    ..spec
+                },
+            );
+            specs[at].count -= CELL;
+            at += 1;
+            pad -= 1;
+        } else if at > opening {
+            at -= 1;
+        } else {
+            return Err(ParseError::OutOfBounds {
+                value: format!("a loop of {} record(s)", specs.len() - opening),
+                bound: format!(
+                    "a loop with {pad} more word(s) of room in it — the encoded loop has \
+                     to be whole packets long, and this one cannot be widened that far; \
+                     loop over more of the audio"
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// A packed stroke stream: the words, and where the header's directory points.
@@ -426,14 +728,43 @@ struct Stream {
     words: Vec<u8>,
     first_record: usize,
     resync: usize,
+    /// The marked record a loop starts at, when the stroke loops.
+    mark: Option<usize>,
     terminator: usize,
 }
 
-/// Right-align records in the smallest `38 + 127·P`-word allocation.
-fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, Error> {
+/// Right-align records in the allocation the preamble law gives this stroke:
+/// `preamble` bytes of payload, then whole packets until the chain fits.
+///
+/// `preamble` is [`stroke::header_len`](super::stroke::header_len), which a zone table
+/// can drive below [`HEADER_LEN`] — the first packet then starts inside what would
+/// otherwise be header, and the loop repays the difference.
+fn pack(
+    specs: &[Spec],
+    values: &[i32],
+    resync_record: usize,
+    preamble: usize,
+) -> Result<Stream, Error> {
     let chain: usize = specs.iter().map(Spec::span).sum::<usize>() + 1;
-    let packets = chain.saturating_sub(SLACK_WORDS).div_ceil(PACKET_WORDS);
-    let total = SLACK_WORDS + PACKET_WORDS * packets;
+    let need = chain
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(HEADER_LEN))
+        .ok_or_else(|| ParseError::OutOfBounds {
+            value: format!("a chain of {chain} words"),
+            bound: "a stroke payload of addressable length".into(),
+        })?;
+    let mut payload = preamble;
+    while payload < need {
+        payload += PACKET_LEN;
+    }
+    if !(payload - HEADER_LEN).is_multiple_of(3) {
+        return Err(ParseError::AssertFail(format!(
+            "a {preamble}-byte preamble puts the word stream off a word boundary; the \
+             sections in front of the stroke are not whole words"
+        ))
+        .into());
+    }
+    let total = (payload - HEADER_LEN) / 3;
     if total > MAX_STREAM_WORDS {
         return Err(ParseError::OutOfBounds {
             value: format!("a stream of {total} words"),
@@ -451,9 +782,13 @@ fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, 
     let lead = total - chain;
     let mut at = lead;
     let mut resync = lead;
+    let mut mark = None;
     for (index, spec) in specs.iter().enumerate() {
         if index == resync_record {
             resync = at;
+        }
+        if spec.mark {
+            mark = Some(at);
         }
         write_record(&mut words, at, spec, values);
         at += spec.span();
@@ -465,6 +800,7 @@ fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, 
         words,
         first_record: lead,
         resync,
+        mark,
         terminator: at,
     })
 }
@@ -474,6 +810,7 @@ fn pack(specs: &[Spec], values: &[i32], resync_record: usize) -> Result<Stream, 
 fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32]) {
     let head = (u32::from(spec.one_to_one) << 23)
         | (u32::from(spec.width - 1) << 19)
+        | (u32::from(spec.mark) << 18)
         | (u32::from(spec.order) << 14)
         | spec.count as u32;
     words[at * 3..at * 3 + 3].copy_from_slice(&head.to_be_bytes()[1..]);
@@ -520,10 +857,12 @@ fn stroke_header(id: u32, root_key: u8, q: &Quantised, stream: &Stream, body_at:
 
     let base = (body_at + HEADER_LEN) / 3 % WRAP;
     let pointer = |word: usize| ((base + word) % WRAP) as u16;
+    // The third pointer names the loop's marked record; aimed at the terminator it says
+    // the stroke does not loop.
     let directory = [
         pointer(stream.first_record),
         pointer(stream.resync),
-        pointer(stream.terminator),
+        pointer(stream.mark.unwrap_or(stream.terminator)),
         pointer(stream.terminator),
     ];
     for (i, p) in directory.iter().enumerate() {
@@ -538,13 +877,21 @@ fn stroke_header(id: u32, root_key: u8, q: &Quantised, stream: &Stream, body_at:
     head
 }
 
-/// Encode one zone's stroke at body offset `body_at`.
-pub fn stroke(
+/// Encode one zone's stroke at body offset `body_at`, packed into `preamble` bytes
+/// plus whole packets.
+///
+/// Both placements come from the sections already sized in front of this stroke, so
+/// only [`multi_zone`] can supply them: `body_at` is the base the word directory is
+/// written against, and a wrong one produces a file whose directory names records
+/// that are not there.
+fn stroke(
     source: &[i16],
     root_key: u8,
     id: u32,
     body_at: usize,
+    preamble: usize,
     predictor: Predictor,
+    loops: Option<Loop>,
 ) -> Result<Vec<u8>, Error> {
     midi_note("root key", root_key)?;
     body_at
@@ -553,14 +900,17 @@ pub fn stroke(
             value: format!("body offset {body_at}"),
             bound: "an addressable stroke header".into(),
         })?;
-    let plan = Plan::new(source.len())?;
+    let plan = match loops {
+        Some(points) => Plan::looped(source.len(), points)?,
+        None => Plan::new(source.len())?,
+    };
     let q = quantise(source, &plan);
-    let specs = records(&q.values, &plan, predictor);
+    let specs = records(&q.values, &plan, predictor)?;
     let resync_record = specs
         .iter()
         .position(|s| s.first == plan.resync_at)
         .unwrap_or(0);
-    let stream = pack(&specs, &q.values, resync_record)?;
+    let stream = pack(&specs, &q.values, resync_record, preamble)?;
 
     let mut payload = stroke_header(id, root_key, &q, &stream, body_at);
     payload.extend_from_slice(&stream.words);
@@ -603,7 +953,9 @@ fn cat() -> Section {
 }
 
 /// Build the unexplained fixed keyboard map and zone table.
-fn map(zones: &[(u32, u8)]) -> Section {
+///
+/// `zones` is `(stroke id, top note)` per zone, already high to low.
+fn map(zones: &[(u8, u8)]) -> Section {
     let mut payload = vec![0u8; super::zone::RECORDS_AT + super::zone::RECORD_LEN * zones.len()];
     payload[0] = 0x10;
     for note in 0..128 {
@@ -613,7 +965,9 @@ fn map(zones: &[(u32, u8)]) -> Section {
     // Zones are stored high to low by top note.
     for (index, &(id, top_note)) in zones.iter().enumerate() {
         let at = super::zone::RECORDS_AT + super::zone::RECORD_LEN * index;
-        payload[at + 2] = id as u8;
+        payload[at + 2] = id;
+        // Nothing here says whether the zone loops: a zone record is byte-identical
+        // either way, and the loop lives in the stroke's own word directory.
         payload[at + 3] = 0x10;
         payload[at + 9] = top_note;
         payload[at + 11] = 0x01;
@@ -634,26 +988,90 @@ fn sty() -> Section {
     }
 }
 
+/// One zone to build: its audio, where it sits on the keyboard, and the id its
+/// record names its stroke by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewZone<'a> {
+    /// Mono PCM at [`codec::SOURCE_RATE`], already trimmed to what the zone plays.
+    pub source: &'a [i16],
+    /// The note this sample plays untransposed at.
+    pub root_key: u8,
+    /// Highest note this zone answers to. Stored as given — the file keeps top notes,
+    /// it does not derive them from the root keys.
+    pub top_note: u8,
+    /// The stroke's global id, 1 through [`MAX_STROKE_ID`]. Zones name their strokes
+    /// by it rather than by position, so it need not run parallel to the sections.
+    pub global_id: u32,
+    /// The zone's sustain loop, which truncates its audio at [`Loop::end`].
+    pub loops: Option<Loop>,
+}
+
 /// Build a one-zone v2 instrument from mono PCM at [`codec::SOURCE_RATE`].
 /// Refuses unmodelled lengths, invalid metadata, and streams past the directory limit.
 pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Error> {
-    const ID: u32 = 1;
-
     midi_note("root key", options.root_key)?;
-    let top_note = options.resolved_top_note();
-    midi_note("top note", top_note)?;
-    let hdr = hdr(&options.name)?;
-    let cat = cat();
-    let map = map(&[(ID, top_note)]);
+    multi_zone(
+        &[NewZone {
+            source,
+            root_key: options.root_key,
+            top_note: options.resolved_top_note(),
+            global_id: 1,
+            loops: options.loops,
+        }],
+        &options.name,
+        options.predictor,
+    )
+}
 
-    // The directory the stroke carries counts words from the start of the body, so the
-    // sections in front of it have to be sized before its stream can be written.
-    let body_at = section::HEADER_LEN
-        + hdr.encoded_len()
-        + cat.encoded_len()
-        + map.encoded_len()
-        + section::HEADER_LEN;
-    let payload = stroke(source, options.root_key, ID, body_at, options.predictor)?;
+/// Build a v2 instrument that spans the keyboard: one `stk` per zone, in the order
+/// given, which must be highest zone first.
+///
+/// Refuses an empty or overlapping zone list, a duplicate or unnameable stroke id,
+/// and everything [`instrument`] refuses about one zone's audio.
+pub fn multi_zone(
+    zones: &[NewZone<'_>],
+    name: &str,
+    predictor: Predictor,
+) -> Result<Cbin<Sample>, Error> {
+    let table = zone_table(zones)?;
+    let hdr = hdr(name)?;
+    let cat = cat();
+    let map = map(&table);
+    // The directory a stroke carries counts words from the start of the body, and these
+    // two decide where the first packet may start, so both are sized before any stream
+    // is written.
+    let cat_len = cat.payload.len();
+    let map_len = map.payload.len();
+
+    let mut sections = vec![
+        Section {
+            tag: *section::CONTAINER,
+            version: CONTAINER_VERSION,
+            payload: Vec::new(),
+        },
+        hdr,
+        cat,
+        map,
+    ];
+    let mut body_at: usize = sections.iter().map(Section::encoded_len).sum();
+    for (index, zone) in zones.iter().enumerate() {
+        let payload = stroke(
+            zone.source,
+            zone.root_key,
+            zone.global_id,
+            body_at + section::HEADER_LEN,
+            super::stroke::header_len(index, cat_len, map_len),
+            predictor,
+            zone.loops,
+        )?;
+        body_at += section::HEADER_LEN + payload.len();
+        sections.push(Section {
+            tag: *section::STK,
+            version: STK_VERSION,
+            payload,
+        });
+    }
+    sections.push(sty());
 
     Ok(Cbin {
         header: Header {
@@ -663,25 +1081,50 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Err
             aux: AUX,
             version: VERSION,
         },
-        body: Sample {
-            sections: vec![
-                Section {
-                    tag: *section::CONTAINER,
-                    version: CONTAINER_VERSION,
-                    payload: Vec::new(),
-                },
-                hdr,
-                cat,
-                map,
-                Section {
-                    tag: *section::STK,
-                    version: STK_VERSION,
-                    payload,
-                },
-                sty(),
-            ],
-        },
+        body: Sample { sections },
     })
+}
+
+/// Validate the zone list and reduce it to the `(stroke id, top note)` pairs the
+/// `map` section stores.
+fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<(u8, u8)>, Error> {
+    if zones.is_empty() || zones.len() > MAX_ZONES {
+        return Err(ParseError::OutOfBounds {
+            value: format!("{} zones", zones.len()),
+            bound: format!("1 through {MAX_ZONES}, the map section's own count byte"),
+        }
+        .into());
+    }
+    let mut table = Vec::with_capacity(zones.len());
+    for (index, zone) in zones.iter().enumerate() {
+        midi_note("root key", zone.root_key)?;
+        midi_note("top note", zone.top_note)?;
+        if !(1..=MAX_STROKE_ID).contains(&zone.global_id) {
+            return Err(ParseError::OutOfBounds {
+                value: format!("stroke id {}", zone.global_id),
+                bound: format!("1 through {MAX_STROKE_ID}, what a zone record can name"),
+            }
+            .into());
+        }
+        let id = zone.global_id as u8;
+        if table.iter().any(|&(seen, _)| seen == id) {
+            return Err(ParseError::AssertFail(format!(
+                "two zones claim stroke id {id}, and a zone record names its stroke by id"
+            ))
+            .into());
+        }
+        if index > 0 && zone.top_note >= zones[index - 1].top_note {
+            return Err(ParseError::AssertFail(format!(
+                "zone {index} reaches up to note {} but the zone before it stops at {}; \
+                 zones are stored highest first and may not overlap",
+                zone.top_note,
+                zones[index - 1].top_note
+            ))
+            .into());
+        }
+        table.push((id, zone.top_note));
+    }
+    Ok(table)
 }
 
 fn midi_note(name: &str, note: u8) -> Result<(), Error> {
@@ -765,18 +1208,25 @@ mod tests {
         let source = vec![0i16; MIN_FRAMES];
         assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
         assert!(instrument(&source, &Options::new("Test").top_note(255)).is_err());
-        assert!(stroke(&source, 128, 1, 0, Predictor::Plain).is_err());
+        assert!(stroke(&source, 128, 1, 0, 165, Predictor::Plain, None).is_err());
     }
 
-    /// The allocation is `38 + 127·P` words with the chain right-aligned, so a
-    /// single-zone stroke is `51 + 114 + 381·P` bytes.
+    /// Encoded audio begins where the preamble law puts it: a stroke payload is its
+    /// own header length plus whole packets, and the chain sits at the end of it.
     #[test]
     fn the_allocation_is_whole_packets_with_the_chain_at_the_end() {
         let file = encoded(&sine(440.0, 8000.0, 44_100), Predictor::Plain);
+        let map_len = section::find(&file.body.sections, section::MAP)
+            .unwrap()
+            .payload
+            .len();
+        let cat_len = section::find(&file.body.sections, section::CAT)
+            .unwrap()
+            .payload
+            .len();
         let stroke = section::find(&file.body.sections, section::STK).unwrap();
-        let words = (stroke.payload.len() - HEADER_LEN) / 3;
-        assert_eq!((stroke.payload.len() - HEADER_LEN) % 3, 0);
-        assert_eq!((words - SLACK_WORDS) % PACKET_WORDS, 0);
+        let head = super::super::stroke::header_len(0, cat_len, map_len);
+        assert_eq!((stroke.payload.len() - head) % PACKET_LEN, 0);
         assert_eq!(&stroke.payload[stroke.payload.len() - 3..], &[0x80, 0, 24]);
     }
 
@@ -835,6 +1285,7 @@ mod tests {
             one_to_one: true,
             width: 13,
             order: 0,
+            mark: false,
             first: 0,
             count: 30,
         };
@@ -949,7 +1400,7 @@ mod tests {
             let source = sine(440.0, 32_000.0, 30_000);
             let plan = Plan::new(source.len()).unwrap();
             let q = quantise(&source, &plan);
-            for spec in records(&q.values, &plan, predictor) {
+            for spec in records(&q.values, &plan, predictor).unwrap() {
                 let limit = 1i64 << (spec.width - 1);
                 for k in 0..spec.count {
                     let v = if spec.order == 0 {
@@ -971,7 +1422,7 @@ mod tests {
         let source = sine(440.0, 20_000.0, 60_000);
         let plan = Plan::new(source.len()).unwrap();
         let q = quantise(&source, &plan);
-        let specs = records(&q.values, &plan, Predictor::Plain);
+        let specs = records(&q.values, &plan, Predictor::Plain).unwrap();
 
         let mut at = 0;
         for spec in &specs {
@@ -994,8 +1445,8 @@ mod tests {
         let source = sine(60.0, 30_000.0, 60_000);
         let plan = Plan::new(source.len()).unwrap();
         let q = quantise(&source, &plan);
-        let plain = records(&q.values, &plan, Predictor::Plain);
-        let minimised = records(&q.values, &plan, Predictor::Minimising);
+        let plain = records(&q.values, &plan, Predictor::Plain).unwrap();
+        let minimised = records(&q.values, &plan, Predictor::Minimising).unwrap();
 
         let bits = |specs: &[Spec]| -> usize { specs.iter().map(Spec::span).sum() };
         assert!(
@@ -1062,6 +1513,386 @@ mod tests {
         for gap in [23..29, 32..38, 41..47] {
             assert!(head[gap.clone()].iter().all(|&b| b == 0), "{gap:?}");
         }
+    }
+
+    fn zone(source: &[i16], root_key: u8, top_note: u8, global_id: u32) -> NewZone<'_> {
+        NewZone {
+            source,
+            root_key,
+            top_note,
+            global_id,
+            loops: None,
+        }
+    }
+
+    #[test]
+    fn every_zone_reads_back_paired_to_its_own_stroke() {
+        let high = sine(880.0, 12_000.0, 12_000);
+        let mid = sine(440.0, 12_000.0, 9_000);
+        let low = sine(220.0, 12_000.0, 15_000);
+        let file = multi_zone(
+            &[
+                zone(&high, 72, 96, 7),
+                zone(&mid, 60, 65, 3),
+                zone(&low, 48, 53, 9),
+            ],
+            "Three",
+            Predictor::Plain,
+        )
+        .unwrap();
+
+        let read = super::super::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(read.name().unwrap(), "Three");
+        let zones = read.zones().unwrap();
+        assert_eq!(
+            zones.iter().map(|z| z.top_note).collect::<Vec<_>>(),
+            [96, 65, 53]
+        );
+        assert_eq!(
+            zones.iter().map(|z| z.stroke_id).collect::<Vec<_>>(),
+            [7, 3, 9]
+        );
+        assert_eq!(
+            read.strokes()
+                .unwrap()
+                .iter()
+                .map(|s| s.root_key)
+                .collect::<Vec<_>>(),
+            [72, 60, 48]
+        );
+
+        for (index, source) in [&high, &mid, &low].iter().enumerate() {
+            let (at, stream) = read.zone_stream(index).unwrap();
+            let audio = codec::decode(stream, at, codec::Layout::V2).unwrap();
+            let plan = Plan::new(source.len()).unwrap();
+            let q = quantise(source, &plan);
+            let gain = 1i32 << q.shift;
+            assert_eq!(audio.samples.len(), plan.fields, "zone {index}");
+            for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
+                assert_eq!(i32::from(got), want * gain, "zone {index} field {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zone_decodes_the_same_alone_as_in_a_crowd() {
+        let source = sine(330.0, 18_000.0, 20_000);
+        let alone = instrument(&source, &Options::new("One").root_key(60)).unwrap();
+        let crowd = multi_zone(
+            &[
+                zone(&sine(880.0, 9000.0, 8000), 72, 96, 3),
+                zone(&source, 60, 65, 2),
+                zone(&sine(110.0, 9000.0, 8000), 48, 53, 1),
+            ],
+            "Three",
+            Predictor::Plain,
+        )
+        .unwrap();
+
+        let one = alone.zone_stream(0).unwrap();
+        let many = crowd.zone_stream(1).unwrap();
+        assert_ne!(one.1, many.1, "the streams differ; only the audio must not");
+        assert_eq!(
+            codec::decode(one.1, one.0, codec::Layout::V2).unwrap(),
+            codec::decode(many.1, many.0, codec::Layout::V2).unwrap()
+        );
+    }
+
+    #[test]
+    fn every_stroke_is_its_own_header_length_plus_whole_packets() {
+        let source = sine(440.0, 12_000.0, 12_000);
+        for count in 1..=6usize {
+            let zones: Vec<NewZone> = (0..count)
+                .map(|i| zone(&source, 60, 120 - 10 * i as u8, i as u32 + 1))
+                .collect();
+            let file = multi_zone(&zones, "Ladder", Predictor::Plain).unwrap();
+            let cat_len = section::find(&file.body.sections, section::CAT)
+                .unwrap()
+                .payload
+                .len();
+            let map_len = section::find(&file.body.sections, section::MAP)
+                .unwrap()
+                .payload
+                .len();
+            for (index, section) in file
+                .body
+                .sections
+                .iter()
+                .filter(|s| s.is(section::STK))
+                .enumerate()
+            {
+                let head = super::super::stroke::header_len(index, cat_len, map_len);
+                assert_eq!(
+                    (section.payload.len() - head) % PACKET_LEN,
+                    0,
+                    "{count} zones, stroke {index}: {} bytes over a {head}-byte header",
+                    section.payload.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_zone_list_the_format_cannot_store_is_refused() {
+        let source = vec![0i16; MIN_FRAMES];
+        let one =
+            |root, top, id| multi_zone(&[zone(&source, root, top, id)], "x", Predictor::Plain);
+        assert!(multi_zone(&[], "x", Predictor::Plain).is_err());
+        assert!(one(60, 84, 0).is_err(), "id zero names no stroke");
+        assert!(one(60, 84, 256).is_err(), "id past the record's one byte");
+        assert!(one(60, 128, 1).is_err());
+        assert!(one(128, 84, 1).is_err());
+        assert!(one(60, 84, 1).is_ok());
+
+        let pair = |tops: [u8; 2], ids: [u32; 2]| {
+            multi_zone(
+                &[
+                    zone(&source, 60, tops[0], ids[0]),
+                    zone(&source, 48, tops[1], ids[1]),
+                ],
+                "x",
+                Predictor::Plain,
+            )
+        };
+        assert!(pair([84, 53], [1, 1]).is_err(), "duplicate stroke id");
+        assert!(pair([53, 84], [2, 1]).is_err(), "zones out of order");
+        assert!(pair([84, 84], [2, 1]).is_err(), "zones overlap");
+        assert!(pair([84, 53], [2, 1]).is_ok());
+    }
+
+    #[test]
+    fn a_looped_plan_covers_every_field_exactly_once() {
+        for (frames, start, end) in [
+            (88_200, 16_384, 32_768),
+            (88_200, 4_096, 20_480),
+            (88_200, 0, 16_384),
+            (88_200, 43_981, 60_365),
+            (44_100, 20_000, 44_100),
+        ] {
+            let plan = Plan::looped(frames, Loop::new(start, end)).unwrap();
+            let points = plan.looped.unwrap();
+            assert_eq!(
+                plan.warmup + CELL * plan.cells_before + plan.resync + CELL * plan.cells_after,
+                points.at,
+                "{start}..{end}: the pre-roll does not reach the loop"
+            );
+            assert_eq!(
+                points.at + points.warmup + CELL * points.cells,
+                plan.fields,
+                "{start}..{end}: the loop does not reach the terminator"
+            );
+            assert_eq!(points.at - fields_of(start).unwrap(), points.lead);
+        }
+    }
+
+    #[test]
+    fn a_loop_comes_back_the_length_it_asked_for() {
+        let source = sine(220.0, 18_000.0, 88_200);
+        for (start, end) in [
+            (16_384, 32_768),
+            (16_384, 17_408),
+            (43_981, 60_365),
+            (4_096, 20_480),
+            (65_536, 81_920),
+        ] {
+            let file = instrument(
+                &source,
+                &Options::new("Looped").loops(Loop::new(start, end)),
+            )
+            .unwrap();
+            let (at, stroke) = file.stroke_streams()[0];
+            let walk = codec::walk(stroke, at, codec::Layout::V2).unwrap();
+            let mark = walk.records.iter().find(|r| r.mark).unwrap();
+            let frames = (walk.fields - mark.first_field) as f64 * f64::from(codec::SOURCE_RATE)
+                / f64::from(codec::FIELD_RATE);
+            assert!(
+                (frames - (end - start) as f64).abs() < 1.0,
+                "loop {start}..{end} came back {frames} frames long"
+            );
+        }
+    }
+
+    #[test]
+    fn the_loop_starts_a_packet_and_the_directory_says_so() {
+        let source = sine(330.0, 14_000.0, 60_000);
+        for (start, end) in [(8_192, 24_576), (20_000, 40_000), (4_096, 59_000)] {
+            for predictor in [Predictor::Plain, Predictor::Minimising] {
+                let file = instrument(
+                    &source,
+                    &Options::new("Looped")
+                        .predictor(predictor)
+                        .loops(Loop::new(start, end)),
+                )
+                .unwrap();
+                let (at, stroke) = file.stroke_streams()[0];
+                let walk = codec::walk(stroke, at, codec::Layout::V2).unwrap();
+                let directory = codec::Directory::read(stroke).unwrap();
+                let marked: Vec<_> = walk.records.iter().filter(|r| r.mark).collect();
+                assert_eq!(marked.len(), 1, "{start}..{end} {predictor:?}");
+                assert_eq!(
+                    codec::Directory::resolve(directory.mark, at, codec::Layout::V2),
+                    marked[0].at
+                );
+                assert_ne!(directory.mark, directory.terminator);
+                assert_eq!(
+                    (walk.terminator - marked[0].at) % PACKET_WORDS,
+                    0,
+                    "{start}..{end} {predictor:?}: {} words",
+                    walk.terminator - marked[0].at
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unlooped_stroke_marks_nothing() {
+        let file = encoded(&sine(440.0, 9_000.0, 44_100), Predictor::Plain);
+        let (at, stroke) = file.stroke_streams()[0];
+        let directory = codec::Directory::read(stroke).unwrap();
+        assert_eq!(directory.mark, directory.terminator);
+        assert!(codec::walk(stroke, at, codec::Layout::V2)
+            .unwrap()
+            .records
+            .iter()
+            .all(|r| !r.mark));
+    }
+
+    #[test]
+    fn the_tail_repeats_the_loops_opening() {
+        let source = sine(200.0, 20_000.0, 88_200);
+        let plan = Plan::looped(source.len(), Loop::new(16_384, 32_768)).unwrap();
+        let points = plan.looped.unwrap();
+        let values = quantise(&source, &plan).values;
+        assert_eq!(
+            values[plan.fields - points.lead..],
+            values[points.at - points.lead..points.at]
+        );
+    }
+
+    #[test]
+    fn the_crossfade_ramps_linearly_into_the_material_before_the_loop() {
+        let source = sine(150.0, 22_000.0, 88_200);
+        let points = Loop::new(16_384, 32_768);
+        let plan = Plan::looped(source.len(), points).unwrap();
+        let faded = Plan::looped(source.len(), points.crossfade(4_096)).unwrap();
+        let (plain, mixed) = (
+            quantise(&source, &plan).values,
+            quantise(&source, &faded).values,
+        );
+        assert_eq!(plain.len(), mixed.len());
+
+        let loop_at = faded.looped.unwrap();
+        let end = faded.fields - loop_at.lead;
+        let length = faded.fields - loop_at.at;
+        let span = loop_at.crossfade;
+        assert!(span > 3_000, "the fade is {span} fields");
+        // Untouched in front of the fade, and the fade itself is the ramp.
+        assert_eq!(plain[..end - span], mixed[..end - span]);
+        for k in 0..span {
+            let f = end - span + k;
+            let (near, far) = (f64::from(plain[f]), f64::from(plain[f - length]));
+            let u = k as f64 / span as f64;
+            let want = near + (far - near) * u;
+            assert!(
+                (f64::from(mixed[f]) - want).abs() <= 1.0,
+                "field {f}: {} against {want}",
+                mixed[f]
+            );
+        }
+    }
+
+    #[test]
+    fn a_loop_the_format_cannot_state_is_refused() {
+        let frames = 44_100;
+        let looped = |points| Plan::looped(frames, points);
+        assert!(looped(Loop::new(8_192, 40_000)).is_ok());
+        assert!(looped(Loop::new(8_192, 8_192)).is_err(), "empty loop");
+        assert!(looped(Loop::new(40_000, 8_192)).is_err(), "loop runs back");
+        assert!(looped(Loop::new(8_192, 44_101)).is_err(), "past the audio");
+        assert!(
+            looped(Loop::new(8_192, 8_250)).is_err(),
+            "shorter than a run"
+        );
+        assert!(
+            looped(Loop::new(1_024, 40_000).crossfade(4_096)).is_err(),
+            "nothing in front of the loop to fade from"
+        );
+        assert!(
+            looped(Loop::new(8_192, 40_000).crossfade(40_000)).is_err(),
+            "a fade longer than the loop"
+        );
+        // Below the modelled opening, whatever the loop says.
+        assert!(Plan::looped(4_000, Loop::new(100, 3_000)).is_err());
+    }
+
+    #[test]
+    fn a_looped_stroke_round_trips_through_the_decoder_exactly() {
+        let source = sine(180.0, 16_000.0, 60_000);
+        for predictor in [Predictor::Plain, Predictor::Minimising] {
+            for points in [
+                Loop::new(8_192, 40_960),
+                Loop::new(8_192, 40_960).crossfade(4_096),
+            ] {
+                let file = instrument(
+                    &source,
+                    &Options::new("Looped").predictor(predictor).loops(points),
+                )
+                .unwrap();
+                let (at, stroke) = file.stroke_streams()[0];
+                let plan = Plan::looped(source.len(), points).unwrap();
+                let q = quantise(&source, &plan);
+                let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+                assert_eq!(audio.samples.len(), plan.fields);
+                let gain = 1i32 << q.shift;
+                for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
+                    assert_eq!(i32::from(got), want * gain, "{predictor:?} field {f}");
+                }
+            }
+        }
+    }
+
+    // Full-scale broadband material can exhaust the three spare bits per field before
+    // a short loop reaches the next packet boundary.
+    #[test]
+    fn a_loop_lands_on_a_packet_boundary_or_is_refused() {
+        let mut source = Vec::with_capacity(60_000);
+        let mut state = 12_345u64;
+        for k in 0..60_000u64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let noise = ((state >> 40) as i32 - 8_192) / 4;
+            let tone = (20_000.0 * (k as f64 * 0.031).sin()) as i32;
+            source.push((tone + noise).clamp(-32_768, 32_767) as i16);
+        }
+
+        let mut placed = 0usize;
+        let mut refused = 0usize;
+        for start in (4_096..48_000).step_by(7_919) {
+            for length in [900, 1_500, 4_096, 11_000] {
+                for predictor in [Predictor::Plain, Predictor::Minimising] {
+                    let points =
+                        Loop::new(start, start + length).crossfade((length / 4).min(start));
+                    let options = Options::new("Sweep").predictor(predictor).loops(points);
+                    let Ok(file) = instrument(&source, &options) else {
+                        refused += 1;
+                        continue;
+                    };
+                    let (at, stroke) = file.stroke_streams()[0];
+                    let walk = codec::walk(stroke, at, codec::Layout::V2).unwrap();
+                    let mark = walk.records.iter().find(|r| r.mark).unwrap();
+                    assert_eq!(
+                        (walk.terminator - mark.at) % PACKET_WORDS,
+                        0,
+                        "loop {start}..{} under {predictor:?} covers {} words",
+                        start + length,
+                        walk.terminator - mark.at
+                    );
+                    placed += 1;
+                }
+            }
+        }
+        assert!(placed > 40, "{placed} placed, {refused} refused");
     }
 
     /// Silence is silence: nothing promotes, so every content record is the width-2

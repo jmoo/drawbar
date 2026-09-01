@@ -290,6 +290,15 @@ enum SampleAction {
     /// acknowledge that and write anything.
     Encode(sample::EncodeArgs),
 
+    /// EXPERIMENTAL: build a v2 instrument from a Nord Sample Editor project.
+    ///
+    /// The project supplies the zones, their root keys, top notes and trim points,
+    /// and the WAVs they play — paths inside it resolve from the project's own
+    /// directory. Anything the editor can express that this writer does not lay out
+    /// — a velocity split, a loop, a per-stroke gain — is refused by name rather
+    /// than quietly dropped. The same `--experimental` caveat as `encode` applies.
+    Build(sample::BuildArgs),
+
     /// Round-trip a sample instrument, in a file or a slot, and with `--deep` also
     /// walk its audio stream. Reading a slot is all this does to the instrument.
     Verify(sample::VerifyArgs),
@@ -668,6 +677,7 @@ fn main() -> ExitCode {
             SampleAction::Edit(args) => sample::run(&ui, args),
             SampleAction::Decode(args) => sample::decode(&ui, args),
             SampleAction::Encode(args) => sample::encode(&ui, args),
+            SampleAction::Build(args) => sample::build(&ui, args),
             SampleAction::Verify(args) => sample::verify(&ui, args),
             SampleAction::Project { action } => match action {
                 SampleProjectAction::New(args) => sample::project_new(&ui, args),

@@ -93,19 +93,26 @@ pub struct Stroke {
     pub loop_start: f64,
     /// `m_loopLengthLong`.
     pub loop_length: f64,
-    /// `m_loopXFadeLengthLong`, frames.
+    /// `m_loopXFadeLengthLong`, in frames. The editor bakes this fade into the
+    /// encoded audio; nothing in the instrument states it.
     pub loop_crossfade: f64,
-    /// `m_loopXFModeLong`. The mode numbering is not decoded.
+    /// `m_loopXFModeLong`. Mode 0 is the linear fade; what mode 1 does to the audio
+    /// is not decoded.
     pub loop_crossfade_mode: u32,
+    /// `m_loopDecayEnabled`. Reaches the instrument nowhere.
     pub loop_decay_enabled: bool,
+    /// `m_loopDecay`. Reaches the instrument nowhere.
     pub loop_decay: f64,
+    /// `m_loopDetune`. Reaches the instrument nowhere.
     pub loop_detune: i32,
+    /// `m_shortLoopEnabled`: the short loop starts where the long one does and runs
+    /// for [`short_loop_length`](Stroke::short_loop_length) instead.
     pub short_loop_enabled: bool,
     /// `m_loopLengthShort`.
     pub short_loop_length: f64,
-    /// `m_loopXFadeShort`. An integer, where the frame positions around it are
-    /// `%f` decimals; the unit is not decoded.
+    /// `m_loopXFadeShort`, an integer whose unit is not frames and is not decoded.
     pub short_loop_crossfade: u32,
+    /// `m_shortLoopUsesPitch`. Reaches the instrument nowhere.
     pub short_loop_uses_pitch: bool,
 }
 
@@ -440,6 +447,12 @@ impl Project {
     /// The instrument's name — what the generated `.nsmp` is called.
     pub fn name(&self) -> Result<String, ParseError> {
         self.instrument()?.get("m_name")
+    }
+
+    /// `m_loopDecayEnabled` on the instrument, which is a different object from the
+    /// one on each stroke. Reaches the generated instrument nowhere.
+    pub fn loop_decay_enabled(&self) -> Result<bool, ParseError> {
+        flag(self.instrument()?, "m_loopDecayEnabled")
     }
 
     pub fn set_name(&mut self, name: &str) -> Result<(), ParseError> {
