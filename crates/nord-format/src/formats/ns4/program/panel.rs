@@ -57,9 +57,8 @@ macro_rules! layer {
 }
 
 pub const PANEL: Panel = Panel {
-    // The three effects chains and the layer bodies are named whole, so everything the
-    // body registers has a place — see the tests in `crate::panel`.
-    exhaustive: true,
+    exhaustive: false,
+    selections: &[],
     groups: &[
         Group {
             // The switches that decide which of the sections below mean anything. They
@@ -240,14 +239,6 @@ pub const PANEL: Panel = Panel {
             ],
             groups: &[],
         },
-        Group {
-            title: "Not on the panel",
-            when: None,
-            // The header's schema version, echoed into the body. A read carries it; no
-            // control moves it.
-            members: &["version_echo"],
-            groups: &[],
-        },
     ],
 };
 
@@ -338,7 +329,7 @@ mod tests {
         assert!(!named.contains(&"organ_a.drawbar_1_wheel"));
         assert!(named.contains(&"organ_a.drawbar_1"));
         assert!(named.contains(&"synth_a_voice.filter_resonance_wheel"));
-        assert!(PANEL.leftovers(&specs).is_empty());
+        assert_eq!(PANEL.leftovers(&specs), ["version_echo"]);
     }
 
     /// The render path and the inspection path have to agree: one resolves against a
@@ -363,7 +354,14 @@ mod tests {
         }
 
         assert_eq!(named(&resolved.sections), PANEL.named(&specs));
-        assert!(resolved.leftovers.is_empty());
+        assert_eq!(
+            resolved
+                .leftovers
+                .iter()
+                .map(|field| field.path.as_str())
+                .collect::<Vec<_>>(),
+            ["version_echo"]
+        );
     }
 
     /// A nested group's resolved relevance carries its parent's, so a caller drawing the
