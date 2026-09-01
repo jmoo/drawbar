@@ -252,9 +252,9 @@ impl Transport for WebUsbTransport {
         // `Transport::read` is met here: the browser ends the transfer at the device's
         // short packet, the same way the desktop backend's bulk read does.
         //
-        // ⚠️ WebUSB has no timeout, so a message that ended on a full packet would leave
-        // this awaiting a terminator forever. Confirmed on hardware for the frames the
-        // read path uses; `READ_BUFFER` is packet-aligned.
+        // Confirmed on hardware.
+        // ⚠️ WebUSB has no timeout, so a message ending on a full packet would wait
+        // forever for a terminator. `READ_BUFFER` is packet-aligned.
         let result = JsFuture::from(self.device.transfer_in(endpoint_number(EP_IN), max as u32))
             .await
             .map_err(map_err("bulk read"))?;

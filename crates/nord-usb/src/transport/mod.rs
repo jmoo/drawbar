@@ -121,8 +121,9 @@ pub trait Transport {
     /// ⚠️ A message whose length is a whole number of packets would end in no short
     /// packet, and the transfer would sit waiting for a terminator the device never
     /// sends. That is a hang, not a half-read frame — the contract holds or nothing
-    /// comes back — but it is the one shape that would break it, and no frame this
-    /// crate has seen from the device is shaped that way.
+    /// comes back — but it is the one shape that would break it.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
     async fn read(&mut self, max: usize) -> Result<Vec<u8>>;
 
     /// Read, giving up after `limit`. `Ok(None)` means nothing arrived in time.
