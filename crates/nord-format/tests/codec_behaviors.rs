@@ -1,5 +1,6 @@
 #![cfg(feature = "corpus")]
 //! Cross-specimen codec contracts that the per-file corpus sweep cannot express.
+//! Inferred from specimens; not confirmed on hardware.
 
 use nord_format::formats::nsmp;
 use nord_format::{Entity, Sample};
@@ -310,9 +311,148 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
 }
 
 #[test]
+fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
+    for frames in [
+        4_096usize, 6_000, 10_000, 16_384, 25_000, 32_768, 60_000, 90_000,
+    ] {
+        let name = format!("SL2-n{frames:06}.nsmp");
+        let sample = v2_named(&name);
+        let (at, stroke) = sample.stroke_streams()[0];
+        let stream = nsmp::codec::walk(stroke, at, nsmp::codec::Layout::V2).unwrap();
+        assert_eq!(stream.channels, 2, "{name}");
+        assert_eq!(stream.cell, Some(48), "{name}");
+
+        let plan = nsmp::encode::Plan::new(frames, 2).unwrap();
+        assert_eq!(stream.fields, plan.fields, "{name}: fields");
+
+        let warmup = stream
+            .records
+            .iter()
+            .take_while(|r| r.one_to_one)
+            .map(|r| r.values.len())
+            .sum::<usize>();
+        assert_eq!(warmup, plan.warmup, "{name}: warmup");
+
+        let resync = stream
+            .records
+            .iter()
+            .skip_while(|r| r.one_to_one)
+            .find(|r| r.one_to_one)
+            .unwrap();
+        assert_eq!(resync.first_field, plan.resync_at, "{name}: resync field");
+        let resync_fields = stream
+            .records
+            .iter()
+            .filter(|r| r.one_to_one && r.first_field >= plan.resync_at)
+            .map(|r| r.values.len())
+            .sum::<usize>();
+        assert_eq!(resync_fields, plan.resync, "{name}: resync length");
+    }
+}
+
+#[test]
+fn a_stereo_strokes_channels_decode_to_the_signals_they_were_authored_from() {
+    let channels = |name: &str| -> [Vec<i16>; 2] {
+        let sample = v2_named(name);
+        let (at, stroke) = sample.stroke_streams()[0];
+        let audio = nsmp::codec::decode(stroke, at, nsmp::codec::Layout::V2).unwrap();
+        assert_eq!(audio.channels, 2, "{name}");
+        [
+            audio.samples.iter().step_by(2).copied().collect(),
+            audio.samples[1..].iter().step_by(2).copied().collect(),
+        ]
+    };
+    let peak = |v: &[i16]| v.iter().map(|s| i32::from(*s).abs()).max().unwrap_or(0);
+
+    let [left, right] = channels("SI-Lonly.nsmp");
+    assert!(peak(&left) > 10_000 && peak(&right) == 0, "SI-Lonly");
+    let [left, right] = channels("SI-Ronly.nsmp");
+    assert!(peak(&left) == 0 && peak(&right) > 10_000, "SI-Ronly");
+
+    let [left, right] = channels("SI-imp.nsmp");
+    let hits = |v: &[i16]| -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        for (f, &s) in v.iter().enumerate() {
+            if i32::from(s).abs() > 4_000 && out.last().is_none_or(|&last| f - last > 8) {
+                out.push(f);
+            }
+        }
+        out.iter()
+            .map(|&f| {
+                f * usize::try_from(nsmp::codec::SOURCE_RATE).unwrap()
+                    / usize::try_from(nsmp::codec::FIELD_RATE).unwrap()
+            })
+            .collect()
+    };
+    let near = |got: &[usize], want: &[usize]| {
+        assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
+        for (&g, &w) in got.iter().zip(want) {
+            assert!(g.abs_diff(w) <= 2, "{got:?} against {want:?}");
+        }
+    };
+    near(&hits(&left), &[1_000, 3_000, 5_000, 7_000, 9_000, 11_000]);
+    near(&hits(&right), &[2_000, 4_000, 6_000, 8_000, 10_000]);
+}
+
+#[test]
+fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
+    let landmarks = |name: &str| {
+        let sample = v2_named(name);
+        let (at, stroke) = sample.stroke_streams()[0];
+        let stream = nsmp::codec::walk(stroke, at, nsmp::codec::Layout::V2).unwrap();
+        let warmup = stream
+            .records
+            .iter()
+            .take_while(|r| r.one_to_one)
+            .map(|r| r.values.len())
+            .sum::<usize>();
+        let resync = stream
+            .records
+            .iter()
+            .skip_while(|r| r.one_to_one)
+            .find(|r| r.one_to_one)
+            .unwrap()
+            .first_field;
+        let resync_fields = stream
+            .records
+            .iter()
+            .filter(|r| r.one_to_one && r.first_field >= resync)
+            .map(|r| r.values.len())
+            .sum::<usize>();
+        (
+            stream.channels,
+            stream.cell,
+            [stream.fields, warmup, resync, resync_fields],
+        )
+    };
+
+    let (channels, cell, mono) = landmarks("C-44k-16-mono.nsmp");
+    assert_eq!(channels, 1);
+    assert_eq!(cell, Some(24));
+    for name in ["C-44k-16-stL.nsmp", "C-44k-16-stLR.nsmp"] {
+        let (channels, cell, stereo) = landmarks(name);
+        assert_eq!(channels, 2, "{name}");
+        assert_eq!(
+            cell,
+            Some(48),
+            "{name}: the terminator states the doubled cell"
+        );
+        for (index, (&both, &one)) in stereo.iter().zip(&mono).enumerate() {
+            assert_eq!(both, 2 * one, "{name}: landmark {index}");
+        }
+    }
+
+    let mono = nsmp::encode::Plan::new(4_409, 1).unwrap();
+    let both = nsmp::encode::Plan::new(4_409, 2).unwrap();
+    assert_eq!(both.fields, 2 * mono.fields);
+    assert_eq!(both.fields, landmarks("C-44k-16-stL.nsmp").2[0]);
+    assert_eq!(both.resync_at, 2 * mono.resync_at);
+}
+
+#[test]
 fn count_laws_reproduce_editor_landmarks() {
     for (name, frames) in [("T-sil.nsmp", 44_100usize), ("A-impulse-C4.nsmp", 4_410)] {
-        let plan = nsmp::encode::Plan::new(frames).unwrap();
+        let plan = nsmp::encode::Plan::new(frames, 1).unwrap();
         let sample = v2_named(name);
         let (stroke_at, stroke) = sample.stroke_streams()[0];
         let stream = nsmp::codec::walk(stroke, stroke_at, nsmp::codec::Layout::V2).unwrap();
@@ -340,5 +480,27 @@ fn count_laws_reproduce_editor_landmarks() {
             .map(|record| record.values.len())
             .sum::<usize>();
         assert_eq!(resync_fields, plan.resync, "{name}: resync length");
+    }
+}
+
+#[test]
+fn a_stereo_silence_reproduces_the_editors_render_exactly() {
+    for frames in [
+        4_096usize, 6_000, 10_000, 16_384, 25_000, 32_768, 60_000, 90_000,
+    ] {
+        let name = format!("SL2-n{frames:06}");
+        let expected = &named(&format!("{name}.nsmp")).bytes;
+        let actual = nsmp::encode::instrument(
+            &vec![0i16; frames * 2],
+            &nsmp::encode::Options::new(&name).root_key(60).channels(2),
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+        assert_eq!(actual.len(), expected.len(), "{name}: length");
+        let differing = (0..expected.len())
+            .filter(|&index| actual[index] != expected[index])
+            .collect::<Vec<_>>();
+        assert!(differing.is_empty(), "{name}: bytes {differing:?} differ");
     }
 }

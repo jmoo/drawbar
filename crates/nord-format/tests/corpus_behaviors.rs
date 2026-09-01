@@ -851,6 +851,7 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
                 .map(
                     |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
                         source: audio,
+                        channels: 1,
                         root_key: *root_key,
                         top_note: *top_note,
                         global_id: *global_id,
@@ -926,7 +927,7 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
             let (at, stream) = twin.zone_stream(index).unwrap();
             let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2).unwrap();
             assert_eq!(
-                nsmp::encode::Plan::new(audio.len()).unwrap().fields,
+                nsmp::encode::Plan::new(audio.len(), 1).unwrap().fields,
                 editor.samples.len(),
                 "{name} zone {index}: {} frames",
                 audio.len()
@@ -946,6 +947,7 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
                 .map(
                     |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
                         source: audio,
+                        channels: 1,
                         root_key: *root_key,
                         top_note: *top_note,
                         global_id: *global_id,
