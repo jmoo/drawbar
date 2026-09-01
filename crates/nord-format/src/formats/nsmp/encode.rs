@@ -31,7 +31,10 @@
 //! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
 //! which is the whole of what the container stores about looping: the crossfade is
 //! baked into the audio here, and loop detune, loop decay and the short loop's
-//! pitch-tracking flag reach the file nowhere at all.
+//! pitch-tracking flag reach the file nowhere at all. The fade's frame count is the
+//! caller's to work out — a project states the long loop's in frames and the short
+//! loop's as a percentage of its length — and it arrives here already in frames,
+//! fraction and all.
 
 use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
@@ -141,7 +144,7 @@ pub enum Predictor {
 /// [`end`](Loop::end), and the record the loop starts at carries the mark bit. Loop
 /// detune, loop decay, and whether the editor called this a short loop or a long one
 /// are not stored anywhere, so a caller that needs them cannot have them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Loop {
     /// First frame of the loop.
     pub start: usize,
@@ -149,8 +152,9 @@ pub struct Loop {
     pub end: usize,
     /// Frames of the loop's tail that fade into the frames before [`start`](Loop::start).
     /// The fade is applied to the samples here, because that is where the instrument
-    /// reads it from.
-    pub crossfade: usize,
+    /// reads it from. Fractional, because a project can state it as a percentage of the
+    /// loop rather than a frame count, and dropping the fraction moves the fade a field.
+    pub crossfade: f64,
 }
 
 impl Loop {
@@ -159,11 +163,11 @@ impl Loop {
         Loop {
             start,
             end,
-            crossfade: 0,
+            crossfade: 0.0,
         }
     }
 
-    pub fn crossfade(mut self, frames: usize) -> Loop {
+    pub fn crossfade(mut self, frames: f64) -> Loop {
         self.crossfade = frames;
         self
     }
@@ -268,6 +272,15 @@ fn fields_of(frames: usize) -> Option<usize> {
         .and_then(|n| round_ratio(n, u64::from(PITCH_NUM)))
 }
 
+/// The same lattice, for a landmark that falls between two frames — a fade a project
+/// states as a percentage of its loop rather than as a frame count. Rounding such a
+/// value to a whole frame before it reaches the lattice opens the ramp a field early.
+fn lattice(frames: f64) -> Option<usize> {
+    let fields = frames * f64::from(PITCH_DEN) / f64::from(PITCH_NUM);
+    (fields.is_finite() && (0.0..=f64::from(u32::MAX)).contains(&fields))
+        .then_some(fields.round() as usize)
+}
+
 impl Plan {
     /// The layout for `frames` source samples with no loop.
     pub fn new(frames: usize) -> Result<Plan, Error> {
@@ -297,9 +310,9 @@ impl Plan {
         let start = fields_of(points.start).ok_or_else(|| size_error(points.start))?;
         // The loop's length is what has to survive, so it is put on the lattice as a
         // length. Rounding its two ends separately can cost it a field.
-        let length = fields_of(points.end - points.start).ok_or_else(|| size_error(points.end))?;
+        let span = points.end - points.start;
+        let length = fields_of(span).ok_or_else(|| size_error(points.end))?;
         let end = start + length;
-        let crossfade = fields_of(points.crossfade).ok_or_else(|| size_error(points.crossfade))?;
         // Ahead of the mark the stream still has to open and resync, so a loop that
         // starts too early is pushed off the front by repeating more of itself.
         let lead = LOOP_LEAD.max(MIN_PRE_LOOP.saturating_sub(start));
@@ -315,18 +328,24 @@ impl Plan {
             }
             .into());
         }
-        if crossfade > start || crossfade > length {
+        if !(0.0..=(points.start.min(span)) as f64).contains(&points.crossfade) {
             return Err(ParseError::OutOfBounds {
                 value: format!("a {} frame crossfade", points.crossfade),
                 bound: format!(
-                    "the {} frames in front of the loop and the {} frames in it — the \
+                    "the {} frames in front of the loop and the {span} frames in it — the \
                      fade mixes the loop's tail with the material before its start",
                     points.start,
-                    points.end - points.start
                 ),
             }
             .into());
         }
+        // The fade opens at a frame position inside the loop, so that position goes on
+        // the lattice the way the loop's own landmarks do and the span is the difference
+        // of the two. Putting the fade's length on the lattice directly is a field out
+        // wherever the two roundings disagree, and so is rounding the fade to a whole
+        // frame before converting.
+        let opens = lattice(span as f64 - points.crossfade).ok_or_else(|| size_error(span))?;
+        let crossfade = length - opens;
         Plan::lay_out(
             frames,
             fields,
@@ -990,7 +1009,7 @@ fn sty() -> Section {
 
 /// One zone to build: its audio, where it sits on the keyboard, and the id its
 /// record names its stroke by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NewZone<'a> {
     /// Mono PCM at [`codec::SOURCE_RATE`], already trimmed to what the zone plays.
     pub source: &'a [i16],
@@ -1769,12 +1788,62 @@ mod tests {
         );
     }
 
+    /// The fade's length on the lattice, measured off the editor's own renders: the
+    /// XFS ladder (a 16384-frame loop start, the short loop's crossfade swept as a
+    /// percentage of its length and the length swept at one percentage) plus the LP
+    /// crossfade ladder, whose unit is a frame count outright. Both are the same rule.
+    ///
+    /// `(loop length, crossfade frames, fields the ramp covers)`.
+    const MEASURED_FADES: &[(usize, f64, usize)] = &[
+        // XFS: the percentage ladder at one length. 25 % and 75 % are the two rungs
+        // that separate this rule from putting the fade's own length on the lattice.
+        (8_192, 81.92, 65),
+        (8_192, 163.84, 130),
+        (8_192, 409.6, 325),
+        (8_192, 819.2, 650),
+        (8_192, 1_638.4, 1_300),
+        (8_192, 2_048.0, 1_626),
+        (8_192, 3_276.8, 2_601),
+        (8_192, 4_096.0, 3_251),
+        (8_192, 6_144.0, 4_877),
+        (8_192, 8_192.0, 6_502),
+        // XFS: one percentage, the length swept.
+        (2_048, 512.0, 406),
+        (4_096, 1_024.0, 813),
+        (16_384, 4_096.0, 3_251),
+        (32_768, 8_192.0, 6_502),
+        // XFS: lengths whose field count lands where rounding and truncation differ.
+        (7_000, 700.0, 556),
+        (10_000, 1_000.0, 794),
+        // LP: the same 409.6-frame fade under two loop lengths, which is what says the
+        // short loop's integer is a percentage and not a count of anything.
+        (4_096, 409.6, 325),
+        (1_024, 409.6, 325),
+        // LP: the long loop's own ladder, stated in frames.
+        (16_384, 256.0, 203),
+        (16_384, 1_024.0, 813),
+        (16_384, 8_192.0, 6_502),
+    ];
+
+    #[test]
+    fn the_fade_opens_where_the_editors_own_renders_open_it() {
+        for &(length, crossfade, want) in MEASURED_FADES {
+            let points = Loop::new(16_384, 16_384 + length).crossfade(crossfade);
+            let plan = Plan::looped(88_200, points).unwrap();
+            assert_eq!(
+                plan.looped.unwrap().crossfade,
+                want,
+                "a {crossfade} frame fade in a {length} frame loop"
+            );
+        }
+    }
+
     #[test]
     fn the_crossfade_ramps_linearly_into_the_material_before_the_loop() {
         let source = sine(150.0, 22_000.0, 88_200);
         let points = Loop::new(16_384, 32_768);
         let plan = Plan::looped(source.len(), points).unwrap();
-        let faded = Plan::looped(source.len(), points.crossfade(4_096)).unwrap();
+        let faded = Plan::looped(source.len(), points.crossfade(4_096.0)).unwrap();
         let (plain, mixed) = (
             quantise(&source, &plan).values,
             quantise(&source, &faded).values,
@@ -1814,11 +1883,11 @@ mod tests {
             "shorter than a run"
         );
         assert!(
-            looped(Loop::new(1_024, 40_000).crossfade(4_096)).is_err(),
+            looped(Loop::new(1_024, 40_000).crossfade(4_096.0)).is_err(),
             "nothing in front of the loop to fade from"
         );
         assert!(
-            looped(Loop::new(8_192, 40_000).crossfade(40_000)).is_err(),
+            looped(Loop::new(8_192, 40_000).crossfade(40_000.0)).is_err(),
             "a fade longer than the loop"
         );
         // Below the modelled opening, whatever the loop says.
@@ -1831,7 +1900,7 @@ mod tests {
         for predictor in [Predictor::Plain, Predictor::Minimising] {
             for points in [
                 Loop::new(8_192, 40_960),
-                Loop::new(8_192, 40_960).crossfade(4_096),
+                Loop::new(8_192, 40_960).crossfade(4_096.0),
             ] {
                 let file = instrument(
                     &source,
@@ -1872,7 +1941,7 @@ mod tests {
             for length in [900, 1_500, 4_096, 11_000] {
                 for predictor in [Predictor::Plain, Predictor::Minimising] {
                     let points =
-                        Loop::new(start, start + length).crossfade((length / 4).min(start));
+                        Loop::new(start, start + length).crossfade((length / 4).min(start) as f64);
                     let options = Options::new("Sweep").predictor(predictor).loops(points);
                     let Ok(file) = instrument(&source, &options) else {
                         refused += 1;
