@@ -435,8 +435,9 @@ fn experimental(acknowledged: bool) -> Result<(), String> {
     )
 }
 
-/// One WAV as the encoder needs it: mono 16-bit at [`codec::SOURCE_RATE`].
-fn mono_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
+/// One WAV as the encoder needs it: 16-bit at [`codec::SOURCE_RATE`], mono or stereo.
+/// A stereo file becomes a stereo stroke — both channels under one header.
+fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let source =
         nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -449,10 +450,10 @@ fn mono_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
             codec::SOURCE_RATE,
         ));
     }
-    if source.channels != 1 {
+    if source.channels != 1 && source.channels != 2 {
         return Err(format!(
-            "{}: {} channels — only mono is encoded; a stroke pair under one header is \
-             how the format carries stereo and that layout is not written yet",
+            "{}: {} channels — a stroke's terminator states one cell size, so it can \
+             carry one channel or two and nothing else",
             path.display(),
             source.channels,
         ));
@@ -508,7 +509,7 @@ fn loop_points(text: &str, crossfade: usize) -> Result<encode::Loop, String> {
 /// `nord sample encode`: a WAV into a one-zone v2 instrument.
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     experimental(args.experimental)?;
-    let source = mono_source(&args.wav)?;
+    let source = pcm_source(&args.wav)?;
 
     let stem = args
         .wav
@@ -518,6 +519,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let name = args.name.unwrap_or_else(|| stem.clone());
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
+        .channels(source.channels)
         .predictor(predictor(args.predict));
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
@@ -548,7 +550,9 @@ struct ProjectZone {
     global_id: u32,
     root_key: u8,
     top_note: u8,
+    /// Interleaved, so `samples.len()` is `channels` times the frame count.
     samples: Vec<i16>,
+    channels: u16,
     source: PathBuf,
     loops: Option<encode::Loop>,
     /// Loop settings the project carries that the instrument has no field for, named
@@ -584,6 +588,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         .iter()
         .map(|z| encode::NewZone {
             source: &z.samples,
+            channels: z.channels,
             root_key: z.root_key,
             top_note: z.top_note,
             global_id: z.global_id,
@@ -686,8 +691,9 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 })?;
 
             let path = dir.join(&file.path);
-            let source = mono_source(&path)?;
+            let source = pcm_source(&path)?;
             let frames = source.frames();
+            let channels = usize::from(source.channels);
             let start = frame(&at, "start", stroke.start, frames)?;
             let stop = frame(&at, "stop", stroke.stop, frames)?;
             if start >= stop {
@@ -704,7 +710,8 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 global_id: layer.global_id,
                 root_key: zone.root_key,
                 top_note: zone.top_note,
-                samples: source.samples[start..stop].to_vec(),
+                channels: source.channels,
+                samples: source.samples[start * channels..stop * channels].to_vec(),
                 source: path,
                 loops,
                 dropped,

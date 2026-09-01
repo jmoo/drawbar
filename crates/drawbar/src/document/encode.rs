@@ -81,7 +81,7 @@ impl Source {
 /// Why this WAV cannot become an instrument, in the operator's words.
 ///
 /// The three limits are the encoder's, not this app's: the field lattice is defined
-/// against one rate, stereo is a stroke pair the writer does not lay down, and a stroke
+/// against one rate, a stroke carries one channel or two and nothing else, and a stroke
 /// shorter than [`encode::MIN_FRAMES`] has an opening the encoder does not model.
 pub fn refusal(source: &Source) -> Option<String> {
     let pcm = match source {
@@ -95,10 +95,10 @@ pub fn refusal(source: &Source) -> Option<String> {
             pcm.rate
         ));
     }
-    if pcm.channels != 1 {
+    if pcm.channels != 1 && pcm.channels != 2 {
         return Some(format!(
-            "{} channels — only mono is encoded; the format carries stereo as a stroke \
-             pair under one header, and that layout is not written yet",
+            "{} channels — a stroke's terminator states one cell size, so it carries \
+             one channel or two and nothing else",
             pcm.channels
         ));
     }
@@ -124,6 +124,7 @@ pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
     let options = encode::Options::new(&draft.name)
         .root_key(draft.root_key)
         .top_note(draft.top_note)
+        .channels(pcm.channels)
         .predictor(match draft.predict {
             true => encode::Predictor::Minimising,
             false => encode::Predictor::Plain,
@@ -253,8 +254,10 @@ mod tests {
         assert!(slow.contains("22050 Hz"), "{slow}");
         assert!(slow.contains(&SOURCE_RATE.to_string()), "{slow}");
 
-        let stereo = refused(wav(SOURCE_RATE, 2, encode::MIN_FRAMES)).expect("two channels");
-        assert!(stereo.contains("2 channels"), "{stereo}");
+        // Two channels is a stereo stroke, not a refusal; three is neither.
+        assert_eq!(refused(wav(SOURCE_RATE, 2, encode::MIN_FRAMES)), None);
+        let wide = refused(wav(SOURCE_RATE, 3, encode::MIN_FRAMES)).expect("three channels");
+        assert!(wide.contains("3 channels"), "{wide}");
 
         let short = refused(wav(SOURCE_RATE, 1, encode::MIN_FRAMES - 1)).expect("too short");
         assert!(short.contains(&encode::MIN_FRAMES.to_string()), "{short}");
@@ -262,6 +265,26 @@ mod tests {
         // Bytes that are not a readable WAV keep the reader's own complaint.
         let unreadable = refused(b"RIFF\0\0\0\0WAVE".to_vec()).expect("not readable");
         assert!(!unreadable.is_empty());
+    }
+
+    /// A stereo WAV encodes to a stereo stroke — both channels under one header, which
+    /// the terminator's doubled cell is what states.
+    #[test]
+    fn a_stereo_wav_encodes_to_a_stereo_stroke() {
+        let source = Source::read(&wav(SOURCE_RATE, 2, encode::MIN_FRAMES));
+        let bytes = instrument(&Draft::new("Pad.wav"), &source).expect("it encodes");
+        let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let nord_format::Entity::Sample(nord_format::Sample::V2(sample)) = entity else {
+            panic!("not a v2 sample");
+        };
+        let (at, stroke) = sample.stroke_streams()[0];
+        let audio = nord_format::formats::nsmp::codec::decode(
+            stroke,
+            at,
+            nord_format::formats::nsmp::codec::Layout::V2,
+        )
+        .expect("it decodes");
+        assert_eq!(audio.channels, 2);
     }
 
     #[test]
