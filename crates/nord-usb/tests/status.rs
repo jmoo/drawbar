@@ -38,9 +38,12 @@ fn status_decodes_the_counters_a_real_transaction_carried() {
     assert_eq!(got.count, 375);
     assert_eq!(got.free, 3525);
     assert_eq!(got.used, 52875);
-    // free + used is the class capacity; deleting programs was seen to shift the
-    // split without changing the total.
+    // A slot class parks nothing: deleting a program returns its bytes to `free`
+    // directly, so both trailing words stay zero here.
+    assert_eq!(got.dirty, 0);
+    assert_eq!(got.spare, 0);
     assert_eq!(got.total(), 56400);
+    assert_eq!(got.available(), 3525);
 
     assert!(t.is_exhausted(), "did not consume the whole exchange");
     assert_eq!(
@@ -87,7 +90,8 @@ fn lenient_mode_tolerates_differing_requests() {
 /// Fixed-size classes report slots; variable-size ones must not pretend to.
 ///
 /// Numbers are off a real Electro 5: adding one program moved used by exactly 141
-/// (53439 -> 53580), and 56400 / 141 is 400 — the instrument's 8 banks x 50 slots.
+/// (53439 -> 53580) — 121 body + 16 name + 4 CRC — and 56400 / 141 is 400, the
+/// instrument's 8 banks x 50 slots.
 #[test]
 fn derives_slots_only_for_fixed_size_classes() {
     use nord_usb::wire::Status;
@@ -97,8 +101,10 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 380,
         free: 2820,
         used: 53580,
+        dirty: 0,
+        spare: 0,
     };
-    assert_eq!(programs.blocks_per_item(), Some(141));
+    assert_eq!(programs.bytes_per_item(), Some(141));
     assert_eq!(programs.slots(), Some(400));
 
     let set_lists = Status {
@@ -106,8 +112,10 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 63,
         free: 5206,
         used: 2394,
+        dirty: 0,
+        spare: 0,
     };
-    assert_eq!(set_lists.blocks_per_item(), Some(38));
+    assert_eq!(set_lists.bytes_per_item(), Some(38));
     assert_eq!(set_lists.slots(), Some(200));
 
     // Pianos genuinely vary in size, so there is no per-item constant to report.
@@ -116,8 +124,10 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 29,
         free: 1,
         used: 4012,
+        dirty: 73,
+        spare: 2,
     };
-    assert_eq!(pianos.blocks_per_item(), None);
+    assert_eq!(pianos.bytes_per_item(), None);
     assert_eq!(pianos.slots(), None);
 
     // An empty class must not divide by zero.
@@ -126,8 +136,45 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 0,
         free: 363,
         used: 0,
+        dirty: 0,
+        spare: 0,
     };
     assert_eq!(empty.slots(), None);
+}
+
+/// A library class's capacity is all four storage words, and only that sum holds still.
+///
+/// Both readings are off the same Electro 5 sample partition: the four words sum to
+/// 2048 either way, while `free + used` reads 1983 in one and 1936 in the other. A
+/// report built from those two makes the partition look like it is losing capacity
+/// every time something is deleted, because a delete parks its space in `dirty`.
+#[test]
+fn a_library_capacity_is_all_four_words() {
+    use nord_usb::wire::Status;
+
+    let probed = Status {
+        class: ObjectClass::Sample,
+        count: 137,
+        free: 47,
+        used: 1936,
+        dirty: 64,
+        spare: 1,
+    };
+    // After a power cycle, with the same content: `free`'s prepared state does not
+    // survive one, `dirty` does, and the sum is unchanged.
+    let rebooted = Status {
+        free: 0,
+        dirty: 111,
+        ..probed
+    };
+
+    assert_eq!(probed.total(), 2048);
+    assert_eq!(rebooted.total(), 2048);
+
+    // What a write can actually reach — the point of decoding `dirty` at all. The
+    // rebooted partition reports zero free and is no less writable for it.
+    assert_eq!(probed.available(), 111);
+    assert_eq!(rebooted.available(), 111);
 }
 
 /// The file a read rebuilds is a real `.ne5p`, not just the right bytes.

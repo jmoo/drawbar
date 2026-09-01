@@ -140,37 +140,66 @@ fn collect<T: Transport>(transport: &mut T) -> Result<Vec<Status>, String> {
 
 fn print_table(ui: &Ui, report: &[Status]) {
     ui.out(ui.dim(format!(
-        "{:<10} {:>20} {:>7}  {}",
-        "class", "used", "full", "of"
+        "{:<10} {:>20} {:>7} {:>14}  {}",
+        "class", "used", "full", "free", "of"
     )));
     let mut any_variable = false;
+    let mut any_dirty = false;
     for s in report {
-        // Fixed-size classes are far clearer as slots than as raw blocks: programs
+        any_variable |= s.slots().is_none();
+        // Fixed-size classes are far clearer as slots than as byte counts: programs
         // report 400, which is exactly the instrument's 8 banks x 50.
-        let (used, of) = match s.slots() {
+        let (used, free, of) = match s.slots() {
             Some(slots) => (
                 format!("{} / {} slots", s.count, slots),
-                format!("{} blocks each", s.blocks_per_item().unwrap_or(0)),
+                u64::from(slots)
+                    .saturating_sub(u64::from(s.count))
+                    .to_string(),
+                format!("{} bytes each", s.bytes_per_item().unwrap_or(0)),
             ),
-            None => {
-                any_variable = true;
-                (
-                    format!("{} / {} blocks", s.used, s.total()),
-                    format!("{} items", s.count),
-                )
-            }
+            // ⚠️ What a write can reach is `available`, not `free`: a delete parks its
+            // blocks in the dirty pool, and a partition reporting no free space at all
+            // is still writable once the cleaning pass has run.
+            None => (
+                format!("{} / {} blocks", s.used, s.total()),
+                match s.dirty {
+                    0 => s.available().to_string(),
+                    dirty => {
+                        any_dirty = true;
+                        format!("{} ({dirty} dirty)", s.available())
+                    }
+                },
+                format!("{} items", s.count),
+            ),
         };
         ui.out(format!(
-            "{:<10} {:>20} {:>6.1}%  {}",
+            "{:<10} {:>20} {:>6.1}% {:>14}  {}",
             s.class.label(),
             used,
             s.used_percent(),
+            free,
             ui.dim(of),
         ));
     }
+    // The units differ by class family, and a reader has no way to know that from the
+    // numbers: a library block is 128 or 256 KiB, a program's 141 is bytes.
+    let mut footnotes: Vec<&str> = Vec::new();
     if any_variable {
+        footnotes.push("a block is the library partition's own allocation unit, 128 or 256 KiB;");
+        footnotes.push("`nord device geometry` reports it exactly. the slot classes count bytes");
+    }
+    if any_dirty {
+        footnotes.push("dirty blocks hold deleted content and are not free yet — a write that");
+        footnotes.push("needs them reclaims exactly the shortfall first");
+    }
+    if !footnotes.is_empty() {
         ui.note("");
-        ui.note("(blocks are a device-internal unit, not bytes)");
+        let last = footnotes.len() - 1;
+        for (i, line) in footnotes.iter().enumerate() {
+            let open = if i == 0 { "(" } else { "" };
+            let close = if i == last { ")" } else { "" };
+            ui.note(format!("{open}{line}{close}"));
+        }
     }
 }
 
@@ -179,12 +208,14 @@ fn print_json(ui: &Ui, report: &[Status]) {
     for (i, s) in report.iter().enumerate() {
         let comma = if i + 1 == report.len() { "" } else { "," };
         ui.out(format!(
-            "  {{\"class\": \"{}\", \"code\": {}, \"items\": {}, \"used\": {}, \"free\": {}, \"capacity\": {}}}{comma}",
+            "  {{\"class\": \"{}\", \"code\": {}, \"items\": {}, \"used\": {}, \"free\": {}, \"dirty\": {}, \"available\": {}, \"capacity\": {}}}{comma}",
             s.class.label(),
             s.class.to_raw(),
             s.count,
             s.used,
             s.free,
+            s.dirty,
+            s.available(),
             s.total(),
         ));
     }
@@ -1250,8 +1281,8 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     ui.out(ui.dim(format!(
-        "{:<4} {:<18} {:>6} {:>7}  banks",
-        "code", "partition", "banks", "slots"
+        "{:<4} {:<18} {:>6} {:>7} {:>10}  banks",
+        "code", "partition", "banks", "slots", "unit"
     )));
     for (p, banks) in &rows {
         // The sentinel is not a capacity and must not be summed into one.
@@ -1261,19 +1292,29 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
         } else {
             "—".to_string()
         };
+        // The allocation granularity is what `device status` counts in for this
+        // partition: a storage block for the libraries, one byte everywhere else.
+        let unit = match p.allocation_unit() {
+            Some(1) => "byte".to_string(),
+            Some(n) => format!("{n} B"),
+            None => "?".to_string(),
+        };
         let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         ui.out(format!(
-            "{:<4} {:<18} {:>6} {:>7}  {}",
+            "{:<4} {:<18} {:>6} {:>7} {:>10}  {}",
             p.index,
             p.name,
             banks.len(),
             slots,
+            unit,
             ui.dim(names.join(", ")),
         ));
     }
     ui.note("");
     ui.note("the partition index is the object class number; (Native) partitions are a");
     ui.note("second view of the same library, so their capacity is a sentinel, not a size");
+    ui.note("the unit is net of per-block overhead, so a library block reads 8 or 512");
+    ui.note("bytes under its power-of-two size");
     Ok(())
 }
 

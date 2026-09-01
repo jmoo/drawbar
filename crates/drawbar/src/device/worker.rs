@@ -1281,13 +1281,15 @@ mod wire_tests {
                 slot: u32::from_be_bytes(msg.args[4..8].try_into().unwrap()),
             };
             match msg.command {
-                cmd::STATUS if !self.reports_counters => Some((0, words(&[0, 0, 0]))),
+                // Five words, as every instrument answers: `count, free, used, dirty,
+                // spare`. A slot class parks nothing, so the last two are zero.
+                cmd::STATUS if !self.reports_counters => Some((0, words(&[0, 0, 0, 0, 0]))),
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
                     let total: u32 = self.banks.iter().map(|(_, slots)| slots).sum();
-                    // One block per item, so `Status::slots()` answers the bank capacity
+                    // One unit per item, so `Status::slots()` answers the bank capacity
                     // total rather than a coincidence of the division.
-                    Some((0, words(&[count, total.saturating_sub(count), count])))
+                    Some((0, words(&[count, total.saturating_sub(count), count, 0, 0])))
                 }
                 // A refusal, and the code is immaterial: what the walk keys on is that
                 // the instrument answered rather than that the pipe failed.

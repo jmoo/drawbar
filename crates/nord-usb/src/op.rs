@@ -177,6 +177,14 @@ fn write_chunk() -> Result<usize> {
 /// words count there. Per class: the piano partition is 4096 × 256 KiB (1 GB), the
 /// sample partition 2048 × 128 KiB (256 MB). Undercounting `needed` here makes
 /// `BEGIN_WRITE` refuse `0x16` even right after the cleaning pass.
+///
+/// These are the **gross** blocks. The device reports the same geometry itself, net of
+/// per-block overhead, as [`Partition::allocation_unit`] — 261,632 for pianos, 131,064
+/// for samples — and the two size a write identically except for a body landing within
+/// that overhead of an exact block boundary, where the net number needs one block more.
+/// Reading it per write would put a `PARTITIONS` exchange inside the write session,
+/// which nothing on the wire has ever done; the equivalence is asserted in the tests
+/// against a recorded partition table instead.
 fn library_block(class: ObjectClass) -> usize {
     match class {
         ObjectClass::Sample => 131_072,
@@ -790,6 +798,46 @@ mod tests {
 
         payload[3] ^= 1;
         assert!(read_payload(&payload, at, 40, 3).is_err());
+    }
+
+    /// The hardcoded block sizes are the device's own geometry, rounded up to the
+    /// enclosing power of two.
+    ///
+    /// [`library_block`] cannot read [`Partition::allocation_unit`] per write without
+    /// putting a `PARTITIONS` exchange somewhere no capture has one, so the equivalence
+    /// is pinned here instead: if a firmware ever reports a different granularity, this
+    /// fails rather than the write path silently miscounting blocks.
+    #[cfg(feature = "replay")]
+    #[test]
+    fn the_block_constants_are_the_devices_own_granularity() {
+        use crate::transport::{ReplayTransport, Script};
+
+        let text = include_str!("../tests/scripts/device/geometry.script");
+        let mut t = ReplayTransport::new(Script::parse(text).unwrap().steps());
+        let parts = pollster::block_on(async {
+            let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+            let r = partitions(&mut s).await;
+            s.abort();
+            r.unwrap()
+        });
+
+        for (class, gross) in [
+            (ObjectClass::Piano, 262_144usize),
+            (ObjectClass::Sample, 131_072),
+        ] {
+            let net = parts[class.to_raw() as usize].allocation_unit().unwrap() as usize;
+            assert_eq!(library_block(class), gross);
+            assert!(
+                net <= gross && gross - net < 1024,
+                "{class:?}: the device reports {net} where the write path uses {gross}"
+            );
+        }
+
+        // A slot class is byte-granular, which is what says its counters are bytes.
+        assert_eq!(
+            parts[ObjectClass::Program.to_raw() as usize].allocation_unit(),
+            Some(1)
+        );
     }
 
     #[test]
