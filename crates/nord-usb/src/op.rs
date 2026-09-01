@@ -700,6 +700,75 @@ pub async fn dependencies<T: Transport, C>(
     Dependency::decode_all(&resp)
 }
 
+/// A set list holding a reference to a program slot a caller is about to disturb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Referrer {
+    /// Where the set list itself lives.
+    pub at: Location,
+    /// The set list's name, as the instrument shows it.
+    pub name: String,
+    /// The set list's schema version *now*. ⚠️ `0` is the one worth stopping for: the
+    /// device rewrites a referring set list in the current format, so a version-0 object
+    /// is migrated to version 1 and there is no route back to what it was.
+    pub version: u32,
+    /// Which of the queried program slots this set list points at.
+    pub programs: Vec<Location>,
+}
+
+/// How long a set-list walk may run before it is treated as not terminating. A bound on
+/// a walk that fails to advance, not an item count — the class holds 200 slots.
+const SET_LIST_WALK_CAP: usize = 1024;
+
+/// Every set list that references one of `targets`. **Read-only.**
+///
+/// The session must be open on [`ObjectClass::SetList`]; the walk and every read run
+/// inside it.
+///
+/// This is what makes a program `move` describable. The instrument maintains referential
+/// integrity itself: moving a program rewrites the body of **every** set list pointing at
+/// it, so a move touches objects in another class that the caller never named, and one of
+/// those rewrites is irreversible where [`Referrer::version`] is `0`. Nothing in the move
+/// request says so, and no reply reports it afterwards — the only way to know is to ask
+/// every set list first.
+///
+/// Cost is one `DEPENDENCIES` per occupied set list, plus one `INFO` per match. A
+/// refusal mid-scan propagates rather than truncating: a short list here reads as "no
+/// set list is affected", which is the wrong answer to act on.
+pub async fn set_lists_referencing<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    targets: &[Location],
+) -> Result<Vec<Referrer>> {
+    let mut out = Vec::new();
+    if targets.is_empty() {
+        return Ok(out);
+    }
+    for at in occupied_slots(session, SET_LIST_WALK_CAP).await? {
+        let mut programs: Vec<Location> = Vec::new();
+        for l in dependencies(session, at)
+            .await?
+            .into_iter()
+            .filter(Dependency::is_required)
+            .filter_map(|d| d.location)
+        {
+            // A set list may hold the same program in more than one of its four slots.
+            if targets.contains(&l) && !programs.contains(&l) {
+                programs.push(l);
+            }
+        }
+        if programs.is_empty() {
+            continue;
+        }
+        let meta = info(session, at).await?;
+        out.push(Referrer {
+            at,
+            name: meta.name,
+            version: meta.version,
+            programs,
+        });
+    }
+    Ok(out)
+}
+
 /// Move an object from one slot to another. The device relocates it internally — no
 /// body crosses the wire.
 ///
@@ -707,6 +776,12 @@ pub async fn dependencies<T: Transport, C>(
 /// source slot, byte-identical. Nothing is destroyed, and no delete-first step is needed
 /// (unlike a write, which the device refuses into an occupied slot with status `0x4`).
 /// Confirmed on hardware.
+///
+/// ⚠️ **Moving a program is not a local operation.** The device rewrites every set list
+/// referencing either slot so no reference is left dangling, changing bodies the caller
+/// never named — and a version-0 set list is migrated to version 1 in the process, which
+/// cannot be undone by moving the program back. [`set_lists_referencing`] names them
+/// before the fact; nothing in the request or the reply mentions them.
 ///
 /// Requires a [`ReadWrite`] session. Class-generalised: works for whichever object
 /// class the session opened (programs, set lists).

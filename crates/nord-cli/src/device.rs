@@ -968,8 +968,96 @@ fn peek_dest(
     }
 }
 
+/// Which set lists the instrument will rewrite as a side effect of moving a program.
+///
+/// Both slots are scanned, not just the source: a move into an occupied slot is a swap,
+/// so the destination's occupant moves too and its referrers are rewritten as well.
+///
+/// Read-only, in its own session. One `DEPENDENCIES` per occupied set list, so it is the
+/// slowest part of the pre-flight — and the only part that can say what the move will do
+/// outside the class it was aimed at.
+fn referring_set_lists(
+    t: &mut nord_usb::transport::UsbTransport,
+    targets: &[Location],
+) -> Result<Vec<op::Referrer>, String> {
+    transact(t, "setlist list", |t| {
+        nord_usb::block_on(async {
+            let mut s = Session::open(t, ObjectClass::SetList).await?;
+            let r = usb_op::set_lists_referencing(&mut s, targets).await;
+            let closed = s.commit().await;
+            finish(r, closed)
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// The pre-flight lines naming what a program move will rewrite outside its own class.
+///
+/// Split from the read so the wording can be tested without an instrument, and so the
+/// empty case is a line rather than silence: "nothing else is touched" is a real answer
+/// and the operator should see it stated.
+fn set_list_rewrite_lines(ui: &Ui, found: &[op::Referrer]) -> Vec<String> {
+    if found.is_empty() {
+        return vec!["no set list references either slot".into()];
+    }
+    let mut lines = vec![format!(
+        "the instrument will also rewrite {} set list{} that reference these slots:",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" }
+    )];
+    for r in found {
+        let refs: Vec<String> = r.programs.iter().map(|&l| addr(l)).collect();
+        lines.push(format!(
+            "  setlist {} {:?} points at {}",
+            addr(r.at),
+            r.name,
+            refs.join(", "),
+        ));
+        // ⚠️ Attached to the set list it is about, not collected into a footnote: this is
+        // the one consequence of a move that moving the program back does not undo, and
+        // it is true of some rows and not others.
+        if r.version == 0 {
+            lines.push(format!(
+                "    {} {} the rewrite migrates it to version 1, and moving the program",
+                ui.danger("VERSION 0"),
+                ui.dash(),
+            ));
+            lines.push("    back does not migrate the set list back".into());
+        }
+    }
+    lines
+}
+
+/// Say what a program move will do to the set lists that point at it.
+///
+/// ⚠️ Silence here would be a lie by omission: the device rewrites every referring set
+/// list itself, and migrates a version-0 one to version 1 **irreversibly**. So a scan
+/// that fails warns rather than printing nothing — and either way the operator still
+/// meets the ordinary `--yes` gate, which is what actually stops the move.
+fn describe_set_list_rewrites(
+    ui: &Ui,
+    t: &mut nord_usb::transport::UsbTransport,
+    targets: &[Location],
+) {
+    match referring_set_lists(t, targets) {
+        Ok(found) => {
+            for line in set_list_rewrite_lines(ui, &found) {
+                ui.note(line);
+            }
+        }
+        Err(e) => ui.warn(format!(
+            "could not read which set lists reference these slots ({e}) {} the move \
+             rewrites every one that does, and this checked none of them",
+            ui.dash()
+        )),
+    }
+}
+
 /// Move an object from one slot to another. Requires confirmation: it changes both slots,
 /// though an occupied destination is swapped rather than destroyed.
+///
+/// For programs the pre-flight also names the set lists the instrument will rewrite —
+/// objects in another class, which the command line never mentions.
 pub fn move_object(
     ui: &Ui,
     from: Location,
@@ -988,6 +1076,11 @@ pub fn move_object(
         ui.dash(),
         dest
     ));
+    // Only programs are referenced by slot. A set list's own move disturbs nothing that
+    // points at it, and the library classes are referenced by content id, not address.
+    if class == ObjectClass::Program {
+        describe_set_list_rewrites(ui, &mut t, &[from, to]);
+    }
     ui.confirm(confirmed)?;
     transact(
         &mut t,
@@ -1798,6 +1891,88 @@ mod tests {
         let at = Location { bank: 6, slot: 49 };
         // Wire is zero-indexed, the instrument's labels are not.
         assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
+    }
+
+    /// The pre-flight has to name the set lists, not merely count them: "2 set lists
+    /// will change" leaves the operator no way to back them up first.
+    #[test]
+    fn a_move_preflight_names_each_set_list_and_what_it_points_at() {
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        let lines = set_list_rewrite_lines(
+            &ui,
+            &[
+                op::Referrer {
+                    at: Location { bank: 0, slot: 42 },
+                    name: "Factory Set".into(),
+                    version: 1,
+                    programs: vec![Location { bank: 0, slot: 6 }],
+                },
+                op::Referrer {
+                    at: Location { bank: 1, slot: 6 },
+                    name: "Friday".into(),
+                    version: 1,
+                    programs: vec![Location { bank: 0, slot: 6 }, Location { bank: 6, slot: 9 }],
+                },
+            ],
+        );
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("2 set lists"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("setlist 1:43 \"Factory Set\""),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("points at 1:7"), "{}", lines[1]);
+        // Both slots of a swap, in the panel's numbering.
+        assert!(lines[2].contains("points at 1:7, 7:10"), "{}", lines[2]);
+        // Nothing here is irreversible, so nothing may claim to be.
+        assert!(!lines.iter().any(|l| l.contains("VERSION 0")));
+    }
+
+    /// The version-0 case is the whole reason this pre-flight exists, so it must be
+    /// unmissable and attached to the set list it is about.
+    #[test]
+    fn a_version_zero_set_list_says_the_rewrite_cannot_be_undone() {
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        let lines = set_list_rewrite_lines(
+            &ui,
+            &[op::Referrer {
+                at: Location { bank: 0, slot: 42 },
+                name: "Factory Set".into(),
+                version: 0,
+                programs: vec![Location { bank: 0, slot: 6 }],
+            }],
+        );
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("1 set list "), "{}", lines[0]);
+        // The set list is named on its own line, and the consequence hangs off it.
+        assert!(
+            lines[1].contains("setlist 1:43 \"Factory Set\""),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].contains("VERSION 0"), "{}", lines[2]);
+        assert!(
+            lines[2].contains("migrates it to version 1"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[3].contains("does not migrate the set list back"),
+            "{}",
+            lines[3]
+        );
+    }
+
+    /// "Nothing else is touched" is a result worth printing: the operator asked what a
+    /// move would disturb, and an empty answer they can see beats no answer at all.
+    #[test]
+    fn no_referrer_is_stated_rather_than_left_silent() {
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        assert_eq!(
+            set_list_rewrite_lines(&ui, &[]),
+            vec!["no set list references either slot".to_string()]
+        );
     }
 
     #[test]
