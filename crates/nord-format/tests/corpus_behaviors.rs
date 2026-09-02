@@ -1136,3 +1136,39 @@ fn setting_the_keyboard_map_touches_only_the_keyboard_map() {
     let reread = nsmp::from_bytes(&bytes).unwrap();
     assert_eq!(reread.key_table().unwrap(), nsmp::KeyTable::NEUTRAL);
 }
+
+/// The corpus's tap table is the same closed form projected into the per-tap intervals
+/// the specimens measure, which moves a few taps by up to `3.3e-8`; every other tap is
+/// the ideal to double precision.
+#[test]
+fn nsmp_the_kernel_reproduces_the_corpus_tap_table() {
+    let path = scan::root().join("tools/nsmp-pitch/kaiser-taps.tsv");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let bank = nsmp::kernel::taps();
+    let mut seen = 0;
+    let mut moved = 0;
+    let mut worst = 0.0f64;
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with("k\t"))
+    {
+        let mut cols = line.split('\t');
+        let k: usize = cols.next().unwrap().parse().unwrap();
+        let m: i64 = cols.next().unwrap().parse().unwrap();
+        let g: f64 = cols.next().unwrap().parse().unwrap();
+        let ours = match usize::try_from(m + 15) {
+            Ok(j) if j < nsmp::kernel::TAPS => bank[k][j],
+            _ => 0.0,
+        };
+        let delta = (ours - g).abs();
+        assert!(delta < 5e-8, "phase {k} m {m}: ours {ours} table {g}");
+        worst = worst.max(delta);
+        moved += usize::from(delta >= 1e-9);
+        seen += 1;
+    }
+    assert_eq!(seen, 512 * 32);
+    assert!(
+        moved <= 34,
+        "{moved} taps off the closed form; worst {worst:e}"
+    );
+}
