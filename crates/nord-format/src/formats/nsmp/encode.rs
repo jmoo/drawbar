@@ -120,6 +120,11 @@ const MAX_STROKE_ID: u32 = u8::MAX as u32;
 /// stores zero: the kernel's ring past the last sample is cut, not coded.
 const RING_OUT: usize = 127;
 
+/// Fields the stream's opening ramp lasts, per channel: field `f` of each channel is
+/// scaled by `(f / RAMP_IN)³`, truncated, until the ramp reaches 1.
+/// Inferred from specimens; not confirmed on hardware.
+const RAMP_IN: usize = 35;
+
 /// Shortest modelled input; shorter streams use an unresolved opening.
 pub const MIN_FRAMES: usize = 4096;
 
@@ -153,8 +158,9 @@ pub enum Predictor {
     /// Store every content field outright at order zero.
     #[default]
     Plain,
-    /// Choose the narrowest predictor per cell, breaking ties by residual sum.
-    /// Smaller than plain records and exact through this crate's decoder.
+    /// Choose the narrowest predictor per cell, the lowest order among equals — the
+    /// editor's own choice. Smaller than plain records and exact through this crate's
+    /// decoder.
     Minimising,
 }
 
@@ -642,6 +648,15 @@ struct Quantised {
     peak: u32,
 }
 
+/// The opening ramp: the first [`RAMP_IN`] fields of a channel rise as the cube of
+/// their position, toward zero like everything else the encoder quantises.
+fn ramp_in(fields: &mut [i64]) {
+    let cube = |n: usize| (n * n * n) as i64;
+    for (f, value) in fields.iter_mut().enumerate().take(RAMP_IN) {
+        *value = *value * cube(f) / cube(RAMP_IN);
+    }
+}
+
 /// Ramp the loop's tail into the material one loop length behind it, then repeat the
 /// loop's opening past its end.
 ///
@@ -684,6 +699,7 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
         lane.clear();
         lane.extend(source.iter().skip(channel).step_by(channels).copied());
         let mut fields: Vec<i64> = (0..per).map(|f| kernel::field(&lane, f)).collect();
+        ramp_in(&mut fields);
         match &plan.looped {
             Some(points) => bake_loop(
                 &mut fields,
@@ -774,40 +790,49 @@ fn residual(values: &[i32], at: usize, order: u8, stride: usize) -> i64 {
 
 /// The width one cell needs at `order`, and the sum of the residuals it would store.
 /// One cell is `stride` channels' worth, and a record declares one width for both.
-fn cost(values: &[i32], first: usize, order: u8, cell: usize, stride: usize) -> (u8, u64) {
+fn width_at(values: &[i32], first: usize, order: u8, cell: usize, stride: usize) -> u8 {
     let mut low = 0i64;
     let mut high = 0i64;
-    let mut total = 0u64;
     for at in first..first + cell {
         let e = residual(values, at, order, stride);
         low = low.min(e);
         high = high.max(e);
-        total += e.unsigned_abs();
     }
-    (width_of(low, high), total)
+    width_of(low, high)
 }
 
-/// The predictor order one cell codes narrowest at, tie broken by the smallest sum of
-/// residuals and then by the lowest order.
-fn best_order(
+/// The width each predictor order codes one cell at, indexed by order — order 0 alone
+/// under [`Predictor::Plain`].
+fn widths_at(
     values: &[i32],
     first: usize,
     predictor: Predictor,
     cell: usize,
     stride: usize,
-) -> (u8, u8) {
-    let plain = cost(values, first, 0, cell, stride);
-    if predictor == Predictor::Plain {
-        return (0, plain.0);
-    }
-    let mut best = (plain.0, plain.1, 0u8);
-    for order in 1..DIFFERENCE.len() as u8 {
-        let (width, total) = cost(values, first, order, cell, stride);
-        if (width, total) < (best.0, best.1) {
-            best = (width, total, order);
-        }
-    }
-    (best.2, best.0)
+) -> Vec<u8> {
+    let orders = match predictor {
+        Predictor::Plain => 1,
+        Predictor::Minimising => DIFFERENCE.len(),
+    };
+    (0..orders as u8)
+        .map(|order| width_at(values, first, order, cell, stride))
+        .collect()
+}
+
+/// The order and width a cell is coded at, given the widths each order needs: the
+/// record being extended, `(order, width)`, keeps its order while the cell's narrowest
+/// width is still the record's and that order still reaches it; otherwise the lowest
+/// order that reaches the narrowest width.
+fn choose_order(widths: &[u8], extending: Option<(u8, u8)>) -> (u8, u8) {
+    let narrowest = *widths.iter().min().unwrap_or(&MIN_WIDTH);
+    let reaches = |order: u8| widths.get(usize::from(order)) == Some(&narrowest);
+    let order = extending
+        .filter(|&(order, width)| width == narrowest && reaches(order))
+        .map_or_else(
+            || (0..widths.len() as u8).find(|&o| reaches(o)).unwrap_or(0),
+            |(order, _)| order,
+        );
+    (order, narrowest)
 }
 
 /// Partition 1:1 values and like-coded content cells into records.
@@ -839,28 +864,36 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
         }
     };
 
+    // A record runs on while each cell's narrowest width is still the record's and the
+    // record's own order still reaches it; the first cell that breaks either opens a new
+    // record at the lowest order that reaches its width.
     let content = |out: &mut Vec<Spec>, at: &mut usize, cells: usize| {
-        let mut done = 0usize;
-        while done < cells {
-            let (order, width) = best_order(values, *at + done * cell, predictor, cell, stride);
-            let mut run = 1usize;
-            while run < MAX_COUNT / cell
-                && done + run < cells
-                && best_order(values, *at + (done + run) * cell, predictor, cell, stride)
-                    == (order, width)
-            {
-                run += 1;
+        let mut run: Option<Spec> = None;
+        for index in 0..cells {
+            let first = *at + index * cell;
+            let widths = widths_at(values, first, predictor, cell, stride);
+            let (order, width) = choose_order(&widths, run.map(|r| (r.order, r.width)));
+            match run {
+                Some(ref mut record)
+                    if (record.order, record.width) == (order, width)
+                        && record.count + cell <= MAX_COUNT =>
+                {
+                    record.count += cell;
+                }
+                _ => {
+                    out.extend(run.take());
+                    run = Some(Spec {
+                        one_to_one: false,
+                        width,
+                        order,
+                        mark: false,
+                        first,
+                        count: cell,
+                    });
+                }
             }
-            out.push(Spec {
-                one_to_one: false,
-                width,
-                order,
-                mark: false,
-                first: *at + done * cell,
-                count: run * cell,
-            });
-            done += run;
         }
+        out.extend(run);
         *at += cells * cell;
     };
 
@@ -881,36 +914,35 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
     Ok(out)
 }
 
-/// Grow the loop region until it is a whole number of packets.
-///
-/// The terminator ends the stream, so the words between the marked record and it are
-/// what has to divide — the loop start lands on a packet boundary by being that far
-/// back from one. Two things pay for the difference, and neither changes a decoded
-/// value: a field stored wider than it needs sign-extends to itself, and a content run
-/// splits at any cell boundary for the cost of one header word. Widening is taken first
-/// where it fits, and the splits carry the last words one at a time.
-///
-/// A loud, short loop can run out of both: [`MAX_WIDTH`] leaves only three spare bits
-/// per field, so a loop of a few hundred fields is refused rather than misplaced.
+/// Pad the loop region out to whole packets the way the editor does: sweep its content
+/// records front to back, halving each one that covers more than one cell — the smaller
+/// half first — and carrying on into the second half, pass after pass, until the words
+/// fit. A region with nothing left to split is widened instead, from its last record
+/// back, which is this crate's own choice: no render has shown what the editor does then.
+/// Inferred from specimens; not confirmed on hardware.
 fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, cell: usize) -> Result<(), Error> {
     let words = |specs: &[Spec]| specs.iter().map(Spec::span).sum::<usize>();
     let mut pad = (PACKET_WORDS - words(&specs[opening..]) % PACKET_WORDS) % PACKET_WORDS;
 
-    // The opening 1:1 run pays a word or two per bit, so it is spent first; a content
-    // cell pays exactly one, which is the granularity the last words need.
-    for spec in specs[opening..].iter_mut().take_while(|s| s.one_to_one) {
-        while spec.width < MAX_STORED_WIDTH {
-            let grown = Spec {
-                width: spec.width + 1,
-                ..*spec
+    let splittable = |spec: &Spec| !spec.one_to_one && spec.count > cell;
+    while pad > 0 && specs[opening..].iter().any(splittable) {
+        let mut at = opening;
+        while pad > 0 && at < specs.len() {
+            let spec = specs[at];
+            if splittable(&spec) {
+                let head = spec.count / cell / 2 * cell;
+                specs[at].count = head;
+                specs.insert(
+                    at + 1,
+                    Spec {
+                        first: spec.first + head,
+                        count: spec.count - head,
+                        ..spec
+                    },
+                );
+                pad -= 1;
             }
-            .span()
-                - spec.span();
-            if grown > pad {
-                break;
-            }
-            pad -= grown;
-            spec.width += 1;
+            at += 1;
         }
     }
 
@@ -924,18 +956,6 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, cell: usize) -> Result<(
         if spec.width < MAX_STORED_WIDTH && wider.span() - spec.span() <= pad {
             pad -= wider.span() - spec.span();
             specs[at].width += 1;
-        } else if !spec.one_to_one && spec.count > cell {
-            specs.insert(
-                at + 1,
-                Spec {
-                    first: spec.first + spec.count - cell,
-                    count: cell,
-                    ..spec
-                },
-            );
-            specs[at].count -= cell;
-            at += 1;
-            pad -= 1;
         } else if at > opening {
             at -= 1;
         } else {
@@ -1582,6 +1602,35 @@ mod tests {
         .unwrap();
         let fresh = instrument(&vec![0i16; 44_100], &Options::new("Stated")).unwrap();
         assert_ne!(stated.stroke_streams()[0].1, fresh.stroke_streams()[0].1);
+    }
+
+    #[test]
+    fn the_stream_opens_on_a_cubic_ramp() {
+        let mut fields = vec![-4_000i64; 40];
+        ramp_in(&mut fields);
+        assert_eq!(fields[0], 0);
+        assert_eq!(fields[7], -4_000 * 343 / 42_875);
+        assert_eq!(fields[34], -4_000 * 39_304 / 42_875);
+        assert!(fields[..RAMP_IN].windows(2).all(|w| w[0] >= w[1]));
+        assert!(fields[RAMP_IN..].iter().all(|&v| v == -4_000));
+    }
+
+    #[test]
+    fn a_width_tie_goes_to_the_lowest_order_unless_a_record_already_holds_it() {
+        let widths = [13, 10, 7, 4, 4];
+        assert_eq!(choose_order(&widths, None), (3, 4));
+        assert_eq!(choose_order(&widths, Some((4, 4))), (4, 4));
+        assert_eq!(choose_order(&widths, Some((4, 3))), (3, 4), "width changed");
+        assert_eq!(choose_order(&widths, Some((2, 4))), (3, 4));
+        assert_eq!(choose_order(&[9], Some((3, 9))), (0, 9));
+        // C(k, 3): the third difference is 1 everywhere and the fourth is 0, so orders
+        // 3 and 4 both fit width 2.
+        let values: Vec<i32> = (0..48).map(|k| k * (k - 1) * (k - 2) / 6).collect();
+        assert_eq!(
+            widths_at(&values, 8, Predictor::Minimising, CELL, 1)[3..],
+            [MIN_WIDTH, MIN_WIDTH]
+        );
+        assert_eq!(widths_at(&values, 8, Predictor::Plain, CELL, 1).len(), 1);
     }
 
     #[test]
