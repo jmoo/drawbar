@@ -1,78 +1,100 @@
 //! The resampling kernel: source samples onto the field lattice.
 //!
 //! Field `f` samples the source at `t(f) = PITCH_NUM·f / PITCH_DEN`, and the value it
-//! stores is that point of the source reconstructed by one interpolation kernel. The
-//! kernel is a [`PHASES`]-phase polyphase bank — a field's taps depend only on
-//! `PITCH_NUM·f mod PITCH_DEN`, since that residue is the fractional part of `t(f)`
-//! — and every phase has **unity DC gain**, which is why a field is already a sample
-//! in the source's own units and dequantising is a shift and nothing more.
+//! stores is `Σ G[k][m]·x[⌊t⌋ − m]` over the [`TAPS`] taps of one phase of a stored
+//! table: `k` is the fractional part of `t` truncated to nine bits, so the bank has
+//! [`PHASES`] phases, and `G[k][m] = h(m + k/512)`, a Kaiser-windowed sinc on the
+//! half-open support `d ∈ [−15, 15)`:
 //!
-//! ⚠️ **The taps are an approximation, and so is the lattice under them.** [`taps`]
-//! evaluates a Hamming-windowed sinc, which fits a specimen sweep to about 4e-4 per
-//! tap but is not the shape the instrument uses: that kernel is a stored table, read
-//! at 512 phases of `frac(22050·f / 17501)`. [`PITCH_NUM`]/[`PITCH_DEN`] is that
-//! ratio's penultimate convergent — indistinguishable from it over a short window,
-//! and 1.6e-7 fast over a long one. Inferred from specimens; not confirmed on
-//! hardware.
+//! ```text
+//! h(d) = B·sinc(B·d) · I₀(β·√(1 − (d/15)²)) / I₀(β) · 32767/32768
+//! B = 1.0429·17501/22050        β = 8
+//! ```
 //!
-//! Audio encoded through this is right to roughly −50 dBFS of the encoder's, not
-//! bit-identical to it. Confirmed on hardware: the Electro 5 plays it at the pitch
-//! this renders.
+//! The cutoff `B` sits 4.29 % above the field rate's Nyquist. The window is `1/I₀(β)`
+//! at its edge, not zero, so `d = −15` (phase 0, `m = −15`) carries a real tap and
+//! `d = +15` does not. The `32767/32768` is the depth term of a 16-bit source, not a
+//! kernel gain: the instrument quantises in the source's own units, and a 16-bit
+//! sample's unit is `1/32768` of a full-scale `32767`. Per-phase DC gain is the ideal
+//! kernel's, within `1e-4` of unity, with no per-phase normalisation.
+//!
+//! The form is exact and so are its constants; the table the instrument reads is known
+//! to an interval of roughly `1e-6` per tap, inside which a handful of taps sit a few
+//! `1e-8` off this ideal. A field whose sum lands within that of a quantiser step can
+//! therefore still store one count off the instrument's. Everything is evaluated in
+//! `f64` and truncated once, after the sum.
+//!
+//! Inferred from specimens; not confirmed on hardware.
 
 use super::codec::{PITCH_DEN, PITCH_NUM};
 use std::sync::OnceLock;
 
-/// Fixed-point scale of a tap: the real coefficient is `tap / ONE`.
-pub const ONE: i64 = 1 << 23;
+/// Phases in the bank: the fractional source position truncated to nine bits.
+pub const PHASES: usize = 512;
 
-/// Phases in the bank, one per residue of `PITCH_NUM·f mod PITCH_DEN`.
-pub const PHASES: usize = PITCH_DEN as usize;
+/// Taps per phase: `m` from `−15` through `14`, the support `[−15, 15)` at every phase.
+pub const TAPS: usize = 30;
 
-/// Taps per phase, spanning 15 samples behind and 16 ahead.
-pub const TAPS: usize = 32;
+/// The `m` of tap 0. Tap `j` weights the source sample at `⌊t⌋ − (j − FIRST)`.
+const FIRST: i128 = 15;
 
-/// Where tap 0 sits relative to `floor(t(f))`, in source samples.
-const FIRST_TAP: i128 = 16;
+/// Half-width of the support, in source samples.
+const HALF_WIDTH: f64 = 15.0;
 
-/// `g(δ) = A·sinc(δ/Z)·(0.543 + 0.457·cos(πδ/L))` for `|δ| < L`, zero beyond.
-const A: f64 = 0.827_50;
-const Z: f64 = 1.208_02;
-const L: f64 = 11.91;
+/// Cutoff of the sinc as a fraction of the source's Nyquist: `1.0429·17501/22050`.
+const B: f64 = 0.827_745_708_5;
 
-fn sinc(x: f64) -> f64 {
-    if x == 0.0 {
-        1.0
-    } else {
-        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+/// Kaiser window shape.
+const BETA: f64 = 8.0;
+
+/// A 16-bit sample's unit as a fraction of full scale.
+const DEPTH_16: f64 = 32767.0 / 32768.0;
+
+/// Modified Bessel function of the first kind, order zero, by its power series.
+fn bessel_i0(x: f64) -> f64 {
+    let quarter_square = (x / 2.0) * (x / 2.0);
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    loop {
+        term *= quarter_square / (k * k);
+        if term < sum * f64::EPSILON {
+            return sum;
+        }
+        sum += term;
+        k += 1.0;
     }
 }
 
-fn g(delta: f64) -> f64 {
-    if delta.abs() >= L {
+/// `sin(πx)/(πx)`, on the magnitude so that mirrored taps are bit-identical.
+fn sinc(x: f64) -> f64 {
+    let x = x.abs();
+    if x == 0.0 {
+        return 1.0;
+    }
+    let y = std::f64::consts::PI * x;
+    y.sin() / y
+}
+
+/// The kernel at `d` source samples from the sample a tap weights, zero off-support.
+fn h(d: f64) -> f64 {
+    if !(-HALF_WIDTH..HALF_WIDTH).contains(&d) {
         return 0.0;
     }
-    A * sinc(delta / Z) * (0.543 + 0.457 * (std::f64::consts::PI * delta / L).cos())
+    let u = d.abs() / HALF_WIDTH;
+    B * sinc(B * d) * bessel_i0(BETA * (1.0 - u * u).sqrt()) / bessel_i0(BETA) * DEPTH_16
 }
 
-/// Lazily build the `[phase][tap]` bank with exact [`ONE`] DC gain per phase.
-pub fn taps() -> &'static [[i32; TAPS]; PHASES] {
-    static BANK: OnceLock<Box<[[i32; TAPS]; PHASES]>> = OnceLock::new();
+/// Lazily build the `[phase][tap]` bank.
+pub fn taps() -> &'static [[f64; TAPS]; PHASES] {
+    static BANK: OnceLock<Box<[[f64; TAPS]; PHASES]>> = OnceLock::new();
     BANK.get_or_init(|| {
-        let mut bank = Box::new([[0i32; TAPS]; PHASES]);
+        let mut bank = Box::new([[0.0; TAPS]; PHASES]);
         for (phase, row) in bank.iter_mut().enumerate() {
             let fraction = phase as f64 / PHASES as f64;
-            let real: Vec<f64> = (0..TAPS)
-                .map(|j| g(j as f64 - FIRST_TAP as f64 + fraction))
-                .collect();
-            let gain = ONE as f64 / real.iter().sum::<f64>();
-            for (slot, &value) in row.iter_mut().zip(&real) {
-                *slot = (value * gain).round() as i32;
+            for (j, slot) in row.iter_mut().enumerate() {
+                *slot = h(j as f64 - FIRST as f64 + fraction);
             }
-            // Rounding leaves the sum a few counts off unity; the largest tap absorbs
-            // the difference, which is below its own rounding error.
-            let residue = ONE - row.iter().map(|&t| i64::from(t)).sum::<i64>();
-            let peak = (0..TAPS).max_by_key(|&j| row[j].abs()).unwrap_or(0);
-            row[peak] += residue as i32;
         }
         bank
     })
@@ -81,29 +103,30 @@ pub fn taps() -> &'static [[i32; TAPS]; PHASES] {
 /// Return field `f` as `(floor(source position), phase)` without index overflow.
 pub fn lattice(field: usize) -> (i128, usize) {
     let t = u128::from(PITCH_NUM) * field as u128;
+    let remainder = t % u128::from(PITCH_DEN);
     (
         (t / u128::from(PITCH_DEN)) as i128,
-        (t % u128::from(PITCH_DEN)) as usize,
+        (remainder * PHASES as u128 / u128::from(PITCH_DEN)) as usize,
     )
 }
 
-/// Accumulate field `f` at [`ONE`] scale; samples outside `source` are zero.
-pub fn accumulate(source: &[i16], field: usize) -> i64 {
+/// Accumulate field `f` at full precision; samples outside `source` are zero.
+pub fn accumulate(source: &[i16], field: usize) -> f64 {
     let (base, phase) = lattice(field);
     let row = &taps()[phase];
-    let mut acc = 0i64;
+    let mut acc = 0.0;
     for (j, &tap) in row.iter().enumerate() {
-        let at = base + FIRST_TAP - j as i128;
+        let at = base + FIRST - j as i128;
         if at >= 0 && at < source.len() as i128 {
-            acc += i64::from(source[at as usize]) * i64::from(tap);
+            acc += f64::from(source[at as usize]) * tap;
         }
     }
     acc
 }
 
-/// Return a field in source units, truncating once after the full-precision sum.
+/// Return a field in source units, truncating toward zero once after the full sum.
 pub fn field(source: &[i16], at: usize) -> i64 {
-    accumulate(source, at) / ONE
+    accumulate(source, at).trunc() as i64
 }
 
 #[cfg(test)]
@@ -111,59 +134,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_phase_has_unity_dc_gain() {
-        for row in taps().iter() {
-            assert_eq!(row.iter().map(|&t| i64::from(t)).sum::<i64>(), ONE);
-        }
+    fn the_bessel_series_matches_tabulated_values() {
+        assert_eq!(bessel_i0(0.0), 1.0);
+        assert!((bessel_i0(1.0) - 1.266_065_877_752_008_4).abs() < 1e-15);
+        assert!((bessel_i0(8.0) - 427.564_115_721_804_74).abs() < 1e-12);
     }
 
-    /// Unity gain at every phase is what makes a field a sample: a constant input
-    /// comes back as that constant, wherever the lattice lands between samples.
+    /// `d = −15` is in the support at the window's edge value; `d = +15` is not.
     #[test]
-    fn a_constant_resamples_to_itself() {
-        let source = vec![1000i16; 4096];
-        // Past the kernel's support at both ends, so no field sees the edges.
-        for f in 20..3000 {
-            assert_eq!(field(&source, f), 1000, "field {f}");
-        }
+    fn the_support_is_half_open() {
+        let edge = B * sinc(B * 15.0) / bessel_i0(BETA) * DEPTH_16;
+        assert_eq!(taps()[0][0], edge);
+        assert!((edge - 4.79e-5).abs() < 1e-7, "{edge}");
+        assert_eq!(h(15.0), 0.0);
+        assert_eq!(h(-15.0 - f64::EPSILON * 16.0), 0.0);
+        assert_ne!(h(-15.0), 0.0);
     }
 
+    /// `G[k][m] = G[512−k][−m−1]`: the lattice point `−d` reads the same tap.
     #[test]
-    fn the_kernel_is_mirror_symmetric() {
-        // Tap j of phase u sits at δ = j − 16 + u/277, so −δ is tap 31−j of phase 277−u.
+    fn the_kernel_is_mirror_symmetric_to_the_bit() {
         let bank = taps();
         for phase in 1..PHASES {
             for j in 0..TAPS {
-                let a = bank[phase][j];
-                let b = bank[PHASES - phase][TAPS - 1 - j];
-                // One tap per phase carries the rounding residue that pins the DC gain.
-                assert!((a - b).abs() <= 8, "phase {phase} tap {j}: {a} vs {b}");
+                assert_eq!(
+                    bank[phase][j].to_bits(),
+                    bank[PHASES - phase][TAPS - 1 - j].to_bits(),
+                    "phase {phase} tap {j}"
+                );
             }
         }
     }
 
-    /// The lattice is exact rational: 277 fields advance the source by exactly 349
-    /// samples, so the phase sequence closes on itself.
+    /// The ideal sinc's DC gain ripples with phase; nothing renormalises it.
     #[test]
-    fn the_lattice_closes_after_a_superperiod() {
-        for f in 0..1000 {
-            let (a, pa) = lattice(f);
-            let (b, pb) = lattice(f + PITCH_DEN as usize);
-            assert_eq!(pa, pb);
-            assert_eq!(b - a, i128::from(PITCH_NUM));
+    fn every_phase_sums_near_the_depth_factor() {
+        for (phase, row) in taps().iter().enumerate() {
+            let sum: f64 = row.iter().sum();
+            assert!((sum - DEPTH_16).abs() < 1.5e-4, "phase {phase}: {sum}");
         }
     }
 
-    /// A single sample reads back as the kernel's own shape, which is where the
-    /// support ends: nothing 13 samples away contributes.
+    /// A constant stores one count under itself: the 16-bit depth factor takes the
+    /// sum a hair below the source value and the truncation lands on the next count.
     #[test]
-    fn one_impulse_lights_only_the_kernels_support() {
+    fn a_constant_resamples_one_count_under_itself() {
+        let source = vec![1000i16; 4096];
+        for f in 20..3000 {
+            assert_eq!(field(&source, f), 999, "field {f}");
+        }
+        let source = vec![-1000i16; 4096];
+        for f in 20..3000 {
+            assert_eq!(field(&source, f), -999, "field {f}");
+        }
+    }
+
+    /// The phase is the fractional position truncated, never rounded, to nine bits.
+    #[test]
+    fn the_phase_truncates_the_fraction() {
+        assert_eq!(lattice(0), (0, 0));
+        // t(1) = 22050/17501 = 1 + 4549/17501; 4549·512/17501 = 133.08.
+        assert_eq!(lattice(1), (1, 133));
+        // t(17501) = 22050 exactly.
+        assert_eq!(lattice(17501), (22050, 0));
+    }
+
+    /// A single sample lights every field whose lattice point is within the support,
+    /// and nothing beyond it.
+    #[test]
+    fn one_impulse_lights_the_kernels_support() {
         let mut source = vec![0i16; 4096];
         source[2048] = 30_000;
         let lit: Vec<usize> = (0..3000).filter(|&f| field(&source, f) != 0).collect();
-        let (first, last) = (lit[0], lit[lit.len() - 1]);
-        let (near, _) = lattice(first);
-        let (far, _) = lattice(last);
-        assert!((2048 - near) <= 13 && (far - 2048) <= 13);
+        let (near, _) = lattice(lit[0]);
+        let (far, _) = lattice(lit[lit.len() - 1]);
+        assert!(2048 - near <= 15 && far - 2048 <= 14, "{near}..{far}");
+        assert!(2048 - near >= 13 && far - 2048 >= 13, "{near}..{far}");
     }
 }
