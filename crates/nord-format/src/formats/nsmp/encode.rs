@@ -7,8 +7,9 @@
 //! **not** is byte-identical to what Nord Sample Editor would produce for the same
 //! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
 //! `1e-8` per tap, which leaves a field in a few thousand one count off, the rule the
-//! editor uses to pick a quantiser shift is not known, and the encoder's own choice
-//! of predictor order per record is reproduced only under [`Predictor::Minimising`].
+//! editor uses to pick a mono stroke's quantiser shift is only partly known, and the
+//! encoder's own choice of predictor order per record is reproduced only under
+//! [`Predictor::Minimising`].
 //!
 //! So three claims: a file from here **round-trips through this crate's own decoder
 //! exactly** under either predictor, it obeys every structural law the format is known
@@ -91,8 +92,22 @@ const MAX_COUNT: usize = (1 << 14) - 1;
 /// into chunks of this, and the count laws guarantee the remainder is a legal record.
 const CHUNK: usize = 32;
 
-/// Widest emitted field; quantisation shifts values until they fit.
-const MAX_WIDTH: u8 = 13;
+/// Widest field a stroke's peak may take: quantisation shifts until it fits. On a
+/// stereo stroke this is the whole of the shift rule.
+const PEAK_WIDTH: u8 = 14;
+
+/// Width a mono stroke's peak is shifted to instead. The editor decides a mono stroke's
+/// further bit by a rule this crate does not know; the tighter cap stands in for it.
+const MONO_WIDTH: u8 = 13;
+
+/// The width the quantiser shifts a stroke's peak to.
+const fn peak_width(channels: usize) -> u8 {
+    if channels == 1 {
+        MONO_WIDTH
+    } else {
+        PEAK_WIDTH
+    }
+}
 
 /// Widest field a record header can declare, from its four-bit width. Padding stores
 /// values wider than they need, which sign-extend back to themselves.
@@ -640,11 +655,11 @@ fn chunks(mut n: usize, chunk: usize) -> Vec<usize> {
 /// header statistics that describe them.
 #[derive(Debug, Clone)]
 struct Quantised {
-    /// One stored value per field, sign-extended and inside [`MAX_WIDTH`] bits.
+    /// One stored value per field, sign-extended and inside [`PEAK_WIDTH`] bits.
     values: Vec<i32>,
     /// Bits the values were shifted right by. Dequantising shifts back.
     shift: i32,
-    /// Statistic B: the largest content field taken at a fixed shift of 2.
+    /// Statistic B: the content field of largest magnitude, taken at a fixed shift of 2.
     peak: u32,
 }
 
@@ -684,8 +699,9 @@ fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
     }
 }
 
-/// Resample and choose the smallest nonnegative shift that fits [`MAX_WIDTH`].
-/// The instrument's shift-selection rule remains unknown.
+/// Resample and choose the smallest nonnegative shift that fits the stroke's peak into
+/// [`peak_width`] bits: the format's own fourteen on a stereo stroke, where the editor
+/// shifts for nothing else, and the mono stand-in otherwise.
 ///
 /// Each channel is resampled on its own lattice and the results interleaved, because
 /// that is what the stream carries; the shift and statistic B are one pair for the
@@ -694,11 +710,15 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
     let channels = plan.channels;
     let per = plan.fields / channels;
     let mut raw = vec![0i64; plan.fields];
+    // The sums each field truncates from. Statistic B ranks fields on these, so two
+    // fields that truncate alike still order.
+    let mut sums = vec![0f64; plan.fields];
     let mut lane: Vec<i16> = Vec::with_capacity(source.len().div_ceil(channels));
     for channel in 0..channels {
         lane.clear();
         lane.extend(source.iter().skip(channel).step_by(channels).copied());
-        let mut fields: Vec<i64> = (0..per).map(|f| kernel::field(&lane, f)).collect();
+        let accumulated: Vec<f64> = (0..per).map(|f| kernel::accumulate(&lane, f)).collect();
+        let mut fields: Vec<i64> = accumulated.iter().map(|sum| sum.trunc() as i64).collect();
         ramp_in(&mut fields);
         match &plan.looped {
             Some(points) => bake_loop(
@@ -709,32 +729,43 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
             ),
             None => fields[per - RING_OUT..].fill(0),
         }
-        for (f, value) in fields.into_iter().enumerate() {
-            raw[f * channels + channel] = value;
+        for (f, (value, sum)) in fields.into_iter().zip(accumulated).enumerate() {
+            let at = f * channels + channel;
+            raw[at] = value;
+            // A field the ramp, the loop or the ring-out rewrote ranks by what it holds.
+            sums[at] = if value == sum.trunc() as i64 {
+                sum
+            } else {
+                value as f64
+            };
         }
     }
     let low = raw.iter().copied().min().unwrap_or(0);
     let high = raw.iter().copied().max().unwrap_or(0);
 
+    let width = peak_width(channels);
     let mut shift = 0i32;
-    while width_of(low >> shift, high >> shift) > MAX_WIDTH {
+    while width_of(low >> shift, high >> shift) > width {
         shift += 1;
     }
 
-    // Statistic B is taken at a fixed shift of two and over content fields only, which
-    // is why a value the 1:1 regime carries never sets it.
+    // Statistic B is the content field of largest magnitude at a fixed shift of two —
+    // a negative extreme therefore rounds away from zero — and a later field takes the
+    // extreme only by exceeding it. Content only, which is why a value the 1:1 regime
+    // carries never sets it.
     let opening = plan.looped.map(|l| l.at..l.at + l.warmup);
     let content = |f: usize| {
         ((f >= plan.warmup && f < plan.resync_at) || f >= plan.resync_at + plan.resync)
             && !opening.as_ref().is_some_and(|run| run.contains(&f))
     };
-    let peak = raw
-        .iter()
-        .enumerate()
-        .filter(|&(f, _)| content(f))
-        .map(|(_, &v)| (v >> 2).unsigned_abs())
-        .max()
-        .unwrap_or(0)
+    let extreme = (0..plan.fields)
+        .filter(|&f| content(f))
+        .fold(None, |best: Option<usize>, f| match best {
+            Some(b) if sums[f].abs() <= sums[b].abs() => Some(b),
+            _ => Some(f),
+        });
+    let peak = extreme
+        .map_or(0, |f| (raw[f] >> 2).unsigned_abs())
         .min(u64::from(u32::MAX >> 8)) as u32;
 
     Quantised {
@@ -1843,6 +1874,50 @@ mod tests {
         assert!(loud > quiet, "loud {loud} vs quiet {quiet}");
     }
 
+    /// A stereo stroke shifts only until its peak fits [`PEAK_WIDTH`]; a mono stroke
+    /// of the same per-channel content shifts one bit further.
+    #[test]
+    fn a_stereo_stroke_stops_shifting_where_its_peak_fits() {
+        let frames = 30_000;
+        let left = sine(220.0, 12_000.0, frames);
+        let right = sine(330.0, 12_000.0, frames);
+        let both: Vec<i16> = left
+            .iter()
+            .zip(&right)
+            .flat_map(|(&l, &r)| [l, r])
+            .collect();
+        let mono = quantise(&left, &plan(frames, 1).unwrap());
+        let stereo = quantise(&both, &plan(frames, 2).unwrap());
+        assert_eq!(mono.shift, 2);
+        assert_eq!(stereo.shift, 1);
+        let widest = stereo
+            .values
+            .iter()
+            .map(|v| width_of(i64::from(*v), i64::from(*v)))
+            .max()
+            .unwrap();
+        assert_eq!(widest, PEAK_WIDTH);
+    }
+
+    /// Statistic B is the extreme field's magnitude after a fixed shift of two, taken
+    /// with the sign the field had, so a negative extreme rounds away from zero; between
+    /// equal magnitudes the earlier field stands. A lone sample of 13 peaks at a field of
+    /// ten or eleven, which reads 2 upright and 3 inverted.
+    #[test]
+    fn statistic_b_takes_the_sign_of_the_extreme_field() {
+        let frames = 20_000;
+        let mut up = vec![0i16; frames];
+        up[10_000] = 13;
+        let down: Vec<i16> = up.iter().map(|v| -v).collect();
+        let positive = quantise(&up, &plan(frames, 1).unwrap()).peak;
+        let negative = quantise(&down, &plan(frames, 1).unwrap()).peak;
+        assert_eq!(positive, 2);
+        assert_eq!(negative, 3);
+        let opposed: Vec<i16> = up.iter().zip(&down).flat_map(|(&l, &r)| [l, r]).collect();
+        let stereo = quantise(&opposed, &plan(frames, 2).unwrap()).peak;
+        assert_eq!(stereo, positive);
+    }
+
     /// Every stored field fits the width its record declares, at every predictor.
     #[test]
     fn no_field_overflows_the_width_its_record_declares() {
@@ -1860,7 +1935,7 @@ mod tests {
                     };
                     assert!((-limit..limit).contains(&v), "{spec:?} field {k} = {v}");
                 }
-                assert!(spec.width <= MAX_WIDTH || spec.order > 0);
+                assert!(spec.width <= MONO_WIDTH || spec.order > 0);
             }
         }
     }
