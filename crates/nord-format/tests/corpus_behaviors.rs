@@ -873,6 +873,7 @@ impl BuiltZone {
             global_id: self.global_id,
             loops: None,
             secondary_start: self.secondary_start,
+            shift: None,
             gain: nsmp::zone::GAIN_UNITY,
         }
     }
