@@ -28,6 +28,7 @@ pub const GAIN_UNITY: u32 = 1 << GAIN_BITS;
 const TOP_NOTE: usize = 9;
 
 /// A high-to-low keyboard zone storing only its upper bound.
+/// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     /// Highest MIDI note this zone answers to.

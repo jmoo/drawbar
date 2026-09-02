@@ -507,7 +507,9 @@ impl Cbin<Sample> {
     /// MIDI note.
     pub fn key_table(&self) -> Result<KeyTable, Error> {
         self.require_known_layout()?;
-        Ok(KeyTable::read(&self.map()?.payload)?)
+        let map = self.map()?;
+        keymap::require_version(map.version)?;
+        Ok(KeyTable::read(&map.payload)?)
     }
 
     /// Replaces the keyboard map. The zone table and the strokes are untouched.
@@ -515,6 +517,7 @@ impl Cbin<Sample> {
         self.require_known_layout()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
+        keymap::require_version(map.version)?;
         table.write(&mut map.payload)?;
         Ok(())
     }
@@ -713,5 +716,20 @@ mod tests {
         };
         let error = sample.set_zone_top_note(0, 60).unwrap_err().to_string();
         assert!(error.contains("predates Sample Library 2.0"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_map_version_cannot_use_the_keyboard_table() {
+        let mut sample = encode::instrument(
+            &vec![0i16; encode::MIN_FRAMES],
+            &encode::Options::new("Test"),
+        )
+        .unwrap();
+        let map = section::find_mut(&mut sample.body.sections, section::MAP).unwrap();
+        map.version = keymap::VERSION + 1;
+        let before = map.payload.clone();
+        assert!(sample.key_table().is_err());
+        assert!(sample.set_key_table(&KeyTable::NEUTRAL).is_err());
+        assert_eq!(sample.map().unwrap().payload, before);
     }
 }

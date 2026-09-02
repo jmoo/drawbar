@@ -418,7 +418,7 @@ let
   # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
 
   corpusTree = builtins.fetchGit {
-    rev = "bbf5eecd60349040a5551bef71c7f48319fb4deb";
+    rev = "3c1f13b882c1a536d6a91ccb3ba4deffd8511b47";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
@@ -438,11 +438,16 @@ let
   # still flow into their suites.
   committed = genAttrs corpusCrates (
     name:
-    final.nord.crates.${name}.override {
-      NORD_CORPUS_ROOT = "${corpus}";
-      cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
-      pname = "${name}-corpus";
-    }
+    final.nord.crates.${name}.override (
+      {
+        NORD_CORPUS_ROOT = "${corpus}";
+        cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
+        pname = "${name}-corpus";
+      }
+      // optionalAttrs (name == "nord-format") {
+        NORD_NSMP_KERNEL_ORACLE = "${corpusTree}/tools/nsmp-pitch/table-fl32.tsv";
+      }
+    )
   );
 
   # The full tier is the committed suite pointed at the bigger assembly.

@@ -73,7 +73,6 @@ const AUX: u32 = 0x000f_0000;
 /// Section schema versions, which do not track the content version.
 const HDR_VERSION: u8 = 9;
 const CAT_VERSION: u8 = 5;
-const MAP_VERSION: u8 = 10;
 const STK_VERSION: u8 = 9;
 const STY_VERSION: u8 = 5;
 const CONTAINER_VERSION: u8 = 11;
@@ -555,7 +554,8 @@ impl Plan {
         let fits = resync_at >= warmup
             && head
                 .checked_sub(warmup)
-                .is_some_and(|rest| head >= resync_at + band(rest));
+                .and_then(|rest| resync_at.checked_add(band(rest)))
+                .is_some_and(|end| head >= end);
         if !fits {
             return Err(ParseError::OutOfBounds {
                 value: format!("a secondary start at field {resync_at}"),
@@ -667,7 +667,7 @@ fn chunks(mut n: usize, chunk: usize) -> Vec<usize> {
 /// header statistics that describe them.
 #[derive(Debug, Clone)]
 struct Quantised {
-    /// One stored value per field, sign-extended and inside [`PEAK_WIDTH`] bits.
+    /// One stored value per field, sign-extended and within the stream's maximum width.
     values: Vec<i32>,
     /// Bits the values were shifted right by. Dequantising shifts back.
     shift: i32,
@@ -795,7 +795,7 @@ fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
 /// [`MIN_WIDTH`].
 fn width_of(low: i64, high: i64) -> u8 {
     let mut w = MIN_WIDTH;
-    while w < 16 && (low < -(1i64 << (w - 1)) || high > (1i64 << (w - 1)) - 1) {
+    while i128::from(low) < -(1i128 << (w - 1)) || i128::from(high) > (1i128 << (w - 1)) - 1 {
         w += 1;
     }
     w
@@ -956,8 +956,18 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
         content(&mut out, &mut at, points.cells);
         pad_to_packet(&mut out, opening, cell)?;
     }
-    debug_assert_eq!(at, plan.fields);
-    debug_assert!(resync_record < out.len());
+    if at != plan.fields {
+        return Err(ParseError::AssertFail(format!(
+            "the record plan covered {at} of {} fields",
+            plan.fields
+        ))
+        .into());
+    }
+    if resync_record >= out.len() {
+        return Err(
+            ParseError::AssertFail("the record plan produced no resync record".into()).into(),
+        );
+    }
     Ok(out)
 }
 
@@ -1093,8 +1103,13 @@ fn pack(
     }
     // The terminator states the cell size, which is what says how many channels the
     // stroke carries: 2*CELL and a reader de-interleaves.
+    if at.checked_add(1) != Some(total) {
+        return Err(ParseError::AssertFail(format!(
+            "the record chain ended at word {at} of {total}"
+        ))
+        .into());
+    }
     words[at * 3..at * 3 + 3].copy_from_slice(&[0x80, 0x00, plan.cell() as u8]);
-    debug_assert_eq!(at + 1, total);
 
     Ok(Stream {
         words,
@@ -1142,7 +1157,7 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], stride
 /// 24-bit fraction in `[½, 1)` — three bits finer than the mantissa — before the gain
 /// multiplies it, and one floor follows; the mantissa leaves its normalised range
 /// freely in either direction, and the exponent never moves with it.
-pub fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
+fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
     let peak = u64::from(peak.max(1));
     let bits = 64 - peak.leading_zeros() as i32;
     let exact_power = i32::from(peak.is_power_of_two());
@@ -1229,12 +1244,38 @@ fn stroke(
         Some(points) => Plan::looped(frames, channels, points, secondary_start)?,
         None => Plan::new(frames, channels, secondary_start)?,
     };
+    if let Some(bits) = shift {
+        if i32::from(bits) > codec::SHIFT_LIMIT {
+            return Err(ParseError::OutOfBounds {
+                value: format!("a quantiser shift of {bits} bits"),
+                bound: format!("0 through {} bits", codec::SHIFT_LIMIT),
+            }
+            .into());
+        }
+    }
     let q = quantise(source, &plan, shift);
+    let low = q.values.iter().copied().min().unwrap_or(0);
+    let high = q.values.iter().copied().max().unwrap_or(0);
+    if width_of(i64::from(low), i64::from(high)) > MAX_STORED_WIDTH {
+        return Err(ParseError::OutOfBounds {
+            value: format!(
+                "a quantiser shift of {} bits for fields spanning {low}..={high}",
+                q.shift
+            ),
+            bound: format!("values that fit the stream's {MAX_STORED_WIDTH}-bit fields"),
+        }
+        .into());
+    }
     let specs = records(&q.values, &plan, predictor)?;
     let resync_record = specs
         .iter()
         .position(|s| s.first == plan.resync_at)
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            ParseError::AssertFail(format!(
+                "no record begins at the planned resync field {}",
+                plan.resync_at
+            ))
+        })?;
     let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
 
     let mut payload = stroke_header(id, root_key, &q, &stream, body_at, channels, gain);
@@ -1301,7 +1342,7 @@ fn map(zones: &[ZoneRecord]) -> Section {
     }
     Section {
         tag: *section::MAP,
-        version: MAP_VERSION,
+        version: super::keymap::VERSION,
         payload,
     }
 }
@@ -1521,12 +1562,10 @@ mod tests {
     use super::super::zone::GAIN_UNITY;
     use super::*;
 
-    /// A plan resynchronising where a fresh project would.
     fn plan(frames: usize, channels: usize) -> Result<Plan, Error> {
         Plan::new(frames, channels, default_secondary_start(frames, None))
     }
 
-    /// A looped plan resynchronising where a fresh project would, repaired around the loop.
     fn looped(frames: usize, channels: usize, points: Loop) -> Result<Plan, Error> {
         Plan::looped(
             frames,
@@ -1536,7 +1575,6 @@ mod tests {
         )
     }
 
-    /// 44100 Hz mono, one second, at `hz` and `amplitude`.
     fn sine(hz: f64, amplitude: f64, frames: usize) -> Vec<i16> {
         (0..frames)
             .map(|k| {
@@ -1550,10 +1588,6 @@ mod tests {
         instrument(source, &Options::new("Test").predictor(predictor)).unwrap()
     }
 
-    /// The band is what some whole number of 1:1 records can actually cover: `j` of them
-    /// span `j*cell` to `j*rmax`, and nothing in the gaps between those windows. The one
-    /// case that separates the constructive rule from the old fitted one is `r ≡ 0`,
-    /// where the reachable length is one cell and not four.
     #[test]
     fn the_band_is_the_shortest_run_a_whole_number_of_records_can_cover() {
         for channels in [1usize, 2] {
@@ -1564,7 +1598,6 @@ mod tests {
                 assert!(b >= cell, "band({r}) = {b}");
                 let records = (1..=8).find(|j| j * cell <= b && b <= j * rmax);
                 assert!(records.is_some(), "{channels}ch band({r}) = {b}");
-                // Nothing shorter, congruent and at or above one cell is reachable.
                 for shorter in (cell..b).filter(|s| s % cell == b % cell) {
                     assert!(
                         !(1..=8).any(|j| j * cell <= shorter && shorter <= j * rmax),
@@ -1577,8 +1610,6 @@ mod tests {
         }
     }
 
-    /// A run splits into records of at most RMAX fields, and the band guarantees the
-    /// remainder is a legal record rather than a stub.
     #[test]
     fn every_one_to_one_chunk_is_a_legal_count() {
         for channels in [1usize, 2] {
@@ -1594,8 +1625,6 @@ mod tests {
         }
     }
 
-    /// The plan's landmarks partition the field lattice exactly: warmup, cells, resync,
-    /// cells, and nothing left over.
     #[test]
     fn the_plan_covers_every_field_exactly_once() {
         for frames in [4096, 8192, 10_000, 44_100, 100_000, 441_000] {
@@ -1695,6 +1724,18 @@ mod tests {
     }
 
     #[test]
+    fn forced_shifts_that_cannot_be_encoded_are_refused() {
+        let mut step = vec![i16::MIN; MIN_FRAMES];
+        step[MIN_FRAMES / 2..].fill(i16::MAX);
+        assert!(instrument(&step, &Options::new("Test").shift(0)).is_err());
+        assert!(instrument(
+            &vec![0i16; MIN_FRAMES],
+            &Options::new("Test").shift(codec::SHIFT_LIMIT as u8 + 1)
+        )
+        .is_err());
+    }
+
+    #[test]
     fn midi_notes_outside_the_wire_range_are_refused() {
         let source = vec![0i16; MIN_FRAMES];
         assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
@@ -1715,8 +1756,6 @@ mod tests {
         .is_err());
     }
 
-    /// Encoded audio begins where the preamble law puts it: a stroke payload is its
-    /// own header length plus whole packets, and the chain sits at the end of it.
     #[test]
     fn the_allocation_is_whole_packets_with_the_chain_at_the_end() {
         let file = encoded(&sine(440.0, 8000.0, 44_100), Predictor::Plain);
@@ -1765,8 +1804,6 @@ mod tests {
         assert!(differenced > 0, "minimising never chose a predictor");
     }
 
-    /// The audio survives the trip as audio, not only as numbers: a sine comes back a
-    /// sine of the same amplitude on the lattice's own rate.
     #[test]
     fn a_sine_comes_back_a_sine() {
         let source = sine(440.0, 20_000.0, 44_100);
@@ -1821,7 +1858,6 @@ mod tests {
         assert_eq!(walked.records[0].values, values);
     }
 
-    /// The file is a file: it parses, checksums, and round-trips as bytes.
     #[test]
     fn the_instrument_reads_back_as_one() {
         let file = instrument(
@@ -1840,8 +1876,6 @@ mod tests {
         assert_eq!(read.to_bytes().unwrap(), bytes);
     }
 
-    /// The word directory is written against the body offset the stroke actually lands
-    /// at, and the walk lands on the records it names.
     #[test]
     fn the_directory_names_the_records_the_walk_finds() {
         let file = encoded(&sine(300.0, 9000.0, 50_000), Predictor::Plain);
@@ -1862,7 +1896,6 @@ mod tests {
         assert_eq!(record.first_field, plan(50_000, 1).unwrap().resync_at);
     }
 
-    /// The shift is stated in the header, so it reads back whatever rule chose it.
     #[test]
     fn the_header_states_the_shift_it_quantised_at() {
         for amplitude in [40.0, 900.0, 8000.0, 32_000.0] {
@@ -1884,7 +1917,6 @@ mod tests {
         }
     }
 
-    /// Loud material costs a shift; quiet material does not.
     #[test]
     fn the_shift_tracks_how_loud_the_content_is() {
         let quiet = plan(20_000, 1)
@@ -1897,8 +1929,6 @@ mod tests {
         assert!(loud > quiet, "loud {loud} vs quiet {quiet}");
     }
 
-    /// A stereo stroke shifts only until its peak fits [`PEAK_WIDTH`]; a mono stroke
-    /// of the same per-channel content shifts one bit further.
     #[test]
     fn a_stereo_stroke_stops_shifting_where_its_peak_fits() {
         let frames = 30_000;
@@ -1922,9 +1952,6 @@ mod tests {
         assert_eq!(widest, PEAK_WIDTH);
     }
 
-    /// The mono extra bit is spent whether or not it shrinks the packet allocation: a
-    /// loud sine fills the same packets at either shift at one length and saves one at
-    /// another, and takes the bit at both.
     #[test]
     fn the_mono_extra_bit_does_not_weigh_the_packet_allocation() {
         assert_eq!(header_shift(&sine(261.6256, 32_000.0, 4_920), 1), 3);
@@ -1932,8 +1959,6 @@ mod tests {
         assert_eq!(header_shift(&sine(440.0, 12_000.0, 44_100), 1), 2);
     }
 
-    /// The shift the stroke header of a one-zone instrument states, coded with the
-    /// minimising predictor.
     fn header_shift(source: &[i16], channels: u16) -> i32 {
         let options = Options::new("Shift")
             .channels(channels)
@@ -1943,10 +1968,6 @@ mod tests {
         codec::shift(stroke, codec::Layout::V2).unwrap()
     }
 
-    /// Statistic B is the extreme field's magnitude after a fixed shift of two, taken
-    /// with the sign the field had, so a negative extreme rounds away from zero; between
-    /// equal magnitudes the earlier field stands. A lone sample of 13 peaks at a field of
-    /// ten or eleven, which reads 2 upright and 3 inverted.
     #[test]
     fn statistic_b_takes_the_sign_of_the_extreme_field() {
         let frames = 20_000;
@@ -1962,7 +1983,6 @@ mod tests {
         assert_eq!(stereo, positive);
     }
 
-    /// Every stored field fits the width its record declares, at every predictor.
     #[test]
     fn no_field_overflows_the_width_its_record_declares() {
         for predictor in [Predictor::Plain, Predictor::Minimising] {
@@ -1984,8 +2004,6 @@ mod tests {
         }
     }
 
-    /// Content records cover whole cells and the 1:1 runs sit exactly where the count
-    /// laws put them.
     #[test]
     fn records_tile_the_lattice_the_way_the_laws_say() {
         let source = sine(440.0, 20_000.0, 60_000);
@@ -2007,8 +2025,6 @@ mod tests {
         assert_eq!(one_to_one, plan.warmup + plan.resync);
     }
 
-    /// The minimising predictor is the encoder's law: smooth material differences down
-    /// to a narrower field than it stores at, and the stream shrinks for it.
     #[test]
     fn the_minimising_predictor_narrows_smooth_material() {
         let source = sine(60.0, 30_000.0, 60_000);
@@ -2029,8 +2045,6 @@ mod tests {
         assert!(minimised.iter().all(|s| !s.one_to_one || s.order == 0));
     }
 
-    /// A residual is the difference the decoder integrates: summing an order-1 run back
-    /// up returns the field values it came from.
     #[test]
     fn a_residual_integrates_back_to_the_field_it_came_from() {
         let values: Vec<i32> = (0..200).map(|k| (k * k / 7) % 501 - 250).collect();
@@ -2045,8 +2059,6 @@ mod tests {
         }
     }
 
-    /// Statistic A carries the shift, whatever the peak, and reads back through the
-    /// decoder's own inverse.
     #[test]
     fn statistic_a_round_trips_the_shift() {
         for peak in [0u32, 1, 2, 255, 4095, 4096, 8191, 8192] {
@@ -2104,9 +2116,6 @@ mod tests {
         }
     }
 
-    /// The gain multiplies a 24-bit reciprocal, not the 20-bit mantissa and not the
-    /// exact value: the truncated mantissa would give 1 200 836 on the fourth line,
-    /// the exact reciprocal 8 180 402 and 4 645 577 on the last two.
     #[test]
     fn statistic_a_scales_a_24_bit_reciprocal_by_the_gain() {
         assert_eq!(statistic_a(4096, 2, GAIN_UNITY), (524_288, 12));
@@ -2117,8 +2126,6 @@ mod tests {
         assert_eq!(statistic_a(1225, 0, 5_557_453), (4_645_576, 11));
     }
 
-    /// A zone's gain scales the mantissa and moves nothing else in the stroke; the
-    /// record carries the same value, and one past the record's range is refused.
     #[test]
     fn a_zone_gain_scales_statistic_a_and_touches_nothing_else() {
         let source = sine(440.0, 12_000.0, 20_000);
@@ -2388,17 +2395,9 @@ mod tests {
         );
     }
 
-    /// The fade's length on the lattice, measured off the editor's own renders: the
-    /// XFS ladder (a 16384-frame loop start, the short loop's crossfade swept as a
-    /// percentage of its length and the length swept at one percentage) plus the LP
-    /// crossfade ladder, whose unit is a frame count outright. Both are the same rule.
-    ///
-    /// `(loop length, crossfade frames, fields the ramp covers)`.
-    ///
-    /// Inferred from specimens; not confirmed on hardware.
+    // (loop length, crossfade frames, fields the ramp covers).
+    // Inferred from specimens; not confirmed on hardware.
     const MEASURED_FADES: &[(usize, f64, usize)] = &[
-        // XFS: the percentage ladder at one length. 25 % and 75 % are the two rungs
-        // that separate this rule from putting the fade's own length on the lattice.
         (8_192, 81.92, 65),
         (8_192, 163.84, 130),
         (8_192, 409.6, 325),
@@ -2409,19 +2408,14 @@ mod tests {
         (8_192, 4_096.0, 3_251),
         (8_192, 6_144.0, 4_877),
         (8_192, 8_192.0, 6_502),
-        // XFS: one percentage, the length swept.
         (2_048, 512.0, 406),
         (4_096, 1_024.0, 813),
         (16_384, 4_096.0, 3_251),
         (32_768, 8_192.0, 6_502),
-        // XFS: lengths whose field count lands where rounding and truncation differ.
         (7_000, 700.0, 556),
         (10_000, 1_000.0, 794),
-        // LP: the same 409.6-frame fade under two loop lengths, which is what says the
-        // short loop's integer is a percentage and not a count of anything.
         (4_096, 409.6, 325),
         (1_024, 409.6, 325),
-        // LP: the long loop's own ladder, stated in frames.
         (16_384, 256.0, 203),
         (16_384, 1_024.0, 813),
         (16_384, 8_192.0, 6_502),
@@ -2724,8 +2718,6 @@ mod tests {
         assert!(instrument(&short, &Options::new("x").channels(2)).is_err());
     }
 
-    /// Silence is silence: nothing promotes, so every content record is the width-2
-    /// draft and the stream is the smallest the allocation allows.
     #[test]
     fn silence_codes_at_the_draft_width_throughout() {
         let file = encoded(&vec![0i16; 44_100], Predictor::Plain);

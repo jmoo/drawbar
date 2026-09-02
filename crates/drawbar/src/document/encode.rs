@@ -255,7 +255,6 @@ mod tests {
         assert!(slow.contains("22050 Hz"), "{slow}");
         assert!(slow.contains(&SOURCE_RATE.to_string()), "{slow}");
 
-        // Two channels is a stereo stroke, not a refusal; three is neither.
         assert_eq!(refused(wav(SOURCE_RATE, 2, encode::MIN_FRAMES)), None);
         let wide = refused(wav(SOURCE_RATE, 3, encode::MIN_FRAMES)).expect("three channels");
         assert!(wide.contains("3 channels"), "{wide}");
@@ -268,8 +267,6 @@ mod tests {
         assert!(!unreadable.is_empty());
     }
 
-    /// A stereo WAV encodes to a stereo stroke — both channels under one header, which
-    /// the terminator's doubled cell is what states.
     #[test]
     fn a_stereo_wav_encodes_to_a_stereo_stroke() {
         let source = Source::read(&wav(SOURCE_RATE, 2, encode::MIN_FRAMES));

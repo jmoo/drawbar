@@ -1124,7 +1124,6 @@ mod tests {
 
     #[test]
     fn the_editor_repairs_a_secondary_start_to_half_the_ceiling() {
-        // D5: a 441-frame zone stating 1 encodes from 110.25.
         assert_eq!(repaired_secondary_start(1.0, 441.0, None), 110.25);
         assert_eq!(repaired_secondary_start(91.0, 44_100.0, None), 11_025.0);
         assert_eq!(repaired_secondary_start(22_051.0, 44_100.0, None), 11_025.0);

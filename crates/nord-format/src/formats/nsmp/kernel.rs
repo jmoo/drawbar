@@ -244,7 +244,6 @@ mod tests {
         assert!((bessel_i0(8.0) - 427.564_115_721_804_74).abs() < 1e-12);
     }
 
-    /// `d = −15` is in the support at the window's edge value; `d = +15` is not.
     #[test]
     fn the_support_is_half_open() {
         let edge = (B * sinc(B * 15.0) / bessel_i0(BETA)) as f32;
@@ -255,7 +254,6 @@ mod tests {
         assert_ne!(h(-15.0), 0.0);
     }
 
-    /// `G[k][m] = G[512−k][−m−1]`: the lattice point `−d` reads the same tap.
     #[test]
     fn the_closed_form_is_mirror_symmetric_to_the_bit() {
         let bank = closed_form();
@@ -270,7 +268,6 @@ mod tests {
         }
     }
 
-    /// Every measured tap names a distinct lattice point and sits a rounding off `h`.
     #[test]
     fn the_measured_taps_stay_within_a_rounding_of_the_closed_form() {
         let mut points: Vec<(usize, usize)> = MEASURED.iter().map(|&(p, t, _)| (p, t)).collect();
@@ -286,7 +283,6 @@ mod tests {
         }
     }
 
-    /// The ideal sinc's DC gain ripples with phase; nothing renormalises it.
     #[test]
     fn every_phase_sums_near_unity() {
         for (phase, row) in taps().iter().enumerate() {
@@ -295,8 +291,6 @@ mod tests {
         }
     }
 
-    /// A constant stores one count under itself: the 16-bit depth factor takes the
-    /// sum a hair below the source value and the truncation lands on the next count.
     #[test]
     fn a_constant_resamples_one_count_under_itself() {
         let source = vec![1000i16; 4096];
@@ -309,11 +303,8 @@ mod tests {
         }
     }
 
-    /// Each product is rounded to `f32` before the sum: a single full-scale sample
-    /// through the centre tap stores what the `f32` product says, not the `f64` one.
     #[test]
     fn products_are_single_precision() {
-        // Field 0 sits on sample 0 at phase 0, so tap m = 0 alone sees the impulse.
         let mut source = vec![0i16; 64];
         source[0] = 32767;
         let sample = f32::from(32767i16) * DEPTH_16;
@@ -325,7 +316,6 @@ mod tests {
         );
     }
 
-    /// The phase is the fractional position truncated, never rounded, to nine bits.
     #[test]
     fn the_phase_truncates_the_fraction() {
         assert_eq!(lattice(0), (0, 0));
@@ -335,8 +325,6 @@ mod tests {
         assert_eq!(lattice(17501), (22050, 0));
     }
 
-    /// A single sample lights every field whose lattice point is within the support,
-    /// and nothing beyond it.
     #[test]
     fn one_impulse_lights_the_kernels_support() {
         let mut source = vec![0i16; 4096];

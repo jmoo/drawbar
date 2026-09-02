@@ -117,7 +117,7 @@ const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
 const EXPONENT_BIAS: i32 = 22;
 
 /// Shifts beyond this are not a scale, they are a misread header.
-const SHIFT_LIMIT: i32 = 32;
+pub(crate) const SHIFT_LIMIT: i32 = 32;
 
 /// Word directory: `u16` big-endian at this offset, on a 9-byte stride.
 const SEEK_AT: usize = 20;

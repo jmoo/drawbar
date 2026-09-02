@@ -313,9 +313,7 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     assert_eq!(differing, [0x18, 0x19, 0x1a, 0x1b, 0x410, 0x47d, 0x47e]);
 }
 
-/// The SL2 stereo silences: frames, and the `m_startSecondary` each specimen's project
-/// states from `m_start = 0`.
-const SL2: [(usize, f64); 8] = [
+const STEREO_SECONDARY_STARTS: [(usize, f64); 8] = [
     (4_096, 512.815658),
     (6_000, 751.194811),
     (10_000, 1_251.991352),
@@ -326,12 +324,11 @@ const SL2: [(usize, f64); 8] = [
     (90_000, 11_267.922167),
 ];
 
-/// `m_startSecondary` from `m_start = 1` in the `C-44k-16-*` projects.
-const C_44K_SECONDARY: f64 = 552.128186 - 1.0;
+const MONO_SECONDARY_START: f64 = 552.128186 - 1.0;
 
 #[test]
 fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
-    for (frames, secondary) in SL2 {
+    for (frames, secondary) in STEREO_SECONDARY_STARTS {
         let name = format!("SL2-n{frames:06}.nsmp");
         let sample = v2_named(&name);
         let (at, stroke) = sample.stroke_streams()[0];
@@ -459,8 +456,8 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
         }
     }
 
-    let mono = nsmp::encode::Plan::new(4_409, 1, C_44K_SECONDARY).unwrap();
-    let both = nsmp::encode::Plan::new(4_409, 2, C_44K_SECONDARY).unwrap();
+    let mono = nsmp::encode::Plan::new(4_409, 1, MONO_SECONDARY_START).unwrap();
+    let both = nsmp::encode::Plan::new(4_409, 2, MONO_SECONDARY_START).unwrap();
     assert_eq!(both.fields, 2 * mono.fields);
     assert_eq!(both.fields, landmarks("C-44k-16-stL.nsmp").2[0]);
     assert_eq!(both.resync_at, 2 * mono.resync_at);
@@ -506,7 +503,7 @@ fn count_laws_reproduce_editor_landmarks() {
 
 #[test]
 fn a_stereo_silence_reproduces_the_editors_render_exactly() {
-    for (frames, secondary) in SL2 {
+    for (frames, secondary) in STEREO_SECONDARY_STARTS {
         let name = format!("SL2-n{frames:06}");
         let expected = &named(&format!("{name}.nsmp")).bytes;
         let actual = nsmp::encode::instrument(

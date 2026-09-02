@@ -7,9 +7,14 @@
 //! The sample editor writes the per-key records from its note list; its macro
 //! spin controls have no storage of their own and write through to the same
 //! table.
+//!
+//! Inferred from specimens; not confirmed on hardware.
 
 use super::zone;
 use crate::error::ParseError;
+
+/// Schema version of a v2 `map` section carrying this table.
+pub(super) const VERSION: u8 = 10;
 
 /// `1.0` in every gain field of the map, a u24 linear ratio.
 pub const GAIN_UNITY: u32 = 0x10_0000;
@@ -36,10 +41,6 @@ const LEVEL_AT: usize = 0;
 /// Where note 0's record sits; note `n` is `KEY_TABLE_AT + RECORD_LEN * n`.
 pub const KEY_TABLE_AT: usize = 15;
 
-/// Reserved bytes on either side of the table, zero on every specimen.
-const RESERVED_HEAD: std::ops::Range<usize> = LEVEL_AT + RECORD_LEN..KEY_TABLE_AT;
-const RESERVED_TAIL: std::ops::Range<usize> = KEY_TABLE_AT + KEYS * RECORD_LEN..zone::COUNT_AT;
-
 const _: () = assert!(KEY_TABLE_AT + KEYS * RECORD_LEN + 2 == zone::COUNT_AT);
 
 /// A gain and a pitch offset — the six-byte record the map is built from.
@@ -50,12 +51,12 @@ pub struct Level {
     /// The editor keeps a key's gain within ±9 dB and the instrument's below
     /// +9 dB, clamping as it encodes without repairing its project. What the
     /// instrument does with a value outside that band is unmeasured.
-    pub gain: u32,
+    gain: u32,
     /// Pitch offset in 1/256 semitone, positive upward, within an s24.
     ///
     /// The editor truncates its cents toward zero: 1 cent stores 2, 8 cents
     /// store 20, and a whole octave stores 3072.
-    pub detune: i32,
+    detune: i32,
 }
 
 impl Level {
@@ -80,8 +81,8 @@ impl Level {
         Ok(Level { gain, detune })
     }
 
-    /// From a linear gain ratio and a detune in semitones, each rounded to the
-    /// nearest unit the field holds.
+    /// From a linear gain ratio and a detune in semitones. Gain is rounded to the
+    /// nearest field unit; detune is truncated toward zero as the editor writes it.
     pub fn from_ratio(gain: f64, semitones: f64) -> Result<Level, ParseError> {
         let units = gain * f64::from(GAIN_UNITY);
         if !units.is_finite() || units < 0.0 || units > f64::from(GAIN_MAX) {
@@ -95,8 +96,17 @@ impl Level {
                 "detune of {semitones} semitones is outside what the 24-bit field holds"
             )));
         }
-        // Both are within their fields, so the casts cannot truncate.
-        Level::new(units.round() as u32, detune.round() as i32)
+        Level::new(units.round() as u32, detune.trunc() as i32)
+    }
+
+    /// The gain field's fixed-point value.
+    pub const fn gain(self) -> u32 {
+        self.gain
+    }
+
+    /// The detune field's signed 1/256-semitone value.
+    pub const fn detune(self) -> i32 {
+        self.detune
     }
 
     /// The gain as a linear ratio, 1.0 for unity.
@@ -129,7 +139,7 @@ pub struct KeyTable {
     /// Scales and detunes the whole map.
     pub instrument: Level,
     /// Indexed by MIDI note.
-    pub keys: [Level; KEYS],
+    keys: [Level; KEYS],
 }
 
 impl KeyTable {
@@ -140,17 +150,8 @@ impl KeyTable {
     };
 
     /// Reads the map ahead of the zone count.
-    ///
-    /// Refuses a payload whose reserved bytes are not zero: no specimen has
-    /// ever carried one, and a value there would mean this layout is wrong.
     pub fn read(map: &[u8]) -> Result<KeyTable, ParseError> {
         fits(map)?;
-        let reserved = map[RESERVED_HEAD].iter().chain(&map[RESERVED_TAIL]);
-        if reserved.copied().any(|b| b != 0) {
-            return Err(ParseError::AssertFail(
-                "map carries data in the bytes reserved around its keyboard table".into(),
-            ));
-        }
         let mut keys = [Level::NEUTRAL; KEYS];
         for (note, key) in keys.iter_mut().enumerate() {
             *key = Level::read(&map[record_at(note)..][..RECORD_LEN]);
@@ -165,11 +166,9 @@ impl KeyTable {
     pub fn write(&self, map: &mut [u8]) -> Result<(), ParseError> {
         fits(map)?;
         self.instrument.write(&mut map[LEVEL_AT..][..RECORD_LEN]);
-        map[RESERVED_HEAD].fill(0);
         for (note, key) in self.keys.iter().enumerate() {
             key.write(&mut map[record_at(note)..][..RECORD_LEN]);
         }
-        map[RESERVED_TAIL].fill(0);
         Ok(())
     }
 
@@ -182,13 +181,27 @@ impl KeyTable {
     }
 
     /// The record for one MIDI note.
-    pub fn key(&self, note: u8) -> Level {
-        self.keys[usize::from(note)]
+    pub fn key(&self, note: u8) -> Result<Level, ParseError> {
+        self.keys
+            .get(usize::from(note))
+            .copied()
+            .ok_or_else(|| ParseError::OutOfBounds {
+                value: format!("MIDI note {note}"),
+                bound: "a MIDI note from 0 through 127".into(),
+            })
     }
 
     /// Sets the record for one MIDI note.
-    pub fn set_key(&mut self, note: u8, level: Level) {
-        self.keys[usize::from(note)] = level;
+    pub fn set_key(&mut self, note: u8, level: Level) -> Result<(), ParseError> {
+        let key = self
+            .keys
+            .get_mut(usize::from(note))
+            .ok_or_else(|| ParseError::OutOfBounds {
+                value: format!("MIDI note {note}"),
+                bound: "a MIDI note from 0 through 127".into(),
+            })?;
+        *key = level;
+        Ok(())
     }
 
     /// Notes whose record is not neutral.
@@ -213,6 +226,15 @@ fn fits(map: &[u8]) -> Result<(), ParseError> {
         )));
     }
     Ok(())
+}
+
+pub(super) fn require_version(version: u8) -> Result<(), ParseError> {
+    if version == VERSION {
+        return Ok(());
+    }
+    Err(ParseError::AssertFail(format!(
+        "map section version {version} has no keyboard table layout derived from specimens"
+    )))
 }
 
 #[cfg(test)]
@@ -241,12 +263,24 @@ mod tests {
     fn records_round_trip_through_their_bytes() {
         let mut table = KeyTable::NEUTRAL;
         table.instrument = Level::new(0x2d_1819, -256).unwrap();
-        table.set_key(60, Level::new(0x08_0000, 20).unwrap());
-        table.set_key(17, Level::new(0, -(1 << 23)).unwrap());
-        table.set_key(127, Level::new(GAIN_MAX, (1 << 23) - 1).unwrap());
+        table
+            .set_key(60, Level::new(0x08_0000, 20).unwrap())
+            .unwrap();
+        table
+            .set_key(17, Level::new(0, -(1 << 23)).unwrap())
+            .unwrap();
+        table
+            .set_key(127, Level::new(GAIN_MAX, (1 << 23) - 1).unwrap())
+            .unwrap();
         let mut map = vec![0xAA; zone::COUNT_AT + 1 + zone::RECORD_LEN];
         table.write(&mut map).unwrap();
         assert_eq!(KeyTable::read(&map).unwrap(), table);
+        assert!(map[LEVEL_AT + RECORD_LEN..KEY_TABLE_AT]
+            .iter()
+            .all(|&b| b == 0xAA));
+        assert!(map[KEY_TABLE_AT + KEYS * RECORD_LEN..zone::COUNT_AT]
+            .iter()
+            .all(|&b| b == 0xAA));
         assert!(map[zone::COUNT_AT..].iter().all(|b| *b == 0xAA));
         assert_eq!(table.adjusted().collect::<Vec<_>>(), [17, 60, 127]);
     }
@@ -255,7 +289,7 @@ mod tests {
     fn detune_reads_signed() {
         let mut map = vec![0u8; zone::COUNT_AT];
         map[record_at(60) + 3..record_at(60) + 6].copy_from_slice(&[0xff, 0xff, 0xec]);
-        assert_eq!(KeyTable::read(&map).unwrap().key(60).detune, -20);
+        assert_eq!(KeyTable::read(&map).unwrap().key(60).unwrap().detune(), -20);
     }
 
     #[test]
@@ -267,19 +301,19 @@ mod tests {
             Level::from_ratio(0.5, -1.0).unwrap(),
             Level::new(0x08_0000, -256).unwrap()
         );
+        assert_eq!(Level::from_ratio(1.0, 0.01).unwrap().detune(), 2);
+        assert_eq!(Level::from_ratio(1.0, -0.01).unwrap().detune(), -2);
         assert!(Level::from_ratio(16.0, 0.0).is_err());
         assert!(Level::from_ratio(-0.5, 0.0).is_err());
         assert!(Level::from_ratio(1.0, f64::NAN).is_err());
     }
 
     #[test]
-    fn reserved_bytes_are_refused_when_set() {
-        let mut map = KeyTable::NEUTRAL.prefix().to_vec();
-        map[7] = 1;
-        assert!(KeyTable::read(&map).is_err());
-        let mut map = KeyTable::NEUTRAL.prefix().to_vec();
-        map[783] = 1;
-        assert!(KeyTable::read(&map).is_err());
+    fn short_maps_and_notes_outside_midi_are_refused() {
+        let map = KeyTable::NEUTRAL.prefix().to_vec();
         assert!(KeyTable::read(&map[..700]).is_err());
+        assert!(KeyTable::NEUTRAL.key(128).is_err());
+        let mut table = KeyTable::NEUTRAL;
+        assert!(table.set_key(128, Level::NEUTRAL).is_err());
     }
 }
