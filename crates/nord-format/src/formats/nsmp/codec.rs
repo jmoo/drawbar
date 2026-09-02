@@ -112,8 +112,9 @@ const PEAK_AT: usize = 13;
 /// Where the wide stroke header's two float32s sit. Both big-endian.
 const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
 
-/// What statistic A's exponent is offset by. `A = 2^(41+s) / PEAK` normalised to a
-/// 20-bit mantissa, so the exponent lands `22 − bits(PEAK) + s` above zero.
+/// What statistic A's exponent is offset by. `A = gain · 2^(41+s) / PEAK` with a 20-bit
+/// mantissa at unity gain, so the exponent lands `22 − bits(PEAK) + s` above zero; the
+/// zone's gain scales the mantissa alone.
 const EXPONENT_BIAS: i32 = 22;
 
 /// Shifts beyond this are not a scale, they are a misread header.

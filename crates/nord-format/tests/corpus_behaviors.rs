@@ -856,6 +856,7 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
                         top_note: *top_note,
                         global_id: *global_id,
                         loops: None,
+                        gain: nsmp::zone::GAIN_UNITY,
                     },
                 )
                 .collect::<Vec<_>>(),
@@ -937,6 +938,46 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
 }
 
 #[test]
+fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
+    // Every self-generated v2 specimen, whatever its gain. Library instruments are left
+    // out: their strokes keep the mantissa of whatever file first encoded them.
+    let layout = nsmp::codec::Layout::V2;
+    let mut seen = 0;
+    for (specimen, sample) in v2_samples() {
+        if !specimen
+            .path
+            .components()
+            .any(|c| c.as_os_str() == "samples")
+        {
+            continue;
+        }
+        let zones = sample.zones().unwrap();
+        let streams = sample.stroke_streams();
+        let peak = streams
+            .iter()
+            .filter_map(|(_, s)| nsmp::codec::peak(s, layout))
+            .max()
+            .unwrap_or(0) as u32;
+        for (_, stroke) in streams {
+            let gain = zones
+                .iter()
+                .find(|z| z.stroke_id == stroke[3])
+                .map_or(nsmp::zone::GAIN_UNITY, |z| z.gain);
+            let (mantissa, _) = nsmp::encode::statistic_a(peak, 0, gain);
+            assert_eq!(
+                stroke[9..12],
+                mantissa.to_be_bytes()[1..],
+                "{} stroke {} at gain {gain}",
+                specimen.path.display(),
+                stroke[3]
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 1000, "{seen} strokes");
+}
+
+#[test]
 fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
@@ -952,6 +993,7 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
                         top_note: *top_note,
                         global_id: *global_id,
                         loops: None,
+                        gain: nsmp::zone::GAIN_UNITY,
                     },
                 )
                 .collect::<Vec<_>>(),

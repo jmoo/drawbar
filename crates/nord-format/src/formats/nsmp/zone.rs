@@ -15,6 +15,15 @@ pub const RECORD_LEN: usize = 15;
 /// Stroke global ID, not a positional index.
 const STROKE_ID: usize = 2;
 
+/// Within a record: the zone's gain, u24 big-endian with [`GAIN_BITS`] fractional bits.
+const GAIN: usize = 3;
+
+/// Fractional bits in a zone record's gain.
+pub const GAIN_BITS: u32 = 20;
+
+/// A zone gain of exactly 1.0 as the record encodes it.
+pub const GAIN_UNITY: u32 = 1 << GAIN_BITS;
+
 /// Within a record: the highest MIDI note this zone answers to.
 const TOP_NOTE: usize = 9;
 
@@ -25,6 +34,9 @@ pub struct Zone {
     pub top_note: u8,
     /// The stroke that plays this zone, by global id — see `STROKE_ID`.
     pub stroke_id: u8,
+    /// Linear playback gain, [`GAIN_BITS`] fractional bits — [`GAIN_UNITY`] is 1.0. The
+    /// audio is stored unscaled; the same factor scales the stroke's statistic A.
+    pub gain: u32,
 }
 
 pub fn count(map: &[u8]) -> Result<usize, ParseError> {
@@ -51,6 +63,7 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
             Zone {
                 top_note: r[TOP_NOTE],
                 stroke_id: r[STROKE_ID],
+                gain: u32::from_be_bytes([0, r[GAIN], r[GAIN + 1], r[GAIN + 2]]),
             }
         })
         .collect())
