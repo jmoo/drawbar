@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use nord_format::formats::nsmp::{codec, encode};
+use nord_format::formats::nsmp::{self, codec, encode};
 use nord_format::formats::nsmpproj::{self, NewZone, Project, Stroke, Zone, LOWEST_NOTE};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
@@ -555,9 +555,23 @@ struct ProjectZone {
     channels: u16,
     source: PathBuf,
     loops: Option<encode::Loop>,
+    /// The zone record's fixed-point gain.
+    gain: u32,
     /// Loop settings the project carries that the instrument has no field for, named
     /// so a build says what it dropped rather than dropping it quietly.
     dropped: Vec<String>,
+}
+
+/// A project's linear gain as the zone record's fixed-point one, to the nearest step.
+/// Whether the editor rounds or truncates here is unmeasured.
+fn zone_gain(at: &str, gain: f64) -> Result<u32, String> {
+    let scaled = gain * f64::from(nsmp::zone::GAIN_UNITY);
+    if !(0.0..f64::from(1u32 << 24)).contains(&scaled) {
+        return Err(format!(
+            "{at} sets gain {gain}, outside the 0 up to 16 a zone record holds"
+        ));
+    }
+    Ok(scaled.round() as u32)
 }
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
@@ -593,6 +607,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             top_note: z.top_note,
             global_id: z.global_id,
             loops: z.loops,
+            gain: z.gain,
         })
         .collect();
     let instrument =
@@ -609,8 +624,16 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             note::name(zone.top_note),
             stroke_line(stream, at)?,
         ));
+        let gain = if zone.gain == nsmp::zone::GAIN_UNITY {
+            String::new()
+        } else {
+            format!(
+                " gain {:.3}",
+                f64::from(zone.gain) / f64::from(nsmp::zone::GAIN_UNITY)
+            )
+        };
         ui.out(ui.dim(format!(
-            "         stroke {} from {}",
+            "         stroke {}{gain} from {}",
             zone.global_id,
             zone.source.display()
         )));
@@ -663,14 +686,15 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
             if !layer.enabled {
                 return Err(format!("{at}'s only stroke is switched off"));
             }
-            if layer.gain != 1.0 || layer.detune != 0 || layer.velocity != (0, 127) {
+            if layer.detune != 0 || layer.velocity != (0, 127) {
                 return Err(format!(
-                    "{at} sets gain {}, detune {} and velocity {}..={} on its stroke; \
-                     where the instrument applies those is not decoded, so nothing here \
-                     reproduces them",
-                    layer.gain, layer.detune, layer.velocity.0, layer.velocity.1
+                    "{at} sets detune {} and velocity {}..={} on its stroke; where the \
+                     instrument applies those is not decoded, so nothing here reproduces \
+                     them",
+                    layer.detune, layer.velocity.0, layer.velocity.1
                 ));
             }
+            let gain = zone_gain(&at, layer.gain)?;
             let stroke = strokes
                 .iter()
                 .find(|s| s.global_id == layer.global_id)
@@ -714,6 +738,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 samples: source.samples[start * channels..stop * channels].to_vec(),
                 source: path,
                 loops,
+                gain,
                 dropped,
             })
         })

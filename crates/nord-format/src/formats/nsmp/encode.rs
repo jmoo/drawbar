@@ -1041,12 +1041,18 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], stride
     }
 }
 
-/// Encode `A = 2^(41+s)/peak` so its exponent carries the quantiser shift.
-fn statistic_a(peak: u32, shift: i32) -> (u32, u8) {
+/// Encode `A = gain · 2^(41+s)/peak` as `(mantissa, exponent)`: the exponent carries the
+/// quantiser shift, the mantissa is `1/peak` to 20 bits scaled by the zone's gain
+/// ([`zone::GAIN_UNITY`](super::zone::GAIN_UNITY) is 1.0). The reciprocal is held as a
+/// 24-bit fraction in `[½, 1)` — three bits finer than the mantissa — before the gain
+/// multiplies it, and one floor follows; the mantissa leaves its normalised range
+/// freely in either direction, and the exponent never moves with it.
+pub fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
     let peak = u64::from(peak.max(1));
     let bits = 64 - peak.leading_zeros() as i32;
     let exact_power = i32::from(peak.is_power_of_two());
-    let mantissa = (1u64 << (18 + bits + (1 - exact_power))) / peak;
+    let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
+    let mantissa = (reciprocal * u64::from(gain)) >> (super::zone::GAIN_BITS + 3);
     (mantissa as u32, (22 + shift - bits + exact_power) as u8)
 }
 
@@ -1058,6 +1064,7 @@ fn stroke_header(
     stream: &Stream,
     body_at: usize,
     channels: usize,
+    gain: u32,
 ) -> Vec<u8> {
     let mut head = vec![0u8; HEADER_LEN];
     head[0..4].copy_from_slice(&id.to_be_bytes());
@@ -1068,7 +1075,7 @@ fn stroke_header(
     // and a reader takes the terminator because that is what the record sizes follow.
     head[8] = channels as u8;
 
-    let (mantissa, exponent) = statistic_a(q.peak, q.shift);
+    let (mantissa, exponent) = statistic_a(q.peak, q.shift, gain);
     head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
     head[12] = exponent;
     head[13..16].copy_from_slice(&q.peak.to_be_bytes()[1..]);
@@ -1111,6 +1118,7 @@ fn stroke(
     preamble: usize,
     predictor: Predictor,
     loops: Option<Loop>,
+    gain: u32,
 ) -> Result<Vec<u8>, Error> {
     midi_note("root key", root_key)?;
     let frames = frames_of(source, channels)?;
@@ -1132,7 +1140,7 @@ fn stroke(
         .unwrap_or(0);
     let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
 
-    let mut payload = stroke_header(id, root_key, &q, &stream, body_at, channels);
+    let mut payload = stroke_header(id, root_key, &q, &stream, body_at, channels, gain);
     payload.extend_from_slice(&stream.words);
     Ok(payload)
 }
@@ -1174,8 +1182,8 @@ fn cat() -> Section {
 
 /// Build the unexplained fixed keyboard map and zone table.
 ///
-/// `zones` is `(stroke id, top note)` per zone, already high to low.
-fn map(zones: &[(u8, u8)]) -> Section {
+/// `zones` is one record per zone, already high to low.
+fn map(zones: &[ZoneRecord]) -> Section {
     let mut payload = vec![0u8; super::zone::RECORDS_AT + super::zone::RECORD_LEN * zones.len()];
     payload[0] = 0x10;
     for note in 0..128 {
@@ -1183,13 +1191,13 @@ fn map(zones: &[(u8, u8)]) -> Section {
     }
     payload[super::zone::COUNT_AT] = zones.len() as u8;
     // Zones are stored high to low by top note.
-    for (index, &(id, top_note)) in zones.iter().enumerate() {
+    for (index, record) in zones.iter().enumerate() {
         let at = super::zone::RECORDS_AT + super::zone::RECORD_LEN * index;
-        payload[at + 2] = id;
+        payload[at + 2] = record.id;
         // Nothing here says whether the zone loops: a zone record is byte-identical
         // either way, and the loop lives in the stroke's own word directory.
-        payload[at + 3] = 0x10;
-        payload[at + 9] = top_note;
+        payload[at + 3..at + 6].copy_from_slice(&record.gain.to_be_bytes()[1..]);
+        payload[at + 9] = record.top_note;
         payload[at + 11] = 0x01;
     }
     Section {
@@ -1228,6 +1236,11 @@ pub struct NewZone<'a> {
     pub global_id: u32,
     /// The zone's sustain loop, which truncates its audio at [`Loop::end`].
     pub loops: Option<Loop>,
+    /// Playback gain with [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits —
+    /// [`zone::GAIN_UNITY`](super::zone::GAIN_UNITY) is 1.0 — below `1 << 24`. Not
+    /// applied to the audio: it goes into the zone record and the stroke's statistic A,
+    /// and the instrument applies it when it plays.
+    pub gain: u32,
 }
 
 /// Build a one-zone v2 instrument from PCM at [`codec::SOURCE_RATE`], mono or stereo
@@ -1243,6 +1256,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Err
             top_note: options.resolved_top_note(),
             global_id: 1,
             loops: options.loops,
+            gain: super::zone::GAIN_UNITY,
         }],
         &options.name,
         options.predictor,
@@ -1290,6 +1304,7 @@ pub fn multi_zone(
             super::stroke::header_len(index, cat_len, map_len),
             predictor,
             zone.loops,
+            zone.gain,
         )?;
         body_at += section::HEADER_LEN + payload.len();
         sections.push(Section {
@@ -1312,9 +1327,15 @@ pub fn multi_zone(
     })
 }
 
-/// Validate the zone list and reduce it to the `(stroke id, top note)` pairs the
-/// `map` section stores.
-fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<(u8, u8)>, Error> {
+/// What the `map` section stores per zone.
+struct ZoneRecord {
+    id: u8,
+    top_note: u8,
+    gain: u32,
+}
+
+/// Validate the zone list and reduce it to the records the `map` section stores.
+fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
     if zones.is_empty() || zones.len() > MAX_ZONES {
         return Err(ParseError::OutOfBounds {
             value: format!("{} zones", zones.len()),
@@ -1333,8 +1354,19 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<(u8, u8)>, Error> {
             }
             .into());
         }
+        if zone.gain >> 24 != 0 {
+            return Err(ParseError::OutOfBounds {
+                value: format!(
+                    "zone {index} gain {}/{}",
+                    zone.gain,
+                    super::zone::GAIN_UNITY
+                ),
+                bound: "below 16.0, the most a zone record's 24-bit gain holds".into(),
+            }
+            .into());
+        }
         let id = zone.global_id as u8;
-        if table.iter().any(|&(seen, _)| seen == id) {
+        if table.iter().any(|seen: &ZoneRecord| seen.id == id) {
             return Err(ParseError::AssertFail(format!(
                 "two zones claim stroke id {id}, and a zone record names its stroke by id"
             ))
@@ -1349,7 +1381,11 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<(u8, u8)>, Error> {
             ))
             .into());
         }
-        table.push((id, zone.top_note));
+        table.push(ZoneRecord {
+            id,
+            top_note: zone.top_note,
+            gain: zone.gain,
+        });
     }
     Ok(table)
 }
@@ -1368,6 +1404,7 @@ fn midi_note(name: &str, note: u8) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::super::codec;
+    use super::super::zone::GAIN_UNITY;
     use super::*;
 
     /// 44100 Hz mono, one second, at `hz` and `amplitude`.
@@ -1456,7 +1493,18 @@ mod tests {
         let source = vec![0i16; MIN_FRAMES];
         assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
         assert!(instrument(&source, &Options::new("Test").top_note(255)).is_err());
-        assert!(stroke(&source, 1, 128, 1, 0, 165, Predictor::Plain, None).is_err());
+        assert!(stroke(
+            &source,
+            1,
+            128,
+            1,
+            0,
+            165,
+            Predictor::Plain,
+            None,
+            GAIN_UNITY
+        )
+        .is_err());
     }
 
     /// Encoded audio begins where the preamble law puts it: a stroke payload is its
@@ -1730,7 +1778,7 @@ mod tests {
     fn statistic_a_round_trips_the_shift() {
         for peak in [0u32, 1, 2, 255, 4095, 4096, 8191, 8192] {
             for shift in 0..6 {
-                let (mantissa, exponent) = statistic_a(peak, shift);
+                let (mantissa, exponent) = statistic_a(peak, shift, GAIN_UNITY);
                 let mut stroke = vec![0u8; HEADER_LEN];
                 stroke[12] = exponent;
                 stroke[13..16].copy_from_slice(&peak.to_be_bytes()[1..]);
@@ -1777,7 +1825,48 @@ mod tests {
             top_note,
             global_id,
             loops: None,
+            gain: GAIN_UNITY,
         }
+    }
+
+    /// The gain multiplies a 24-bit reciprocal, not the 20-bit mantissa and not the
+    /// exact value: the truncated mantissa would give 1 200 836 on the fourth line,
+    /// the exact reciprocal 8 180 402 and 4 645 577 on the last two.
+    #[test]
+    fn statistic_a_scales_a_24_bit_reciprocal_by_the_gain() {
+        assert_eq!(statistic_a(4096, 2, GAIN_UNITY), (524_288, 12));
+        assert_eq!(statistic_a(4096, 2, GAIN_UNITY / 2), (262_144, 12));
+        assert_eq!(statistic_a(4096, 2, 2 * GAIN_UNITY), (1_048_576, 12));
+        assert_eq!(statistic_a(1225, 0, 1_436_549), (1_200_837, 11));
+        assert_eq!(statistic_a(4195, 2, 8_378_122), (8_180_401, 11));
+        assert_eq!(statistic_a(1225, 0, 5_557_453), (4_645_576, 11));
+    }
+
+    /// A zone's gain scales the mantissa and moves nothing else in the stroke; the
+    /// record carries the same value, and one past the record's range is refused.
+    #[test]
+    fn a_zone_gain_scales_statistic_a_and_touches_nothing_else() {
+        let source = sine(440.0, 12_000.0, 20_000);
+        let unity = multi_zone(&[zone(&source, 60, 127, 1)], "Gain", Predictor::Plain).unwrap();
+        let half = NewZone {
+            gain: GAIN_UNITY / 2,
+            ..zone(&source, 60, 127, 1)
+        };
+        let halved = multi_zone(&[half], "Gain", Predictor::Plain).unwrap();
+        let (_, a) = unity.stroke_streams()[0];
+        let (_, b) = halved.stroke_streams()[0];
+        assert_eq!(a[..9], b[..9]);
+        assert_eq!(a[12..], b[12..]);
+        let mantissa = |s: &[u8]| u32::from_be_bytes([0, s[9], s[10], s[11]]);
+        assert_eq!(mantissa(b), mantissa(a) / 2);
+        assert_eq!(unity.zones().unwrap()[0].gain, GAIN_UNITY);
+        assert_eq!(halved.zones().unwrap()[0].gain, GAIN_UNITY / 2);
+
+        let over = NewZone {
+            gain: 1 << 24,
+            ..zone(&source, 60, 127, 1)
+        };
+        assert!(multi_zone(&[over], "Gain", Predictor::Plain).is_err());
     }
 
     #[test]
