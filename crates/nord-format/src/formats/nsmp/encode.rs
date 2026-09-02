@@ -5,7 +5,8 @@
 //! laws and record grammar are the format's, and whose audio is the source on the
 //! field lattice quantised the way the instrument's encoder quantises. What it is
 //! **not** is byte-identical to what Nord Sample Editor would produce for the same
-//! input: the resampling [`kernel`](super::kernel) is an approximation, the rule the
+//! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
+//! `1e-8` per tap, which leaves a field in a few thousand one count off, the rule the
 //! editor uses to pick a quantiser shift is not known, and the encoder's own choice
 //! of predictor order per record is reproduced only under [`Predictor::Minimising`].
 //!
@@ -114,8 +115,9 @@ const MAX_ZONES: usize = u8::MAX as usize;
 /// not an id the editor issues.
 const MAX_STROKE_ID: u32 = u8::MAX as u32;
 
-/// Source samples the kernel is allowed to ring out past the end of the input.
-const RING_OUT: usize = 160;
+/// Fields an unlooped stroke carries past the end of its source, every one of which
+/// stores zero: the kernel's ring past the last sample is cut, not coded.
+const RING_OUT: usize = 127;
 
 /// Where this puts the resync, as a ratio of the frame count.
 ///
@@ -346,9 +348,8 @@ impl Plan {
     /// The layout for `frames` source frames of `channels`-channel audio, no loop.
     pub fn new(frames: usize, channels: usize) -> Result<Plan, Error> {
         Plan::modelled(frames, channels)?;
-        let fields = frames
-            .checked_add(RING_OUT)
-            .and_then(fields_of)
+        let fields = fields_of(frames)
+            .and_then(|f| f.checked_add(RING_OUT))
             .and_then(|f| f.checked_mul(channels))
             .ok_or_else(|| size_error(frames))?;
         Plan::lay_out(frames, channels, fields, None, fields / 2)
@@ -657,13 +658,14 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
         lane.clear();
         lane.extend(source.iter().skip(channel).step_by(channels).copied());
         let mut fields: Vec<i64> = (0..per).map(|f| kernel::field(&lane, f)).collect();
-        if let Some(points) = &plan.looped {
-            bake_loop(
+        match &plan.looped {
+            Some(points) => bake_loop(
                 &mut fields,
                 points.at / channels,
                 points.lead / channels,
                 points.crossfade / channels,
-            );
+            ),
+            None => fields[per - RING_OUT..].fill(0),
         }
         for (f, value) in fields.into_iter().enumerate() {
             raw[f * channels + channel] = value;
