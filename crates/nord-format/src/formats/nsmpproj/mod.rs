@@ -58,6 +58,36 @@ pub const HIGHEST_NOTE: u8 = 108;
 /// The id of the lowest zone; ids rise with the root key.
 pub const FIRST_ZONE_ID: u32 = 129;
 
+/// Lowest secondary start the editor keeps, in frames. Below it a stroke's
+/// `m_startSecondary` is repaired on load, see [`repaired_secondary_start`].
+/// Inferred from specimens; not confirmed on hardware.
+pub const MIN_SECONDARY_START: f64 = 92.0;
+
+/// The `m_startSecondary` a fresh project states for a stroke over `end` frames.
+///
+/// The editor's own value is an attack analysis within a percent of this on every
+/// specimen; this is what [`Project::new`] writes, and the editor keeps it.
+pub fn default_secondary_start(end: f64) -> f64 {
+    end / 8.0
+}
+
+/// The secondary start the editor encodes from, given what the project states.
+///
+/// On load the editor keeps `stated` when it lies between [`MIN_SECONDARY_START`] and
+/// a ceiling — half of `stop`, or the loop start when that is lower and the loop is
+/// switched on — and otherwise replaces it with half the ceiling, floored at
+/// [`MIN_SECONDARY_START`]. A 441-frame stroke stating 1 encodes from 110.25.
+/// Every position is in the file's frames.
+/// Inferred from specimens; not confirmed on hardware.
+pub fn repaired_secondary_start(stated: f64, stop: f64, loop_start: Option<f64>) -> f64 {
+    let ceiling = loop_start.map_or(stop / 2.0, |start| start.min(stop / 2.0));
+    if (MIN_SECONDARY_START..=ceiling).contains(&stated) {
+        stated
+    } else {
+        (ceiling / 2.0).max(MIN_SECONDARY_START)
+    }
+}
+
 /// One saved project. Reads and writes byte-exactly; the views decode the
 /// tree on demand and the setters edit it in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +118,10 @@ pub struct Stroke {
     pub begin: f64,
     pub end: f64,
     pub start: f64,
+    /// `m_startSecondary`: the attack analysis the editor stores, in file frames. The
+    /// encoded stream resynchronises here, measured from [`start`](Stroke::start) —
+    /// after the repair in [`encoded_secondary_start`](Stroke::encoded_secondary_start).
+    pub start_secondary: f64,
     pub stop: f64,
     pub loop_enabled: bool,
     pub loop_start: f64,
@@ -118,6 +152,18 @@ pub struct Stroke {
     pub short_loop_crossfade: u32,
     /// `m_shortLoopUsesPitch`. Reaches the instrument nowhere.
     pub short_loop_uses_pitch: bool,
+}
+
+impl Stroke {
+    /// The secondary start the editor encodes this stroke from, in file frames — see
+    /// [`repaired_secondary_start`].
+    pub fn encoded_secondary_start(&self) -> f64 {
+        repaired_secondary_start(
+            self.start_secondary,
+            self.stop,
+            self.loop_enabled.then_some(self.loop_start),
+        )
+    }
 }
 
 /// One `map_zone`: a root key, the key range it answers to, and its strokes.
@@ -417,6 +463,7 @@ impl Project {
                     begin: s.get("m_begin")?,
                     end: s.get("m_end")?,
                     start: s.get("m_start")?,
+                    start_secondary: s.get("m_startSecondary")?,
                     stop: s.get("m_stop")?,
                     loop_enabled: flag(s, "m_loopEnabled")?,
                     loop_start: s.get("m_loopStart")?,
@@ -799,7 +846,7 @@ fn common_stroke(global_id: u32, frames: u64, date: &str) -> Node {
     s.push_field("m_begin", real(0.0));
     s.push_field("m_end", real(end));
     s.push_field("m_start", real(start));
-    s.push_field("m_startSecondary", real(end / 8.0));
+    s.push_field("m_startSecondary", real(default_secondary_start(end)));
     s.push_field("m_stop", real(end));
     s.push_field("m_loopEnabled", "0");
     s.push_field("m_shortLoopEnabled", "0");
@@ -1017,6 +1064,7 @@ mod tests {
         );
         assert_eq!(strokes[0].end, 4394.0);
         assert_eq!(strokes[0].loop_start, 2197.0);
+        assert_eq!(strokes[0].start_secondary, 549.25);
         assert_eq!(strokes[0].loop_length, 2196.0);
         assert!(!strokes[0].loop_enabled);
     }
@@ -1061,6 +1109,31 @@ mod tests {
         assert!(project.set_root_key(200, 60).is_err());
         assert!(project.set_audio_path(9, "x").is_err());
         assert!(project.set_key_range(131, 70, 60).is_err());
+    }
+
+    #[test]
+    fn the_editor_keeps_a_secondary_start_between_92_and_the_ceiling() {
+        assert_eq!(repaired_secondary_start(5_512.5, 44_100.0, None), 5_512.5);
+        assert_eq!(repaired_secondary_start(92.0, 44_100.0, None), 92.0);
+        assert_eq!(repaired_secondary_start(22_050.0, 44_100.0, None), 22_050.0);
+        assert_eq!(
+            repaired_secondary_start(5_512.5, 44_100.0, Some(8_000.0)),
+            5_512.5
+        );
+    }
+
+    #[test]
+    fn the_editor_repairs_a_secondary_start_to_half_the_ceiling() {
+        // D5: a 441-frame zone stating 1 encodes from 110.25.
+        assert_eq!(repaired_secondary_start(1.0, 441.0, None), 110.25);
+        assert_eq!(repaired_secondary_start(91.0, 44_100.0, None), 11_025.0);
+        assert_eq!(repaired_secondary_start(22_051.0, 44_100.0, None), 11_025.0);
+        assert_eq!(
+            repaired_secondary_start(5_512.5, 44_100.0, Some(1_000.0)),
+            500.0
+        );
+        assert_eq!(repaired_secondary_start(200.0, 300.0, None), 92.0);
+        assert_eq!(repaired_secondary_start(f64::NAN, 44_100.0, None), 11_025.0);
     }
 
     fn stroke(project: &Project, global_id: u32) -> Stroke {
