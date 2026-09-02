@@ -739,31 +739,41 @@ fn projects() -> impl Iterator<Item = (&'static Specimen, &'static nsmpproj::Pro
 #[test]
 fn nsmpproj_stroke_fields_move_alone() {
     use nsmpproj::StrokeField as F;
-    let fields = [
-        ("start", F::Start(3.0)),
-        ("stop", F::Stop(4000.0)),
-        ("gain", F::Gain(0.75)),
-        ("velocity_min", F::VelocityMin(10)),
-        ("velocity_max", F::VelocityMax(100)),
-        ("loop_enabled", F::LoopEnabled(true)),
-        ("loop_start", F::LoopStart(1234.5)),
-        ("loop_length", F::LoopLength(600.0)),
-        ("loop_crossfade", F::LoopCrossfade(90.0)),
-        ("loop_crossfade_mode", F::LoopCrossfadeMode(1)),
-        ("loop_decay_enabled", F::LoopDecayEnabled(true)),
-        ("loop_decay", F::LoopDecay(3.25)),
-        ("loop_detune", F::LoopDetune(-12)),
-        ("short_loop_enabled", F::ShortLoopEnabled(true)),
-        ("short_loop_length", F::ShortLoopLength(64.0)),
-        ("short_loop_crossfade", F::ShortLoopCrossfade(5)),
-        ("short_loop_uses_pitch", F::ShortLoopUsesPitch(false)),
-    ];
 
     let mut seen = 0;
     for (specimen, project) in projects() {
         let at = specimen.path.display();
         let before = project.render();
         for stroke in project.strokes().unwrap() {
+            // A probe has to differ from what the stroke holds, or nothing moves.
+            let fields = [
+                ("start", F::Start(3.0)),
+                ("stop", F::Stop(4000.0)),
+                ("gain", F::Gain(0.75)),
+                ("velocity_min", F::VelocityMin(10)),
+                ("velocity_max", F::VelocityMax(100)),
+                ("loop_enabled", F::LoopEnabled(!stroke.loop_enabled)),
+                ("loop_start", F::LoopStart(1234.5)),
+                ("loop_length", F::LoopLength(600.0)),
+                ("loop_crossfade", F::LoopCrossfade(90.0)),
+                ("loop_crossfade_mode", F::LoopCrossfadeMode(1)),
+                (
+                    "loop_decay_enabled",
+                    F::LoopDecayEnabled(!stroke.loop_decay_enabled),
+                ),
+                ("loop_decay", F::LoopDecay(3.25)),
+                ("loop_detune", F::LoopDetune(-12)),
+                (
+                    "short_loop_enabled",
+                    F::ShortLoopEnabled(!stroke.short_loop_enabled),
+                ),
+                ("short_loop_length", F::ShortLoopLength(64.0)),
+                ("short_loop_crossfade", F::ShortLoopCrossfade(5)),
+                (
+                    "short_loop_uses_pitch",
+                    F::ShortLoopUsesPitch(!stroke.short_loop_uses_pitch),
+                ),
+            ];
             for (name, field) in fields {
                 let mut edited = project.clone();
                 edited.set_stroke_field(stroke.global_id, field).unwrap();
@@ -998,4 +1008,89 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
             );
         }
     }
+}
+
+fn v2_map_payload(sample: &nord_format::cbin::Cbin<nsmp::Sample>) -> Vec<u8> {
+    sample
+        .body
+        .sections
+        .iter()
+        .find(|s| s.is(nsmp::section::MAP))
+        .expect("a v2 instrument has a map section")
+        .payload
+        .clone()
+}
+
+#[test]
+fn v2_keyboard_maps_round_trip_byte_exactly() {
+    let mut seen = 0;
+    for (specimen, sample) in v2_samples() {
+        if sample.header.version < nsmp::LIBRARY_2_VERSION {
+            continue;
+        }
+        let payload = v2_map_payload(sample);
+        let table = sample
+            .key_table()
+            .unwrap_or_else(|e| panic!("{}: {e}", specimen.path.display()));
+        let mut copy = payload.clone();
+        table.write(&mut copy).unwrap();
+        assert_eq!(copy, payload, "{}", specimen.path.display());
+        seen += 1;
+    }
+    assert!(seen > 0, "no Sample Library 2.0 instrument in the corpus");
+}
+
+#[test]
+fn keyboard_map_records_read_as_the_editor_wrote_them() {
+    use nsmp::keymap::{Level, GAIN_UNITY};
+    let key = |name: &str, note: u8| v2_named(name).key_table().unwrap().key(note);
+    let instrument = |name: &str| v2_named(name).key_table().unwrap().instrument;
+
+    assert_eq!(
+        v2_named("MN-00base.nsmp").key_table().unwrap(),
+        nsmp::KeyTable::NEUTRAL
+    );
+    assert_eq!(
+        key("MN-05ng60h.nsmp", 60),
+        Level::new(GAIN_UNITY / 2, 0).unwrap()
+    );
+    assert_eq!(key("MN-06ng17h.nsmp", 17).gain, GAIN_UNITY / 2);
+    assert_eq!(key("MN-07ng108h.nsmp", 108).gain, GAIN_UNITY / 2);
+    assert_eq!(key("MN-01nd60p8.nsmp", 60).detune, 20);
+    assert_eq!(key("MN-02nd60m8.nsmp", 60).detune, -20);
+    assert_eq!(key("MN-03nd17p1.nsmp", 17).detune, 2);
+    assert_eq!(key("MN-04nd108p1.nsmp", 108).detune, 2);
+    // The editor's +9 dB ceiling and -9 dB floor on a key's gain.
+    assert_eq!(key("MN-08ng60x4.nsmp", 60).gain, 0x2d_1819);
+    assert_eq!(key("MN-09ng60tny.nsmp", 60).gain, 0x05_ad51);
+    assert_eq!(instrument("MN-13mgn4.nsmp").gain, 0x2d_1819);
+    assert_eq!(instrument("MN-14mgn001.nsmp").gain, 0x419);
+    assert_eq!(instrument("MN-15mdt100.nsmp").detune, 256);
+    assert_eq!(instrument("MN-16mdtm100.nsmp").detune, -256);
+    assert_eq!(instrument("MN-17mdt1200.nsmp").detune, 3072);
+
+    let macro3 = v2_named("MN-10mac3h.nsmp").key_table().unwrap();
+    assert_eq!(
+        macro3.adjusted().collect::<Vec<_>>(),
+        (49..=71).collect::<Vec<_>>()
+    );
+    assert_eq!(macro3.key(60).gain, GAIN_UNITY / 2);
+}
+
+#[test]
+fn setting_the_keyboard_map_touches_only_the_keyboard_map() {
+    use nsmp::keymap::Level;
+    let mut edited = v2_named("MN-05ng60h.nsmp");
+    let strokes_before = edited.stroke_streams().len();
+    let mut table = edited.key_table().unwrap();
+    table.set_key(60, Level::NEUTRAL);
+    edited.set_key_table(&table).unwrap();
+    assert_eq!(
+        v2_map_payload(&edited),
+        v2_map_payload(&v2_named("MN-00base.nsmp"))
+    );
+    assert_eq!(edited.stroke_streams().len(), strokes_before);
+    let bytes = edited.to_bytes().unwrap();
+    let reread = nsmp::from_bytes(&bytes).unwrap();
+    assert_eq!(reread.key_table().unwrap(), nsmp::KeyTable::NEUTRAL);
 }

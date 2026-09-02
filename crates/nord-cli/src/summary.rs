@@ -583,6 +583,27 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
             ),
         ));
     }
+    match s.key_table() {
+        Ok(table) => {
+            let level = table.instrument;
+            ui.out(field(
+                ui,
+                4,
+                "keyboard",
+                format!(
+                    "{} {:.3} ({:+.1} dB)  {} {:+.2} st  {} {}",
+                    ui.dim("gain"),
+                    level.ratio(),
+                    20.0 * level.ratio().log10(),
+                    ui.dim("detune"),
+                    level.semitones(),
+                    ui.dim("keys adjusted"),
+                    table.adjusted().count(),
+                ),
+            ));
+        }
+        Err(e) => ui.warn(format!("keyboard map unreadable: {e}")),
+    }
     // Do not present a partial packet count as a complete measurement.
     let counted: usize = strokes.iter().filter_map(|s| s.packets).sum();
     let unknown = strokes.iter().filter(|s| s.packets.is_none()).count();

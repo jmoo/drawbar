@@ -1164,7 +1164,11 @@ fn cat() -> Section {
         payload.push(label.len() as u8);
         payload.extend_from_slice(label);
     }
-    payload.push(0);
+    // Every section payload is a whole number of 24-bit words; the labels are
+    // padded out to one.
+    while !payload.len().is_multiple_of(3) {
+        payload.push(0);
+    }
     Section {
         tag: *section::CAT,
         version: CAT_VERSION,
@@ -1172,15 +1176,13 @@ fn cat() -> Section {
     }
 }
 
-/// Build the unexplained fixed keyboard map and zone table.
+/// Build a neutral keyboard map — unity gain and no detune at every key —
+/// and the zone table behind it.
 ///
 /// `zones` is `(stroke id, top note)` per zone, already high to low.
 fn map(zones: &[(u8, u8)]) -> Section {
     let mut payload = vec![0u8; super::zone::RECORDS_AT + super::zone::RECORD_LEN * zones.len()];
-    payload[0] = 0x10;
-    for note in 0..128 {
-        payload[15 + 6 * note] = 0x10;
-    }
+    payload[..super::zone::COUNT_AT].copy_from_slice(&super::keymap::KeyTable::NEUTRAL.prefix());
     payload[super::zone::COUNT_AT] = zones.len() as u8;
     // Zones are stored high to low by top note.
     for (index, &(id, top_note)) in zones.iter().enumerate() {

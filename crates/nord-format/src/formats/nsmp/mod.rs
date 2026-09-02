@@ -31,10 +31,12 @@ pub struct ZoneAudio<'a> {
 pub mod codec;
 pub mod encode;
 pub mod kernel;
+pub mod keymap;
 pub mod section;
 pub mod stroke;
 pub mod zone;
 
+pub use keymap::{KeyTable, Level};
 pub use section::Section;
 pub use stroke::Stroke;
 pub use zone::Zone;
@@ -498,6 +500,22 @@ impl Cbin<Sample> {
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
         zone::set_top_note(&mut map.payload, index, note)?;
+        Ok(())
+    }
+
+    /// The keyboard map: the instrument's gain and detune, and one record per
+    /// MIDI note.
+    pub fn key_table(&self) -> Result<KeyTable, Error> {
+        self.require_known_layout()?;
+        Ok(KeyTable::read(&self.map()?.payload)?)
+    }
+
+    /// Replaces the keyboard map. The zone table and the strokes are untouched.
+    pub fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
+        self.require_known_layout()?;
+        let map = section::find_mut(&mut self.body.sections, section::MAP)
+            .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
+        table.write(&mut map.payload)?;
         Ok(())
     }
 
