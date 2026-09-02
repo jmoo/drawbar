@@ -553,8 +553,15 @@ struct ProjectZone {
     /// Interleaved, so `samples.len()` is `channels` times the frame count.
     samples: Vec<i16>,
     channels: u16,
+    /// The file frame `samples` starts at — the project's `m_start`.
+    start: usize,
     source: PathBuf,
     loops: Option<encode::Loop>,
+    /// Where the stream resynchronises, in frames from the start of `samples`.
+    secondary_start: f64,
+    /// The project's `m_startSecondary` when the editor would not keep it, so a build
+    /// says where it encoded from instead.
+    repaired_secondary_start: Option<f64>,
     /// The zone record's fixed-point gain.
     gain: u32,
     /// Loop settings the project carries that the instrument has no field for, named
@@ -607,6 +614,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             top_note: z.top_note,
             global_id: z.global_id,
             loops: z.loops,
+            secondary_start: z.secondary_start,
             gain: z.gain,
         })
         .collect();
@@ -643,6 +651,14 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
                 index + 1,
                 zone.dropped.join(", ")
             ));
+        }
+        if let Some(stated) = zone.repaired_secondary_start {
+            ui.note(ui.dim(format!(
+                "zone{} states m_startSecondary = {stated}, which the editor repairs on \
+                 load; encoded from frame {} as the editor would",
+                index + 1,
+                zone.secondary_start + zone.start as f64,
+            )));
         }
     }
 
@@ -730,6 +746,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
             if loops.is_some() && instrument_decay {
                 dropped.push("the instrument's own m_loopDecayEnabled".into());
             }
+            let encoded_secondary = stroke.encoded_secondary_start();
             Ok(ProjectZone {
                 global_id: layer.global_id,
                 root_key: zone.root_key,
@@ -738,6 +755,10 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 samples: source.samples[start * channels..stop * channels].to_vec(),
                 source: path,
                 loops,
+                start,
+                secondary_start: encoded_secondary - start as f64,
+                repaired_secondary_start: (encoded_secondary != stroke.start_secondary)
+                    .then_some(stroke.start_secondary),
                 gain,
                 dropped,
             })
@@ -1401,6 +1422,7 @@ mod tests {
             begin: 0.0,
             end: 88_200.0,
             start: 0.0,
+            start_secondary: 11_025.0,
             stop: 88_200.0,
             loop_enabled: false,
             short_loop_enabled: false,

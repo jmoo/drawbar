@@ -830,7 +830,7 @@ fn project_named(name: &str) -> &'static nsmpproj::Project {
 /// The editor's own WAVs are not corpus material, so the audio is generated. Only the
 /// frame count reaches anything asserted below: a stroke's field count comes from its
 /// length, and every other field compared is metadata.
-fn built_zones(project: &nsmpproj::Project) -> Vec<(u32, u8, u8, Vec<i16>)> {
+fn built_zones(project: &nsmpproj::Project) -> Vec<BuiltZone> {
     let strokes = project.strokes().unwrap();
     project
         .zones()
@@ -844,9 +844,38 @@ fn built_zones(project: &nsmpproj::Project) -> Vec<(u32, u8, u8, Vec<i16>)> {
                 .unwrap_or_else(|| panic!("no stroke {}", layer.global_id));
             let frames = (stroke.stop - stroke.start) as usize;
             let audio = (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect();
-            (layer.global_id, zone.root_key, zone.top_note, audio)
+            BuiltZone {
+                global_id: layer.global_id,
+                root_key: zone.root_key,
+                top_note: zone.top_note,
+                audio,
+                secondary_start: stroke.encoded_secondary_start() - stroke.start,
+            }
         })
         .collect()
+}
+
+struct BuiltZone {
+    global_id: u32,
+    root_key: u8,
+    top_note: u8,
+    audio: Vec<i16>,
+    secondary_start: f64,
+}
+
+impl BuiltZone {
+    fn new_zone(&self) -> nsmp::encode::NewZone<'_> {
+        nsmp::encode::NewZone {
+            source: &self.audio,
+            channels: 1,
+            root_key: self.root_key,
+            top_note: self.top_note,
+            global_id: self.global_id,
+            loops: None,
+            secondary_start: self.secondary_start,
+            gain: nsmp::zone::GAIN_UNITY,
+        }
+    }
 }
 
 #[test]
@@ -856,20 +885,7 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
         let built = nsmp::encode::multi_zone(
-            &zones
-                .iter()
-                .map(
-                    |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
-                        source: audio,
-                        channels: 1,
-                        root_key: *root_key,
-                        top_note: *top_note,
-                        global_id: *global_id,
-                        loops: None,
-                        gain: nsmp::zone::GAIN_UNITY,
-                    },
-                )
-                .collect::<Vec<_>>(),
+            &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
             nsmp::encode::Predictor::Minimising,
         )
@@ -934,14 +950,16 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     for name in ["D1-one-zone", "D3-2zones", "D4-3zones", "D8-2zones-hi"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let twin = v2_named(&format!("{name}.nsmp"));
-        for (index, (_, _, _, audio)) in built_zones(project).iter().enumerate() {
+        for (index, zone) in built_zones(project).iter().enumerate() {
             let (at, stream) = twin.zone_stream(index).unwrap();
             let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2).unwrap();
             assert_eq!(
-                nsmp::encode::Plan::new(audio.len(), 1).unwrap().fields,
+                nsmp::encode::Plan::new(zone.audio.len(), 1, zone.secondary_start)
+                    .unwrap()
+                    .fields,
                 editor.samples.len(),
                 "{name} zone {index}: {} frames",
-                audio.len()
+                zone.audio.len()
             );
         }
     }
@@ -993,20 +1011,7 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
         let built = nsmp::encode::multi_zone(
-            &zones
-                .iter()
-                .map(
-                    |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
-                        source: audio,
-                        channels: 1,
-                        root_key: *root_key,
-                        top_note: *top_note,
-                        global_id: *global_id,
-                        loops: None,
-                        gain: nsmp::zone::GAIN_UNITY,
-                    },
-                )
-                .collect::<Vec<_>>(),
+            &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
             nsmp::encode::Predictor::Minimising,
         )

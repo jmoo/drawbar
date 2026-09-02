@@ -295,9 +295,12 @@ fn non_overridden_zones_match_the_editors_default_layout() {
 #[test]
 fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     let expected = &named("T-sil.nsmp").bytes;
+    // The specimen's project: m_start 0, m_startSecondary 5521.281862.
     let actual = nsmp::encode::instrument(
         &vec![0i16; 44_100],
-        &nsmp::encode::Options::new("T-sil").root_key(60),
+        &nsmp::encode::Options::new("T-sil")
+            .root_key(60)
+            .secondary_start(5_521.281862),
     )
     .unwrap()
     .to_bytes()
@@ -310,11 +313,25 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     assert_eq!(differing, [0x18, 0x19, 0x1a, 0x1b, 0x410, 0x47d, 0x47e]);
 }
 
+/// The SL2 stereo silences: frames, and the `m_startSecondary` each specimen's project
+/// states from `m_start = 0`.
+const SL2: [(usize, f64); 8] = [
+    (4_096, 512.815658),
+    (6_000, 751.194811),
+    (10_000, 1_251.991352),
+    (16_384, 2_051.262631),
+    (25_000, 3_129.978380),
+    (32_768, 4_102.525262),
+    (60_000, 7_511.948111),
+    (90_000, 11_267.922167),
+];
+
+/// `m_startSecondary` from `m_start = 1` in the `C-44k-16-*` projects.
+const C_44K_SECONDARY: f64 = 552.128186 - 1.0;
+
 #[test]
 fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
-    for frames in [
-        4_096usize, 6_000, 10_000, 16_384, 25_000, 32_768, 60_000, 90_000,
-    ] {
+    for (frames, secondary) in SL2 {
         let name = format!("SL2-n{frames:06}.nsmp");
         let sample = v2_named(&name);
         let (at, stroke) = sample.stroke_streams()[0];
@@ -322,7 +339,7 @@ fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
         assert_eq!(stream.channels, 2, "{name}");
         assert_eq!(stream.cell, Some(48), "{name}");
 
-        let plan = nsmp::encode::Plan::new(frames, 2).unwrap();
+        let plan = nsmp::encode::Plan::new(frames, 2, secondary).unwrap();
         assert_eq!(stream.fields, plan.fields, "{name}: fields");
 
         let warmup = stream
@@ -442,8 +459,8 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
         }
     }
 
-    let mono = nsmp::encode::Plan::new(4_409, 1).unwrap();
-    let both = nsmp::encode::Plan::new(4_409, 2).unwrap();
+    let mono = nsmp::encode::Plan::new(4_409, 1, C_44K_SECONDARY).unwrap();
+    let both = nsmp::encode::Plan::new(4_409, 2, C_44K_SECONDARY).unwrap();
     assert_eq!(both.fields, 2 * mono.fields);
     assert_eq!(both.fields, landmarks("C-44k-16-stL.nsmp").2[0]);
     assert_eq!(both.resync_at, 2 * mono.resync_at);
@@ -451,8 +468,12 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
 
 #[test]
 fn count_laws_reproduce_editor_landmarks() {
-    for (name, frames) in [("T-sil.nsmp", 44_100usize), ("A-impulse-C4.nsmp", 4_410)] {
-        let plan = nsmp::encode::Plan::new(frames, 1).unwrap();
+    // Each specimen's project states its m_startSecondary from m_start = 0.
+    for (name, frames, secondary) in [
+        ("T-sil.nsmp", 44_100usize, 5_521.281862),
+        ("A-impulse-C4.nsmp", 4_410, 552.128186),
+    ] {
+        let plan = nsmp::encode::Plan::new(frames, 1, secondary).unwrap();
         let sample = v2_named(name);
         let (stroke_at, stroke) = sample.stroke_streams()[0];
         let stream = nsmp::codec::walk(stroke, stroke_at, nsmp::codec::Layout::V2).unwrap();
@@ -485,14 +506,15 @@ fn count_laws_reproduce_editor_landmarks() {
 
 #[test]
 fn a_stereo_silence_reproduces_the_editors_render_exactly() {
-    for frames in [
-        4_096usize, 6_000, 10_000, 16_384, 25_000, 32_768, 60_000, 90_000,
-    ] {
+    for (frames, secondary) in SL2 {
         let name = format!("SL2-n{frames:06}");
         let expected = &named(&format!("{name}.nsmp")).bytes;
         let actual = nsmp::encode::instrument(
             &vec![0i16; frames * 2],
-            &nsmp::encode::Options::new(&name).root_key(60).channels(2),
+            &nsmp::encode::Options::new(&name)
+                .root_key(60)
+                .channels(2)
+                .secondary_start(secondary),
         )
         .unwrap()
         .to_bytes()
