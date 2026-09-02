@@ -179,6 +179,10 @@ pub struct EncodeArgs {
     #[arg(long)]
     pub predict: bool,
 
+    /// Quantise every stroke at this shift instead of the rule's. Experimental.
+    #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
+    pub shift: Option<u8>,
+
     /// Acknowledge that this is not a vendor-identical encode. Required.
     #[arg(long)]
     pub experimental: bool,
@@ -202,6 +206,10 @@ pub struct BuildArgs {
     /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
     #[arg(long)]
     pub predict: bool,
+
+    /// Quantise every stroke at this shift instead of the rule's. Experimental.
+    #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
+    pub shift: Option<u8>,
 
     /// Acknowledge that this is not a vendor-identical encode. Required.
     #[arg(long)]
@@ -527,6 +535,9 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     if let Some(points) = &args.loop_points {
         options = options.loops(loop_points(points, args.loop_crossfade as f64)?);
     }
+    if let Some(bits) = args.shift {
+        options = options.shift(bits);
+    }
 
     let instrument = encode::instrument(&source.samples, &options).map_err(|e| e.to_string())?;
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
@@ -615,6 +626,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             global_id: z.global_id,
             loops: z.loops,
             secondary_start: z.secondary_start,
+            shift: args.shift,
             gain: z.gain,
         })
         .collect();

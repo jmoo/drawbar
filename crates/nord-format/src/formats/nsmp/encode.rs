@@ -96,18 +96,11 @@ const CHUNK: usize = 32;
 /// stereo stroke this is the whole of the shift rule.
 const PEAK_WIDTH: u8 = 14;
 
-/// Width a mono stroke's peak is shifted to instead. The editor decides a mono stroke's
-/// further bit by a rule this crate does not know; the tighter cap stands in for it.
+/// Width a mono stroke's peak is shifted down to when that shrinks the stroke's packet
+/// allocation. The editor spends this further bit on mono strokes only and never when
+/// both shifts allocate the same packets; it also refuses it on some strokes this rule
+/// takes, by a condition this crate does not know.
 const MONO_WIDTH: u8 = 13;
-
-/// The width the quantiser shifts a stroke's peak to.
-const fn peak_width(channels: usize) -> u8 {
-    if channels == 1 {
-        MONO_WIDTH
-    } else {
-        PEAK_WIDTH
-    }
-}
 
 /// Widest field a record header can declare, from its four-bit width. Padding stores
 /// values wider than they need, which sign-extend back to themselves.
@@ -225,6 +218,7 @@ pub struct Options {
     loops: Option<Loop>,
     channels: u16,
     secondary_start: Option<f64>,
+    shift: Option<u8>,
 }
 
 impl Options {
@@ -239,6 +233,7 @@ impl Options {
             loops: None,
             channels: 1,
             secondary_start: None,
+            shift: None,
         }
     }
 
@@ -254,6 +249,14 @@ impl Options {
     /// the instrument is built.
     pub fn channels(mut self, channels: u16) -> Options {
         self.channels = channels;
+        self
+    }
+
+    /// Quantise at `bits` of shift instead of what the shift rule picks. Experimental: a
+    /// lever for laying the same stroke out at neighbouring shifts, not a setting the
+    /// editor exposes.
+    pub fn shift(mut self, bits: u8) -> Options {
+        self.shift = Some(bits);
         self
     }
 
@@ -661,6 +664,28 @@ struct Quantised {
     shift: i32,
     /// Statistic B: the content field of largest magnitude, taken at a fixed shift of 2.
     peak: u32,
+    /// Width of the widest stored value.
+    width: u8,
+}
+
+impl Quantised {
+    /// The same stroke shifted one bit further.
+    fn halved(&self) -> Quantised {
+        let values: Vec<i32> = self.values.iter().map(|v| v >> 1).collect();
+        Quantised {
+            width: extent_width(&values),
+            values,
+            shift: self.shift + 1,
+            peak: self.peak,
+        }
+    }
+}
+
+/// Width of the widest value in `values`.
+fn extent_width(values: &[i32]) -> u8 {
+    let low = values.iter().copied().min().unwrap_or(0);
+    let high = values.iter().copied().max().unwrap_or(0);
+    width_of(i64::from(low), i64::from(high))
 }
 
 /// The opening ramp: the first [`RAMP_IN`] fields of a channel rise as the cube of
@@ -700,13 +725,14 @@ fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
 }
 
 /// Resample and choose the smallest nonnegative shift that fits the stroke's peak into
-/// [`peak_width`] bits: the format's own fourteen on a stereo stroke, where the editor
-/// shifts for nothing else, and the mono stand-in otherwise.
+/// [`PEAK_WIDTH`] bits — the peak term of the shift rule, which is the whole of it on a
+/// stereo stroke. A mono stroke may go one bit further; [`stroke`] decides that on the
+/// packed stream. `forced` lays the stroke out at that shift instead.
 ///
 /// Each channel is resampled on its own lattice and the results interleaved, because
 /// that is what the stream carries; the shift and statistic B are one pair for the
 /// stroke, taken across both.
-fn quantise(source: &[i16], plan: &Plan) -> Quantised {
+fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
     let channels = plan.channels;
     let per = plan.fields / channels;
     let mut raw = vec![0i64; plan.fields];
@@ -743,10 +769,12 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
     let low = raw.iter().copied().min().unwrap_or(0);
     let high = raw.iter().copied().max().unwrap_or(0);
 
-    let width = peak_width(channels);
     let mut shift = 0i32;
-    while width_of(low >> shift, high >> shift) > width {
+    while width_of(low >> shift, high >> shift) > PEAK_WIDTH {
         shift += 1;
+    }
+    if let Some(bits) = forced {
+        shift = i32::from(bits);
     }
 
     // Statistic B is the content field of largest magnitude at a fixed shift of two —
@@ -772,6 +800,7 @@ fn quantise(source: &[i16], plan: &Plan) -> Quantised {
         values: raw.iter().map(|&v| (v >> shift) as i32).collect(),
         shift,
         peak,
+        width: width_of(low >> shift, high >> shift),
     }
 }
 
@@ -1198,6 +1227,7 @@ fn stroke(
     predictor: Predictor,
     loops: Option<Loop>,
     secondary_start: f64,
+    shift: Option<u8>,
     gain: u32,
 ) -> Result<Vec<u8>, Error> {
     midi_note("root key", root_key)?;
@@ -1212,17 +1242,47 @@ fn stroke(
         Some(points) => Plan::looped(frames, channels, points, secondary_start)?,
         None => Plan::new(frames, channels, secondary_start)?,
     };
-    let q = quantise(source, &plan);
-    let specs = records(&q.values, &plan, predictor)?;
+    let mut laid = layout(quantise(source, &plan, shift), &plan, predictor, preamble)?;
+    if channels == 1 && shift.is_none() && laid.quantised.width > MONO_WIDTH {
+        let further = layout(laid.quantised.halved(), &plan, predictor, preamble)?;
+        if further.stream.words.len() < laid.stream.words.len() {
+            laid = further;
+        }
+    }
+
+    let mut payload = stroke_header(
+        id,
+        root_key,
+        &laid.quantised,
+        &laid.stream,
+        body_at,
+        channels,
+        gain,
+    );
+    payload.extend_from_slice(&laid.stream.words);
+    Ok(payload)
+}
+
+/// A quantisation and the stream it packs into.
+struct Layout {
+    quantised: Quantised,
+    stream: Stream,
+}
+
+/// Lay one quantisation out: its records, then the packed stream.
+fn layout(
+    quantised: Quantised,
+    plan: &Plan,
+    predictor: Predictor,
+    preamble: usize,
+) -> Result<Layout, Error> {
+    let specs = records(&quantised.values, plan, predictor)?;
     let resync_record = specs
         .iter()
         .position(|s| s.first == plan.resync_at)
         .unwrap_or(0);
-    let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
-
-    let mut payload = stroke_header(id, root_key, &q, &stream, body_at, channels, gain);
-    payload.extend_from_slice(&stream.words);
-    Ok(payload)
+    let stream = pack(&specs, &quantised.values, resync_record, preamble, plan)?;
+    Ok(Layout { quantised, stream })
 }
 
 /// The `hdr` section: a fixed prefix, then the instrument name NUL-padded.
@@ -1322,6 +1382,9 @@ pub struct NewZone<'a> {
     /// frames from the first frame of [`source`](NewZone::source), after the repair
     /// the editor applies on load ([`nsmpproj::Stroke::encoded_secondary_start`]).
     pub secondary_start: f64,
+    /// Quantiser shift to lay the stroke out at instead of the rule's choice, or `None`
+    /// for the rule. Experimental — see [`Options::shift`].
+    pub shift: Option<u8>,
     /// Playback gain with [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits —
     /// [`zone::GAIN_UNITY`](super::zone::GAIN_UNITY) is 1.0 — below `1 << 24`. Not
     /// applied to the audio: it goes into the zone record and the stroke's statistic A,
@@ -1347,6 +1410,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Err
             global_id: 1,
             loops: options.loops,
             secondary_start,
+            shift: options.shift,
             gain: super::zone::GAIN_UNITY,
         }],
         &options.name,
@@ -1396,6 +1460,7 @@ pub fn multi_zone(
             predictor,
             zone.loops,
             zone.secondary_start,
+            zone.shift,
             zone.gain,
         )?;
         body_at += section::HEADER_LEN + payload.len();
@@ -1687,6 +1752,7 @@ mod tests {
             Predictor::Plain,
             None,
             default_secondary_start(source.len(), None),
+            None,
             GAIN_UNITY
         )
         .is_err());
@@ -1724,7 +1790,7 @@ mod tests {
                 let file = encoded(&source, predictor);
                 let (at, stroke) = file.stroke_streams()[0];
                 let plan = plan(source.len(), 1).unwrap();
-                let q = quantise(&source, &plan);
+                let q = as_encoded(quantise(&source, &plan, None), stroke);
 
                 let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
                 assert_eq!(audio.samples.len(), plan.fields);
@@ -1839,15 +1905,16 @@ mod tests {
         assert_eq!(record.first_field, plan(50_000, 1).unwrap().resync_at);
     }
 
-    /// The shift is stated in the header, so it reads back whatever rule chose it.
+    /// The shift is stated in the header, so it reads back whatever rule chose it: the
+    /// peak term, or one bit past it where a mono stroke spends the extra bit.
     #[test]
     fn the_header_states_the_shift_it_quantised_at() {
         for amplitude in [40.0, 900.0, 8000.0, 32_000.0] {
             let source = sine(440.0, amplitude, 20_000);
             let plan = plan(source.len(), 1).unwrap();
-            let q = quantise(&source, &plan);
             let file = encoded(&source, Predictor::Plain);
             let (_, stroke) = file.stroke_streams()[0];
+            let q = as_encoded(quantise(&source, &plan, None), stroke);
             assert_eq!(
                 codec::shift(stroke, codec::Layout::V2),
                 Some(q.shift),
@@ -1865,17 +1932,17 @@ mod tests {
     #[test]
     fn the_shift_tracks_how_loud_the_content_is() {
         let quiet = plan(20_000, 1)
-            .map(|p| quantise(&sine(440.0, 500.0, 20_000), &p).shift)
+            .map(|p| quantise(&sine(440.0, 500.0, 20_000), &p, None).shift)
             .unwrap();
         let loud = plan(20_000, 1)
-            .map(|p| quantise(&sine(440.0, 32_000.0, 20_000), &p).shift)
+            .map(|p| quantise(&sine(440.0, 32_000.0, 20_000), &p, None).shift)
             .unwrap();
         assert_eq!(quiet, 0);
         assert!(loud > quiet, "loud {loud} vs quiet {quiet}");
     }
 
     /// A stereo stroke shifts only until its peak fits [`PEAK_WIDTH`]; a mono stroke
-    /// of the same per-channel content shifts one bit further.
+    /// of the same per-channel content shifts one bit further, which saves it packets.
     #[test]
     fn a_stereo_stroke_stops_shifting_where_its_peak_fits() {
         let frames = 30_000;
@@ -1886,17 +1953,48 @@ mod tests {
             .zip(&right)
             .flat_map(|(&l, &r)| [l, r])
             .collect();
-        let mono = quantise(&left, &plan(frames, 1).unwrap());
-        let stereo = quantise(&both, &plan(frames, 2).unwrap());
-        assert_eq!(mono.shift, 2);
+        let stereo = quantise(&both, &plan(frames, 2).unwrap(), None);
         assert_eq!(stereo.shift, 1);
-        let widest = stereo
-            .values
-            .iter()
-            .map(|v| width_of(i64::from(*v), i64::from(*v)))
-            .max()
-            .unwrap();
-        assert_eq!(widest, PEAK_WIDTH);
+        assert_eq!(stereo.width, PEAK_WIDTH);
+        assert_eq!(header_shift(&left, 1), 2);
+        assert_eq!(header_shift(&both, 2), 1);
+    }
+
+    /// The mono extra bit is spent only where it shrinks the packet allocation: a loud
+    /// sine fills the same packets at either shift at one length and saves one at
+    /// another, and its length alone decides.
+    #[test]
+    fn the_mono_extra_bit_is_spent_only_where_it_saves_a_packet() {
+        assert_eq!(header_shift(&sine(261.6256, 32_000.0, 4_920), 1), 2);
+        assert_eq!(header_shift(&sine(261.6256, 32_000.0, 4_200), 1), 3);
+        assert_eq!(header_shift(&sine(440.0, 12_000.0, 44_100), 1), 2);
+    }
+
+    /// The quantisation a stroke was written from: the peak term, then the mono extra
+    /// bit where the stroke's header says it was spent.
+    fn as_encoded(mut q: Quantised, stroke: &[u8]) -> Quantised {
+        let stated = codec::shift(stroke, codec::Layout::V2).unwrap();
+        assert!(
+            (q.shift..=q.shift + 1).contains(&stated),
+            "stated {stated} from {}",
+            q.shift
+        );
+        while q.shift < stated {
+            q = q.halved();
+        }
+        q
+    }
+
+    /// The shift the stroke header of a one-zone instrument states, coded with the
+    /// minimising predictor, which is what the packet allocation the mono extra bit
+    /// weighs is measured on.
+    fn header_shift(source: &[i16], channels: u16) -> i32 {
+        let options = Options::new("Shift")
+            .channels(channels)
+            .predictor(Predictor::Minimising);
+        let file = instrument(source, &options).unwrap();
+        let (_, stroke) = file.stroke_streams()[0];
+        codec::shift(stroke, codec::Layout::V2).unwrap()
     }
 
     /// Statistic B is the extreme field's magnitude after a fixed shift of two, taken
@@ -1909,12 +2007,12 @@ mod tests {
         let mut up = vec![0i16; frames];
         up[10_000] = 13;
         let down: Vec<i16> = up.iter().map(|v| -v).collect();
-        let positive = quantise(&up, &plan(frames, 1).unwrap()).peak;
-        let negative = quantise(&down, &plan(frames, 1).unwrap()).peak;
+        let positive = quantise(&up, &plan(frames, 1).unwrap(), None).peak;
+        let negative = quantise(&down, &plan(frames, 1).unwrap(), None).peak;
         assert_eq!(positive, 2);
         assert_eq!(negative, 3);
         let opposed: Vec<i16> = up.iter().zip(&down).flat_map(|(&l, &r)| [l, r]).collect();
-        let stereo = quantise(&opposed, &plan(frames, 2).unwrap()).peak;
+        let stereo = quantise(&opposed, &plan(frames, 2).unwrap(), None).peak;
         assert_eq!(stereo, positive);
     }
 
@@ -1924,7 +2022,7 @@ mod tests {
         for predictor in [Predictor::Plain, Predictor::Minimising] {
             let source = sine(440.0, 32_000.0, 30_000);
             let plan = plan(source.len(), 1).unwrap();
-            let q = quantise(&source, &plan);
+            let q = quantise(&source, &plan, None);
             for spec in records(&q.values, &plan, predictor).unwrap() {
                 let limit = 1i64 << (spec.width - 1);
                 for k in 0..spec.count {
@@ -1935,7 +2033,7 @@ mod tests {
                     };
                     assert!((-limit..limit).contains(&v), "{spec:?} field {k} = {v}");
                 }
-                assert!(spec.width <= MONO_WIDTH || spec.order > 0);
+                assert!(spec.width <= PEAK_WIDTH || spec.order > 0);
             }
         }
     }
@@ -1946,7 +2044,7 @@ mod tests {
     fn records_tile_the_lattice_the_way_the_laws_say() {
         let source = sine(440.0, 20_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
-        let q = quantise(&source, &plan);
+        let q = quantise(&source, &plan, None);
         let specs = records(&q.values, &plan, Predictor::Plain).unwrap();
 
         let mut at = 0;
@@ -1969,7 +2067,7 @@ mod tests {
     fn the_minimising_predictor_narrows_smooth_material() {
         let source = sine(60.0, 30_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
-        let q = quantise(&source, &plan);
+        let q = quantise(&source, &plan, None);
         let plain = records(&q.values, &plan, Predictor::Plain).unwrap();
         let minimised = records(&q.values, &plan, Predictor::Minimising).unwrap();
 
@@ -2055,6 +2153,7 @@ mod tests {
             global_id,
             loops: None,
             secondary_start: default_secondary_start(source.len(), None),
+            shift: None,
             gain: GAIN_UNITY,
         }
     }
@@ -2139,7 +2238,7 @@ mod tests {
             let (at, stream) = read.zone_stream(index).unwrap();
             let audio = codec::decode(stream, at, codec::Layout::V2).unwrap();
             let plan = plan(source.len(), 1).unwrap();
-            let q = quantise(source, &plan);
+            let q = as_encoded(quantise(source, &plan, None), stream);
             let gain = 1i32 << q.shift;
             assert_eq!(audio.samples.len(), plan.fields, "zone {index}");
             for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
@@ -2336,7 +2435,7 @@ mod tests {
         let source = sine(200.0, 20_000.0, 88_200);
         let plan = looped(source.len(), 1, Loop::new(16_384, 32_768)).unwrap();
         let points = plan.looped.unwrap();
-        let values = quantise(&source, &plan).values;
+        let values = quantise(&source, &plan, None).values;
         assert_eq!(
             values[plan.fields - points.lead..],
             values[points.at - points.lead..points.at]
@@ -2402,8 +2501,8 @@ mod tests {
         let plan = looped(source.len(), 1, points).unwrap();
         let faded = looped(source.len(), 1, points.crossfade(4_096.0)).unwrap();
         let (plain, mixed) = (
-            quantise(&source, &plan).values,
-            quantise(&source, &faded).values,
+            quantise(&source, &plan, None).values,
+            quantise(&source, &faded, None).values,
         );
         assert_eq!(plain.len(), mixed.len());
 
@@ -2480,7 +2579,7 @@ mod tests {
                 .unwrap();
                 let (at, stroke) = file.stroke_streams()[0];
                 let plan = looped(source.len(), 1, points).unwrap();
-                let q = quantise(&source, &plan);
+                let q = as_encoded(quantise(&source, &plan, None), stroke);
                 let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
                 assert_eq!(audio.samples.len(), plan.fields);
                 let gain = 1i32 << q.shift;
@@ -2583,7 +2682,7 @@ mod tests {
             assert_eq!(&stroke[stroke.len() - 3..], &[0x80, 0, 48]);
 
             let plan = plan(30_000, 2).unwrap();
-            let q = quantise(&source, &plan);
+            let q = quantise(&source, &plan, None);
             let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
             assert_eq!(audio.channels, 2);
             assert_eq!(audio.samples.len(), plan.fields);
@@ -2615,7 +2714,7 @@ mod tests {
         assert!(audio.differenced > 0, "nothing chose a predictor");
 
         let plan = plan(frames, 2).unwrap();
-        let q = quantise(&source, &plan);
+        let q = quantise(&source, &plan, None);
         let gain = 1i32 << q.shift;
         for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
             assert_eq!(i32::from(got), want * gain, "field {f}");
@@ -2654,7 +2753,7 @@ mod tests {
         );
 
         let plan = looped(60_000, 2, points).unwrap();
-        let q = quantise(&source, &plan);
+        let q = quantise(&source, &plan, None);
         let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
         let gain = 1i32 << q.shift;
         for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
