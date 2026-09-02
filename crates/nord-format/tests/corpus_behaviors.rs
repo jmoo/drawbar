@@ -1137,17 +1137,19 @@ fn setting_the_keyboard_map_touches_only_the_keyboard_map() {
     assert_eq!(reread.key_table().unwrap(), nsmp::KeyTable::NEUTRAL);
 }
 
-/// The corpus's tap table is the same closed form projected into the per-tap intervals
-/// the specimens measure, which moves a few taps by up to `3.3e-8`; every other tap is
-/// the ideal to double precision.
+/// The corpus's table lists each tap as an `f32` with a class: `unique` where the
+/// specimens pin a single `f32`, `excluded` where they rule out the closed form's own
+/// rounding, `ideal` where the closed form's rounding is admissible but not proven, and
+/// `zero` outside the support. The kernel must match the first two to the bit and the
+/// third to within one ulp.
 #[test]
-fn nsmp_the_kernel_reproduces_the_corpus_tap_table() {
-    let path = scan::root().join("tools/nsmp-pitch/kaiser-taps.tsv");
+fn nsmp_the_kernel_matches_the_corpus_f32_tap_table() {
+    let path = scan::root().join("tools/nsmp-pitch/table-fl32.tsv");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let bank = nsmp::kernel::taps();
     let mut seen = 0;
-    let mut moved = 0;
-    let mut worst = 0.0f64;
+    let mut pinned = 0;
+    let mut ideal_off = 0;
     for line in text
         .lines()
         .filter(|l| !l.starts_with('#') && !l.starts_with("k\t"))
@@ -1155,20 +1157,36 @@ fn nsmp_the_kernel_reproduces_the_corpus_tap_table() {
         let mut cols = line.split('\t');
         let k: usize = cols.next().unwrap().parse().unwrap();
         let m: i64 = cols.next().unwrap().parse().unwrap();
-        let g: f64 = cols.next().unwrap().parse().unwrap();
+        let g: f32 = cols.next().unwrap().parse().unwrap();
+        let class = cols.next().unwrap();
         let ours = match usize::try_from(m + 15) {
             Ok(j) if j < nsmp::kernel::TAPS => bank[k][j],
             _ => 0.0,
         };
-        let delta = (ours - g).abs();
-        assert!(delta < 5e-8, "phase {k} m {m}: ours {ours} table {g}");
-        worst = worst.max(delta);
-        moved += usize::from(delta >= 1e-9);
+        let ulps = if ours.is_sign_negative() == g.is_sign_negative() {
+            i64::from(ours.to_bits()).abs_diff(i64::from(g.to_bits()))
+        } else {
+            u64::MAX
+        };
+        match class {
+            "unique" | "excluded" => {
+                assert_eq!(
+                    ours.to_bits(),
+                    g.to_bits(),
+                    "{class} phase {k} m {m}: ours {ours} table {g}"
+                );
+                pinned += 1;
+            }
+            "ideal" => {
+                assert!(ulps <= 1, "phase {k} m {m}: ours {ours} table {g}");
+                ideal_off += usize::from(ulps == 1);
+            }
+            "zero" => assert_eq!(ours, 0.0, "phase {k} m {m}"),
+            other => panic!("phase {k} m {m}: class {other}"),
+        }
         seen += 1;
     }
     assert_eq!(seen, 512 * 32);
-    assert!(
-        moved <= 34,
-        "{moved} taps off the closed form; worst {worst:e}"
-    );
+    assert_eq!(pinned, 100 + 88);
+    println!("{ideal_off} ideal-class taps one ulp off the table");
 }
