@@ -276,6 +276,81 @@ fn v3_samples_decode_names_and_strokes() {
     assert!(paired > 0, "no v3 zone map paired with its strokes");
 }
 
+/// The velocity window has existed since `map` v14 and nothing has ever narrowed
+/// it: a reader that ignored the field would still play every vendor instrument
+/// correctly, which is exactly why it has to be read rather than assumed.
+#[test]
+fn wide_zone_velocity_windows_are_all_full_range() {
+    let mut with_window = 0;
+    let mut without = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let Ok(zones) = sample.zones() else { continue };
+        for zone in zones {
+            match zone.velocity {
+                Some(window) => {
+                    assert_eq!(
+                        window,
+                        nsmp::zone::VelocityWindow::FULL,
+                        "{}: a zone answers only to velocities {}..={}",
+                        specimen.path.display(),
+                        window.low,
+                        window.high
+                    );
+                    with_window += 1;
+                }
+                None => without += 1,
+            }
+        }
+    }
+    assert!(with_window > 0, "no zone record carrying a velocity window");
+    assert!(without > 0, "no v12 zone record, whose layout stores none");
+}
+
+/// `sty` is a preset block whose v4 payload comes in two widths under one
+/// section version, so every specimen has to parse from its length.
+#[test]
+fn every_sample_preset_parses_under_its_own_schema() {
+    let mut v2 = 0;
+    let (mut v3, mut v4) = (0, 0);
+    for (specimen, sample) in v2_samples() {
+        let where_ = specimen.path.display();
+        let sty = sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        assert_eq!(sty.raw.len(), nsmp::sty::V2_LEN);
+        v2 += 1;
+    }
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let where_ = specimen.path.display();
+        match sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}")) {
+            nsmp::Sty::V2(_) => panic!("{where_}: a wide chain read a v2 preset"),
+            nsmp::Sty::V3(raw) => {
+                assert_eq!(raw.len(), nsmp::sty::V3_LEN);
+                v3 += 1;
+            }
+            nsmp::Sty::V4(block) => {
+                assert!(
+                    block.raw.len() == nsmp::sty::V4_LEN
+                        || block.raw.len() == nsmp::sty::V4_LEN_LONG
+                );
+                for band in block.eq() {
+                    assert!(
+                        band.frequency <= 20_000,
+                        "{where_}: EQ band at {} Hz",
+                        band.frequency
+                    );
+                }
+                v4 += 1;
+            }
+        }
+    }
+    assert!(v2 > 0 && v3 > 0 && v4 > 0, "a generation went unseen");
+}
+
 /// Confirmed on hardware: a live slot and a stored program use the same body.
 #[test]
 fn ne5_live_body_decodes_as_a_program() {
@@ -744,14 +819,23 @@ fn nsmpproj_stroke_fields_move_alone() {
     for (specimen, project) in projects() {
         let at = specimen.path.display();
         let before = project.render();
+        // A probe has to differ from what the stroke holds, or nothing moves —
+        // and the LY ladder's projects hold windows other than the default.
+        let windows: BTreeMap<u32, (u8, u8)> = project
+            .zones()
+            .unwrap()
+            .iter()
+            .flat_map(|z| z.strokes.iter().map(|s| (s.global_id, s.velocity)))
+            .collect();
+        let elsewhere = |held: u8, probe: u8| if held == probe { probe ^ 1 } else { probe };
         for stroke in project.strokes().unwrap() {
-            // A probe has to differ from what the stroke holds, or nothing moves.
+            let (vmin, vmax) = windows.get(&stroke.global_id).copied().unwrap_or((0, 127));
             let fields = [
                 ("start", F::Start(3.0)),
                 ("stop", F::Stop(4000.0)),
                 ("gain", F::Gain(0.75)),
-                ("velocity_min", F::VelocityMin(10)),
-                ("velocity_max", F::VelocityMax(100)),
+                ("velocity_min", F::VelocityMin(elsewhere(vmin, 10))),
+                ("velocity_max", F::VelocityMax(elsewhere(vmax, 100))),
                 ("loop_enabled", F::LoopEnabled(!stroke.loop_enabled)),
                 ("loop_start", F::LoopStart(1234.5)),
                 ("loop_length", F::LoopLength(600.0)),
