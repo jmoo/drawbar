@@ -34,11 +34,13 @@ pub mod kernel;
 pub mod keymap;
 pub mod section;
 pub mod stroke;
+pub mod sty;
 pub mod zone;
 
 pub use keymap::{KeyTable, Level};
 pub use section::Section;
 pub use stroke::Stroke;
+pub use sty::{EqBand, Sty, StyV2};
 pub use zone::Zone;
 pub use zone::ZoneV3;
 
@@ -256,6 +258,14 @@ impl Cbin<SampleV3> {
     fn map(&self) -> Result<&section::Section4, Error> {
         section::find4(&self.body.sections, section::MAP4)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
+    }
+
+    /// The instrument's default sound preset, under the schema its section
+    /// version selects.
+    pub fn sty(&self) -> Result<Sty, Error> {
+        let s = section::find4(&self.body.sections, section::STY4)
+            .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
+        Ok(Sty::parse_wide(s.version, &s.payload)?)
     }
 
     fn map_mut(&mut self) -> Result<&mut section::Section4, Error> {
@@ -492,6 +502,20 @@ impl Cbin<Sample> {
     pub fn zones(&self) -> Result<Vec<Zone>, Error> {
         self.require_known_layout()?;
         Ok(zone::read(&self.map()?.payload)?)
+    }
+
+    /// The instrument's default sound preset — nine enum-quantised bytes.
+    pub fn sty(&self) -> Result<StyV2, Error> {
+        let s = section::find(&self.body.sections, section::STY)
+            .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
+        if s.version != sty::VERSION_V2 {
+            return Err(ParseError::AssertFail(format!(
+                "sty section version {} has no preset layout derived from a specimen",
+                s.version
+            ))
+            .into());
+        }
+        Ok(StyV2::parse(&s.payload)?)
     }
 
     /// Sets one zone's top note. The strokes are untouched.

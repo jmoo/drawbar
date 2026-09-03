@@ -110,6 +110,33 @@ pub struct ZoneV3 {
     /// Lowest note, where the layout stores one (`map` v14/v21). On v12 zones
     /// tile: a zone's bottom is one above the next-lower zone's top.
     pub low_note: Option<u8>,
+    /// The velocities this zone answers to, where the layout stores a window
+    /// (`map` v14/v21). `None` on v12, whose records are too short to hold one.
+    pub velocity: Option<VelocityWindow>,
+}
+
+/// The velocities a zone answers to, inclusive at both ends.
+///
+/// The format has carried this since `map` v14 and nothing has ever used it:
+/// every zone of every vendor instrument reads [`VelocityWindow::FULL`], and
+/// the sample editor will not enable a second stroke in a zone, so a window is
+/// only ever the whole range. A reader must still honour it — a narrower one is
+/// legal and would silence the zone outside its band.
+///
+/// Inferred from specimens; not confirmed on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VelocityWindow {
+    pub low: u8,
+    pub high: u8,
+}
+
+impl VelocityWindow {
+    /// The only window any specimen carries.
+    pub const FULL: VelocityWindow = VelocityWindow { low: 0, high: 127 };
+
+    pub fn contains(&self, velocity: u8) -> bool {
+        (self.low..=self.high).contains(&velocity)
+    }
 }
 
 /// Within a wide zone record: the stroke's root key, duplicated from the stroke.
@@ -120,6 +147,10 @@ const WIDE_TOP: usize = 1;
 
 /// Within a wide zone record: the lowest, on the layouts that store one.
 const WIDE_LOW: usize = 2;
+
+/// Within a 16-byte wide zone record: the velocity window's low then high
+/// bound, the last two bytes of the record.
+const WIDE_VELOCITY: usize = 14;
 
 /// Which byte of a zone record an edit names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +212,15 @@ impl Wide {
 
     pub const fn stores_low(self) -> bool {
         matches!(self, Wide::V14 | Wide::V21)
+    }
+
+    /// Offset of the velocity window within a record, `None` on the layout
+    /// whose records predate it.
+    pub const fn velocity_at(self) -> Option<usize> {
+        match self {
+            Wide::V12 => None,
+            Wide::V14 | Wide::V21 => Some(WIDE_VELOCITY),
+        }
     }
 
     /// Offset of a field within a zone record, `None` where the layout stores
@@ -413,6 +453,10 @@ impl Table {
                         root_key: r[WIDE_ROOT],
                         top_note: r[WIDE_TOP],
                         low_note: self.wide.stores_low().then(|| r[WIDE_LOW]),
+                        velocity: self.wide.velocity_at().map(|at| VelocityWindow {
+                            low: r[at],
+                            high: r[at + 1],
+                        }),
                     }),
                     Some(root) => Err(ParseError::AssertFail(format!(
                         "zone {i} carries root {} but its stroke {gid} holds {root}",
