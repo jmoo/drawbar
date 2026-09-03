@@ -152,11 +152,13 @@ impl StyV4 {
         }
     }
 
-    /// The dynamics response, one 0..127 value per layer, softest first.
+    /// The dynamics response, one 0..127 value per layer, in the order the pool
+    /// holds them non-decreasing.
     ///
-    /// Pinned to 127 in all three positions while [`StyV4::dynamics_curve`] is
-    /// `None`, which is the shape every one of these triples takes when the
-    /// control behind it is off.
+    /// Pinned to 127 in all three positions exactly while
+    /// [`StyV4::dynamics_curve`] is `None`. ⚠️ The block's other triples sit
+    /// behind enable bytes that only approximate the same relationship, so this
+    /// is the one that is measured rather than assumed.
     pub fn dynamics_response(&self) -> [u8; 3] {
         std::array::from_fn(|i| self.raw[V4_DYNAMICS_RESPONSE + i])
     }
