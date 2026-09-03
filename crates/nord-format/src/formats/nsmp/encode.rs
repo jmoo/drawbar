@@ -1338,7 +1338,10 @@ fn map(zones: &[ZoneRecord]) -> Section {
         // either way, and the loop lives in the stroke's own word directory.
         payload[at + 3..at + 6].copy_from_slice(&record.gain.to_be_bytes()[1..]);
         payload[at + 9] = record.top_note;
-        payload[at + 11] = 0x01;
+        // One sample in the zone, so the playing stroke sits at the bottom of the
+        // strength axis. A stack positions its enabled stroke higher; nothing the
+        // builder produces has one.
+        payload[at + 10..at + 12].copy_from_slice(&super::zone::REL_STRENGTH_DEFAULT.to_be_bytes());
     }
     Section {
         tag: *section::MAP,
