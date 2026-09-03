@@ -6,8 +6,9 @@
 //! `map`, and `sty` is byte-identical across stack depth.
 //!
 //! No byte of one schema is a function of any byte of another over the vendor
-//! pool's instruments that appear in more than one generation, so nothing here
-//! translates between generations.
+//! pool's instruments that appear in more than one generation, so no value here
+//! translates between generations. One *offset* does: the dynamics enable is at
+//! `+3` in both v2 and v4, the single field the rewrite left where it was.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
