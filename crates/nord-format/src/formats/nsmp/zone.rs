@@ -113,15 +113,22 @@ pub struct ZoneV3 {
     /// The velocities this zone answers to, where the layout stores a window
     /// (`map` v14/v21). `None` on v12, whose records are too short to hold one.
     pub velocity: Option<VelocityWindow>,
+    /// Where the playing stroke sits on the editor's 0..32767 strength axis,
+    /// where the layout stores it (`map` v14/v21). `None` on v12.
+    ///
+    /// The same field [`Zone::rel_strength`] holds one generation earlier, four
+    /// bytes further into a wider record, and — like it — a position rather
+    /// than a count: a zone plays exactly one stroke.
+    pub rel_strength: Option<u16>,
 }
 
 /// The velocities a zone answers to, inclusive at both ends.
 ///
-/// The format has carried this since `map` v14 and nothing has ever used it:
-/// every zone of every vendor instrument reads [`VelocityWindow::FULL`], and
-/// the sample editor will not enable a second stroke in a zone, so a window is
-/// only ever the whole range. A reader must still honour it — a narrower one is
-/// legal and would silence the zone outside its band.
+/// The format has carried this since `map` v14 and no shipped instrument uses
+/// it: every zone of every vendor instrument reads [`VelocityWindow::FULL`].
+/// It is nonetheless a live field — a project naming a narrower window renders
+/// one into a v4 record — and a zone is silent outside its band, so a reader
+/// must honour what is stored rather than assume the full range.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +138,7 @@ pub struct VelocityWindow {
 }
 
 impl VelocityWindow {
-    /// The only window any specimen carries.
+    /// The window every shipped instrument carries.
     pub const FULL: VelocityWindow = VelocityWindow { low: 0, high: 127 };
 
     pub fn contains(&self, velocity: u8) -> bool {
@@ -147,6 +154,10 @@ const WIDE_TOP: usize = 1;
 
 /// Within a wide zone record: the lowest, on the layouts that store one.
 const WIDE_LOW: usize = 2;
+
+/// Within a 16-byte wide zone record: the playing stroke's relative strength,
+/// u16 big-endian, ahead of the velocity window.
+const WIDE_REL_STRENGTH: usize = 12;
 
 /// Within a 16-byte wide zone record: the velocity window's low then high
 /// bound, the last two bytes of the record.
@@ -220,6 +231,15 @@ impl Wide {
         match self {
             Wide::V12 => None,
             Wide::V14 | Wide::V21 => Some(WIDE_VELOCITY),
+        }
+    }
+
+    /// Offset of the relative strength within a record, `None` on the layout
+    /// whose records predate it.
+    pub const fn rel_strength_at(self) -> Option<usize> {
+        match self {
+            Wide::V12 => None,
+            Wide::V14 | Wide::V21 => Some(WIDE_REL_STRENGTH),
         }
     }
 
@@ -457,6 +477,10 @@ impl Table {
                             low: r[at],
                             high: r[at + 1],
                         }),
+                        rel_strength: self
+                            .wide
+                            .rel_strength_at()
+                            .map(|at| u16::from_be_bytes([r[at], r[at + 1]])),
                     }),
                     Some(root) => Err(ParseError::AssertFail(format!(
                         "zone {i} carries root {} but its stroke {gid} holds {root}",
@@ -960,6 +984,34 @@ mod tests {
         map[RECORDS_AT + REL_STRENGTH + 1] = 0xff;
         let zones = read(&map).unwrap();
         assert_eq!(zones[0].rel_strength, 32767);
+    }
+
+    #[test]
+    fn a_wide_record_yields_its_strength_and_window_and_v12_neither() {
+        for (version, expected) in [(21u32, Some(300u16)), (12, None)] {
+            let zs = [(9u32, 60u8, 84u8, 48u8)];
+            let mut map = wide_map(version, &zs, 2);
+            let wide = Wide::from_version(version).unwrap();
+            let at = map.len() - 2 - wide.record_len();
+            if let Some(off) = wide.rel_strength_at() {
+                map[at + off..at + off + 2].copy_from_slice(&300u16.to_be_bytes());
+            }
+            if let Some(off) = wide.velocity_at() {
+                map[at + off] = 64;
+                map[at + off + 1] = 100;
+            }
+            let zone = Table::locate(version, &map, &strokes(&zs))
+                .unwrap()
+                .read(&map, &strokes(&zs))
+                .unwrap()
+                .remove(0);
+            assert_eq!(zone.rel_strength, expected, "map v{version}");
+            assert_eq!(
+                zone.velocity,
+                expected.map(|_| VelocityWindow { low: 64, high: 100 }),
+                "map v{version}"
+            );
+        }
     }
 
     #[test]

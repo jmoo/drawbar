@@ -32,12 +32,14 @@ pub mod codec;
 pub mod encode;
 pub mod kernel;
 pub mod keymap;
+pub mod meta;
 pub mod section;
 pub mod stroke;
 pub mod sty;
 pub mod zone;
 
 pub use keymap::{KeyTable, Level};
+pub use meta::Meta;
 pub use section::Section;
 pub use stroke::Stroke;
 pub use sty::{EqBand, Sty, StyV2};
@@ -266,6 +268,23 @@ impl Cbin<SampleV3> {
         let s = section::find4(&self.body.sections, section::STY4)
             .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
         Ok(Sty::parse_wide(s.version, &s.payload)?)
+    }
+
+    /// The chain's own length, as its closing `meta` section states it.
+    pub fn meta(&self) -> Result<Meta, Error> {
+        let s = section::find4(&self.body.sections, section::META4)
+            .ok_or_else(|| ParseError::AssertFail("no meta section".into()))?;
+        Ok(Meta::parse(s.version, &s.payload)?)
+    }
+
+    /// The length `meta` should state: every section ahead of it on the wire.
+    pub fn chain_len_before_meta(&self) -> usize {
+        self.body
+            .sections
+            .iter()
+            .take_while(|s| !s.is(section::META4))
+            .map(section::Section4::encoded_len)
+            .sum()
     }
 
     fn map_mut(&mut self) -> Result<&mut section::Section4, Error> {

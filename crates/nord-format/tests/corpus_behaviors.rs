@@ -276,11 +276,23 @@ fn v3_samples_decode_names_and_strokes() {
     assert!(paired > 0, "no v3 zone map paired with its strokes");
 }
 
-/// The velocity window has existed since `map` v14 and nothing has ever narrowed
-/// it: a reader that ignored the field would still play every vendor instrument
-/// correctly, which is exactly why it has to be read rather than assumed.
+/// The velocity window has existed since `map` v14 and no shipped instrument
+/// narrows it, so a reader that ignored the field would still play the whole
+/// vendor library correctly. It is nonetheless live: the LY ladder's v4 pass
+/// asked for narrower windows in a project and got them, byte for byte, which
+/// is exactly why the field has to be read rather than assumed.
 #[test]
-fn wide_zone_velocity_windows_are_all_full_range() {
+fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
+    let asked: BTreeMap<&str, (u8, u8)> = BTreeMap::from([
+        ("LY-30vmin64.nsmp4", (64, 127)),
+        ("LY-31vmax63.nsmp4", (0, 63)),
+        ("LY-32vwin.nsmp4", (64, 100)),
+        ("LY-50two-en.nsmp4", (0, 63)),
+        ("LY-51two-axis.nsmp4", (0, 63)),
+        ("LY-52four-en.nsmp4", (0, 31)),
+        ("LY-54bracket.nsmp4", (0, 63)),
+    ]);
+    let mut narrowed = BTreeMap::new();
     let mut with_window = 0;
     let mut without = 0;
     for specimen in corpus() {
@@ -288,25 +300,114 @@ fn wide_zone_velocity_windows_are_all_full_range() {
             continue;
         };
         let Ok(zones) = sample.zones() else { continue };
+        let name = specimen.path.file_name().unwrap().to_string_lossy();
         for zone in zones {
             match zone.velocity {
                 Some(window) => {
-                    assert_eq!(
-                        window,
-                        nsmp::zone::VelocityWindow::FULL,
-                        "{}: a zone answers only to velocities {}..={}",
-                        specimen.path.display(),
-                        window.low,
-                        window.high
-                    );
                     with_window += 1;
+                    if window != nsmp::zone::VelocityWindow::FULL {
+                        narrowed.insert(name.to_string(), (window.low, window.high));
+                    }
                 }
                 None => without += 1,
             }
         }
     }
+    let expected: BTreeMap<String, (u8, u8)> =
+        asked.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
+    assert_eq!(narrowed, expected);
     assert!(with_window > 0, "no zone record carrying a velocity window");
     assert!(without > 0, "no v12 zone record, whose layout stores none");
+}
+
+/// The wide zone record carries the same relative strength the v2 record does,
+/// four bytes later. The ladder pinned its width past a byte: 300 is the first
+/// weight the campaign ever rendered over 255.
+#[test]
+fn a_wide_zone_records_its_strokes_relative_strength() {
+    for (file, weight) in [
+        ("LY-1base.nsmp4", 1u16),
+        ("LY-20rs0.nsmp4", 0),
+        ("LY-21rs300.nsmp4", 300),
+        ("LY-22rs32767.nsmp4", 32767),
+        ("LY-32vwin.nsmp4", 16384),
+    ] {
+        let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
+            panic!("{file} is not a wide sample");
+        };
+        let zones = sample.zones().unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert_eq!(zones[0].rel_strength, Some(weight), "{file}");
+    }
+}
+
+/// `sty`'s v4 dynamics group is the one part of the preset a project reaches:
+/// enabling the category's dynamics writes the enable, the curve and the
+/// response triple together, and the curve is a null one generation earlier.
+#[test]
+fn the_v4_preset_holds_the_dynamics_a_project_asked_for() {
+    for (file, enabled, curve, response) in [
+        ("LY-1base.nsmp4", false, None, [127u8; 3]),
+        ("LY-70dynen.nsmp4", true, Some(1), [74, 82, 90]),
+    ] {
+        let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
+            panic!("{file} is not a wide sample");
+        };
+        let nsmp::Sty::V4(sty) = sample.sty().unwrap_or_else(|e| panic!("{file}: {e}")) else {
+            panic!("{file} carries no v4 preset");
+        };
+        assert_eq!(sty.dynamics_enabled(), enabled, "{file}");
+        assert_eq!(sty.dynamics_curve(), curve, "{file}");
+        assert_eq!(sty.dynamics_response(), response, "{file}");
+    }
+}
+
+/// A `sty` triple sits at its 127 ceiling exactly while the control behind it
+/// is switched off — which is what makes the block's near-constant columns
+/// legible rather than mysterious.
+#[test]
+fn a_v4_dynamics_response_is_pinned_while_no_curve_is_selected() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let Ok(nsmp::Sty::V4(sty)) = sample.sty() else {
+            continue;
+        };
+        assert_eq!(
+            sty.dynamics_curve().is_none(),
+            sty.dynamics_response() == [127; 3],
+            "{}: curve {:?} against response {:?}",
+            specimen.path.display(),
+            sty.dynamics_curve(),
+            sty.dynamics_response()
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no v4 preset");
+}
+
+/// Every wide body states its own length in `meta`, and it is the one field a
+/// writer that resized a section would have to restate.
+#[test]
+fn a_wide_body_states_the_length_of_the_chain_ahead_of_its_meta() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let meta = sample
+            .meta()
+            .unwrap_or_else(|e| panic!("{}: {e}", specimen.path.display()));
+        assert_eq!(
+            meta.chain_len as usize,
+            sample.chain_len_before_meta(),
+            "{}",
+            specimen.path.display()
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no wide sample");
 }
 
 /// `sty` is a preset block whose v4 payload comes in two widths under one
