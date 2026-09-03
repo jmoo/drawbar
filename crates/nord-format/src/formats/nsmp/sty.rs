@@ -67,6 +67,21 @@ impl StyV2 {
     }
 }
 
+/// Within a v4 payload: whether the category's dynamics curve is enabled — the
+/// same offset the v2 schema puts it at, and the only byte the two share.
+const V4_DYNAMICS_ENABLE: usize = 3;
+
+/// Within a v4 payload: which dynamics curve, or [`DYNAMICS_CURVE_NONE`].
+const V4_DYNAMICS_CURVE: usize = 4;
+
+/// The value [`V4_DYNAMICS_CURVE`] holds when no curve is selected. Over the
+/// vendor pool's 557 v4 instruments this byte reads 6 exactly when the response
+/// triple sits at its 127 ceiling, with no exception either way.
+pub const DYNAMICS_CURVE_NONE: u8 = 6;
+
+/// Within a v4 payload: the dynamics response, one value per layer.
+const V4_DYNAMICS_RESPONSE: usize = 85;
+
 /// One band of the v4 preset's EQ.
 ///
 /// Gain and Q are held in whole tens across the pool; the divisor each uses is
@@ -92,12 +107,18 @@ const EQ_AT: usize = 45;
 pub const EQ_BANDS: usize = 3;
 
 const _: () = assert!(EQ_AT + (EQ_BANDS - 1) * EQ_BAND_STRIDE + EQ_BAND_BODY <= V4_LEN);
+const _: () = assert!(V4_DYNAMICS_RESPONSE + 3 <= V4_LEN);
 
 /// The v4 preset: a block of 0..127 scalars, each control stored three times —
 /// once per dynamics layer — behind an enable byte valued 0 or 127, plus
 /// [`EQ_BANDS`] EQ bands.
 ///
-/// Only the EQ is named. The scalars are preserved verbatim.
+/// The dynamics group and the EQ are named; the remaining scalars are
+/// preserved verbatim. A project reaches the dynamics group and nothing else:
+/// enabling the category's dynamics moves [`StyV4::dynamics_enabled`],
+/// [`StyV4::dynamics_curve`] and [`StyV4::dynamics_response`] together, while
+/// the whole `samplib_attrs` block and the zone EQ leave every byte alone —
+/// the zone EQ because the encoder bakes it into the audio instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyV4 {
     pub raw: Vec<u8>,
@@ -114,6 +135,30 @@ impl StyV4 {
         Ok(StyV4 {
             raw: payload.to_vec(),
         })
+    }
+
+    /// Whether the instrument plays through its category's dynamics curve.
+    pub fn dynamics_enabled(&self) -> bool {
+        self.raw[V4_DYNAMICS_ENABLE] != 0
+    }
+
+    /// Which dynamics curve the instrument loads with, `None` where none is
+    /// selected. Unlike v2, which stores only the enable, the wide schema
+    /// stores the curve the project names.
+    pub fn dynamics_curve(&self) -> Option<u8> {
+        match self.raw[V4_DYNAMICS_CURVE] {
+            DYNAMICS_CURVE_NONE => None,
+            curve => Some(curve),
+        }
+    }
+
+    /// The dynamics response, one 0..127 value per layer, softest first.
+    ///
+    /// Pinned to 127 in all three positions while [`StyV4::dynamics_curve`] is
+    /// `None`, which is the shape every one of these triples takes when the
+    /// control behind it is off.
+    pub fn dynamics_response(&self) -> [u8; 3] {
+        std::array::from_fn(|i| self.raw[V4_DYNAMICS_RESPONSE + i])
     }
 
     pub fn eq(&self) -> [EqBand; EQ_BANDS] {
@@ -194,6 +239,25 @@ mod tests {
     #[test]
     fn an_unknown_wide_version_is_refused_rather_than_guessed() {
         assert!(Sty::parse_wide(VERSION_V3 + 1, &[0; V3_LEN]).is_err());
+    }
+
+    #[test]
+    fn v4_dynamics_reads_its_enable_curve_and_response() {
+        let mut raw = [0u8; V4_LEN];
+        raw[V4_DYNAMICS_CURVE] = DYNAMICS_CURVE_NONE;
+        raw[V4_DYNAMICS_RESPONSE..][..3].fill(127);
+        let off = StyV4::parse(&raw).unwrap();
+        assert!(!off.dynamics_enabled());
+        assert_eq!(off.dynamics_curve(), None);
+        assert_eq!(off.dynamics_response(), [127; 3]);
+
+        raw[V4_DYNAMICS_ENABLE] = 1;
+        raw[V4_DYNAMICS_CURVE] = 1;
+        raw[V4_DYNAMICS_RESPONSE..][..3].copy_from_slice(&[74, 82, 90]);
+        let on = StyV4::parse(&raw).unwrap();
+        assert!(on.dynamics_enabled());
+        assert_eq!(on.dynamics_curve(), Some(1));
+        assert_eq!(on.dynamics_response(), [74, 82, 90]);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5;
 use nord_format::formats::ne5::{Instrument, OrganModel};
+use nord_format::formats::nsmp::zone::VelocityWindow;
 use nord_format::formats::nsmp::{stroke, Sample};
 use nord_format::formats::nsmpproj;
 use nord_format::{Entity, Live, Program, Settings, Song};
@@ -438,12 +439,13 @@ fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
                     Some(low) => format!("{}..={}", low, z.top_note),
                     None => format!("..={}", z.top_note),
                 };
-                ui.out(field(
-                    ui,
-                    2,
-                    &range,
-                    format!("root {} (stroke {})", z.root_key, z.stroke_gid),
-                ));
+                let mut says = format!("root {} (stroke {})", z.root_key, z.stroke_gid);
+                // Silent unless it is not the whole range: a narrow window is
+                // the difference between a zone that sounds and one that does not.
+                if let Some(w) = z.velocity.filter(|w| *w != VelocityWindow::FULL) {
+                    says.push_str(&format!(" velocity {}..={}", w.low, w.high));
+                }
+                ui.out(field(ui, 2, &range, says));
             }
         }
     }
