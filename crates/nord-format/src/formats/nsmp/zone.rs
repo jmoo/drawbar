@@ -27,6 +27,12 @@ pub const GAIN_UNITY: u32 = 1 << GAIN_BITS;
 /// Within a record: the highest MIDI note this zone answers to.
 const TOP_NOTE: usize = 9;
 
+/// Within a record: the playing stroke's relative strength, u16 big-endian.
+const REL_STRENGTH: usize = 10;
+
+/// The relative strength the editor writes for a zone holding one sample.
+pub const REL_STRENGTH_DEFAULT: u16 = 1;
+
 /// A high-to-low keyboard zone storing only its upper bound.
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +44,14 @@ pub struct Zone {
     /// Linear playback gain, [`GAIN_BITS`] fractional bits — [`GAIN_UNITY`] is 1.0. The
     /// audio is stored unscaled; the same factor scales the stroke's statistic A.
     pub gain: u32,
+    /// Where the playing stroke sits on the editor's 0..32767 strength axis.
+    /// [`REL_STRENGTH_DEFAULT`] on a zone holding a single sample.
+    ///
+    /// ⚠️ A zone plays exactly one stroke, so this is a position and not a
+    /// count: an editor project may hold several samples per zone, but only
+    /// one of them is enabled and only that one is written. Reading it as a
+    /// layer count is wrong on every file the format has ever carried.
+    pub rel_strength: u16,
 }
 
 pub fn count(map: &[u8]) -> Result<usize, ParseError> {
@@ -65,6 +79,7 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
                 top_note: r[TOP_NOTE],
                 stroke_id: r[STROKE_ID],
                 gain: u32::from_be_bytes([0, r[GAIN], r[GAIN + 1], r[GAIN + 2]]),
+                rel_strength: u16::from_be_bytes([r[REL_STRENGTH], r[REL_STRENGTH + 1]]),
             }
         })
         .collect())
@@ -889,6 +904,18 @@ mod tests {
         assert_eq!(partners(&zs, 16), (16, 16));
         assert_eq!(partners(&zs, 17), (51, 51));
         assert_eq!(partners(&zs, 54), (54, 54));
+    }
+
+    #[test]
+    fn a_record_yields_its_strength_as_a_big_endian_pair() {
+        let mut map = vec![0u8; RECORDS_AT + RECORD_LEN];
+        map[COUNT_AT] = 1;
+        map[RECORDS_AT + STROKE_ID] = 4;
+        map[RECORDS_AT + TOP_NOTE] = 60;
+        map[RECORDS_AT + REL_STRENGTH] = 0x7f;
+        map[RECORDS_AT + REL_STRENGTH + 1] = 0xff;
+        let zones = read(&map).unwrap();
+        assert_eq!(zones[0].rel_strength, 32767);
     }
 
     #[test]
