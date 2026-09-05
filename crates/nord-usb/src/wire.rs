@@ -365,9 +365,12 @@ pub struct Partition {
     /// Whether this is the `(Native)` view of a library. Native and user partitions
     /// describe **one** pool — identical capacity fields — ordered differently.
     pub native: bool,
-    /// The 29 capacity/flag bytes, verbatim. **Not decoded**: the values do not map
-    /// cleanly onto the block counts `STATUS` reports, so they are carried rather than
-    /// interpreted.
+    /// The 29 trailing bytes, verbatim: four big-endian words and then 13 one-byte
+    /// flags. Only the words this type exposes an accessor for are decoded; the rest are
+    /// carried so a caller can look at them without another read.
+    ///
+    /// Static configuration, not state — every value is unchanged by storing or deleting
+    /// content.
     pub fields: Vec<u8>,
 }
 
@@ -418,6 +421,25 @@ impl Partition {
             at = fields_end;
         }
         Ok(out)
+    }
+
+    /// The partition's allocation granularity, in **net** bytes — the payload one unit of
+    /// whatever [`Status`] counts here holds.
+    ///
+    /// Library partitions report a storage block minus its own overhead; an Electro 5
+    /// reports `261632` (256 KiB − 512) for pianos and `131064` (128 KiB − 8) for
+    /// samples. Slot-addressed partitions report `1`, which is what says their counters
+    /// are byte-granular.
+    ///
+    /// ⚠️ Net, not gross. Sizing a write off the enclosing power-of-two block instead
+    /// differs only for a body within the overhead of an exact block boundary, but it
+    /// differs by a whole block when it does.
+    ///
+    /// Confirmed on hardware.
+    pub fn allocation_unit(&self) -> Option<u32> {
+        self.fields
+            .get(..4)
+            .map(|w| u32::from_be_bytes(w.try_into().expect("four bytes")))
     }
 }
 
@@ -804,6 +826,12 @@ impl ObjectClass {
         }
     }
 
+    /// Whether this class is one of the content libraries, whose objects vary in size
+    /// and whose [`Status`] counters are storage blocks rather than bytes.
+    pub fn is_library(self) -> bool {
+        matches!(self, ObjectClass::Piano | ObjectClass::Sample)
+    }
+
     /// Whether a write into an *occupied* slot of this class lands without deleting it
     /// first.
     ///
@@ -833,30 +861,62 @@ impl ObjectClass {
 
 /// What [`cmd::STATUS`] reports, for whichever [`ObjectClass`] the session opened.
 ///
-/// `free + used` is constant per class (the class's total capacity). Deleting programs
-/// was observed to raise `free` and lower `used` by the same amount, which is what
-/// fixes the orientation — otherwise the two are indistinguishable.
+/// **The unit differs by class family.** The slot-addressed classes (program, set list,
+/// live, settings) count **bytes**: a program costs 141 = 121 body + 16 name + 4 CRC, a
+/// set list 38 = 18 + 16 + 4. The library classes (piano, sample) count **storage
+/// blocks** of [`Partition::allocation_unit`] net payload bytes each — just under 256
+/// KiB for pianos and 128 KiB for samples on an Electro 5.
 ///
-/// The unit is not identified. It is *not* bytes: the program class totals 56,400,
-/// which is far too small. Treat the numbers as opaque blocks.
+/// ⚠️ **`free + used` is not the capacity.** A delete moves its space into
+/// [`Self::dirty`], not into `free`, so a report built from those two words shrinks
+/// every time something is deleted. [`Self::total`] sums all four storage words, which
+/// *is* constant, and [`Self::available`] is the space a write can actually reach —
+/// `free` now, plus whatever the cleaning pass can reclaim out of `dirty`.
+///
+/// `dirty` and `spare` read `0` outside the library partitions.
+///
+/// Confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {
     pub class: ObjectClass,
     pub count: u32,
+    /// Space a write may use immediately, without a cleaning pass.
     pub free: u32,
+    /// Space live objects occupy. Deleting lowers this and raises `dirty`.
     pub used: u32,
+    /// Space held by deleted objects, reclaimable by [`cmd::WRITE_PREPARE`]. Survives a
+    /// power cycle, where `free`'s prepared state does not reliably.
+    pub dirty: u32,
+    /// The fifth word: a small per-partition constant (1 and 2 observed), never seen to
+    /// move. Meaning unknown, and counted in [`Self::total`] only because the four
+    /// storage words together sum to a value that does not change.
+    pub spare: u32,
 }
 
 impl Status {
+    /// The partition's capacity — constant per class, in the class's own unit.
     pub fn total(&self) -> u64 {
-        u64::from(self.free) + u64::from(self.used)
+        u64::from(self.free) + u64::from(self.used) + u64::from(self.dirty) + u64::from(self.spare)
     }
 
-    /// Blocks per item, when every item of this class costs the same.
+    /// Space a write can reach: what is free now plus what cleaning can reclaim.
     ///
-    /// Fixed-size classes divide both used and total blocks exactly. Variable-size
-    /// library classes yield `None`.
-    pub fn blocks_per_item(&self) -> Option<u32> {
+    /// A partition reporting `free` 0 with a large `dirty` pool is entirely writable —
+    /// [`crate::op::write`] reclaims the shortfall before it begins.
+    pub fn available(&self) -> u64 {
+        u64::from(self.free) + u64::from(self.dirty)
+    }
+
+    /// Bytes per item, when every item of this class costs the same.
+    ///
+    /// Only the slot-addressed classes resolve: their `STATUS` unit is bytes and every
+    /// item is one fixed record. The library classes count blocks of genuinely
+    /// variable-size content, and a class this crate cannot name has no known unit, so
+    /// both yield `None` whatever their counters happen to divide into.
+    pub fn bytes_per_item(&self) -> Option<u32> {
+        if self.class.is_library() || matches!(self.class, ObjectClass::Unknown(_)) {
+            return None;
+        }
         if self.count == 0 || self.used == 0 || !self.used.is_multiple_of(self.count) {
             return None;
         }
@@ -868,10 +928,10 @@ impl Status {
 
     /// Total item slots, for classes where items are fixed-size.
     ///
-    /// Far more meaningful than raw blocks: programs report 400, which is exactly the
+    /// Far more meaningful than a byte count: programs report 400, which is exactly the
     /// 8 banks × 50 slots of an Electro 5.
     pub fn slots(&self) -> Option<u32> {
-        self.blocks_per_item()
+        self.bytes_per_item()
             .and_then(|per| u32::try_from(self.total() / u64::from(per)).ok())
     }
 
@@ -884,8 +944,11 @@ impl Status {
         }
     }
 
-    /// Decode a [`cmd::STATUS`] response. Arguments after the status word are
-    /// `count, free, used, …`.
+    /// Decode a [`cmd::STATUS`] response: `count, free, used, dirty, spare`.
+    ///
+    /// The five-word shape is what an Electro 5 answers. Confirmed on hardware. Only the
+    /// first three words are required; a shorter reply decodes with the missing words as
+    /// zero.
     pub fn decode(class: ObjectClass, msg: &Message) -> Result<Self> {
         // Request decoding would leave the status position and shift every counter.
         if !msg.is_response() {
@@ -900,12 +963,20 @@ impl Status {
                 need: 12,
             });
         }
+        if !p.len().is_multiple_of(4) {
+            return Err(Error::Truncated {
+                got: p.len(),
+                need: (p.len() / 4 + 1) * 4,
+            });
+        }
         let word = |i: usize| u32::from_be_bytes(p[i * 4..i * 4 + 4].try_into().unwrap());
         Ok(Self {
             class,
             count: word(0),
             free: word(1),
             used: word(2),
+            dirty: if p.len() >= 16 { word(3) } else { 0 },
+            spare: if p.len() >= 20 { word(4) } else { 0 },
         })
     }
 }

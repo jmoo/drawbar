@@ -56,7 +56,10 @@ run device status --replay "$POC_SCRIPT" >poc.txt 2>err.txt || {
 }
 cat poc.txt
 
-for want in pianos samples programs 'set lists' '380 / 400 slots' '141 blocks each'; do
+# The last two pin the two `STATUS` unit families: a slot class counts bytes and
+# divides into slots, a library class counts blocks and reports a dirty pool.
+for want in pianos samples programs 'set lists' '380 / 400 slots' '141 bytes each' \
+  '1936 / 2048 blocks' '111 (64 dirty)'; do
   grep -q "$want" poc.txt || {
     echo "POC output missing '$want'"
     cat poc.txt
