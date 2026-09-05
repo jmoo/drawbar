@@ -602,6 +602,34 @@ pub fn put(
     )
 }
 
+/// Reclaim room for `file`, sized by the instrument's own allocation unit, inside the
+/// session that is about to write it.
+///
+/// A library write is refused `0x16` without a prepared block per storage block of body.
+/// The slot classes count bytes and have nothing to reserve.
+async fn reserve_for<T: nord_usb::Transport>(
+    s: &mut Session<'_, T, nord_usb::ReadWrite>,
+    file: &[u8],
+) -> nord_usb::Result<()> {
+    let class = s.class();
+    if !class.is_library() {
+        return Ok(());
+    }
+    let unit = usb_op::partitions(s)
+        .await?
+        .into_iter()
+        .find(|p| p.index == class.to_raw())
+        .ok_or_else(|| {
+            nord_usb::Error::InvalidArgument(format!(
+                "the instrument has no {} partition",
+                class.label()
+            ))
+        })?
+        .allocation_unit()?;
+    let blocks = unit.blocks_for(nord_usb::envelope::unwrap(file)?.body.0.len())?;
+    usb_op::reserve(s, blocks).await
+}
+
 /// Run one mutating operation in its own session, committing either way — an abandoned
 /// session leaves the instrument mid-transaction with its progress label still painted.
 macro_rules! one_shot {
@@ -789,13 +817,10 @@ pub fn send(
             &mut t,
             put_intent(class, what, at, &write_name, timestamp),
             |t| {
-                one_shot!(t, class, |s| usb_op::write(
-                    &mut s,
-                    at,
-                    file,
-                    &write_name,
-                    timestamp
-                ))
+                one_shot!(t, class, |s| async {
+                    reserve_for(&mut s, file).await?;
+                    usb_op::write(&mut s, at, file, &write_name, timestamp).await
+                })
             },
         )
     };
@@ -829,13 +854,10 @@ pub fn send(
                     timestamp,
                 ),
                 |t| {
-                    one_shot!(t, class, |s| usb_op::write(
-                        &mut s,
-                        at,
-                        &backup,
-                        &restore_name,
-                        timestamp
-                    ))
+                    one_shot!(t, class, |s| async {
+                        reserve_for(&mut s, &backup).await?;
+                        usb_op::write(&mut s, at, &backup, &restore_name, timestamp).await
+                    })
                 },
             );
             match restore {
@@ -979,7 +1001,11 @@ fn referring_set_lists(
     transact(t, "setlist list", |t| {
         nord_usb::block_on(async {
             let mut s = Session::open(t, ObjectClass::SetList).await?;
-            let r = usb_op::set_lists_referencing(&mut s, targets).await;
+            let r = async {
+                let banks = usb_op::banks(&mut s, ObjectClass::SetList.to_raw()).await?;
+                usb_op::set_lists_referencing(&mut s, &banks, targets).await
+            }
+            .await;
             let closed = s.commit().await;
             finish(r, closed)
         })
@@ -1371,9 +1397,9 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
         // The allocation granularity is what `device status` counts in for this
         // partition: a storage block for the libraries, one byte everywhere else.
         let unit = match p.allocation_unit() {
-            Some(1) => "byte".to_string(),
-            Some(n) => format!("{n} B"),
-            None => "?".to_string(),
+            Ok(unit) if unit.is_bytes() => "byte".to_string(),
+            Ok(unit) => format!("{} B", unit.get()),
+            Err(e) => e.to_string(),
         };
         let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         ui.out(format!(
@@ -1537,21 +1563,15 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 ///
 /// One session: the cursor walk and every `info` share it, so a library of a few hundred
 /// items is a few hundred exchanges rather than a few hundred sessions.
-pub fn list(ui: &Ui, class: ObjectClass, cap: usize) -> Result<(), String> {
+pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
     let mut t = open_usb()?;
-    // The guard is part of what the walk sends, so it belongs in the intent whenever it
-    // is not the default the sweep assumes.
-    let bound = if cap == 1024 {
-        String::new()
-    } else {
-        format!(" {cap}")
-    };
-    let rows = transact(&mut t, format!("{} walk{bound}", noun(class)), |t| {
+    let rows = transact(&mut t, format!("{} walk", noun(class)), |t| {
         nord_usb::block_on(async {
             let mut s = Session::open(t, class).await?;
             let r = async {
+                let banks = usb_op::banks(&mut s, class.to_raw()).await?;
                 let mut rows = Vec::new();
-                for at in usb_op::occupied_slots(&mut s, cap).await? {
+                for at in usb_op::occupied_slots(&mut s, &banks).await? {
                     // The cursor may return an empty starting address; status 1 is harmless.
                     match usb_op::info(&mut s, at).await {
                         Ok(info) => rows.push((at, info)),

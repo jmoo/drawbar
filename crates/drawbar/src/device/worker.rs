@@ -275,6 +275,36 @@ async fn execute<T: Transport>(
     }
 }
 
+/// Write a file into a slot, reclaiming library space first where the class counts in
+/// storage blocks.
+///
+/// A library write is refused `0x16` without a prepared block per storage block of body,
+/// and the block size is the one that partition reports — read in the same session, from
+/// the instrument being written. The slot classes count bytes and have nothing to
+/// reserve.
+async fn write_reserved<T: Transport>(
+    s: &mut Session<'_, T, ReadWrite>,
+    at: Location,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<(), Error> {
+    let class = s.class();
+    if class.is_library() {
+        let unit = op::partitions(s)
+            .await?
+            .into_iter()
+            .find(|p| p.index == class.to_raw())
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("the instrument has no {} partition", class.label()))
+            })?
+            .allocation_unit()?;
+        let blocks = unit.blocks_for(nord_usb::envelope::unwrap(file)?.body.0.len())?;
+        op::reserve(s, blocks).await?;
+    }
+    op::write(s, at, file, name, timestamp).await
+}
+
 /// Replace a slot inside the caller's session.
 /// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
@@ -336,7 +366,7 @@ async fn put<T: Transport>(
         }
     }
 
-    let written = op::write(s, at, &bytes, &write_name, timestamp).await;
+    let written = write_reserved(s, at, &bytes, &write_name, timestamp).await;
 
     Ok(match (written, backup) {
         (Ok(()), _) => Ok(wrote(class, at, what, &write_name)),
@@ -352,7 +382,7 @@ async fn put<T: Transport>(
                 .as_ref()
                 .map(|info| info.name.clone())
                 .unwrap_or_default();
-            match op::write(s, at, &backup, &restore_name, timestamp).await {
+            match write_reserved(s, at, &backup, &restore_name, timestamp).await {
                 Ok(()) => Err(format!(
                     "{e} ({} was restored, and is unchanged)",
                     shown(at)
@@ -636,10 +666,10 @@ async fn scan_class<T: Transport>(
             true => Some(plan.len() as u32),
             false => counted,
         };
-        if let Some(geometry) = geometry {
+        if let Some(geometry) = &geometry {
             emit.send(DeviceEvent::Geometry {
                 class,
-                banks: geometry,
+                banks: geometry.clone(),
             });
         }
         emit.send(DeviceEvent::ClassStatus {
@@ -663,9 +693,12 @@ async fn scan_class<T: Transport>(
         // The cursor is useful only for sparse content with a known class boundary.
         let capacity: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
         let sparse = capacity.is_none_or(|capacity| worth_the_cursor(held, capacity));
-        let found = match ends_known && sparse {
-            true => occupied(&mut s, cap_slots(&plan, held)).await?,
-            false => None,
+        // The cursor walk is bounded by the banks the instrument declared. Where it
+        // declared none there is nothing to bound it, and the slot-by-slot walk below is
+        // the only path left.
+        let found = match (&geometry, ends_known && sparse) {
+            (Some(banks), true) => occupied(&mut s, banks).await?,
+            _ => None,
         };
 
         if let Some(found) = found {
@@ -742,16 +775,6 @@ fn worth_the_cursor(held: u32, capacity: u32) -> bool {
     capacity > 0 && held.saturating_mul(2) < capacity
 }
 
-/// Bound cursor enumeration; an unstated bank capacity receives the remaining budget.
-fn cap_slots(plan: &[Planned], held: u32) -> usize {
-    let stated: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
-    match stated {
-        Some(stated) => (stated as usize).max(held as usize),
-        None => MOST_OCCUPIED,
-    }
-    .clamp(1, MOST_OCCUPIED)
-}
-
 /// Every occupied slot of the session's class, with the name of what is in it.
 ///
 /// `Ok(None)` where the instrument refused to enumerate — [`op::ENUMERATION_DISABLED`]
@@ -759,9 +782,9 @@ fn cap_slots(plan: &[Planned], held: u32) -> usize {
 /// slot instead. A refusal leaves the session in step, so it may.
 async fn occupied<T: Transport, C>(
     s: &mut Session<'_, T, C>,
-    cap: usize,
+    banks: &[Bank],
 ) -> Result<Option<Vec<(Location, ProgramInfo)>>, Error> {
-    let found = match op::occupied_slots(s, cap).await {
+    let found = match op::occupied_slots(s, banks).await {
         Ok(found) => found,
         Err(Error::DeviceStatus(_)) => return Ok(None),
         Err(e) => return Err(e),
@@ -1723,9 +1746,9 @@ mod wire_tests {
             ]
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "the cursor was used");
-        // Each bank probed at its first slot, one probe past the last bank to find the
-        // end, and one read per thing found.
-        assert_eq!(counted(&device, cmd::INFO), 5, "not the 80 addresses");
+        // One read per thing found; the declared banks say where to walk, so nothing is
+        // spent discovering them.
+        assert_eq!(counted(&device, cmd::INFO), 2, "not the 80 addresses");
     }
 
     /// ⚠️ An instrument can refuse to enumerate at all — see [`op::ENUMERATION_DISABLED`]
@@ -1747,9 +1770,9 @@ mod wire_tests {
             "the same folder, found the long way"
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "it was tried");
-        // Every address of both banks, plus the one probe the cursor walk spends before
-        // the refusal shows up.
-        assert_eq!(counted(&device, cmd::INFO), 81);
+        // Every address of both banks. The cursor walk spends no `INFO` before the
+        // refusal: its first frame is the cursor request itself.
+        assert_eq!(counted(&device, cmd::INFO), 80);
     }
 
     /// The device's own banks decide the shape, names and all. Told a category of 50 and
