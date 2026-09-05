@@ -128,7 +128,7 @@ the bytes the tab opened with — the only undo there is — and **Export…** w
 A name is this app's own: a Nord file stores none. It is set when the bytes arrive —
 from the slot the instrument read it out of, from the filename, or from the New menu —
 and nothing after that re-derives it. It is kept **verbatim**: "Big strings" is
-"Big strings" in the list, in the tab, and on the slot a send renames. Only the
+"Big strings" in the list, in the tab, and on the slot a send names. Only the
 filename an **Export…** suggests is made path-safe, because that is the one place a
 name meets a filesystem.
 
@@ -209,12 +209,13 @@ and it goes nowhere until you say so.
   computer it says so and does nothing, because those edits are already kept. It is
   never a file-export shortcut — that is Export….
 
-**The name goes with the bytes.** A write does not carry one — the instrument names
-the slot itself, from an argument this app does not choose — so every write is
-followed by a rename, inside the same session, to whatever the sound is called
-here. The format tag comes off on the way: `Africa-Split.ne5p` on this computer is
-`Africa-Split` on the panel. A rename that will not go is said out loud and
-nothing more; the bytes are in the slot either way.
+**The name goes with the bytes.** The write itself carries the name, so the slot
+ends up called whatever the sound is called here — nothing is renamed afterwards,
+because the instrument refuses a rename on samples and pianos outright and accepts
+one on live and settings without doing it. The format tag comes off on the way:
+`Africa-Split.ne5p` on this computer is `Africa-Split` on the panel. Something
+with no name of its own leaves the slot called what it was called, and a write
+that fails puts the occupant back under its own name.
 
 ### Advanced
 

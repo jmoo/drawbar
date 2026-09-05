@@ -299,8 +299,16 @@ async fn put<T: Transport>(
         Err(e) => return Ok(Err(spoil(gone, Some(at))(e))),
     };
 
+    // What the slot ends up called: the operator's label, else the occupant's own name.
+    // ⚠️ `BEGIN_WRITE`'s name argument is the only thing that names a written slot —
+    // the device refuses `0x1c` rename on the library classes and accepts-then-ignores
+    // it on the buffer ones. Confirmed on hardware.
+    let write_name = slot_label(what)
+        .or_else(|| existing.as_ref().map(|info| info.name.clone()))
+        .unwrap_or_default();
+
     // Nothing is deleted until the backup is in hand.
-    let backup = match existing {
+    let backup = match &existing {
         Some(_) => match op::read_program(s, at).await {
             Ok(file) => Some(file),
             Err(e) => {
@@ -330,11 +338,10 @@ async fn put<T: Transport>(
         }
     }
 
-    // "0" is a placeholder; the rename that follows is what names the slot.
-    let written = op::write(s, at, &bytes, "0", timestamp).await;
+    let written = op::write(s, at, &bytes, &write_name, timestamp).await;
 
     Ok(match (written, backup) {
-        (Ok(()), _) => Ok(name_slot(s, at, what, emit, gone).await),
+        (Ok(()), _) => Ok(wrote(class, at, what, &write_name)),
         (Err(e), None) => Err(spoil(gone, Some(at))(e)),
         // Getting the occupant back matters more than reporting the original error,
         // which is carried along and reported once the slot is whole again.
@@ -343,7 +350,13 @@ async fn put<T: Transport>(
                 "the write failed and {}; putting the original back",
                 aftermath(class, at)
             )));
-            match op::write(s, at, &backup, "0", timestamp).await {
+            // The occupant goes back under its own name, not the one the replacement
+            // was to be given.
+            let restore_name = existing
+                .as_ref()
+                .map(|info| info.name.clone())
+                .unwrap_or_default();
+            match op::write(s, at, &backup, &restore_name, timestamp).await {
                 Ok(()) => Err(format!(
                     "{e} ({} was restored, and is unchanged)",
                     shown(at)
@@ -380,34 +393,15 @@ fn aftermath(class: ObjectClass, at: Location) -> String {
     }
 }
 
-/// Rename a newly written slot before commit; writes do not carry the local label.
-/// A rename failure is reported but does not fail a successful write.
-async fn name_slot<T: Transport>(
-    s: &mut Session<'_, T, ReadWrite>,
-    at: Location,
-    what: &str,
-    emit: &Emit,
-    gone: &mut bool,
-) -> String {
+/// What a completed write is reported as.
+///
+/// ⚠️ A class that stores no name carries the write's name argument and discards it,
+/// so saying the slot was named would report a naming that never happened.
+fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
     let wrote = format!("wrote {what} -> {}", shown(at));
-    // ⚠️ A class that stores no name answers the rename with success and changes
-    // nothing, so sending one would report a naming that never happened.
-    if !s.class().names_its_slots() {
-        return wrote;
-    }
-    let Some(label) = slot_label(what) else {
-        return wrote;
-    };
-    match op::rename(s, at, &label).await {
-        Ok(()) => format!("{wrote}, named {label:?}"),
-        Err(e) => {
-            let why = spoil(gone, Some(at))(e);
-            emit.send(DeviceEvent::OpFailed(format!(
-                "{} holds the right bytes, but naming it {label:?} failed: {why}",
-                shown(at)
-            )));
-            wrote
-        }
+    match class.names_its_slots() && !name.is_empty() {
+        true => format!("{wrote}, named {name:?}"),
+        false => wrote,
     }
 }
 
@@ -1125,7 +1119,7 @@ mod tests {
     /// A verbatim name goes over the wire verbatim: the round trip the operator sees is
     /// get "Big strings" → edit → send, and the slot must still read "Big strings".
     #[test]
-    fn a_spaced_name_survives_to_the_rename() {
+    fn a_spaced_name_survives_to_the_write() {
         assert_eq!(slot_label("Big strings").as_deref(), Some("Big strings"));
     }
 }
@@ -1178,6 +1172,9 @@ mod wire_tests {
         enumerates: bool,
         /// What `FOCUS` reports. `None` answers "nothing loaded".
         focus: Option<Location>,
+        /// Whether the first `BEGIN_WRITE` is refused, which is the only way to reach
+        /// the restore path without an instrument to pull the cable on.
+        refuses_first_write: bool,
     }
 
     /// The Electro 5's own division, which is what an unremarkable Puppet stands for.
@@ -1206,6 +1203,7 @@ mod wire_tests {
                 filled: None,
                 enumerates: true,
                 focus: None,
+                refuses_first_write: false,
             }
         }
 
@@ -1257,6 +1255,12 @@ mod wire_tests {
             self
         }
 
+        /// An instrument that refuses the write it is asked for and takes the restore.
+        fn refusing_the_first_write(mut self) -> Puppet {
+            self.refuses_first_write = true;
+            self
+        }
+
         /// The contents of one address, where this device is keeping any.
         fn holds(&self, at: Location) -> Option<&'static str> {
             self.filled
@@ -1281,6 +1285,12 @@ mod wire_tests {
                 slot: u32::from_be_bytes(msg.args[4..8].try_into().unwrap()),
             };
             match msg.command {
+                cmd::BEGIN_WRITE
+                    if self.refuses_first_write
+                        && !self.heard.iter().any(|m| m.command == cmd::BEGIN_WRITE) =>
+                {
+                    Some((4, Vec::new()))
+                }
                 cmd::STATUS if !self.reports_counters => Some((0, words(&[0, 0, 0]))),
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
@@ -1454,14 +1464,66 @@ mod wire_tests {
         (flow, events)
     }
 
-    /// ⚠️ The bug this pins: a slot written into is called whatever `BEGIN_WRITE` named
-    /// it, and this app does not choose that name. Without the rename the operator's own
-    /// label stops at the cable, and the panel shows something else entirely.
+    /// The name `BEGIN_WRITE` carries, which is the only thing that names a written
+    /// slot. Location, body length, tag, timestamp and the `0xffffffff` word come
+    /// first — six words — and then the length-prefixed name.
+    fn written_names(device: &Puppet) -> Vec<String> {
+        device
+            .heard
+            .iter()
+            .filter(|msg| msg.command == cmd::BEGIN_WRITE)
+            .map(|msg| {
+                let (len, name) = msg.args[24..].split_at(4);
+                let len = u32::from_be_bytes(len.try_into().expect("four bytes")) as usize;
+                assert_eq!(name.len(), len, "the name is length-prefixed");
+                String::from_utf8(name.to_vec()).expect("a name is UTF-8")
+            })
+            .collect()
+    }
+
+    fn written_name(device: &Puppet) -> String {
+        let mut names = written_names(device);
+        assert_eq!(names.len(), 1, "one write");
+        names.remove(0)
+    }
+
+    /// ⚠️ The bug this pins: the device refuses `0x1c` on the library classes, so a
+    /// write that carried a placeholder name and renamed afterwards left every sample
+    /// called by the placeholder. The write's own name argument is what names the slot.
     #[test]
-    fn a_put_names_the_slot_it_wrote_into() {
+    fn a_put_names_the_slot_in_the_write_itself() {
         let at = Location { bank: 6, slot: 3 };
-        let mut device = Puppet::new(1);
-        let (flow, _) = drive(
+        for class in [ObjectClass::Program, ObjectClass::Sample] {
+            let mut device = Puppet::new(1);
+            let (flow, _) = drive(
+                &mut device,
+                DeviceCmd::Put {
+                    id: 1,
+                    class,
+                    at,
+                    name: "Africa-Split.ne5p".into(),
+                    bytes: a_program(),
+                },
+            );
+            assert!(flow == Flow::Continue, "the instrument is still there");
+            assert_eq!(written_name(&device), "Africa-Split", "{}", class.label());
+            assert_eq!(
+                counted(&device, cmd::RENAME),
+                0,
+                "{} refuses a rename, and needs none",
+                class.label()
+            );
+        }
+    }
+
+    /// A write that fails puts the occupant back under the name it had, not under the
+    /// one the replacement was to be given.
+    #[test]
+    fn a_restore_puts_the_occupants_own_name_back() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device =
+            Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_the_first_write();
+        drive(
             &mut device,
             DeviceCmd::Put {
                 id: 1,
@@ -1471,31 +1533,7 @@ mod wire_tests {
                 bytes: a_program(),
             },
         );
-        assert!(flow == Flow::Continue, "the instrument is still there");
-
-        let rename = device.first(cmd::RENAME).expect("the slot was named");
-        let mut expected = Vec::new();
-        at.write_to(&mut expected);
-        expected.extend_from_slice(&12u32.to_be_bytes());
-        expected.extend_from_slice(b"Africa-Split");
-        assert_eq!(
-            rename.args, expected,
-            "the location and the operator's name"
-        );
-
-        // After the bytes, and inside the same session: a rename before the write would
-        // name the occupant that is about to be deleted.
-        let commands = device.commands();
-        let order = |command| commands.iter().position(|held| *held == command);
-        assert!(order(cmd::RENAME) > order(cmd::WRITE_DATA), "{commands:x?}");
-        assert!(
-            order(cmd::RENAME) < order(cmd::SESSION_CLOSE),
-            "{commands:x?}"
-        );
-        assert!(
-            order(cmd::RENAME) > order(cmd::BEGIN_WRITE),
-            "{commands:x?}"
-        );
+        assert_eq!(written_names(&device), ["Africa-Split", "Squabble B"]);
     }
 
     #[test]
@@ -1524,8 +1562,10 @@ mod wire_tests {
         );
     }
 
+    /// The device carries the write's name argument for these classes and discards it,
+    /// so the report must not claim a naming that never happened.
     #[test]
-    fn a_class_that_stores_no_name_is_not_renamed_after_a_write() {
+    fn a_class_that_stores_no_name_is_not_reported_as_named() {
         let at = Location { bank: 0, slot: 2 };
         let mut device = Puppet::stocked(&[("Live", 3)], &[(at, "Live 3")]);
         let (flow, _) = drive(
@@ -1540,14 +1580,12 @@ mod wire_tests {
         );
         assert!(flow == Flow::Continue);
         assert!(device.first(cmd::WRITE_DATA).is_some(), "the bytes went");
-        assert!(
-            device.first(cmd::RENAME).is_none(),
-            "the device would have said yes and done nothing"
-        );
+        let told = wrote(ObjectClass::Live, at, "Africa-Split.ne5l", "Africa-Split");
+        assert!(!told.contains("named"), "{told}");
     }
 
-    /// The bytes are in the slot either way. A name that would not go is worth saying and
-    /// nothing more — least of all worth stopping a batch over.
+    /// Blanking a name is not an improvement on a wrong one. An empty slot has no name
+    /// to keep either, so the write carries nothing and the bytes still go.
     #[test]
     fn a_nameless_asset_still_gets_its_bytes_written() {
         let mut device = Puppet::new(1);
@@ -1563,7 +1601,26 @@ mod wire_tests {
         );
         assert!(flow == Flow::Continue);
         assert!(device.first(cmd::WRITE_DATA).is_some(), "the bytes went");
-        assert!(device.first(cmd::RENAME).is_none(), "nothing to name it");
+        assert_eq!(written_name(&device), "", "nothing to name it");
+    }
+
+    /// An asset the operator never named lands in an occupied slot without renaming it:
+    /// the occupant's name is a better answer than a blank one.
+    #[test]
+    fn a_nameless_asset_leaves_the_slots_name_alone() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]);
+        drive(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "   ".into(),
+                bytes: a_program(),
+            },
+        );
+        assert_eq!(written_name(&device), "Squabble B");
     }
 
     /// A batch names every slot it writes into, not just the first.
@@ -1585,12 +1642,11 @@ mod wire_tests {
             },
         );
         assert!(flow == Flow::Continue);
-        let named: Vec<u32> = device
-            .commands()
-            .into_iter()
-            .filter(|command| *command == cmd::RENAME)
-            .collect();
-        assert_eq!(named.len(), 2, "one rename per item");
+        assert_eq!(
+            written_names(&device),
+            ["Africa-Split", "Squabble-B"],
+            "one name per item"
+        );
         // And one session around the pair, which is what a batch is for.
         let opens = device
             .commands()
