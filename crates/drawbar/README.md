@@ -209,13 +209,10 @@ and it goes nowhere until you say so.
   computer it says so and does nothing, because those edits are already kept. It is
   never a file-export shortcut — that is Export….
 
-**The name goes with the bytes.** The write itself carries the name, so the slot
-ends up called whatever the sound is called here — nothing is renamed afterwards,
-because the instrument refuses a rename on samples and pianos outright and accepts
-one on live and settings without doing it. The format tag comes off on the way:
-`Africa-Split.ne5p` on this computer is `Africa-Split` on the panel. Something
-with no name of its own leaves the slot called what it was called, and a write
-that fails puts the occupant back under its own name.
+**The name goes with the bytes.** The write carries the sound's local name, with the
+format tag removed: `Africa-Split.ne5p` on this computer is `Africa-Split` on the
+panel. An unnamed sound keeps an occupied slot's current name. If a write fails,
+restoring the occupant also restores its name.
 
 ### Advanced
 
