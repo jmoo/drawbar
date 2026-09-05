@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use nord_usb::op;
-use nord_usb::transport::Transport;
-use nord_usb::wire::{Location, ProgramInfo, Status};
-use nord_usb::{op as usb_op, ObjectClass, Session};
+use nord_usb::transport::{Transport, UsbTransport};
+use nord_usb::wire::{Bank, Location, ProgramInfo, Status};
+use nord_usb::{op as usb_op, Device, Geometry, ObjectClass, Product, Session};
 
 use crate::slot::{addr, noun, shown};
 use crate::ui::Ui;
@@ -32,9 +32,9 @@ pub enum Source {
 pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     let report = match source {
         Source::Usb => {
-            let mut transport = open_usb()?;
-            transact(&mut transport, "device status", |t| {
-                nord_usb::block_on(op::inventory(t))
+            let mut device = open_usb()?;
+            transact(&mut device, "device status", |d| {
+                nord_usb::block_on(op::inventory(d.transport()))
             })
             .map_err(|e| e.to_string())?
         }
@@ -225,25 +225,6 @@ fn print_json(ui: &Ui, report: &[Status]) {
     ui.out("]");
 }
 
-/// Combine an operation's result with its session close, keeping the operation's error
-/// when both fail — a close failing is usually a *consequence* of the op failing, and
-/// the original error is the informative one.
-///
-/// ⚠️ **Always call the close, including on the error path.** An abandoned session leaves
-/// the instrument mid-transaction, and a read that has already sent its `"Uploading..."`
-/// progress label leaves that label on the display with **no way out but a power cycle**
-/// — the closing exchanges are what clear it. A `?` between opening a session and
-/// committing it is how that happens.
-fn finish<T>(
-    result: Result<T, nord_usb::Error>,
-    closed: Result<(), nord_usb::Error>,
-) -> Result<T, nord_usb::Error> {
-    match result {
-        Ok(v) => closed.map(|()| v),
-        Err(e) => Err(e),
-    }
-}
-
 /// Turn the device's bare status code into something actionable.
 ///
 /// All three confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address
@@ -313,53 +294,83 @@ pub fn set_recording(path: Option<PathBuf>) {
 /// known once they are on disk. A success writes nothing, because a section that says
 /// nothing expects `ok`.
 fn transact<T>(
-    t: &mut nord_usb::transport::UsbTransport,
+    device: &mut Device<UsbTransport>,
     intent: impl std::fmt::Display,
-    run: impl FnOnce(&mut nord_usb::transport::UsbTransport) -> nord_usb::Result<T>,
+    run: impl FnOnce(&mut Device<UsbTransport>) -> nord_usb::Result<T>,
 ) -> nord_usb::Result<T> {
-    t.mark_intent(&intent.to_string());
-    let outcome = run(t);
+    device.transport().mark_intent(&intent.to_string());
+    let outcome = run(device);
     if let Err(e) = &outcome {
-        t.mark_expect(e);
+        device.transport().mark_expect(e);
     }
     outcome
 }
 
-fn open_usb() -> Result<nord_usb::transport::UsbTransport, String> {
-    let t = nord_usb::transport::UsbTransport::open_first().map_err(|e| e.to_string())?;
-    match RECORDING.get().and_then(Option::as_deref) {
-        Some(path) => t.recording_to(path).map_err(|e| e.to_string()),
-        None => Ok(t),
-    }
+fn open_usb() -> Result<Device<UsbTransport>, String> {
+    let info = nord_usb::transport::usb::list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no Clavia device found".to_string())?;
+    let product = Product::from_product_id(info.product_id());
+    let transport = UsbTransport::open(&info).map_err(|e| e.to_string())?;
+    let transport = match RECORDING.get().and_then(Option::as_deref) {
+        Some(path) => transport.recording_to(path).map_err(|e| e.to_string())?,
+        None => transport,
+    };
+    Ok(Device::new(transport, product))
+}
+
+/// The instrument's own tables, read in a transaction of their own.
+///
+/// ⚠️ The first read has to happen here rather than inside the command that needs it: a
+/// recording is a sequence of intents, and partition frames buried in the middle of a
+/// `walk` or a `put` belong to a section that does not send them. Every later use — this
+/// crate's and [`Device::write`]'s — is answered from the cache.
+fn read_geometry(device: &mut Device<UsbTransport>) -> Result<&Geometry, String> {
+    transact(device, "device geometry", |d| {
+        nord_usb::block_on(d.geometry()).map(|_| ())
+    })
+    .map_err(|e| e.to_string())?;
+    nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
+}
+
+/// The banks bounding a walk of `class`, from those tables.
+fn declared_banks(
+    device: &mut Device<UsbTransport>,
+    class: ObjectClass,
+) -> Result<Vec<Bank>, String> {
+    read_geometry(device)?
+        .banks(class)
+        .map(<[Bank]>::to_vec)
+        .map_err(|e| e.to_string())
 }
 
 /// One read in its own session: the slot's metadata, then its bytes.
 ///
 /// `body` returns the wire body verbatim; otherwise the bytes are a whole CBIN file.
 fn read_object(
-    t: &mut nord_usb::transport::UsbTransport,
+    device: &mut Device<UsbTransport>,
     at: Location,
     class: ObjectClass,
     body: bool,
 ) -> Result<(ProgramInfo, Vec<u8>), String> {
     let verb = if body { "get-body" } else { "get" };
-    transact(t, format!("{} {verb} {}", noun(class), addr(at)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = async {
-                let info = usb_op::info(&mut s, at).await?;
+    transact(
+        device,
+        format!("{} {verb} {}", noun(class), addr(at)),
+        |d| {
+            nord_usb::block_on(d.read(class, async |s| {
+                let info = usb_op::info(s, at).await?;
                 let file = if body {
-                    usb_op::read_body(&mut s, at).await?
+                    usb_op::read_body(s, at).await?
                 } else {
-                    usb_op::read_program(&mut s, at).await?
+                    usb_op::read_program(s, at).await?
                 };
-                Ok::<_, nord_usb::Error>((info, file))
-            }
-            .await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
-    })
+                Ok((info, file))
+            }))
+        },
+    )
     .map_err(|e| explain(e, at))
 }
 
@@ -382,8 +393,8 @@ pub fn get(
     if body && out.is_none() {
         return Err("--body writes a file; give -o a path".into());
     }
-    let mut t = open_usb()?;
-    let (info, file) = read_object(&mut t, at, class, body)?;
+    let mut device = open_usb()?;
+    let (info, file) = read_object(&mut device, at, class, body)?;
 
     if let Some(path) = out {
         std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -439,7 +450,7 @@ pub fn sweep(
     body: bool,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut t = open_usb()?;
+    let mut device = open_usb()?;
     ui.note(format!(
         "sweeping {} ({}) into {}",
         shown(at),
@@ -469,7 +480,7 @@ pub fn sweep(
             continue;
         }
 
-        let (info, file) = match read_object(&mut t, at, class, body) {
+        let (info, file) = match read_object(&mut device, at, class, body) {
             Ok(read) => read,
             Err(e) => {
                 ui.warn(e);
@@ -602,47 +613,6 @@ pub fn put(
     )
 }
 
-/// Reclaim room for `file`, sized by the instrument's own allocation unit, inside the
-/// session that is about to write it.
-///
-/// A library write is refused `0x16` without a prepared block per storage block of body.
-/// The slot classes count bytes and have nothing to reserve.
-async fn reserve_for<T: nord_usb::Transport>(
-    s: &mut Session<'_, T, nord_usb::ReadWrite>,
-    file: &[u8],
-) -> nord_usb::Result<()> {
-    let class = s.class();
-    if !class.is_library() {
-        return Ok(());
-    }
-    let unit = usb_op::partitions(s)
-        .await?
-        .into_iter()
-        .find(|p| p.index == class.to_raw())
-        .ok_or_else(|| {
-            nord_usb::Error::InvalidArgument(format!(
-                "the instrument has no {} partition",
-                class.label()
-            ))
-        })?
-        .allocation_unit()?;
-    let blocks = unit.blocks_for(nord_usb::envelope::unwrap(file)?.body.0.len())?;
-    usb_op::reserve(s, blocks).await
-}
-
-/// Run one mutating operation in its own session, committing either way — an abandoned
-/// session leaves the instrument mid-transaction with its progress label still painted.
-macro_rules! one_shot {
-    ($t:expr, $class:expr, |$s:ident| $body:expr) => {
-        nord_usb::block_on(async {
-            let mut $s = Session::open($t, $class).await?.allow_destructive_writes();
-            let r = $body.await;
-            let closed = $s.commit().await;
-            r.and(closed)
-        })
-    };
-}
-
 /// Send an already-validated file into a slot, describing the target first. Shared with
 /// `edit`, which arrives with bytes rather than a path.
 ///
@@ -666,20 +636,13 @@ pub fn send(
     // `None` means now; the device can refuse a timestamp it considers future.
     stamp: Option<u32>,
 ) -> Result<(), String> {
-    let mut t = open_usb()?;
+    let mut device = open_usb()?;
 
     // Check geometry before the transfer starts.
     let bad = transact(
-        &mut t,
+        &mut device,
         format!("{} check-address {}", noun(class), addr(at)),
-        |t| {
-            nord_usb::block_on(async {
-                let mut s = Session::open(t, class).await?;
-                let r = usb_op::check_address(&mut s, at).await;
-                let closed = s.commit().await;
-                finish(r, closed)
-            })
-        },
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::check_address(s, at).await)),
     )
     .map_err(|e| explain(e, at))?;
     if let Some(reason) = bad {
@@ -699,14 +662,11 @@ pub fn send(
 
     // Name what is about to be destroyed before destroying it. An empty destination is
     // not a failure: status 1 means the slot is vacant, so there is nothing to report.
-    let existing = transact(&mut t, format!("{} info {}", noun(class), addr(at)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = usb_op::info(&mut s, at).await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
-    });
+    let existing = transact(
+        &mut device,
+        format!("{} info {}", noun(class), addr(at)),
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await)),
+    );
 
     let existing = match existing {
         Ok(info) => Some(info),
@@ -770,14 +730,11 @@ pub fn send(
     // sit through it only to be asked whether they meant it.
     let backup = match &existing {
         Some(_) => Some(
-            transact(&mut t, format!("{} read {}", noun(class), addr(at)), |t| {
-                nord_usb::block_on(async {
-                    let mut s = Session::open(t, class).await?;
-                    let r = usb_op::read_program(&mut s, at).await;
-                    let closed = s.commit().await;
-                    finish(r, closed)
-                })
-            })
+            transact(
+                &mut device,
+                format!("{} read {}", noun(class), addr(at)),
+                |d| nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await)),
+            )
             // Nothing is deleted until the backup is in hand.
             .map_err(|e| {
                 format!(
@@ -790,12 +747,19 @@ pub fn send(
         None => None,
     };
 
+    // ⚠️ Read before the occupant is deleted: `Device::write` sizes a library reservation
+    // from the instrument's tables, that read must not land inside the write's own
+    // recorded section, and a failure here must find the slot still intact.
+    if class.is_library() {
+        read_geometry(&mut device)?;
+    }
+
     if existing.is_some() && !in_place {
         ui.note(format!("deleting {} to make room", shown(at)));
         transact(
-            &mut t,
+            &mut device,
             format!("{} delete {}", noun(class), addr(at)),
-            |t| one_shot!(t, class, |s| usb_op::delete(&mut s, at)),
+            |d| nord_usb::block_on(d.destructive(class, async |s| usb_op::delete(s, at).await)),
         )
         .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
@@ -814,14 +778,9 @@ pub fn send(
         ))
     } else {
         transact(
-            &mut t,
+            &mut device,
             put_intent(class, what, at, &write_name, timestamp),
-            |t| {
-                one_shot!(t, class, |s| async {
-                    reserve_for(&mut s, file).await?;
-                    usb_op::write(&mut s, at, file, &write_name, timestamp).await
-                })
-            },
+            |d| nord_usb::block_on(d.write(class, at, file, &write_name, timestamp)),
         )
     };
 
@@ -845,7 +804,7 @@ pub fn send(
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| write_name.clone());
             let restore = transact(
-                &mut t,
+                &mut device,
                 put_intent(
                     class,
                     &rescue_name(at, &backup),
@@ -853,12 +812,7 @@ pub fn send(
                     &restore_name,
                     timestamp,
                 ),
-                |t| {
-                    one_shot!(t, class, |s| async {
-                        reserve_for(&mut s, &backup).await?;
-                        usb_op::write(&mut s, at, &backup, &restore_name, timestamp).await
-                    })
-                },
+                |d| nord_usb::block_on(d.write(class, at, &backup, &restore_name, timestamp)),
             );
             match restore {
                 Ok(()) => {
@@ -947,18 +901,14 @@ fn aftermath(class: ObjectClass, at: Location) -> String {
 /// Read one slot's name in a throwaway read-only session — used to show what a mutation
 /// is about to affect before it happens.
 fn peek(
-    t: &mut nord_usb::transport::UsbTransport,
+    device: &mut Device<UsbTransport>,
     class: ObjectClass,
     at: Location,
 ) -> Result<String, String> {
-    transact(t, format!("{} info {}", noun(class), addr(at)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = usb_op::info(&mut s, at).await;
-            let closed = s.commit().await;
-            finish(r, closed).map(|info| info.name)
-        })
+    transact(device, format!("{} info {}", noun(class), addr(at)), |d| {
+        nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await))
     })
+    .map(|info| info.name)
     .map_err(|e| explain(e, at))
 }
 
@@ -981,12 +931,12 @@ enum DestFate {
 /// later.
 fn peek_dest(
     ui: &Ui,
-    t: &mut nord_usb::transport::UsbTransport,
+    device: &mut Device<UsbTransport>,
     class: ObjectClass,
     at: Location,
     fate: DestFate,
 ) -> String {
-    match (peek(t, class, at), fate) {
+    match (peek(device, class, at), fate) {
         (Ok(name), DestFate::Overwritten) => format!("{} {name:?}", ui.danger("OVERWRITING")),
         (Ok(name), DestFate::Swapped) => format!("{} {name:?}", ui.bold("SWAPPING WITH")),
         (Err(_), _) => "destination reads as empty".into(),
@@ -995,20 +945,17 @@ fn peek_dest(
 
 /// The set lists affected by moving or swapping the target programs.
 fn referring_set_lists(
-    t: &mut nord_usb::transport::UsbTransport,
+    device: &mut Device<UsbTransport>,
     targets: &[Location],
 ) -> Result<Vec<op::Referrer>, String> {
-    transact(t, "setlist list", |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, ObjectClass::SetList).await?;
-            let r = async {
-                let banks = usb_op::banks(&mut s, ObjectClass::SetList.to_raw()).await?;
-                usb_op::set_lists_referencing(&mut s, &banks, targets).await
-            }
-            .await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
+    let class = ObjectClass::SetList;
+    let banks = declared_banks(device, class)?;
+    let where_: Vec<String> = targets.iter().map(|&at| addr(at)).collect();
+    let intent = format!("{} referrers {}", noun(class), where_.join(" "));
+    transact(device, intent, |d| {
+        nord_usb::block_on(d.read(class, async |s| {
+            usb_op::set_lists_referencing(s, &banks, targets).await
+        }))
     })
     .map_err(|e| e.to_string())
 }
@@ -1047,10 +994,10 @@ fn set_list_rewrite_lines(ui: &Ui, found: &[op::Referrer]) -> Vec<String> {
 /// Say what a program move will do to the set lists that point at it.
 fn describe_set_list_rewrites(
     ui: &Ui,
-    t: &mut nord_usb::transport::UsbTransport,
+    device: &mut Device<UsbTransport>,
     targets: &[Location],
 ) -> Result<(), String> {
-    let found = referring_set_lists(t, targets).map_err(|e| {
+    let found = referring_set_lists(device, targets).map_err(|e| {
         format!(
             "could not read which set lists reference these slots ({e}); the move was \
              not attempted"
@@ -1074,9 +1021,9 @@ pub fn move_object(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let name = peek(&mut t, class, from)?;
-    let dest = peek_dest(ui, &mut t, class, to, DestFate::Swapped);
+    let mut device = open_usb()?;
+    let name = peek(&mut device, class, from)?;
+    let dest = peek_dest(ui, &mut device, class, to, DestFate::Swapped);
     ui.note(format!(
         "moving {:?} from {} to {} {} {}",
         name,
@@ -1088,13 +1035,17 @@ pub fn move_object(
     // Only programs are referenced by slot. A set list's own move disturbs nothing that
     // points at it, and the library classes are referenced by content id, not address.
     if class == ObjectClass::Program {
-        describe_set_list_rewrites(ui, &mut t, &[from, to])?;
+        describe_set_list_rewrites(ui, &mut device, &[from, to])?;
     }
     ui.confirm(confirmed)?;
     transact(
-        &mut t,
+        &mut device,
         format!("{} move {} {}", noun(class), addr(from), addr(to)),
-        |t| one_shot!(t, class, |s| usb_op::move_object(&mut s, from, to)),
+        |d| {
+            nord_usb::block_on(
+                d.destructive(class, async |s| usb_op::move_object(s, from, to).await),
+            )
+        },
     )
     .map_err(|e| explain_pair(e, from, to))?;
     ui.note(format!("moved {} -> {}", shown(from), shown(to)));
@@ -1109,9 +1060,9 @@ pub fn delete(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut t = open_usb()?;
+    let mut device = open_usb()?;
     for &at in slots {
-        let name = peek(&mut t, class, at)?;
+        let name = peek(&mut device, class, at)?;
         ui.note(format!(
             "{} {:?} at {}",
             ui.danger("deleting"),
@@ -1124,40 +1075,23 @@ pub fn delete(
     // Each delete lands on the instrument as it is sent: a failure part-way leaves the
     // earlier ones gone, and the report has to say which.
     let mut done = 0;
-    // Which slot the failure was about — carried out of the transaction separately, so
-    // the recorder still sees a plain protocol error to write down.
-    let mut failed = slots[0];
     let outcome = transact(
-        &mut t,
+        &mut device,
         format!("{} delete {}", noun(class), addresses.join(" ")),
-        |t| {
-            nord_usb::block_on(async {
-                let mut s = Session::open(t, class)
-                    .await
-                    .map_err(|e| (slots[0], e))?
-                    .allow_destructive_writes();
-                let mut r = Ok(());
+        |d| {
+            nord_usb::block_on(d.destructive(class, async |s| {
                 for &at in slots {
-                    r = usb_op::delete(&mut s, at).await.map_err(|e| (at, e));
-                    if r.is_err() {
-                        break;
-                    }
+                    usb_op::delete(s, at).await?;
                     done += 1;
                 }
-                match (r, s.commit().await) {
-                    (Err(e), _) => Err(e),
-                    (Ok(()), Err(e)) => Err((slots[slots.len() - 1], e)),
-                    (Ok(()), Ok(())) => Ok(()),
-                }
-            })
-            .map_err(|(at, e)| {
-                failed = at;
-                e
-            })
+                Ok(())
+            }))
         },
     );
     if let Err(e) = outcome {
-        let at = failed;
+        // The slot the failure was about: the first one not deleted, or — when the
+        // session would not close after the last delete — that last slot.
+        let at = slots[done.min(slots.len() - 1)];
         let gone: Vec<String> = slots[..done].iter().map(|&at| shown(at)).collect();
         return Err(match done {
             0 => format!("deleting {}: {}", shown(at), explain(e, at)),
@@ -1167,7 +1101,7 @@ pub fn delete(
                 explain(e, at),
                 done,
                 gone.join(", "),
-                slots.len() - done - 1
+                slots.len().saturating_sub(done + 1)
             ),
         });
     }
@@ -1183,8 +1117,8 @@ pub fn rename(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let old = peek(&mut t, class, at)?;
+    let mut device = open_usb()?;
+    let old = peek(&mut device, class, at)?;
     ui.note(format!(
         "renaming {} from {:?} to {:?}",
         shown(at),
@@ -1193,9 +1127,9 @@ pub fn rename(
     ));
     ui.confirm(confirmed)?;
     transact(
-        &mut t,
+        &mut device,
         format!("{} rename {} {name:?}", noun(class), addr(at)),
-        |t| one_shot!(t, class, |s| usb_op::rename(&mut s, at, &name)),
+        |d| nord_usb::block_on(d.destructive(class, async |s| usb_op::rename(s, at, &name).await)),
     )
     .map_err(|e| explain(e, at))?;
     ui.note(format!("renamed {} -> {:?}", shown(at), name));
@@ -1211,9 +1145,9 @@ pub fn duplicate(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let name = peek(&mut t, class, from)?;
-    let dest = peek_dest(ui, &mut t, class, to, DestFate::Overwritten);
+    let mut device = open_usb()?;
+    let name = peek(&mut device, class, from)?;
+    let dest = peek_dest(ui, &mut device, class, to, DestFate::Overwritten);
     ui.note(format!(
         "duplicating {:?} from {} to {} {} {}",
         name,
@@ -1224,9 +1158,11 @@ pub fn duplicate(
     ));
     ui.confirm(confirmed)?;
     transact(
-        &mut t,
+        &mut device,
         format!("{} duplicate {} {}", noun(class), addr(from), addr(to)),
-        |t| one_shot!(t, class, |s| usb_op::duplicate(&mut s, from, to)),
+        |d| {
+            nord_usb::block_on(d.destructive(class, async |s| usb_op::duplicate(s, from, to).await))
+        },
     )
     .map_err(|e| explain_pair(e, from, to))?;
     ui.note(format!("duplicated {} -> {}", shown(from), shown(to)));
@@ -1236,18 +1172,11 @@ pub fn duplicate(
 /// Load an object live on the instrument (double-click in NSM). Non-destructive, so no
 /// confirmation is needed.
 pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut t = open_usb()?;
+    let mut device = open_usb()?;
     transact(
-        &mut t,
+        &mut device,
         format!("{} select {}", noun(class), addr(at)),
-        |t| {
-            nord_usb::block_on(async {
-                let mut s = Session::open(t, class).await?;
-                let r = usb_op::select(&mut s, at).await;
-                let closed = s.commit().await;
-                r.and(closed)
-            })
-        },
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::select(s, at).await)),
     )
     .map_err(|e| explain(e, at))?;
     ui.note(format!("selected {} on the instrument", shown(at)));
@@ -1284,15 +1213,12 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
 
 /// List the piano/sample library objects an entity depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let deps = transact(&mut t, format!("{} deps {}", noun(class), addr(at)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = usb_op::dependencies(&mut s, at).await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
-    })
+    let mut device = open_usb()?;
+    let deps = transact(
+        &mut device,
+        format!("{} deps {}", noun(class), addr(at)),
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::dependencies(s, at).await)),
+    )
     .map_err(|e| explain(e, at))?;
 
     // Unrouted sections still report rows, but they are not live dependencies.
@@ -1349,9 +1275,9 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
 
 /// Release anything an interrupted run left open on the instrument.
 pub fn recover(ui: &Ui) -> Result<(), String> {
-    let mut t = open_usb()?;
-    transact(&mut t, "device recover", |t| {
-        nord_usb::block_on(usb_op::recover(t))
+    let mut device = open_usb()?;
+    transact(&mut device, "device recover", |d| {
+        nord_usb::block_on(usb_op::recover(d.transport()))
     })
     .map_err(|e| e.to_string())?;
     ui.note("released any session the instrument was still holding");
@@ -1361,38 +1287,32 @@ pub fn recover(ui: &Ui) -> Result<(), String> {
 
 /// Report the instrument's storage layout, from the device's own tables. Read-only.
 pub fn geometry(ui: &Ui) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let rows = transact(&mut t, "device geometry", |t| {
-        nord_usb::block_on(async {
-            // Any class opens a session; the partition table is device-wide.
-            let mut s = Session::open(t, ObjectClass::Program).await?;
-            let r = async {
-                let parts = usb_op::partitions(&mut s).await?;
-                let mut rows = Vec::new();
-                for p in parts {
-                    let banks = usb_op::banks(&mut s, p.index).await?;
-                    rows.push((p, banks));
-                }
-                Ok(rows)
-            }
-            .await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
-    })
-    .map_err(|e| e.to_string())?;
+    let mut device = open_usb()?;
+    let geometry = read_geometry(&mut device)?;
 
     ui.out(ui.dim(format!(
         "{:<4} {:<18} {:>6} {:>7} {:>10}  banks",
         "code", "partition", "banks", "slots", "unit"
     )));
-    for (p, banks) in &rows {
-        // The sentinel is not a capacity and must not be summed into one.
-        let bounded: Vec<&nord_usb::wire::Bank> = banks.iter().filter(|b| b.is_bounded()).collect();
-        let slots = if bounded.len() == banks.len() {
-            bounded.iter().map(|b| b.slots).sum::<u32>().to_string()
-        } else {
-            "—".to_string()
+    for (p, banks) in geometry.entries() {
+        // A partition whose banks the device refused still has a row: the refusal is
+        // what there is to report about it.
+        let (count, slots, names) = match banks {
+            Ok(banks) => {
+                // The sentinel is not a capacity and must not be summed into one.
+                let bounded: Vec<&Bank> = banks.iter().filter(|b| b.is_bounded()).collect();
+                let slots = match bounded.len() == banks.len() {
+                    true => bounded.iter().map(|b| b.slots).sum::<u32>().to_string(),
+                    false => "—".to_string(),
+                };
+                let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
+                (banks.len().to_string(), slots, names.join(", "))
+            }
+            Err(status) => (
+                "—".to_string(),
+                "—".to_string(),
+                format!("the instrument refused its bank list with status {status:#x}"),
+            ),
         };
         // The allocation granularity is what `device status` counts in for this
         // partition: a storage block for the libraries, one byte everywhere else.
@@ -1401,15 +1321,14 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
             Ok(unit) => format!("{} B", unit.get()),
             Err(e) => e.to_string(),
         };
-        let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         ui.out(format!(
             "{:<4} {:<18} {:>6} {:>7} {:>10}  {}",
             p.index,
             p.name,
-            banks.len(),
+            count,
             slots,
             unit,
-            ui.dim(names.join(", ")),
+            ui.dim(names),
         ));
     }
     ui.note("");
@@ -1437,9 +1356,9 @@ pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
              clear it afterwards with `nord device recover`"
             .into());
     }
-    let mut t = open_usb()?;
+    let mut device = open_usb()?;
     nord_usb::block_on(async {
-        let s = Session::open(&mut t, class).await?;
+        let s = Session::open(device.transport(), class).await?;
         s.abort();
         Ok::<(), nord_usb::Error>(())
     })
@@ -1471,7 +1390,7 @@ pub fn controls(
             "--from {from:#04x} is above --to {to:#04x}; nothing to sweep"
         ));
     }
-    let t = open_usb()?;
+    let mut device = open_usb()?;
     let recipient = if interface {
         nord_usb::transport::usb::Recipient::Interface
     } else {
@@ -1481,7 +1400,7 @@ pub fn controls(
     ui.out(ui.dim(format!("{:<9} {:>5}  {}", "bRequest", "bytes", "response")));
     let mut answered = 0;
     for request in from..=to {
-        let got = t.vendor_control_in(
+        let got = device.transport().vendor_control_in(
             recipient,
             request,
             value,
@@ -1531,24 +1450,18 @@ pub fn controls(
 
 /// Report which object the panel has loaded in this class. Read-only.
 pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let (at, info) = transact(&mut t, format!("{} focus", noun(class)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = async {
-                let at = usb_op::focus(&mut s).await?;
-                // An empty focused slot is possible and is not an error to report as one.
-                let info = match usb_op::info(&mut s, at).await {
-                    Ok(i) => Some(i),
-                    Err(nord_usb::Error::DeviceStatus(1)) => None,
-                    Err(e) => return Err(e),
-                };
-                Ok((at, info))
-            }
-            .await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
+    let mut device = open_usb()?;
+    let (at, info) = transact(&mut device, format!("{} focus", noun(class)), |d| {
+        nord_usb::block_on(d.read(class, async |s| {
+            let at = usb_op::focus(s).await?;
+            // An empty focused slot is possible and is not an error to report as one.
+            let info = match usb_op::info(s, at).await {
+                Ok(i) => Some(i),
+                Err(nord_usb::Error::DeviceStatus(1)) => None,
+                Err(e) => return Err(e),
+            };
+            Ok((at, info))
+        }))
     })
     .map_err(|e| e.to_string())?;
 
@@ -1564,27 +1477,21 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 /// One session: the cursor walk and every `info` share it, so a library of a few hundred
 /// items is a few hundred exchanges rather than a few hundred sessions.
 pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let rows = transact(&mut t, format!("{} walk", noun(class)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = async {
-                let banks = usb_op::banks(&mut s, class.to_raw()).await?;
-                let mut rows = Vec::new();
-                for at in usb_op::occupied_slots(&mut s, &banks).await? {
-                    // The cursor may return an empty starting address; status 1 is harmless.
-                    match usb_op::info(&mut s, at).await {
-                        Ok(info) => rows.push((at, info)),
-                        Err(nord_usb::Error::DeviceStatus(1)) => {}
-                        Err(e) => return Err(e),
-                    }
+    let mut device = open_usb()?;
+    let banks = declared_banks(&mut device, class)?;
+    let rows = transact(&mut device, format!("{} walk", noun(class)), |d| {
+        nord_usb::block_on(d.read(class, async |s| {
+            let mut rows = Vec::new();
+            for at in usb_op::occupied_slots(s, &banks).await? {
+                // The cursor may return an empty starting address; status 1 is harmless.
+                match usb_op::info(s, at).await {
+                    Ok(info) => rows.push((at, info)),
+                    Err(nord_usb::Error::DeviceStatus(1)) => {}
+                    Err(e) => return Err(e),
                 }
-                Ok(rows)
             }
-            .await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
+            Ok(rows)
+        }))
     })
     .map_err(explain_walk)?;
 
@@ -1680,12 +1587,13 @@ pub fn probe(
     }
 
     let svc = nord_usb::Service::from_raw(service);
-    let mut t = open_usb()?;
+    let mut device = open_usb()?;
 
     // Bare probes bypass session machinery that may itself be refusing commands.
     if bare {
         let reply = nord_usb::block_on(async {
             let req = nord_usb::Message::new(svc, subsystem, op, words.clone());
+            let t = device.transport();
             t.write(&req.encode()).await?;
             match t
                 .read_timeout(
@@ -1708,7 +1616,7 @@ pub fn probe(
     }
 
     let (reply, changed, close_failed) = nord_usb::block_on(async {
-        let mut s = Session::open(&mut t, class).await?;
+        let mut s = Session::open(device.transport(), class).await?;
         let r = s
             .probe(
                 svc,
@@ -1792,15 +1700,12 @@ fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
 /// CBIN header, which is never itself transmitted, plus the name, which no `.ne5p`/`.ne5t`
 /// file stores at all.
 pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut t = open_usb()?;
-    let info = transact(&mut t, format!("{} info {}", noun(class), addr(at)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = usb_op::info(&mut s, at).await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
-    })
+    let mut device = open_usb()?;
+    let info = transact(
+        &mut device,
+        format!("{} info {}", noun(class), addr(at)),
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await)),
+    )
     .map_err(|e| explain(e, at))?;
 
     let row = |label: &str, value: String| {
@@ -1837,15 +1742,12 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
 
 /// Read one object's bytes with no printing, for `edit`'s read-modify-write.
 pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
-    let mut t = open_usb()?;
-    transact(&mut t, format!("{} read {}", noun(class), addr(at)), |t| {
-        nord_usb::block_on(async {
-            let mut s = Session::open(t, class).await?;
-            let r = usb_op::read_program(&mut s, at).await;
-            let closed = s.commit().await;
-            finish(r, closed)
-        })
-    })
+    let mut device = open_usb()?;
+    transact(
+        &mut device,
+        format!("{} read {}", noun(class), addr(at)),
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await)),
+    )
     .map_err(|e| explain(e, at))
 }
 
