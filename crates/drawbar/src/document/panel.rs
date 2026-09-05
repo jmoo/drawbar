@@ -1,60 +1,142 @@
-//! The Electro 5 panel as a document: the sections the instrument itself is divided
-//! into, holding the controls that instrument would be showing.
+//! A decoded body as a document: the sections the instrument itself is divided into,
+//! holding the controls that instrument would be showing.
+//!
+//! The division is `nord_format::panel`'s, not this app's — which groups a body has, in
+//! what order, and which of them the instrument is using for the state the file holds all
+//! come off the layout the library ships. A body becomes a panel here by having one.
+
+use std::collections::HashMap;
 
 use eframe::egui;
 use nord_format::fields::Field;
+use nord_format::panel::{Panel, Section};
 
 use super::controls::{self, Ctx, Sets};
-use crate::drawbar_widget;
-use crate::fields::Control;
-use crate::strings::{self, Section};
-use crate::visibility::{self, Bars, Organ, Registration};
+use crate::strings;
 
-/// A program or a live slot: the same body, so the same panel.
+/// The field the piano lookup decorates, and so the section it belongs in.
+const PIANO_MODEL: &str = "piano_panel.piano_model";
+
+/// The two halves of the transpose control — see [`transpose`].
+const TRANSPOSE_ENABLED: &str = "center_panel.transpose_enabled";
+const TRANSPOSE: &str = "center_panel.transpose";
+
+/// Any body the library has authored a layout for, nested to whatever depth it uses.
+///
+/// ⚠️ A group the instrument is not using is not drawn. It is still state the file
+/// carries and still writable — the Advanced table is where it stays reachable — but
+/// drawing an organ registration for a model that is not selected asserts a sound the
+/// program does not make. The pickers that bring a section back are themselves in a
+/// group nothing conditions, so nothing can be hidden beyond reach.
 pub fn program(
     ui: &mut egui::Ui,
     ctx: &Ctx,
+    layout: &'static Panel,
     fields: &[Field],
     piano: &mut PianoLookup,
     sets: &mut Sets,
 ) {
-    let organ = visibility::organ(fields);
-    for section in strings::PROGRAM_SECTIONS {
-        if !visibility::shown(section, fields) {
+    let resolved = layout.resolve(fields);
+    let folded = fields.len() > FOLD_ABOVE;
+    for section in &resolved.sections {
+        if !section.relevant {
             continue;
         }
-        let mut rows = gather(fields, section, organ.as_ref());
-        if visibility::switches_first(section) {
-            reading_order(ctx, &mut rows);
-        }
-        let organ_here = (section == Section::Organ)
-            .then_some(organ.as_ref())
-            .flatten();
-        if rows.is_empty() && organ_here.is_none() {
-            continue;
-        }
-        controls::section(ui, section.title(), |ui| {
-            if section == Section::Piano {
-                piano.ui(ui);
+        match folded {
+            true => {
+                egui::CollapsingHeader::new(section.group.title)
+                    .id_salt(section.group.title)
+                    .show(ui, |ui| section_body(ui, ctx, section, fields, piano, sets));
             }
-            match organ_here {
-                Some(organ) => organ_section(ui, ctx, fields, organ, &rows, sets),
-                None => controls::strip(ui, |ui| {
-                    // The transpose pair leads its section, because it is the control the
-                    // panel's own button is: two fields written as one.
-                    if section == Section::Keyboard {
-                        transpose(ui, fields, sets);
-                    }
-                    for field in &rows {
-                        if section == Section::Piano
-                            && field.path == "piano_panel.piano_model"
-                            && piano.model_cell(ui, field, sets)
+            false => controls::section(ui, section.group.title, |ui| {
+                section_body(ui, ctx, section, fields, piano, sets);
+            }),
+        }
+    }
+}
+
+/// One group: its own controls, then the groups under it, however deep they go.
+fn section_body(
+    ui: &mut egui::Ui,
+    ctx: &Ctx,
+    section: &Section,
+    fields: &[Field],
+    piano: &mut PianoLookup,
+    sets: &mut Sets,
+) {
+    if section.fields.iter().any(|field| field.path == PIANO_MODEL) {
+        piano.ui(ui);
+    }
+    let selectors: Vec<&str> = section
+        .groups
+        .iter()
+        .filter_map(|group| {
+            group
+                .group
+                .selected_by
+                .as_ref()
+                .map(|selection| selection.field)
+        })
+        .collect();
+    controls::strip(ui, |ui| {
+        for cluster in clustered(&section.fields) {
+            let field = cluster.parameter;
+            if selectors.contains(&field.path.as_str()) {
+                continue;
+            }
+            // ⚠️ Two fields, one control. The layout puts them side by side because
+            // neither reads on its own; drawing them as two cells would offer a
+            // semitone count the instrument ignores.
+            if field.path == TRANSPOSE_ENABLED {
+                transpose(ui, &section.fields, sets);
+                continue;
+            }
+            if field.path == TRANSPOSE {
+                continue;
+            }
+            if field.path == PIANO_MODEL && piano.model_cell(ui, field, sets) {
+                continue;
+            }
+            controls::morphed(ui, ctx, field, &cluster.morphs, sets);
+        }
+    });
+    for nested in &section.groups {
+        if !nested.relevant {
+            continue;
+        }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match &nested.group.selected_by {
+                Some(selection) => {
+                    let selected = selection.selected(fields);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(
+                                selected,
+                                egui::RichText::new(nested.group.title).strong(),
+                            )
+                            .on_hover_text("select the preset the instrument plays")
+                            .clicked()
+                            && !selected
                         {
-                            continue;
+                            sets.push((selection.field.to_string(), selection.value.to_string()));
                         }
-                        controls::cell(ui, ctx, field, sets);
-                    }
-                }),
+                        if selected {
+                            ui.label(
+                                egui::RichText::new("playing")
+                                    .small()
+                                    .color(crate::app::good(ui.visuals())),
+                            );
+                        }
+                    });
+                    ui.add_enabled_ui(selected, |ui| {
+                        section_body(ui, ctx, nested, fields, piano, sets)
+                    });
+                }
+                None => {
+                    ui.label(egui::RichText::new(nested.group.title).strong());
+                    section_body(ui, ctx, nested, fields, piano, sets);
+                }
             }
         });
     }
@@ -63,7 +145,7 @@ pub fn program(
 /// The settings body, in the order the instrument's own menus run.
 pub fn settings(ui: &mut egui::Ui, ctx: &Ctx, fields: &[Field], sets: &mut Sets) {
     for section in strings::SETTINGS_SECTIONS {
-        let rows = gather(fields, section, None);
+        let rows = gather(fields, section);
         if rows.is_empty() {
             continue;
         }
@@ -115,10 +197,51 @@ pub fn plain(ui: &mut egui::Ui, ctx: &Ctx, fields: &[Field], sets: &mut Sets) {
 
 fn cells(ui: &mut egui::Ui, ctx: &Ctx, rows: &[&Field], sets: &mut Sets) {
     controls::strip(ui, |ui| {
-        for field in rows {
-            controls::cell(ui, ctx, field, sets);
+        for cluster in clustered(rows) {
+            controls::morphed(ui, ctx, cluster.parameter, &cluster.morphs, sets);
         }
     });
+}
+
+/// A parameter and the performance controls that morph it, drawn as one cell.
+struct Cluster<'a> {
+    parameter: &'a Field,
+    /// The wheel, aftertouch and control-pedal targets, in declaration order. Empty for
+    /// a parameter nothing morphs, which is most of them.
+    morphs: Vec<&'a Field>,
+}
+
+/// The rows as cells, with every morph slot moved onto the parameter it moves.
+///
+/// A slot whose parameter is not in the same run — the layout named one and not the
+/// other, or the body declares no such parameter — stands as its own cell rather than
+/// being dropped.
+fn clustered<'a>(rows: &[&'a Field]) -> Vec<Cluster<'a>> {
+    let mut out: Vec<Cluster<'a>> = Vec::new();
+    let mut at: HashMap<&'a str, usize> = HashMap::new();
+    let mut slots: Vec<(&'a Field, String)> = Vec::new();
+    for field in rows {
+        match field.spec.morph_parent() {
+            Some(parent) => slots.push((field, parent)),
+            None => {
+                at.insert(field.path.as_str(), out.len());
+                out.push(Cluster {
+                    parameter: field,
+                    morphs: Vec::new(),
+                });
+            }
+        }
+    }
+    for (slot, parent) in slots {
+        match at.get(parent.as_str()) {
+            Some(&index) => out[index].morphs.push(slot),
+            None => out.push(Cluster {
+                parameter: slot,
+                morphs: Vec::new(),
+            }),
+        }
+    }
+    out
 }
 
 /// One titled run of a field list.
@@ -292,225 +415,187 @@ impl PianoLookup {
     }
 }
 
-/// The fields a section shows: its own, minus what another control speaks for.
-fn gather<'a>(fields: &'a [Field], section: Section, organ: Option<&Organ>) -> Vec<&'a Field> {
+/// The fields a settings section shows.
+///
+/// ⚠️ The settings body has no authored layout, so its division is still this app's own
+/// table — see `strings::FIELDS`.
+fn gather(fields: &[Field], section: strings::Section) -> Vec<&Field> {
     fields
         .iter()
         .filter(|field| strings::section(&field.path) == section)
-        .filter(|field| !visibility::engineering_only(&field.path))
-        .filter(|field| !organ.is_some_and(|organ| organ.covers(&field.path)))
         .collect()
-}
-
-/// One effect at a time, and within an effect what it *is* before how much of it there
-/// is — the order the panel's own labelling reads in.
-fn reading_order(ctx: &Ctx, rows: &mut [&Field]) {
-    let group = |path: &str| -> String {
-        let leaf = path.rsplit('.').next().unwrap_or(path);
-        leaf.split_once('_')
-            .map_or(leaf, |(head, _)| head)
-            .to_string()
-    };
-    let mut order: Vec<String> = Vec::new();
-    for field in rows.iter() {
-        let key = group(&field.path);
-        if !order.contains(&key) {
-            order.push(key);
-        }
-    }
-    rows.sort_by_key(|field| {
-        let at = order
-            .iter()
-            .position(|key| *key == group(&field.path))
-            .unwrap_or(usize::MAX);
-        let knob = !matches!(ctx.control(field), Control::Toggle | Control::Choice);
-        (at, knob)
-    });
-}
-
-fn find<'a>(fields: &'a [Field], path: &str) -> Option<&'a Field> {
-    fields.iter().find(|field| field.path == path)
-}
-
-fn organ_section(
-    ui: &mut egui::Ui,
-    ctx: &Ctx,
-    fields: &[Field],
-    organ: &Organ,
-    rows: &[&Field],
-    sets: &mut Sets,
-) {
-    // Model and shared organ settings remain visible regardless of the active registration.
-    controls::strip(ui, |ui| {
-        if let Some(field) = find(fields, "center_panel.organ_type") {
-            controls::cell(ui, ctx, field, sets);
-        }
-        for path in organ.vib_type.iter().chain(
-            organ
-                .perc
-                .iter()
-                .flat_map(|(third, speed)| [third, speed].into_iter()),
-        ) {
-            if let Some(field) = find(fields, path) {
-                controls::cell(ui, ctx, field, sets);
-            }
-        }
-    });
-    if !organ.known {
-        ui.label(
-            egui::RichText::new(
-                "This program has an organ selection this app does not recognise, so it \
-                 cannot say which registration the instrument is playing. Everything the \
-                 file stores is below.",
-            )
-            .small()
-            .color(crate::app::warn(ui.visuals())),
-        );
-    }
-
-    for registration in &organ.registrations {
-        preset(ui, fields, organ, registration, sets);
-    }
-
-    // Whatever else this section holds: an unrecognised selection's whole panel, or a
-    // field the library has grown since.
-    controls::strip(ui, |ui| {
-        for field in rows {
-            if field.path == "center_panel.organ_type" {
-                continue;
-            }
-            controls::cell(ui, ctx, field, sets);
-        }
-    });
-}
-
-fn preset(
-    ui: &mut egui::Ui,
-    fields: &[Field],
-    organ: &Organ,
-    registration: &Registration,
-    sets: &mut Sets,
-) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            let title = match &registration.bars {
-                Bars::Bass(..) => format!("Preset {} — bass manual", registration.preset),
-                _ => format!("Preset {}", registration.preset),
-            };
-            let picked = ui
-                .selectable_label(registration.live, egui::RichText::new(title).strong())
-                .on_hover_text("the preset the instrument plays");
-            if picked.clicked() && !registration.live {
-                if let Some(path) = organ.preset_field {
-                    sets.push((path.to_string(), (registration.preset == 2).to_string()));
-                }
-            }
-            if registration.live {
-                let good = crate::app::good(ui.visuals());
-                ui.label(egui::RichText::new("playing").small().color(good));
-            }
-        });
-
-        match &registration.bars {
-            Bars::Nine(path) => nine(ui, fields, path, sets),
-            Bars::Tabs(path) => {
-                nine(ui, fields, path, sets);
-                ui.label(
-                    egui::RichText::new("The instrument reads a register at 5 or more as on.")
-                        .small()
-                        .weak(),
-                );
-            }
-            Bars::Bass(first, second) => bass(ui, fields, first, second, sets),
-        }
-
-        ui.horizontal_wrapped(|ui| {
-            controls::switch(
-                ui,
-                registration.vib.and_then(|p| find(fields, p)),
-                "vibrato",
-                sets,
-            );
-            controls::switch(
-                ui,
-                registration.perc.and_then(|p| find(fields, p)),
-                "percussion",
-                sets,
-            );
-        });
-    });
-}
-
-fn nine(ui: &mut egui::Ui, fields: &[Field], path: &str, sets: &mut Sets) {
-    let Some(field) = find(fields, path) else {
-        return;
-    };
-    if let Some(value) = controls::register(ui, field, true) {
-        sets.push((field.path.clone(), value));
-    }
-}
-
-/// The bass manual: two drawbars, each its own field, written together so a pull moves
-/// the registration rather than half of it.
-fn bass(ui: &mut egui::Ui, fields: &[Field], first: &str, second: &str, sets: &mut Sets) {
-    let read = |path: &str| -> u8 {
-        find(fields, path)
-            .and_then(|field| field.value.parse().ok())
-            .unwrap_or(0)
-    };
-    let mut positions = [0u8; drawbar_widget::BARS];
-    positions[0] = read(first);
-    positions[1] = read(second);
-    if let Some(moved) = controls::bars(ui, positions, true, &drawbar_widget::BASS_RANKS) {
-        sets.push((first.to_string(), moved[0].to_string()));
-        sets.push((second.to_string(), moved[1].to_string()));
-    }
 }
 
 /// The transpose control: a lamp and a number, written together the way the panel's own
 /// button writes them — two cells, because that is how the panel prints it.
 ///
-/// The instrument ignores the amount while the lamp is dark, and moving the amount is
-/// what lights it.
-pub fn transpose(ui: &mut egui::Ui, fields: &[Field], sets: &mut Sets) {
+/// ⚠️ Neither field reads on its own. `transpose_enabled` is sticky — the instrument sets
+/// it the first time transposition is touched and never clears it — and an untouched
+/// program stores `+1` in the value rather than `0`. The instrument ignores the amount
+/// while the lamp is dark, and moving the amount is what lights it.
+/// Confirmed on hardware.
+pub fn transpose(ui: &mut egui::Ui, fields: &[&Field], sets: &mut Sets) {
     /// The panel's own travel, either side of nothing.
     const SEMITONES: i64 = 6;
 
-    let Some((on, semitones)) = visibility::transpose(fields) else {
+    let value = |path: &str| fields.iter().find(|field| field.path == path);
+    let on = value(TRANSPOSE_ENABLED).is_some_and(|field| field.value == "true");
+    let Some(semitones) =
+        value(TRANSPOSE).and_then(|field| field.value.trim_start_matches('+').parse::<i64>().ok())
+    else {
         return;
     };
+
     let mut switched = None;
-    controls::named_cell(ui, "center_panel.transpose_enabled", 78.0, |ui| {
+    controls::named_cell(ui, TRANSPOSE_ENABLED, 78.0, |ui| {
         switched = crate::led::ui(ui, on, "");
     })
     .on_hover_text("the transpose light on the panel");
 
     let mut moved = None;
-    controls::named_cell(ui, "center_panel.transpose", 78.0, |ui| {
-        moved = crate::knob::ui(
-            ui,
-            "center_panel.transpose",
-            semitones,
-            -SEMITONES,
-            SEMITONES,
-        );
+    controls::named_cell(ui, TRANSPOSE, 78.0, |ui| {
+        moved = crate::knob::ui(ui, TRANSPOSE, semitones, -SEMITONES, SEMITONES);
     });
 
-    match (switched, moved) {
-        (_, Some(want)) => {
-            // Moving the semitones turns the light on, which is what the panel does.
-            sets.extend(visibility::set_transpose(true, want));
-        }
-        (Some(want_on), None) => sets.extend(visibility::set_transpose(want_on, semitones)),
-        (None, None) => {}
-    }
+    // Moving the semitones turns the light on, which is what the panel does.
+    let (on, semitones) = match (switched, moved) {
+        (_, Some(want)) => (true, want),
+        (Some(want_on), None) => (want_on, semitones),
+        (None, None) => return,
+    };
+    sets.push((TRANSPOSE_ENABLED.to_string(), on.to_string()));
+    sets.push((TRANSPOSE.to_string(), semitones.to_string()));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fields::{apply, blank};
+    use nord_format::formats::{ne5, ns4};
+    use nord_format::{Entity, Program};
+
+    fn electro5() -> Vec<Field> {
+        let entity = Entity::Program(Program::Electro5(ne5::program::new(
+            (0, 0).try_into().unwrap(),
+        )));
+        apply(&nord_format::to_bytes(&entity).unwrap(), &[])
+            .unwrap()
+            .0
+    }
+
+    /// Every control the view offers comes off the layout, so nothing this app knows
+    /// about a body's sections can disagree with what the library says.
+    #[test]
+    fn the_electro5_view_is_the_librarys_layout() {
+        let fields = electro5();
+        let resolved = ne5::program::PANEL.resolve(&fields);
+        let leftovers: Vec<&str> = resolved
+            .leftovers
+            .iter()
+            .map(|field| field.path.as_str())
+            .collect();
+        assert_eq!(leftovers.len(), 6, "{leftovers:?}");
+        assert!(leftovers.contains(&"program_version"));
+        assert!(leftovers.contains(&"piano_panel.id"));
+        assert!(leftovers.contains(&"sample_panel.id"));
+        let titles: Vec<&str> = resolved
+            .sections
+            .iter()
+            .filter(|section| section.relevant)
+            .map(|section| section.group.title)
+            .collect();
+        // A fresh program plays organ on both parts, so piano and sample are state
+        // rather than controls and the view does not offer them.
+        assert!(titles.contains(&"Keyboard & split"));
+        assert!(titles.contains(&"Organ"));
+        assert!(!titles.contains(&"Piano"));
+    }
+
+    /// The transpose pair is drawn as one control, which needs both halves in the same
+    /// group — the layout is what puts them there.
+    #[test]
+    fn the_transpose_pair_stays_in_one_group() {
+        let fields = electro5();
+        let resolved = ne5::program::PANEL.resolve(&fields);
+        let keyboard = resolved
+            .sections
+            .iter()
+            .find(|section| section.group.title == "Keyboard & split")
+            .expect("the keyboard section");
+        let paths: Vec<&str> = keyboard
+            .fields
+            .iter()
+            .map(|field| field.path.as_str())
+            .collect();
+        assert!(paths.contains(&TRANSPOSE_ENABLED));
+        assert!(paths.contains(&TRANSPOSE));
+    }
+
+    /// A morph target is the value its parameter is driven to, so it is drawn on that
+    /// parameter and never as a control of its own.
+    #[test]
+    fn a_morph_slot_is_drawn_on_the_parameter_it_moves() {
+        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let rows: Vec<&Field> = fields.iter().collect();
+        let clusters = clustered(&rows);
+
+        let volume = clusters
+            .iter()
+            .find(|cluster| cluster.parameter.path == "organ_a_volume")
+            .expect("organ_a_volume");
+        let morphs: Vec<&str> = volume
+            .morphs
+            .iter()
+            .map(|field| field.path.as_str())
+            .collect();
+        assert_eq!(
+            morphs,
+            [
+                "organ_a_volume_wheel",
+                "organ_a_volume_aftertouch",
+                "organ_a_volume_ctrl_pedal",
+            ]
+        );
+        assert!(
+            !clusters
+                .iter()
+                .any(|cluster| cluster.parameter.path == "organ_a_volume_wheel"),
+            "a slot with a parameter is not a cell of its own",
+        );
+        assert_eq!(morph_paths(&clusters).len(), 0, "no slot stands alone here");
+    }
+
+    /// A slot whose parameter the body does not declare has nothing to ride on, so it
+    /// keeps a cell rather than disappearing.
+    #[test]
+    fn a_slot_with_no_parameter_beside_it_still_gets_a_cell() {
+        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let rows: Vec<&Field> = fields
+            .iter()
+            .filter(|field| field.path != "organ_a_volume")
+            .collect();
+        let clusters = clustered(&rows);
+        assert!(clusters
+            .iter()
+            .any(|cluster| cluster.parameter.path == "organ_a_volume_wheel"));
+    }
+
+    /// A layout exists for the Stage 4 program too, so the same view serves it.
+    #[test]
+    fn a_stage4_program_has_a_layout_as_well() {
+        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let resolved = ns4::program::PANEL.resolve(&fields);
+        assert!(!resolved.sections.is_empty());
+    }
+
+    /// The slots that ended up as their own cells.
+    fn morph_paths<'a>(clusters: &[Cluster<'a>]) -> Vec<&'a str> {
+        clusters
+            .iter()
+            .filter(|cluster| cluster.parameter.spec.morph_parent().is_some())
+            .map(|cluster| cluster.parameter.path.as_str())
+            .collect()
+    }
 
     fn titles(bytes: Vec<u8>) -> Vec<String> {
         let (fields, _) = apply(&bytes, &[]).unwrap();

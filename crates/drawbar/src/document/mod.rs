@@ -337,8 +337,8 @@ impl Document {
             return None;
         }
         if let Some(fields) = registry {
-            if fields::is_electro5_panel(decoded) {
-                panel::program(ui, &self.ctx, fields, piano, sets);
+            if let Some(layout) = nord_format::panel::of(decoded) {
+                panel::program(ui, &self.ctx, layout, fields, piano, sets);
             } else if fields::is_electro5_settings(decoded) {
                 panel::settings(ui, &self.ctx, fields, sets);
             } else {
