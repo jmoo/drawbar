@@ -593,132 +593,58 @@ pub async fn next_occupied<T: Transport, C>(
 /// Every occupied slot in the session's class, in address order.
 ///
 /// **Read-only.** [`next_occupied`] walks *within* one bank and stops at its end, so this
-/// drives it bank by bank, each from [`SLOT_BOUNDARY`]. Pianos span several banks and
-/// programs fill eight of them; only the sample library is flat, and walking bank 0
-/// alone silently reports a fraction of the class.
+/// drives it over `banks` in table order, each from [`SLOT_BOUNDARY`]. Pianos span
+/// several banks and programs fill eight of them; only the sample library is flat, and
+/// walking bank 0 alone silently reports a fraction of the class.
 ///
-/// Each bank's slot 0 is tested with [`info`] first, because the cursor cannot say
-/// whether a bank *exists*: an empty bank and a bank the class does not have answer a
-/// boundary request identically. `info` distinguishes — status `3` (out of range) means
-/// the class has no more banks and ends the walk, status `1` a bank that merely holds
-/// nothing — the sample library has addressable empty banks past its only populated one.
+/// `banks` is the instrument's own answer for this class — [`banks`] on the partition
+/// whose index is the class code, or [`Geometry::banks`](crate::device::Geometry::banks).
+/// Nothing here guesses how many banks a class has or how far one runs: a bank ends where
+/// the device ends it (status `1` to a cursor request), and its declared capacity bounds
+/// how many objects it may yield.
 ///
-/// Two bounds keep a walk finite when the device does not behave as expected: `cap` on
-/// total slots, and a stop after `EMPTY_BANKS_BEFORE_STOP` consecutive empty banks for
-/// classes that never report out-of-range at all.
+/// A cursor answer that leaves the bank, repeats, or goes backwards is
+/// [`Error::Enumeration`] rather than a quiet stop: the walk would otherwise spin or pass
+/// off a truncated list. So is a bank yielding more objects than it declares slots. An
+/// unbounded bank ([`Bank::is_bounded`] false) declares no capacity, so the sentinel
+/// itself bounds it.
 ///
 /// A refusal mid-walk — [`ENUMERATION_DISABLED`] above all — propagates as its error
 /// rather than truncating the list: a partial inventory that looks complete is the one
 /// result worse than none.
 pub async fn occupied_slots<T: Transport, C>(
     session: &mut Session<'_, T, C>,
-    cap: usize,
+    banks: &[Bank],
 ) -> Result<Vec<Location>> {
-    occupied_slots_until(session, cap)
-        .await
-        .map(|walk| walk.slots)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WalkEnd {
-    Exhausted,
-    SlotCap,
-    EmptyBankCap,
-    BankCap,
-}
-
-impl WalkEnd {
-    fn incomplete_reason(self, slot_cap: usize) -> String {
-        match self {
-            WalkEnd::Exhausted => "the device reported the end of the class".into(),
-            WalkEnd::SlotCap => format!("reached the {slot_cap}-slot safety bound"),
-            WalkEnd::EmptyBankCap => format!(
-                "reached the safety bound of {EMPTY_BANKS_BEFORE_STOP} consecutive empty banks"
-            ),
-            WalkEnd::BankCap => format!("reached the {MAX_BANKS}-bank safety bound"),
-        }
-    }
-}
-
-struct SlotWalk {
-    slots: Vec<Location>,
-    end: WalkEnd,
-}
-
-async fn occupied_slots_until<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-    cap: usize,
-) -> Result<SlotWalk> {
     let mut found: Vec<Location> = Vec::new();
-    let mut empty_banks = 0;
 
-    for bank in 0..MAX_BANKS {
-        if found.len() >= cap {
-            return Ok(SlotWalk {
-                slots: found,
-                end: WalkEnd::SlotCap,
-            });
-        }
-        match info(session, Location { bank, slot: 0 }).await {
-            Ok(_) | Err(Error::DeviceStatus(1)) => {}
-            Err(Error::DeviceStatus(3)) => {
-                return Ok(SlotWalk {
-                    slots: found,
-                    end: WalkEnd::Exhausted,
-                });
-            }
-            Err(e) => return Err(e),
-        }
-
-        let before = found.len();
+    for bank in banks {
         let mut at = Location {
-            bank,
+            bank: bank.index,
             slot: SLOT_BOUNDARY,
         };
-        while found.len() < cap {
-            match next_occupied(session, at).await? {
-                // Staying inside the bank and moving forward, or the walk is not making
-                // progress and would spin.
-                Some(next)
-                    if next.bank == bank && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
-                {
-                    found.push(next);
-                    at = next;
-                }
-                Some(next) => {
-                    return Err(Error::UnexpectedLocation {
-                        requested: at,
-                        reported: next,
-                    });
-                }
-                None => break,
-            }
-        }
-
-        if found.len() == before {
-            empty_banks += 1;
-            if empty_banks >= EMPTY_BANKS_BEFORE_STOP {
-                return Ok(SlotWalk {
-                    slots: found,
-                    end: WalkEnd::EmptyBankCap,
+        let mut held = 0u32;
+        while let Some(next) = next_occupied(session, at).await? {
+            let advanced =
+                next.bank == bank.index && (at.slot == SLOT_BOUNDARY || next.slot > at.slot);
+            held += 1;
+            let overrun = match bank.is_bounded() {
+                true => held > bank.slots,
+                false => held >= Bank::UNBOUNDED,
+            };
+            if !advanced || overrun {
+                return Err(Error::Enumeration {
+                    bank: bank.index,
+                    answered: next,
+                    slots: bank.slots,
                 });
             }
-        } else {
-            empty_banks = 0;
+            found.push(next);
+            at = next;
         }
     }
-    Ok(SlotWalk {
-        slots: found,
-        end: WalkEnd::BankCap,
-    })
+    Ok(found)
 }
-
-/// Highest bank number a walk will try. Programs use eight; nothing observed uses more.
-const MAX_BANKS: u32 = 64;
-
-/// How many consecutive empty banks end a walk, for classes whose banks stay addressable
-/// past the last populated one instead of reporting out-of-range.
-const EMPTY_BANKS_BEFORE_STOP: u32 = 2;
 
 /// The library objects an entity actually needs. **Read-only.**
 ///
@@ -780,15 +706,10 @@ pub struct Referrer {
     pub programs: Vec<Location>,
 }
 
-/// How many occupied set-list slots a walk may return before it is treated as not
-/// terminating. An Electro 5 holds 200 set lists, so reaching this safety bound is an
-/// error rather than a place to stop.
-const SET_LIST_WALK_CAP: usize = 1024;
-
 /// Every set list that references one of `targets`. **Read-only.**
 ///
 /// The session must be open on [`ObjectClass::SetList`]; the walk and every read run
-/// inside it.
+/// inside it, over the `banks` [`occupied_slots`] documents.
 ///
 /// This is what makes a program `move` describable. The instrument maintains referential
 /// integrity itself: moving a program rewrites the body of **every** set list pointing at
@@ -798,13 +719,14 @@ const SET_LIST_WALK_CAP: usize = 1024;
 /// every set list first.
 ///
 /// Cost is one `DEPENDENCIES` per occupied set list, plus one `INFO` per match. A
-/// refusal mid-scan propagates rather than truncating, and a walk that runs to its
-/// bound without ending is an error for the same reason: a short list here reads as "no
-/// set list is affected", which is the wrong answer to act on.
+/// refusal mid-scan propagates rather than truncating, and so does a walk that
+/// contradicts the declared geometry, for the same reason: a short list here reads as
+/// "no set list is affected", which is the wrong answer to act on.
 ///
 /// Confirmed on hardware.
 pub async fn set_lists_referencing<T: Transport, C>(
     session: &mut Session<'_, T, C>,
+    banks: &[Bank],
     targets: &[Location],
 ) -> Result<Vec<Referrer>> {
     if session.class() != ObjectClass::SetList {
@@ -816,14 +738,7 @@ pub async fn set_lists_referencing<T: Transport, C>(
     if targets.is_empty() {
         return Ok(out);
     }
-    let walk = occupied_slots_until(session, SET_LIST_WALK_CAP).await?;
-    if walk.end != WalkEnd::Exhausted {
-        return Err(Error::Transport(format!(
-            "the set-list walk did not reach a confirmed end: {}",
-            walk.end.incomplete_reason(SET_LIST_WALK_CAP),
-        )));
-    }
-    for at in walk.slots {
+    for at in occupied_slots(session, banks).await? {
         let mut programs: Vec<Location> = Vec::new();
         for l in dependencies(session, at)
             .await?

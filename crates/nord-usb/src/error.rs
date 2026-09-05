@@ -28,6 +28,18 @@ pub enum Error {
         reported: Location,
     },
 
+    /// The slot cursor contradicted the geometry the instrument itself declared, so the
+    /// walk can neither continue nor report what it has.
+    #[error(
+        "walking bank {bank}, which declares {slots} slots: the cursor answered \
+         {answered:?}, and a walk must advance within its bank and end inside it"
+    )]
+    Enumeration {
+        bank: u32,
+        answered: Location,
+        slots: u32,
+    },
+
     /// The byte pipe itself failed — a USB transfer error, a missing device, a claim
     /// refusal. Nothing about message *content* belongs here.
     #[error("transport: {0}")]
@@ -66,6 +78,7 @@ impl Error {
             Error::DeviceStatus(code) => format!("device-status {code:#x}"),
             Error::UnexpectedResponse { .. } => "unexpected-response".into(),
             Error::UnexpectedLocation { .. } => "unexpected-location".into(),
+            Error::Enumeration { .. } => "enumeration".into(),
             Error::Replay(_) => "replay".into(),
             _ => "transport".into(),
         }
