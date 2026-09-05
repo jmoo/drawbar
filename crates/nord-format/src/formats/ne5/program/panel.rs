@@ -10,6 +10,16 @@
 
 use crate::panel::{Group, Match, Panel, Relevance, Selection};
 
+/// One of a model's two stored presets, chosen by its `…_preset2_selected` flag.
+macro_rules! preset {
+    ($field:expr, $value:expr) => {
+        Some(Selection {
+            field: $field,
+            value: $value,
+        })
+    };
+}
+
 /// Either part playing `instrument` — the condition an engine section hangs on.
 macro_rules! part_plays {
     ($instrument:expr) => {
@@ -67,56 +77,10 @@ macro_rules! switched_on {
 
 pub const PANEL: Panel = Panel {
     exhaustive: false,
-    selections: &[
-        Selection {
-            member: "organ_panel.b3_preset1_drawbars",
-            field: "organ_panel.b3_preset2_selected",
-            value: "false",
-        },
-        Selection {
-            member: "organ_panel.b3_bass_bar1",
-            field: "organ_panel.b3_preset2_selected",
-            value: "false",
-        },
-        Selection {
-            member: "organ_panel.b3_preset2_drawbars",
-            field: "organ_panel.b3_preset2_selected",
-            value: "true",
-        },
-        Selection {
-            member: "organ_panel.vox_preset1_drawbars",
-            field: "organ_panel.vox_preset2_selected",
-            value: "false",
-        },
-        Selection {
-            member: "organ_panel.vox_preset2_drawbars",
-            field: "organ_panel.vox_preset2_selected",
-            value: "true",
-        },
-        Selection {
-            member: "organ_panel.farfisa_preset1_drawbars",
-            field: "organ_panel.farfisa_preset2_selected",
-            value: "false",
-        },
-        Selection {
-            member: "organ_panel.farfisa_preset2_drawbars",
-            field: "organ_panel.farfisa_preset2_selected",
-            value: "true",
-        },
-        Selection {
-            member: "organ_panel.pipe_preset1_drawbars",
-            field: "organ_panel.pipe_preset2_selected",
-            value: "false",
-        },
-        Selection {
-            member: "organ_panel.pipe_preset2_drawbars",
-            field: "organ_panel.pipe_preset2_selected",
-            value: "true",
-        },
-    ],
     groups: &[
         Group {
             title: "Keyboard & split",
+            selected_by: None,
             when: None,
             groups: &[],
             members: &[
@@ -141,6 +105,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Organ",
+            selected_by: None,
             when: part_plays!("Organ"),
             // The model selector stays here rather than inside a model's cluster: it is
             // what a reader changes to make another cluster relevant.
@@ -148,6 +113,7 @@ pub const PANEL: Panel = Panel {
             groups: &[
                 Group {
                     title: "B3",
+                    selected_by: None,
                     when: organ_is!("B3", "B3Bass"),
                     members: &[
                         "organ_panel.b3_vib",
@@ -158,6 +124,7 @@ pub const PANEL: Panel = Panel {
                     groups: &[
                         Group {
                             title: "Preset 1",
+                            selected_by: preset!("organ_panel.b3_preset2_selected", "false"),
                             // b3+bass replaces this registration with the bass manual
                             // below, and the nine nibbles it would draw hold stale
                             // leftovers there — showing them asserts a registration that
@@ -172,6 +139,7 @@ pub const PANEL: Panel = Panel {
                         },
                         Group {
                             title: "Preset 1, bass manual",
+                            selected_by: preset!("organ_panel.b3_preset2_selected", "false"),
                             // ⚠️ Two live bars, outside the nine-nibble block. The vib
                             // and percussion flags of preset 1 are in the group above,
                             // so they read as not-relevant here; whether the bass manual
@@ -182,6 +150,7 @@ pub const PANEL: Panel = Panel {
                         },
                         Group {
                             title: "Preset 2",
+                            selected_by: preset!("organ_panel.b3_preset2_selected", "true"),
                             when: None,
                             members: &[
                                 "organ_panel.b3_preset2_drawbars",
@@ -194,11 +163,13 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Vox",
+                    selected_by: None,
                     when: organ_is!("Vox"),
                     members: &["organ_panel.vox_vib", "organ_panel.vox_preset2_selected"],
                     groups: &[
                         Group {
                             title: "Preset 1",
+                            selected_by: preset!("organ_panel.vox_preset2_selected", "false"),
                             when: None,
                             members: &[
                                 "organ_panel.vox_preset1_drawbars",
@@ -208,6 +179,7 @@ pub const PANEL: Panel = Panel {
                         },
                         Group {
                             title: "Preset 2",
+                            selected_by: preset!("organ_panel.vox_preset2_selected", "true"),
                             when: None,
                             members: &[
                                 "organ_panel.vox_preset2_drawbars",
@@ -219,6 +191,7 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Farfisa",
+                    selected_by: None,
                     // The registers are stored as drawbar positions and read by the
                     // instrument as on/off tabs, at a threshold of 5.
                     when: organ_is!("Farfisa"),
@@ -229,6 +202,7 @@ pub const PANEL: Panel = Panel {
                     groups: &[
                         Group {
                             title: "Preset 1",
+                            selected_by: preset!("organ_panel.farfisa_preset2_selected", "false"),
                             when: None,
                             members: &[
                                 "organ_panel.farfisa_preset1_drawbars",
@@ -238,6 +212,7 @@ pub const PANEL: Panel = Panel {
                         },
                         Group {
                             title: "Preset 2",
+                            selected_by: preset!("organ_panel.farfisa_preset2_selected", "true"),
                             when: None,
                             members: &[
                                 "organ_panel.farfisa_preset2_drawbars",
@@ -249,6 +224,7 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Pipe",
+                    selected_by: None,
                     // No vibrato and no percussion the panel can reach: the bit the other
                     // models use for preset-1 vib is set in nearly every real program,
                     // and the vib button does not respond while pipe is selected.
@@ -258,12 +234,14 @@ pub const PANEL: Panel = Panel {
                     groups: &[
                         Group {
                             title: "Preset 1",
+                            selected_by: preset!("organ_panel.pipe_preset2_selected", "false"),
                             when: None,
                             members: &["organ_panel.pipe_preset1_drawbars"],
                             groups: &[],
                         },
                         Group {
                             title: "Preset 2",
+                            selected_by: preset!("organ_panel.pipe_preset2_selected", "true"),
                             when: None,
                             members: &["organ_panel.pipe_preset2_drawbars"],
                             groups: &[],
@@ -274,6 +252,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Piano",
+            selected_by: None,
             when: part_plays!("Piano"),
             members: &[
                 "piano_panel.category",
@@ -284,6 +263,7 @@ pub const PANEL: Panel = Panel {
             ],
             groups: &[Group {
                 title: "Clavinet",
+                selected_by: None,
                 // Inferred from specimens; not confirmed on hardware.
                 when: Some(Relevance {
                     any_of: &[Match {
@@ -297,6 +277,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Sample",
+            selected_by: None,
             when: part_plays!("Sample"),
             members: &[
                 "sample_panel.number",
@@ -309,6 +290,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Effects",
+            selected_by: None,
             when: None,
             // The five routing switches, which are what turns each effect on. They stay
             // out of the clusters they govern for the same reason the organ model does.
@@ -322,6 +304,7 @@ pub const PANEL: Panel = Panel {
             groups: &[
                 Group {
                     title: "Effect 1",
+                    selected_by: None,
                     when: routed!("effects_panel.fx1"),
                     members: &[
                         "effects_panel.fx1_type",
@@ -332,6 +315,7 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Effect 2",
+                    selected_by: None,
                     when: routed!("effects_panel.fx2"),
                     members: &[
                         "effects_panel.fx2_type",
@@ -342,10 +326,12 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Amp / compressor",
+                    selected_by: None,
                     when: routed!("effects_panel.fx3"),
                     members: &["effects_panel.fx3_type", "effects_panel.fx3_compression"],
                     groups: &[Group {
                         title: "Rotary speaker",
+                        selected_by: None,
                         // Nested, so it needs both: the amp block routed to a part *and*
                         // the rotary chosen as its model.
                         when: Some(Relevance {
@@ -360,6 +346,7 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Delay",
+                    selected_by: None,
                     when: routed!("effects_panel.fx4"),
                     members: &[
                         "effects_panel.fx4_tempo",
@@ -371,6 +358,7 @@ pub const PANEL: Panel = Panel {
                 },
                 Group {
                     title: "Reverb",
+                    selected_by: None,
                     when: switched_on!("effects_panel.fx5"),
                     members: &["effects_panel.fx5_type", "effects_panel.fx5_moisture"],
                     groups: &[],
@@ -379,10 +367,12 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "EQ",
+            selected_by: None,
             when: None,
             members: &["effects_panel.equalizer_on"],
             groups: &[Group {
                 title: "Bands",
+                selected_by: None,
                 when: switched_on!("effects_panel.equalizer_on"),
                 members: &[
                     "effects_panel.equalizer_part",
