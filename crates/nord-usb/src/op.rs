@@ -10,8 +10,8 @@ use crate::session::ReadWrite;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::wire::{
-    cmd, ui, Bank, Dependency, Location, Message, ObjectClass, Partition, ProgramInfo, Service,
-    Status,
+    cmd, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
+    ProgramInfo, Service, Status,
 };
 
 /// Query the inventory for the class the session was opened with.
@@ -314,9 +314,8 @@ async fn clean_library<T: Transport>(
 /// exactly the shortfall out of `dirty` and waits for the pass to finish. Under what is
 /// already free it sends nothing but the `STATUS` request.
 ///
-/// `blocks` is the body's length in units of the partition's
-/// [`AllocationUnit`](crate::wire::AllocationUnit); a count from anywhere else sizes the
-/// reclaim wrongly. [`Device::write`](crate::device::Device::write) does this for its
+/// `blocks` is the body's length in units of the partition's [`AllocationUnit`]; a count
+/// from anywhere else sizes the reclaim wrongly. [`write_library`] does this for its
 /// caller.
 pub async fn reserve<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
@@ -329,13 +328,57 @@ pub async fn reserve<T: Transport>(
     Ok(())
 }
 
-/// Write an entity into a slot; one shape for every class. `name` is what the slot
-/// ends up called — the file carries none, and a placeholder becomes the slot's name.
+/// Write an entity into a slot class. `name` is what the slot ends up called — the file
+/// carries none, and a placeholder becomes the slot's name.
 ///
-/// The transfer alone. A library class needs [`reserve`] ahead of it in the same
-/// session, or the device refuses `0x16`;
-/// [`Device::write`](crate::device::Device::write) is the composed form.
+/// The transfer alone. A library class is refused here rather than sent without the
+/// [`reserve`] the device answers `0x16` without: [`write_library`] is that composition.
 pub async fn write<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    at: Location,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<()> {
+    let class = session.class();
+    if class.is_library() {
+        return Err(Error::InvalidArgument(format!(
+            "{} is a library class, so its write must reserve first: use write_library",
+            class.label()
+        )));
+    }
+    transfer_in(session, at, file, name, timestamp).await
+}
+
+/// Write an entity into a library slot, reclaiming the space it needs first.
+///
+/// A library write is refused `0x16` without a prepared block per storage block of body,
+/// so the [`reserve`] and the transfer share one transaction. `unit` is the partition's
+/// own [`AllocationUnit`] — [`Geometry::allocation_unit`](crate::device::Geometry::allocation_unit)
+/// is where one comes from — and it sizes the reclaim from the CBIN body the file
+/// carries, which is shorter than the file by its header.
+pub async fn write_library<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    unit: AllocationUnit,
+    at: Location,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<()> {
+    let class = session.class();
+    if !class.is_library() {
+        return Err(Error::InvalidArgument(format!(
+            "{} is a slot class, so it has no blocks to reserve: use write",
+            class.label()
+        )));
+    }
+    let blocks = unit.blocks_for(envelope::unwrap(file)?.body.0.len())?;
+    reserve(session, blocks).await?;
+    transfer_in(session, at, file, name, timestamp).await
+}
+
+/// The write transfer itself, identical for every class.
+async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
     file: &[u8],

@@ -515,6 +515,53 @@ fn a_library_write_reserves_the_shortfall_it_is_short_by() {
     );
 }
 
+/// The two writes are not interchangeable — one reserves and one must not — so each
+/// refuses the other's class before a byte of the body is committed to.
+#[test]
+fn a_write_aimed_at_the_wrong_kind_of_class_is_refused_before_any_frame() {
+    let at = Location { bank: 0, slot: 0 };
+    let file = envelope::wrap("nsmp", at, 1, &[0u8; 8]).unwrap();
+    let unit = partition_reporting(131_064).allocation_unit().unwrap();
+
+    // Each script holds the opening and closing exchanges and nothing else, so a write
+    // that reached the wire would fail against the script rather than return.
+    let mut library = ReplayTransport::new(
+        session_open(ObjectClass::Sample)
+            .into_iter()
+            .chain(session_close())
+            .collect(),
+    );
+    let mut slots = ReplayTransport::new(
+        session_open(ObjectClass::SetList)
+            .into_iter()
+            .chain(session_close())
+            .collect(),
+    );
+
+    let refused = |t: &mut ReplayTransport, class, library: bool| {
+        pollster::block_on(async {
+            let mut s = Session::open(t, class)
+                .await
+                .unwrap()
+                .allow_destructive_writes();
+            let r = match library {
+                true => op::write_library(&mut s, unit, at, &file, "Marimba", 0).await,
+                false => op::write(&mut s, at, &file, "Marimba", 0).await,
+            };
+            s.commit().await.unwrap();
+            r.expect_err("the class is the wrong kind for this write")
+        })
+    };
+
+    let err = refused(&mut library, ObjectClass::Sample, false);
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+    assert!(library.is_exhausted(), "a refused write sent a frame");
+
+    let err = refused(&mut slots, ObjectClass::SetList, true);
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+    assert!(slots.is_exhausted(), "a refused write sent a frame");
+}
+
 /// A slot class has no blocks to reserve, so nothing precedes its transfer.
 #[test]
 fn a_slot_class_write_sends_no_reserve_step() {
