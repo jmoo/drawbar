@@ -239,22 +239,6 @@ impl<T: Transport> Device<T> {
     }
 }
 
-#[cfg(feature = "nusb")]
-impl Device<crate::transport::UsbTransport> {
-    /// Open the first attached Clavia device, naming it from its USB product id.
-    pub fn detect() -> Result<Self> {
-        let info = crate::transport::usb::list()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Transport("no Clavia device found".into()))?;
-        let product = Product::from_product_id(info.product_id());
-        Ok(Self::new(
-            crate::transport::UsbTransport::open(&info)?,
-            product,
-        ))
-    }
-}
-
 /// Run `f` and close the session on both paths, keeping `f`'s error over the close's.
 async fn bracket<T: Transport, C, R>(
     mut session: Session<'_, T, C>,
