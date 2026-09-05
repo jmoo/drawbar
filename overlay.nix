@@ -53,7 +53,8 @@ let
     strictDeps = true;
   };
 
-  # Share one dependency build, excluding drawbar so library builds do not compile its GUI stack.
+  # Share one dependency build, excluding drawbar so library builds do not compile its
+  # GUI stack. `drawbarArtifacts` is that crate's own.
   cargoArtifacts = crane.buildDepsOnly (
     commonArgs
     // {
@@ -116,11 +117,24 @@ let
     nativeBuildInputs = [ final.pkg-config ];
   };
 
+  # The shared build above excludes drawbar, so its GUI stack needs a dependency build
+  # of its own; without one, every edit under `drawbar/src` recompiles all of it.
+  drawbarArtifacts = crane.buildDepsOnly (
+    commonArgs
+    // audioArgs
+    // {
+      cargoExtraArgs = "--locked -p drawbar";
+      pname = "drawbar";
+      inherit (manifests.drawbar) version;
+    }
+  );
+
   crates = mapAttrs (name: _: mkCrate { crate = name; }) manifests // {
     drawbar =
       let
         pkg = mkCrate (
           {
+            cargoArtifacts = drawbarArtifacts;
             crate = "drawbar";
             meta.mainProgram = "drawbar";
           }
