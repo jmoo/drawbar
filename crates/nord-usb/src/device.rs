@@ -13,7 +13,6 @@
 //!
 //! Nothing here touches the wire: every frame is emitted by [`op`] or [`Session`].
 
-use crate::envelope;
 use crate::error::{Error, Result};
 use crate::op;
 use crate::session::{ReadOnly, ReadWrite, Session};
@@ -225,15 +224,9 @@ impl<T: Transport> Device<T> {
                 })
                 .await;
         }
-        let body_len = envelope::unwrap(file)?.body.0.len();
-        let blocks = self
-            .geometry()
-            .await?
-            .allocation_unit(class)?
-            .blocks_for(body_len)?;
+        let unit = self.geometry().await?.allocation_unit(class)?;
         self.destructive(class, async |s| {
-            op::reserve(s, blocks).await?;
-            op::write(s, at, file, name, timestamp).await
+            op::write_library(s, unit, at, file, name, timestamp).await
         })
         .await
     }

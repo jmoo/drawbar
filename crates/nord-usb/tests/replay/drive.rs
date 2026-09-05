@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use nord_usb::device::Geometry;
 use nord_usb::transport::ReplayTransport;
 use nord_usb::wire::{AllocationUnit, Bank, ObjectClass};
-use nord_usb::{envelope, op, Error, Location, Result, Session};
+use nord_usb::{op, Error, Location, Result, Session};
 
 /// Bytes an intent produced, and the file it named to compare them against.
 pub struct Produced {
@@ -222,11 +222,9 @@ async fn drive_write(
                     .map(|()| None);
             }
             let unit = declared_unit(geometry, class).await?;
-            let blocks = unit.blocks_for(envelope::unwrap(&file)?.body.0.len())?;
-            rw_session!(t, class, |s| async {
-                op::reserve(&mut s, blocks).await?;
-                op::write(&mut s, at, &file, name, stamp).await
-            })
+            rw_session!(t, class, |s| op::write_library(
+                &mut s, unit, at, &file, name, stamp
+            ))
             .map(|()| None)
         }
         "move" => {
