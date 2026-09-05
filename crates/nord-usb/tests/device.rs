@@ -595,6 +595,23 @@ fn a_slot_class_write_sends_no_reserve_step() {
     assert!(device.transport().is_exhausted());
 }
 
+/// The device queues a `CHANGED` of its own when its contents change outside the
+/// session — a front-panel STORE does it — and the caller has to learn that whatever it
+/// read may already be stale. The flag outlives the transaction the notification arrived
+/// in, and reading it clears it.
+#[test]
+fn a_change_notification_reaches_the_caller_once() {
+    let steps = scripts::fixture("session/changed_notification.script").steps();
+    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+
+    pollster::block_on(device.read(ObjectClass::Program, async |_| Ok(())))
+        .expect("the notification is drained, not mistaken for the reply");
+    assert!(device.transport().is_exhausted());
+
+    assert!(device.take_changed(), "the notification did not reach out");
+    assert!(!device.take_changed(), "and it is not reported twice");
+}
+
 #[test]
 fn a_product_id_names_the_instrument_it_belongs_to() {
     assert_eq!(

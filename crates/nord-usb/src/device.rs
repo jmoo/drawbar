@@ -10,6 +10,8 @@
 //!   walk and what sizes a library write are numbers the device supplied.
 //! - [`Device::write`] sizes a library's cleaning pass from that partition's
 //!   [`AllocationUnit`] and the body it is about to send.
+//! - [`Device::take_changed`] carries the instrument's own "I changed" notification out
+//!   of the transaction it arrived in.
 //!
 //! Nothing here touches the wire: every frame is emitted by [`op`] or [`Session`].
 
@@ -121,6 +123,7 @@ pub struct Device<T: Transport> {
     transport: T,
     product: Product,
     geometry: Option<Geometry>,
+    changed: bool,
 }
 
 impl<T: Transport> Device<T> {
@@ -131,6 +134,7 @@ impl<T: Transport> Device<T> {
             transport,
             product,
             geometry: None,
+            changed: false,
         }
     }
 
@@ -164,7 +168,7 @@ impl<T: Transport> Device<T> {
         f: impl AsyncFnOnce(&mut Session<'_, T, ReadOnly>) -> Result<R>,
     ) -> Result<R> {
         let session = Session::open(&mut self.transport, class).await?;
-        bracket(session, f).await
+        bracket(&mut self.changed, session, f).await
     }
 
     /// Run a chain that may mutate the instrument, in one transaction.
@@ -179,7 +183,17 @@ impl<T: Transport> Device<T> {
         let session = Session::open(&mut self.transport, class)
             .await?
             .allow_destructive_writes();
-        bracket(session, f).await
+        bracket(&mut self.changed, session, f).await
+    }
+
+    /// Whether the instrument reported changing under us since this was last asked, and
+    /// clear it.
+    ///
+    /// Every bracket ORs its session's [`Session::instrument_changed`] in, so this
+    /// answers for the whole run of transactions rather than the last one: state read in
+    /// any of them may be stale.
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
     }
 
     /// The instrument's [`Geometry`], read on first use and kept.
@@ -233,11 +247,17 @@ impl<T: Transport> Device<T> {
 }
 
 /// Run `f` and close the session on both paths, keeping `f`'s error over the close's.
+///
+/// `changed` collects the session's [`Session::instrument_changed`] whichever way the
+/// chain went: a notification that arrived is a fact about the instrument, not about the
+/// operation that happened to be running.
 async fn bracket<T: Transport, C, R>(
+    changed: &mut bool,
     mut session: Session<'_, T, C>,
     f: impl AsyncFnOnce(&mut Session<'_, T, C>) -> Result<R>,
 ) -> Result<R> {
     let r = f(&mut session).await;
+    *changed |= session.instrument_changed();
     // A chain that bailed on a desync released the session already, and `commit` on a
     // released session sends nothing and reports `Ok`.
     let closed = session.commit().await;
