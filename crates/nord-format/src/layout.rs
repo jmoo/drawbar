@@ -146,7 +146,7 @@ mod tests {
 
     /// A body whose names carry the two relations the derive binds: a morph slot beside
     /// its parameter, a drawbar with a rank, and an orphan of each.
-    #[bitbody(4)]
+    #[bitbody(6)]
     struct Named {
         #[bits(0..=6)]
         pub volume: crate::components::Level,
@@ -158,10 +158,17 @@ mod tests {
         pub drawbar_4: crate::components::Drawbar,
         #[bits(27..=30)]
         pub bar: crate::components::Drawbar,
+        #[bits(31..=38)]
+        #[morphs(volume)]
+        pub misnamed_wheel: crate::components::MorphTarget,
+        #[bits(39..=42)]
+        #[rank(7)]
+        pub seventh: crate::components::Drawbar,
     }
 
     /// The parameter is bound by name, and only where the body registers one; the rank
-    /// likewise. Neither reaches a field whose type has no use for it.
+    /// likewise. Neither reaches a field whose type has no use for it, and a declared
+    /// binding stands in where the name says nothing.
     #[test]
     fn a_name_binds_a_morph_slot_and_places_a_drawbar() {
         let specs = Named::field_specs();
@@ -173,9 +180,14 @@ mod tests {
         );
         // Nothing named `absent` in this body, so the slot stands alone.
         assert_eq!(of("absent_wheel"), ControlKind::Morph { of: None });
+        assert_eq!(
+            of("misnamed_wheel"),
+            ControlKind::Morph { of: Some("volume") }
+        );
         let drawbar = <crate::components::Drawbar as crate::bits::Packed>::CONTROL;
         assert_eq!(of("drawbar_4"), drawbar.ranked(4));
         assert_eq!(of("bar"), drawbar);
+        assert_eq!(of("seventh"), drawbar.ranked(7));
         // The knob a morph slot is named after is untouched by the binding.
         assert_eq!(of("volume"), ControlKind::Knob(Unit::Panel10));
     }
