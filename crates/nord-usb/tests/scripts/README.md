@@ -69,6 +69,7 @@ a path beside the script.
 | `device recover` | the two bare frames that release an abandoned session |
 | `<class> status` | that class's counters |
 | `<class> walk` | the occupied-slot enumeration, then an `info` per slot |
+| `setlist referrers <at>…` | the set lists pointing at those program slots, walked as `walk` is |
 | `<class> focus` | what the panel has loaded, then an `info` on it |
 | `<class> info <at>` | one slot's metadata |
 | `<class> deps <at>` | one object's library dependencies |

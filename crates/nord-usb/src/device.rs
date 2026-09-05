@@ -73,6 +73,16 @@ impl Geometry {
         &self.partitions
     }
 
+    /// Every partition in table order with its banks, or the status the device refused
+    /// [`cmd::BANKS`](crate::wire::cmd::BANKS) with for that one. This is the whole
+    /// table, `(Native)` partitions included, rather than the classes this crate names.
+    pub fn entries(&self) -> impl Iterator<Item = (&Partition, std::result::Result<&[Bank], u32>)> {
+        self.partitions
+            .iter()
+            .zip(&self.banks)
+            .map(|(partition, banks)| (partition, banks.as_deref().map_err(|&status| status)))
+    }
+
     /// The partition storing `class`. An instrument without one is an error, never a
     /// default: the whole point of reading the table is not to assume.
     pub fn partition(&self, class: ObjectClass) -> Result<&Partition> {
