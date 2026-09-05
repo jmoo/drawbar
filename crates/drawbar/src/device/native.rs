@@ -7,6 +7,7 @@
 use std::sync::mpsc::{self, Sender};
 
 use eframe::egui;
+use nord_usb::device::{Device, Product};
 use nord_usb::transport::{usb, UsbTransport};
 
 use super::worker::{self, Emit, Flow};
@@ -34,10 +35,10 @@ impl Link {
         let emit = Emit::new(self.events.clone(), self.ctx.clone());
 
         std::thread::spawn(move || {
-            let mut transport = match open() {
-                Ok((card, transport)) => {
+            let mut device = match open() {
+                Ok((card, device)) => {
                     emit.send(DeviceEvent::Connected(card));
-                    transport
+                    device
                 }
                 Err(why) => {
                     emit.send(DeviceEvent::ConnectFailed(why));
@@ -48,14 +49,14 @@ impl Link {
             // thread still stops it.
             let mut flow = Flow::Released;
             while let Ok(cmd) = rx.recv() {
-                flow = nord_usb::block_on(worker::run(&mut transport, cmd, &emit));
+                flow = nord_usb::block_on(worker::run(&mut device, cmd, &emit));
                 if flow != Flow::Continue {
                     break;
                 }
             }
-            // Dropping the transport releases the claimed interface, which is what lets
-            // Nord Sound Manager and nord-cli have the device back.
-            drop(transport);
+            // Dropping the device drops its transport, releasing the claimed interface,
+            // which is what lets Nord Sound Manager and nord-cli have it back.
+            drop(device);
             emit.send(DeviceEvent::Disconnected {
                 lost: flow == Flow::Lost,
             });
@@ -82,7 +83,7 @@ impl Link {
 /// The vendor-interface check happens here rather than inside the first transaction:
 /// a Clavia this tool cannot drive should say so at connect time, not fail somewhere
 /// inside a session.
-fn open() -> Result<(DeviceCard, UsbTransport), String> {
+fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     let devices = usb::list().map_err(|e| e.to_string())?;
     let info = devices
         .into_iter()
@@ -117,5 +118,6 @@ fn open() -> Result<(DeviceCard, UsbTransport), String> {
         serial: info.serial_number().map(str::to_string),
         vendor_id: info.vendor_id(),
     };
-    Ok((card, transport))
+    let device = Device::new(transport, Product::from_product_id(info.product_id()));
+    Ok((card, device))
 }

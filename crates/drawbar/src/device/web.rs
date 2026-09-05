@@ -1,9 +1,9 @@
 //! Browser link: the device chooser, and a pump that runs one command at a time.
 //!
 //! There is one thread, so the "worker" is a chain of `spawn_local` tasks: each takes
-//! the transport out of the shared cell, runs one command, and puts it back before
+//! the device out of the shared cell, runs one command, and puts it back before
 //! starting the next. Holding a `RefCell` borrow across an `await` would panic the
-//! moment the UI touched the same cell, so the transport is moved rather than borrowed.
+//! moment the UI touched the same cell, so the device is moved rather than borrowed.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -12,6 +12,7 @@ use std::sync::mpsc::Sender;
 
 use eframe::egui;
 use js_sys::Promise;
+use nord_usb::device::{Device, Product};
 use nord_usb::transport::{web::WebUsbTransport, VENDOR_ID};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
@@ -23,13 +24,13 @@ use super::{DeviceCard, DeviceCmd, DeviceEvent};
 
 #[derive(Default)]
 struct Inner {
-    transport: Option<WebUsbTransport>,
+    device: Option<Device<WebUsbTransport>>,
     /// The device the chooser handed over, kept so the browser's own disconnect event
     /// can be told apart from another Clavia's. WebUSB hands back the same object for
     /// the same device, so this is an identity and not a description.
-    device: Option<UsbDevice>,
+    chosen: Option<UsbDevice>,
     queue: VecDeque<DeviceCmd>,
-    /// A command is running, so the transport is out of the cell.
+    /// A command is running, so the device is out of the cell.
     busy: bool,
     /// The device went away. Whatever is running is the last thing that runs.
     lost: bool,
@@ -74,8 +75,8 @@ impl Link {
         let emit = self.emit.clone();
         let inner = self.inner.clone();
         spawn_local(async move {
-            let device = match JsFuture::from(request).await {
-                Ok(device) => device,
+            let chosen = match JsFuture::from(request).await {
+                Ok(chosen) => chosen,
                 Err(e) => {
                     emit.send(DeviceEvent::ConnectFailed(format!(
                         "no device chosen: {}",
@@ -90,21 +91,21 @@ impl Link {
                 firmware: None,
                 interface: None,
                 kind: None,
-                manufacturer: device.manufacturer_name(),
+                manufacturer: chosen.manufacturer_name(),
                 max_transfer: None,
-                product: device
+                product: chosen
                     .product_name()
                     .unwrap_or_else(|| "unnamed device".into()),
-                product_id: device.product_id(),
-                serial: device.serial_number(),
-                vendor_id: device.vendor_id(),
+                product_id: chosen.product_id(),
+                serial: chosen.serial_number(),
+                vendor_id: chosen.vendor_id(),
             };
-            let chosen = device.clone();
-            match WebUsbTransport::open(device).await {
+            let product = Product::from_product_id(chosen.product_id());
+            match WebUsbTransport::open(chosen.clone()).await {
                 Ok(transport) => {
                     let mut state = inner.borrow_mut();
-                    state.transport = Some(transport);
-                    state.device = Some(chosen);
+                    state.device = Some(Device::new(transport, product));
+                    state.chosen = Some(chosen);
                     drop(state);
                     emit.send(DeviceEvent::Connected(card));
                 }
@@ -124,38 +125,38 @@ impl Link {
     }
 }
 
-/// Start the next queued command, if the transport is free.
+/// Start the next queued command, if the device is free.
 fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
-    let (transport, cmd) = {
+    let (device, cmd) = {
         let mut state = inner.borrow_mut();
-        if state.busy || state.transport.is_none() {
+        if state.busy || state.device.is_none() {
             return;
         }
         let Some(cmd) = state.queue.pop_front() else {
             return;
         };
         state.busy = true;
-        (state.transport.take(), cmd)
+        (state.device.take(), cmd)
     };
-    let Some(mut transport) = transport else {
+    let Some(mut device) = device else {
         return;
     };
 
     let inner = inner.clone();
     let emit = emit.clone();
     spawn_local(async move {
-        let flow = worker::run(&mut transport, cmd, &emit).await;
+        let flow = worker::run(&mut device, cmd, &emit).await;
         if flow == Flow::Continue && !inner.borrow().lost {
             {
                 let mut state = inner.borrow_mut();
-                state.transport = Some(transport);
+                state.device = Some(device);
                 state.busy = false;
             }
             return pump(&inner, &emit);
         }
         // ⚠️ Release a connected interface so other hosts are not locked out.
         if flow == Flow::Released {
-            if let Err(e) = transport.close().await {
+            if let Err(e) = device.into_transport().close().await {
                 emit.send(DeviceEvent::OpFailed(e.to_string()));
             }
         }
@@ -163,7 +164,7 @@ fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
             let mut state = inner.borrow_mut();
             state.busy = false;
             state.queue.clear();
-            state.device = None;
+            state.chosen = None;
             let said = state.lost;
             state.lost = said || flow == Flow::Lost;
             said
@@ -192,14 +193,14 @@ fn watch_for_unplug(
     let watch = Closure::wrap(Box::new(move |event: UsbConnectionEvent| {
         let went = event.device();
         // Another Clavia leaving the machine is not this one leaving.
-        if held.borrow().device.as_ref() != Some(&went) {
+        if held.borrow().chosen.as_ref() != Some(&went) {
             return;
         }
         let mut state = held.borrow_mut();
         state.queue.clear();
+        state.chosen = None;
+        // An unplugged device cannot be closed; whichever owner holds it drops it.
         state.device = None;
-        // An unplugged transport cannot be closed; whichever owner holds it drops it.
-        state.transport = None;
         let said = std::mem::replace(&mut state.lost, true);
         drop(state);
         if !said {

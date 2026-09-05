@@ -25,9 +25,13 @@
 
 use std::path::PathBuf;
 
+#[path = "support/scripts.rs"]
+mod scripts;
+
+use nord_usb::device::Geometry;
 use nord_usb::op;
 use nord_usb::transport::{Direction, ReplayTransport, Step};
-use nord_usb::wire::ObjectClass;
+use nord_usb::wire::{Bank, ObjectClass};
 use nord_usb::Session;
 
 /// Where the recorded walks live: the Electro 5 tree's USB recordings.
@@ -65,11 +69,18 @@ fn script(name: &str) -> Vec<Step> {
         .collect()
 }
 
-/// The runaway guard the recordings were made under. It is a bound on a walk that
-/// fails to advance, not an item count: a walk that stops *at* the count never issues
-/// the probe that discovers the bank has no more occupied slots, and would diverge from
-/// the script by one request per bank.
-const CAP: usize = 1024;
+/// The banks each walk is bounded by. The recordings carry no geometry section of their
+/// own, so they are read from the committed recording of `device geometry` — the same
+/// instrument, and tables that do not change.
+fn banks(class: ObjectClass) -> Vec<Bank> {
+    let mut t = ReplayTransport::new(scripts::fixture("device/geometry.script").steps());
+    pollster::block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let geometry = Geometry::read(&mut s).await.unwrap();
+        s.commit().await.unwrap();
+        geometry.banks(class).unwrap().to_vec()
+    })
+}
 
 /// Replay one recorded listing and return the slots it found.
 ///
@@ -77,10 +88,11 @@ const CAP: usize = 1024;
 /// per slot found, all inside one session — so the replay has to do both to consume the
 /// script. Reading `info` for every result makes an invented address fail the replay.
 fn walk(name: &str, class: ObjectClass) -> Vec<nord_usb::Location> {
+    let banks = banks(class);
     let mut t = ReplayTransport::new(script(name));
     pollster::block_on(async {
         let mut s = Session::open(&mut t, class).await.unwrap();
-        let found = op::occupied_slots(&mut s, CAP).await.unwrap();
+        let found = op::occupied_slots(&mut s, &banks).await.unwrap();
         for at in &found {
             op::info(&mut s, *at).await.unwrap();
         }
@@ -122,7 +134,7 @@ fn sample_walk_finds_every_occupied_slot() {
     assert!(found.iter().all(|l| l.bank == 0), "samples are one bank");
 }
 
-/// Six banks of 120 — the library class whose banks are named categories rather than
+/// Six banks of 20 — the library class whose banks are named categories rather than
 /// numbered slots.
 #[test]
 fn piano_walk_finds_every_occupied_slot() {

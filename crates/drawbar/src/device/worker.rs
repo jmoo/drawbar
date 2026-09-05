@@ -5,46 +5,23 @@
 //!
 //! ⚠️ **Every session commits, including on the error path.** An abandoned transaction
 //! leaves the instrument mid-operation with its progress label still painted, and the
-//! only way out is a power cycle. A `?` between opening a session and committing it is
-//! how that happens, so each operation below holds the result, commits, and only then
-//! reports.
+//! only way out is a power cycle. [`Device::read`] and [`Device::destructive`] are what
+//! guarantee it, so nothing here opens a [`Session`] of its own.
 
 use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use eframe::egui;
+use nord_usb::device::Device;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{Bank, Dependency, ProgramInfo};
+use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::{DeviceCmd, DeviceEvent, Outgoing};
 use crate::strings::shown;
 use crate::workspace::Origin;
-
-/// Run a batch in one session, committing even when an item fails.
-/// `write` selects the destructive session mode; events remain live during the batch.
-macro_rules! one_session {
-    ($t:expr, $class:expr, $changed:expr, |$s:ident| $body:block) => {
-        one_session!(@run Session::open($t, $class).await?, $changed, |$s| $body)
-    };
-    (write $t:expr, $class:expr, $changed:expr, |$s:ident| $body:block) => {
-        one_session!(
-            @run Session::open($t, $class).await?.allow_destructive_writes(),
-            $changed,
-            |$s| $body
-        )
-    };
-    (@run $open:expr, $changed:expr, |$s:ident| $body:block) => {{
-        #[allow(unused_mut)]
-        let mut $s = $open;
-        let result = async { $body }.await;
-        *$changed |= $s.instrument_changed();
-        let closed = $s.commit().await;
-        finish(result, closed)
-    }};
-}
 
 /// The event channel back to the UI thread, with the repaint that makes an event
 /// visible before the next input arrives.
@@ -101,20 +78,19 @@ fn spoil(gone: &mut bool, at: Option<Location>) -> impl FnOnce(Error) -> String 
 ///
 /// Emits exactly one [`DeviceEvent::Started`] and one [`DeviceEvent::Finished`], so the
 /// UI's in-flight marker cannot be left set by an operation that failed halfway.
-pub async fn run<T: Transport>(transport: &mut T, cmd: DeviceCmd, emit: &Emit) -> Flow {
+pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Emit) -> Flow {
     if matches!(cmd, DeviceCmd::Disconnect) {
         return Flow::Released;
     }
     let what = cmd.label();
     emit.send(DeviceEvent::Started(what.clone()));
 
-    let mut changed = false;
     let mut gone = false;
-    let result = execute(transport, cmd, emit, &mut changed, &mut gone).await;
+    let result = execute(device, cmd, emit, &mut gone).await;
 
     // Reported before the outcome: state read during this command may already be stale,
     // and that is true whether it succeeded or not.
-    if changed {
+    if device.take_changed() {
         emit.send(DeviceEvent::InstrumentChanged);
     }
     match result {
@@ -132,10 +108,9 @@ pub async fn run<T: Transport>(transport: &mut T, cmd: DeviceCmd, emit: &Emit) -
 /// The command bodies. `Ok(Some(note))` is a line for the log; `Ok(None)` means the
 /// command's own event already said everything.
 async fn execute<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     cmd: DeviceCmd,
     emit: &Emit,
-    changed: &mut bool,
     gone: &mut bool,
 ) -> Result<Option<String>, String> {
     match cmd {
@@ -145,9 +120,9 @@ async fn execute<T: Transport>(
         DeviceCmd::ScanBank {
             class,
             bank,
-            slots: count,
+            slots: capacity,
         } => {
-            let slots = scan_bank(t, class, bank, count, changed)
+            let slots = scan_bank(device, class, bank, capacity)
                 .await
                 .map_err(spoil(gone, None))?;
             let filled = slots.iter().filter(|s| s.is_some()).count();
@@ -159,12 +134,8 @@ async fn execute<T: Transport>(
             Ok(Some(note))
         }
 
-        DeviceCmd::ScanClass {
-            class,
-            slots,
-            banks,
-        } => {
-            let walked = scan_class(t, class, slots, banks, emit, changed)
+        DeviceCmd::ScanClass { class } => {
+            let walked = scan_class(device, class, emit)
                 .await
                 .map_err(spoil(gone, None))?;
             Ok(Some(format!(
@@ -177,7 +148,7 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::SlotInfo { class, at } => {
-            let info = match slot_info(t, class, at, changed).await {
+            let info = match slot_info(device, class, at).await {
                 Ok(info) => Some(info),
                 // Status 1 is a vacant slot, not a failure.
                 Err(Error::DeviceStatus(1)) => None,
@@ -188,7 +159,7 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::Deps { class, at } => {
-            let deps = dependencies(t, class, at, changed)
+            let deps = dependencies(device, class, at)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             let note = format!("{}: {} dependencies", shown(at), deps.len());
@@ -202,7 +173,7 @@ async fn execute<T: Transport>(
             body,
             open,
         } => {
-            let (info, bytes) = read_object(t, class, at, body, changed)
+            let (info, bytes) = read_object(device, class, at, body)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             let note = format!(
@@ -227,7 +198,7 @@ async fn execute<T: Transport>(
             name,
             bytes,
         } => {
-            let note = put_one(t, class, at, &name, bytes, emit, changed, gone)
+            let note = put_one(device, class, at, &name, bytes, emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
             // Raised here rather than inside `put_one`, which runs before its session is
@@ -236,38 +207,38 @@ async fn execute<T: Transport>(
             Ok(Some(note))
         }
 
-        DeviceCmd::SendAll { class, items } => send_all(t, class, items, emit, changed, gone).await,
+        DeviceCmd::SendAll { class, items } => send_all(device, class, items, emit, gone).await,
 
         DeviceCmd::Select { class, at } => {
-            select(t, class, at, changed)
+            select(device, class, at)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             Ok(Some(format!("selected {} on the instrument", shown(at))))
         }
 
         DeviceCmd::Rename { class, at, name } => {
-            rename(t, class, at, &name, changed)
+            rename(device, class, at, &name)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             Ok(Some(format!("renamed {} to {name:?}", shown(at))))
         }
 
         DeviceCmd::Move { class, from, to } => {
-            move_object(t, class, from, to, changed)
+            move_object(device, class, from, to)
                 .await
                 .map_err(spoil(gone, Some(from)))?;
             Ok(Some(format!("moved {} -> {}", shown(from), shown(to))))
         }
 
         DeviceCmd::Duplicate { class, from, to } => {
-            duplicate(t, class, from, to, changed)
+            duplicate(device, class, from, to)
                 .await
                 .map_err(spoil(gone, Some(from)))?;
             Ok(Some(format!("duplicated {} -> {}", shown(from), shown(to))))
         }
 
         DeviceCmd::Delete { class, at } => {
-            delete(t, class, at, changed)
+            delete(device, class, at)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             Ok(Some(format!("deleted {}", shown(at))))
@@ -275,10 +246,41 @@ async fn execute<T: Transport>(
     }
 }
 
+/// The unit a library class reserves in, from the instrument's own partition table.
+/// `None` for a slot class, whose counters are byte-granular and reserve nothing.
+async fn library_unit<T: Transport>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+) -> Result<Option<AllocationUnit>, Error> {
+    match class.is_library() {
+        true => device.geometry().await?.allocation_unit(class).map(Some),
+        false => Ok(None),
+    }
+}
+
+/// Write a file into a slot of the class the session is open on.
+///
+/// `unit` is what [`library_unit`] answered for that class, so a library reserves its
+/// blocks in this same transaction and a slot class sends the transfer alone. The slot is
+/// written under a placeholder name; the rename that follows is what names it.
+async fn store<T: Transport>(
+    s: &mut Session<'_, T, ReadWrite>,
+    unit: Option<AllocationUnit>,
+    at: Location,
+    file: &[u8],
+    timestamp: u32,
+) -> Result<(), Error> {
+    match unit {
+        Some(unit) => op::write_library(s, unit, at, file, "0", timestamp).await,
+        None => op::write(s, at, file, "0", timestamp).await,
+    }
+}
+
 /// Replace a slot inside the caller's session.
 /// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
+    unit: Option<AllocationUnit>,
     at: Location,
     what: &str,
     bytes: Vec<u8>,
@@ -330,8 +332,7 @@ async fn put<T: Transport>(
         }
     }
 
-    // "0" is a placeholder; the rename that follows is what names the slot.
-    let written = op::write(s, at, &bytes, "0", timestamp).await;
+    let written = store(s, unit, at, &bytes, timestamp).await;
 
     Ok(match (written, backup) {
         (Ok(()), _) => Ok(name_slot(s, at, what, emit, gone).await),
@@ -343,7 +344,7 @@ async fn put<T: Transport>(
                 "the write failed and {}; putting the original back",
                 aftermath(class, at)
             )));
-            match op::write(s, at, &backup, "0", timestamp).await {
+            match store(s, unit, at, &backup, timestamp).await {
                 Ok(()) => Err(format!(
                     "{e} ({} was restored, and is unchanged)",
                     shown(at)
@@ -440,20 +441,21 @@ fn slot_label(name: &str) -> Option<String> {
 }
 
 /// One put in a session of its own.
-#[allow(clippy::too_many_arguments)]
 async fn put_one<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
     what: &str,
     bytes: Vec<u8>,
     emit: &Emit,
-    changed: &mut bool,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
-    one_session!(write t, class, changed, |s| {
-        put(&mut s, at, what, bytes, emit, gone).await
-    })
+    let unit = library_unit(device, class).await?;
+    device
+        .destructive(class, async |s| {
+            put(s, unit, at, what, bytes, emit, gone).await
+        })
+        .await
 }
 
 /// Every queued object of one class, inside one session.
@@ -461,18 +463,16 @@ async fn put_one<T: Transport>(
 /// ⚠️ A refusal stops the batch where it stands. What has already landed has landed —
 /// the report says which — and the rest stay owed, because carrying on past a failure
 /// would be writing into an instrument whose state nobody has looked at since.
-#[allow(clippy::too_many_arguments)]
 async fn send_all<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     items: Vec<Outgoing>,
     emit: &Emit,
-    changed: &mut bool,
     gone: &mut bool,
 ) -> Result<Option<String>, String> {
     let total = items.len();
     let mut done = 0;
-    let outcome = batch(t, class, &items, total, &mut done, emit, changed, gone).await;
+    let outcome = batch(device, class, &items, total, &mut done, emit, gone).await;
     let refusal = outcome.map_err(spoil(gone, None))?;
     match refusal {
         None => Ok(Some(format!(
@@ -487,48 +487,40 @@ async fn send_all<T: Transport>(
 
 #[allow(clippy::too_many_arguments)]
 async fn batch<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     items: &[Outgoing],
     total: usize,
     done: &mut usize,
     emit: &Emit,
-    changed: &mut bool,
     gone: &mut bool,
 ) -> Result<Option<String>, Error> {
-    one_session!(write t, class, changed, |s| {
-        for item in items {
-            emit.send(DeviceEvent::Note(format!(
-                "sending {:?} to {} ({} of {total})",
-                item.name,
-                shown(item.at),
-                *done + 1
-            )));
-            match put(&mut s, item.at, &item.name, item.bytes.clone(), emit, gone).await? {
-                Ok(note) => {
-                    *done += 1;
-                    emit.send(DeviceEvent::OpOk(note));
-                    emit.send(DeviceEvent::Sent {
-                        id: item.id,
-                        class,
-                        at: item.at,
-                    });
+    let unit = library_unit(device, class).await?;
+    device
+        .destructive(class, async |s| {
+            for item in items {
+                emit.send(DeviceEvent::Note(format!(
+                    "sending {:?} to {} ({} of {total})",
+                    item.name,
+                    shown(item.at),
+                    *done + 1
+                )));
+                match put(s, unit, item.at, &item.name, item.bytes.clone(), emit, gone).await? {
+                    Ok(note) => {
+                        *done += 1;
+                        emit.send(DeviceEvent::OpOk(note));
+                        emit.send(DeviceEvent::Sent {
+                            id: item.id,
+                            class,
+                            at: item.at,
+                        });
+                    }
+                    Err(why) => return Ok(Some(why)),
                 }
-                Err(why) => return Ok::<Option<String>, Error>(Some(why)),
             }
-        }
-        Ok(None)
-    })
-}
-
-/// Combine an operation's result with its session close, keeping the operation's error
-/// when both fail — a close failing is usually a *consequence* of the op failing, and
-/// the original error is the informative one.
-fn finish<T>(result: Result<T, Error>, closed: Result<(), Error>) -> Result<T, Error> {
-    match result {
-        Ok(v) => closed.map(|()| v),
-        Err(e) => Err(e),
-    }
+            Ok(None)
+        })
+        .await
 }
 
 /// Turn the device's bare status code into something actionable.
@@ -548,16 +540,11 @@ fn explain(e: Error, at: Location) -> String {
 }
 
 async fn slot_info<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-    changed: &mut bool,
 ) -> Result<ProgramInfo, Error> {
-    let mut s = Session::open(t, class).await?;
-    let r = op::info(&mut s, at).await;
-    *changed |= s.instrument_changed();
-    let closed = s.commit().await;
-    finish(r, closed)
+    device.read(class, async |s| op::info(s, at).await).await
 }
 
 /// A shorter per-frame limit for metadata walks; transfers keep the session default.
@@ -577,27 +564,31 @@ const VACANT_RUN: u32 = 32;
 
 /// Every slot of one bank, in one session.
 ///
-/// A vacant slot is a `None` row rather than an error, and the walk stops where the
-/// device says the class's slot space ends.
+/// `slots` is the capacity the device declared for it, `None` where it declared the
+/// unbounded sentinel — the same rule [`Planned`] holds the two walks to. A vacant slot
+/// is a `None` row rather than an error.
 async fn scan_bank<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     bank: u32,
-    slots: u32,
-    changed: &mut bool,
+    slots: Option<u32>,
 ) -> Result<Vec<Option<ProgramInfo>>, Error> {
-    one_session!(t, class, changed, |s| {
-        s.set_read_limit(SCAN_READ_LIMIT);
-        walk_bank(&mut s, bank, slots).await
-    })
+    device
+        .read(class, async |s| {
+            s.set_read_limit(SCAN_READ_LIMIT);
+            match slots {
+                Some(capacity) => walk_bank(s, bank, capacity).await,
+                None => walk_open_bank(s, bank).await,
+            }
+        })
+        .await
 }
 
 /// One bank a walk will read.
 struct Planned {
     /// The bank number the panel labels it with.
     bank: NonZeroU32,
-    /// Slots the device says it holds. `None` where it reported the unbounded sentinel,
-    /// or where nobody asked it and the guess stands in.
+    /// Slots the device says it holds. `None` where it reported the unbounded sentinel.
     slots: Option<u32>,
 }
 
@@ -609,82 +600,84 @@ struct Walked {
     how: &'static str,
 }
 
-/// Scan one class in one session, preferring device geometry and sparse enumeration.
-/// Both enumeration paths return the same bank shape, including vacant rows.
+/// Scan one class in one session, over the banks the instrument declared for it.
+///
+/// The declared banks are the plan: nothing here guesses how many a class has or how far
+/// one runs. A class whose bank list the instrument refuses is not scanned at all — that
+/// refusal is the error [`nord_usb::Geometry::banks`] reports. Both enumeration paths
+/// return the same bank shape, including vacant rows.
 async fn scan_class<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
-    per_bank: u32,
-    cap: u32,
     emit: &Emit,
-    changed: &mut bool,
 ) -> Result<Walked, Error> {
+    // Taken out of the cache before the class's own session opens, which borrows the
+    // device for the length of the transaction.
+    let declared = device.geometry().await?.banks(class)?.to_vec();
+    let plan = planned(&declared);
+
     let mut banks = 0;
     let mut items = 0;
     let mut how = "slot by slot";
-    let counted = one_session!(t, class, changed, |s| {
-        // Bounds the closing exchanges as well as the walk, which is the half a
-        // per-command timeout would not cover — see [`SCAN_READ_LIMIT`].
-        s.set_read_limit(SCAN_READ_LIMIT);
+    device
+        .read(class, async |s| {
+            // Bounds the closing exchanges as well as the walk, which is the half a
+            // per-command timeout would not cover — see [`SCAN_READ_LIMIT`].
+            s.set_read_limit(SCAN_READ_LIMIT);
 
-        let status = op::status(&mut s).await?;
-        let held = status.count;
-        let geometry = match op::banks(&mut s, class.to_raw()).await {
-            Ok(geometry) => Some(geometry),
-            // The instrument answered, and what it said is that it will not divide this
-            // class up. A refusal leaves the session in step, so the walk carries on.
-            Err(Error::DeviceStatus(_)) => None,
-            Err(e) => return Err(e),
-        };
-
-        let counted = status.slots().map(|slots| slots.div_ceil(per_bank));
-        let (plan, ends_known) = match &geometry {
-            Some(geometry) => (planned(geometry), true),
-            None => (
-                guessed(counted.unwrap_or(cap).min(cap), per_bank),
-                counted.is_some(),
-            ),
-        };
-        let expected = match geometry.is_some() {
-            true => Some(plan.len() as u32),
-            false => counted,
-        };
-        if let Some(geometry) = geometry {
+            let status = op::status(s).await?;
+            let held = status.count;
             emit.send(DeviceEvent::Geometry {
                 class,
-                banks: geometry,
+                banks: declared.clone(),
             });
-        }
-        emit.send(DeviceEvent::ClassStatus {
-            class,
-            status,
-            banks: expected,
-        });
-
-        // Status 1 is "supported, nothing loaded"; 0x15 is "focus does not apply to
-        // this class" — only the first is worth an event.
-        match op::focus(&mut s).await {
-            Ok(at) => emit.send(DeviceEvent::Focus {
+            emit.send(DeviceEvent::ClassStatus {
                 class,
-                at: Some(at),
-            }),
-            Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),
-            Err(Error::DeviceStatus(_)) => {}
-            Err(e) => return Err(e),
-        }
+                status,
+                banks: Some(plan.len() as u32),
+            });
 
-        // The cursor is useful only for sparse content with a known class boundary.
-        let capacity: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
-        let sparse = capacity.is_none_or(|capacity| worth_the_cursor(held, capacity));
-        let found = match ends_known && sparse {
-            true => occupied(&mut s, cap_slots(&plan, held)).await?,
-            false => None,
-        };
+            // Status 1 is "supported, nothing loaded"; 0x15 is "focus does not apply to
+            // this class" — only the first is worth an event.
+            match op::focus(s).await {
+                Ok(at) => emit.send(DeviceEvent::Focus {
+                    class,
+                    at: Some(at),
+                }),
+                Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),
+                Err(Error::DeviceStatus(_)) => {}
+                Err(e) => return Err(e),
+            }
 
-        if let Some(found) = found {
-            how = "by cursor";
+            // The cursor is useful only for sparse content. A class holding an unbounded
+            // bank declares no capacity to be sparse against, so it takes the cursor.
+            let capacity: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
+            let sparse = capacity.is_none_or(|capacity| worth_the_cursor(held, capacity));
+            let found = match sparse {
+                true => occupied(s, &declared).await?,
+                false => None,
+            };
+
+            if let Some(found) = found {
+                how = "by cursor";
+                for planned in &plan {
+                    let slots = shape(&found, planned);
+                    banks += 1;
+                    items += slots.iter().filter(|slot| slot.is_some()).count();
+                    emit.send(DeviceEvent::BankScanned {
+                        class,
+                        bank: planned.bank.get(),
+                        slots,
+                    });
+                }
+                return Ok(());
+            }
+
             for planned in &plan {
-                let slots = shape(&found, planned);
+                let slots = match planned.slots {
+                    Some(capacity) => walk_bank(s, planned.bank.get(), capacity).await?,
+                    None => walk_open_bank(s, planned.bank.get()).await?,
+                };
                 banks += 1;
                 items += slots.iter().filter(|slot| slot.is_some()).count();
                 emit.send(DeviceEvent::BankScanned {
@@ -693,41 +686,15 @@ async fn scan_class<T: Transport>(
                     slots,
                 });
             }
-            return Ok::<(), Error>(());
-        }
-
-        for planned in &plan {
-            let slots = match planned.slots {
-                Some(capacity) => walk_bank(&mut s, planned.bank.get(), capacity).await?,
-                None => walk_open_bank(&mut s, planned.bank.get()).await?,
-            };
-            // Without geometry, a refused bank marks the end; an empty known bank does not.
-            if slots.is_empty() && !ends_known {
-                break;
-            }
-            let short = planned
-                .slots
-                .is_some_and(|asked| slots.len() as u32 != asked);
-            banks += 1;
-            items += slots.iter().filter(|slot| slot.is_some()).count();
-            emit.send(DeviceEvent::BankScanned {
-                class,
-                bank: planned.bank.get(),
-                slots,
-            });
-            // A short bank marks the end only when the device supplied no geometry.
-            if short && !ends_known {
-                break;
-            }
-        }
-        Ok::<(), Error>(())
-    });
-    counted.map(|()| Walked { banks, items, how })
+            Ok(())
+        })
+        .await
+        .map(|()| Walked { banks, items, how })
 }
 
 /// The device's own banks, as a walk plan.
-fn planned(geometry: &[Bank]) -> Vec<Planned> {
-    geometry
+fn planned(declared: &[Bank]) -> Vec<Planned> {
+    declared
         .iter()
         .map(|bank| Planned {
             bank: bank
@@ -740,29 +707,9 @@ fn planned(geometry: &[Bank]) -> Vec<Planned> {
         .collect()
 }
 
-/// A walk plan for an instrument that would not report its banks.
-fn guessed(banks: u32, per_bank: u32) -> Vec<Planned> {
-    (1..=banks)
-        .map(|bank| Planned {
-            bank: NonZeroU32::new(bank).expect("guessed banks start at one"),
-            slots: Some(per_bank),
-        })
-        .collect()
-}
-
 /// Use cursor enumeration below half capacity, where its two exchanges per item win.
 fn worth_the_cursor(held: u32, capacity: u32) -> bool {
     capacity > 0 && held.saturating_mul(2) < capacity
-}
-
-/// Bound cursor enumeration; an unstated bank capacity receives the remaining budget.
-fn cap_slots(plan: &[Planned], held: u32) -> usize {
-    let stated: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
-    match stated {
-        Some(stated) => (stated as usize).max(held as usize),
-        None => MOST_OCCUPIED,
-    }
-    .clamp(1, MOST_OCCUPIED)
 }
 
 /// Every occupied slot of the session's class, with the name of what is in it.
@@ -772,9 +719,9 @@ fn cap_slots(plan: &[Planned], held: u32) -> usize {
 /// slot instead. A refusal leaves the session in step, so it may.
 async fn occupied<T: Transport, C>(
     s: &mut Session<'_, T, C>,
-    cap: usize,
+    banks: &[Bank],
 ) -> Result<Option<Vec<(Location, ProgramInfo)>>, Error> {
-    let found = match op::occupied_slots(s, cap).await {
+    let found = match op::occupied_slots(s, banks).await {
         Ok(found) => found,
         Err(Error::DeviceStatus(_)) => return Ok(None),
         Err(e) => return Err(e),
@@ -869,102 +816,82 @@ async fn walk_open_bank<T: Transport, C>(
 ///
 /// `body` returns the wire body verbatim; otherwise the bytes are a whole CBIN file.
 async fn read_object<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
     body: bool,
-    changed: &mut bool,
 ) -> Result<(ProgramInfo, Vec<u8>), Error> {
-    let mut s = Session::open(t, class).await?;
-    let r = async {
-        let info = op::info(&mut s, at).await?;
-        let file = if body {
-            op::read_body(&mut s, at).await?
-        } else {
-            op::read_program(&mut s, at).await?
-        };
-        Ok::<_, Error>((info, file))
-    }
-    .await;
-    *changed |= s.instrument_changed();
-    let closed = s.commit().await;
-    finish(r, closed)
+    device
+        .read(class, async |s| {
+            let info = op::info(s, at).await?;
+            let file = match body {
+                true => op::read_body(s, at).await?,
+                false => op::read_program(s, at).await?,
+            };
+            Ok((info, file))
+        })
+        .await
 }
 
 async fn dependencies<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-    changed: &mut bool,
 ) -> Result<Vec<Dependency>, Error> {
-    let mut s = Session::open(t, class).await?;
-    let r = op::dependencies(&mut s, at).await;
-    *changed |= s.instrument_changed();
-    let closed = s.commit().await;
-    finish(r, closed)
+    device
+        .read(class, async |s| op::dependencies(s, at).await)
+        .await
 }
 
 async fn select<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-    changed: &mut bool,
 ) -> Result<(), Error> {
-    let mut s = Session::open(t, class).await?;
-    let r = op::select(&mut s, at).await;
-    *changed |= s.instrument_changed();
-    r.and(s.commit().await)
+    device.read(class, async |s| op::select(s, at).await).await
 }
 
 async fn rename<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
     name: &str,
-    changed: &mut bool,
 ) -> Result<(), Error> {
-    let mut s = Session::open(t, class).await?.allow_destructive_writes();
-    let r = op::rename(&mut s, at, name).await;
-    *changed |= s.instrument_changed();
-    r.and(s.commit().await)
+    device
+        .destructive(class, async |s| op::rename(s, at, name).await)
+        .await
 }
 
 async fn move_object<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     from: Location,
     to: Location,
-    changed: &mut bool,
 ) -> Result<(), Error> {
-    let mut s = Session::open(t, class).await?.allow_destructive_writes();
-    let r = op::move_object(&mut s, from, to).await;
-    *changed |= s.instrument_changed();
-    r.and(s.commit().await)
+    device
+        .destructive(class, async |s| op::move_object(s, from, to).await)
+        .await
 }
 
 async fn duplicate<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     from: Location,
     to: Location,
-    changed: &mut bool,
 ) -> Result<(), Error> {
-    let mut s = Session::open(t, class).await?.allow_destructive_writes();
-    let r = op::duplicate(&mut s, from, to).await;
-    *changed |= s.instrument_changed();
-    r.and(s.commit().await)
+    device
+        .destructive(class, async |s| op::duplicate(s, from, to).await)
+        .await
 }
 
 async fn delete<T: Transport>(
-    t: &mut T,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-    changed: &mut bool,
 ) -> Result<(), Error> {
-    let mut s = Session::open(t, class).await?.allow_destructive_writes();
-    let r = op::delete(&mut s, at).await;
-    *changed |= s.instrument_changed();
-    r.and(s.commit().await)
+    device
+        .destructive(class, async |s| op::delete(s, at).await)
+        .await
 }
 
 /// Unix seconds, for the timestamp word `BEGIN_WRITE` carries.
@@ -1138,6 +1065,7 @@ mod wire_tests {
     use std::sync::mpsc::Receiver;
 
     use super::*;
+    use nord_usb::device::Product;
     use nord_usb::wire::{cmd, ui, Message, Service};
     use nord_usb::Transport;
 
@@ -1146,8 +1074,8 @@ mod wire_tests {
     /// Enough of one to drive a whole operation: the framing rule is that a reply carries
     /// the request's command `+1` and leads with a status word, and nothing on the write
     /// path reads a reply's payload. The read paths do, so the commands a scan sends —
-    /// `STATUS`, `BANKS`, `FOCUS`, `NEXT_SLOT`, `INFO` — are answered from the geometry
-    /// and contents below rather than with the blanket reply.
+    /// `PARTITIONS`, `STATUS`, `BANKS`, `FOCUS`, `NEXT_SLOT`, `INFO` — are answered from
+    /// the geometry and contents below rather than with the blanket reply.
     ///
     /// ⚠️ The progress strings are fire-and-forget — the code that sends them never reads
     /// a reply. Queueing one for those is how the stream desyncs, so they get none.
@@ -1167,10 +1095,6 @@ mod wire_tests {
         /// `BANKS` answers success with a reply too short to decode, which is neither a
         /// refusal nor a dead pipe.
         garbles_geometry: bool,
-        /// Whether `STATUS` reports counters that divide into whole items. An instrument
-        /// whose class holds variable-size things gives a walk no bank count to work
-        /// from.
-        reports_counters: bool,
         /// Occupied addresses and their names. `None` leaves `INFO` answering
         /// [`Puppet::info`] for every slot and nothing to enumerate.
         filled: Option<Vec<(Location, &'static str)>>,
@@ -1202,7 +1126,6 @@ mod wire_tests {
                 banks: EIGHT_BANKS.to_vec(),
                 reports_geometry: true,
                 garbles_geometry: false,
-                reports_counters: true,
                 filled: None,
                 enumerates: true,
                 focus: None,
@@ -1229,13 +1152,6 @@ mod wire_tests {
         /// banks — it just will not name them.
         fn mute_about_geometry(mut self) -> Puppet {
             self.reports_geometry = false;
-            self
-        }
-
-        /// An instrument whose counters divide into nothing, so neither `BANKS` nor
-        /// `STATUS` says where the class ends.
-        fn mute_about_counters(mut self) -> Puppet {
-            self.reports_counters = false;
             self
         }
 
@@ -1281,9 +1197,9 @@ mod wire_tests {
                 slot: u32::from_be_bytes(msg.args[4..8].try_into().unwrap()),
             };
             match msg.command {
+                cmd::PARTITIONS => Some((0, partition_table())),
                 // Five words, as the Electro 5 answers: `count, free, used, dirty,
                 // spare`. A slot class parks nothing, so the last two are zero.
-                cmd::STATUS if !self.reports_counters => Some((0, words(&[0, 0, 0, 0, 0]))),
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
                     let total: u32 = self.banks.iter().map(|(_, slots)| slots).sum();
@@ -1396,6 +1312,31 @@ mod wire_tests {
         of.iter().flat_map(|w| w.to_be_bytes()).collect()
     }
 
+    /// A `PARTITIONS` reply covering every class code: `[u8 count]` then a
+    /// `[u32 name_len][name][u32 allocation unit][25 further field bytes]` record per
+    /// partition, whose position in the table is the code [`ObjectClass::to_raw`] uses.
+    ///
+    /// The unit is a net storage block in a library and `1` where the counters are
+    /// byte-granular; nothing here reads the fields after it.
+    fn partition_table() -> Vec<u8> {
+        const COUNT: u32 = 8;
+        const UNREAD_FIELDS: usize = 25;
+
+        let mut p = vec![COUNT as u8];
+        for index in 0..COUNT {
+            let name = format!("Partition {index}");
+            p.extend_from_slice(&(name.len() as u32).to_be_bytes());
+            p.extend_from_slice(name.as_bytes());
+            let unit: u32 = match ObjectClass::from_raw(index).is_library() {
+                true => 131_064,
+                false => 1,
+            };
+            p.extend_from_slice(&unit.to_be_bytes());
+            p.resize(p.len() + UNREAD_FIELDS, 0);
+        }
+        p
+    }
+
     /// An `INFO` reply body: the fixed words, then the length-prefixed name, then the
     /// `0xffffffff` that stands for "this device reported no checksum".
     fn info_payload(at: Location, name: &str) -> Vec<u8> {
@@ -1449,10 +1390,15 @@ mod wire_tests {
         workspace.get(id).expect("just made").bytes.clone()
     }
 
-    fn drive(device: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {
+    /// Run one command against `puppet`, which a [`Device`] owns for the length of it and
+    /// hands back for the assertions.
+    fn drive(puppet: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {
         let (tx, events) = std::sync::mpsc::channel();
         let emit = Emit::new(tx, egui::Context::default());
-        let flow = nord_usb::block_on(run(device, cmd, &emit));
+        let lent = std::mem::replace(puppet, Puppet::new(1));
+        let mut device = Device::new(lent, Product::Unknown(0));
+        let flow = nord_usb::block_on(run(&mut device, cmd, &emit));
+        *puppet = device.into_transport();
         (flow, events)
     }
 
@@ -1639,11 +1585,7 @@ mod wire_tests {
     }
 
     fn scan(class: ObjectClass) -> DeviceCmd {
-        DeviceCmd::ScanClass {
-            class,
-            slots: crate::device::slots_per_bank(class),
-            banks: crate::device::MAX_BANKS,
-        }
+        DeviceCmd::ScanClass { class }
     }
 
     /// Every bank a scan reported, in the order it reported them.
@@ -1661,6 +1603,18 @@ mod wire_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Everything the operator was told went wrong, joined for one assertion.
+    fn refused(events: Receiver<DeviceEvent>) -> String {
+        events
+            .try_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::OpFailed(why) => Some(why),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn counted(device: &Puppet, command: u32) -> usize {
@@ -1689,9 +1643,9 @@ mod wire_tests {
             ]
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "the cursor was used");
-        // Each bank probed at its first slot, one probe past the last bank to find the
-        // end, and one read per thing found.
-        assert_eq!(counted(&device, cmd::INFO), 5, "not the 80 addresses");
+        // One read per thing found; the declared banks say where to walk, so nothing is
+        // spent discovering them.
+        assert_eq!(counted(&device, cmd::INFO), 2, "not the 80 addresses");
     }
 
     /// ⚠️ An instrument can refuse to enumerate at all — see [`op::ENUMERATION_DISABLED`]
@@ -1713,9 +1667,9 @@ mod wire_tests {
             "the same folder, found the long way"
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "it was tried");
-        // Every address of both banks, plus the one probe the cursor walk spends before
-        // the refusal shows up.
-        assert_eq!(counted(&device, cmd::INFO), 81);
+        // Every address of both banks. The cursor walk spends no `INFO` before the
+        // refusal: its first frame is the cursor request itself.
+        assert_eq!(counted(&device, cmd::INFO), 80);
     }
 
     /// The device's own banks decide the shape, names and all. Told a category of 50 and
@@ -1744,34 +1698,49 @@ mod wire_tests {
             vec![("Grand".to_string(), 50), ("Upright".to_string(), 30)],
             "the categories reach the browser by name"
         );
-        assert_eq!(widths, vec![50, 30], "and its capacities, not the guess");
+        assert_eq!(widths, vec![50, 30], "and its capacities");
     }
 
-    /// An instrument that will not report its banks is still read: the counters divide
-    /// into a bank count, and that bounds the walk instead.
+    /// The instrument's own bank list is the whole plan, so a class it refuses to divide
+    /// up is not walked at all: its refusal is the scan's error, and the operator is told
+    /// rather than shown a folder nothing on the instrument agrees with.
     #[test]
-    fn a_scan_falls_back_to_the_counters_when_the_banks_are_not_reported() {
+    fn a_class_whose_banks_are_refused_is_not_scanned() {
         let mut device = Puppet::stocked(
             &[("Bank 1", 50)],
             &[(Location { bank: 0, slot: 1 }, "Africa Split")],
         )
         .mute_about_geometry();
         let (flow, events) = drive(&mut device, scan(ObjectClass::Program));
-        assert!(flow == Flow::Continue);
+        assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
-        let banks = scanned(events);
-        assert_eq!(
-            banks.iter().map(holdings).collect::<Vec<_>>(),
-            vec![(1, 50, vec![(1, "Africa Split")])],
-            "one bank of the guessed 50, and nothing past it"
+        let why = refused(events);
+        assert!(
+            why.contains("status 0x2"),
+            "the device's own refusal: {why}"
         );
+        assert_eq!(counted(&device, cmd::INFO), 0, "and nothing was walked");
     }
 
-    /// ⚠️ The bug this pins: a bank the device states no capacity for was capped at the
-    /// caller's per-bank guess, so a library of 60 read back as 50 — no error anywhere,
-    /// and the folder's own header saying 60.
+    /// ⚠️ A bank list that cannot be decoded is a fault, not a refusal: it stops the whole
+    /// geometry read, because a partly decoded division is one no walk should be planned
+    /// from.
     #[test]
-    fn an_unbounded_bank_is_not_cut_off_at_the_guess() {
+    fn a_bank_list_that_will_not_decode_stops_the_scan() {
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]).garbling_geometry();
+        let (flow, events) = drive(&mut device, scan(ObjectClass::Program));
+        assert!(flow == Flow::Continue, "a bad reply is not a dead pipe");
+
+        let why = refused(events);
+        assert!(why.contains("truncated"), "{why}");
+        assert_eq!(counted(&device, cmd::INFO), 0, "and nothing was walked");
+    }
+
+    /// ⚠️ A bank the device states no capacity for ends where its contents end. Bounding
+    /// it by anything else reads a library of 60 back as some other number, with no error
+    /// anywhere and the folder's own header saying 60.
+    #[test]
+    fn an_unbounded_bank_is_read_to_its_last_item() {
         let filled: Vec<(Location, &'static str)> = (0..60)
             .map(|slot| (Location { bank: 0, slot }, "Marimba"))
             .collect();
@@ -1781,7 +1750,7 @@ mod wire_tests {
 
         let banks = scanned(events);
         assert_eq!(banks.len(), 1);
-        assert_eq!(banks[0].1.len(), 60, "all of them, not the 50 guessed");
+        assert_eq!(banks[0].1.len(), 60, "all of them");
         assert!(banks[0].1.iter().all(Option::is_some));
     }
 
@@ -1839,28 +1808,6 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::WRITE_DATA), 1, "the bytes still went");
     }
 
-    /// ⚠️ The bottom of the ladder: no geometry and no counters that divide, so nothing
-    /// says where the class ends but the device's own out-of-range answer. The walk has
-    /// to find it slot by slot and still stop.
-    #[test]
-    fn a_scan_with_nothing_to_go_on_stops_where_the_device_says_it_ends() {
-        let mut device = Puppet::stocked(
-            &[("Bank 1", 4)],
-            &[(Location { bank: 0, slot: 1 }, "Africa Split")],
-        )
-        .mute_about_geometry()
-        .mute_about_counters();
-        let (flow, events) = drive(&mut device, scan(ObjectClass::Program));
-        assert!(flow == Flow::Continue);
-
-        let banks = scanned(events);
-        assert_eq!(
-            banks.iter().map(holdings).collect::<Vec<_>>(),
-            vec![(1, 4, vec![(1, "Africa Split")])],
-            "the one bank there is, cut where the device refused"
-        );
-    }
-
     /// The slot the panel is on is read while the class's session is open, so the browser
     /// can mark it without a transaction of its own.
     #[test]
@@ -1897,14 +1844,7 @@ mod wire_tests {
         );
         assert!(flow == Flow::Continue, "it said no, it did not go away");
 
-        let refused: Vec<String> = events
-            .try_iter()
-            .filter_map(|event| match event {
-                DeviceEvent::OpFailed(why) => Some(why),
-                _ => None,
-            })
-            .collect();
-        let why = refused.join(" | ");
+        let why = refused(events);
         assert!(why.contains("bank 7 does not exist"), "{why}");
         assert!(
             why.contains("Grand, Upright"),

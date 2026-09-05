@@ -72,6 +72,7 @@ pub enum ErrKind {
     DeviceStatus(u32),
     UnexpectedResponse,
     UnexpectedLocation,
+    Enumeration,
     Transport,
     Replay,
 }
@@ -135,6 +136,7 @@ impl ErrKind {
             (ErrKind::DeviceStatus(want), Error::DeviceStatus(got)) => want == got,
             (ErrKind::UnexpectedResponse, Error::UnexpectedResponse { .. }) => true,
             (ErrKind::UnexpectedLocation, Error::UnexpectedLocation { .. }) => true,
+            (ErrKind::Enumeration, Error::Enumeration { .. }) => true,
             (ErrKind::Transport, Error::Transport(_)) => true,
             (ErrKind::Replay, Error::Replay(_)) => true,
             _ => false,
@@ -155,11 +157,12 @@ impl ErrKind {
                 .ok_or_else(|| format!("bad device status {code:?}")),
             ("unexpected-response", "") => Ok(ErrKind::UnexpectedResponse),
             ("unexpected-location", "") => Ok(ErrKind::UnexpectedLocation),
+            ("enumeration", "") => Ok(ErrKind::Enumeration),
             ("transport", "") => Ok(ErrKind::Transport),
             ("replay", "") => Ok(ErrKind::Replay),
             (kind, _) => Err(format!(
                 "unknown failure {kind:?}; the vocabulary is device-status <code>, \
-                unexpected-response, unexpected-location, transport, replay"
+                unexpected-response, unexpected-location, enumeration, transport, replay"
             )),
         }
     }
@@ -171,6 +174,7 @@ impl std::fmt::Display for ErrKind {
             ErrKind::DeviceStatus(code) => write!(f, "device-status {code:#x}"),
             ErrKind::UnexpectedResponse => f.write_str("unexpected-response"),
             ErrKind::UnexpectedLocation => f.write_str("unexpected-location"),
+            ErrKind::Enumeration => f.write_str("enumeration"),
             ErrKind::Transport => f.write_str("transport"),
             ErrKind::Replay => f.write_str("replay"),
         }

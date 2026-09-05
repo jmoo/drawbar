@@ -538,11 +538,7 @@ enum SlotAction {
     /// Walks the device's own slot cursor, so it reports what is actually stored rather
     /// than probing every address: occupied slots are sparse, and their indices run past
     /// the class's item count.
-    List {
-        /// Stop after this many slots. A guard against a walk that fails to advance.
-        #[arg(long, default_value_t = 1024)]
-        cap: usize,
-    },
+    List,
 
     /// Send a raw command code and print whatever the device answers. For RE only.
     ///
@@ -772,7 +768,7 @@ fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), St
             slot::Target::Slot(at) => device::deps(ui, at, class),
         },
         SlotAction::Focus => device::focus(ui, class),
-        SlotAction::List { cap } => device::list(ui, class, cap),
+        SlotAction::List => device::list(ui, class),
         SlotAction::Probe {
             op,
             args,

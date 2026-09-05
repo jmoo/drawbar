@@ -12,10 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-use nord_usb::op;
+use nord_usb::device::Geometry;
 use nord_usb::transport::ReplayTransport;
-use nord_usb::wire::ObjectClass;
-use nord_usb::{Error, Location, Result, Session};
+use nord_usb::wire::{AllocationUnit, Bank, ObjectClass};
+use nord_usb::{op, Error, Location, Result, Session};
 
 /// Bytes an intent produced, and the file it named to compare them against.
 pub struct Produced {
@@ -46,8 +46,10 @@ macro_rules! rw_session {
 /// Drive one section's intent through the transport its frames came from.
 ///
 /// `dir` is the script's own directory: a file an intent names travels beside it.
+/// `geometry` is the script's own, once one of its sections has read it.
 pub async fn drive(
     t: &mut ReplayTransport,
+    geometry: &mut Option<Geometry>,
     class: Option<ObjectClass>,
     verb: &str,
     args: &[String],
@@ -56,29 +58,54 @@ pub async fn drive(
     match verb {
         "status" if class.is_none() => op::inventory(t).await.map(|_| None),
         "recover" => op::recover(t).await.map(|_| None),
-        "geometry" => geometry(t).await,
+        "geometry" => {
+            let read = session!(t, ObjectClass::Program, |s| Geometry::read(&mut s))?;
+            *geometry = Some(read);
+            Ok(None)
+        }
         "get" | "read" | "get-body" | "read-body" => {
             drive_read(t, need_class(class)?, verb, args, dir).await
         }
         "put" | "move" | "duplicate" | "rename" | "delete" => {
-            drive_write(t, need_class(class)?, verb, args, dir).await
+            drive_write(t, geometry, need_class(class)?, verb, args, dir).await
         }
-        _ => drive_query(t, class, verb, args).await,
+        _ => drive_query(t, geometry, class, verb, args).await,
     }
 }
 
-async fn geometry(t: &mut ReplayTransport) -> Result<Option<Produced>> {
-    session!(t, ObjectClass::Program, |s| async {
-        for partition in op::partitions(&mut s).await? {
-            op::banks(&mut s, partition.index).await?;
-        }
-        Ok(())
-    })
-    .map(|()| None)
+/// The banks a walk is bounded by, and the unit a library `put` reserves in: from the
+/// script's own `device geometry` section, else from the committed recording of that
+/// exchange, replayed offline.
+///
+/// A recording made before either was geometry-bounded has no geometry section to read.
+/// The tables are static configuration — confirmed on hardware — so the fixture stands
+/// in for the instrument those recordings were taken from.
+async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Result<Vec<Bank>> {
+    match geometry {
+        Some(read) => read.banks(class).map(<[Bank]>::to_vec),
+        None => committed_geometry()
+            .await?
+            .banks(class)
+            .map(<[Bank]>::to_vec),
+    }
+}
+
+async fn declared_unit(geometry: &Option<Geometry>, class: ObjectClass) -> Result<AllocationUnit> {
+    match geometry {
+        Some(read) => read.allocation_unit(class),
+        None => committed_geometry().await?.allocation_unit(class),
+    }
+}
+
+/// The committed recording of `device geometry`, replayed on a transport of its own.
+async fn committed_geometry() -> Result<Geometry> {
+    let mut t = ReplayTransport::new(crate::scripts::fixture("device/geometry.script").steps());
+    session!(&mut t, ObjectClass::Program, |s| Geometry::read(&mut s))
 }
 
 async fn drive_query(
     t: &mut ReplayTransport,
+    geometry: &mut Option<Geometry>,
     class: Option<ObjectClass>,
     verb: &str,
     args: &[String],
@@ -112,13 +139,13 @@ async fn drive_query(
             session!(t, need_class(class)?, |s| op::select(&mut s, at)).map(|_| None)
         }
         "walk" => {
-            // This bounds requests; reaching it must not masquerade as end-of-bank.
-            let cap = match args.first() {
-                Some(cap) => number(cap)? as usize,
-                None => 1024,
-            };
-            session!(t, need_class(class)?, |s| async {
-                for at in op::occupied_slots(&mut s, cap).await? {
+            if !args.is_empty() {
+                return Err(bad("walk takes no arguments; the device's banks bound it"));
+            }
+            let class = need_class(class)?;
+            let banks = declared_banks(geometry, class).await?;
+            session!(t, class, |s| async {
+                for at in op::occupied_slots(&mut s, &banks).await? {
                     // The cursor's starting address may be empty; status 1 remains in step.
                     match op::info(&mut s, at).await {
                         Ok(_) | Err(Error::DeviceStatus(1)) => {}
@@ -128,6 +155,25 @@ async fn drive_query(
                 Ok(())
             })
             .map(|()| None)
+        }
+        "referrers" => {
+            let class = need_class(class)?;
+            if class != ObjectClass::SetList {
+                return Err(bad(
+                    "only set lists refer to a slot: `setlist referrers <at>…`",
+                ));
+            }
+            if args.is_empty() {
+                return Err(bad("referrers names at least one program slot"));
+            }
+            let targets: Vec<Location> = (0..args.len())
+                .map(|i| slot(args, i))
+                .collect::<Result<_>>()?;
+            let banks = declared_banks(geometry, class).await?;
+            session!(t, class, |s| op::set_lists_referencing(
+                &mut s, &banks, &targets
+            ))
+            .map(|_| None)
         }
         other => Err(bad(format!("unknown verb {other:?}"))),
     }
@@ -157,6 +203,7 @@ async fn drive_read(
 
 async fn drive_write(
     t: &mut ReplayTransport,
+    geometry: &mut Option<Geometry>,
     class: ObjectClass,
     verb: &str,
     args: &[String],
@@ -170,7 +217,15 @@ async fn drive_write(
                 text(args, 2)?,
                 number(args.get(3).map_or("", String::as_str))?,
             );
-            rw_session!(t, class, |s| op::write(&mut s, at, &file, name, stamp)).map(|()| None)
+            if !class.is_library() {
+                return rw_session!(t, class, |s| op::write(&mut s, at, &file, name, stamp))
+                    .map(|()| None);
+            }
+            let unit = declared_unit(geometry, class).await?;
+            rw_session!(t, class, |s| op::write_library(
+                &mut s, unit, at, &file, name, stamp
+            ))
+            .map(|()| None)
         }
         "move" => {
             let (from, to) = (slot(args, 0)?, slot(args, 1)?);

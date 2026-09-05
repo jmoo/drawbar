@@ -10,8 +10,8 @@ use crate::session::ReadWrite;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::wire::{
-    cmd, ui, Bank, Dependency, Location, Message, ObjectClass, Partition, ProgramInfo, Service,
-    Status,
+    cmd, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
+    ProgramInfo, Service, Status,
 };
 
 /// Query the inventory for the class the session was opened with.
@@ -173,17 +173,6 @@ fn write_chunk() -> Result<usize> {
     Ok(WRITE_CHUNK)
 }
 
-/// Bytes per storage block in a library partition — the unit `STATUS`'s free/used
-/// words count there. Per class: the piano partition is 4096 × 256 KiB (1 GB), the
-/// sample partition 2048 × 128 KiB (256 MB). Undercounting `needed` here makes
-/// `BEGIN_WRITE` refuse `0x16` even right after the cleaning pass.
-fn library_block(class: ObjectClass) -> usize {
-    match class {
-        ObjectClass::Sample => 131_072,
-        _ => 262_144,
-    }
-}
-
 /// Read the metadata and body through the device's chunked transfer sequence.
 async fn transfer_out<T: Transport, C>(
     session: &mut Session<'_, T, C>,
@@ -317,9 +306,79 @@ async fn clean_library<T: Transport>(
     )))
 }
 
-/// Write an entity into a slot; one shape for every class. `name` is what the slot
-/// ends up called — the file carries none, and a placeholder becomes the slot's name.
+/// Make room for `blocks` storage blocks in a library partition, in the session that is
+/// about to write. Requires a [`ReadWrite`] session.
+///
+/// A library write is refused `0x16` unless a prepared block exists per storage block of
+/// body, so this reads [`status`] and, where `blocks` exceeds what is free, reclaims
+/// exactly the shortfall out of `dirty` and waits for the pass to finish. Under what is
+/// already free it sends nothing but the `STATUS` request.
+///
+/// `blocks` is the body's length in units of the partition's [`AllocationUnit`]; a count
+/// from anywhere else sizes the reclaim wrongly. [`write_library`] does this for its
+/// caller.
+pub async fn reserve<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    blocks: u32,
+) -> Result<()> {
+    let free = status(session).await?.free;
+    if blocks > free {
+        clean_library(session, blocks - free).await?;
+    }
+    Ok(())
+}
+
+/// Write an entity into a slot class. `name` is what the slot ends up called — the file
+/// carries none, and a placeholder becomes the slot's name.
+///
+/// The transfer alone. A library class is refused here rather than sent without the
+/// [`reserve`] the device answers `0x16` without: [`write_library`] is that composition.
 pub async fn write<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    at: Location,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<()> {
+    let class = session.class();
+    if class.is_library() {
+        return Err(Error::InvalidArgument(format!(
+            "{} is a library class, so its write must reserve first: use write_library",
+            class.label()
+        )));
+    }
+    transfer_in(session, at, file, name, timestamp).await
+}
+
+/// Write an entity into a library slot, reclaiming the space it needs first.
+///
+/// A library write is refused `0x16` without a prepared block per storage block of body,
+/// so the [`reserve`] and the transfer share one transaction. `unit` is the partition's
+/// own [`AllocationUnit`] — [`Geometry::allocation_unit`](crate::device::Geometry::allocation_unit)
+/// is where one comes from — and it sizes the reclaim from the CBIN body the file
+/// carries, which is shorter than the file by its header.
+pub async fn write_library<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    unit: AllocationUnit,
+    at: Location,
+    file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<()> {
+    let class = session.class();
+    if !class.is_library() {
+        return Err(Error::InvalidArgument(format!(
+            "{} is a slot class, so it has no blocks to reserve: use write",
+            class.label()
+        )));
+    }
+    let blocks = unit.blocks_for(envelope::unwrap(file)?.body.0.len())?;
+    reserve(session, blocks).await?;
+    transfer_in(session, at, file, name, timestamp).await
+}
+
+/// The write transfer itself, identical for every class.
+async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
     file: &[u8],
@@ -333,16 +392,6 @@ pub async fn write<T: Transport>(
         .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
     let name_len = u32::try_from(name.len())
         .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
-
-    if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
-        // A library write is refused 0x16 unless a prepared block exists per
-        // storage block of body; reclaim exactly the shortfall.
-        let needed = body.len().div_ceil(library_block(session.class())) as u32;
-        let free = status(session).await?.free;
-        if needed > free {
-            clean_library(session, needed - free).await?;
-        }
-    }
 
     session.notify(&ui::label("Downloading...")?).await?;
 
@@ -587,132 +636,58 @@ pub async fn next_occupied<T: Transport, C>(
 /// Every occupied slot in the session's class, in address order.
 ///
 /// **Read-only.** [`next_occupied`] walks *within* one bank and stops at its end, so this
-/// drives it bank by bank, each from [`SLOT_BOUNDARY`]. Pianos span several banks and
-/// programs fill eight of them; only the sample library is flat, and walking bank 0
-/// alone silently reports a fraction of the class.
+/// drives it over `banks` in table order, each from [`SLOT_BOUNDARY`]. Pianos span
+/// several banks and programs fill eight of them; only the sample library is flat, and
+/// walking bank 0 alone silently reports a fraction of the class.
 ///
-/// Each bank's slot 0 is tested with [`info`] first, because the cursor cannot say
-/// whether a bank *exists*: an empty bank and a bank the class does not have answer a
-/// boundary request identically. `info` distinguishes — status `3` (out of range) means
-/// the class has no more banks and ends the walk, status `1` a bank that merely holds
-/// nothing — the sample library has addressable empty banks past its only populated one.
+/// `banks` is the instrument's own answer for this class — [`banks`] on the partition
+/// whose index is the class code, or [`Geometry::banks`](crate::device::Geometry::banks).
+/// Nothing here guesses how many banks a class has or how far one runs: a bank ends where
+/// the device ends it (status `1` to a cursor request), and its declared capacity bounds
+/// how many objects it may yield.
 ///
-/// Two bounds keep a walk finite when the device does not behave as expected: `cap` on
-/// total slots, and a stop after `EMPTY_BANKS_BEFORE_STOP` consecutive empty banks for
-/// classes that never report out-of-range at all.
+/// A cursor answer that leaves the bank, repeats, or goes backwards is
+/// [`Error::Enumeration`] rather than a quiet stop: the walk would otherwise spin or pass
+/// off a truncated list. So is a bank yielding more objects than it declares slots. An
+/// unbounded bank ([`Bank::is_bounded`] false) declares no capacity, so the sentinel
+/// itself bounds it.
 ///
 /// A refusal mid-walk — [`ENUMERATION_DISABLED`] above all — propagates as its error
 /// rather than truncating the list: a partial inventory that looks complete is the one
 /// result worse than none.
 pub async fn occupied_slots<T: Transport, C>(
     session: &mut Session<'_, T, C>,
-    cap: usize,
+    banks: &[Bank],
 ) -> Result<Vec<Location>> {
-    occupied_slots_until(session, cap)
-        .await
-        .map(|walk| walk.slots)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WalkEnd {
-    Exhausted,
-    SlotCap,
-    EmptyBankCap,
-    BankCap,
-}
-
-impl WalkEnd {
-    fn incomplete_reason(self, slot_cap: usize) -> String {
-        match self {
-            WalkEnd::Exhausted => "the device reported the end of the class".into(),
-            WalkEnd::SlotCap => format!("reached the {slot_cap}-slot safety bound"),
-            WalkEnd::EmptyBankCap => format!(
-                "reached the safety bound of {EMPTY_BANKS_BEFORE_STOP} consecutive empty banks"
-            ),
-            WalkEnd::BankCap => format!("reached the {MAX_BANKS}-bank safety bound"),
-        }
-    }
-}
-
-struct SlotWalk {
-    slots: Vec<Location>,
-    end: WalkEnd,
-}
-
-async fn occupied_slots_until<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-    cap: usize,
-) -> Result<SlotWalk> {
     let mut found: Vec<Location> = Vec::new();
-    let mut empty_banks = 0;
 
-    for bank in 0..MAX_BANKS {
-        if found.len() >= cap {
-            return Ok(SlotWalk {
-                slots: found,
-                end: WalkEnd::SlotCap,
-            });
-        }
-        match info(session, Location { bank, slot: 0 }).await {
-            Ok(_) | Err(Error::DeviceStatus(1)) => {}
-            Err(Error::DeviceStatus(3)) => {
-                return Ok(SlotWalk {
-                    slots: found,
-                    end: WalkEnd::Exhausted,
-                });
-            }
-            Err(e) => return Err(e),
-        }
-
-        let before = found.len();
+    for bank in banks {
         let mut at = Location {
-            bank,
+            bank: bank.index,
             slot: SLOT_BOUNDARY,
         };
-        while found.len() < cap {
-            match next_occupied(session, at).await? {
-                // Staying inside the bank and moving forward, or the walk is not making
-                // progress and would spin.
-                Some(next)
-                    if next.bank == bank && (at.slot == SLOT_BOUNDARY || next.slot > at.slot) =>
-                {
-                    found.push(next);
-                    at = next;
-                }
-                Some(next) => {
-                    return Err(Error::UnexpectedLocation {
-                        requested: at,
-                        reported: next,
-                    });
-                }
-                None => break,
-            }
-        }
-
-        if found.len() == before {
-            empty_banks += 1;
-            if empty_banks >= EMPTY_BANKS_BEFORE_STOP {
-                return Ok(SlotWalk {
-                    slots: found,
-                    end: WalkEnd::EmptyBankCap,
+        let mut held = 0u32;
+        while let Some(next) = next_occupied(session, at).await? {
+            let advanced =
+                next.bank == bank.index && (at.slot == SLOT_BOUNDARY || next.slot > at.slot);
+            held += 1;
+            let overrun = match bank.is_bounded() {
+                true => held > bank.slots,
+                false => held >= Bank::UNBOUNDED,
+            };
+            if !advanced || overrun {
+                return Err(Error::Enumeration {
+                    bank: bank.index,
+                    answered: next,
+                    slots: bank.slots,
                 });
             }
-        } else {
-            empty_banks = 0;
+            found.push(next);
+            at = next;
         }
     }
-    Ok(SlotWalk {
-        slots: found,
-        end: WalkEnd::BankCap,
-    })
+    Ok(found)
 }
-
-/// Highest bank number a walk will try. Programs use eight; nothing observed uses more.
-const MAX_BANKS: u32 = 64;
-
-/// How many consecutive empty banks end a walk, for classes whose banks stay addressable
-/// past the last populated one instead of reporting out-of-range.
-const EMPTY_BANKS_BEFORE_STOP: u32 = 2;
 
 /// The library objects an entity actually needs. **Read-only.**
 ///
@@ -774,15 +749,10 @@ pub struct Referrer {
     pub programs: Vec<Location>,
 }
 
-/// How many occupied set-list slots a walk may return before it is treated as not
-/// terminating. An Electro 5 holds 200 set lists, so reaching this safety bound is an
-/// error rather than a place to stop.
-const SET_LIST_WALK_CAP: usize = 1024;
-
 /// Every set list that references one of `targets`. **Read-only.**
 ///
 /// The session must be open on [`ObjectClass::SetList`]; the walk and every read run
-/// inside it.
+/// inside it, over the `banks` [`occupied_slots`] documents.
 ///
 /// This is what makes a program `move` describable. The instrument maintains referential
 /// integrity itself: moving a program rewrites the body of **every** set list pointing at
@@ -792,13 +762,14 @@ const SET_LIST_WALK_CAP: usize = 1024;
 /// every set list first.
 ///
 /// Cost is one `DEPENDENCIES` per occupied set list, plus one `INFO` per match. A
-/// refusal mid-scan propagates rather than truncating, and a walk that runs to its
-/// bound without ending is an error for the same reason: a short list here reads as "no
-/// set list is affected", which is the wrong answer to act on.
+/// refusal mid-scan propagates rather than truncating, and so does a walk that
+/// contradicts the declared geometry, for the same reason: a short list here reads as
+/// "no set list is affected", which is the wrong answer to act on.
 ///
 /// Confirmed on hardware.
 pub async fn set_lists_referencing<T: Transport, C>(
     session: &mut Session<'_, T, C>,
+    banks: &[Bank],
     targets: &[Location],
 ) -> Result<Vec<Referrer>> {
     if session.class() != ObjectClass::SetList {
@@ -810,14 +781,7 @@ pub async fn set_lists_referencing<T: Transport, C>(
     if targets.is_empty() {
         return Ok(out);
     }
-    let walk = occupied_slots_until(session, SET_LIST_WALK_CAP).await?;
-    if walk.end != WalkEnd::Exhausted {
-        return Err(Error::Transport(format!(
-            "the set-list walk did not reach a confirmed end: {}",
-            walk.end.incomplete_reason(SET_LIST_WALK_CAP),
-        )));
-    }
-    for at in walk.slots {
+    for at in occupied_slots(session, banks).await? {
         let mut programs: Vec<Location> = Vec::new();
         for l in dependencies(session, at)
             .await?

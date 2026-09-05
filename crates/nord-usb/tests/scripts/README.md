@@ -51,6 +51,7 @@ failed: a section that says nothing expects `ok`.
 | `ok` | the operation and its closing exchanges succeeded |
 | `err device-status <code>` | the device refused it with exactly that status (`0x15`, `1`) |
 | `err unexpected-response` | a reply answered the wrong command |
+| `err enumeration` | the slot cursor contradicted the instrument's declared geometry |
 | `err transport` | the byte pipe failed |
 | `err replay` | the script and the code under test contradicted each other |
 
@@ -67,7 +68,8 @@ a path beside the script.
 | `device geometry` | the partition table, then every partition's banks |
 | `device recover` | the two bare frames that release an abandoned session |
 | `<class> status` | that class's counters |
-| `<class> walk [cap]` | the occupied-slot enumeration, then an `info` per slot |
+| `<class> walk` | the occupied-slot enumeration, then an `info` per slot |
+| `setlist referrers <at>…` | the set lists pointing at those program slots, walked as `walk` is |
 | `<class> focus` | what the panel has loaded, then an `info` on it |
 | `<class> info <at>` | one slot's metadata |
 | `<class> deps <at>` | one object's library dependencies |
@@ -77,11 +79,18 @@ a path beside the script.
 | `<class> get-body <at> [file]` | the same, keeping the wire body verbatim |
 | `<class> read <at> [file]` | the bare container read, with no `info` first |
 | `<class> read-body <at> [file]` | the bare body read |
-| `<class> put <file> <at> <name> <stamp>` | write a file into a slot |
+| `<class> put <file> <at> <name> <stamp>` | write a file into a slot, reserving library space first |
 | `<class> move <from> <to>` | move, swapping with any occupant |
 | `<class> duplicate <from> <to>` | the device-internal deep copy |
 | `<class> rename <at> <name>` | rename |
 | `<class> delete <at>…` | delete every slot named, in one transaction |
+
+A walk is bounded by the banks the instrument declares, and a `put` into a library class
+reserves storage blocks of the size that partition reports. Both come from the script's own
+`device geometry` section where it has one; a script recorded before either read the tables
+falls back to the committed `device/geometry.script`, replayed on a transport of its own.
+The tables are static configuration, so the fixture stands in for the instrument the
+recording was taken from — a new recording carries its own.
 
 `get` is what the CLI's own verb sends; `read` and `read-body` are the bare transfers it
 performs inside a larger operation. A file after a read is compared against what the read

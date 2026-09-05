@@ -137,6 +137,7 @@ The protocol is testable without hardware, which is the whole point of the split
 | `transport` | The byte pipe. The **only** part that touches a device. |
 | `session` | The transaction wrapper every operation runs inside. |
 | `op` | Typed operations. |
+| `device` | An instrument as a value: session brackets and its own geometry. |
 
 ## Testing
 
