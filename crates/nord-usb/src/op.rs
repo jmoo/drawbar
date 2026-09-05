@@ -173,17 +173,6 @@ fn write_chunk() -> Result<usize> {
     Ok(WRITE_CHUNK)
 }
 
-/// Bytes per storage block in a library partition — the unit `STATUS`'s free/used
-/// words count there. Per class: the piano partition is 4096 × 256 KiB (1 GB), the
-/// sample partition 2048 × 128 KiB (256 MB). Undercounting `needed` here makes
-/// `BEGIN_WRITE` refuse `0x16` even right after the cleaning pass.
-fn library_block(class: ObjectClass) -> usize {
-    match class {
-        ObjectClass::Sample => 131_072,
-        _ => 262_144,
-    }
-}
-
 /// Read the metadata and body through the device's chunked transfer sequence.
 async fn transfer_out<T: Transport, C>(
     session: &mut Session<'_, T, C>,
@@ -317,8 +306,35 @@ async fn clean_library<T: Transport>(
     )))
 }
 
+/// Make room for `blocks` storage blocks in a library partition, in the session that is
+/// about to write. Requires a [`ReadWrite`] session.
+///
+/// A library write is refused `0x16` unless a prepared block exists per storage block of
+/// body, so this reads [`status`] and, where `blocks` exceeds what is free, reclaims
+/// exactly the shortfall out of `dirty` and waits for the pass to finish. Under what is
+/// already free it sends nothing but the `STATUS` request.
+///
+/// `blocks` is the body's length in units of the partition's
+/// [`AllocationUnit`](crate::wire::AllocationUnit); a count from anywhere else sizes the
+/// reclaim wrongly. [`Device::write`](crate::device::Device::write) does this for its
+/// caller.
+pub async fn reserve<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    blocks: u32,
+) -> Result<()> {
+    let free = status(session).await?.free;
+    if blocks > free {
+        clean_library(session, blocks - free).await?;
+    }
+    Ok(())
+}
+
 /// Write an entity into a slot; one shape for every class. `name` is what the slot
 /// ends up called — the file carries none, and a placeholder becomes the slot's name.
+///
+/// The transfer alone. A library class needs [`reserve`] ahead of it in the same
+/// session, or the device refuses `0x16`;
+/// [`Device::write`](crate::device::Device::write) is the composed form.
 pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -333,16 +349,6 @@ pub async fn write<T: Transport>(
         .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
     let name_len = u32::try_from(name.len())
         .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
-
-    if matches!(session.class(), ObjectClass::Piano | ObjectClass::Sample) {
-        // A library write is refused 0x16 unless a prepared block exists per
-        // storage block of body; reclaim exactly the shortfall.
-        let needed = body.len().div_ceil(library_block(session.class())) as u32;
-        let free = status(session).await?.free;
-        if needed > free {
-            clean_library(session, needed - free).await?;
-        }
-    }
 
     session.notify(&ui::label("Downloading...")?).await?;
 
