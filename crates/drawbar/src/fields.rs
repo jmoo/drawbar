@@ -111,7 +111,7 @@ impl Control {
                 Control::Register
             }
             ControlKind::Drawbar { bars: 1, rank, .. } => {
-                Control::Bar(rank.map(|rank| rank as usize - 1))
+                Control::Bar(rank.and_then(|rank| usize::from(rank).checked_sub(1)))
             }
             // A register of some other length has no widget here.
             ControlKind::Drawbar { .. } => Control::Stored,
