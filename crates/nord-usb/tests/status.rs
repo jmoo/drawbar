@@ -38,15 +38,68 @@ fn status_decodes_the_counters_a_real_transaction_carried() {
     assert_eq!(got.count, 375);
     assert_eq!(got.free, 3525);
     assert_eq!(got.used, 52875);
-    // free + used is the class capacity; deleting programs was seen to shift the
-    // split without changing the total.
+    // A slot class parks nothing: deleting a program returns its bytes to `free`
+    // directly, so both trailing words stay zero here.
+    assert_eq!(got.dirty, 0);
+    assert_eq!(got.spare, 0);
     assert_eq!(got.total(), 56400);
+    assert_eq!(got.available(), 3525);
 
     assert!(t.is_exhausted(), "did not consume the whole exchange");
     assert_eq!(
         t.sent().len(),
         5,
         "expected 5 host messages in this transaction"
+    );
+}
+
+/// A `STATUS` response frame carrying `payload` after the success status word.
+fn status_reply(payload: &[u8]) -> nord_usb::wire::Message {
+    use nord_usb::wire::{cmd, Message, Service};
+
+    let args = [&0u32.to_be_bytes()[..], payload].concat();
+    Message::decode_response(&Message::new(Service::Program, 10, cmd::STATUS + 1, args).encode())
+        .unwrap()
+}
+
+fn counters(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_be_bytes()).collect()
+}
+
+/// A reply that stops after the three counters every class reports still decodes; the
+/// words it does not carry read zero rather than failing the decode.
+#[test]
+fn a_three_word_status_reply_reads_no_dirty_or_spare() {
+    use nord_usb::wire::Status;
+
+    let got = Status::decode(
+        ObjectClass::Program,
+        &status_reply(&counters(&[375, 3525, 52875])),
+    )
+    .unwrap();
+
+    assert_eq!(got.count, 375);
+    assert_eq!(got.free, 3525);
+    assert_eq!(got.used, 52875);
+    assert_eq!(got.dirty, 0);
+    assert_eq!(got.spare, 0);
+    assert_eq!(got.total(), 56400);
+}
+
+/// One byte short of three words there is no whole `used` to report, so the reply is
+/// refused rather than decoded around a counter cut in half.
+#[test]
+fn a_status_reply_short_of_three_words_is_refused() {
+    use nord_usb::wire::Status;
+
+    let mut payload = counters(&[375, 3525, 52875]);
+    payload.truncate(11);
+    let err = Status::decode(ObjectClass::Program, &status_reply(&payload))
+        .expect_err("11 bytes is not a decodable STATUS payload");
+
+    assert!(
+        matches!(err, nord_usb::Error::Truncated { got: 11, need: 12 }),
+        "{err}"
     );
 }
 
@@ -87,7 +140,8 @@ fn lenient_mode_tolerates_differing_requests() {
 /// Fixed-size classes report slots; variable-size ones must not pretend to.
 ///
 /// Numbers are off a real Electro 5: adding one program moved used by exactly 141
-/// (53439 -> 53580), and 56400 / 141 is 400 — the instrument's 8 banks x 50 slots.
+/// (53439 -> 53580) — 121 body + 16 name + 4 CRC — and 56400 / 141 is 400, the
+/// instrument's 8 banks x 50 slots.
 #[test]
 fn derives_slots_only_for_fixed_size_classes() {
     use nord_usb::wire::Status;
@@ -97,8 +151,10 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 380,
         free: 2820,
         used: 53580,
+        dirty: 0,
+        spare: 0,
     };
-    assert_eq!(programs.blocks_per_item(), Some(141));
+    assert_eq!(programs.bytes_per_item(), Some(141));
     assert_eq!(programs.slots(), Some(400));
 
     let set_lists = Status {
@@ -106,8 +162,10 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 63,
         free: 5206,
         used: 2394,
+        dirty: 0,
+        spare: 0,
     };
-    assert_eq!(set_lists.blocks_per_item(), Some(38));
+    assert_eq!(set_lists.bytes_per_item(), Some(38));
     assert_eq!(set_lists.slots(), Some(200));
 
     // Pianos genuinely vary in size, so there is no per-item constant to report.
@@ -116,8 +174,10 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 29,
         free: 1,
         used: 4012,
+        dirty: 73,
+        spare: 2,
     };
-    assert_eq!(pianos.blocks_per_item(), None);
+    assert_eq!(pianos.bytes_per_item(), None);
     assert_eq!(pianos.slots(), None);
 
     // An empty class must not divide by zero.
@@ -126,8 +186,72 @@ fn derives_slots_only_for_fixed_size_classes() {
         count: 0,
         free: 363,
         used: 0,
+        dirty: 0,
+        spare: 0,
     };
     assert_eq!(empty.slots(), None);
+}
+
+/// A library class's capacity is all four storage words, and only that sum holds still.
+///
+/// Both readings are off the same Electro 5 sample partition: the four words sum to
+/// 2048 either way, while `free + used` reads 1983 in one and 1936 in the other. A
+/// report built from those two makes the partition look like it is losing capacity
+/// every time something is deleted, because a delete parks its space in `dirty`.
+#[test]
+fn a_library_capacity_is_all_four_words() {
+    use nord_usb::wire::Status;
+
+    let probed = Status {
+        class: ObjectClass::Sample,
+        count: 137,
+        free: 47,
+        used: 1936,
+        dirty: 64,
+        spare: 1,
+    };
+    // After a power cycle, with the same content: `free`'s prepared state does not
+    // survive one, `dirty` does, and the sum is unchanged.
+    let rebooted = Status {
+        free: 0,
+        dirty: 111,
+        ..probed
+    };
+
+    assert_eq!(probed.total(), 2048);
+    assert_eq!(rebooted.total(), 2048);
+
+    // What a write can actually reach — the point of decoding `dirty` at all. The
+    // rebooted partition reports zero free and is no less writable for it.
+    assert_eq!(probed.available(), 111);
+    assert_eq!(rebooted.available(), 111);
+}
+
+/// A per-item size is a property of the class, not of numbers that happen to divide.
+///
+/// Library content varies in size, so any exact division of its block counters is a
+/// coincidence — and acting on one would report a slot count the class does not have.
+#[test]
+fn a_library_class_reports_no_per_item_size_however_its_counters_divide() {
+    use nord_usb::wire::Status;
+
+    let divisible = Status {
+        class: ObjectClass::Sample,
+        count: 4,
+        free: 600,
+        used: 400,
+        dirty: 0,
+        spare: 0,
+    };
+    assert_eq!(divisible.bytes_per_item(), None);
+    assert_eq!(divisible.slots(), None);
+
+    let slot_class = Status {
+        class: ObjectClass::Program,
+        ..divisible
+    };
+    assert_eq!(slot_class.bytes_per_item(), Some(100));
+    assert_eq!(slot_class.slots(), Some(10));
 }
 
 /// The file a read rebuilds is a real `.ne5p`, not just the right bytes.

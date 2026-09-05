@@ -176,7 +176,7 @@ fn probe_limit_covers_close_without_changing_ordinary_reads() {
             Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
             Some(response(Service::Program, cmd::SESSION_OPEN, &[]).bytes),
             None,
-            Some(response(Service::Program, cmd::STATUS, &[1, 2, 3]).bytes),
+            Some(response(Service::Program, cmd::STATUS, &[1, 2, 3, 4, 5]).bytes),
             Some(response(Service::Program, cmd::SESSION_CLOSE, &[]).bytes),
             Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
         ]),
