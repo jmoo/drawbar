@@ -694,11 +694,13 @@ fn ramp_in(fields: &mut [i64]) {
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
+    debug_assert!(crossfade == 0 || crossfade <= raw.len());
     let fields = raw.len();
     let end = fields - lead;
     let length = fields - at;
     let span = crossfade as i64;
     for k in 0..crossfade {
+        debug_assert!(span != 0);
         let f = end - crossfade + k;
         let (near, far) = (raw[f], raw[f - length]);
         let step = (far - near) * k as i64;
@@ -1065,14 +1067,19 @@ fn pack(
     while payload < need {
         payload += PACKET_LEN;
     }
-    if !(payload - HEADER_LEN).is_multiple_of(3) {
+    let payload_minus_header = payload.checked_sub(HEADER_LEN).ok_or_else(|| {
+        ParseError::AssertFail(format!(
+            "a {preamble}-byte preamble is shorter than the {HEADER_LEN}-byte stroke header"
+        ))
+    })?;
+    if !payload_minus_header.is_multiple_of(3) {
         return Err(ParseError::AssertFail(format!(
             "a {preamble}-byte preamble puts the word stream off a word boundary; the \
              sections in front of the stroke are not whole words"
         ))
         .into());
     }
-    let total = (payload - HEADER_LEN) / 3;
+    let total = payload_minus_header / 3;
     if total > MAX_STREAM_WORDS {
         return Err(ParseError::OutOfBounds {
             value: format!("a stream of {total} words"),

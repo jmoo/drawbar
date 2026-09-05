@@ -6,11 +6,12 @@
 //! see the header layout, the checksum, or the generation — which is what makes a
 //! type-0 format the same amount of work as a type-1 format.
 //!
-//! The layouts. Type 1's tag, location, version and body length are confirmed on
-//! hardware — the device reports the same four in its object-info reply, and a body
-//! wrapped from that reply reproduces the file byte for byte. Type 0 is inferred from
-//! specimens; it cannot be confirmed on hardware, because the header never crosses the
-//! wire and its checksum is the one that covers it.
+//! The layouts. Type 1's tag, location, version and body length are
+//! Confirmed on hardware. The device reports the same four in its
+//! object-info reply, and a body wrapped from that reply reproduces the file
+//! byte for byte. Type 0 is
+//! Inferred from specimens; not confirmed on hardware. The header never
+//! crosses the wire and its checksum is the one that covers it.
 //!
 //! | offset | type 0 | type 1 |
 //! |---|---|---|
@@ -68,11 +69,12 @@ pub type Tag = [u8; 4];
 
 /// `format` as its 4-byte tag. A format constant of any other length is a bug in
 /// the format module, not a file condition, hence the panic.
+#[track_caller]
 fn tag(format: &str) -> Tag {
     format
         .as_bytes()
         .try_into()
-        .unwrap_or_else(|_| panic!("format tag {format:?} is not 4 bytes"))
+        .unwrap_or_else(|_| panic!("format tag {format:?} is not 4 bytes — bug in format module"))
 }
 
 fn tag_str(tag: &Tag) -> String {
@@ -223,15 +225,23 @@ impl Hash {
     }
 }
 
+fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+fn tag_from_slice(bytes: &[u8]) -> Tag {
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
 /// Parse the header; for a type-1 file also consume the crc32 word and the pad,
 /// leaving the stream at the first body byte.
 fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
     let mut head = [0u8; HEAD_LEN];
     r.read_exact(&mut head)?;
     if &head[0..4] != MAGIC {
-        return Err(ParseError::UnknownFileType(tag_str(&head[0..4].try_into().unwrap())).into());
+        return Err(ParseError::UnknownFileType(tag_str(&tag_from_slice(&head[0..4]))).into());
     }
-    let le = |at: usize| u32::from_le_bytes(head[at..at + 4].try_into().unwrap());
+    let le = |at: usize| le_u32(&head, at);
     let generation = match le(4) {
         0 => Generation::V0,
         1 => Generation::V1,
@@ -241,7 +251,7 @@ fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
     };
     let header = Header {
         generation,
-        tag: head[8..12].try_into().unwrap(),
+        tag: tag_from_slice(&head[8..12]),
         location: le(12),
         aux: le(16),
         version: le(20),
@@ -251,7 +261,7 @@ fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
     if generation == Generation::V1 {
         let mut rest = [0u8; 20];
         r.read_exact(&mut rest)?;
-        stored_crc32 = u32::from_le_bytes(rest[0..4].try_into().unwrap());
+        stored_crc32 = le_u32(&rest, 0);
         // Zero on every specimen. A file that used these bytes would round-trip
         // wrong silently, so refuse it loudly instead.
         if rest[4..] != [0u8; 16] {

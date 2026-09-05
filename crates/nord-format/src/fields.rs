@@ -337,12 +337,11 @@ impl Display for FieldError {
                     // Too wide to have named values; the stored bits are its only
                     // spelling.
                     0 => write!(f, " (accepts the stored bits, decimal or 0x…)"),
-                    n if n > 12 => write!(
-                        f,
-                        " (accepts {} .. {})",
-                        legal.first().unwrap(),
-                        legal.last().unwrap()
-                    ),
+                    n if n > 12 => {
+                        let first = legal.first().map(String::as_str).unwrap_or("?");
+                        let last = legal.last().map(String::as_str).unwrap_or("?");
+                        write!(f, " (accepts {first} .. {last})")
+                    }
                     _ => write!(f, " (accepts {})", legal.join(", ")),
                 }
             }

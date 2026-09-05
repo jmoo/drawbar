@@ -22,8 +22,9 @@ pub fn crc32(bytes: &[u8]) -> u32 {
 
 /// CRC-16 (IBM-3740) of a contiguous slice — the type-0 whole-file checksum.
 ///
-/// Identified by matching the trailing two bytes of specimens from four families
-/// (`nspg`, `ne5p`, `nsmp` v2, `nsmp3`); not confirmed on hardware.
+/// Inferred from specimens; not confirmed on hardware. Identified by matching
+/// the trailing two bytes of specimens from four families (`nspg`, `ne5p`,
+/// `nsmp` v2, `nsmp3`).
 pub fn crc16(bytes: &[u8]) -> u16 {
     CRC_16.compute(bytes)
 }

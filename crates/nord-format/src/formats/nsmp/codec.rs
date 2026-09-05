@@ -561,7 +561,7 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
                 continue;
             };
             let wide = if shift >= 0 {
-                value.saturating_mul(1 << shift)
+                value.saturating_mul(1i64 << shift)
             } else {
                 value >> -shift
             };
