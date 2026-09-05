@@ -47,10 +47,6 @@ pub const EP_OUT: u8 = 0x03;
 
 /// The read buffer NSM posts. The device answers with ~32KB chunks; the size is the
 /// device's choice, not a USB constraint (the link is Full Speed, 64-byte packets).
-///
-/// Sized past that chunk so a bulk IN ends on the device's short packet rather than on a
-/// full buffer, which is what makes one read one whole frame — see [`Transport::read`].
-/// It is a whole number of 64-byte packets, so it is never itself a terminator.
 pub const READ_BUFFER: usize = 49152;
 
 /// Whether a frame of `written` bytes leaves the device waiting for the rest of a
@@ -100,30 +96,10 @@ pub trait Transport {
     /// device simply never answers, and the session stays open.
     async fn write(&mut self, buf: &[u8]) -> Result<()>;
 
-    /// Read **one whole device message** from the IN endpoint, at most `max` bytes long.
+    /// Read one complete device message from the IN endpoint.
     ///
-    /// `max` is a ceiling on the frame, not a slice length: one call answers with exactly
-    /// one frame — never a piece of one, never two run together — and an implementor that
-    /// cannot promise that must return an error rather than a fragment. Callers hold no
-    /// residual buffer and never read twice for one frame, so there is nowhere for a
-    /// leftover byte to go. [`crate::Message::decode`] compares the frame's own length
-    /// word against the buffer it was handed, which makes a split frame and a coalesced
-    /// pair both [`crate::Error::LengthMismatch`] — a hard failure, never a signal to
-    /// read again.
-    ///
-    /// What holds this up on a real bus is the short-packet rule [`Self::write`] states
-    /// for the other direction. The device ends a message with a short packet, so a
-    /// transfer of at least the message's length ends where the message does; [`READ_BUFFER`]
-    /// is sized past the largest chunk the device sends for exactly that reason. Turn-taking
-    /// supplies the other half: the device answers a request and then waits, so there is
-    /// never a second frame queued behind the first.
-    ///
-    /// ⚠️ A message whose length is a whole number of packets would end in no short
-    /// packet, and the transfer would sit waiting for a terminator the device never
-    /// sends. That is a hang, not a half-read frame — the contract holds or nothing
-    /// comes back — but it is the one shape that would break it.
-    ///
-    /// Inferred from specimens; not confirmed on hardware.
+    /// `max` is the transfer buffer size. Callers must choose it large enough for the
+    /// expected message; a message is never assembled across multiple calls.
     async fn read(&mut self, max: usize) -> Result<Vec<u8>>;
 
     /// Read, giving up after `limit`. `Ok(None)` means nothing arrived in time.

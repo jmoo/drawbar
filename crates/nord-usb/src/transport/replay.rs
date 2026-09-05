@@ -483,11 +483,6 @@ impl Transport for ReplayTransport {
         }
     }
 
-    /// One recorded frame per call, whatever `max` says — a script line *is* a frame, so
-    /// the one-frame contract on [`Transport::read`] is met by construction.
-    ///
-    /// ⚠️ Which also means no replay test can catch a backend that breaks it. Only the
-    /// two real backends can, and only against hardware.
     async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
         let step = self
             .script

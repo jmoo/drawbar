@@ -248,13 +248,8 @@ impl Transport for WebUsbTransport {
     }
 
     async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
-        // One `transferIn` and no accumulation, which is how the one-frame contract on
-        // `Transport::read` is met here: the browser ends the transfer at the device's
-        // short packet, the same way the desktop backend's bulk read does.
-        //
-        // Confirmed on hardware.
-        // ⚠️ WebUSB has no timeout, so a message ending on a full packet would wait
-        // forever for a terminator. `READ_BUFFER` is packet-aligned.
+        // ⚠️ WebUSB has no timeout, so this relies on each message ending with a
+        // short packet. Confirmed on hardware; `READ_BUFFER` is packet-aligned.
         let result = JsFuture::from(self.device.transfer_in(endpoint_number(EP_IN), max as u32))
             .await
             .map_err(map_err("bulk read"))?;
