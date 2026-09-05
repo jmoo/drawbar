@@ -5,7 +5,7 @@
 
 use nord_usb::op;
 use nord_usb::transport::{Direction, ReplayTransport, Step};
-use nord_usb::wire::{cmd, ui, Message, ObjectClass, Service};
+use nord_usb::wire::{cmd, ui, Bank, Message, ObjectClass, Service};
 use nord_usb::{Location, Session};
 
 fn set_list(slot: u32) -> Location {
@@ -109,16 +109,22 @@ fn session_close() -> Vec<Step> {
     ]
 }
 
+/// The one bank the scan is bounded by, as the Electro 5's set list partition declares
+/// each of its four: 50 slots.
+fn banks() -> Vec<Bank> {
+    vec![Bank {
+        index: 0,
+        name: "Set List 1".into(),
+        slots: 50,
+    }]
+}
+
 /// The enumeration walk over one bank holding set lists at slots 0, 1 and 2.
 ///
-/// It is the walk `op::occupied_slots` performs: an `INFO` probe at each bank's slot 0
-/// to find out whether the bank exists at all, then the cursor from the bank's boundary
-/// until it stops advancing, and a second bank answering out-of-range to end it.
+/// It is the walk `op::occupied_slots` performs: the cursor from the declared bank's
+/// boundary until the device ends the bank.
 fn walk_of_three() -> Vec<Step> {
     let mut steps = Vec::new();
-
-    steps.push(request(cmd::INFO, &slot_args(set_list(0))));
-    steps.push(info_reply(set_list(0), 1, "First"));
 
     let cursor = |from: u32| {
         let mut args = slot_args(Location {
@@ -141,13 +147,6 @@ fn walk_of_three() -> Vec<Step> {
             None => steps.push(refusal(cmd::NEXT_SLOT + 1, 1)),
         }
     }
-
-    // The class has one bank, so the next probe is out of range.
-    steps.push(request(
-        cmd::INFO,
-        &slot_args(Location { bank: 1, slot: 0 }),
-    ));
-    steps.push(refusal(cmd::INFO + 1, 3));
     steps
 }
 
@@ -155,7 +154,7 @@ fn scan(steps: Vec<Step>, targets: &[Location]) -> (Vec<op::Referrer>, bool) {
     let mut t = ReplayTransport::new(steps);
     let found = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, targets).await;
+        let r = op::set_lists_referencing(&mut s, &banks(), targets).await;
         let closed = s.commit().await;
         closed.unwrap();
         r.unwrap()
@@ -280,8 +279,6 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
 #[test]
 fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
     let mut steps = session_open(ObjectClass::SetList);
-    steps.push(request(cmd::INFO, &slot_args(set_list(0))));
-    steps.push(info_reply(set_list(0), 1, "First"));
     let mut args = slot_args(Location {
         bank: 0,
         slot: op::SLOT_BOUNDARY,
@@ -293,7 +290,7 @@ fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
     let mut t = ReplayTransport::new(steps);
     let err = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &[Location { bank: 0, slot: 6 }]).await;
+        let r = op::set_lists_referencing(&mut s, &banks(), &[Location { bank: 0, slot: 6 }]).await;
         s.abort();
         r.unwrap_err()
     });
@@ -302,38 +299,6 @@ fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
             err,
             nord_usb::Error::DeviceStatus(s) if s == op::ENUMERATION_DISABLED
         ),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_heuristic_end_is_an_error_rather_than_a_complete_scan() {
-    let mut steps = session_open(ObjectClass::SetList);
-    for bank in 0..2 {
-        let at = Location { bank, slot: 0 };
-        steps.push(request(cmd::INFO, &slot_args(at)));
-        steps.push(refusal(cmd::INFO + 1, 1));
-
-        let mut args = slot_args(Location {
-            bank,
-            slot: op::SLOT_BOUNDARY,
-        });
-        args.extend_from_slice(&0u32.to_be_bytes());
-        steps.push(request(cmd::NEXT_SLOT, &args));
-        steps.push(refusal(cmd::NEXT_SLOT + 1, 1));
-    }
-
-    let mut t = ReplayTransport::new(steps);
-    let err = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &[Location { bank: 0, slot: 6 }]).await;
-        s.abort();
-        r.unwrap_err()
-    });
-
-    assert!(t.is_exhausted(), "the scan read past the heuristic bound");
-    assert!(
-        matches!(&err, nord_usb::Error::Transport(m) if m.contains("empty banks")),
         "{err}"
     );
 }
@@ -349,7 +314,7 @@ fn a_dependency_reply_must_echo_the_set_list_queried() {
     let mut t = ReplayTransport::new(steps);
     let err = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &[moved]).await;
+        let r = op::set_lists_referencing(&mut s, &banks(), &[moved]).await;
         s.abort();
         r.unwrap_err()
     });
@@ -370,7 +335,7 @@ fn referrers_require_a_set_list_session() {
     let mut t = ReplayTransport::new(session_open(ObjectClass::Program));
     let err = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &[Location { bank: 0, slot: 6 }]).await;
+        let r = op::set_lists_referencing(&mut s, &banks(), &[Location { bank: 0, slot: 6 }]).await;
         s.abort();
         r.unwrap_err()
     });
@@ -382,21 +347,20 @@ fn referrers_require_a_set_list_session() {
     assert!(matches!(err, nord_usb::Error::InvalidArgument(_)), "{err}");
 }
 
-/// The bound `op::set_lists_referencing` walks to before it gives up on a cursor that
-/// will not terminate.
-const WALK_CAP: u32 = 1024;
-
-/// A cursor that keeps advancing forever must not have the slots it did report passed
-/// off as the whole answer: "no set list is affected" is the one wrong thing to say
-/// before a move.
+/// A cursor that keeps advancing past the bank's declared capacity must not have the
+/// slots it did report passed off as the whole answer: "no set list is affected" is the
+/// one wrong thing to say before a move.
 #[test]
-fn a_walk_that_never_ends_is_an_error_rather_than_a_truncated_list() {
-    let mut steps = session_open(ObjectClass::SetList);
-    steps.push(request(cmd::INFO, &slot_args(set_list(0))));
-    steps.push(info_reply(set_list(0), 1, "First"));
+fn a_walk_that_outruns_its_bank_is_an_error_rather_than_a_truncated_list() {
+    let declared = [Bank {
+        index: 0,
+        name: "Set List 1".into(),
+        slots: 3,
+    }];
 
+    let mut steps = session_open(ObjectClass::SetList);
     let mut from = op::SLOT_BOUNDARY;
-    for slot in 0..WALK_CAP {
+    for slot in 0..=declared[0].slots {
         let mut args = slot_args(Location {
             bank: 0,
             slot: from,
@@ -410,14 +374,22 @@ fn a_walk_that_never_ends_is_an_error_rather_than_a_truncated_list() {
     let mut t = ReplayTransport::new(steps);
     let err = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &[Location { bank: 0, slot: 6 }]).await;
+        let r =
+            op::set_lists_referencing(&mut s, &declared, &[Location { bank: 0, slot: 6 }]).await;
         s.abort();
         r.unwrap_err()
     });
 
-    assert!(t.is_exhausted(), "the walk stopped short of its bound");
+    assert!(t.is_exhausted(), "the walk stopped short of the bank's end");
     assert!(
-        matches!(&err, nord_usb::Error::Transport(m) if m.contains("1024-slot")),
+        matches!(
+            err,
+            nord_usb::Error::Enumeration {
+                bank: 0,
+                slots: 3,
+                ..
+            }
+        ),
         "{err}"
     );
 }
@@ -432,7 +404,7 @@ fn an_empty_target_list_sends_nothing() {
     );
     let found = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &[]).await;
+        let r = op::set_lists_referencing(&mut s, &banks(), &[]).await;
         s.commit().await.unwrap();
         r.unwrap()
     });
