@@ -8,8 +8,9 @@
 //!
 //! The nouns are the protocol's object classes: `nord program`, `nord sample`,
 //! `nord setlist` and `nord live` are [`slot_action`] with the class fixed, `nord
-//! settings` carries the one verb its singleton needs (`edit`), and the hidden
-//! `nord raw --class N` is [`slot_action`] with the class given as a number.
+//! settings` carries the subset its singleton can answer (`get`, `info`, `edit`),
+//! and the hidden `nord raw --class N` is [`slot_action`] with the class given as a
+//! number.
 //! `inspect`/`verify`/`edit` dispatch on the format rather than on a class, so they
 //! sit at the top level — `edit` is how the formats with no noun of their own (the
 //! Stage bodies, the Sample Editor project) are edited.
@@ -333,10 +334,14 @@ enum LiveAction {
 }
 
 /// `nord settings`: the instrument holds exactly one of these, so there is nothing to
-/// move, copy, name or delete, and `edit` is the whole verb set. The class-generic
-/// verbs remain reachable as `raw --class 7`.
+/// move, copy, name or delete. What is left is the read-only subset, spelled exactly as
+/// [`SlotAction`] spells it, plus `edit`. The class-generic verbs remain reachable as
+/// `raw --class 7`.
 #[derive(Subcommand)]
 enum SettingsAction {
+    #[command(flatten)]
+    Slot(SettingsSlotAction),
+
     /// Change fields inside the global settings, in a `.ne5s` file or on the instrument.
     ///
     /// Fields are the menu settings plus the `startup_*` state the instrument restores
@@ -346,6 +351,48 @@ enum SettingsAction {
     /// ⚠️ A settings write reloads the selected program, losing panel state that has
     /// not been stored.
     Edit(EditArgs),
+}
+
+/// The [`SlotAction`] verbs the settings singleton keeps, spelled identically.
+///
+/// There is one object and it holds no library references, so `deps` is left to
+/// `raw --class 7` rather than offered on a noun that can only answer "none".
+#[derive(Subcommand)]
+enum SettingsSlotAction {
+    /// Read the settings off the instrument, or a `.ne5s` file. Read-only.
+    ///
+    /// Prints a summary by default; with `--out` writes the file instead.
+    Get {
+        /// The singleton, addressed as 1:1 — or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
+        at: String,
+
+        /// Write the object to this file instead of printing a summary. With `--sweep`,
+        /// the directory every capture lands in.
+        #[arg(short, long, value_name = "FILE|DIR")]
+        out: Option<PathBuf>,
+
+        /// Save the wire body verbatim instead of wrapping it in a CBIN header.
+        /// Needs `--out`.
+        #[arg(long)]
+        body: bool,
+
+        /// Read the singleton over and over, once per prompt, into the `--out`
+        /// directory.
+        ///
+        /// Change one menu setting on the instrument, say what you changed, and that
+        /// capture is filed under your answer; repeat until a blank line.
+        #[arg(long, requires = "out")]
+        sweep: bool,
+    },
+
+    /// Report everything the instrument knows about the settings singleton, or a
+    /// `.ne5s` file's header. Read-only.
+    Info {
+        /// The singleton, addressed as 1:1 — or a file.
+        #[arg(value_name = "FILE|BANK:SLOT")]
+        at: String,
+    },
 }
 
 /// The [`SlotAction`] verbs the live buffer keeps, spelled identically.
@@ -682,6 +729,7 @@ fn main() -> ExitCode {
             LiveAction::Edit(args) => edit::run(&ui, args, ObjectClass::Live),
         },
         Command::Settings { action } => match action {
+            SettingsAction::Slot(action) => slot_action(&ui, action.into(), ObjectClass::Settings),
             SettingsAction::Edit(args) => edit::run(&ui, args, ObjectClass::Settings),
         },
         Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::from_raw(class)),
@@ -692,6 +740,25 @@ fn main() -> ExitCode {
         Err(e) => {
             ui.note(format!("{}: {e}", ui.danger("error")));
             ExitCode::FAILURE
+        }
+    }
+}
+
+impl From<SettingsSlotAction> for SlotAction {
+    fn from(action: SettingsSlotAction) -> SlotAction {
+        match action {
+            SettingsSlotAction::Get {
+                at,
+                out,
+                body,
+                sweep,
+            } => SlotAction::Get {
+                at,
+                out,
+                body,
+                sweep,
+            },
+            SettingsSlotAction::Info { at } => SlotAction::Info { at },
         }
     }
 }
