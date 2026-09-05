@@ -8,7 +8,15 @@
 //! No byte of one schema is a function of any byte of another over the vendor
 //! pool's instruments that appear in more than one generation, so no value here
 //! translates between generations. One *offset* does: the dynamics enable is at
-//! `+3` in both v2 and v4, the single field the rewrite left where it was.
+//! `+3` in both v2 and v4, the single field the rewrite left where it was. v3
+//! puts it at `+4` and scales it onto the block's 0..127 grid.
+//!
+//! What a project reaches differs by schema. v2 exposes the category's velocity
+//! response, because the editor's loader installs a preset chosen by the
+//! instrument's category and the encoder writes it through; the wide schemas
+//! ignore the category entirely and hold a constant block plus the dynamics
+//! group. The EQ is read-only in every schema: the editor bakes both the zone
+//! and the instrument EQ into the audio and leaves [`StyV4::eq`] zero.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
@@ -39,12 +47,38 @@ pub const V4_LEN_LONG: usize = 108;
 /// Within a v2 payload: whether the category's dynamics curve is enabled.
 const V2_DYNAMICS_ENABLE: usize = 3;
 
+/// Within a v2 payload: how far velocity moves level, quantised to
+/// [`VELOCITY_LEVELS`].
+const V2_VELOCITY_TO_AMPLITUDE: usize = 4;
+
+/// Within a v2 payload: how far velocity moves timbre, on the same scale.
+const V2_VELOCITY_TO_TIMBRE: usize = 5;
+
+/// Steps a v2 velocity depth takes. The project's own field has four; the byte
+/// holds three, with the project's middle two both landing on 1.
+pub const VELOCITY_LEVELS: u8 = 3;
+
+/// The level [`StyV2::velocity_to_amplitude`] and [`StyV2::velocity_to_timbre`]
+/// take for a `samplib_attrs` velocity depth.
+///
+/// The loader installs the depth from the instrument's category and never above
+/// 3, so the top step is saturating rather than measured beyond that.
+pub fn velocity_level(depth: u8) -> u8 {
+    match depth {
+        0 => 0,
+        1 | 2 => 1,
+        _ => VELOCITY_LEVELS - 1,
+    }
+}
+
 /// The v2 preset: nine enum-quantised bytes.
 ///
-/// Only [`StyV2::dynamics_enabled`] is named. The editor writes a constant here
-/// — the project's category and its whole `samplib_attrs` block leave every
-/// other byte alone — so the rest is readable from the vendor pool and not
-/// reachable from a project.
+/// The dynamics enable comes straight from the project. The two velocity depths
+/// come from the preset the loader installs for the instrument's category,
+/// which is the only route a project has to them — setting the fields directly
+/// is undone on load. The remaining bytes are readable from the vendor pool and
+/// not reachable at all: they hold the same value whatever the category and
+/// whatever `samplib_attrs` says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyV2 {
     pub raw: [u8; V2_LEN],
@@ -62,9 +96,69 @@ impl StyV2 {
     }
 
     /// Whether the instrument plays through its category's dynamics curve. The
-    /// curve itself is not stored; only this enable reaches the file.
+    /// curve itself is stored in no schema.
     pub fn dynamics_enabled(&self) -> bool {
         self.raw[V2_DYNAMICS_ENABLE] != 0
+    }
+
+    /// How far note velocity moves level, `0..VELOCITY_LEVELS`.
+    pub fn velocity_to_amplitude(&self) -> u8 {
+        self.raw[V2_VELOCITY_TO_AMPLITUDE]
+    }
+
+    /// How far note velocity moves timbre, `0..VELOCITY_LEVELS`.
+    pub fn velocity_to_timbre(&self) -> u8 {
+        self.raw[V2_VELOCITY_TO_TIMBRE]
+    }
+}
+
+/// Within a v3 payload: the dynamics enable, on the block's 0..127 scale rather
+/// than the flag v2 and v4 keep.
+const V3_DYNAMICS_ENABLE: usize = 4;
+
+/// Within a v3 payload: the dynamics response, one value where v4 holds one per
+/// layer.
+const V3_DYNAMICS_RESPONSE: usize = 12;
+
+/// Within a v3 payload: the counterpart of [`V4_DYNAMICS_CURVE`]. No value of
+/// it marks "no curve" the way [`DYNAMICS_CURVE_NONE`] does at v4.
+const V3_DYNAMICS_CURVE: usize = 14;
+
+/// The v3 preset: 24 bytes, of which the dynamics group is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StyV3 {
+    pub raw: [u8; V3_LEN],
+}
+
+impl StyV3 {
+    pub fn parse(payload: &[u8]) -> Result<StyV3, ParseError> {
+        let raw = payload.try_into().map_err(|_| {
+            ParseError::AssertFail(format!(
+                "sty section is {} bytes, not the {V3_LEN} a v3 preset is",
+                payload.len()
+            ))
+        })?;
+        Ok(StyV3 { raw })
+    }
+
+    /// Whether the instrument plays through its category's dynamics curve.
+    pub fn dynamics_enabled(&self) -> bool {
+        self.raw[V3_DYNAMICS_ENABLE] != 0
+    }
+
+    /// Which dynamics curve the instrument loads with. Unlike v4 this schema
+    /// offers no sentinel for "none", so the value is returned as it stands.
+    pub fn dynamics_curve(&self) -> u8 {
+        self.raw[V3_DYNAMICS_CURVE]
+    }
+
+    /// The dynamics response.
+    ///
+    /// ⚠️ `+16` holds the same control in a second representation and is a
+    /// deterministic function of this byte across the pool, so a writer that
+    /// changes one must restate the other.
+    pub fn dynamics_response(&self) -> u8 {
+        self.raw[V3_DYNAMICS_RESPONSE]
     }
 }
 
@@ -73,6 +167,9 @@ impl StyV2 {
 const V4_DYNAMICS_ENABLE: usize = 3;
 
 /// Within a v4 payload: which dynamics curve, or [`DYNAMICS_CURVE_NONE`].
+///
+/// ⚠️ The project's own curve field selects nothing here: the editor writes 1
+/// at both of that field's legal values whenever the dynamics enable is on.
 const V4_DYNAMICS_CURVE: usize = 4;
 
 /// The value [`V4_DYNAMICS_CURVE`] holds when no curve is selected. Over the
@@ -118,8 +215,10 @@ const _: () = assert!(V4_DYNAMICS_RESPONSE + 3 <= V4_LEN);
 /// preserved verbatim. A project reaches the dynamics group and nothing else:
 /// enabling the category's dynamics moves [`StyV4::dynamics_enabled`],
 /// [`StyV4::dynamics_curve`] and [`StyV4::dynamics_response`] together, while
-/// the whole `samplib_attrs` block and the zone EQ leave every byte alone —
-/// the zone EQ because the encoder bakes it into the audio instead.
+/// the whole `samplib_attrs` block, the instrument's category and both EQs
+/// leave every byte alone. ⚠️ The EQs because the encoder bakes them into the
+/// audio instead, which is why [`StyV4::eq`] reads zero on everything this
+/// project can render and only vendor content fills it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyV4 {
     pub raw: Vec<u8>,
@@ -144,8 +243,8 @@ impl StyV4 {
     }
 
     /// Which dynamics curve the instrument loads with, `None` where none is
-    /// selected. Unlike v2, which stores only the enable, the wide schema
-    /// stores the curve the project names.
+    /// selected. ⚠️ A project cannot choose between the curves the pool holds
+    /// — the enable alone drives this byte off its sentinel.
     pub fn dynamics_curve(&self) -> Option<u8> {
         match self.raw[V4_DYNAMICS_CURVE] {
             DYNAMICS_CURVE_NONE => None,
@@ -180,9 +279,7 @@ impl StyV4 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sty {
     V2(StyV2),
-    /// 24 bytes. No field is named: the schema shares no byte with the one
-    /// before it or the one after.
-    V3(Box<[u8; V3_LEN]>),
+    V3(StyV3),
     V4(StyV4),
 }
 
@@ -190,15 +287,7 @@ impl Sty {
     /// Reads a wide-chain `sty` payload, refusing a version no specimen carries.
     pub fn parse_wide(version: u32, payload: &[u8]) -> Result<Sty, ParseError> {
         match version {
-            VERSION_V3 => payload
-                .try_into()
-                .map(|raw| Sty::V3(Box::new(raw)))
-                .map_err(|_| {
-                    ParseError::AssertFail(format!(
-                        "sty section is {} bytes, not the {V3_LEN} a v3 preset is",
-                        payload.len()
-                    ))
-                }),
+            VERSION_V3 => StyV3::parse(payload).map(Sty::V3),
             VERSION_V4 => StyV4::parse(payload).map(Sty::V4),
             v => Err(ParseError::AssertFail(format!(
                 "sty section version {v} has no preset layout derived from a specimen"
@@ -209,7 +298,7 @@ impl Sty {
     pub fn raw(&self) -> &[u8] {
         match self {
             Sty::V2(s) => &s.raw,
-            Sty::V3(s) => s.as_slice(),
+            Sty::V3(s) => &s.raw,
             Sty::V4(s) => &s.raw,
         }
     }
@@ -220,11 +309,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v2_names_only_the_dynamics_enable() {
+    fn v2_reads_the_dynamics_enable_and_both_velocity_depths() {
         let off = StyV2::parse(&[0, 1, 0, 0, 1, 1, 0, 0, 0]).unwrap();
-        let on = StyV2::parse(&[0, 1, 0, 1, 1, 1, 0, 0, 0]).unwrap();
+        let on = StyV2::parse(&[0, 1, 0, 1, 0, 2, 0, 0, 0]).unwrap();
         assert!(!off.dynamics_enabled());
+        assert_eq!(off.velocity_to_amplitude(), 1);
+        assert_eq!(off.velocity_to_timbre(), 1);
         assert!(on.dynamics_enabled());
+        assert_eq!(on.velocity_to_amplitude(), 0);
+        assert_eq!(on.velocity_to_timbre(), 2);
+    }
+
+    #[test]
+    fn v3_reads_its_dynamics_group() {
+        let mut raw = [0u8; V3_LEN];
+        raw[V3_DYNAMICS_RESPONSE] = 127;
+        raw[V3_DYNAMICS_CURVE] = 2;
+        let off = Sty::parse_wide(VERSION_V3, &raw).unwrap();
+        let Sty::V3(off) = off else {
+            panic!("not a v3 preset");
+        };
+        assert!(!off.dynamics_enabled());
+        assert_eq!(off.dynamics_curve(), 2);
+        assert_eq!(off.dynamics_response(), 127);
+
+        raw[V3_DYNAMICS_ENABLE] = 43;
+        raw[V3_DYNAMICS_RESPONSE] = 74;
+        raw[V3_DYNAMICS_CURVE] = 1;
+        let on = StyV3::parse(&raw).unwrap();
+        assert!(on.dynamics_enabled());
+        assert_eq!(on.dynamics_curve(), 1);
+        assert_eq!(on.dynamics_response(), 74);
+    }
+
+    #[test]
+    fn a_velocity_depth_quantises_onto_three_levels() {
+        assert_eq!(
+            [0, 1, 2, 3].map(velocity_level),
+            [0, 1, 1, VELOCITY_LEVELS - 1]
+        );
+        assert_eq!(velocity_level(u8::MAX), VELOCITY_LEVELS - 1);
+    }
+
+    #[test]
+    fn a_short_v3_preset_is_refused() {
+        assert!(StyV3::parse(&[0; V3_LEN - 1]).is_err());
+        assert!(Sty::parse_wide(VERSION_V3, &[0; V3_LEN + 1]).is_err());
     }
 
     #[test]

@@ -42,7 +42,7 @@ pub use keymap::{KeyTable, Level};
 pub use meta::Meta;
 pub use section::Section;
 pub use stroke::Stroke;
-pub use sty::{EqBand, Sty, StyV2};
+pub use sty::{velocity_level, EqBand, Sty, StyV2, StyV3};
 pub use zone::Zone;
 pub use zone::ZoneV3;
 

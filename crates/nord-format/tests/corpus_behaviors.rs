@@ -340,14 +340,18 @@ fn a_wide_zone_records_its_strokes_relative_strength() {
     }
 }
 
-/// `sty`'s v4 dynamics group is the one part of the preset a project reaches:
-/// enabling the category's dynamics writes the enable, the curve and the
-/// response triple together, and the curve is a null one generation earlier.
+/// `sty`'s v4 dynamics group is the one part of the preset a wide project
+/// reaches, and the enable alone carries all of it: `SP-dynen1` leaves the
+/// project's own curve field at its default and still moves the curve byte off
+/// its sentinel, while `SP-dyn1` sets that field and renders the base.
 #[test]
 fn the_v4_preset_holds_the_dynamics_a_project_asked_for() {
     for (file, enabled, curve, response) in [
         ("LY-1base.nsmp4", false, None, [127u8; 3]),
         ("LY-70dynen.nsmp4", true, Some(1), [74, 82, 90]),
+        ("SP-00base.nsmp4", false, None, [127u8; 3]),
+        ("SP-dyn1.nsmp4", false, None, [127u8; 3]),
+        ("SP-dynen1.nsmp4", true, Some(1), [74, 82, 90]),
     ] {
         let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
             panic!("{file} is not a wide sample");
@@ -359,6 +363,109 @@ fn the_v4_preset_holds_the_dynamics_a_project_asked_for() {
         assert_eq!(sty.dynamics_curve(), curve, "{file}");
         assert_eq!(sty.dynamics_response(), response, "{file}");
     }
+}
+
+/// v3 keeps the same dynamics group at its own offsets and on its own scale:
+/// the enable is a level on the block's 0..127 grid rather than a flag, and the
+/// response is stored once instead of once per layer.
+#[test]
+fn the_v3_preset_holds_the_same_dynamics_group() {
+    for (file, enabled, curve, response) in [
+        ("SP-00base.nsmp3", false, 2, 127),
+        ("SP-dyn1.nsmp3", false, 2, 127),
+        ("SP-dynen1.nsmp3", true, 1, 74),
+    ] {
+        let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
+            panic!("{file} is not a wide sample");
+        };
+        let nsmp::Sty::V3(sty) = sample.sty().unwrap_or_else(|e| panic!("{file}: {e}")) else {
+            panic!("{file} carries no v3 preset");
+        };
+        assert_eq!(sty.dynamics_enabled(), enabled, "{file}");
+        assert_eq!(sty.dynamics_curve(), curve, "{file}");
+        assert_eq!(sty.dynamics_response(), response, "{file}");
+    }
+}
+
+/// The editor's loader replaces `samplib_attrs` with a preset chosen by the
+/// instrument's category, and the v2 encoder writes the two velocity depths of
+/// that preset through. Pairing each written-back project with the file it
+/// produced is what names the bytes: no project can set the depths itself.
+#[test]
+fn a_v2_preset_carries_the_velocity_depths_the_category_installed() {
+    let mut seen = 0;
+    for (specimen, sample) in v2_samples() {
+        let Some(stem) = specimen.path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !stem.starts_with("SP-") {
+            continue;
+        }
+        let project = project_named(&format!("{stem}.nsmpproj"));
+        let installed = project.velocity_defaults().unwrap();
+        let sty = sample.sty().unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(
+            (sty.velocity_to_amplitude(), sty.velocity_to_timbre()),
+            (
+                nsmp::velocity_level(installed.amplitude),
+                nsmp::velocity_level(installed.timbre)
+            ),
+            "{stem}: preset {installed:?}"
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no SP specimen");
+}
+
+/// The instrument EQ is baked into the audio, not stored: every rung that turns
+/// a band on renders a different stroke and leaves all three `sty` records
+/// zero, so nothing this project can render fills them in.
+#[test]
+fn the_instrument_eq_never_reaches_the_wide_preset() {
+    let Entity::Sample(Sample::V3(base)) = &named("SP-00base.nsmp4").entity else {
+        panic!("the SP base is not a wide sample");
+    };
+    let quiet = base.stroke_streams();
+    let mut seen = 0;
+    for stem in [
+        "SP-eq1lcon",
+        "SP-eq4m0on",
+        "SP-eq5m0freq",
+        "SP-eq6m0gain",
+        "SP-eq7m0q",
+        "SP-eq8m1on",
+        "SP-eq9m1freq",
+        "SP-eqAm1gain",
+        "SP-eqBm1q",
+        "SP-eqDf12000",
+        "SP-eqEg12",
+        "SP-eqFq8",
+    ] {
+        let Entity::Sample(Sample::V3(sample)) = &named(&format!("{stem}.nsmp4")).entity else {
+            panic!("{stem} is not a wide sample");
+        };
+        let nsmp::Sty::V4(sty) = sample.sty().unwrap_or_else(|e| panic!("{stem}: {e}")) else {
+            panic!("{stem} carries no v4 preset");
+        };
+        for band in sty.eq() {
+            assert_eq!(
+                band,
+                nsmp::EqBand {
+                    frequency: 0,
+                    gain: 0,
+                    q: 0
+                },
+                "{stem}"
+            );
+        }
+        assert_ne!(
+            sample.stroke_streams(),
+            quiet,
+            "{stem}: the band was set and the audio did not move"
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no SP EQ specimen");
 }
 
 /// A `sty` triple sits at its 127 ceiling exactly while the control behind it
@@ -429,8 +536,8 @@ fn every_sample_preset_parses_under_its_own_schema() {
         let where_ = specimen.path.display();
         match sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}")) {
             nsmp::Sty::V2(_) => panic!("{where_}: a wide chain read a v2 preset"),
-            nsmp::Sty::V3(raw) => {
-                assert_eq!(raw.len(), nsmp::sty::V3_LEN);
+            nsmp::Sty::V3(block) => {
+                assert_eq!(block.raw.len(), nsmp::sty::V3_LEN);
                 v3 += 1;
             }
             nsmp::Sty::V4(block) => {
@@ -985,6 +1092,7 @@ fn nsmpproj_stroke_fields_move_alone() {
 fn nsmpproj_velocity_defaults_move_alone() {
     for (specimen, project) in projects() {
         let before = project.render();
+        let was = project.velocity_defaults().unwrap();
         let mut edited = project.clone();
         let defaults = nsmpproj::VelocityDefaults {
             attack_amount: 64,
@@ -999,7 +1107,15 @@ fn nsmpproj_velocity_defaults_move_alone() {
             .zip(after.lines())
             .filter(|(a, b)| a != b)
             .count();
-        assert_eq!(changed, 3, "{}", specimen.path.display());
+        let asked = [
+            was.attack_amount != defaults.attack_amount,
+            was.amplitude != defaults.amplitude,
+            was.timbre != defaults.timbre,
+        ]
+        .into_iter()
+        .filter(|moved| *moved)
+        .count();
+        assert_eq!(changed, asked, "{}", specimen.path.display());
     }
 }
 
