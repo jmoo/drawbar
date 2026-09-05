@@ -40,8 +40,10 @@ with real Nord devices.
 
 Drawbar began as a project to reverse engineer the Nord Electro 5. It can now recognize most Clavia file types
 and read/write most stage models as well (Stage 2, 3, and 4) thanks to documentation created by other community
-reverse engineering efforts. It can also read and write most Nord sample files, although the audio codec is not currently
-understood. The USB protocol is also mostly understood and implemented, although only tested on one device.
+reverse engineering efforts. It can also read and write most Nord sample files, including
+encoding v2 instruments that round-trip through this crate's decoder and play on an Electro 5
+(the codec is verified for v2 and inferred for v3/v4). The USB protocol is also mostly
+understood and implemented, although only tested on one device.
 
 Only the Electro 5 has had thorough on device testing and validation, but all codecs are tested round-trip
 against a corpus of >10,000 real Nord file specimens found in the wild. This includes files from most Clavia products and

@@ -1244,8 +1244,7 @@ mod tests {
         }
     }
 
-    /// A 54-character sample name, straight off the wire. The superseded name-scanning
-    /// heuristic was bounded at 32 and would have skipped this entirely.
+    /// A 54-character sample name, straight off the wire.
     #[test]
     fn object_info_reads_names_longer_than_the_old_scan_bound() {
         let info = ProgramInfo::decode(

@@ -1042,7 +1042,10 @@ macro_rules! sparse_enum {
 
         impl Default for $name {
             fn default() -> Self {
-                <Self as $crate::bits::Packed>::from_bits(0).expect("decoding is total")
+                match <Self as $crate::bits::Packed>::from_bits(0) {
+                    Ok(v) => v,
+                    Err(never) => match never {},
+                }
             }
         }
 
