@@ -140,37 +140,69 @@ fn collect<T: Transport>(transport: &mut T) -> Result<Vec<Status>, String> {
 
 fn print_table(ui: &Ui, report: &[Status]) {
     ui.out(ui.dim(format!(
-        "{:<10} {:>20} {:>7}  {}",
-        "class", "used", "full", "of"
+        "{:<10} {:>20} {:>7} {:>14}  {}",
+        "class", "used", "full", "free", "of"
     )));
-    let mut any_variable = false;
+    let mut any_dirty = false;
     for s in report {
-        // Fixed-size classes are far clearer as slots than as raw blocks: programs
+        // Fixed-size classes are far clearer as slots than as byte counts: programs
         // report 400, which is exactly the instrument's 8 banks x 50.
-        let (used, of) = match s.slots() {
+        let (used, free, of) = match s.slots() {
             Some(slots) => (
                 format!("{} / {} slots", s.count, slots),
-                format!("{} blocks each", s.blocks_per_item().unwrap_or(0)),
+                u64::from(slots)
+                    .saturating_sub(u64::from(s.count))
+                    .to_string(),
+                format!("{} bytes each", s.bytes_per_item().unwrap_or(0)),
             ),
+            // ⚠️ What a write can reach is `available`, not `free`: a delete parks its
+            // blocks in the dirty pool, and a partition reporting no free space at all
+            // is still writable once the cleaning pass has run.
             None => {
-                any_variable = true;
+                let unit = if s.class.is_library() {
+                    "blocks"
+                } else {
+                    "bytes"
+                };
                 (
-                    format!("{} / {} blocks", s.used, s.total()),
+                    format!("{} / {} {unit}", s.used, s.total()),
+                    match s.dirty {
+                        0 => s.available().to_string(),
+                        dirty => {
+                            any_dirty = true;
+                            format!("{} ({dirty} dirty)", s.available())
+                        }
+                    },
                     format!("{} items", s.count),
                 )
             }
         };
         ui.out(format!(
-            "{:<10} {:>20} {:>6.1}%  {}",
+            "{:<10} {:>20} {:>6.1}% {:>14}  {}",
             s.class.label(),
             used,
             s.used_percent(),
+            free,
             ui.dim(of),
         ));
     }
-    if any_variable {
+    let mut footnotes: Vec<&str> = Vec::new();
+    if report.iter().any(|s| s.class.is_library()) {
+        footnotes.push("a block is the library partition's own allocation unit, and");
+        footnotes.push("`nord device geometry` reports its size; the slot classes count bytes");
+    }
+    if any_dirty {
+        footnotes.push("dirty blocks hold deleted content and are not free yet — a write that");
+        footnotes.push("needs them reclaims exactly the shortfall first");
+    }
+    if !footnotes.is_empty() {
         ui.note("");
-        ui.note("(blocks are a device-internal unit, not bytes)");
+        let last = footnotes.len() - 1;
+        for (i, line) in footnotes.iter().enumerate() {
+            let open = if i == 0 { "(" } else { "" };
+            let close = if i == last { ")" } else { "" };
+            ui.note(format!("{open}{line}{close}"));
+        }
     }
 }
 
@@ -179,12 +211,14 @@ fn print_json(ui: &Ui, report: &[Status]) {
     for (i, s) in report.iter().enumerate() {
         let comma = if i + 1 == report.len() { "" } else { "," };
         ui.out(format!(
-            "  {{\"class\": \"{}\", \"code\": {}, \"items\": {}, \"used\": {}, \"free\": {}, \"capacity\": {}}}{comma}",
+            "  {{\"class\": \"{}\", \"code\": {}, \"items\": {}, \"used\": {}, \"free\": {}, \"dirty\": {}, \"available\": {}, \"capacity\": {}}}{comma}",
             s.class.label(),
             s.class.to_raw(),
             s.count,
             s.used,
             s.free,
+            s.dirty,
+            s.available(),
             s.total(),
         ));
     }
@@ -937,8 +971,76 @@ fn peek_dest(
     }
 }
 
+/// The set lists affected by moving or swapping the target programs.
+fn referring_set_lists(
+    t: &mut nord_usb::transport::UsbTransport,
+    targets: &[Location],
+) -> Result<Vec<op::Referrer>, String> {
+    transact(t, "setlist list", |t| {
+        nord_usb::block_on(async {
+            let mut s = Session::open(t, ObjectClass::SetList).await?;
+            let r = usb_op::set_lists_referencing(&mut s, targets).await;
+            let closed = s.commit().await;
+            finish(r, closed)
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// The pre-flight lines naming set lists a program move will rewrite.
+fn set_list_rewrite_lines(ui: &Ui, found: &[op::Referrer]) -> Vec<String> {
+    if found.is_empty() {
+        return vec!["no set list references either slot".into()];
+    }
+    let mut lines = vec![format!(
+        "the instrument will also rewrite {} set list{} that reference these slots:",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" }
+    )];
+    for r in found {
+        let refs: Vec<String> = r.programs.iter().map(|&l| addr(l)).collect();
+        lines.push(format!(
+            "  setlist {} {:?} points at {}",
+            addr(r.at),
+            r.name,
+            refs.join(", "),
+        ));
+        // ⚠️ Keep the irreversible migration beside the affected set list.
+        if r.version == 0 {
+            lines.push(format!(
+                "    {} {} the rewrite migrates it to version 1, and moving the program",
+                ui.danger("VERSION 0"),
+                ui.dash(),
+            ));
+            lines.push("    back does not migrate the set list back".into());
+        }
+    }
+    lines
+}
+
+/// Say what a program move will do to the set lists that point at it.
+fn describe_set_list_rewrites(
+    ui: &Ui,
+    t: &mut nord_usb::transport::UsbTransport,
+    targets: &[Location],
+) -> Result<(), String> {
+    let found = referring_set_lists(t, targets).map_err(|e| {
+        format!(
+            "could not read which set lists reference these slots ({e}); the move was \
+             not attempted"
+        )
+    })?;
+    for line in set_list_rewrite_lines(ui, &found) {
+        ui.note(line);
+    }
+    Ok(())
+}
+
 /// Move an object from one slot to another. Requires confirmation: it changes both slots,
 /// though an occupied destination is swapped rather than destroyed.
+///
+/// For programs the pre-flight also names the set lists the instrument will rewrite —
+/// objects in another class, which the command line never mentions.
 pub fn move_object(
     ui: &Ui,
     from: Location,
@@ -957,6 +1059,11 @@ pub fn move_object(
         ui.dash(),
         dest
     ));
+    // Only programs are referenced by slot. A set list's own move disturbs nothing that
+    // points at it, and the library classes are referenced by content id, not address.
+    if class == ObjectClass::Program {
+        describe_set_list_rewrites(ui, &mut t, &[from, to])?;
+    }
     ui.confirm(confirmed)?;
     transact(
         &mut t,
@@ -1250,8 +1357,8 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     ui.out(ui.dim(format!(
-        "{:<4} {:<18} {:>6} {:>7}  banks",
-        "code", "partition", "banks", "slots"
+        "{:<4} {:<18} {:>6} {:>7} {:>10}  banks",
+        "code", "partition", "banks", "slots", "unit"
     )));
     for (p, banks) in &rows {
         // The sentinel is not a capacity and must not be summed into one.
@@ -1261,19 +1368,28 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
         } else {
             "—".to_string()
         };
+        // The allocation granularity is what `device status` counts in for this
+        // partition: a storage block for the libraries, one byte everywhere else.
+        let unit = match p.allocation_unit() {
+            Some(1) => "byte".to_string(),
+            Some(n) => format!("{n} B"),
+            None => "?".to_string(),
+        };
         let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         ui.out(format!(
-            "{:<4} {:<18} {:>6} {:>7}  {}",
+            "{:<4} {:<18} {:>6} {:>7} {:>10}  {}",
             p.index,
             p.name,
             banks.len(),
             slots,
+            unit,
             ui.dim(names.join(", ")),
         ));
     }
     ui.note("");
     ui.note("the partition index is the object class number; (Native) partitions are a");
     ui.note("second view of the same library, so their capacity is a sentinel, not a size");
+    ui.note("the unit is net of the block's own overhead");
     Ok(())
 }
 
@@ -1757,6 +1873,79 @@ mod tests {
         let at = Location { bank: 6, slot: 49 };
         // Wire is zero-indexed, the instrument's labels are not.
         assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
+    }
+
+    #[test]
+    fn a_move_preflight_names_each_set_list_and_what_it_points_at() {
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        let lines = set_list_rewrite_lines(
+            &ui,
+            &[
+                op::Referrer {
+                    at: Location { bank: 0, slot: 42 },
+                    name: "Factory Set".into(),
+                    version: 1,
+                    programs: vec![Location { bank: 0, slot: 6 }],
+                },
+                op::Referrer {
+                    at: Location { bank: 1, slot: 6 },
+                    name: "Friday".into(),
+                    version: 1,
+                    programs: vec![Location { bank: 0, slot: 6 }, Location { bank: 6, slot: 9 }],
+                },
+            ],
+        );
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("2 set lists"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("setlist 1:43 \"Factory Set\""),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("points at 1:7"), "{}", lines[1]);
+        assert!(lines[2].contains("points at 1:7, 7:10"), "{}", lines[2]);
+        assert!(!lines.iter().any(|l| l.contains("VERSION 0")));
+    }
+
+    #[test]
+    fn a_version_zero_set_list_says_the_rewrite_cannot_be_undone() {
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        let lines = set_list_rewrite_lines(
+            &ui,
+            &[op::Referrer {
+                at: Location { bank: 0, slot: 42 },
+                name: "Factory Set".into(),
+                version: 0,
+                programs: vec![Location { bank: 0, slot: 6 }],
+            }],
+        );
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("1 set list "), "{}", lines[0]);
+        assert!(
+            lines[1].contains("setlist 1:43 \"Factory Set\""),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].contains("VERSION 0"), "{}", lines[2]);
+        assert!(
+            lines[2].contains("migrates it to version 1"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[3].contains("does not migrate the set list back"),
+            "{}",
+            lines[3]
+        );
+    }
+
+    #[test]
+    fn no_referrer_is_stated_rather_than_left_silent() {
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        assert_eq!(
+            set_list_rewrite_lines(&ui, &[]),
+            vec!["no set list references either slot".to_string()]
+        );
     }
 
     #[test]
