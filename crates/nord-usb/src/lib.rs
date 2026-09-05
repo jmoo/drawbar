@@ -11,6 +11,7 @@
 //! - [`transport`] — the byte pipe. The only part that touches a device.
 //! - [`session`] — the transaction wrapper every operation runs inside.
 //! - [`op`] — typed operations.
+//! - [`device`] — an instrument as a value: session brackets and its own geometry.
 //!
 //! The wire format was reverse-engineered from a corpus of NSM captures and is
 //! verified against every message in it.
@@ -24,6 +25,7 @@
 
 #[cfg(feature = "nusb")]
 pub mod deadline;
+pub mod device;
 pub mod envelope;
 pub mod error;
 pub mod op;
@@ -32,6 +34,7 @@ pub mod sleep;
 pub mod transport;
 pub mod wire;
 
+pub use device::{Device, Geometry, Product};
 pub use error::{Error, Result};
 pub use session::{ReadOnly, ReadWrite, Session};
 pub use transport::Transport;
