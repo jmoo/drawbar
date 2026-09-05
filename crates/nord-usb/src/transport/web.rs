@@ -1,13 +1,11 @@
 //! Browser transport, via WebUSB (`navigator.usb`). Chrome/Edge only — Firefox and
 //! Safari have declined the spec.
 //!
-//! **Confirmed on hardware** (Chrome on macOS, a real Electro 5) for the read-only
-//! path: open, claim-by-class, both transfer directions across whole transactions
-//! (session open, STATUS, INFO, close), the masked endpoint numbering, and
-//! release/close handing the interface back to other hosts. **Still not confirmed:**
-//! the `select_configuration` branch (it only runs when the OS left the device
-//! unconfigured, which macOS does not), multi-chunk bulk reads, any write, and the
-//! zero-length-packet edge on `read` — each is marked where it lives.
+//! Confirmed on hardware.
+//!
+//! Chrome on macOS completed read and write sessions with an Electro 5, including
+//! program and sample writes. Configuration selection, multi-chunk reads, and the
+//! zero-length-packet edge on `read` remain untested.
 //!
 //! # Enumeration is not here
 //!
