@@ -53,6 +53,9 @@ fn framing(steps: &[Step]) -> Result<(), Failed> {
 /// Replay one script's sections in order, on one transport.
 fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
     let mut t = ReplayTransport::new(script.steps());
+    // What a `device geometry` section read, for the later sections a walk or a library
+    // write bounds itself by.
+    let mut geometry = None;
 
     for (i, section) in script.sections.iter().enumerate() {
         let before = t.position();
@@ -64,7 +67,14 @@ fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
         };
         let class = drive::class_of(class).map_err(|e| where_(i, intent, e))?;
 
-        let outcome = pollster::block_on(drive::drive(&mut t, class, &verb[0], &verb[1..], dir));
+        let outcome = pollster::block_on(drive::drive(
+            &mut t,
+            &mut geometry,
+            class,
+            &verb[0],
+            &verb[1..],
+            dir,
+        ));
         section
             .expect()
             .check(&outcome)
