@@ -156,6 +156,25 @@ async fn drive_query(
             })
             .map(|()| None)
         }
+        "referrers" => {
+            let class = need_class(class)?;
+            if class != ObjectClass::SetList {
+                return Err(bad(
+                    "only set lists refer to a slot: `setlist referrers <at>…`",
+                ));
+            }
+            if args.is_empty() {
+                return Err(bad("referrers names at least one program slot"));
+            }
+            let targets: Vec<Location> = (0..args.len())
+                .map(|i| slot(args, i))
+                .collect::<Result<_>>()?;
+            let banks = declared_banks(geometry, class).await?;
+            session!(t, class, |s| op::set_lists_referencing(
+                &mut s, &banks, &targets
+            ))
+            .map(|_| None)
+        }
         other => Err(bad(format!("unknown verb {other:?}"))),
     }
 }
