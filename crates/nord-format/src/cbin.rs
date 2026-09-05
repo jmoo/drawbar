@@ -6,12 +6,14 @@
 //! see the header layout, the checksum, or the generation — which is what makes a
 //! type-0 format the same amount of work as a type-1 format.
 //!
-//! The layouts. Type 1's tag, location, version and body length are
-//! Confirmed on hardware. The device reports the same four in its
-//! object-info reply, and a body wrapped from that reply reproduces the file
-//! byte for byte. Type 0 is
-//! Inferred from specimens; not confirmed on hardware. The header never
-//! crosses the wire and its checksum is the one that covers it.
+//! Type 1's tag, location, version, and body length match the device's object-info
+//! reply. Combining them with the downloaded body reproduces the file byte for byte.
+//!
+//! Confirmed on hardware.
+//!
+//! A type-0 header never crosses the wire, and its checksum covers the header.
+//!
+//! Inferred from specimens; not confirmed on hardware.
 //!
 //! | offset | type 0 | type 1 |
 //! |---|---|---|
