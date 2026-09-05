@@ -101,9 +101,7 @@ impl Control {
             ControlKind::Drawbar { bars, .. } if bars as usize == drawbar_widget::BARS => {
                 Control::Register
             }
-            ControlKind::Drawbar { bars: 1, rank, .. } => {
-                Control::Bar(rank.and_then(|rank| usize::from(rank).checked_sub(1)))
-            }
+            ControlKind::Drawbar { bars: 1, rank, .. } => Control::Bar(drawbar_rank(rank)),
             // A register of some other length has no widget here.
             ControlKind::Drawbar { .. } => Control::Stored,
             // Pattern and reference controls need UI data this app does not have.
@@ -118,6 +116,11 @@ impl Control {
             _ => picked(legal),
         }
     }
+}
+
+fn drawbar_rank(rank: Option<u8>) -> Option<usize> {
+    rank.and_then(|rank| usize::from(rank).checked_sub(1))
+        .filter(|&rank| rank < drawbar_widget::BARS)
 }
 
 /// A knob's control: the run its values cover, or a menu where they are named rather
@@ -443,6 +446,16 @@ mod tests {
             control_of(&electro5, "organ_panel.vox_preset1_drawbars"),
             Control::Register
         );
+    }
+
+    #[test]
+    fn only_a_rank_the_widget_can_label_claims_footage() {
+        assert_eq!(drawbar_rank(None), None);
+        assert_eq!(drawbar_rank(Some(0)), None);
+        assert_eq!(drawbar_rank(Some(1)), Some(0));
+        assert_eq!(drawbar_rank(Some(9)), Some(8));
+        assert_eq!(drawbar_rank(Some(10)), None);
+        assert_eq!(drawbar_rank(Some(u8::MAX)), None);
     }
 
     /// A selector is its positions, a two-state field is a lamp, and a knob is travel —

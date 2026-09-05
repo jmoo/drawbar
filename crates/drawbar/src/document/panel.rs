@@ -79,7 +79,7 @@ fn section_body(
         })
         .collect();
     controls::strip(ui, |ui| {
-        for cluster in clustered(&section.fields) {
+        for cluster in clustered(&section.fields, fields) {
             let field = cluster.parameter;
             if selectors.contains(&field.path.as_str()) {
                 continue;
@@ -188,16 +188,18 @@ pub fn plain(ui: &mut egui::Ui, ctx: &Ctx, fields: &[Field], sets: &mut Sets) {
             true => {
                 egui::CollapsingHeader::new(&group.title)
                     .id_salt(&group.key)
-                    .show(ui, |ui| cells(ui, ctx, &group.rows, sets));
+                    .show(ui, |ui| cells(ui, ctx, &group.rows, fields, sets));
             }
-            false => controls::section(ui, &group.title, |ui| cells(ui, ctx, &group.rows, sets)),
+            false => controls::section(ui, &group.title, |ui| {
+                cells(ui, ctx, &group.rows, fields, sets)
+            }),
         }
     }
 }
 
-fn cells(ui: &mut egui::Ui, ctx: &Ctx, rows: &[&Field], sets: &mut Sets) {
+fn cells(ui: &mut egui::Ui, ctx: &Ctx, rows: &[&Field], fields: &[Field], sets: &mut Sets) {
     controls::strip(ui, |ui| {
-        for cluster in clustered(rows) {
+        for cluster in clustered(rows, fields) {
             controls::morphed(ui, ctx, cluster.parameter, &cluster.morphs, sets);
         }
     });
@@ -216,29 +218,37 @@ struct Cluster<'a> {
 /// A slot whose parameter is not in the same run — the layout named one and not the
 /// other, or the body declares no such parameter — stands as its own cell rather than
 /// being dropped.
-fn clustered<'a>(rows: &[&'a Field]) -> Vec<Cluster<'a>> {
+fn clustered<'a>(rows: &[&'a Field], fields: &'a [Field]) -> Vec<Cluster<'a>> {
     let mut out: Vec<Cluster<'a>> = Vec::new();
     let mut at: HashMap<&'a str, usize> = HashMap::new();
-    let mut slots: Vec<(&'a Field, String)> = Vec::new();
     for field in rows {
-        match field.spec.morph_parent() {
-            Some(parent) => slots.push((field, parent)),
-            None => {
-                at.insert(field.path.as_str(), out.len());
-                out.push(Cluster {
-                    parameter: field,
-                    morphs: Vec::new(),
-                });
+        if field.spec.morph_parent().is_none() {
+            at.insert(field.path.as_str(), out.len());
+            out.push(Cluster {
+                parameter: field,
+                morphs: Vec::new(),
+            });
+        }
+    }
+
+    for slot in fields {
+        if let Some(parent) = slot.spec.morph_parent() {
+            if let Some(&index) = at.get(parent.as_str()) {
+                out[index].morphs.push(slot);
             }
         }
     }
-    for (slot, parent) in slots {
-        match at.get(parent.as_str()) {
-            Some(&index) => out[index].morphs.push(slot),
-            None => out.push(Cluster {
+
+    for slot in rows {
+        if slot
+            .spec
+            .morph_parent()
+            .is_some_and(|parent| !at.contains_key(parent.as_str()))
+        {
+            out.push(Cluster {
                 parameter: slot,
                 morphs: Vec::new(),
-            }),
+            });
         }
     }
     out
@@ -536,8 +546,18 @@ mod tests {
     #[test]
     fn a_morph_slot_is_drawn_on_the_parameter_it_moves() {
         let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
-        let rows: Vec<&Field> = fields.iter().collect();
-        let clusters = clustered(&rows);
+        let resolved = ns4::program::PANEL.resolve(&fields);
+        let organ = resolved
+            .sections
+            .iter()
+            .find(|section| section.group.title == "Organ")
+            .expect("the organ section");
+        let layer = organ
+            .groups
+            .iter()
+            .find(|section| section.group.title == "Layer A")
+            .expect("organ layer A");
+        let clusters = clustered(&layer.fields, &fields);
 
         let volume = clusters
             .iter()
@@ -574,7 +594,7 @@ mod tests {
             .iter()
             .filter(|field| field.path != "organ_a_volume")
             .collect();
-        let clusters = clustered(&rows);
+        let clusters = clustered(&rows, &fields);
         assert!(clusters
             .iter()
             .any(|cluster| cluster.parameter.path == "organ_a_volume_wheel"));
