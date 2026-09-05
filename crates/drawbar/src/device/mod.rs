@@ -55,18 +55,14 @@ pub enum DeviceCmd {
     /// streaming a [`DeviceEvent::BankScanned`] as each bank lands.
     ScanClass {
         class: ObjectClass,
-        /// Slots to ask each bank for, where the device will not say.
-        slots: u32,
-        /// Ceiling on the walk, for a class whose size neither the geometry nor the
-        /// counters can divide.
-        banks: u32,
     },
     /// One `INFO` per slot of a single bank. What a mutation owes: only the bank it
     /// touched can have changed.
     ScanBank {
         class: ObjectClass,
         bank: u32,
-        slots: u32,
+        /// The capacity the device declared for it, `None` where it declared none.
+        slots: Option<u32>,
     },
     SlotInfo {
         class: ObjectClass,
@@ -167,7 +163,7 @@ impl DeviceCmd {
     /// What the log and the in-flight spinner call this operation.
     pub fn label(&self) -> String {
         match self {
-            DeviceCmd::ScanClass { class, .. } => format!("scan {}", class.label()),
+            DeviceCmd::ScanClass { class } => format!("scan {}", class.label()),
             DeviceCmd::ScanBank { bank, .. } => format!("scan bank {bank}"),
             DeviceCmd::SlotInfo { at, .. } => format!("info {}", shown(*at)),
             DeviceCmd::Deps { at, .. } => format!("deps {}", shown(*at)),
@@ -195,7 +191,7 @@ impl DeviceCmd {
     /// The plain-words sentences the status strip shows for this operation.
     pub fn words(&self) -> Words {
         match self {
-            DeviceCmd::ScanClass { class, .. } => words(READING, folder(*class).to_string()),
+            DeviceCmd::ScanClass { class } => words(READING, folder(*class).to_string()),
             DeviceCmd::ScanBank { class, bank, .. } => {
                 words(READING, format!("{} — bank {bank}", folder(*class)))
             }
@@ -261,8 +257,7 @@ pub enum DeviceEvent {
     ClassStatus {
         class: ObjectClass,
         status: Status,
-        /// Banks to expect: the device's own count where it gave one, otherwise what the
-        /// counters divide into.
+        /// Banks to expect, as the instrument's own bank list divides the class.
         banks: Option<u32>,
     },
     /// The device's own division of a class into banks, read at the head of its walk.
@@ -545,26 +540,6 @@ impl DeviceState {
     }
 }
 
-/// ⚠️ A ceiling on a walk whose end the device alone decides, used only where the
-/// device would not report its own geometry. The cap is here so an instrument that
-/// never answers "out of range" cannot walk forever.
-pub const MAX_BANKS: u32 = 32;
-
-/// Slots per bank, per class, where the device will not say.
-///
-/// ⚠️ These are the Electro 5's divisions — 50 programs and 50 set lists to a bank,
-/// three live slots, one settings singleton — which its own bank list reports, confirmed
-/// on hardware. They are a fallback because another instrument's need not match: the
-/// walk asks the device for its real banks first, and either way is not held to the
-/// number, because the device answers status 3 past the end of its slot space.
-pub fn slots_per_bank(class: ObjectClass) -> u32 {
-    match class {
-        ObjectClass::Live => 3,
-        ObjectClass::Settings => 1,
-        _ => 50,
-    }
-}
-
 /// How full a folder is, in the width its own heading has for it: `312/400`, or a bare
 /// count for a class whose items differ in size and divide into no slots.
 ///
@@ -713,11 +688,7 @@ impl Device {
             return;
         };
         self.reading = Some(class);
-        self.dispatch(DeviceCmd::ScanClass {
-            class,
-            slots: slots_per_bank(class),
-            banks: MAX_BANKS,
-        });
+        self.dispatch(DeviceCmd::ScanClass { class });
     }
 
     fn dispatch(&mut self, cmd: DeviceCmd) {
@@ -883,10 +854,7 @@ impl Device {
                         self.pending.push_back(DeviceCmd::Select { class, at });
                     }
                     for (class, bank) in std::mem::take(&mut self.rescan) {
-                        let slots = self
-                            .state
-                            .slots_in(class, bank)
-                            .unwrap_or_else(|| slots_per_bank(class));
+                        let slots = self.state.slots_in(class, bank);
                         self.pending
                             .push_back(DeviceCmd::ScanBank { class, bank, slots });
                     }
