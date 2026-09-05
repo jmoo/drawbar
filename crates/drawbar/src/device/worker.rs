@@ -299,10 +299,8 @@ async fn put<T: Transport>(
         Err(e) => return Ok(Err(spoil(gone, Some(at))(e))),
     };
 
-    // What the slot ends up called: the operator's label, else the occupant's own name.
-    // ⚠️ `BEGIN_WRITE`'s name argument is the only thing that names a written slot —
-    // the device refuses `0x1c` rename on the library classes and accepts-then-ignores
-    // it on the buffer ones. Confirmed on hardware.
+    // Confirmed on hardware.
+    // Library slots take their name from `BEGIN_WRITE`; buffer classes discard it.
     let write_name = slot_label(what)
         .or_else(|| existing.as_ref().map(|info| info.name.clone()))
         .unwrap_or_default();
@@ -350,8 +348,6 @@ async fn put<T: Transport>(
                 "the write failed and {}; putting the original back",
                 aftermath(class, at)
             )));
-            // The occupant goes back under its own name, not the one the replacement
-            // was to be given.
             let restore_name = existing
                 .as_ref()
                 .map(|info| info.name.clone())
@@ -393,10 +389,7 @@ fn aftermath(class: ObjectClass, at: Location) -> String {
     }
 }
 
-/// What a completed write is reported as.
-///
-/// ⚠️ A class that stores no name carries the write's name argument and discards it,
-/// so saying the slot was named would report a naming that never happened.
+/// Report a name only for classes that store one.
 fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
     let wrote = format!("wrote {what} -> {}", shown(at));
     match class.names_its_slots() && !name.is_empty() {
@@ -1129,6 +1122,7 @@ mod tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod wire_tests {
     use std::collections::VecDeque;
+    use std::mem::size_of;
     use std::sync::mpsc::Receiver;
 
     use super::*;
@@ -1172,8 +1166,6 @@ mod wire_tests {
         enumerates: bool,
         /// What `FOCUS` reports. `None` answers "nothing loaded".
         focus: Option<Location>,
-        /// Whether the first `BEGIN_WRITE` is refused, which is the only way to reach
-        /// the restore path without an instrument to pull the cable on.
         refuses_first_write: bool,
     }
 
@@ -1255,7 +1247,6 @@ mod wire_tests {
             self
         }
 
-        /// An instrument that refuses the write it is asked for and takes the restore.
         fn refusing_the_first_write(mut self) -> Puppet {
             self.refuses_first_write = true;
             self
@@ -1464,16 +1455,14 @@ mod wire_tests {
         (flow, events)
     }
 
-    /// The name `BEGIN_WRITE` carries, which is the only thing that names a written
-    /// slot. Location, body length, tag, timestamp and the `0xffffffff` word come
-    /// first — six words — and then the length-prefixed name.
     fn written_names(device: &Puppet) -> Vec<String> {
         device
             .heard
             .iter()
             .filter(|msg| msg.command == cmd::BEGIN_WRITE)
             .map(|msg| {
-                let (len, name) = msg.args[24..].split_at(4);
+                let name_arg = &msg.args[6 * size_of::<u32>()..];
+                let (len, name) = name_arg.split_at(size_of::<u32>());
                 let len = u32::from_be_bytes(len.try_into().expect("four bytes")) as usize;
                 assert_eq!(name.len(), len, "the name is length-prefixed");
                 String::from_utf8(name.to_vec()).expect("a name is UTF-8")
@@ -1487,9 +1476,6 @@ mod wire_tests {
         names.remove(0)
     }
 
-    /// ⚠️ The bug this pins: the device refuses `0x1c` on the library classes, so a
-    /// write that carried a placeholder name and renamed afterwards left every sample
-    /// called by the placeholder. The write's own name argument is what names the slot.
     #[test]
     fn a_put_names_the_slot_in_the_write_itself() {
         let at = Location { bank: 6, slot: 3 };
@@ -1510,14 +1496,12 @@ mod wire_tests {
             assert_eq!(
                 counted(&device, cmd::RENAME),
                 0,
-                "{} refuses a rename, and needs none",
+                "no follow-up rename for {}",
                 class.label()
             );
         }
     }
 
-    /// A write that fails puts the occupant back under the name it had, not under the
-    /// one the replacement was to be given.
     #[test]
     fn a_restore_puts_the_occupants_own_name_back() {
         let at = Location { bank: 0, slot: 3 };
@@ -1562,8 +1546,6 @@ mod wire_tests {
         );
     }
 
-    /// The device carries the write's name argument for these classes and discards it,
-    /// so the report must not claim a naming that never happened.
     #[test]
     fn a_class_that_stores_no_name_is_not_reported_as_named() {
         let at = Location { bank: 0, slot: 2 };
@@ -1584,8 +1566,6 @@ mod wire_tests {
         assert!(!told.contains("named"), "{told}");
     }
 
-    /// Blanking a name is not an improvement on a wrong one. An empty slot has no name
-    /// to keep either, so the write carries nothing and the bytes still go.
     #[test]
     fn a_nameless_asset_still_gets_its_bytes_written() {
         let mut device = Puppet::new(1);
@@ -1604,8 +1584,6 @@ mod wire_tests {
         assert_eq!(written_name(&device), "", "nothing to name it");
     }
 
-    /// An asset the operator never named lands in an occupied slot without renaming it:
-    /// the occupant's name is a better answer than a blank one.
     #[test]
     fn a_nameless_asset_leaves_the_slots_name_alone() {
         let at = Location { bank: 0, slot: 3 };

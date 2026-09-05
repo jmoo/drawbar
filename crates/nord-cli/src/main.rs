@@ -333,10 +333,7 @@ enum LiveAction {
     Edit(EditArgs),
 }
 
-/// `nord settings`: the instrument holds exactly one of these, so there is nothing to
-/// move, copy, name or delete. What is left is the read-only subset, spelled exactly as
-/// [`SlotAction`] spells it, plus `edit`. The class-generic verbs remain reachable as
-/// `raw --class 7`.
+/// `nord settings`: read or edit the singleton at 1:1.
 #[derive(Subcommand)]
 enum SettingsAction {
     #[command(flatten)]
@@ -353,10 +350,7 @@ enum SettingsAction {
     Edit(EditArgs),
 }
 
-/// The [`SlotAction`] verbs the settings singleton keeps, spelled identically.
-///
-/// There is one object and it holds no library references, so `deps` is left to
-/// `raw --class 7` rather than offered on a noun that can only answer "none".
+/// Read-only actions for the settings singleton.
 #[derive(Subcommand)]
 enum SettingsSlotAction {
     /// Read the settings off the instrument, or a `.ne5s` file. Read-only.

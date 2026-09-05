@@ -33,8 +33,8 @@ edit               content (program, setlist, live, settings, sample)
 
 `live` keeps only the read-only subset plus `edit` — the live buffer is the panel
 as it stands, so there is nothing to name, delete, or select. `settings` is a
-singleton with nothing to organize at all, so it keeps `get`, `info` and `edit`;
-it holds no library references, so `deps` is left to `raw --class 7`.
+singleton with nothing to organize, so it keeps `get`, `info` and `edit`. Other
+class-generic operations remain available through `raw --class 7`.
 
 `nord raw --class N` is those same verbs with the class given as a number. It is
 how to reach a class that has no noun of its own — pianos are class 1.
