@@ -35,6 +35,9 @@ const BUDGET: usize = 3 * 1024 * 1024;
 /// local copy they never asked to keep; an edited one is the **only** copy there is, and
 /// quitting with its tab open must not be how it goes.
 ///
+/// ⚠️ On wasm every call base64-encodes the whole list on the only thread. Callers
+/// must rate-limit writes because dragging mutates the list every frame.
+///
 /// What is written comes back kept — see [`load`].
 pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, log: &mut Log) {
     let mut out = format!("{VERSION}\n{}\n", workspace.next_id());

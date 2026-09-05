@@ -952,6 +952,9 @@ impl Workspace {
     /// Every asset is decoded and re-checked on the way in: bytes out of a store have
     /// been sitting somewhere this app does not control and get no more trust than bytes
     /// off a disk.
+    ///
+    /// ⚠️ Restore decodes and re-encodes every asset before the first wasm frame. The
+    /// tab cannot yield while checking up to the store budget.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) {
         for Saved {
             id,
