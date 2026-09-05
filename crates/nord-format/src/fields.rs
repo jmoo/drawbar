@@ -52,6 +52,24 @@ pub struct FieldSpec {
     pub control: ControlKind,
 }
 
+impl FieldSpec {
+    /// The full path of the parameter this field morphs, for a [`ControlKind::Morph`]
+    /// that names one.
+    ///
+    /// The kind carries the parent's *sibling name*, since that is all the declaring body
+    /// knows; the path is this field's path with its last segment replaced, so a nested
+    /// body's prefix rides along.
+    pub fn morph_parent(&self) -> Option<String> {
+        let ControlKind::Morph { of: Some(parent) } = self.control else {
+            return None;
+        };
+        Some(match self.name.rsplit_once('.') {
+            Some((prefix, _)) => format!("{prefix}.{parent}"),
+            None => parent.to_string(),
+        })
+    }
+}
+
 /// What the panel puts under a reader's finger.
 ///
 /// The registry already says where a field sits and which values it takes; this says what
@@ -70,20 +88,181 @@ pub enum ControlKind {
     Knob(Unit),
     /// A knob whose musical zero is its centre, reading in `unit` either side.
     Bipolar(Unit),
-    /// A drawbar, `0..=8`, drawn as a bar rather than a number.
-    Drawbar,
+    /// One or more drawbars, each `0..=8`, drawn as bars rather than numbers.
+    Drawbar {
+        /// How many bars the field holds, in register order. The Stage models give each
+        /// bar its own field and the Electro 5 packs a whole register into one, so this
+        /// is what tells a caller which it is holding.
+        bars: u8,
+        /// Where the field's **first** bar sits in the register: 1 is the leftmost bar,
+        /// 9 the rightmost of a nine-bar manual. A whole register starts at 1 and a
+        /// single Stage bar carries its own position.
+        ///
+        /// ⚠️ A position, not a pitch. Which harmonic each position draws is the organ
+        /// model's business — the B3's 16'/5⅓'/8' series is not the Vox's or the
+        /// Farfisa's, and the same nine positions serve all of them here — so labelling
+        /// them is for a caller that knows which model the field belongs to.
+        ///
+        /// `None` where the declaration does not place the bar in a register at all: the
+        /// Electro 5's bass manual, whose two bars nothing establishes the position of.
+        rank: Option<u8>,
+        /// Bits one bar occupies.
+        bits_per_bar: u8,
+        /// Which end of the field the first bar sits at. Only meaningful above one bar,
+        /// and the reason it is here: the Electro 5 packs its nine nibbles high-first
+        /// while the arpeggiator packs its steps low-first, so a caller reading one by
+        /// the other's convention draws the register mirrored.
+        order: PackedOrder,
+    },
     /// The value a performance control morphs its parent parameter *to*. Belongs on that
     /// parent's control, not on one of its own.
-    Morph,
-    /// A per-step pattern grid.
-    Pattern,
+    Morph {
+        /// The parent parameter's field name, as a sibling of this field — the full path
+        /// is this field's path with its last segment replaced, which is what
+        /// [`FieldSpec::morph_parent`] does.
+        ///
+        /// `None` where the body declares no parameter under the name this slot's own
+        /// name implies, so the slot stands alone until one is placed beside it.
+        of: Option<&'static str>,
+    },
+    /// A per-step pattern grid: `steps` steps of `bits_per_step` bits, the first step at
+    /// the `order` end.
+    Pattern {
+        steps: u8,
+        bits_per_step: u8,
+        order: PackedOrder,
+    },
     /// An opaque id into one of the instrument's libraries.
-    Reference,
+    Reference(Library),
     /// A signed shift, reading in `unit`.
     Shift(Unit),
     /// An integer nothing has been claimed about — the default, and a standing invitation
     /// to give the field a type that says more.
     Number,
+}
+
+impl ControlKind {
+    /// Name the parent a morph slot morphs — the sibling field, not a path.
+    ///
+    /// `#[bitbody]` applies this from the field's own name, and only where the body
+    /// really declares that sibling. Every other kind is returned unchanged, so a field
+    /// named like a morph slot but typed as something else keeps what its type said.
+    pub const fn morphing(self, parent: &'static str) -> ControlKind {
+        match self {
+            ControlKind::Morph { .. } => ControlKind::Morph { of: Some(parent) },
+            other => other,
+        }
+    }
+
+    /// Place a drawbar in its register: `rank` 1 is the leftmost bar.
+    ///
+    /// Applied by `#[bitbody]` from a `…_N` field name, and ignored by every other kind
+    /// — a field whose name happens to end in a digit is not a drawbar unless its type
+    /// says so.
+    pub const fn ranked(self, rank: u8) -> ControlKind {
+        match self {
+            ControlKind::Drawbar {
+                bars,
+                bits_per_bar,
+                order,
+                ..
+            } => ControlKind::Drawbar {
+                bars,
+                rank: Some(rank),
+                bits_per_bar,
+                order,
+            },
+            other => other,
+        }
+    }
+}
+
+/// Which end of a field the first of its packed values sits at.
+///
+/// Only a field holding several values in one slot needs it — a drawbar register, a
+/// pattern row — and such a field cannot be drawn without it: read from the wrong end,
+/// the register comes out mirrored and looks like a plausible registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PackedOrder {
+    /// The first value occupies the most significant bits.
+    HighFirst,
+    /// The first value occupies the least significant bits.
+    LowFirst,
+}
+
+/// One of the instrument's stored libraries — what a [`ControlKind::Reference`] id is an
+/// id *into*.
+///
+/// A file carries the id alone, so nothing but this says which catalogue resolves it.
+/// Listed here are the libraries something in a decoded body actually refers to; the
+/// instruments hold others (the live slots, the settings singleton) that no reference
+/// points at, and they are not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Library {
+    /// Piano instruments (`.npno`).
+    Piano,
+    /// Sample instruments (`.nsmp`).
+    Sample,
+    /// The instrument's own programs.
+    Program,
+    /// Set lists, which name programs in turn.
+    SetList,
+}
+
+impl Library {
+    /// The library's numeric code.
+    ///
+    /// It exists because a const generic parameter cannot be an enum: a type that carries
+    /// its library — [`LibraryRefOf`](crate::components::LibraryRefOf) — carries this
+    /// instead and turns it back with [`from_code`](Self::from_code).
+    ///
+    /// The numbers are the object-class codes the instruments use on the wire, and
+    /// `nord-usb`'s `ObjectClass` takes its library codes from here, so a caller holding
+    /// both has one table.
+    pub const fn code(self) -> u8 {
+        match self {
+            Library::Piano => 1,
+            Library::Sample => 3,
+            Library::Program => 4,
+            Library::SetList => 5,
+        }
+    }
+
+    /// The library a [`code`](Self::code) names, or `None` — most bytes name none.
+    pub const fn from_code(code: u8) -> Option<Library> {
+        match code {
+            1 => Some(Library::Piano),
+            3 => Some(Library::Sample),
+            4 => Some(Library::Program),
+            5 => Some(Library::SetList),
+            _ => None,
+        }
+    }
+
+    /// The library a [`code`](Self::code) names, for the type-level parameter this
+    /// vocabulary exists to carry.
+    ///
+    /// ⚠️ Panics on a code naming none. That is a build failure only where the value is
+    /// *forced* at compile time, which the aliases in [`components`](crate::components)
+    /// are — a `LibraryRefOf<7>` nobody places compiles clean and fails when a field
+    /// declared with it asks for its control kind. Use [`from_code`](Self::from_code)
+    /// anywhere a code arrives at runtime.
+    pub const fn expect_code(code: u8) -> Library {
+        match Library::from_code(code) {
+            Some(library) => library,
+            None => panic!("no library has this code"),
+        }
+    }
+
+    /// The catalogue's name, singular, as a caller would put it in front of "id".
+    pub fn label(&self) -> &'static str {
+        match self {
+            Library::Piano => "piano",
+            Library::Sample => "sample",
+            Library::Program => "program",
+            Library::SetList => "set list",
+        }
+    }
 }
 
 /// What a control's reading is *in*.
@@ -313,7 +492,57 @@ impl FieldError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::MorphTarget;
     use crate::formats::ne5::{Level, Transpose};
+
+    /// A refinement carries what the declaration site knows and the type cannot. It is
+    /// keyed on the kind, so a field whose *name* looks like a morph slot or a drawbar
+    /// but whose type says otherwise keeps what its type said.
+    #[test]
+    fn a_refinement_only_reaches_the_kind_it_is_for() {
+        assert_eq!(
+            ControlKind::Morph { of: None }.morphing("organ_a_volume"),
+            ControlKind::Morph {
+                of: Some("organ_a_volume")
+            }
+        );
+        let bar = |rank| ControlKind::Drawbar {
+            bars: 1,
+            rank,
+            bits_per_bar: 4,
+            order: PackedOrder::HighFirst,
+        };
+        assert_eq!(bar(None).ranked(7), bar(Some(7)));
+
+        let knob = ControlKind::Knob(Unit::Panel10);
+        assert_eq!(knob.morphing("delay_tempo"), knob);
+        assert_eq!(knob.ranked(2), knob);
+    }
+
+    /// The kind names the parent as a sibling; the path is the field's own, one segment
+    /// swapped, so a nested body's prefix rides along.
+    #[test]
+    fn a_morph_slot_resolves_its_parents_full_path() {
+        let spec = |name: &str| FieldSpec {
+            name: name.to_string(),
+            placement: "0..=7",
+            width: 8,
+            legal: || Vec::new(),
+            control: <MorphTarget as Packed>::CONTROL.morphing("drawbar_1"),
+        };
+        assert_eq!(
+            spec("organ_a.drawbar_1_wheel").morph_parent().as_deref(),
+            Some("organ_a.drawbar_1"),
+        );
+        assert_eq!(
+            spec("drawbar_1_wheel").morph_parent().as_deref(),
+            Some("drawbar_1"),
+        );
+        // A slot with no parameter beside it stands alone.
+        let mut orphan = spec("drawbar_1_wheel");
+        orphan.control = <MorphTarget as Packed>::CONTROL;
+        assert_eq!(orphan.morph_parent(), None);
+    }
 
     #[test]
     fn a_value_is_parsed_out_of_the_way_it_prints() {

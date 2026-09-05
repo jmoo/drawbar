@@ -50,6 +50,18 @@
 //! **Paths.** A nested field registers its children under its own name:
 //! `center_panel.transpose`. A leaf registers under its own name alone.
 //!
+//! **Names carry two relations the type cannot.** A registered leaf named `x_wheel`,
+//! `x_aftertouch` or `x_ctrl_pedal` beside a registered `x` is that parameter's morph
+//! slot, and one named `…_N` is drawbar N of a register. Both are applied to the field's
+//! `ControlKind`, which honours whichever it has a use for and ignores the other — so a
+//! field named like one of these but typed as something else is unaffected, and a morph
+//! slot with no parameter beside it binds to nothing rather than to a guess.
+//!
+//! Where a name says the wrong thing, the declaration says the right one:
+//! `#[morphs(x)]` binds a slot to the registered leaf `x` whatever the slot is called,
+//! and `#[rank(N)]` places a drawbar at N. Either names a registered leaf of the same
+//! body or fails to compile.
+//!
 //! Only usable inside `nord-format`: generated code names `crate::bits`,
 //! `crate::cbin`, `crate::error`, `crate::layout` and `crate::fields`.
 
@@ -233,6 +245,73 @@ fn map_table(mut rows: Vec<MapRow>) -> Vec<String> {
     lines
 }
 
+/// The suffixes a morph slot's name ends in, one per performance control.
+const MORPH_SUFFIXES: [&str; 3] = ["_wheel", "_aftertouch", "_ctrl_pedal"];
+
+/// The parameter a slot named `x_wheel` morphs, when the body registers an `x`.
+///
+/// The convention is the formats' own and it is systematic, so binding here costs one
+/// pass over the field list and saves every caller a table of names. A slot whose
+/// parameter is not beside it binds to nothing rather than to a guess.
+fn morphed_parent<'a>(field: &str, registered: &[&'a str]) -> Option<&'a str> {
+    let stem = MORPH_SUFFIXES
+        .iter()
+        .find_map(|suffix| field.strip_suffix(suffix))?;
+    registered.iter().copied().find(|&name| name == stem)
+}
+
+/// The drawbar position a name ending in `_N` declares — 1 is the leftmost bar.
+///
+/// Applied to every leaf and honoured only by a drawbar, so a field that ends in a digit
+/// for some other reason keeps whatever its type said.
+fn trailing_ordinal(field: &str) -> Option<u8> {
+    let stem = field.trim_end_matches(|c: char| c.is_ascii_digit());
+    if !stem.ends_with('_') {
+        return None;
+    }
+    field[stem.len()..].parse().ok().filter(|&rank| rank >= 1)
+}
+
+/// What a field's own attributes say about its control, where the name would say the
+/// wrong thing: `#[morphs(x)]` and `#[rank(N)]`.
+#[derive(Debug, Default)]
+struct Refinement {
+    morphs: Option<String>,
+    rank: Option<u8>,
+}
+
+/// The refinements declared on `field`, each checked against the body: a parent must be
+/// a registered leaf, and a rank starts at 1.
+fn refinement(field: &syn::Field, registered: &[&str]) -> syn::Result<Refinement> {
+    let mut out = Refinement::default();
+    for attr in &field.attrs {
+        if attr.path().is_ident("morphs") {
+            if out.morphs.is_some() {
+                return Err(syn::Error::new_spanned(attr, "a slot morphs one parameter"));
+            }
+            let parent: Ident = attr.parse_args()?;
+            if !registered.contains(&parent.to_string().as_str()) {
+                return Err(syn::Error::new_spanned(
+                    &parent,
+                    format!("`{parent}` is not a registered leaf of this body"),
+                ));
+            }
+            out.morphs = Some(parent.to_string());
+        } else if attr.path().is_ident("rank") {
+            if out.rank.is_some() {
+                return Err(syn::Error::new_spanned(attr, "a drawbar has one rank"));
+            }
+            let rank: LitInt = attr.parse_args()?;
+            let rank: u8 = rank.base10_parse()?;
+            if rank == 0 {
+                return Err(syn::Error::new_spanned(attr, "rank 1 is the leftmost bar"));
+            }
+            out.rank = Some(rank);
+        }
+    }
+    Ok(out)
+}
+
 /// The ranges of `0..bits` no field claims.
 fn unclaimed(claimed: &[(u32, u32)], bits: u32) -> Vec<(u32, u32)> {
     let mut sorted = claimed.to_vec();
@@ -372,10 +451,11 @@ fn common_field(
         field: Some((ident.to_string(), ty_str.to_string())),
     });
 
-    let kept = field
-        .attrs
-        .iter()
-        .filter(|attr| !attr.path().is_ident("bits") && !attr.path().is_ident("at"));
+    let kept = field.attrs.iter().filter(|attr| {
+        !["bits", "at", "morphs", "rank"]
+            .iter()
+            .any(|own| attr.path().is_ident(own))
+    });
     let placement_doc = if nested {
         format!("Bytes {:#04x}..{:#04x}.", lo / 8, (hi + 1) / 8)
     } else {
@@ -454,6 +534,8 @@ fn leaf_field(
     field: &syn::Field,
     placement: Placement,
     ty_str: &str,
+    registered: &[&str],
+    refinement: &Refinement,
 ) {
     let ident = field.ident.as_ref().expect("named fields");
     let ty = &field.ty;
@@ -491,13 +573,27 @@ fn leaf_field(
             value: ::std::format!("{:?}", &self.#ident),
         });
     });
+    // What the type cannot know, taken from the declaration or else the field's own
+    // name, and applied to the kinds that have a use for it — every other kind ignores
+    // the refinement.
+    let mut control = quote! { <#ty as crate::bits::Packed>::CONTROL };
+    let parent = refinement
+        .morphs
+        .as_deref()
+        .or_else(|| morphed_parent(&path, registered));
+    if let Some(parent) = parent {
+        control = quote! { #control.morphing(#parent) };
+    }
+    if let Some(rank) = refinement.rank.or_else(|| trailing_ordinal(&path)) {
+        control = quote! { #control.ranked(#rank) };
+    }
     generated.specs.push(quote! {
         out.push(crate::fields::FieldSpec {
             name: #path.to_string(),
             placement: #placement,
             width: #width,
             legal: || crate::fields::legal_values::<#ty>(#width),
-            control: <#ty as crate::bits::Packed>::CONTROL,
+            control: #control,
         });
     });
     // The type rejects values it cannot hold instead of clamping them into the slot.
@@ -515,6 +611,19 @@ fn generate_fields(
     span_bits: u32,
     bytes: usize,
 ) -> syn::Result<GeneratedFields> {
+    // Every registered leaf's name, for the one relation a field's own declaration cannot
+    // state: which parameter a morph slot belongs to. A private field is not in the
+    // registry for a caller to resolve, and a nested body registers a path prefix rather
+    // than a value, so neither is a parameter anything can morph.
+    let registered: Vec<String> = named
+        .named
+        .iter()
+        .filter(|f| matches!(f.vis, syn::Visibility::Public(_)))
+        .filter(|f| f.attrs.iter().any(|a| a.path().is_ident("bits")))
+        .filter_map(|f| f.ident.as_ref().map(Ident::to_string))
+        .collect();
+    let registered: Vec<&str> = registered.iter().map(String::as_str).collect();
+
     let mut generated = GeneratedFields::default();
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named fields");
@@ -530,10 +639,24 @@ fn generate_fields(
         let ty = &field.ty;
         let ty_str = quote!(#ty).to_string().replace(' ', "");
         common_field(&mut generated, field, placement, &ty_str);
+        let refinement = refinement(field, &registered)?;
         if placement.nested {
+            if refinement.morphs.is_some() || refinement.rank.is_some() {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "a refinement belongs on a leaf: a nested body registers a prefix, not a control",
+                ));
+            }
             nested_field(&mut generated, field, placement, &ty_str);
         } else {
-            leaf_field(&mut generated, field, placement, &ty_str);
+            leaf_field(
+                &mut generated,
+                field,
+                placement,
+                &ty_str,
+                &registered,
+                &refinement,
+            );
         }
     }
     Ok(generated)
@@ -780,6 +903,82 @@ mod tests {
                 "| `0x02` bits 4..0 | `19..=23` | — | *unclaimed* |",
             ],
         );
+    }
+
+    /// The binding is by name, and only to a parameter the body actually registers.
+    #[test]
+    fn a_morph_slot_binds_to_the_parameter_beside_it() {
+        let registered = ["organ_a_volume", "drawbar_1", "delay_tempo"];
+        assert_eq!(
+            morphed_parent("organ_a_volume_ctrl_pedal", &registered),
+            Some("organ_a_volume"),
+        );
+        assert_eq!(
+            morphed_parent("drawbar_1_wheel", &registered),
+            Some("drawbar_1")
+        );
+        // No such parameter in this body, and no suffix at all.
+        assert_eq!(morphed_parent("piano_a_volume_wheel", &registered), None);
+        assert_eq!(morphed_parent("delay_tempo", &registered), None);
+        // ⚠️ A mangled name is not a morph slot: the Stage 2 has a
+        // `…_wheel_o_delay_on` whose suffix is `_on`.
+        assert_eq!(
+            morphed_parent("delay_tempo_wheel_o_delay_on", &registered),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ordinal_is_read_off_the_end_of_a_name() {
+        assert_eq!(trailing_ordinal("drawbar_1"), Some(1));
+        assert_eq!(trailing_ordinal("organ_a_drawbar_9"), Some(9));
+        assert_eq!(trailing_ordinal("b3_preset1_drawbars"), None);
+        assert_eq!(trailing_ordinal("b3_bass_bar1"), None);
+        assert_eq!(trailing_ordinal("kb_zones_1_2_split_point"), None);
+        assert_eq!(trailing_ordinal("gain"), None);
+        // Rank 1 is the leftmost bar, so a `_0` places nothing.
+        assert_eq!(trailing_ordinal("drawbar_0"), None);
+    }
+
+    fn field(tokens: TokenStream2) -> syn::Field {
+        use syn::parse::Parser;
+        syn::Field::parse_named.parse2(tokens).unwrap()
+    }
+
+    /// A declared refinement is checked against the body it is in, and a mistake is a
+    /// compile error rather than a binding that never resolves.
+    #[test]
+    fn a_declared_refinement_names_a_registered_leaf() {
+        let registered = ["cc_value", "cc_number"];
+        let bound = refinement(
+            &field(quote! { #[morphs(cc_value)] #[rank(3)] pub cc_wheel: MorphTarget }),
+            &registered,
+        )
+        .unwrap();
+        assert_eq!(bound.morphs.as_deref(), Some("cc_value"));
+        assert_eq!(bound.rank, Some(3));
+
+        let plain = refinement(&field(quote! { pub cc_wheel: MorphTarget }), &registered).unwrap();
+        assert_eq!(plain.morphs, None);
+        assert_eq!(plain.rank, None);
+
+        let orphan = refinement(
+            &field(quote! { #[morphs(cc)] pub cc_wheel: MorphTarget }),
+            &registered,
+        );
+        assert!(orphan
+            .unwrap_err()
+            .to_string()
+            .contains("not a registered leaf"));
+
+        let zero = refinement(&field(quote! { #[rank(0)] pub bar: Drawbar }), &registered);
+        assert!(zero.unwrap_err().to_string().contains("leftmost"));
+
+        let twice = refinement(
+            &field(quote! { #[rank(1)] #[rank(2)] pub bar: Drawbar }),
+            &registered,
+        );
+        assert!(twice.is_err());
     }
 
     #[test]

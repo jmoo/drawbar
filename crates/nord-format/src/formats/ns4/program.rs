@@ -14,6 +14,9 @@ use crate::error::Error;
 use crate::types::RangedU8;
 use std::io::{Read, Seek};
 
+mod panel;
+pub use panel::PANEL;
+
 pub const FORMAT: &str = "ns4p";
 /// Schema versions this build's field offsets have been validated against,
 /// stored ×100. The corpus holds 3.13 throughout; ns4decode reports the same

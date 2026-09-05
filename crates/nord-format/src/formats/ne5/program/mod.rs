@@ -13,12 +13,14 @@
 mod center;
 mod effects;
 mod organ;
+mod panel;
 mod piano;
 mod sample;
 
 pub use center::{CenterPanel, OrganType};
 pub use effects::{EffectsPanel, EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Routing};
 pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, VoxVib};
+pub use panel::PANEL;
 pub use piano::{PianoCategory, PianoPanel};
 pub use sample::SamplePanel;
 

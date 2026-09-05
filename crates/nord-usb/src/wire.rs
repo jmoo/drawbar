@@ -28,6 +28,7 @@
 //! deriving it (see [`Message::decode_response`]).
 
 use crate::error::{Error, Result};
+use nord_format::fields::Library;
 
 /// Bytes ahead of the argument region: length, service, subsystem, command.
 pub const HEADER_LEN: usize = 16;
@@ -780,13 +781,25 @@ pub enum ObjectClass {
     Unknown(u32),
 }
 
+/// The four library classes are the libraries a decoded body can refer into, and their
+/// codes are [`Library::code`]'s — one table for a caller holding both.
+impl From<Library> for ObjectClass {
+    fn from(library: Library) -> Self {
+        match library {
+            Library::Piano => ObjectClass::Piano,
+            Library::Sample => ObjectClass::Sample,
+            Library::Program => ObjectClass::Program,
+            Library::SetList => ObjectClass::SetList,
+        }
+    }
+}
+
 impl ObjectClass {
     pub fn from_raw(v: u32) -> Self {
+        if let Some(library) = u8::try_from(v).ok().and_then(Library::from_code) {
+            return library.into();
+        }
         match v {
-            1 => ObjectClass::Piano,
-            3 => ObjectClass::Sample,
-            4 => ObjectClass::Program,
-            5 => ObjectClass::SetList,
             6 => ObjectClass::Live,
             7 => ObjectClass::Settings,
             other => ObjectClass::Unknown(other),
@@ -795,10 +808,10 @@ impl ObjectClass {
 
     pub fn to_raw(self) -> u32 {
         match self {
-            ObjectClass::Piano => 1,
-            ObjectClass::Sample => 3,
-            ObjectClass::Program => 4,
-            ObjectClass::SetList => 5,
+            ObjectClass::Piano => Library::Piano.code().into(),
+            ObjectClass::Sample => Library::Sample.code().into(),
+            ObjectClass::Program => Library::Program.code().into(),
+            ObjectClass::SetList => Library::SetList.code().into(),
             ObjectClass::Live => 6,
             ObjectClass::Settings => 7,
             ObjectClass::Unknown(v) => v,
@@ -1023,6 +1036,26 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
+    /// A library reference in a decoded body and a session on the wire name the same
+    /// catalogue by the same code, in both directions.
+    #[test]
+    fn a_library_class_code_is_the_librarys_own() {
+        use super::ObjectClass;
+        use nord_format::fields::Library;
+        for library in [
+            Library::Piano,
+            Library::Sample,
+            Library::Program,
+            Library::SetList,
+        ] {
+            let class = ObjectClass::from(library);
+            assert_eq!(class.to_raw(), u32::from(library.code()), "{library:?}");
+            assert_eq!(ObjectClass::from_raw(library.code().into()), class);
+        }
+        assert_eq!(ObjectClass::from_raw(6), ObjectClass::Live);
+        assert_eq!(ObjectClass::from_raw(0), ObjectClass::Unknown(0));
+    }
+
     use super::*;
 
     /// The middle exchange of `move_prog_8-13_to_7-16`, byte-for-byte off the wire.

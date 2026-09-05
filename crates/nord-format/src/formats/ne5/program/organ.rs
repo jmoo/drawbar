@@ -9,18 +9,14 @@
 //! expressible as a placement, so it lives in an accessor.
 
 use crate::bits::Packed;
-use crate::components::{PercSpeed, VibChorus};
+use crate::components::{Drawbar, PercSpeed, VibChorus};
 use crate::error::ParseError;
-use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Debug, Display, Formatter};
 
 /// Length of the organ panel block, 0x4e..=0x92.
 const ORGAN_LEN: usize = 0x92 - 0x4d;
-
-/// A drawbar position, `0..=8`, in the nibble it is stored in.
-type Bar = RangedU8<{ Drawbars::MAX }>;
 
 /// The Electro 5's four organ models. (B3-bass shares the B3 storage slots, so
 /// it isn't a separate model here.)
@@ -58,10 +54,10 @@ pub struct OrganPanel {
     /// It is not in the nine-nibble block, and the two nibbles it shadows there hold
     /// stale leftovers.
     #[bits(94..=97)]
-    pub b3_bass_bar1: Bar,
+    pub b3_bass_bar1: Drawbar,
     /// Second bass drawbar of b3+bass preset 1. The four bits after it are unused.
     #[bits(98..=101)]
-    pub b3_bass_bar2: Bar,
+    pub b3_bass_bar2: Drawbar,
     #[bits(112..=147)]
     pub b3_preset2_drawbars: Drawbars,
     #[bits(148..=148)]
@@ -150,7 +146,7 @@ impl OrganPanel {
     ///
     /// Confirmed on hardware — captures `1100_400000000` and `1100_040000000`.
     pub fn b3_bass_drawbars(&self) -> [u8; 2] {
-        [self.b3_bass_bar1.as_u8(), self.b3_bass_bar2.as_u8()]
+        [self.b3_bass_bar1.raw(), self.b3_bass_bar2.raw()]
     }
 
     /// Farfisa drawbars as the instrument actually treats them: **on/off tabs**, not
@@ -287,8 +283,8 @@ impl OrganPanel {
 
     /// Set the two bass drawbars of b3+bass preset 1, `0..=8`.
     pub fn set_b3_bass_drawbars(&mut self, bars: [u8; 2]) -> Result<(), ParseError> {
-        self.b3_bass_bar1 = bars[0].try_into()?;
-        self.b3_bass_bar2 = bars[1].try_into()?;
+        self.b3_bass_bar1 = Drawbar::new(bars[0])?;
+        self.b3_bass_bar2 = Drawbar::new(bars[1])?;
         Ok(())
     }
 
@@ -484,7 +480,14 @@ impl Drawbars {
 impl Packed for Drawbars {
     const MAX_BITS: u32 = 4 * Drawbars::BARS as u32;
     const DECODE_BITS: u32 = Self::MAX_BITS;
-    const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Drawbar;
+    /// The whole register in one field, so the first bar is the leftmost one and the
+    /// nibbles run down from the top of the slot.
+    const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Drawbar {
+        bars: Drawbars::BARS as u8,
+        rank: Some(1),
+        bits_per_bar: (Self::MAX_BITS / Drawbars::BARS as u32) as u8,
+        order: crate::fields::PackedOrder::HighFirst,
+    };
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {

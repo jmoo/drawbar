@@ -10,7 +10,7 @@ use super::fx::FxChain;
 use super::synth_voice::SynthVoice;
 use crate::cbin::{self, Cbin};
 use crate::components::{
-    ArpPattern, KbZone4, Level, LibraryRef, MorphTarget, OctaveShiftNibble, Pan, Selector, Time,
+    ArpPattern, KbZone4, Level, MorphTarget, OctaveShiftNibble, Pan, SampleRef, Selector, Time,
 };
 use crate::error::Error;
 use crate::types::{RangedU16, RangedU8};
@@ -76,7 +76,7 @@ pub struct SynthPreset {
     #[bits(294..=305)]
     pub synth_a_sample_slot: RangedU16<4095>,
     #[bits(306..=337)]
-    pub synth_a_sample_id: LibraryRef,
+    pub synth_a_sample_id: SampleRef,
     #[bits(338..=341)]
     pub synth_a_kb_zones: KbZone4,
     #[bits(342..=345)]
@@ -166,7 +166,7 @@ pub struct SynthPreset {
     #[bits(702..=713)]
     pub synth_b_sample_slot: RangedU16<4095>,
     #[bits(714..=745)]
-    pub synth_b_sample_id: LibraryRef,
+    pub synth_b_sample_id: SampleRef,
     #[bits(746..=749)]
     pub synth_b_kb_zones: KbZone4,
     #[bits(750..=753)]
@@ -256,7 +256,7 @@ pub struct SynthPreset {
     #[bits(1110..=1121)]
     pub synth_c_sample_slot: RangedU16<4095>,
     #[bits(1122..=1153)]
-    pub synth_c_sample_id: LibraryRef,
+    pub synth_c_sample_id: SampleRef,
     #[bits(1154..=1157)]
     pub synth_c_kb_zones: KbZone4,
     #[bits(1158..=1161)]

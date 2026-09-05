@@ -8,7 +8,7 @@
 use super::program::*;
 use crate::components::{
     Bipolar, ClockDivision, Drawbar, DrawbarMorph, Effect1Type, Effect2Type, EqBand, Frequency,
-    KbZone3, Level, LibraryRef, MorphOf, MorphTarget, Rate, Selector, Time, WideSelector,
+    KbZone3, Level, MorphOf, MorphTarget, PianoRef, Rate, SampleRef, Selector, Time, WideSelector,
 };
 use crate::types::RangedU16;
 
@@ -559,7 +559,7 @@ pub struct Slot {
     #[bits(1128..=1129)]
     pub piano_clav_eq: Selector<2>,
     #[bits(1130..=1161)]
-    pub piano_sample_id: LibraryRef,
+    pub piano_sample_id: PianoRef,
     #[bits(1207..=1207)]
     pub synth_arp_on: bool,
     #[bits(1208..=1208)]
@@ -647,7 +647,7 @@ pub struct Slot {
     #[bits(1444..=1445)]
     pub synth_lfo_waveform: Selector<2>,
     #[bits(1446..=1477)]
-    pub synth_sample_id: LibraryRef,
+    pub synth_sample_id: SampleRef,
     #[bits(1478..=1484)]
     pub synth_glide_rate: Time,
     #[bits(1485..=1486)]

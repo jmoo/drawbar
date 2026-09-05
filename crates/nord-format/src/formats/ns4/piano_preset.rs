@@ -6,7 +6,7 @@
 
 use super::fx::FxChain;
 use crate::cbin::{self, Cbin};
-use crate::components::{KbZone4, Level, LibraryRef, MorphTarget, OctaveShiftNibble, Selector};
+use crate::components::{KbZone4, Level, MorphTarget, OctaveShiftNibble, PianoRef, Selector};
 use crate::error::Error;
 use std::io::{Read, Seek};
 
@@ -62,7 +62,7 @@ pub struct PianoPreset {
     #[bits(162..=163)]
     pub piano_a_model_variation: Selector<2>,
     #[bits(164..=195)]
-    pub piano_a_model_id: LibraryRef,
+    pub piano_a_model_id: PianoRef,
     #[bits(196..=196)]
     pub piano_a_soft_rel_enabled: bool,
     #[bits(197..=197)]
@@ -92,7 +92,7 @@ pub struct PianoPreset {
     #[bits(258..=259)]
     pub piano_b_model_variation: Selector<2>,
     #[bits(260..=291)]
-    pub piano_b_model_id: LibraryRef,
+    pub piano_b_model_id: PianoRef,
     #[bits(292..=292)]
     pub piano_b_soft_rel_enabled: bool,
     #[bits(293..=293)]

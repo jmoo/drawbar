@@ -21,7 +21,6 @@ pub mod note;
 pub mod store;
 pub mod strings;
 pub mod tabs;
-pub mod visibility;
 pub mod workspace;
 
 pub use app::DrawbarApp;
