@@ -608,16 +608,59 @@ pub async fn occupied_slots<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     cap: usize,
 ) -> Result<Vec<Location>> {
+    occupied_slots_until(session, cap)
+        .await
+        .map(|walk| walk.slots)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkEnd {
+    Exhausted,
+    SlotCap,
+    EmptyBankCap,
+    BankCap,
+}
+
+impl WalkEnd {
+    fn incomplete_reason(self, slot_cap: usize) -> String {
+        match self {
+            WalkEnd::Exhausted => "the device reported the end of the class".into(),
+            WalkEnd::SlotCap => format!("reached the {slot_cap}-slot safety bound"),
+            WalkEnd::EmptyBankCap => format!(
+                "reached the safety bound of {EMPTY_BANKS_BEFORE_STOP} consecutive empty banks"
+            ),
+            WalkEnd::BankCap => format!("reached the {MAX_BANKS}-bank safety bound"),
+        }
+    }
+}
+
+struct SlotWalk {
+    slots: Vec<Location>,
+    end: WalkEnd,
+}
+
+async fn occupied_slots_until<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    cap: usize,
+) -> Result<SlotWalk> {
     let mut found: Vec<Location> = Vec::new();
     let mut empty_banks = 0;
 
     for bank in 0..MAX_BANKS {
         if found.len() >= cap {
-            break;
+            return Ok(SlotWalk {
+                slots: found,
+                end: WalkEnd::SlotCap,
+            });
         }
         match info(session, Location { bank, slot: 0 }).await {
             Ok(_) | Err(Error::DeviceStatus(1)) => {}
-            Err(Error::DeviceStatus(3)) => break,
+            Err(Error::DeviceStatus(3)) => {
+                return Ok(SlotWalk {
+                    slots: found,
+                    end: WalkEnd::Exhausted,
+                });
+            }
             Err(e) => return Err(e),
         }
 
@@ -636,20 +679,32 @@ pub async fn occupied_slots<T: Transport, C>(
                     found.push(next);
                     at = next;
                 }
-                _ => break,
+                Some(next) => {
+                    return Err(Error::UnexpectedLocation {
+                        requested: at,
+                        reported: next,
+                    });
+                }
+                None => break,
             }
         }
 
         if found.len() == before {
             empty_banks += 1;
             if empty_banks >= EMPTY_BANKS_BEFORE_STOP {
-                break;
+                return Ok(SlotWalk {
+                    slots: found,
+                    end: WalkEnd::EmptyBankCap,
+                });
             }
         } else {
             empty_banks = 0;
         }
     }
-    Ok(found)
+    Ok(SlotWalk {
+        slots: found,
+        end: WalkEnd::BankCap,
+    })
 }
 
 /// Highest bank number a walk will try. Programs use eight; nothing observed uses more.
@@ -689,7 +744,19 @@ pub async fn dependencies<T: Transport, C>(
     let resp = session
         .request(Service::Program, 10, cmd::DEPENDENCIES, &args)
         .await?;
-    Dependency::decode_all(&resp)
+    let dependencies = Dependency::decode_all(&resp)?;
+    let p = resp.payload();
+    let reported = Location {
+        bank: u32::from_be_bytes(p[0..4].try_into().unwrap()),
+        slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
+    };
+    if reported != at {
+        return Err(Error::UnexpectedLocation {
+            requested: at,
+            reported,
+        });
+    }
+    Ok(dependencies)
 }
 
 /// A set list holding a reference to a program slot a caller is about to disturb.
@@ -707,9 +774,9 @@ pub struct Referrer {
     pub programs: Vec<Location>,
 }
 
-/// How long a set-list walk may run before it is treated as not terminating. A bound on
-/// a walk that fails to advance, not an item count — an Electro 5 holds 200 set lists —
-/// so reaching it is an error rather than a place to stop.
+/// How many occupied set-list slots a walk may return before it is treated as not
+/// terminating. An Electro 5 holds 200 set lists, so reaching this safety bound is an
+/// error rather than a place to stop.
 const SET_LIST_WALK_CAP: usize = 1024;
 
 /// Every set list that references one of `targets`. **Read-only.**
@@ -734,17 +801,23 @@ pub async fn set_lists_referencing<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     targets: &[Location],
 ) -> Result<Vec<Referrer>> {
+    if session.class() != ObjectClass::SetList {
+        return Err(Error::InvalidArgument(
+            "set-list referrers require a set-list session".into(),
+        ));
+    }
     let mut out = Vec::new();
     if targets.is_empty() {
         return Ok(out);
     }
-    let set_lists = occupied_slots(session, SET_LIST_WALK_CAP).await?;
-    if set_lists.len() >= SET_LIST_WALK_CAP {
+    let walk = occupied_slots_until(session, SET_LIST_WALK_CAP).await?;
+    if walk.end != WalkEnd::Exhausted {
         return Err(Error::Transport(format!(
-            "the set-list walk reached its bound of {SET_LIST_WALK_CAP} slots without ending"
+            "the set-list walk did not reach a confirmed end: {}",
+            walk.end.incomplete_reason(SET_LIST_WALK_CAP),
         )));
     }
-    for at in set_lists {
+    for at in walk.slots {
         let mut programs: Vec<Location> = Vec::new();
         for l in dependencies(session, at)
             .await?

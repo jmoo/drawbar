@@ -104,6 +104,21 @@ fn a_status_reply_short_of_three_words_is_refused() {
 }
 
 #[test]
+fn a_status_reply_truncated_inside_an_optional_word_is_refused() {
+    use nord_usb::wire::Status;
+
+    let full = counters(&[375, 3525, 52875, 64, 1]);
+    for (len, need) in [(13, 16), (15, 16), (17, 20), (19, 20)] {
+        let err = Status::decode(ObjectClass::Sample, &status_reply(&full[..len]))
+            .expect_err("a partial counter is not a shorter STATUS shape");
+        assert!(
+            matches!(err, nord_usb::Error::Truncated { got, need: n } if got == len && n == need),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn wrong_bytes_are_caught() {
     // Opening the wrong class must not silently "work": the bytes differ from the
     // script, so the exact-match transport rejects them.

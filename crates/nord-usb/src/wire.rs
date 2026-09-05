@@ -963,6 +963,12 @@ impl Status {
                 need: 12,
             });
         }
+        if !p.len().is_multiple_of(4) {
+            return Err(Error::Truncated {
+                got: p.len(),
+                need: (p.len() / 4 + 1) * 4,
+            });
+        }
         let word = |i: usize| u32::from_be_bytes(p[i * 4..i * 4 + 4].try_into().unwrap());
         Ok(Self {
             class,

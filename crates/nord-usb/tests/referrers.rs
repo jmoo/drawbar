@@ -85,21 +85,15 @@ fn deps_reply(at: Location, programs: &[Location]) -> Step {
     response(cmd::DEPENDENCIES + 1, &args)
 }
 
-fn session_open() -> Vec<Step> {
+fn session_open(class: ObjectClass) -> Vec<Step> {
     vec![
         out(Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO, Vec::new()).encode()),
         Step {
             direction: Direction::In,
             bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO + 1, vec![0; 4]).encode(),
         },
-        request(
-            cmd::SESSION_OPEN,
-            &ObjectClass::SetList.to_raw().to_be_bytes(),
-        ),
-        response(
-            cmd::SESSION_OPEN + 1,
-            &ObjectClass::SetList.to_raw().to_be_bytes(),
-        ),
+        request(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()),
+        response(cmd::SESSION_OPEN + 1, &class.to_raw().to_be_bytes()),
     ]
 }
 
@@ -176,7 +170,7 @@ fn a_move_names_every_set_list_that_points_at_either_slot() {
     let destination = Location { bank: 6, slot: 9 }; // panel 7:10, occupied
     let untouched = Location { bank: 2, slot: 4 };
 
-    let mut steps = session_open();
+    let mut steps = session_open(ObjectClass::SetList);
     steps.extend(walk_of_three());
     steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(0))));
     steps.push(deps_reply(set_list(0), &[moved, untouched]));
@@ -211,7 +205,7 @@ fn a_move_names_every_set_list_that_points_at_either_slot() {
 fn a_repeated_reference_is_reported_once() {
     let moved = Location { bank: 0, slot: 6 };
 
-    let mut steps = session_open();
+    let mut steps = session_open(ObjectClass::SetList);
     steps.extend(walk_of_three());
     steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(0))));
     steps.push(deps_reply(set_list(0), &[moved, moved, moved, moved]));
@@ -233,7 +227,7 @@ fn a_repeated_reference_is_reported_once() {
 fn a_program_nothing_references_reports_an_empty_list() {
     let moved = Location { bank: 7, slot: 49 };
 
-    let mut steps = session_open();
+    let mut steps = session_open(ObjectClass::SetList);
     steps.extend(walk_of_three());
     for slot in [0, 1, 2] {
         steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(slot))));
@@ -268,7 +262,7 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
         deps.extend_from_slice(&w.to_be_bytes());
     }
 
-    let mut steps = session_open();
+    let mut steps = session_open(ObjectClass::SetList);
     steps.extend(walk_of_three());
     steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(0))));
     steps.push(response(cmd::DEPENDENCIES + 1, &deps));
@@ -285,7 +279,7 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
 
 #[test]
 fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
-    let mut steps = session_open();
+    let mut steps = session_open(ObjectClass::SetList);
     steps.push(request(cmd::INFO, &slot_args(set_list(0))));
     steps.push(info_reply(set_list(0), 1, "First"));
     let mut args = slot_args(Location {
@@ -312,6 +306,82 @@ fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
     );
 }
 
+#[test]
+fn a_heuristic_end_is_an_error_rather_than_a_complete_scan() {
+    let mut steps = session_open(ObjectClass::SetList);
+    for bank in 0..2 {
+        let at = Location { bank, slot: 0 };
+        steps.push(request(cmd::INFO, &slot_args(at)));
+        steps.push(refusal(cmd::INFO + 1, 1));
+
+        let mut args = slot_args(Location {
+            bank,
+            slot: op::SLOT_BOUNDARY,
+        });
+        args.extend_from_slice(&0u32.to_be_bytes());
+        steps.push(request(cmd::NEXT_SLOT, &args));
+        steps.push(refusal(cmd::NEXT_SLOT + 1, 1));
+    }
+
+    let mut t = ReplayTransport::new(steps);
+    let err = pollster::block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
+        let r = op::set_lists_referencing(&mut s, &[Location { bank: 0, slot: 6 }]).await;
+        s.abort();
+        r.unwrap_err()
+    });
+
+    assert!(t.is_exhausted(), "the scan read past the heuristic bound");
+    assert!(
+        matches!(&err, nord_usb::Error::Transport(m) if m.contains("empty banks")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_dependency_reply_must_echo_the_set_list_queried() {
+    let moved = Location { bank: 0, slot: 6 };
+    let mut steps = session_open(ObjectClass::SetList);
+    steps.extend(walk_of_three());
+    steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(0))));
+    steps.push(deps_reply(set_list(1), &[moved]));
+
+    let mut t = ReplayTransport::new(steps);
+    let err = pollster::block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
+        let r = op::set_lists_referencing(&mut s, &[moved]).await;
+        s.abort();
+        r.unwrap_err()
+    });
+
+    assert!(t.is_exhausted(), "did not consume the mismatched reply");
+    assert!(
+        matches!(
+            &err,
+            nord_usb::Error::UnexpectedLocation { requested, reported }
+                if *requested == set_list(0) && *reported == set_list(1)
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn referrers_require_a_set_list_session() {
+    let mut t = ReplayTransport::new(session_open(ObjectClass::Program));
+    let err = pollster::block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let r = op::set_lists_referencing(&mut s, &[Location { bank: 0, slot: 6 }]).await;
+        s.abort();
+        r.unwrap_err()
+    });
+
+    assert!(
+        t.is_exhausted(),
+        "the operation sent a request on the wrong session"
+    );
+    assert!(matches!(err, nord_usb::Error::InvalidArgument(_)), "{err}");
+}
+
 /// The bound `op::set_lists_referencing` walks to before it gives up on a cursor that
 /// will not terminate.
 const WALK_CAP: u32 = 1024;
@@ -321,7 +391,7 @@ const WALK_CAP: u32 = 1024;
 /// before a move.
 #[test]
 fn a_walk_that_never_ends_is_an_error_rather_than_a_truncated_list() {
-    let mut steps = session_open();
+    let mut steps = session_open(ObjectClass::SetList);
     steps.push(request(cmd::INFO, &slot_args(set_list(0))));
     steps.push(info_reply(set_list(0), 1, "First"));
 
@@ -347,14 +417,19 @@ fn a_walk_that_never_ends_is_an_error_rather_than_a_truncated_list() {
 
     assert!(t.is_exhausted(), "the walk stopped short of its bound");
     assert!(
-        matches!(&err, nord_usb::Error::Transport(m) if m.contains("without ending")),
+        matches!(&err, nord_usb::Error::Transport(m) if m.contains("1024-slot")),
         "{err}"
     );
 }
 
 #[test]
 fn an_empty_target_list_sends_nothing() {
-    let mut t = ReplayTransport::new(session_open().into_iter().chain(session_close()).collect());
+    let mut t = ReplayTransport::new(
+        session_open(ObjectClass::SetList)
+            .into_iter()
+            .chain(session_close())
+            .collect(),
+    );
     let found = pollster::block_on(async {
         let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
         let r = op::set_lists_referencing(&mut s, &[]).await;
