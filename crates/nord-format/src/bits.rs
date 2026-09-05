@@ -20,9 +20,10 @@ pub trait Packed: Sized {
     /// fits its slot.
     const MAX_BITS: u32;
 
-    /// Widest input [`Self::from_bits`] can inspect without truncating it.
+    /// Widest slot this type can decode without losing bits on re-encoding.
     ///
-    /// This differs from [`Self::MAX_BITS`] for sparse or range-checked types.
+    /// This differs from [`Self::MAX_BITS`] for types that preserve or reject wider
+    /// encodings.
     const DECODE_BITS: u32 = Self::MAX_BITS;
 
     /// Which panel control this value is, for a caller building an interface over the
@@ -50,7 +51,7 @@ pub const fn bits_for(max: u64) -> u32 {
 
 impl Packed for bool {
     const MAX_BITS: u32 = 1;
-    const DECODE_BITS: u32 = u64::BITS;
+    const DECODE_BITS: u32 = 1;
     const CONTROL: ControlKind = ControlKind::Toggle;
     type Error = Infallible;
 
@@ -113,6 +114,13 @@ fn splice(raw: &mut [u8], lo: u32, hi: u32, bits: u64) {
 /// ```compile_fail
 /// use nord_format::bits::Field;
 /// let _ = Field::<u8, 0, 15>::read(&[0; 2]);
+/// ```
+///
+/// A one-bit type cannot decode a wider field:
+///
+/// ```compile_fail
+/// use nord_format::bits::Field;
+/// let _ = Field::<bool, 0, 1>::read(&[0]);
 /// ```
 ///
 /// A [`Packed`] implementation cannot advertise more value bits than it can decode:

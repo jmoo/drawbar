@@ -1088,7 +1088,7 @@ macro_rules! switch {
 
         impl $crate::bits::Packed for $name {
             const MAX_BITS: u32 = 1;
-            const DECODE_BITS: u32 = u64::BITS;
+            const DECODE_BITS: u32 = 1;
             const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Toggle;
             type Error = ::core::convert::Infallible;
 
