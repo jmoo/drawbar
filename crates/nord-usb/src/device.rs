@@ -154,6 +154,11 @@ impl<T: Transport> Device<T> {
     /// The transaction is committed whether the chain succeeded or failed, and the
     /// chain's error is the one reported: a close that fails after it usually fails
     /// because of it.
+    ///
+    /// ⚠️ The close is what clears the instrument's progress label. A transaction
+    /// abandoned after a read has painted `"Uploading..."` leaves that label on the
+    /// display with no way out but a power cycle; the bracket exists so no `?` can do
+    /// that.
     pub async fn read<R>(
         &mut self,
         class: ObjectClass,
