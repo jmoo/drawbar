@@ -70,7 +70,13 @@ fn section_body(
     let selectors: Vec<&str> = section
         .groups
         .iter()
-        .filter_map(|group| group.selection.map(|selection| selection.field))
+        .filter_map(|group| {
+            group
+                .group
+                .selected_by
+                .as_ref()
+                .map(|selection| selection.field)
+        })
         .collect();
     controls::strip(ui, |ui| {
         for cluster in clustered(&section.fields) {
@@ -100,7 +106,7 @@ fn section_body(
         }
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            match nested.selection {
+            match &nested.group.selected_by {
                 Some(selection) => {
                     let selected = selection.selected(fields);
                     ui.horizontal(|ui| {
