@@ -71,8 +71,6 @@ use crate::{Entity, Live, Program};
 pub struct Panel {
     /// The sections, in the order a reader meets them.
     pub groups: &'static [Group],
-    /// Groups that act as alternatives, such as the two stored organ presets.
-    pub selections: &'static [Selection],
     /// Whether the groups account for every field the body registers.
     ///
     /// True is checked by this module's tests, so an exhaustive layout stays exhaustive
@@ -81,14 +79,17 @@ pub struct Panel {
     pub exhaustive: bool,
 }
 
-/// A group selected by writing one value to a field.
+/// How a group is chosen when it is one of several stored alternatives: writing `value`
+/// to `field` makes the instrument play this one.
+///
+/// Not a relevance condition. The other alternatives stay relevant — a stored preset the
+/// instrument is not playing is still state the panel offers — where a group whose
+/// [`Group::when`] fails is one the instrument is not using at all.
 #[derive(Debug)]
 pub struct Selection {
-    /// A member unique to the selectable group.
-    pub member: &'static str,
     /// The field that chooses between the sibling groups.
     pub field: &'static str,
-    /// The value that selects this group.
+    /// The value that selects this group, spelled as [`Field::value`] spells it.
     pub value: &'static str,
 }
 
@@ -117,6 +118,9 @@ pub struct Group {
     pub groups: &'static [Group],
     /// What makes this group relevant, or `None` for a group that always is.
     pub when: Option<Relevance>,
+    /// How this group is selected, where it is one of several stored alternatives such
+    /// as the two organ presets; `None` for a group that is not an alternative.
+    pub selected_by: Option<Selection>,
 }
 
 /// A condition on the body's own values: satisfied when **any** match holds.
@@ -271,8 +275,6 @@ impl Panel {
 /// One group with the fields it names, resolved against a body — what a caller draws.
 pub struct Section<'a> {
     pub group: &'a Group,
-    /// How this group is selected, when it is one of several stored alternatives.
-    pub selection: Option<&'a Selection>,
     /// Whether the instrument is using these controls: this group's own condition **and**
     /// every ancestor's. [`Group::is_relevant`] on `group` answers for this level alone,
     /// where a caller wants to tell "the section is off" from "this cluster is not the
@@ -306,7 +308,7 @@ impl Panel {
         let sections = self
             .groups
             .iter()
-            .map(|group| resolve_group(group, self.selections, fields, &index, true, &mut claimed))
+            .map(|group| resolve_group(group, fields, &index, true, &mut claimed))
             .collect();
         let leftovers = fields
             .iter()
@@ -327,7 +329,6 @@ impl Panel {
 
 fn resolve_group<'a>(
     group: &'a Group,
-    selections: &'a [Selection],
     fields: &'a [Field],
     index: &Index<'a>,
     parent_relevant: bool,
@@ -352,14 +353,11 @@ fn resolve_group<'a>(
     let groups = group
         .groups
         .iter()
-        .map(|nested| resolve_group(nested, selections, fields, index, relevant, claimed))
+        .map(|nested| resolve_group(nested, fields, index, relevant, claimed))
         .collect();
 
     Section {
         group,
-        selection: selections
-            .iter()
-            .find(|selection| group.members.contains(&selection.member)),
         relevant,
         fields: own,
         groups,
@@ -512,29 +510,24 @@ mod tests {
         }
     }
 
+    /// A selection is written back through `set_field`, so it names a registered field
+    /// and a value that field accepts — and the selector is not among the group it
+    /// selects, or a caller drawing only the selected group would lose the switch.
     #[test]
-    fn every_selection_names_one_group_and_a_value_the_field_accepts() {
+    fn every_selection_names_a_field_and_a_value_it_accepts() {
         for authored in AUTHORED {
             let specs = (authored.specs)();
-            for selection in authored.panel.selections {
-                let groups = authored
-                    .panel
-                    .walk()
-                    .into_iter()
-                    .filter(|group| group.members.contains(&selection.member))
-                    .count();
-                assert_eq!(
-                    groups, 1,
-                    "{}: {} identifies {groups} groups",
-                    authored.name, selection.member
-                );
+            for group in authored.panel.walk() {
+                let Some(selection) = &group.selected_by else {
+                    continue;
+                };
                 let spec = specs
                     .iter()
                     .find(|spec| spec.name == selection.field)
                     .unwrap_or_else(|| {
                         panic!(
-                            "{}: selection field {} is not registered",
-                            authored.name, selection.field
+                            "{}: {} is selected by {}, which is not a field",
+                            authored.name, group.title, selection.field
                         )
                     });
                 assert!(
@@ -543,6 +536,13 @@ mod tests {
                     authored.name,
                     selection.field,
                     selection.value,
+                );
+                assert!(
+                    !group.members_of(&specs).contains(&selection.field),
+                    "{}: {} contains its own selector {}",
+                    authored.name,
+                    group.title,
+                    selection.field,
                 );
             }
         }

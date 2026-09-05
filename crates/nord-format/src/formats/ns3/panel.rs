@@ -410,15 +410,17 @@ pub struct Panel {
     pub extern_midi_cc_number: Level,
     #[bits(1455..=1461)]
     pub extern_midi_cc_value: Level,
-    /// ⚠️ The three morph slots below name an `extern_midi_cc` this body does not declare,
-    /// so they bind to nothing. `extern_midi_cc_value` is the parameter beside them and
-    /// the likely one they move.
+    /// The three morph slots below are named for an `extern_midi_cc` this body does not
+    /// declare; `extern_midi_cc_value` is the parameter beside them and the one they move.
     /// Inferred from specimens; not confirmed on hardware.
     #[bits(1462..=1469)]
+    #[morphs(extern_midi_cc_value)]
     pub extern_midi_cc_wheel: MorphTarget,
     #[bits(1470..=1477)]
+    #[morphs(extern_midi_cc_value)]
     pub extern_midi_cc_aftertouch: MorphTarget,
     #[bits(1478..=1485)]
+    #[morphs(extern_midi_cc_value)]
     pub extern_midi_cc_ctrl_pedal: MorphTarget,
     #[bits(1486..=1486)]
     pub extern_midi_send_user_cc_on_load: bool,

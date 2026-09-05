@@ -28,6 +28,7 @@ macro_rules! split_point {
     ($title:expr, $zones:expr) => {
         Group {
             title: $title,
+            selected_by: None,
             when: switched_on!(concat!("kb_zones_", $zones, "_split_point_enabled")),
             members: &[
                 concat!("kb_zones_", $zones, "_split_point"),
@@ -44,10 +45,12 @@ macro_rules! layer {
     ($title:expr, $enable:expr, $members:expr, $fx:expr) => {
         Group {
             title: $title,
+            selected_by: None,
             when: switched_on!($enable),
             members: $members,
             groups: &[Group {
                 title: "Effects",
+                selected_by: None,
                 when: None,
                 members: &[$fx],
                 groups: &[],
@@ -58,13 +61,13 @@ macro_rules! layer {
 
 pub const PANEL: Panel = Panel {
     exhaustive: false,
-    selections: &[],
     groups: &[
         Group {
             // The switches that decide which of the sections below mean anything. They
             // lead, and they stay out of the groups they govern — a switch inside the
             // section it turns off is a switch nobody can turn back on.
             title: "Sections",
+            selected_by: None,
             when: None,
             members: &[
                 "organ_section_enabled",
@@ -76,6 +79,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Keyboard & split",
+            selected_by: None,
             when: None,
             members: &[
                 "split_enabled",
@@ -84,6 +88,7 @@ pub const PANEL: Panel = Panel {
             ],
             groups: &[Group {
                 title: "Split points",
+                selected_by: None,
                 when: switched_on!("split_enabled"),
                 // Each boundary's own enable, outside the group it governs.
                 members: &[
@@ -100,6 +105,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Organ",
+            selected_by: None,
             when: switched_on!("organ_section_enabled"),
             members: &[
                 "organ_a_layer_enabled",
@@ -111,18 +117,21 @@ pub const PANEL: Panel = Panel {
             groups: &[
                 Group {
                     title: "Layer A",
+                    selected_by: None,
                     when: switched_on!("organ_a_layer_enabled"),
                     members: &["organ_a_volume", "organ_a.*"],
                     groups: &[],
                 },
                 Group {
                     title: "Layer B",
+                    selected_by: None,
                     when: switched_on!("organ_b_layer_enabled"),
                     members: &["organ_b_volume", "organ_b.*"],
                     groups: &[],
                 },
                 Group {
                     title: "Rotary speaker",
+                    selected_by: None,
                     when: switched_on!("organ_rotary_speaker_enabled"),
                     members: &[
                         "rotary_speaker_drive",
@@ -136,6 +145,7 @@ pub const PANEL: Panel = Panel {
                     // Both organ layers play through one chain, so it belongs to the
                     // section rather than to either layer.
                     title: "Effects",
+                    selected_by: None,
                     when: None,
                     members: &["organ_fx.*"],
                     groups: &[],
@@ -144,6 +154,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Piano",
+            selected_by: None,
             when: switched_on!("piano_section_enabled"),
             members: &["piano_a_layer_enabled", "piano_b_layer_enabled"],
             groups: &[
@@ -163,6 +174,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Synth",
+            selected_by: None,
             when: switched_on!("synth_section_enabled"),
             members: &[
                 "synth_a_layer_enabled",
@@ -209,6 +221,7 @@ pub const PANEL: Panel = Panel {
         },
         Group {
             title: "Effects, globally",
+            selected_by: None,
             when: switched_on!("fx_enabled"),
             members: &[
                 "fx_comp_global_enabled",
@@ -223,6 +236,7 @@ pub const PANEL: Panel = Panel {
             // means scene 2 is not established, so nothing here is conditional on it —
             // asserting the wrong way round would hide the half that is playing.
             title: "Scene 2",
+            selected_by: None,
             when: None,
             members: &[
                 "active_layer_scene",

@@ -216,10 +216,9 @@ impl Library {
     /// its library — [`LibraryRefOf`](crate::components::LibraryRefOf) — carries this
     /// instead and turns it back with [`from_code`](Self::from_code).
     ///
-    /// The numbers are the object-class codes the instruments use on the wire, chosen so
-    /// the two vocabularies line up for a caller holding both. ⚠️ Nothing enforces that:
-    /// `nord-usb` owns its own table and this crate does not depend on it, so a change
-    /// there is not a compile error here.
+    /// The numbers are the object-class codes the instruments use on the wire, and
+    /// `nord-usb`'s `ObjectClass` takes its library codes from here, so a caller holding
+    /// both has one table.
     pub const fn code(self) -> u8 {
         match self {
             Library::Piano => 1,
