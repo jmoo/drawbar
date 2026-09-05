@@ -96,7 +96,10 @@ pub trait Transport {
     /// device simply never answers, and the session stays open.
     async fn write(&mut self, buf: &[u8]) -> Result<()>;
 
-    /// Read up to `max` bytes from the IN endpoint.
+    /// Read one complete device message from the IN endpoint.
+    ///
+    /// `max` is the transfer buffer size. Callers must choose it large enough for the
+    /// expected message; a message is never assembled across multiple calls.
     async fn read(&mut self, max: usize) -> Result<Vec<u8>>;
 
     /// Read, giving up after `limit`. `Ok(None)` means nothing arrived in time.
