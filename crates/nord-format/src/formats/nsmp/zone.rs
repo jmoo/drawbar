@@ -15,16 +15,43 @@ pub const RECORD_LEN: usize = 15;
 /// Stroke global ID, not a positional index.
 const STROKE_ID: usize = 2;
 
+/// Within a record: the zone's gain, u24 big-endian with [`GAIN_BITS`] fractional bits.
+const GAIN: usize = 3;
+
+/// Fractional bits in a zone record's gain.
+pub const GAIN_BITS: u32 = 20;
+
+/// A zone gain of exactly 1.0 as the record encodes it.
+pub const GAIN_UNITY: u32 = 1 << GAIN_BITS;
+
 /// Within a record: the highest MIDI note this zone answers to.
 const TOP_NOTE: usize = 9;
 
+/// Within a record: the playing stroke's relative strength, u16 big-endian.
+const REL_STRENGTH: usize = 10;
+
+/// The relative strength the editor writes for a zone holding one sample.
+pub const REL_STRENGTH_DEFAULT: u16 = 1;
+
 /// A high-to-low keyboard zone storing only its upper bound.
+/// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     /// Highest MIDI note this zone answers to.
     pub top_note: u8,
     /// The stroke that plays this zone, by global id — see `STROKE_ID`.
     pub stroke_id: u8,
+    /// Linear playback gain, [`GAIN_BITS`] fractional bits — [`GAIN_UNITY`] is 1.0. The
+    /// audio is stored unscaled; the same factor scales the stroke's statistic A.
+    pub gain: u32,
+    /// Where the playing stroke sits on the editor's 0..32767 strength axis.
+    /// [`REL_STRENGTH_DEFAULT`] on a zone holding a single sample.
+    ///
+    /// ⚠️ A zone plays exactly one stroke, so this is a position and not a
+    /// count: an editor project may hold several samples per zone, but only
+    /// one of them is enabled and only that one is written. Reading it as a
+    /// layer count is wrong on every file the format has ever carried.
+    pub rel_strength: u16,
 }
 
 pub fn count(map: &[u8]) -> Result<usize, ParseError> {
@@ -51,6 +78,8 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
             Zone {
                 top_note: r[TOP_NOTE],
                 stroke_id: r[STROKE_ID],
+                gain: u32::from_be_bytes([0, r[GAIN], r[GAIN + 1], r[GAIN + 2]]),
+                rel_strength: u16::from_be_bytes([r[REL_STRENGTH], r[REL_STRENGTH + 1]]),
             }
         })
         .collect())
@@ -81,6 +110,40 @@ pub struct ZoneV3 {
     /// Lowest note, where the layout stores one (`map` v14/v21). On v12 zones
     /// tile: a zone's bottom is one above the next-lower zone's top.
     pub low_note: Option<u8>,
+    /// The velocities this zone answers to, where the layout stores a window
+    /// (`map` v14/v21). `None` on v12, whose records are too short to hold one.
+    pub velocity: Option<VelocityWindow>,
+    /// Where the playing stroke sits on the editor's 0..32767 strength axis,
+    /// where the layout stores it (`map` v14/v21). `None` on v12.
+    ///
+    /// The same field [`Zone::rel_strength`] holds one generation earlier, four
+    /// bytes further into a wider record, and — like it — a position rather
+    /// than a count: a zone plays exactly one stroke.
+    pub rel_strength: Option<u16>,
+}
+
+/// The velocities a zone answers to, inclusive at both ends.
+///
+/// The format has carried this since `map` v14 and no shipped instrument uses
+/// it: every zone of every vendor instrument reads [`VelocityWindow::FULL`].
+/// It is nonetheless a live field — a project naming a narrower window renders
+/// one into a v4 record — and a zone is silent outside its band, so a reader
+/// must honour what is stored rather than assume the full range.
+///
+/// Inferred from specimens; not confirmed on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VelocityWindow {
+    pub low: u8,
+    pub high: u8,
+}
+
+impl VelocityWindow {
+    /// The window every shipped instrument carries.
+    pub const FULL: VelocityWindow = VelocityWindow { low: 0, high: 127 };
+
+    pub fn contains(&self, velocity: u8) -> bool {
+        (self.low..=self.high).contains(&velocity)
+    }
 }
 
 /// Within a wide zone record: the stroke's root key, duplicated from the stroke.
@@ -91,6 +154,14 @@ const WIDE_TOP: usize = 1;
 
 /// Within a wide zone record: the lowest, on the layouts that store one.
 const WIDE_LOW: usize = 2;
+
+/// Within a 16-byte wide zone record: the playing stroke's relative strength,
+/// u16 big-endian, ahead of the velocity window.
+const WIDE_REL_STRENGTH: usize = 12;
+
+/// Within a 16-byte wide zone record: the velocity window's low then high
+/// bound, the last two bytes of the record.
+const WIDE_VELOCITY: usize = 14;
 
 /// Which byte of a zone record an edit names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +223,24 @@ impl Wide {
 
     pub const fn stores_low(self) -> bool {
         matches!(self, Wide::V14 | Wide::V21)
+    }
+
+    /// Offset of the velocity window within a record, `None` on the layout
+    /// whose records predate it.
+    pub const fn velocity_at(self) -> Option<usize> {
+        match self {
+            Wide::V12 => None,
+            Wide::V14 | Wide::V21 => Some(WIDE_VELOCITY),
+        }
+    }
+
+    /// Offset of the relative strength within a record, `None` on the layout
+    /// whose records predate it.
+    pub const fn rel_strength_at(self) -> Option<usize> {
+        match self {
+            Wide::V12 => None,
+            Wide::V14 | Wide::V21 => Some(WIDE_REL_STRENGTH),
+        }
     }
 
     /// Offset of a field within a zone record, `None` where the layout stores
@@ -384,6 +473,14 @@ impl Table {
                         root_key: r[WIDE_ROOT],
                         top_note: r[WIDE_TOP],
                         low_note: self.wide.stores_low().then(|| r[WIDE_LOW]),
+                        velocity: self.wide.velocity_at().map(|at| VelocityWindow {
+                            low: r[at],
+                            high: r[at + 1],
+                        }),
+                        rel_strength: self
+                            .wide
+                            .rel_strength_at()
+                            .map(|at| u16::from_be_bytes([r[at], r[at + 1]])),
                     }),
                     Some(root) => Err(ParseError::AssertFail(format!(
                         "zone {i} carries root {} but its stroke {gid} holds {root}",
@@ -875,6 +972,46 @@ mod tests {
         assert_eq!(partners(&zs, 16), (16, 16));
         assert_eq!(partners(&zs, 17), (51, 51));
         assert_eq!(partners(&zs, 54), (54, 54));
+    }
+
+    #[test]
+    fn a_record_yields_its_strength_as_a_big_endian_pair() {
+        let mut map = vec![0u8; RECORDS_AT + RECORD_LEN];
+        map[COUNT_AT] = 1;
+        map[RECORDS_AT + STROKE_ID] = 4;
+        map[RECORDS_AT + TOP_NOTE] = 60;
+        map[RECORDS_AT + REL_STRENGTH] = 0x7f;
+        map[RECORDS_AT + REL_STRENGTH + 1] = 0xff;
+        let zones = read(&map).unwrap();
+        assert_eq!(zones[0].rel_strength, 32767);
+    }
+
+    #[test]
+    fn a_wide_record_yields_its_strength_and_window_and_v12_neither() {
+        for (version, expected) in [(21u32, Some(300u16)), (12, None)] {
+            let zs = [(9u32, 60u8, 84u8, 48u8)];
+            let mut map = wide_map(version, &zs, 2);
+            let wide = Wide::from_version(version).unwrap();
+            let at = map.len() - 2 - wide.record_len();
+            if let Some(off) = wide.rel_strength_at() {
+                map[at + off..at + off + 2].copy_from_slice(&300u16.to_be_bytes());
+            }
+            if let Some(off) = wide.velocity_at() {
+                map[at + off] = 64;
+                map[at + off + 1] = 100;
+            }
+            let zone = Table::locate(version, &map, &strokes(&zs))
+                .unwrap()
+                .read(&map, &strokes(&zs))
+                .unwrap()
+                .remove(0);
+            assert_eq!(zone.rel_strength, expected, "map v{version}");
+            assert_eq!(
+                zone.velocity,
+                expected.map(|_| VelocityWindow { low: 64, high: 100 }),
+                "map v{version}"
+            );
+        }
     }
 
     #[test]

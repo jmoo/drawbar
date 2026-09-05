@@ -276,6 +276,182 @@ fn v3_samples_decode_names_and_strokes() {
     assert!(paired > 0, "no v3 zone map paired with its strokes");
 }
 
+/// The velocity window has existed since `map` v14 and no shipped instrument
+/// narrows it, so a reader that ignored the field would still play the whole
+/// vendor library correctly. It is nonetheless live: the LY ladder's v4 pass
+/// asked for narrower windows in a project and got them, byte for byte, which
+/// is exactly why the field has to be read rather than assumed.
+#[test]
+fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
+    let asked: BTreeMap<&str, (u8, u8)> = BTreeMap::from([
+        ("LY-30vmin64.nsmp4", (64, 127)),
+        ("LY-31vmax63.nsmp4", (0, 63)),
+        ("LY-32vwin.nsmp4", (64, 100)),
+        ("LY-50two-en.nsmp4", (0, 63)),
+        ("LY-51two-axis.nsmp4", (0, 63)),
+        ("LY-52four-en.nsmp4", (0, 31)),
+        ("LY-54bracket.nsmp4", (0, 63)),
+    ]);
+    let mut narrowed = BTreeMap::new();
+    let mut with_window = 0;
+    let mut without = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let Ok(zones) = sample.zones() else { continue };
+        let name = specimen.path.file_name().unwrap().to_string_lossy();
+        for zone in zones {
+            match zone.velocity {
+                Some(window) => {
+                    with_window += 1;
+                    if window != nsmp::zone::VelocityWindow::FULL {
+                        narrowed.insert(name.to_string(), (window.low, window.high));
+                    }
+                }
+                None => without += 1,
+            }
+        }
+    }
+    let expected: BTreeMap<String, (u8, u8)> =
+        asked.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
+    assert_eq!(narrowed, expected);
+    assert!(with_window > 0, "no zone record carrying a velocity window");
+    assert!(without > 0, "no v12 zone record, whose layout stores none");
+}
+
+/// The wide zone record carries the same relative strength the v2 record does,
+/// four bytes later. The ladder pinned its width past a byte: 300 is the first
+/// weight the campaign ever rendered over 255.
+#[test]
+fn a_wide_zone_records_its_strokes_relative_strength() {
+    for (file, weight) in [
+        ("LY-1base.nsmp4", 1u16),
+        ("LY-20rs0.nsmp4", 0),
+        ("LY-21rs300.nsmp4", 300),
+        ("LY-22rs32767.nsmp4", 32767),
+        ("LY-32vwin.nsmp4", 16384),
+    ] {
+        let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
+            panic!("{file} is not a wide sample");
+        };
+        let zones = sample.zones().unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert_eq!(zones[0].rel_strength, Some(weight), "{file}");
+    }
+}
+
+/// `sty`'s v4 dynamics group is the one part of the preset a project reaches:
+/// enabling the category's dynamics writes the enable, the curve and the
+/// response triple together, and the curve is a null one generation earlier.
+#[test]
+fn the_v4_preset_holds_the_dynamics_a_project_asked_for() {
+    for (file, enabled, curve, response) in [
+        ("LY-1base.nsmp4", false, None, [127u8; 3]),
+        ("LY-70dynen.nsmp4", true, Some(1), [74, 82, 90]),
+    ] {
+        let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
+            panic!("{file} is not a wide sample");
+        };
+        let nsmp::Sty::V4(sty) = sample.sty().unwrap_or_else(|e| panic!("{file}: {e}")) else {
+            panic!("{file} carries no v4 preset");
+        };
+        assert_eq!(sty.dynamics_enabled(), enabled, "{file}");
+        assert_eq!(sty.dynamics_curve(), curve, "{file}");
+        assert_eq!(sty.dynamics_response(), response, "{file}");
+    }
+}
+
+/// A `sty` triple sits at its 127 ceiling exactly while the control behind it
+/// is switched off — which is what makes the block's near-constant columns
+/// legible rather than mysterious.
+#[test]
+fn a_v4_dynamics_response_is_pinned_while_no_curve_is_selected() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let Ok(nsmp::Sty::V4(sty)) = sample.sty() else {
+            continue;
+        };
+        assert_eq!(
+            sty.dynamics_curve().is_none(),
+            sty.dynamics_response() == [127; 3],
+            "{}: curve {:?} against response {:?}",
+            specimen.path.display(),
+            sty.dynamics_curve(),
+            sty.dynamics_response()
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no v4 preset");
+}
+
+/// Every wide body states its own length in `meta`, and it is the one field a
+/// writer that resized a section would have to restate.
+#[test]
+fn a_wide_body_states_the_length_of_the_chain_ahead_of_its_meta() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let meta = sample
+            .meta()
+            .unwrap_or_else(|e| panic!("{}: {e}", specimen.path.display()));
+        assert_eq!(
+            meta.chain_len as usize,
+            sample.chain_len_before_meta(),
+            "{}",
+            specimen.path.display()
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no wide sample");
+}
+
+/// `sty` is a preset block whose v4 payload comes in two widths under one
+/// section version, so every specimen has to parse from its length.
+#[test]
+fn every_sample_preset_parses_under_its_own_schema() {
+    let mut v2 = 0;
+    let (mut v3, mut v4) = (0, 0);
+    for (specimen, sample) in v2_samples() {
+        let where_ = specimen.path.display();
+        let sty = sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        assert_eq!(sty.raw.len(), nsmp::sty::V2_LEN);
+        v2 += 1;
+    }
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        let where_ = specimen.path.display();
+        match sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}")) {
+            nsmp::Sty::V2(_) => panic!("{where_}: a wide chain read a v2 preset"),
+            nsmp::Sty::V3(raw) => {
+                assert_eq!(raw.len(), nsmp::sty::V3_LEN);
+                v3 += 1;
+            }
+            nsmp::Sty::V4(block) => {
+                assert!(
+                    block.raw.len() == nsmp::sty::V4_LEN
+                        || block.raw.len() == nsmp::sty::V4_LEN_LONG
+                );
+                for band in block.eq() {
+                    assert!(
+                        band.frequency <= 20_000,
+                        "{where_}: EQ band at {} Hz",
+                        band.frequency
+                    );
+                }
+                v4 += 1;
+            }
+        }
+    }
+    assert!(v2 > 0 && v3 > 0 && v4 > 0, "a generation went unseen");
+}
+
 /// Confirmed on hardware: a live slot and a stored program use the same body.
 #[test]
 fn ne5_live_body_decodes_as_a_program() {
@@ -739,31 +915,50 @@ fn projects() -> impl Iterator<Item = (&'static Specimen, &'static nsmpproj::Pro
 #[test]
 fn nsmpproj_stroke_fields_move_alone() {
     use nsmpproj::StrokeField as F;
-    let fields = [
-        ("start", F::Start(3.0)),
-        ("stop", F::Stop(4000.0)),
-        ("gain", F::Gain(0.75)),
-        ("velocity_min", F::VelocityMin(10)),
-        ("velocity_max", F::VelocityMax(100)),
-        ("loop_enabled", F::LoopEnabled(true)),
-        ("loop_start", F::LoopStart(1234.5)),
-        ("loop_length", F::LoopLength(600.0)),
-        ("loop_crossfade", F::LoopCrossfade(90.0)),
-        ("loop_crossfade_mode", F::LoopCrossfadeMode(1)),
-        ("loop_decay_enabled", F::LoopDecayEnabled(true)),
-        ("loop_decay", F::LoopDecay(3.25)),
-        ("loop_detune", F::LoopDetune(-12)),
-        ("short_loop_enabled", F::ShortLoopEnabled(true)),
-        ("short_loop_length", F::ShortLoopLength(64.0)),
-        ("short_loop_crossfade", F::ShortLoopCrossfade(5)),
-        ("short_loop_uses_pitch", F::ShortLoopUsesPitch(false)),
-    ];
 
     let mut seen = 0;
     for (specimen, project) in projects() {
         let at = specimen.path.display();
         let before = project.render();
+        // A probe has to differ from what the stroke holds, or nothing moves —
+        // and the LY ladder's projects hold windows other than the default.
+        let windows: BTreeMap<u32, (u8, u8)> = project
+            .zones()
+            .unwrap()
+            .iter()
+            .flat_map(|z| z.strokes.iter().map(|s| (s.global_id, s.velocity)))
+            .collect();
+        let elsewhere = |held: u8, probe: u8| if held == probe { probe ^ 1 } else { probe };
         for stroke in project.strokes().unwrap() {
+            let (vmin, vmax) = windows.get(&stroke.global_id).copied().unwrap_or((0, 127));
+            let fields = [
+                ("start", F::Start(3.0)),
+                ("stop", F::Stop(4000.0)),
+                ("gain", F::Gain(0.75)),
+                ("velocity_min", F::VelocityMin(elsewhere(vmin, 10))),
+                ("velocity_max", F::VelocityMax(elsewhere(vmax, 100))),
+                ("loop_enabled", F::LoopEnabled(!stroke.loop_enabled)),
+                ("loop_start", F::LoopStart(1234.5)),
+                ("loop_length", F::LoopLength(600.0)),
+                ("loop_crossfade", F::LoopCrossfade(90.0)),
+                ("loop_crossfade_mode", F::LoopCrossfadeMode(1)),
+                (
+                    "loop_decay_enabled",
+                    F::LoopDecayEnabled(!stroke.loop_decay_enabled),
+                ),
+                ("loop_decay", F::LoopDecay(3.25)),
+                ("loop_detune", F::LoopDetune(-12)),
+                (
+                    "short_loop_enabled",
+                    F::ShortLoopEnabled(!stroke.short_loop_enabled),
+                ),
+                ("short_loop_length", F::ShortLoopLength(64.0)),
+                ("short_loop_crossfade", F::ShortLoopCrossfade(5)),
+                (
+                    "short_loop_uses_pitch",
+                    F::ShortLoopUsesPitch(!stroke.short_loop_uses_pitch),
+                ),
+            ];
             for (name, field) in fields {
                 let mut edited = project.clone();
                 edited.set_stroke_field(stroke.global_id, field).unwrap();
@@ -820,7 +1015,7 @@ fn project_named(name: &str) -> &'static nsmpproj::Project {
 /// The editor's own WAVs are not corpus material, so the audio is generated. Only the
 /// frame count reaches anything asserted below: a stroke's field count comes from its
 /// length, and every other field compared is metadata.
-fn built_zones(project: &nsmpproj::Project) -> Vec<(u32, u8, u8, Vec<i16>)> {
+fn built_zones(project: &nsmpproj::Project) -> Vec<BuiltZone> {
     let strokes = project.strokes().unwrap();
     project
         .zones()
@@ -834,9 +1029,39 @@ fn built_zones(project: &nsmpproj::Project) -> Vec<(u32, u8, u8, Vec<i16>)> {
                 .unwrap_or_else(|| panic!("no stroke {}", layer.global_id));
             let frames = (stroke.stop - stroke.start) as usize;
             let audio = (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect();
-            (layer.global_id, zone.root_key, zone.top_note, audio)
+            BuiltZone {
+                global_id: layer.global_id,
+                root_key: zone.root_key,
+                top_note: zone.top_note,
+                audio,
+                secondary_start: stroke.encoded_secondary_start() - stroke.start,
+            }
         })
         .collect()
+}
+
+struct BuiltZone {
+    global_id: u32,
+    root_key: u8,
+    top_note: u8,
+    audio: Vec<i16>,
+    secondary_start: f64,
+}
+
+impl BuiltZone {
+    fn new_zone(&self) -> nsmp::encode::NewZone<'_> {
+        nsmp::encode::NewZone {
+            source: &self.audio,
+            channels: 1,
+            root_key: self.root_key,
+            top_note: self.top_note,
+            global_id: self.global_id,
+            loops: None,
+            secondary_start: self.secondary_start,
+            shift: None,
+            gain: nsmp::zone::GAIN_UNITY,
+        }
+    }
 }
 
 #[test]
@@ -846,18 +1071,7 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
         let built = nsmp::encode::multi_zone(
-            &zones
-                .iter()
-                .map(
-                    |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
-                        source: audio,
-                        root_key: *root_key,
-                        top_note: *top_note,
-                        global_id: *global_id,
-                        loops: None,
-                    },
-                )
-                .collect::<Vec<_>>(),
+            &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
             nsmp::encode::Predictor::Minimising,
         )
@@ -922,17 +1136,63 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     for name in ["D1-one-zone", "D3-2zones", "D4-3zones", "D8-2zones-hi"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let twin = v2_named(&format!("{name}.nsmp"));
-        for (index, (_, _, _, audio)) in built_zones(project).iter().enumerate() {
+        for (index, zone) in built_zones(project).iter().enumerate() {
             let (at, stream) = twin.zone_stream(index).unwrap();
             let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2).unwrap();
             assert_eq!(
-                nsmp::encode::Plan::new(audio.len()).unwrap().fields,
+                nsmp::encode::Plan::new(zone.audio.len(), 1, zone.secondary_start)
+                    .unwrap()
+                    .fields,
                 editor.samples.len(),
                 "{name} zone {index}: {} frames",
-                audio.len()
+                zone.audio.len()
             );
         }
     }
+}
+
+#[test]
+fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
+    // Every self-generated v2 specimen, whatever its gain. Library instruments are left
+    // out: their strokes keep the mantissa of whatever file first encoded them.
+    let layout = nsmp::codec::Layout::V2;
+    let mut seen = 0;
+    for (specimen, sample) in v2_samples() {
+        if !specimen
+            .path
+            .components()
+            .any(|c| c.as_os_str() == "samples")
+        {
+            continue;
+        }
+        let zones = sample.zones().unwrap();
+        let streams = sample.stroke_streams();
+        let peak = streams
+            .iter()
+            .filter_map(|(_, s)| nsmp::codec::peak(s, layout))
+            .max()
+            .unwrap_or(0) as u32;
+        for (_, stroke) in streams {
+            let gain = zones
+                .iter()
+                .find(|z| z.stroke_id == stroke[3])
+                .map_or(nsmp::zone::GAIN_UNITY, |z| z.gain);
+            let peak = u64::from(peak.max(1));
+            let bits = 64 - peak.leading_zeros();
+            let exact_power = u32::from(peak.is_power_of_two());
+            let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
+            let mantissa = (reciprocal * u64::from(gain)) >> (nsmp::zone::GAIN_BITS + 3);
+            assert_eq!(
+                stroke[9..12],
+                (mantissa as u32).to_be_bytes()[1..],
+                "{} stroke {} at gain {gain}",
+                specimen.path.display(),
+                stroke[3]
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "no self-generated v2 stroke");
 }
 
 #[test]
@@ -941,18 +1201,7 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
         let built = nsmp::encode::multi_zone(
-            &zones
-                .iter()
-                .map(
-                    |(global_id, root_key, top_note, audio)| nsmp::encode::NewZone {
-                        source: audio,
-                        root_key: *root_key,
-                        top_note: *top_note,
-                        global_id: *global_id,
-                        loops: None,
-                    },
-                )
-                .collect::<Vec<_>>(),
+            &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
             nsmp::encode::Predictor::Minimising,
         )
@@ -996,4 +1245,150 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
             );
         }
     }
+}
+
+fn v2_map_payload(sample: &nord_format::cbin::Cbin<nsmp::Sample>) -> Vec<u8> {
+    sample
+        .body
+        .sections
+        .iter()
+        .find(|s| s.is(nsmp::section::MAP))
+        .expect("a v2 instrument has a map section")
+        .payload
+        .clone()
+}
+
+#[test]
+fn v2_keyboard_maps_round_trip_byte_exactly() {
+    let mut seen = 0;
+    for (specimen, sample) in v2_samples() {
+        if sample.header.version < nsmp::LIBRARY_2_VERSION {
+            continue;
+        }
+        let payload = v2_map_payload(sample);
+        let table = sample
+            .key_table()
+            .unwrap_or_else(|e| panic!("{}: {e}", specimen.path.display()));
+        let mut copy = payload.clone();
+        table.write(&mut copy).unwrap();
+        assert_eq!(copy, payload, "{}", specimen.path.display());
+        seen += 1;
+    }
+    assert!(seen > 0, "no Sample Library 2.0 instrument in the corpus");
+}
+
+#[test]
+fn keyboard_map_records_read_as_the_editor_wrote_them() {
+    use nsmp::keymap::{Level, GAIN_UNITY};
+    let key = |name: &str, note: u8| v2_named(name).key_table().unwrap().key(note).unwrap();
+    let instrument = |name: &str| v2_named(name).key_table().unwrap().instrument;
+
+    assert_eq!(
+        v2_named("MN-00base.nsmp").key_table().unwrap(),
+        nsmp::KeyTable::NEUTRAL
+    );
+    assert_eq!(
+        key("MN-05ng60h.nsmp", 60),
+        Level::new(GAIN_UNITY / 2, 0).unwrap()
+    );
+    assert_eq!(key("MN-06ng17h.nsmp", 17).gain(), GAIN_UNITY / 2);
+    assert_eq!(key("MN-07ng108h.nsmp", 108).gain(), GAIN_UNITY / 2);
+    assert_eq!(key("MN-01nd60p8.nsmp", 60).detune(), 20);
+    assert_eq!(key("MN-02nd60m8.nsmp", 60).detune(), -20);
+    assert_eq!(key("MN-03nd17p1.nsmp", 17).detune(), 2);
+    assert_eq!(key("MN-04nd108p1.nsmp", 108).detune(), 2);
+    // The editor's +9 dB ceiling and -9 dB floor on a key's gain.
+    assert_eq!(key("MN-08ng60x4.nsmp", 60).gain(), 0x2d_1819);
+    assert_eq!(key("MN-09ng60tny.nsmp", 60).gain(), 0x05_ad51);
+    assert_eq!(instrument("MN-13mgn4.nsmp").gain(), 0x2d_1819);
+    assert_eq!(instrument("MN-14mgn001.nsmp").gain(), 0x419);
+    assert_eq!(instrument("MN-15mdt100.nsmp").detune(), 256);
+    assert_eq!(instrument("MN-16mdtm100.nsmp").detune(), -256);
+    assert_eq!(instrument("MN-17mdt1200.nsmp").detune(), 3072);
+
+    let macro3 = v2_named("MN-10mac3h.nsmp").key_table().unwrap();
+    assert_eq!(
+        macro3.adjusted().collect::<Vec<_>>(),
+        (49..=71).collect::<Vec<_>>()
+    );
+    assert_eq!(macro3.key(60).unwrap().gain(), GAIN_UNITY / 2);
+}
+
+#[test]
+fn setting_the_keyboard_map_touches_only_the_keyboard_map() {
+    use nsmp::keymap::Level;
+    let mut edited = v2_named("MN-05ng60h.nsmp");
+    let strokes_before = edited.stroke_streams().len();
+    let mut table = edited.key_table().unwrap();
+    table.set_key(60, Level::NEUTRAL).unwrap();
+    edited.set_key_table(&table).unwrap();
+    assert_eq!(
+        v2_map_payload(&edited),
+        v2_map_payload(&v2_named("MN-00base.nsmp"))
+    );
+    assert_eq!(edited.stroke_streams().len(), strokes_before);
+    let bytes = edited.to_bytes().unwrap();
+    let reread = nsmp::from_bytes(&bytes).unwrap();
+    assert_eq!(reread.key_table().unwrap(), nsmp::KeyTable::NEUTRAL);
+}
+
+#[test]
+fn nsmp_the_kernel_matches_the_corpus_f32_tap_table() {
+    let path = std::env::var_os("NORD_NSMP_KERNEL_ORACLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| scan::root().join("tools/nsmp-pitch/table-fl32.tsv"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let bank = nsmp::kernel::taps();
+    let mut points = BTreeSet::new();
+    for (line_number, line) in text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.starts_with('#') && !line.starts_with("k\t"))
+    {
+        let mut cols = line.split('\t');
+        let mut column = |name: &str| {
+            cols.next()
+                .unwrap_or_else(|| panic!("{}:{} has no {name}", path.display(), line_number + 1))
+        };
+        let k: usize = column("phase")
+            .parse()
+            .unwrap_or_else(|e| panic!("{}:{}: {e}", path.display(), line_number + 1));
+        let m: i64 = column("tap")
+            .parse()
+            .unwrap_or_else(|e| panic!("{}:{}: {e}", path.display(), line_number + 1));
+        let g: f32 = column("value")
+            .parse()
+            .unwrap_or_else(|e| panic!("{}:{}: {e}", path.display(), line_number + 1));
+        let class = column("class");
+        assert!(k < nsmp::kernel::PHASES, "phase {k}");
+        assert!((-16..=15).contains(&m), "phase {k} tap {m}");
+        assert!(points.insert((k, m)), "duplicate phase {k} tap {m}");
+        let ours = match usize::try_from(m + 15) {
+            Ok(j) if j < nsmp::kernel::TAPS => bank[k][j],
+            _ => 0.0,
+        };
+        let ulps = if ours.is_sign_negative() == g.is_sign_negative() {
+            i64::from(ours.to_bits()).abs_diff(i64::from(g.to_bits()))
+        } else {
+            u64::MAX
+        };
+        match class {
+            "unique" | "excluded" => {
+                assert_eq!(
+                    ours.to_bits(),
+                    g.to_bits(),
+                    "{class} phase {k} m {m}: ours {ours} table {g}"
+                );
+            }
+            "ideal" => {
+                assert!(ulps <= 1, "phase {k} m {m}: ours {ours} table {g}");
+            }
+            "zero" => assert_eq!(ours, 0.0, "phase {k} m {m}"),
+            other => panic!("phase {k} m {m}: class {other}"),
+        }
+    }
+    assert_eq!(
+        points.len(),
+        nsmp::kernel::PHASES * (nsmp::kernel::TAPS + 2)
+    );
 }

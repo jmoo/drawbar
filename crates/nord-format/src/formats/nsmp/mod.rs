@@ -31,12 +31,18 @@ pub struct ZoneAudio<'a> {
 pub mod codec;
 pub mod encode;
 pub mod kernel;
+pub mod keymap;
+pub mod meta;
 pub mod section;
 pub mod stroke;
+pub mod sty;
 pub mod zone;
 
+pub use keymap::{KeyTable, Level};
+pub use meta::Meta;
 pub use section::Section;
 pub use stroke::Stroke;
+pub use sty::{EqBand, Sty, StyV2};
 pub use zone::Zone;
 pub use zone::ZoneV3;
 
@@ -254,6 +260,31 @@ impl Cbin<SampleV3> {
     fn map(&self) -> Result<&section::Section4, Error> {
         section::find4(&self.body.sections, section::MAP4)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
+    }
+
+    /// The instrument's default sound preset, under the schema its section
+    /// version selects.
+    pub fn sty(&self) -> Result<Sty, Error> {
+        let s = section::find4(&self.body.sections, section::STY4)
+            .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
+        Ok(Sty::parse_wide(s.version, &s.payload)?)
+    }
+
+    /// The chain's own length, as its closing `meta` section states it.
+    pub fn meta(&self) -> Result<Meta, Error> {
+        let s = section::find4(&self.body.sections, section::META4)
+            .ok_or_else(|| ParseError::AssertFail("no meta section".into()))?;
+        Ok(Meta::parse(s.version, &s.payload)?)
+    }
+
+    /// The length `meta` should state: every section ahead of it on the wire.
+    pub fn chain_len_before_meta(&self) -> usize {
+        self.body
+            .sections
+            .iter()
+            .take_while(|s| !s.is(section::META4))
+            .map(section::Section4::encoded_len)
+            .sum()
     }
 
     fn map_mut(&mut self) -> Result<&mut section::Section4, Error> {
@@ -492,12 +523,45 @@ impl Cbin<Sample> {
         Ok(zone::read(&self.map()?.payload)?)
     }
 
+    /// The instrument's default sound preset — nine enum-quantised bytes.
+    pub fn sty(&self) -> Result<StyV2, Error> {
+        let s = section::find(&self.body.sections, section::STY)
+            .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
+        if s.version != sty::VERSION_V2 {
+            return Err(ParseError::AssertFail(format!(
+                "sty section version {} has no preset layout derived from a specimen",
+                s.version
+            ))
+            .into());
+        }
+        Ok(StyV2::parse(&s.payload)?)
+    }
+
     /// Sets one zone's top note. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
         self.require_known_layout()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
         zone::set_top_note(&mut map.payload, index, note)?;
+        Ok(())
+    }
+
+    /// The keyboard map: the instrument's gain and detune, and one record per
+    /// MIDI note.
+    pub fn key_table(&self) -> Result<KeyTable, Error> {
+        self.require_known_layout()?;
+        let map = self.map()?;
+        keymap::require_version(map.version)?;
+        Ok(KeyTable::read(&map.payload)?)
+    }
+
+    /// Replaces the keyboard map. The zone table and the strokes are untouched.
+    pub fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
+        self.require_known_layout()?;
+        let map = section::find_mut(&mut self.body.sections, section::MAP)
+            .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
+        keymap::require_version(map.version)?;
+        table.write(&mut map.payload)?;
         Ok(())
     }
 
@@ -695,5 +759,20 @@ mod tests {
         };
         let error = sample.set_zone_top_note(0, 60).unwrap_err().to_string();
         assert!(error.contains("predates Sample Library 2.0"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_map_version_cannot_use_the_keyboard_table() {
+        let mut sample = encode::instrument(
+            &vec![0i16; encode::MIN_FRAMES],
+            &encode::Options::new("Test"),
+        )
+        .unwrap();
+        let map = section::find_mut(&mut sample.body.sections, section::MAP).unwrap();
+        map.version = keymap::VERSION + 1;
+        let before = map.payload.clone();
+        assert!(sample.key_table().is_err());
+        assert!(sample.set_key_table(&KeyTable::NEUTRAL).is_err());
+        assert_eq!(sample.map().unwrap().payload, before);
     }
 }

@@ -13,10 +13,9 @@
 //! channels: v2 and v3 alternate fields, v4 alternates words.
 //!
 //! The lattice is absolute, so field 0 is the start of the source and the stream's
-//! own length gives the duration. The resampling kernel measures unity gain at every
-//! phase, which is why a field is already a sample in the source's own 16-bit units
-//! and dequantising is a shift and nothing more. The kernel's exact taps are not
-//! known, so this reconstructs the signal; it does not claim the encoder's residues.
+//! own length gives the duration. The resampling kernel's DC gain is unity to within
+//! the source's own quantisation, which is why a field is already a sample in the
+//! source's 16-bit units and dequantising is a shift and nothing more.
 //!
 //! ⚠️ **The slack in front of a stream can hold stale words that look like records**,
 //! so where the chain begins comes from the header's [`Directory`] rather than from
@@ -112,12 +111,13 @@ const PEAK_AT: usize = 13;
 /// Where the wide stroke header's two float32s sit. Both big-endian.
 const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
 
-/// What statistic A's exponent is offset by. `A = 2^(41+s) / PEAK` normalised to a
-/// 20-bit mantissa, so the exponent lands `22 − bits(PEAK) + s` above zero.
+/// What statistic A's exponent is offset by. `A = gain · 2^(41+s) / PEAK` with a 20-bit
+/// mantissa at unity gain, so the exponent lands `22 − bits(PEAK) + s` above zero; the
+/// zone's gain scales the mantissa alone.
 const EXPONENT_BIAS: i32 = 22;
 
 /// Shifts beyond this are not a scale, they are a misread header.
-const SHIFT_LIMIT: i32 = 32;
+pub(crate) const SHIFT_LIMIT: i32 = 32;
 
 /// Word directory: `u16` big-endian at this offset, on a 9-byte stride.
 const SEEK_AT: usize = 20;
@@ -127,19 +127,20 @@ const SEEK_STRIDE: usize = 9;
 /// Openings use the first alias; terminators use the last in-range alias.
 pub const WRAP: usize = 1 << 16;
 
-/// Approximation of `22050/17501`; it drifts one field per 17,501.
-/// The analytic kernel intentionally uses its 277-phase denominator.
-pub const PITCH_NUM: u32 = 349;
+/// Input samples per [`PITCH_DEN`] fields: field `f` samples the source at exactly
+/// `PITCH_NUM·f / PITCH_DEN`. The ratio is exact; `349/277` is its penultimate
+/// continued-fraction convergent and drifts one field per 17,501.
+pub const PITCH_NUM: u32 = 22_050;
 /// Fields per [`PITCH_NUM`] input samples.
-pub const PITCH_DEN: u32 = 277;
+pub const PITCH_DEN: u32 = 17_501;
 
 /// Rate the editor resamples every import to before encoding. Neither the source
 /// rate nor its bit depth survives anywhere in the file.
 pub const SOURCE_RATE: u32 = 44_100;
 
-/// Field rate in Hz. Exactly 35,002 — `44100 × 17501/22050` is a whole number, and the
-/// rounding here only absorbs what [`PITCH_NUM`] approximates.
-pub const FIELD_RATE: u32 = (SOURCE_RATE * PITCH_DEN + PITCH_NUM / 2) / PITCH_NUM;
+/// Field rate in Hz. Exactly 35,002: `44100 × 17501/22050` is a whole number.
+pub const FIELD_RATE: u32 = SOURCE_RATE * PITCH_DEN / PITCH_NUM;
+const _: () = assert!((SOURCE_RATE * PITCH_DEN).is_multiple_of(PITCH_NUM));
 
 /// Mask for the 14-bit count in `[flag][width−1][reserved][mark][order][count]`.
 const COUNT_MASK: u32 = 0x3fff;
