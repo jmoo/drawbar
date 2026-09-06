@@ -670,11 +670,9 @@ pub async fn next_occupied<T: Transport, C>(
 /// the device ends it (status `1` to a cursor request), and its declared capacity bounds
 /// how many objects it may yield.
 ///
-/// A cursor answer that leaves the bank, repeats, or goes backwards is
-/// [`Error::Enumeration`] rather than a quiet stop: the walk would otherwise spin or pass
-/// off a truncated list. So is a bank yielding more objects than it declares slots. An
-/// unbounded bank ([`Bank::is_bounded`] false) declares no capacity, so the sentinel
-/// itself bounds it.
+/// A cursor answer that leaves the bank, repeats, goes backwards, or exceeds the declared
+/// capacity is [`Error::Enumeration`]. [`ENUMERATION_LIMIT`] bounds the complete walk;
+/// exhausting it is an error rather than a truncated inventory.
 ///
 /// A refusal mid-walk — [`ENUMERATION_DISABLED`] above all — propagates as its error
 /// rather than truncating the list: a partial inventory that looks complete is the one

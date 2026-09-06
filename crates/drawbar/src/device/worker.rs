@@ -50,12 +50,7 @@ pub enum Flow {
     Lost,
 }
 
-/// Whether an error means the instrument has gone.
-///
-/// ⚠️ A device status is an **answer**: the instrument is attached, it understood, and it
-/// said no. Only a failure of the byte pipe itself — a transfer that errored, a device
-/// that stopped answering — is a cable coming out, and only that may put the app back
-/// into its unattached state.
+/// A device status is a reply; only transport failure means detachment.
 fn hung_up(e: &Error) -> bool {
     matches!(e, Error::Transport(_))
 }
@@ -86,8 +81,7 @@ pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Em
     let mut gone = false;
     let result = execute(device, cmd, emit, &mut gone).await;
 
-    // Reported before the outcome: state read during this command may already be stale,
-    // and that is true whether it succeeded or not.
+    // State read during this command may already be stale, even when it failed.
     if device.take_changed() {
         emit.send(DeviceEvent::InstrumentChanged);
     }
@@ -199,8 +193,7 @@ async fn execute<T: Transport>(
             let note = put_one(device, class, at, &name, bytes, emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
-            // Raised here rather than inside `put_one`, which runs before its session is
-            // committed: nothing is owed to the instrument until the session closes.
+            // Nothing is owed to the instrument until this session has closed.
             emit.send(DeviceEvent::Sent { id, class, at });
             Ok(Some(note))
         }
@@ -252,9 +245,7 @@ async fn write_unit<T: Transport>(
     device.geometry().await?.allocation_unit(class)
 }
 
-/// Write a file into a slot of the class the session is open on.
-///
-/// The reported allocation unit decides whether the write reserves blocks first.
+/// Write using the partition's reported allocation unit.
 async fn store<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
@@ -335,8 +326,7 @@ async fn put<T: Transport>(
     Ok(match (written, backup) {
         (Ok(()), _) => Ok(wrote(class, at, what, &write_name)),
         (Err(e), None) => Err(spoil(gone, Some(at))(e)),
-        // Getting the occupant back matters more than reporting the original error,
-        // which is carried along and reported once the slot is whole again.
+        // Restore the occupant before reporting the original error.
         (Err(e), Some(backup)) => {
             emit.send(DeviceEvent::OpFailed(format!(
                 "the write failed and {}; putting the original back",
@@ -371,11 +361,7 @@ async fn put<T: Transport>(
     })
 }
 
-/// What a failed write left in the slot, for the line that reports it.
-///
-/// The delete-first composition leaves the slot genuinely empty; a class that
-/// overwrites in place leaves whatever the interrupted write put there. Naming the
-/// wrong one sends the operator to the wrong next step.
+/// Describe the slot state after a failed write.
 fn aftermath(class: ObjectClass, at: Location) -> String {
     match class.overwrites_in_place() {
         true => format!("{} may hold a partly written body", shown(at)),
@@ -395,7 +381,7 @@ fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
 /// Strip the format suffix from a local label, preserving the operator's text.
 /// Returns `None` rather than sending a blank name.
 fn slot_label(name: &str) -> Option<String> {
-    /// An application bound; the instrument's maximum is unknown.
+    // Application bound; the instrument's maximum is unknown.
     const LONGEST: usize = 64;
 
     let mut label = name.trim();
@@ -412,8 +398,7 @@ fn slot_label(name: &str) -> Option<String> {
     if label.is_empty() {
         return None;
     }
-    // Cut on a character boundary: a name is UTF-8, and half a character is not a
-    // shorter name.
+    // A truncated UTF-8 name must still end on a character boundary.
     let end = (0..=LONGEST.min(label.len()))
         .rev()
         .find(|end| label.is_char_boundary(*end))?;
@@ -438,11 +423,7 @@ async fn put_one<T: Transport>(
         .await
 }
 
-/// Every queued object of one class, inside one session.
-///
-/// ⚠️ A refusal stops the batch where it stands. What has already landed has landed —
-/// the report says which — and the rest stay owed, because carrying on past a failure
-/// would be writing into an instrument whose state nobody has looked at since.
+/// Send a batch until its first refusal; completed writes remain committed.
 async fn send_all<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -503,10 +484,7 @@ async fn batch<T: Transport>(
         .await
 }
 
-/// Turn the device's bare status code into something actionable.
-///
-/// All three confirmed on hardware: `0x1` from a vacant slot, `0x3` from a slot outside
-/// the instrument's range, `0x4` from a write aimed at an occupied slot.
+/// Status `1`, `3`, and `4` meanings are confirmed on hardware.
 fn explain(e: Error, at: Location) -> String {
     match e {
         Error::DeviceStatus(1) => format!("{} is empty", shown(at)),
@@ -533,11 +511,7 @@ const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 /// Host safety limit for one complete class scan, not an instrument capacity.
 const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
-/// Every slot of one bank, in one session.
-///
-/// `slots` is the capacity the device declared for it, `None` where it declared the
-/// unbounded sentinel — the same rule [`Planned`] holds the two walks to. A vacant slot
-/// is a `None` row rather than an error.
+/// Scan the declared capacity, or scan to the device boundary when it reported none.
 async fn scan_bank<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -577,26 +551,18 @@ struct Walked {
     how: &'static str,
 }
 
-/// Scan one class in one session, over the banks the instrument declared for it.
-///
-/// The declared banks are the plan: nothing here guesses how many a class has or how far
-/// one runs. A class whose bank list the instrument refuses is not scanned at all — that
-/// refusal is the error [`nord_usb::Geometry::banks`] reports. Both enumeration paths
-/// return the same bank shape, including vacant rows.
+/// Scan only the banks and capacities declared by the instrument.
 async fn scan_class<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     emit: &Emit,
 ) -> Result<Walked, Error> {
-    // Taken out of the cache before the class's own session opens, which borrows the
-    // device for the length of the transaction.
     let declared = device.geometry().await?.banks(class)?.to_vec();
     let plan = planned(&declared)?;
 
     device
         .read(class, async |s| {
-            // Bounds the closing exchanges as well as the walk, which is the half a
-            // per-command timeout would not cover — see [`SCAN_READ_LIMIT`].
+            // This also bounds the closing exchanges.
             s.set_read_limit(SCAN_READ_LIMIT);
 
             let status = op::status(s).await?;
@@ -611,8 +577,7 @@ async fn scan_class<T: Transport>(
                 banks: Some(plan.len() as u32),
             });
 
-            // Status 1 is "supported, nothing loaded"; 0x15 is "focus does not apply to
-            // this class" — only the first is worth an event.
+            // Status 1 means supported but empty; other refusals mean no focus applies.
             match op::focus(s).await {
                 Ok(at) => emit.send(DeviceEvent::Focus {
                     class,
@@ -623,8 +588,7 @@ async fn scan_class<T: Transport>(
                 Err(e) => return Err(e),
             }
 
-            // The cursor is useful only for sparse content. A class holding an unbounded
-            // bank declares no capacity to be sparse against, so it takes the cursor.
+            // Cursor enumeration wins for sparse or unbounded storage.
             let capacity = plan
                 .iter()
                 .try_fold(0u32, |sum, planned| sum.checked_add(planned.slots?));
@@ -714,11 +678,7 @@ fn worth_the_cursor(held: u32, capacity: u32) -> bool {
     capacity > 0 && held.saturating_mul(2) < capacity
 }
 
-/// Every occupied slot of the session's class, with the name of what is in it.
-///
-/// `Ok(None)` where the instrument refused to enumerate — [`op::ENUMERATION_DISABLED`]
-/// above all, whose documentation says when — which is the caller's cue to walk every
-/// slot instead. A refusal leaves the session in step, so it may.
+/// Return `None` when the device refuses cursor enumeration.
 async fn occupied<T: Transport, C>(
     s: &mut Session<'_, T, C>,
     banks: &[Bank],
@@ -728,12 +688,6 @@ async fn occupied<T: Transport, C>(
         Err(Error::DeviceStatus(_)) => return Ok(None),
         Err(e) => return Err(e),
     };
-    if found.len() > MOST_OCCUPIED as usize {
-        return Err(Error::ScanLimit {
-            bank: found[MOST_OCCUPIED as usize].bank,
-            limit: MOST_OCCUPIED,
-        });
-    }
     if let Some(at) = found.iter().find(|at| at.slot >= MOST_OCCUPIED) {
         return Err(Error::ScanLimit {
             bank: at.bank,
@@ -752,9 +706,7 @@ async fn occupied<T: Transport, C>(
     Ok(Some(out))
 }
 
-/// One bank's rows, from what the cursor walk found across the whole class.
-///
-/// A bounded bank keeps its declared shape; an open bank ends after its last item.
+/// Shape cursor hits to the declared capacity, or through an open bank's last item.
 fn shape(
     found: &[(Location, ProgramInfo)],
     planned: &Planned,
@@ -791,8 +743,6 @@ async fn walk_bank<T: Transport, C>(
     }
     let mut out = Vec::new();
     for slot in 1..=slots {
-        // A refusal keeps the session in step — request and reply still pair — so the
-        // walk continues inside the same transaction.
         match op::info(s, Location::from_user(bank, slot)).await {
             Ok(info) => out.push(Some(info)),
             Err(Error::DeviceStatus(1)) => out.push(None),
@@ -835,9 +785,7 @@ async fn walk_open_bank<T: Transport, C>(
     })
 }
 
-/// One read in its own session: the slot's metadata, then its bytes.
-///
-/// `body` returns the wire body verbatim; otherwise the bytes are a whole CBIN file.
+/// Read metadata plus either the wire body or a complete CBIN file.
 async fn read_object<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
