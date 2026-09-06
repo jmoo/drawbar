@@ -64,7 +64,7 @@ use super::codec::{self, Layout, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
 use super::section::{self, Section, Section4};
 use super::stroke::packet_len;
-use super::{Sample, SampleV3, MAX_NAME_LEN, MAX_NAME_V3_LEN};
+use super::{Sample, SampleV3};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
 use crate::formats::nsmpproj;
@@ -1506,17 +1506,10 @@ const CATEGORY: u8 = 0x0f;
 
 /// The `hdr` section: a fixed prefix, then the instrument name NUL-padded.
 fn hdr(name: &str) -> Result<Section, Error> {
-    if name.len() > MAX_NAME_LEN {
-        return Err(ParseError::OutOfBounds {
-            value: format!("{name:?} ({} bytes)", name.len()),
-            bound: format!("a name of at most {MAX_NAME_LEN} bytes"),
-        }
-        .into());
-    }
     let mut payload = vec![0u8; 111];
     // Unexplained: real programs hold this, and the panel cannot produce it.
     payload[0..6].copy_from_slice(&[0x00, 0x01, 0xb4, 0x00, 0x06, 0x50]);
-    payload[12..12 + name.len()].copy_from_slice(name.as_bytes());
+    super::StringField::NAME.write(&mut payload, name)?;
     Ok(Section {
         tag: *section::HDR,
         version: HDR_VERSION,
@@ -1671,17 +1664,10 @@ const KEYS: usize = 128;
 /// The wide `hdr` section: the same prefix at a wider name field, with the sub-name
 /// the vendor's filenames append left empty.
 fn hdr4(schema: &WideSchema, name: &str) -> Result<Section4, Error> {
-    if name.len() > MAX_NAME_V3_LEN {
-        return Err(ParseError::OutOfBounds {
-            value: format!("{name:?} ({} bytes)", name.len()),
-            bound: format!("a name of at most {MAX_NAME_V3_LEN} bytes"),
-        }
-        .into());
-    }
     let mut payload = vec![0u8; 112];
     // Unexplained: real programs hold this, and the panel cannot produce it.
     payload[4..6].copy_from_slice(&[0x06, 0x50]);
-    payload[super::NAME_V3_AT..][..name.len()].copy_from_slice(name.as_bytes());
+    super::StringField::NAME_V3.write(&mut payload, name)?;
     Ok(Section4 {
         tag: *section::HDR4,
         version: schema.hdr,

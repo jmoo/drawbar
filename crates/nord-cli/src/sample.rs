@@ -149,7 +149,8 @@ pub struct EncodeArgs {
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
-    /// Instrument name, up to 14 bytes. Defaults to the WAV's file stem.
+    /// Instrument name. Defaults to the WAV's file stem. The `hdr` name field is
+    /// fixed-width and wider on the wide generations; a longer name is refused.
     #[arg(long)]
     pub name: Option<String>,
 
@@ -204,7 +205,8 @@ pub struct BuildArgs {
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
-    /// Instrument name, up to 14 bytes. Defaults to the project's own.
+    /// Instrument name. Defaults to the project's own. The `hdr` name field is
+    /// fixed-width and wider on the wide generations; a longer name is refused.
     #[arg(long)]
     pub name: Option<String>,
 
