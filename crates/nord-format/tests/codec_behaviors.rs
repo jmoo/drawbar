@@ -162,10 +162,12 @@ fn same_source_generations_decode_within_one_quantiser_step() {
             Entity::Sample(Sample::V3(sample)) => sample.stroke_streams()[0],
             other => panic!("{}: {other:?}", specimen.path.display()),
         };
+        let directory = nsmp::codec::Directory::read(stroke).unwrap();
         (
             nsmp::codec::decode(stroke, stroke_at, layout)
                 .unwrap_or_else(|error| panic!("{}: {error}", specimen.path.display())),
             nsmp::codec::shift(stroke, layout).unwrap(),
+            directory.mark != directory.terminator,
         )
     };
     let by_name = |name: &str| {
@@ -188,17 +190,25 @@ fn same_source_generations_decode_within_one_quantiser_step() {
         };
         triplets += 1;
 
-        let (narrow, shift2) = decode(v2, nsmp::codec::Layout::V2);
-        let (wide, shift3) = decode(v3, nsmp::codec::Layout::V3);
-        let (widest, shift4) = decode(v4, nsmp::codec::Layout::V4);
-        assert_eq!(narrow.samples.len(), wide.samples.len(), "{stem}: v2/v3");
-        assert_eq!(narrow.samples.len(), widest.samples.len(), "{stem}: v2/v4");
+        let (narrow, shift2, marked) = decode(v2, nsmp::codec::Layout::V2);
+        let (wide, shift3, _) = decode(v3, nsmp::codec::Layout::V3);
+        let (widest, shift4, _) = decode(v4, nsmp::codec::Layout::V4);
 
         let step = |a: i32, b: i32| 4.max(1i32 << a.max(b).clamp(0, 30));
-        for (other, allowed) in [
-            (&wide, step(shift2, shift3)),
-            (&widest, step(shift2, shift4)),
+        for (side, other, allowed) in [
+            ("v2/v3", &wide, step(shift2, shift3)),
+            ("v2/v4", &widest, step(shift2, shift4)),
         ] {
+            // A loop mark clears the resync point by a floor of the generation's own,
+            // so a loop that starts near the resync repeats more of itself at v2 than
+            // it does wide. Only that repeat differs: the shorter stream is the longer
+            // one cut short.
+            assert!(
+                marked || narrow.samples.len() == other.samples.len(),
+                "{stem}: {side} lengths {} and {}, and nothing is marked",
+                narrow.samples.len(),
+                other.samples.len()
+            );
             let worst = narrow
                 .samples
                 .iter()
@@ -208,7 +218,7 @@ fn same_source_generations_decode_within_one_quantiser_step() {
                 .unwrap_or(0);
             assert!(
                 worst <= allowed,
-                "{stem}: difference {worst}, limit {allowed}"
+                "{stem}: {side} difference {worst}, limit {allowed}"
             );
         }
     }
