@@ -2178,9 +2178,9 @@ fn gain_decibels(gain: f64) -> f32 {
 /// than the decibel and rounded once.
 ///
 /// ⚠️ **Not the identity on the linear gain it came from.** Below `2^24` the decibel's
-/// own precision is worth less than half a step and the two agree everywhere the corpus
-/// reaches; above it they part by up to tens of steps, and it is this value — not the
-/// project's — that statistic A is built from.
+/// own precision is worth less than half a step and the two agree; above it they part
+/// by tens of steps, and it is this value — not the project's — that statistic A is
+/// built from.
 fn gain_units(decibels: f32) -> u64 {
     let units = 10f64.powf(f64::from(decibels) / 20.0) * f64::from(super::zone::GAIN_UNITY);
     units.round() as u64
