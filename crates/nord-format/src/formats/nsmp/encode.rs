@@ -1166,10 +1166,16 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
 /// fit.
 ///
 /// A region with nothing left to split is widened instead, and that sweep also runs
-/// front to back — from the record after the mark, which is left alone — spending each
-/// record up to [`widen_cap`] before moving on, so the last one widened takes only the
-/// words still owed. A greedy sweep from the back finishes in fewer, wider records and
-/// is observably not what the editor writes.
+/// front to back, spending each **content** record up to [`widen_cap`] before moving on,
+/// so the last one widened takes only the words still owed. An alignment record is
+/// walked past whether or not it has room — including the marked one the region opens
+/// at, and any further alignment record its 1:1 run needs. A greedy sweep from the back
+/// finishes in fewer, wider records and is observably not what the editor writes.
+///
+/// ⚠️ A record's alignment flag and its predictor order are indistinguishable as the
+/// skip predicate on the specimens: every alignment record is order zero, and no content
+/// record of order zero is reached with words still owed. The flag is the record's class
+/// bit, which is why it is the one used here.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<(), Error> {
@@ -1202,9 +1208,12 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
 
     let cap = widen_cap(units.layout);
     for ceiling in [cap, MAX_STORED_WIDTH] {
-        for spec in specs[opening + 1..].iter_mut() {
+        for spec in specs[opening..].iter_mut() {
             if pad == 0 {
                 break;
+            }
+            if spec.one_to_one {
+                continue;
             }
             let count = spec.count;
             let step = |width: u8| units.span(count, width + 1) - units.span(count, width);
@@ -3441,20 +3450,22 @@ mod tests {
 
     // Full-scale broadband material can exhaust the three spare bits per field before
     // a short loop reaches the next packet boundary.
-    /// A loop region with nothing left to split is widened forward from the record
-    /// after the mark — the marked record itself is left alone — each record spent up
-    /// to the cap before the next is touched, so the last one widened takes only the
-    /// words still owed. Widening from the back instead finishes in fewer, wider
-    /// records, which is not what the editor writes.
+    /// A loop region with nothing left to split is widened forward, each content record
+    /// spent up to the cap before the next is touched, so the last one widened takes
+    /// only the words still owed. Widening from the back instead finishes in fewer,
+    /// wider records, which is not what the editor writes.
+    ///
+    /// The alignment run the region opens with is walked past however much room it has,
+    /// and however many records it takes — the marked one here is followed by a second.
     ///
     /// The two wide generations lay the same mono region out in the same words, so the
     /// widths they finish on differ only by the cap: v3 stops one width below v4 and
     /// the deficit runs on into the next record.
     #[test]
-    fn the_widen_fallback_spends_words_forward_from_the_mark() {
+    fn the_widen_fallback_walks_past_the_regions_alignment_records() {
         for (layout, widths) in [
-            (Layout::V3, [1, 13, 9, 1, 1, 1]),
-            (Layout::V4, [1, 14, 8, 1, 1, 1]),
+            (Layout::V3, [1, 1, 13, 9, 1, 1]),
+            (Layout::V4, [1, 1, 14, 8, 1, 1]),
         ] {
             let units = Units {
                 layout,
@@ -3468,12 +3479,16 @@ mod tests {
                 first: 0,
                 count: units.cell(),
             };
+            let opening = Spec {
+                one_to_one: true,
+                ..record
+            };
             let mut specs = vec![
                 Spec {
                     mark: true,
-                    ..record
+                    ..opening
                 },
-                record,
+                opening,
                 record,
                 record,
                 record,
