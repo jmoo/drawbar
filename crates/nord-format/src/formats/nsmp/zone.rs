@@ -146,6 +146,10 @@ impl VelocityWindow {
     }
 }
 
+/// Bytes in the wide zone record `map` v14 and v21 store. The v12 record is
+/// narrower; nothing writes one.
+pub(super) const WIDE_RECORD_LEN: usize = 16;
+
 /// Within a wide zone record: the stroke's root key, duplicated from the stroke.
 const WIDE_ROOT: usize = 0;
 
@@ -288,7 +292,7 @@ const KEYS: usize = 128;
 /// The lowest key the per-key table ever describes, and the floor the editor's
 /// project file counts its note list from. The editor writes it into the bottom
 /// zone's `low`; the vendor library writes 0 there and means this.
-const KEY_FLOOR: u8 = 17;
+pub(super) const KEY_FLOOR: u8 = 17;
 
 /// How far a partner root below a zone's own may be pitched up to cover it: a
 /// minor third. Pitching down is unrestricted as far as any specimen shows.

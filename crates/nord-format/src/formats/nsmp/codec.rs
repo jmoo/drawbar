@@ -97,6 +97,22 @@ impl Layout {
         }
     }
 
+    /// Fields one 1:1 record covers at most, per channel — RMAX. A run is split into
+    /// whole records of at least [`Layout::cell`] and at most this, which is what
+    /// makes the reachable run lengths come in windows with gaps between them.
+    pub const fn rmax(self) -> usize {
+        match self {
+            Layout::V2 => 32,
+            Layout::V3 | Layout::V4 => 48,
+        }
+    }
+
+    /// Whether statistic B carries the extreme content field's sign. V2 stores its
+    /// magnitude, so `ffffff` is a peak of 16,777,215 there and −1 in the wide chain.
+    pub const fn signed_peak(self) -> bool {
+        !matches!(self, Layout::V2)
+    }
+
     const fn word_bits(self) -> usize {
         self.word() * 8
     }
@@ -109,7 +125,7 @@ const STAT_A_EXP_AT: usize = 12;
 const PEAK_AT: usize = 13;
 
 /// Where the wide stroke header's two float32s sit. Both big-endian.
-const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
+pub(super) const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
 
 /// What statistic A's exponent is offset by. `A = gain · 2^(41+s) / PEAK` with a 20-bit
 /// mantissa at unity gain, so the exponent lands `22 − bits(PEAK) + s` above zero; the
@@ -286,10 +302,9 @@ impl Audio {
 pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
     let b = stroke.get(PEAK_AT..PEAK_AT + 3)?;
     let v = u32::from_be_bytes([0, b[0], b[1], b[2]]);
-    Some(match layout {
-        Layout::V2 => v as i32,
-        _ if v >= 1 << 23 => v as i32 - (1 << 24),
-        _ => v as i32,
+    Some(match layout.signed_peak() && v >= 1 << 23 {
+        true => v as i32 - (1 << 24),
+        false => v as i32,
     })
 }
 

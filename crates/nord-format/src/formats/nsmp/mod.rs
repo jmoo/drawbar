@@ -174,7 +174,7 @@ impl cbin::Body for SampleV3 {
 }
 
 /// Offset of the main name within the v3/v4 `hdr` payload.
-const NAME_V3_AT: usize = 10;
+pub(super) const NAME_V3_AT: usize = 10;
 
 /// End of the main-name field: the sub-name field starts here. The two fields
 /// are what the filename convention joins — `Bass Clarinet 2` + `KG  mono` →
@@ -763,11 +763,13 @@ mod tests {
 
     #[test]
     fn an_unknown_map_version_cannot_use_the_keyboard_table() {
-        let mut sample = encode::instrument(
+        let crate::Sample::V2(mut sample) = encode::instrument(
             &vec![0i16; encode::MIN_FRAMES],
             &encode::Options::new("Test"),
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("the default options build the narrow chain");
+        };
         let map = section::find_mut(&mut sample.body.sections, section::MAP).unwrap();
         map.version = keymap::VERSION + 1;
         let before = map.payload.clone();

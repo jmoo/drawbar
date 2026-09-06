@@ -1,4 +1,4 @@
-//! Building a v2 sample instrument from PCM — tier "instrument-valid".
+//! Building a sample instrument from PCM — tier "instrument-valid".
 //!
 //! The inverse of [`codec`](super::codec), and honest about how far the inverse goes.
 //! What this emits is a file whose container, section chain, stroke header, count
@@ -16,7 +16,8 @@
 //! to have, and **the Electro 5 loads and plays one** under either predictor, at the pitch
 //! the decoder renders.
 //!
-//! Confirmed on hardware.
+//! Confirmed on hardware for [`Layout::V2`], which is what the Electro 5 plays. The
+//! wide generations are inferred from specimens; not confirmed on hardware.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -25,6 +26,12 @@
 //! let instrument = encode::instrument(&samples, &options).unwrap();
 //! std::fs::write("test.nsmp", instrument.to_bytes().unwrap()).unwrap();
 //! ```
+//!
+//! **All three generations write from the one plan.** [`Options::layout`] picks the
+//! generation; what moves with it is the container — the narrow `NWS` chain against
+//! the wide `NSMP` one, and the section schemas inside — and the stream's units, which
+//! [`Units`] holds. The lattice, the kernel, the quantiser, the count laws and the
+//! record grammar's bit layout are the same object in all three.
 //!
 //! [`multi_zone`] is the same builder across a keyboard: one `stk` per zone, highest
 //! zone first, each zone's record naming its stroke by the global id the caller gives
@@ -36,8 +43,10 @@
 //! carries both channels under one header at the doubled cell, and every count-law
 //! landmark — the field total, the resync position, both 1:1 runs — is exactly its mono
 //! value doubled. So the whole of stereo, on the plan side, is a channel count: cells
-//! are `2*24` fields, 1:1 records reach `2*32`, the terminator states `2*24`, and the
-//! predictor keeps a history per channel.
+//! and 1:1 records double, the terminator states the doubled cell, and the predictor
+//! keeps a history per channel. Where the two channels' *bits* go does move with the
+//! generation: v2 and v3 alternate fields in one bitstream, v4 packs each channel's
+//! half into its own words and alternates those.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 //!
@@ -51,59 +60,144 @@
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
-use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
+use super::codec::{self, Layout, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
-use super::section::{self, Section};
-use super::stroke::PACKET_LEN;
-use super::{Sample, MAX_NAME_LEN};
+use super::section::{self, Section, Section4};
+use super::stroke::packet_len;
+use super::{Sample, SampleV3, MAX_NAME_LEN, MAX_NAME_V3_LEN};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
 use crate::formats::nsmpproj;
 
-/// This writes v2 only, so the stroke header is always the narrow one.
-const HEADER_LEN: usize = codec::Layout::V2.header_len();
+/// Content version this writes per generation: `format × 100 + revision`, at the
+/// revision the editor emits.
+const fn version(layout: Layout) -> u32 {
+    match layout {
+        Layout::V2 => 200,
+        Layout::V3 => 300,
+        Layout::V4 => 400,
+    }
+}
 
-/// Content version of the Sample Library 2.0 layout this writes.
-const VERSION: u32 = 200;
-
-/// The v2 sample-instrument `aux` value.
+/// The sample-instrument `aux` value, the same in every generation.
 /// Unexplained: real programs hold this, and the panel cannot produce it.
 const AUX: u32 = 0x000f_0000;
-
-/// Section schema versions, which do not track the content version.
-const HDR_VERSION: u8 = 9;
-const CAT_VERSION: u8 = 5;
-const STK_VERSION: u8 = 9;
-const STY_VERSION: u8 = 5;
-const CONTAINER_VERSION: u8 = 11;
-
-/// Fields per cell, per channel. Content records cover whole cells, which is why their
-/// counts are always a multiple of it — of twice it on a stereo stroke, whose cell holds
-/// both channels.
-const CELL: usize = 24;
 
 /// Largest field count a record header can state, from its 14-bit count field.
 /// ⚠️ A record covers whole cells, so how many *cells* that is halves on a stereo
 /// stroke — the count is a field count, and a stereo cell holds two channels' worth.
 const MAX_COUNT: usize = (1 << 14) - 1;
 
-/// Fields the 1:1 regime puts in one record, per channel — RMAX. Warmup and resync split
-/// into chunks of this, and the count laws guarantee the remainder is a legal record.
-const CHUNK: usize = 32;
-
 /// Widest field a stroke's peak may take: quantisation shifts until it fits. On a
 /// stereo stroke this is the whole of the shift rule.
 const PEAK_WIDTH: u8 = 14;
 
+/// The stream units one stroke is written in: the generation's word and cell sizes,
+/// scaled by how many channels share the stroke.
+///
+/// Everything else about the encoder is generation-independent — the lattice, the
+/// kernel, the quantiser and the record grammar's bit layout do not move — so this is
+/// the whole of what a generation changes about a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Units {
+    layout: Layout,
+    /// 1 or 2.
+    channels: usize,
+}
+
+impl Units {
+    const fn word(self) -> usize {
+        self.layout.word()
+    }
+
+    const fn word_bits(self) -> usize {
+        self.layout.word() * 8
+    }
+
+    /// Fields one content cell covers: the generation's cell per channel.
+    const fn cell(self) -> usize {
+        self.layout.cell() * self.channels
+    }
+
+    /// Fields one 1:1 record covers at most: the generation's RMAX per channel.
+    const fn chunk(self) -> usize {
+        self.layout.rmax() * self.channels
+    }
+
+    /// Whether a record's two channels occupy alternating, independently padded
+    /// words rather than alternating fields in one bitstream.
+    const fn splits(self) -> bool {
+        self.channels == 2 && self.layout.splits_wide_openings()
+    }
+
+    /// Words one channel's half of a split record occupies.
+    const fn half(self, count: usize, width: u8) -> usize {
+        (count / 2 * width as usize).div_ceil(self.word_bits())
+    }
+
+    /// Words one record occupies, header included.
+    ///
+    /// A split record pays for each channel's own padding; a content record tiles
+    /// whole words either way, so only the 1:1 regime is ever wider for it.
+    const fn span(self, count: usize, width: u8) -> usize {
+        if self.splits() {
+            1 + 2 * self.half(count, width)
+        } else {
+            (self.word_bits() + count * width as usize).div_ceil(self.word_bits())
+        }
+    }
+
+    /// Words in one packet of allocation.
+    const fn packet_words(self) -> usize {
+        packet_len(self.layout) / self.word()
+    }
+
+    /// Words of slack the allocation keeps ahead of the chain's first record.
+    ///
+    /// The chain is right-aligned in whole packets either way; the wide chain buys a
+    /// further packet rather than let the lead fall below this, so its strokes carry
+    /// 7 to 38 words of slack where a narrow one carries 0 to 126.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
+    const fn min_lead(self) -> usize {
+        match self.layout {
+            Layout::V2 => 0,
+            Layout::V3 | Layout::V4 => 7,
+        }
+    }
+
+    /// Absolute field ceiling imposed by the stream directory and minimum width.
+    const fn max_fields(self) -> usize {
+        MAX_STREAM_WORDS * self.word_bits() / MIN_WIDTH as usize
+    }
+}
+
 /// Last-record field counts that do not carry the extra quantiser bit, per channel.
-/// A run's records are [`CHUNK`], [`CHUNK`] and a remainder of at least [`CELL`], so its
-/// last record is always 24..=32 fields and these are the three of the nine that never
-/// buy the bit — both ends of the range and one width in the middle.
+/// A v2 run's records are RMAX, RMAX and a remainder of at least one cell, so its last
+/// record is always 24..=32 fields and these are the three of the nine that never buy
+/// the bit — both ends of the range and one width in the middle.
 const DEAD_LAST_RECORD: [usize; 3] = [24, 29, 32];
 
-/// Whether a mono stroke spends one more quantiser bit than its peak needs, narrowing
-/// its widest field a bit under [`PEAK_WIDTH`] and shrinking the stream. A stereo
-/// stroke never spends it.
+/// Whether a stroke spends one more quantiser bit than its peak needs, narrowing its
+/// widest field a bit under [`PEAK_WIDTH`] and shrinking the stream.
+///
+/// A stereo stroke never spends it, in any generation, and neither does a v4 mono one:
+/// both quantise at the peak term alone. Only v2 has a derived rule.
+///
+/// Inferred from specimens; not confirmed on hardware, the Electro 5 playing v2 only.
+fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
+    if plan.channels != 1 {
+        return false;
+    }
+    match plan.layout {
+        Layout::V2 => spends_extra_bit_v2(values, plan),
+        // The v3 rule is not derived. Until it is, a v3 mono stroke quantises at the
+        // peak term like a v4 one, which is wrong on some fraction of loud material.
+        Layout::V3 | Layout::V4 => false,
+    }
+}
+
+/// The v2 rule.
 ///
 /// `values` are the stroke's fields before any shift. Read them at the smallest shift
 /// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still of
@@ -113,7 +207,7 @@ const DEAD_LAST_RECORD: [usize; 3] = [24, 29, 32];
 /// the content cells, never buys it, and neither run's length is otherwise consulted.
 ///
 /// Measured against the editor over every mono chosen plaintext with an exact stream.
-fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
+fn spends_extra_bit_v2(values: &[i64], plan: &Plan) -> bool {
     let over = 1i64 << (PEAK_WIDTH - 2);
     let shift = peak_shift(values, PEAK_WIDTH);
     [(0, plan.warmup), (plan.resync_at, plan.resync)]
@@ -148,9 +242,6 @@ const MAX_STORED_WIDTH: u8 = 16;
 /// promotes anything, and a width-1 flag-1 record is the terminator.
 const MIN_WIDTH: u8 = 2;
 
-/// Absolute field ceiling imposed by the stream directory and minimum width.
-const MAX_FIELDS: usize = MAX_STREAM_WORDS * 24 / MIN_WIDTH as usize;
-
 /// Channels one stroke may carry. The terminator states the cell size, and one bit of
 /// doubling is all it can say.
 const MAX_CHANNELS: usize = 2;
@@ -173,9 +264,6 @@ const RAMP_IN: usize = 35;
 
 /// Shortest modelled input; shorter streams use an unresolved opening.
 pub const MIN_FRAMES: usize = 4096;
-
-/// Words in one packet. A looped stroke's loop region is a whole number of them.
-const PACKET_WORDS: usize = PACKET_LEN / 3;
 
 /// Fields a looped stroke carries past its loop end, repeating the loop's own opening
 /// so that playback is unchanged. The mark clears the loop start by the same amount,
@@ -257,11 +345,12 @@ pub struct Options {
     channels: u16,
     secondary_start: Option<f64>,
     shift: Option<u8>,
+    layout: Layout,
 }
 
 impl Options {
     /// Defaults: the name given, root key C4, the editor's own top note, plain records,
-    /// no loop.
+    /// no loop, the v2 generation.
     pub fn new(name: impl Into<String>) -> Options {
         Options {
             name: name.into(),
@@ -272,7 +361,15 @@ impl Options {
             channels: 1,
             secondary_start: None,
             shift: None,
+            layout: Layout::V2,
         }
+    }
+
+    /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`. The audio is the same
+    /// object in all three — what moves is the container and the stream's units.
+    pub fn layout(mut self, layout: Layout) -> Options {
+        self.layout = layout;
+        self
     }
 
     /// Resynchronise the stream at `frames` source frames from the first one — a
@@ -352,6 +449,8 @@ pub struct Looped {
 /// [`chunk`] scale with it, which is the whole of what stereo changes about the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
+    /// Which generation's units the stream is written in.
+    pub layout: Layout,
     /// Source frames the stroke covers — frames, not samples: a stereo frame is two.
     pub frames: usize,
     /// Channels interleaved into the stream: 1 or 2.
@@ -374,14 +473,21 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Fields one content cell covers — [`CELL`] per channel.
-    pub const fn cell(&self) -> usize {
-        CELL * self.channels
+    const fn units(&self) -> Units {
+        Units {
+            layout: self.layout,
+            channels: self.channels,
+        }
     }
 
-    /// Fields one 1:1 record covers at most — [`CHUNK`] per channel.
+    /// Fields one content cell covers — the generation's cell per channel.
+    pub const fn cell(&self) -> usize {
+        self.units().cell()
+    }
+
+    /// Fields one 1:1 record covers at most — the generation's RMAX per channel.
     const fn chunk(&self) -> usize {
-        CHUNK * self.channels
+        self.units().chunk()
     }
 }
 
@@ -410,14 +516,19 @@ impl Plan {
     ///
     /// Refuses a secondary start the stream cannot resynchronise at: off the lattice,
     /// or too close to either end for the 1:1 runs around it.
-    pub fn new(frames: usize, channels: usize, secondary_start: f64) -> Result<Plan, Error> {
+    pub fn new(
+        layout: Layout,
+        frames: usize,
+        channels: usize,
+        secondary_start: f64,
+    ) -> Result<Plan, Error> {
         Plan::modelled(frames, channels)?;
         let fields = fields_of(frames)
             .and_then(|f| f.checked_add(RING_OUT))
             .and_then(|f| f.checked_mul(channels))
             .ok_or_else(|| size_error(frames))?;
         let resync_at = Plan::resync_at(secondary_start, channels)?;
-        Plan::lay_out(frames, channels, fields, None, resync_at)
+        Plan::lay_out(layout, frames, channels, fields, None, resync_at)
     }
 
     /// The layout for a stroke that loops: `frames` source samples truncated at
@@ -428,6 +539,7 @@ impl Plan {
     /// the run it has to open with, or a crossfade with no material in front of the loop
     /// to fade from — and a secondary start that leaves no room ahead of the loop.
     pub fn looped(
+        layout: Layout,
         frames: usize,
         channels: usize,
         points: Loop,
@@ -455,8 +567,8 @@ impl Plan {
             .ok_or_else(|| size_error(points.end))?;
         // Ahead of the mark the stream still has to open and resync, so a loop that
         // starts too early is pushed off the front by repeating more of itself.
-        let cell = CELL * channels;
-        let chunk = CHUNK * channels;
+        let units = Units { layout, channels };
+        let (cell, chunk) = (units.cell(), units.chunk());
         let lead = (LOOP_LEAD * channels).max((MIN_PRE_LOOP * channels).saturating_sub(start));
         let at = start
             .checked_add(lead)
@@ -512,6 +624,7 @@ impl Plan {
         }
         let resync_at = Plan::resync_at(secondary_start, channels)?;
         Plan::lay_out(
+            layout,
             frames,
             channels,
             fields,
@@ -567,17 +680,18 @@ impl Plan {
     /// Place the warmup, the resync and the cells between them across everything ahead
     /// of the loop — or across the whole stream when there is none.
     fn lay_out(
+        layout: Layout,
         frames: usize,
         channels: usize,
         fields: usize,
         looped: Option<Looped>,
         resync_at: usize,
     ) -> Result<Plan, Error> {
-        if fields > MAX_FIELDS {
+        let units = Units { layout, channels };
+        if fields > units.max_fields() {
             return Err(size_error(frames).into());
         }
-        let cell = CELL * channels;
-        let chunk = CHUNK * channels;
+        let (cell, chunk) = (units.cell(), units.chunk());
         let band = |r: usize| band(r, cell, chunk);
         let head = looped.map_or(fields, |l| l.at);
         let warmup = band(resync_at);
@@ -602,6 +716,7 @@ impl Plan {
         }
         let resync = band(head - warmup);
         Ok(Plan {
+            layout,
             frames,
             channels,
             fields,
@@ -702,8 +817,13 @@ struct Quantised {
     /// Bits the values were shifted right by. Dequantising shifts back.
     shift: i32,
     /// Statistic B: the content field of largest magnitude, taken at a fixed shift of 2.
-    peak: u32,
+    /// Carries the extreme's sign where the generation stores one; a magnitude at v2.
+    peak: i32,
 }
+
+/// Largest magnitude statistic B's 24 bits hold once a sign is allowed for. A field
+/// is the source's own 16-bit unit taken at a shift of two, so nothing reaches it.
+const MAX_PEAK: i64 = (1 << 23) - 1;
 
 /// The opening ramp: the first [`RAMP_IN`] fields of a channel rise as the cube of
 /// their position, toward zero like everything else the encoder quantises.
@@ -783,7 +903,7 @@ fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
         }
     }
     let mut shift = peak_shift(&raw, PEAK_WIDTH);
-    if channels == 1 && spends_extra_bit(&raw, plan) {
+    if spends_extra_bit(&raw, plan) {
         shift += 1;
     }
     if let Some(bits) = forced {
@@ -805,9 +925,13 @@ fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
             Some(b) if sums[f].abs() <= sums[b].abs() => Some(b),
             _ => Some(f),
         });
-    let peak = extreme
-        .map_or(0, |f| (raw[f] >> 2).unsigned_abs())
-        .min(u64::from(u32::MAX >> 8)) as u32;
+    let signed = extreme
+        .map_or(0, |f| raw[f] >> 2)
+        .clamp(-MAX_PEAK - 1, MAX_PEAK) as i32;
+    let peak = match plan.layout.signed_peak() {
+        true => signed,
+        false => signed.abs(),
+    };
 
     Quantised {
         values: raw.iter().map(|&v| (v >> shift) as i32).collect(),
@@ -840,8 +964,8 @@ struct Spec {
 
 impl Spec {
     /// Words this record occupies, header included.
-    fn span(&self) -> usize {
-        (24 + self.count * usize::from(self.width)).div_ceil(24)
+    fn span(&self, units: Units) -> usize {
+        units.span(self.count, self.width)
     }
 }
 
@@ -979,7 +1103,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
         one_to_one(&mut out, &mut at, points.warmup);
         out[opening].mark = true;
         content(&mut out, &mut at, points.cells);
-        pad_to_packet(&mut out, opening, cell)?;
+        pad_to_packet(&mut out, opening, plan.units())?;
     }
     if at != plan.fields {
         return Err(ParseError::AssertFail(format!(
@@ -1002,9 +1126,11 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
 /// fit. A region with nothing left to split is widened instead, from its last record
 /// back, which is this crate's own choice: no render has shown what the editor does then.
 /// Inferred from specimens; not confirmed on hardware.
-fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, cell: usize) -> Result<(), Error> {
-    let words = |specs: &[Spec]| specs.iter().map(Spec::span).sum::<usize>();
-    let mut pad = (PACKET_WORDS - words(&specs[opening..]) % PACKET_WORDS) % PACKET_WORDS;
+fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<(), Error> {
+    let cell = units.cell();
+    let packet = units.packet_words();
+    let words = |specs: &[Spec]| specs.iter().map(|s| s.span(units)).sum::<usize>();
+    let mut pad = (packet - words(&specs[opening..]) % packet) % packet;
 
     let splittable = |spec: &Spec| !spec.one_to_one && spec.count > cell;
     while pad > 0 && specs[opening..].iter().any(splittable) {
@@ -1035,8 +1161,8 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, cell: usize) -> Result<(
             width: spec.width + 1,
             ..spec
         };
-        if spec.width < MAX_STORED_WIDTH && wider.span() - spec.span() <= pad {
-            pad -= wider.span() - spec.span();
+        if spec.width < MAX_STORED_WIDTH && wider.span(units) - spec.span(units) <= pad {
+            pad -= wider.span(units) - spec.span(units);
             specs[at].width += 1;
         } else if at > opening {
             at -= 1;
@@ -1069,7 +1195,7 @@ struct Stream {
 /// `preamble` bytes of payload, then whole packets until the chain fits.
 ///
 /// `preamble` is [`stroke::header_len`](super::stroke::header_len), which a zone table
-/// can drive below [`HEADER_LEN`] — the first packet then starts inside what would
+/// can drive below the stroke header — the first packet then starts inside what would
 /// otherwise be header, and the loop repays the difference.
 fn pack(
     specs: &[Spec],
@@ -1078,26 +1204,28 @@ fn pack(
     preamble: usize,
     plan: &Plan,
 ) -> Result<Stream, Error> {
-    let chain: usize = specs.iter().map(Spec::span).sum::<usize>() + 1;
-    let need = chain
-        .checked_mul(3)
-        .and_then(|bytes| bytes.checked_add(HEADER_LEN))
+    let units = plan.units();
+    let (word, header) = (units.word(), plan.layout.header_len());
+    let chain: usize = specs.iter().map(|s| s.span(units)).sum::<usize>() + 1;
+    let need = (chain + units.min_lead())
+        .checked_mul(word)
+        .and_then(|bytes| bytes.checked_add(header))
         .ok_or_else(|| ParseError::OutOfBounds {
             value: format!("a chain of {chain} words"),
             bound: "a stroke payload of addressable length".into(),
         })?;
     let mut payload = preamble;
     while payload < need {
-        payload += PACKET_LEN;
+        payload += packet_len(plan.layout);
     }
-    if !(payload - HEADER_LEN).is_multiple_of(3) {
+    if !(payload - header).is_multiple_of(word) {
         return Err(ParseError::AssertFail(format!(
             "a {preamble}-byte preamble puts the word stream off a word boundary; the \
              sections in front of the stroke are not whole words"
         ))
         .into());
     }
-    let total = (payload - HEADER_LEN) / 3;
+    let total = (payload - header) / word;
     if total > MAX_STREAM_WORDS {
         return Err(ParseError::OutOfBounds {
             value: format!("a stream of {total} words"),
@@ -1111,7 +1239,7 @@ fn pack(
         .into());
     }
 
-    let mut words = vec![0u8; total * 3];
+    let mut words = vec![0u8; total * word];
     let lead = total - chain;
     let mut at = lead;
     let mut resync = lead;
@@ -1123,18 +1251,19 @@ fn pack(
         if spec.mark {
             mark = Some(at);
         }
-        write_record(&mut words, at, spec, values, plan.channels);
-        at += spec.span();
+        write_record(&mut words, at, spec, values, units);
+        at += spec.span(units);
     }
     // The terminator states the cell size, which is what says how many channels the
-    // stroke carries: 2*CELL and a reader de-interleaves.
+    // stroke carries: twice the layout's cell and a reader de-interleaves.
     if at.checked_add(1) != Some(total) {
         return Err(ParseError::AssertFail(format!(
             "the record chain ended at word {at} of {total}"
         ))
         .into());
     }
-    words[at * 3..at * 3 + 3].copy_from_slice(&[0x80, 0x00, plan.cell() as u8]);
+    let terminator = (1u32 << 23) | plan.cell() as u32;
+    words[at * word..(at + 1) * word].copy_from_slice(&terminator.to_be_bytes()[4 - word..]);
 
     Ok(Stream {
         words,
@@ -1147,31 +1276,65 @@ fn pack(
 
 /// Writes one record: its header word, then its fields, which start at the first bit
 /// after it. Any alignment tail is left zero at the end of the segment.
-/// v2 stores a stereo stroke's channels as **alternating fields**, which is the order
-/// `values` is already in — so the fields go down in stream order either way, and only
-/// the residual's reach changes with the channel count.
-fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], stride: usize) {
+///
+/// v2 and v3 store a stereo stroke's channels as **alternating fields**, which is the
+/// order `values` is already in, so the fields go down in stream order; v4 gives each
+/// channel its own word stream and alternates the words, so its halves are packed
+/// apart and then interleaved. Only the residual's reach moves with the channel count.
+fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units: Units) {
+    let (word, bits) = (units.word(), units.word_bits());
     let head = (u32::from(spec.one_to_one) << 23)
         | (u32::from(spec.width - 1) << 19)
         | (u32::from(spec.mark) << 18)
         | (u32::from(spec.order) << 14)
         | spec.count as u32;
-    words[at * 3..at * 3 + 3].copy_from_slice(&head.to_be_bytes()[1..]);
+    words[at * word..(at + 1) * word].copy_from_slice(&head.to_be_bytes()[4 - word..]);
 
-    let mut bit = at * 24 + 24;
-    for k in 0..spec.count {
+    let stored = |k: usize| -> u64 {
         let field = spec.first + k;
         let value = if spec.order == 0 {
             i64::from(values[field])
         } else {
-            residual(values, field, spec.order, stride)
+            residual(values, field, spec.order, units.channels)
         };
-        let raw = (value as u64) & ((1u64 << spec.width) - 1);
+        (value as u64) & ((1u64 << spec.width) - 1)
+    };
+    let put = |words: &mut [u8], mut bit: usize, raw: u64| {
         for b in (0..spec.width).rev() {
             if raw >> b & 1 != 0 {
                 words[bit / 8] |= 1 << (7 - bit % 8);
             }
             bit += 1;
+        }
+    };
+
+    if !units.splits() {
+        for k in 0..spec.count {
+            put(
+                words,
+                (at + 1) * bits + k * usize::from(spec.width),
+                stored(k),
+            );
+        }
+        return;
+    }
+    // Each channel is packed into its own contiguous words first, because the two
+    // halves are padded apart; the words then alternate from the header on.
+    let per = spec.count / 2;
+    let half = units.half(spec.count, spec.width);
+    let mut packed = vec![0u8; half * word];
+    for channel in 0..2 {
+        packed.fill(0);
+        for k in 0..per {
+            put(
+                &mut packed,
+                k * usize::from(spec.width),
+                stored(2 * k + channel),
+            );
+        }
+        for w in 0..half {
+            let to = (at + 1 + 2 * w + channel) * word;
+            words[to..to + word].copy_from_slice(&packed[w * word..(w + 1) * word]);
         }
     }
 }
@@ -1192,7 +1355,9 @@ fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
 }
 
 /// Build the fixed header and its body-relative, wrapping word directory.
+#[allow(clippy::too_many_arguments)]
 fn stroke_header(
+    layout: Layout,
     id: u32,
     root_key: u8,
     q: &Quantised,
@@ -1201,7 +1366,7 @@ fn stroke_header(
     channels: usize,
     gain: u32,
 ) -> Vec<u8> {
-    let mut head = vec![0u8; HEADER_LEN];
+    let mut head = vec![0u8; layout.header_len()];
     head[0..4].copy_from_slice(&id.to_be_bytes());
     head[5] = root_key;
     // Unexplained: real programs hold this, and the panel cannot produce it.
@@ -1210,12 +1375,12 @@ fn stroke_header(
     // and a reader takes the terminator because that is what the record sizes follow.
     head[8] = channels as u8;
 
-    let (mantissa, exponent) = statistic_a(q.peak, q.shift, gain);
+    let (mantissa, exponent) = statistic_a(q.peak.unsigned_abs(), q.shift, gain);
     head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
     head[12] = exponent;
-    head[13..16].copy_from_slice(&q.peak.to_be_bytes()[1..]);
+    head[13..16].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
 
-    let base = (body_at + HEADER_LEN) / 3 % WRAP;
+    let base = (body_at + layout.header_len()) / layout.word() % WRAP;
     let pointer = |word: usize| ((base + word) % WRAP) as u16;
     // The third pointer names the loop's marked record; aimed at the terminator it says
     // the stroke does not loop.
@@ -1233,8 +1398,19 @@ fn stroke_header(
             head[at + 2] = 0x80;
         }
     }
+    // The wide header's two float32 tails. The editor writes this pair on every
+    // stroke it renders; what they scale is unexplained.
+    for (at, value) in codec::TAIL_FLOATS_AT.iter().zip(WIDE_TAIL_FLOATS) {
+        if let Some(slot) = head.get_mut(*at..at + 4) {
+            slot.copy_from_slice(&value.to_be_bytes());
+        }
+    }
     head
 }
+
+/// The two float32s a wide stroke header carries at [`codec::TAIL_FLOATS_AT`].
+/// Unexplained: real programs hold this, and the panel cannot produce it.
+const WIDE_TAIL_FLOATS: [f32; 2] = [0.0, 20.0];
 
 /// Encode one zone's stroke at body offset `body_at`, packed into `preamble` bytes
 /// plus whole packets.
@@ -1245,6 +1421,7 @@ fn stroke_header(
 /// that are not there.
 #[allow(clippy::too_many_arguments)]
 fn stroke(
+    layout: Layout,
     source: &[i16],
     channels: usize,
     root_key: u8,
@@ -1260,14 +1437,14 @@ fn stroke(
     midi_note("root key", root_key)?;
     let frames = frames_of(source, channels)?;
     body_at
-        .checked_add(HEADER_LEN)
+        .checked_add(layout.header_len())
         .ok_or_else(|| ParseError::OutOfBounds {
             value: format!("body offset {body_at}"),
             bound: "an addressable stroke header".into(),
         })?;
     let plan = match loops {
-        Some(points) => Plan::looped(frames, channels, points, secondary_start)?,
-        None => Plan::new(frames, channels, secondary_start)?,
+        Some(points) => Plan::looped(layout, frames, channels, points, secondary_start)?,
+        None => Plan::new(layout, frames, channels, secondary_start)?,
     };
     if let Some(bits) = shift {
         if i32::from(bits) > codec::SHIFT_LIMIT {
@@ -1303,10 +1480,22 @@ fn stroke(
         })?;
     let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
 
-    let mut payload = stroke_header(id, root_key, &q, &stream, body_at, channels, gain);
+    let mut payload = stroke_header(layout, id, root_key, &q, &stream, body_at, channels, gain);
     payload.extend_from_slice(&stream.words);
     Ok(payload)
 }
+
+/// Section schema versions the narrow chain writes. They track the section's own
+/// schema rather than the content version.
+const HDR_VERSION: u8 = 9;
+const CAT_VERSION: u8 = 5;
+const STK_VERSION: u8 = 9;
+const STY_VERSION: u8 = 5;
+const CONTAINER_VERSION: u8 = 11;
+
+/// The category every chain's `cat` section opens with.
+/// Unexplained: real programs hold this, and the panel cannot produce it.
+const CATEGORY: u8 = 0x0f;
 
 /// The `hdr` section: a fixed prefix, then the instrument name NUL-padded.
 fn hdr(name: &str) -> Result<Section, Error> {
@@ -1330,7 +1519,7 @@ fn hdr(name: &str) -> Result<Section, Error> {
 
 /// The `cat` section: a short prefix and two length-prefixed labels.
 fn cat() -> Section {
-    let mut payload = vec![0x0f, 0x00, 0x00, 0x00, 0x01];
+    let mut payload = vec![CATEGORY, 0x00, 0x00, 0x00, 0x01];
     for label in [&b"Production"[..], &b"Origin"[..]] {
         payload.push(label.len() as u8);
         payload.extend_from_slice(label);
@@ -1385,6 +1574,185 @@ fn sty() -> Section {
     }
 }
 
+/// Everything a `.nsmp3` chain and a `.nsmp4` chain do not share.
+///
+/// The section versions track their own schemas, so they move independently of the
+/// content version and of each other. The payloads named here are constant across
+/// every render of a project that does not reach them.
+///
+/// Inferred from specimens; not confirmed on hardware.
+struct WideSchema {
+    container: u32,
+    /// The `NSMP` payload. Constant per generation and unrelated to the stroke count.
+    /// Unexplained: real programs hold this, and the panel cannot produce it.
+    container_payload: [u8; 4],
+    hdr: u32,
+    map: u32,
+    /// Bytes one per-key record takes: the level alone, or the level and the partner
+    /// quad the wider schema puts behind it.
+    key_stride: usize,
+    /// The unexplained run between the per-key table and the zone count.
+    map_gap: &'static [u8],
+    /// The unexplained run behind the last zone record.
+    map_tail: &'static [u8],
+    /// Whether the zone records are stored low to high. Every other layout stores
+    /// them high to low.
+    zones_ascend: bool,
+    sty: u32,
+    /// The preset a project that touches none renders as.
+    /// Unexplained: real programs hold this, and the panel cannot produce it.
+    sty_payload: &'static [u8],
+}
+
+/// The `map`'s gain-and-detune unit: unity gain, no detune. It opens the section as
+/// the instrument's own level and then repeats once per key.
+const LEVEL: [u8; 6] = [0x10, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+const STY_V3_PAYLOAD: [u8; super::sty::V3_LEN] = [
+    0x00, 0x00, 0x7f, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x7f, 0x00, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+];
+
+const STY_V4_PAYLOAD: [u8; super::sty::V4_LEN_LONG] = [
+    0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1e,
+    0x1e, 0x1e, 0x00, 0x00, 0x00, 0x7f, 0x7f, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// The schema for a wide generation, `None` for the narrow chain.
+fn wide_schema(layout: Layout) -> Option<WideSchema> {
+    match layout {
+        Layout::V2 => None,
+        Layout::V3 => Some(WideSchema {
+            container: 30,
+            container_payload: [0x00, 0x02, 0x00, 0x0c],
+            hdr: 10,
+            map: 14,
+            key_stride: LEVEL.len(),
+            map_gap: &[],
+            map_tail: &[0x00],
+            zones_ascend: true,
+            sty: super::sty::VERSION_V3,
+            sty_payload: &STY_V3_PAYLOAD,
+        }),
+        Layout::V4 => Some(WideSchema {
+            container: 40,
+            container_payload: [0x00, 0x02, 0x00, 0x05],
+            hdr: 11,
+            map: 21,
+            key_stride: LEVEL.len() + 4,
+            map_gap: &[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+                0x02, 0x02, 0x02, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00,
+                0x00, 0x00, 0x00,
+            ],
+            map_tail: &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
+            zones_ascend: false,
+            sty: super::sty::VERSION_V4,
+            sty_payload: &STY_V4_PAYLOAD,
+        }),
+    }
+}
+
+/// Keys the wide `map`'s per-key table describes.
+const KEYS: usize = 128;
+
+/// The wide `hdr` section: the same prefix at a wider name field, with the sub-name
+/// the vendor's filenames append left empty.
+fn hdr4(schema: &WideSchema, name: &str) -> Result<Section4, Error> {
+    if name.len() > MAX_NAME_V3_LEN {
+        return Err(ParseError::OutOfBounds {
+            value: format!("{name:?} ({} bytes)", name.len()),
+            bound: format!("a name of at most {MAX_NAME_V3_LEN} bytes"),
+        }
+        .into());
+    }
+    let mut payload = vec![0u8; 112];
+    // Unexplained: real programs hold this, and the panel cannot produce it.
+    payload[4..6].copy_from_slice(&[0x06, 0x50]);
+    payload[super::NAME_V3_AT..][..name.len()].copy_from_slice(name.as_bytes());
+    Ok(Section4 {
+        tag: *section::HDR4,
+        version: schema.hdr,
+        payload,
+    })
+}
+
+/// The wide `cat` section: the category alone, where the narrow chain also spells
+/// out its labels.
+fn cat4() -> Section4 {
+    let mut payload = vec![0u8; 8];
+    payload[0] = CATEGORY;
+    Section4 {
+        tag: *section::CAT4,
+        version: 7,
+        payload,
+    }
+}
+
+/// The wide `map` section: a per-key table at unity gain and no detune, then the
+/// zone records behind their count.
+///
+/// The wider schema's per-key record carries a partner quad as well as the level.
+/// The editor writes the identity there whatever the zone layout — only the vendor's
+/// own builder fills it in — so every quad names its own key.
+fn map4(schema: &WideSchema, zones: &[WideZoneRecord]) -> Section4 {
+    let mut payload = Vec::with_capacity(
+        LEVEL.len()
+            + KEYS * schema.key_stride
+            + schema.map_gap.len()
+            + 1
+            + super::zone::WIDE_RECORD_LEN * zones.len()
+            + schema.map_tail.len(),
+    );
+    payload.extend_from_slice(&LEVEL);
+    for key in 0..KEYS as u8 {
+        payload.extend_from_slice(&LEVEL);
+        payload.extend(std::iter::repeat_n(key, schema.key_stride - LEVEL.len()));
+    }
+    payload.extend_from_slice(schema.map_gap);
+    payload.push(zones.len() as u8);
+    let ordered: Vec<&WideZoneRecord> = match schema.zones_ascend {
+        true => zones.iter().rev().collect(),
+        false => zones.iter().collect(),
+    };
+    for record in ordered {
+        payload.extend_from_slice(&record.bytes());
+    }
+    payload.extend_from_slice(schema.map_tail);
+    Section4 {
+        tag: *section::MAP4,
+        version: schema.map,
+        payload,
+    }
+}
+
+/// The wide `sty` section.
+fn sty4(schema: &WideSchema) -> Section4 {
+    Section4 {
+        tag: *section::STY4,
+        version: schema.sty,
+        payload: schema.sty_payload.to_vec(),
+    }
+}
+
+/// The `meta` section: the length of everything ahead of it, which is the only place
+/// a wide file states its own size.
+fn meta4(chain_len: usize) -> Section4 {
+    let mut payload = vec![0u8; super::meta::LEN];
+    payload[0..2].copy_from_slice(&2u16.to_be_bytes());
+    payload[2..6].copy_from_slice(&(chain_len as u32).to_be_bytes());
+    Section4 {
+        tag: *section::META4,
+        version: super::meta::VERSION,
+        payload,
+    }
+}
+
 /// One zone to build: its audio, where it sits on the keyboard, and the id its
 /// record names its stroke by.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1415,13 +1783,17 @@ pub struct NewZone<'a> {
     /// [`zone::GAIN_UNITY`](super::zone::GAIN_UNITY) is 1.0 — below `1 << 24`. Not
     /// applied to the audio: it goes into the zone record and the stroke's statistic A,
     /// and the instrument applies it when it plays.
+    ///
+    /// ⚠️ The narrow chain alone stores it. No byte of a wide zone record is known to
+    /// hold a gain, so a wide build refuses anything but unity rather than write one
+    /// the instrument would not apply.
     pub gain: u32,
 }
 
-/// Build a one-zone v2 instrument from PCM at [`codec::SOURCE_RATE`], mono or stereo
-/// interleaved per [`Options::channels`].
+/// Build a one-zone instrument from PCM at [`codec::SOURCE_RATE`], mono or stereo
+/// interleaved per [`Options::channels`], in the generation [`Options::layout`] names.
 /// Refuses unmodelled lengths, invalid metadata, and streams past the directory limit.
-pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Error> {
+pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Error> {
     midi_note("root key", options.root_key)?;
     let frames = frames_of(source, usize::from(options.channels))?;
     let secondary_start = options
@@ -1441,15 +1813,39 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<Cbin<Sample>, Err
         }],
         &options.name,
         options.predictor,
+        options.layout,
     )
 }
 
-/// Build a v2 instrument that spans the keyboard: one `stk` per zone, in the order
+/// Build an instrument that spans the keyboard: one `stk` per zone, in the order
 /// given, which must be highest zone first.
 ///
 /// Refuses an empty or overlapping zone list, a duplicate or unnameable stroke id,
 /// and everything [`instrument`] refuses about one zone's audio.
 pub fn multi_zone(
+    zones: &[NewZone<'_>],
+    name: &str,
+    predictor: Predictor,
+    layout: Layout,
+) -> Result<crate::Sample, Error> {
+    match wide_schema(layout) {
+        Some(schema) => wide_chain(zones, name, predictor, layout, &schema).map(crate::Sample::V3),
+        None => narrow_chain(zones, name, predictor).map(crate::Sample::V2),
+    }
+}
+
+/// The CBIN header every generation writes, at its own content version.
+fn container(layout: Layout) -> Header {
+    Header {
+        generation: Generation::V1,
+        tag: *b"nsmp",
+        location: 0xFFFF_FFFF,
+        aux: AUX,
+        version: version(layout),
+    }
+}
+
+fn narrow_chain(
     zones: &[NewZone<'_>],
     name: &str,
     predictor: Predictor,
@@ -1477,12 +1873,13 @@ pub fn multi_zone(
     let mut body_at: usize = sections.iter().map(Section::encoded_len).sum();
     for (index, zone) in zones.iter().enumerate() {
         let payload = stroke(
+            Layout::V2,
             zone.source,
             usize::from(zone.channels),
             zone.root_key,
             zone.global_id,
             body_at + section::HEADER_LEN,
-            super::stroke::header_len(index, cat_len, map_len),
+            super::stroke::header_len(Layout::V2, index, cat_len, map_len),
             predictor,
             zone.loops,
             zone.secondary_start,
@@ -1499,15 +1896,126 @@ pub fn multi_zone(
     sections.push(sty());
 
     Ok(Cbin {
-        header: Header {
-            generation: Generation::V1,
-            tag: *b"nsmp",
-            location: 0xFFFF_FFFF,
-            aux: AUX,
-            version: VERSION,
-        },
+        header: container(Layout::V2),
         body: Sample { sections },
     })
+}
+
+/// The `stk` schema version both wide generations carry.
+const STK4_VERSION: u32 = 11;
+
+fn wide_chain(
+    zones: &[NewZone<'_>],
+    name: &str,
+    predictor: Predictor,
+    layout: Layout,
+    schema: &WideSchema,
+) -> Result<Cbin<SampleV3>, Error> {
+    let table = wide_zone_table(zones)?;
+    let hdr = hdr4(schema, name)?;
+    let cat = cat4();
+    let map = map4(schema, &table);
+    let cat_len = cat.payload.len();
+    let map_len = map.payload.len();
+
+    let mut sections = vec![
+        Section4 {
+            tag: *section::CONTAINER4,
+            version: schema.container,
+            payload: schema.container_payload.to_vec(),
+        },
+        hdr,
+        cat,
+        map,
+    ];
+    let mut body_at: usize = sections.iter().map(Section4::encoded_len).sum();
+    for (index, zone) in zones.iter().enumerate() {
+        let payload = stroke(
+            layout,
+            zone.source,
+            usize::from(zone.channels),
+            zone.root_key,
+            zone.global_id,
+            body_at + section::HEADER4_LEN,
+            super::stroke::header_len(layout, index, cat_len, map_len),
+            predictor,
+            zone.loops,
+            zone.secondary_start,
+            zone.shift,
+            zone.gain,
+        )?;
+        body_at += section::HEADER4_LEN + payload.len();
+        sections.push(Section4 {
+            tag: *section::STK4,
+            version: STK4_VERSION,
+            payload,
+        });
+    }
+    sections.push(sty4(schema));
+    let chain_len: usize = sections.iter().map(Section4::encoded_len).sum();
+    sections.push(meta4(chain_len));
+
+    Ok(Cbin {
+        header: container(layout),
+        body: SampleV3 { sections },
+    })
+}
+
+/// What a wide `map` section stores per zone.
+struct WideZoneRecord {
+    root_key: u8,
+    top_note: u8,
+    low_note: u8,
+    global_id: u32,
+}
+
+impl WideZoneRecord {
+    fn bytes(&self) -> [u8; super::zone::WIDE_RECORD_LEN] {
+        let mut r = [0u8; super::zone::WIDE_RECORD_LEN];
+        r[0] = self.root_key;
+        r[1] = self.top_note;
+        r[2] = self.low_note;
+        // Unexplained: real programs hold this, and the panel cannot produce it.
+        r[7] = 1;
+        r[8..12].copy_from_slice(&self.global_id.to_be_bytes());
+        // One sample in the zone, so the playing stroke sits at the bottom of the
+        // strength axis.
+        r[12..14].copy_from_slice(&super::zone::REL_STRENGTH_DEFAULT.to_be_bytes());
+        let full = super::zone::VelocityWindow::FULL;
+        r[14] = full.low;
+        r[15] = full.high;
+        r
+    }
+}
+
+/// Validate the zone list and reduce it to the records a wide `map` stores.
+///
+/// A wide zone states its own bottom as well as its top, and zones tile: each reaches
+/// down to one above the zone below it, and the lowest reaches the keyboard's floor.
+fn wide_zone_table(zones: &[NewZone<'_>]) -> Result<Vec<WideZoneRecord>, Error> {
+    let table = zone_table(zones)?;
+    for (index, zone) in zones.iter().enumerate() {
+        if zone.gain != super::zone::GAIN_UNITY {
+            return Err(ParseError::AssertFail(format!(
+                "zone {index} sets a gain, and no byte of a wide zone record is known \
+                 to hold one"
+            ))
+            .into());
+        }
+    }
+    Ok(table
+        .iter()
+        .enumerate()
+        .map(|(index, record)| WideZoneRecord {
+            root_key: zones[index].root_key,
+            top_note: record.top_note,
+            low_note: match table.get(index + 1) {
+                Some(below) => below.top_note.saturating_add(1),
+                None => super::zone::KEY_FLOOR,
+            },
+            global_id: zones[index].global_id,
+        })
+        .collect())
 }
 
 /// What the `map` section stores per zone.
@@ -1590,12 +2098,46 @@ mod tests {
     use super::super::zone::GAIN_UNITY;
     use super::*;
 
+    /// The narrow chain's own units, which most of these tests are written against.
+    const CELL: usize = Layout::V2.cell();
+    const CHUNK: usize = Layout::V2.rmax();
+    const HEADER_LEN: usize = Layout::V2.header_len();
+    const PACKET_LEN: usize = packet_len(Layout::V2);
+    const VERSION: u32 = version(Layout::V2);
+    const MONO: Units = Units {
+        layout: Layout::V2,
+        channels: 1,
+    };
+    const PACKET_WORDS: usize = MONO.packet_words();
+
+    /// The narrow body an encode produced. These tests build no wide one.
+    fn narrow(sample: crate::Sample) -> Cbin<Sample> {
+        match sample {
+            crate::Sample::V2(file) => file,
+            crate::Sample::V3(_) => panic!("the narrow chain was asked for"),
+        }
+    }
+
+    fn built(
+        zones: &[NewZone<'_>],
+        name: &str,
+        predictor: Predictor,
+    ) -> Result<Cbin<Sample>, Error> {
+        multi_zone(zones, name, predictor, Layout::V2).map(narrow)
+    }
+
     fn plan(frames: usize, channels: usize) -> Result<Plan, Error> {
-        Plan::new(frames, channels, default_secondary_start(frames, None))
+        Plan::new(
+            Layout::V2,
+            frames,
+            channels,
+            default_secondary_start(frames, None),
+        )
     }
 
     fn looped(frames: usize, channels: usize, points: Loop) -> Result<Plan, Error> {
         Plan::looped(
+            Layout::V2,
             frames,
             channels,
             points,
@@ -1613,7 +2155,7 @@ mod tests {
     }
 
     fn encoded(source: &[i16], predictor: Predictor) -> Cbin<Sample> {
-        instrument(source, &Options::new("Test").predictor(predictor)).unwrap()
+        narrow(instrument(source, &Options::new("Test").predictor(predictor)).unwrap())
     }
 
     #[test]
@@ -1671,27 +2213,35 @@ mod tests {
     // `m_start = 1`: a 44 100-frame mono sine and a 30 870-frame stereo pair.
     #[test]
     fn the_resync_lands_where_the_projects_secondary_start_says() {
-        let mono = Plan::new(44_099, 1, 5_512.5 - 1.0).unwrap();
+        let mono = Plan::new(Layout::V2, 44_099, 1, 5_512.5 - 1.0).unwrap();
         assert_eq!(
             (mono.fields, mono.warmup, mono.resync_at, mono.resync),
             (35_128, 30, 4_374, 58)
         );
-        let both = Plan::new(30_869, 2, 3_858.75 - 1.0).unwrap();
+        let both = Plan::new(Layout::V2, 30_869, 2, 3_858.75 - 1.0).unwrap();
         assert_eq!(
             (both.fields, both.warmup, both.resync_at, both.resync),
             (49_256, 124, 6_124, 124)
         );
         // Half-up on the lattice: 11 025 frames land on exactly 8 750.5 fields.
-        assert_eq!(Plan::new(88_200, 1, 11_025.0).unwrap().resync_at, 8_751);
+        assert_eq!(
+            Plan::new(Layout::V2, 88_200, 1, 11_025.0)
+                .unwrap()
+                .resync_at,
+            8_751
+        );
     }
 
     #[test]
     fn a_secondary_start_the_stream_cannot_resync_at_is_refused() {
         for at in [0.0, 20.0, 50_000.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(Plan::new(44_100, 1, at).is_err(), "secondary start {at}");
+            assert!(
+                Plan::new(Layout::V2, 44_100, 1, at).is_err(),
+                "secondary start {at}"
+            );
         }
-        assert!(Plan::looped(44_100, 1, Loop::new(8_192, 40_000), 8_192.0).is_err());
-        assert!(Plan::looped(44_100, 1, Loop::new(8_192, 40_000), 4_096.0).is_ok());
+        assert!(Plan::looped(Layout::V2, 44_100, 1, Loop::new(8_192, 40_000), 8_192.0).is_err());
+        assert!(Plan::looped(Layout::V2, 44_100, 1, Loop::new(8_192, 40_000), 4_096.0).is_ok());
     }
 
     #[test]
@@ -1769,6 +2319,7 @@ mod tests {
         assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
         assert!(instrument(&source, &Options::new("Test").top_note(255)).is_err());
         assert!(stroke(
+            Layout::V2,
             &source,
             1,
             128,
@@ -1796,7 +2347,7 @@ mod tests {
             .payload
             .len();
         let stroke = section::find(&file.body.sections, section::STK).unwrap();
-        let head = super::super::stroke::header_len(0, cat_len, map_len);
+        let head = super::super::stroke::header_len(Layout::V2, 0, cat_len, map_len);
         assert_eq!((stroke.payload.len() - head) % PACKET_LEN, 0);
         assert_eq!(&stroke.payload[stroke.payload.len() - 3..], &[0x80, 0, 24]);
     }
@@ -1858,15 +2409,15 @@ mod tests {
             first: 0,
             count: 30,
         };
-        let tail = spec.span() * 24 - 24 - spec.count * usize::from(spec.width);
+        let tail = spec.span(MONO) * 24 - 24 - spec.count * usize::from(spec.width);
         assert_eq!(tail, 18, "this spec is chosen to leave a tail");
 
         let values: Vec<i32> = (0..30).map(|k| k * 7 - 40).collect();
-        let mut words = vec![0u8; spec.span() * 3];
-        write_record(&mut words, 0, &spec, &values, 1);
+        let mut words = vec![0u8; spec.span(MONO) * 3];
+        write_record(&mut words, 0, &spec, &values, MONO);
 
         // The tail is the last `tail` bits of the segment, and nothing is in it.
-        let total = spec.span() * 24;
+        let total = spec.span(MONO) * 24;
         for bit in total - tail..total {
             assert_eq!(
                 words[bit / 8] >> (7 - bit % 8) & 1,
@@ -1878,7 +2429,7 @@ mod tests {
         let mut stroke = vec![0u8; HEADER_LEN];
         stroke.extend_from_slice(&words);
         stroke.extend_from_slice(&[0x80, 0x00, 0x18]);
-        let end = (HEADER_LEN / 3 + spec.span()) as u16;
+        let end = (HEADER_LEN / 3 + spec.span(MONO)) as u16;
         for (i, p) in [HEADER_LEN as u16 / 3, 0, end, end].iter().enumerate() {
             stroke[20 + 9 * i..22 + 9 * i].copy_from_slice(&p.to_be_bytes());
         }
@@ -1937,10 +2488,7 @@ mod tests {
                 Some(q.shift),
                 "amplitude {amplitude}"
             );
-            assert_eq!(
-                codec::peak(stroke, codec::Layout::V2),
-                i32::try_from(q.peak).ok()
-            );
+            assert_eq!(codec::peak(stroke, codec::Layout::V2), Some(q.peak));
             assert!(q.shift >= 0);
         }
     }
@@ -1985,7 +2533,7 @@ mod tests {
     fn probe(resync: usize, field: usize) -> (Plan, Vec<i64>) {
         let frames = 100_000;
         let secondary = resync as f64 * f64::from(PITCH_NUM) / f64::from(PITCH_DEN);
-        let plan = Plan::new(frames, 1, secondary).unwrap();
+        let plan = Plan::new(Layout::V2, frames, 1, secondary).unwrap();
         assert_eq!(plan.resync_at, resync);
         let mut values = vec![0i64; plan.fields];
         values[field] = 1 << (PEAK_WIDTH - 2);
@@ -2096,7 +2644,7 @@ mod tests {
         let plain = records(&q.values, &plan, Predictor::Plain).unwrap();
         let minimised = records(&q.values, &plan, Predictor::Minimising).unwrap();
 
-        let bits = |specs: &[Spec]| -> usize { specs.iter().map(Spec::span).sum() };
+        let bits = |specs: &[Spec]| -> usize { specs.iter().map(|s| s.span(MONO)).sum() };
         assert!(
             bits(&minimised) < bits(&plain),
             "{} words vs {}",
@@ -2192,12 +2740,12 @@ mod tests {
     #[test]
     fn a_zone_gain_scales_statistic_a_and_touches_nothing_else() {
         let source = sine(440.0, 12_000.0, 20_000);
-        let unity = multi_zone(&[zone(&source, 60, 127, 1)], "Gain", Predictor::Plain).unwrap();
+        let unity = built(&[zone(&source, 60, 127, 1)], "Gain", Predictor::Plain).unwrap();
         let half = NewZone {
             gain: GAIN_UNITY / 2,
             ..zone(&source, 60, 127, 1)
         };
-        let halved = multi_zone(&[half], "Gain", Predictor::Plain).unwrap();
+        let halved = built(&[half], "Gain", Predictor::Plain).unwrap();
         let (_, a) = unity.stroke_streams()[0];
         let (_, b) = halved.stroke_streams()[0];
         assert_eq!(a[..9], b[..9]);
@@ -2211,7 +2759,7 @@ mod tests {
             gain: 1 << 24,
             ..zone(&source, 60, 127, 1)
         };
-        assert!(multi_zone(&[over], "Gain", Predictor::Plain).is_err());
+        assert!(built(&[over], "Gain", Predictor::Plain).is_err());
     }
 
     #[test]
@@ -2219,7 +2767,7 @@ mod tests {
         let high = sine(880.0, 12_000.0, 12_000);
         let mid = sine(440.0, 12_000.0, 9_000);
         let low = sine(220.0, 12_000.0, 15_000);
-        let file = multi_zone(
+        let file = built(
             &[
                 zone(&high, 72, 96, 7),
                 zone(&mid, 60, 65, 3),
@@ -2266,8 +2814,8 @@ mod tests {
     #[test]
     fn a_zone_decodes_the_same_alone_as_in_a_crowd() {
         let source = sine(330.0, 18_000.0, 20_000);
-        let alone = instrument(&source, &Options::new("One").root_key(60)).unwrap();
-        let crowd = multi_zone(
+        let alone = narrow(instrument(&source, &Options::new("One").root_key(60)).unwrap());
+        let crowd = built(
             &[
                 zone(&sine(880.0, 9000.0, 8000), 72, 96, 3),
                 zone(&source, 60, 65, 2),
@@ -2294,7 +2842,7 @@ mod tests {
             let zones: Vec<NewZone> = (0..count)
                 .map(|i| zone(&source, 60, 120 - 10 * i as u8, i as u32 + 1))
                 .collect();
-            let file = multi_zone(&zones, "Ladder", Predictor::Plain).unwrap();
+            let file = built(&zones, "Ladder", Predictor::Plain).unwrap();
             let cat_len = section::find(&file.body.sections, section::CAT)
                 .unwrap()
                 .payload
@@ -2310,7 +2858,7 @@ mod tests {
                 .filter(|s| s.is(section::STK))
                 .enumerate()
             {
-                let head = super::super::stroke::header_len(index, cat_len, map_len);
+                let head = super::super::stroke::header_len(Layout::V2, index, cat_len, map_len);
                 assert_eq!(
                     (section.payload.len() - head) % PACKET_LEN,
                     0,
@@ -2324,9 +2872,8 @@ mod tests {
     #[test]
     fn a_zone_list_the_format_cannot_store_is_refused() {
         let source = vec![0i16; MIN_FRAMES];
-        let one =
-            |root, top, id| multi_zone(&[zone(&source, root, top, id)], "x", Predictor::Plain);
-        assert!(multi_zone(&[], "x", Predictor::Plain).is_err());
+        let one = |root, top, id| built(&[zone(&source, root, top, id)], "x", Predictor::Plain);
+        assert!(built(&[], "x", Predictor::Plain).is_err());
         assert!(one(60, 84, 0).is_err(), "id zero names no stroke");
         assert!(one(60, 84, 256).is_err(), "id past the record's one byte");
         assert!(one(60, 128, 1).is_err());
@@ -2334,7 +2881,7 @@ mod tests {
         assert!(one(60, 84, 1).is_ok());
 
         let pair = |tops: [u8; 2], ids: [u32; 2]| {
-            multi_zone(
+            built(
                 &[
                     zone(&source, 60, tops[0], ids[0]),
                     zone(&source, 48, tops[1], ids[1]),
@@ -2779,6 +3326,181 @@ mod tests {
         let short = vec![0i16; MIN_FRAMES];
         assert!(instrument(&short, &Options::new("x")).is_ok());
         assert!(instrument(&short, &Options::new("x").channels(2)).is_err());
+    }
+
+    /// Every generation, mono and stereo, through this crate's own decoder. v4 stereo
+    /// is the one that packs each channel's half into its own words, so it is the one
+    /// this would catch.
+    #[test]
+    fn every_generation_round_trips_through_the_decoder_exactly() {
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            for channels in [1u16, 2] {
+                let frames = 30_000;
+                let source: Vec<i16> = match channels {
+                    1 => sine(220.0, 14_000.0, frames),
+                    _ => stereo(220.0, 1.5, 14_000.0, frames),
+                };
+                let file = instrument(
+                    &source,
+                    &Options::new("Round trip")
+                        .layout(layout)
+                        .channels(channels)
+                        .predictor(Predictor::Minimising),
+                )
+                .unwrap();
+                let (at, stroke) = file.stroke_streams()[0];
+                let plan = Plan::new(
+                    layout,
+                    frames,
+                    usize::from(channels),
+                    default_secondary_start(frames, None),
+                )
+                .unwrap();
+                let q = quantise(&source, &plan, None);
+                let audio = codec::decode(stroke, at, layout)
+                    .unwrap_or_else(|e| panic!("{layout:?} {channels}ch: {e}"));
+                assert_eq!(audio.channels, channels, "{layout:?} {channels}ch");
+                assert_eq!(audio.samples.len(), plan.fields, "{layout:?} {channels}ch");
+                let gain = 1i32 << q.shift;
+                for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
+                    assert_eq!(
+                        i32::from(got),
+                        want * gain,
+                        "{layout:?} {channels}ch field {f}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_instrument_reads_back_as_one() {
+        for (layout, version) in [(Layout::V3, 300u32), (Layout::V4, 400)] {
+            let file = instrument(
+                &sine(220.0, 15_000.0, 30_000),
+                &Options::new("Encoded")
+                    .layout(layout)
+                    .root_key(48)
+                    .top_note(72),
+            )
+            .unwrap();
+            let bytes = file.to_bytes().unwrap();
+            let read = crate::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+            let crate::Entity::Sample(read) = read else {
+                panic!("{layout:?} did not read back as a sample");
+            };
+            assert_eq!(read.name().unwrap(), "Encoded", "{layout:?}");
+            assert_eq!(read.layout(), layout, "{layout:?}");
+            assert_eq!(read.to_bytes().unwrap(), bytes, "{layout:?}");
+            let crate::Sample::V3(read) = &read else {
+                panic!("{layout:?} did not read back on the wide chain");
+            };
+            assert_eq!(read.header.version, version);
+            let zones = read.zones().unwrap();
+            assert_eq!(zones.len(), 1);
+            assert_eq!(zones[0].root_key, 48);
+            assert_eq!(zones[0].top_note, 72);
+            assert_eq!(zones[0].low_note, Some(super::super::zone::KEY_FLOOR));
+            assert_eq!(
+                read.meta().unwrap().chain_len as usize,
+                read.chain_len_before_meta()
+            );
+        }
+    }
+
+    /// Zones tile: each reaches down to one above the one below it, and the lowest to
+    /// the keyboard's floor. ⚠️ The v3 `map` stores its records low to high and the v4
+    /// one high to low, which is why the stored order is asserted per generation.
+    #[test]
+    fn a_wide_zone_states_its_own_bottom() {
+        let high = sine(880.0, 12_000.0, 12_000);
+        let low = sine(220.0, 12_000.0, 15_000);
+        let floor = super::super::zone::KEY_FLOOR;
+        for (layout, stored) in [
+            (Layout::V3, [(65, floor), (96, 66)]),
+            (Layout::V4, [(96, 66), (65, floor)]),
+        ] {
+            let file = multi_zone(
+                &[zone(&high, 72, 96, 2), zone(&low, 48, 65, 1)],
+                "Two",
+                Predictor::Plain,
+                layout,
+            )
+            .unwrap();
+            let zones = file.zones().unwrap();
+            assert_eq!(
+                zones
+                    .iter()
+                    .map(|z| (z.top_note, z.low_note.unwrap()))
+                    .collect::<Vec<_>>(),
+                stored,
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_zone_refuses_a_gain_it_has_nowhere_to_put() {
+        let source = sine(440.0, 12_000.0, 20_000);
+        let quiet = NewZone {
+            gain: GAIN_UNITY / 2,
+            ..zone(&source, 60, 127, 1)
+        };
+        for layout in [Layout::V3, Layout::V4] {
+            assert!(
+                multi_zone(&[quiet], "Gain", Predictor::Plain, layout).is_err(),
+                "{layout:?}"
+            );
+            assert!(multi_zone(
+                &[zone(&source, 60, 127, 1)],
+                "Gain",
+                Predictor::Plain,
+                layout
+            )
+            .is_ok());
+        }
+    }
+
+    /// The wide terminator states 32 fields per channel where the narrow one states 24,
+    /// and a 1:1 run reaches 48 fields per channel rather than 32.
+    #[test]
+    fn the_wide_plan_tiles_the_lattice_in_its_own_units() {
+        for frames in [4096, 10_000, 44_100, 100_000] {
+            for layout in [Layout::V3, Layout::V4] {
+                let p =
+                    Plan::new(layout, frames, 1, default_secondary_start(frames, None)).unwrap();
+                assert_eq!(p.cell(), 32, "{layout:?} {frames} frames");
+                assert_eq!(
+                    p.warmup + p.cell() * p.cells_before + p.resync + p.cell() * p.cells_after,
+                    p.fields,
+                    "{layout:?} {frames} frames"
+                );
+                for run in chunks(p.warmup, p.chunk())
+                    .into_iter()
+                    .chain(chunks(p.resync, p.chunk()))
+                {
+                    assert!(
+                        (32..=48).contains(&run),
+                        "{layout:?} {frames} frames: {run}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A silent wide stroke stores statistic B as a signed extreme, so it reads back
+    /// through the codec's own sign rule rather than as a 24-bit magnitude.
+    #[test]
+    fn a_wide_statistic_b_carries_the_extremes_sign() {
+        let frames = 20_000;
+        let mut down = vec![0i16; frames];
+        down[10_000] = -13;
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let file = instrument(&down, &Options::new("Peak").layout(layout)).unwrap();
+            let (_, stroke) = file.stroke_streams()[0];
+            let want = if layout.signed_peak() { -3 } else { 3 };
+            assert_eq!(codec::peak(stroke, layout), Some(want), "{layout:?}");
+        }
     }
 
     #[test]

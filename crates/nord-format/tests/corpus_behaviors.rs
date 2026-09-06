@@ -1040,6 +1040,23 @@ fn built_zones(project: &nsmpproj::Project) -> Vec<BuiltZone> {
         .collect()
 }
 
+/// A narrow instrument from the zones a project resolves to, under the editor's own
+/// predictor choice.
+fn built_v2(
+    zones: &[nsmp::encode::NewZone<'_>],
+    name: &str,
+) -> Result<nord_format::cbin::Cbin<nsmp::Sample>, nord_format::error::Error> {
+    match nsmp::encode::multi_zone(
+        zones,
+        name,
+        nsmp::encode::Predictor::Minimising,
+        nsmp::codec::Layout::V2,
+    )? {
+        Sample::V2(file) => Ok(file),
+        Sample::V3(_) => panic!("the narrow layout builds the narrow chain"),
+    }
+}
+
 struct BuiltZone {
     global_id: u32,
     root_key: u8,
@@ -1070,10 +1087,9 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
-        let built = nsmp::encode::multi_zone(
+        let built = built_v2(
             &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
-            nsmp::encode::Predictor::Minimising,
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));
 
@@ -1140,9 +1156,14 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
             let (at, stream) = twin.zone_stream(index).unwrap();
             let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2).unwrap();
             assert_eq!(
-                nsmp::encode::Plan::new(zone.audio.len(), 1, zone.secondary_start)
-                    .unwrap()
-                    .fields,
+                nsmp::encode::Plan::new(
+                    nsmp::codec::Layout::V2,
+                    zone.audio.len(),
+                    1,
+                    zone.secondary_start
+                )
+                .unwrap()
+                .fields,
                 editor.samples.len(),
                 "{name} zone {index}: {} frames",
                 zone.audio.len()
@@ -1200,10 +1221,9 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
-        let built = nsmp::encode::multi_zone(
+        let built = built_v2(
             &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
-            nsmp::encode::Predictor::Minimising,
         )
         .unwrap();
 
@@ -1216,9 +1236,9 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
             .payload
             .len();
         for (index, (at, stream)) in built.stroke_streams().iter().enumerate() {
-            let head = nsmp::stroke::header_len(index, cat_len, map_len);
+            let head = nsmp::stroke::header_len(nsmp::codec::Layout::V2, index, cat_len, map_len);
             assert_eq!(
-                (stream.len() - head) % nsmp::stroke::PACKET_LEN,
+                (stream.len() - head) % nsmp::stroke::packet_len(nsmp::codec::Layout::V2),
                 0,
                 "{name} stroke {index}: {} bytes over a {head}-byte header",
                 stream.len()

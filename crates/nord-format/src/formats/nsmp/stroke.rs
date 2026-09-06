@@ -1,5 +1,6 @@
 //! The `stk` sections — one per zone, each holding one zone's encoded audio.
 
+use super::codec::Layout;
 use crate::error::ParseError;
 
 /// Within a stroke payload: the MIDI note the sample was recorded at.
@@ -7,10 +8,20 @@ const ROOT_KEY: usize = 5;
 
 /// Encoded audio is emitted in fixed-size packets; the count varies with how
 /// compressible the material is.
-pub const PACKET_LEN: usize = 381;
+pub const fn packet_len(layout: Layout) -> usize {
+    match layout {
+        Layout::V2 => 381,
+        Layout::V3 | Layout::V4 => 128,
+    }
+}
 
 /// Every stroke after the first has a fixed header, whatever the zone count.
-const LATER_HEADER_LEN: usize = 372;
+const fn later_header_len(layout: Layout) -> usize {
+    match layout {
+        Layout::V2 => 372,
+        Layout::V3 | Layout::V4 => 116,
+    }
+}
 
 /// Bytes the metadata region reserves ahead of the first packet, over the `cat` and
 /// `map` payloads and the first stroke's own header.
@@ -20,33 +31,40 @@ const LATER_HEADER_LEN: usize = 372;
 /// of constant size, so the first stroke's header is not a field of its own so much as
 /// whatever space the rest did not use. Adding a zone grows `map` by a record and takes
 /// exactly that much off the header; when the metadata would fill the preamble
-/// completely, the whole thing grows by one [`PACKET_LEN`] and the header starts over
-/// with a full packet's worth of room.
+/// completely, the whole thing grows by one packet and the header starts over with a
+/// full packet's worth of room.
 ///
-/// Observed first-packet offsets are 1146 and 1527. This also explains the 15-byte
-/// header difference between vendor files and our output at equal zone counts: their
-/// `cat` payload is 9 bytes and ours is 24.
-const PREAMBLE: usize = 990;
+/// The narrow chain's own budget also explains the 15-byte header difference between
+/// vendor files and our output at equal zone counts: their `cat` payload is 9 bytes
+/// and ours is 24.
+///
+/// Inferred from specimens; not confirmed on hardware.
+const fn preamble(layout: Layout) -> usize {
+    match layout {
+        Layout::V2 => 990,
+        Layout::V3 | Layout::V4 => 852,
+    }
+}
 
 /// The first stroke's header, from the two sections that share the preamble with it.
 ///
-/// Both lengths are payload sizes, excluding their 9-byte section headers.
-pub fn first_header_len(cat_len: usize, map_len: usize) -> usize {
+/// Both lengths are payload sizes, excluding their section headers.
+pub fn first_header_len(layout: Layout, cat_len: usize, map_len: usize) -> usize {
     let used = cat_len + map_len;
-    let mut room = PREAMBLE;
+    let mut room = preamble(layout);
     // Exact-boundary metadata advances because a zero-length header does not occur.
     while room <= used {
-        room += PACKET_LEN;
+        room += packet_len(layout);
     }
     room - used
 }
 
 /// Bytes of stroke header. Only the first stroke's depends on anything.
-pub fn header_len(index: usize, cat_len: usize, map_len: usize) -> usize {
+pub fn header_len(layout: Layout, index: usize, cat_len: usize, map_len: usize) -> usize {
     if index > 0 {
-        LATER_HEADER_LEN
+        later_header_len(layout)
     } else {
-        first_header_len(cat_len, map_len)
+        first_header_len(layout, cat_len, map_len)
     }
 }
 
@@ -73,12 +91,12 @@ pub fn read(
     let root_key = *payload.get(ROOT_KEY).ok_or_else(|| {
         ParseError::AssertFail(format!("stroke {index} is {} bytes", payload.len()))
     })?;
-    let header = header_len(index, cat_len, map_len);
+    let header = header_len(Layout::V2, index, cat_len, map_len);
     let packets = payload
         .len()
         .checked_sub(header)
-        .filter(|body| body % PACKET_LEN == 0)
-        .map(|body| body / PACKET_LEN);
+        .filter(|body| body % packet_len(Layout::V2) == 0)
+        .map(|body| body / packet_len(Layout::V2));
     Ok(Stroke { root_key, packets })
 }
 
@@ -103,19 +121,23 @@ mod tests {
     const OUR_CAT: usize = 24;
 
     fn stroke(index: usize, zones: usize, packets: usize, root: u8) -> Vec<u8> {
-        let mut v = vec![0u8; header_len(index, OUR_CAT, map_len(zones)) + packets * PACKET_LEN];
+        let mut v = vec![
+            0u8;
+            header_len(Layout::V2, index, OUR_CAT, map_len(zones))
+                + packets * packet_len(Layout::V2)
+        ];
         v[ROOT_KEY] = root;
         v
     }
 
     #[test]
     fn header_shrinks_only_for_the_first_stroke() {
-        assert_eq!(header_len(0, OUR_CAT, map_len(1)), 165);
-        assert_eq!(header_len(0, OUR_CAT, map_len(2)), 150);
-        assert_eq!(header_len(0, OUR_CAT, map_len(3)), 135);
+        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(1)), 165);
+        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(2)), 150);
+        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(3)), 135);
         // Position, not the zone table, decides the rest.
-        assert_eq!(header_len(1, OUR_CAT, map_len(2)), 372);
-        assert_eq!(header_len(2, OUR_CAT, map_len(3)), 372);
+        assert_eq!(header_len(Layout::V2, 1, OUR_CAT, map_len(2)), 372);
+        assert_eq!(header_len(Layout::V2, 2, OUR_CAT, map_len(3)), 372);
     }
 
     /// The zone-count ladder, generated for exactly this question: identical audio in
@@ -127,13 +149,13 @@ mod tests {
     fn the_preamble_grows_by_a_packet_rather_than_going_negative() {
         for (zones, header) in [(4, 120), (6, 90), (8, 60), (12, 381), (16, 321)] {
             assert_eq!(
-                header_len(0, OUR_CAT, map_len(zones)),
+                header_len(Layout::V2, 0, OUR_CAT, map_len(zones)),
                 header,
                 "{zones} zones"
             );
         }
         // Eleven zones is the tightest fit before the step: 24 + 951 + 15 = 990.
-        assert_eq!(header_len(0, OUR_CAT, map_len(11)), 15);
+        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(11)), 15);
     }
 
     /// The vendor library's `cat` section is 9 bytes where ours is 24, and that alone
@@ -142,11 +164,33 @@ mod tests {
     #[test]
     fn a_smaller_cat_section_lends_its_bytes_to_the_header() {
         const VENDOR_CAT: usize = 9;
-        assert_eq!(header_len(0, VENDOR_CAT, map_len(6)), 105);
-        assert_eq!(header_len(0, VENDOR_CAT, map_len(11)), 30);
+        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(6)), 105);
+        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(11)), 30);
         // Their smaller cat also defers the step by a zone: ours steps at twelve.
-        assert_eq!(header_len(0, VENDOR_CAT, map_len(12)), 15);
-        assert_eq!(header_len(0, VENDOR_CAT, map_len(16)), 336);
+        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(12)), 15);
+        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(16)), 336);
+    }
+
+    /// Lengths off wide instruments the editor rendered: `cat` is 8 bytes there and
+    /// `map` is 776 + 16 per zone at v3, 1324 + 16 at v4.
+    #[test]
+    fn the_wide_chain_budgets_its_preamble_the_same_way() {
+        const WIDE_CAT: usize = 8;
+        for (layout, map, header) in [
+            (Layout::V3, 792, 52),
+            (Layout::V3, 792 + 16 * 11, 4),
+            (Layout::V3, 792 + 16 * 12, 116),
+            (Layout::V4, 1340, 16),
+            (Layout::V4, 1340 + 16, 128),
+        ] {
+            assert_eq!(
+                header_len(layout, 0, WIDE_CAT, map),
+                header,
+                "{layout:?}, a {map}-byte map"
+            );
+        }
+        assert_eq!(header_len(Layout::V3, 1, WIDE_CAT, 792), 116);
+        assert_eq!(header_len(Layout::V4, 3, WIDE_CAT, 1340), 116);
     }
 
     #[test]

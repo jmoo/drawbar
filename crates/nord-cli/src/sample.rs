@@ -478,8 +478,7 @@ fn predictor(minimising: bool) -> encode::Predictor {
 }
 
 /// What one encoded stroke came out as, for the report.
-fn stroke_line(stream: &[u8], at: usize) -> Result<String, String> {
-    let layout = codec::Layout::V2;
+fn stroke_line(stream: &[u8], at: usize, layout: codec::Layout) -> Result<String, String> {
     let walk = codec::walk(stream, at, layout).map_err(|e| e.to_string())?;
     let audio = codec::decode(stream, at, layout).map_err(|e| e.to_string())?;
     let mut line = format!(
@@ -517,6 +516,7 @@ fn loop_points(text: &str, crossfade: f64) -> Result<encode::Loop, String> {
 /// `nord sample encode`: a WAV into a one-zone v2 instrument.
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     experimental(args.experimental)?;
+    let layout = codec::Layout::V2;
     let source = pcm_source(&args.wav)?;
 
     let stem = args
@@ -528,7 +528,8 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
         .channels(source.channels)
-        .predictor(predictor(args.predict));
+        .predictor(predictor(args.predict))
+        .layout(layout);
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
     }
@@ -546,7 +547,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     ui.out(format!(
         "{} frames -> {}",
         source.frames(),
-        stroke_line(stroke, at)?
+        stroke_line(stroke, at, layout)?
     ));
 
     let path = args
@@ -595,6 +596,7 @@ fn zone_gain(at: &str, gain: f64) -> Result<u32, String> {
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     experimental(args.experimental)?;
+    let layout = codec::Layout::V2;
 
     let project = match nord_format::from_path(&args.project)
         .map_err(|e| format!("{}: {e}", args.project.display()))?
@@ -630,19 +632,22 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             gain: z.gain,
         })
         .collect();
-    let instrument =
-        encode::multi_zone(&zones, &name, predictor(args.predict)).map_err(|e| e.to_string())?;
+    let instrument = encode::multi_zone(&zones, &name, predictor(args.predict), layout)
+        .map_err(|e| e.to_string())?;
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
     ui.out(format!("{} — {} zone(s)", ui.bold(&name), zones.len()));
+    let placed = instrument.zones().map_err(|e| e.to_string())?;
     for (index, zone) in resolved.iter().enumerate() {
-        let (at, stream) = instrument.zone_stream(index).map_err(|e| e.to_string())?;
+        let stream = placed
+            .get(index)
+            .ok_or_else(|| format!("zone{} did not reach the file", index + 1))?;
         ui.out(format!(
             "  zone{:<2} root {:<4} top {:<4} {}",
             index + 1,
             note::name(zone.root_key),
             note::name(zone.top_note),
-            stroke_line(stream, at)?,
+            stroke_line(stream.stream, stream.at, layout)?,
         ));
         let gain = if zone.gain == nsmp::zone::GAIN_UNITY {
             String::new()
@@ -1016,7 +1021,7 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
         // wide generations pack to their own size and are not checked against this one.
         if let (codec::Layout::V2, Some(record)) = (layout, actual.first()) {
             let words = terminator - record.at;
-            if !words.is_multiple_of(nord_format::formats::nsmp::stroke::PACKET_LEN / 3) {
+            if !words.is_multiple_of(nsmp::stroke::packet_len(layout) / layout.word()) {
                 return Err(format!(
                     "stroke {index}: the loop covers {words} words, which is not whole packets"
                 ));
@@ -1463,11 +1468,14 @@ mod tests {
 
     #[test]
     fn a_directory_cannot_claim_an_unmarked_record_as_a_loop() {
-        let mut file = encode::instrument(
+        let mut sample = encode::instrument(
             &vec![0; encode::MIN_FRAMES],
             &encode::Options::new("Unmarked"),
         )
         .unwrap();
+        let nord_format::Sample::V2(file) = &mut sample else {
+            panic!("the default options build the narrow chain");
+        };
         let stroke = nord_format::formats::nsmp::section::find_mut(
             &mut file.body.sections,
             nord_format::formats::nsmp::section::STK,
@@ -1476,7 +1484,6 @@ mod tests {
         let first = stroke.payload[20..22].to_vec();
         stroke.payload[38..40].copy_from_slice(&first);
 
-        let sample = nord_format::Sample::V2(file);
         assert!(deep_body(&sample)
             .unwrap_err()
             .contains("marked record disagrees"));
