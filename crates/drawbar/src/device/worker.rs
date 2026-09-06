@@ -237,7 +237,6 @@ async fn execute<T: Transport>(
     }
 }
 
-/// The unit this class allocates, from the instrument's own partition table.
 async fn write_unit<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -305,8 +304,6 @@ async fn put<T: Transport>(
         None => None,
     };
 
-    // ⚠️ Deleting a class that overwrites in place has never been attempted on the
-    // instrument, and its acceptance of a write at an occupied slot makes it needless.
     if backup.is_some() && !class.overwrites_in_place() {
         emit.send(DeviceEvent::Note(format!(
             "deleting {} to make room",
@@ -361,7 +358,6 @@ async fn put<T: Transport>(
     })
 }
 
-/// Describe the slot state after a failed write.
 fn aftermath(class: ObjectClass, at: Location) -> String {
     match class.overwrites_in_place() {
         true => format!("{} may hold a partly written body", shown(at)),
@@ -405,7 +401,6 @@ fn slot_label(name: &str) -> Option<String> {
     Some(label[..end].trim_end().to_string())
 }
 
-/// One put in a session of its own.
 async fn put_one<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -543,11 +538,9 @@ struct Planned {
     slots: Option<u32>,
 }
 
-/// What one class's walk did, for the line the activity log gets.
 struct Walked {
     banks: u32,
     items: usize,
-    /// Which of the two walks found the slots.
     how: &'static str,
 }
 
@@ -643,7 +636,6 @@ async fn scan_class<T: Transport>(
         .await
 }
 
-/// The device's own banks, as a walk plan.
 fn planned(declared: &[Bank]) -> Result<Vec<Planned>, Error> {
     let mut total = 0u32;
     let mut plan = Vec::with_capacity(declared.len());
@@ -732,7 +724,6 @@ fn shape(
     Ok(slots)
 }
 
-/// One bank's worth of `INFO`, inside a session the caller owns.
 async fn walk_bank<T: Transport, C>(
     s: &mut Session<'_, T, C>,
     bank: u32,
@@ -743,17 +734,23 @@ async fn walk_bank<T: Transport, C>(
     }
     let mut out = Vec::new();
     for slot in 1..=slots {
-        match op::info(s, Location::from_user(bank, slot)).await {
+        let at = Location::from_user(bank, slot);
+        match op::info(s, at).await {
             Ok(info) => out.push(Some(info)),
             Err(Error::DeviceStatus(1)) => out.push(None),
-            Err(Error::DeviceStatus(3)) => break,
+            Err(Error::DeviceStatus(3)) => {
+                return Err(Error::Enumeration {
+                    bank: at.bank,
+                    answered: at,
+                    slots,
+                })
+            }
             Err(e) => return Err(e),
         }
     }
     Ok(out)
 }
 
-/// One bank's worth of `INFO` where the device stated no capacity for it.
 async fn walk_open_bank<T: Transport, C>(
     s: &mut Session<'_, T, C>,
     bank: u32,
@@ -891,10 +888,7 @@ fn unix_now() -> Result<u32, Error> {
     Ok(seconds as u32)
 }
 
-/// What the workspace calls an object read off the instrument.
-///
-/// Files store no name — it lives on the instrument — so a read is the one moment the
-/// name and the bytes are together, and it goes into the entity's label here.
+/// Name a fetched entity after its slot; raw body dumps receive a `.body` suffix.
 fn entity_name(info: &ProgramInfo, body: bool) -> String {
     let name = info.name.trim();
     let name = match name.is_empty() {
@@ -909,12 +903,7 @@ fn entity_name(info: &ProgramInfo, body: bool) -> String {
     }
 }
 
-/// Filename for a rescued slot: the location as the instrument labels it, and the
-/// object's own format tag so it can be handed straight back to a put.
-///
-/// ⚠️ The tag is read out of the header rather than through `envelope::unwrap`, which
-/// also verifies the checksum. These bytes are the last copy of the slot even if they
-/// fail that check, so naming them must not depend on it.
+/// Name rescued bytes without requiring their last copy to pass checksum validation.
 fn rescue_name(at: Location, backup: &[u8]) -> String {
     let format = backup
         .get(8..12)
@@ -932,29 +921,22 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// The rescue entity is the last copy of a program that no longer exists on the
-    /// instrument, so it has to be named something a person can act on.
     #[test]
     fn a_rescued_slot_is_named_for_its_location_and_format() {
         let mut file = vec![0u8; 45];
         file[0..4].copy_from_slice(b"CBIN");
         file[4..8].copy_from_slice(&1u32.to_le_bytes());
         file[8..12].copy_from_slice(b"ne5p");
-        // Wire is zero-indexed, the instrument's labels are not.
         let at = Location { bank: 6, slot: 49 };
         assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
     }
 
-    /// Bytes that do not parse are still the only copy, so they still get a name.
     #[test]
     fn unparseable_bytes_still_get_rescued() {
         let at = Location { bank: 0, slot: 0 };
         assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
     }
 
-    /// The device's name is the name, verbatim — spaces and all. Making it path-safe is
-    /// the export dialog's business; a name sanitised here would go back to the
-    /// instrument sanitised.
     #[test]
     fn a_read_keeps_the_slots_name_verbatim() {
         let info = ProgramInfo {
@@ -969,8 +951,6 @@ mod tests {
         assert_eq!(entity_name(&info, true), "Africa Split.body");
     }
 
-    /// The format tag the local list carries is a filename's business, not the panel's;
-    /// everything else the operator typed goes over as it stands.
     #[test]
     fn a_slot_is_named_what_this_computer_calls_the_object() {
         let label = |name: &str| slot_label(name);
@@ -987,8 +967,6 @@ mod tests {
         );
     }
 
-    /// Nothing to send leaves the slot as the write left it. Blanking a name is not an
-    /// improvement on the wrong one, and it is not what anybody asked for.
     #[test]
     fn a_name_with_nothing_in_it_is_not_sent() {
         for nothing in ["", "   ", "\t"] {
@@ -996,7 +974,6 @@ mod tests {
         }
     }
 
-    /// A name is UTF-8, and half a character is not a shorter name.
     #[test]
     fn a_long_name_is_cut_on_a_character_boundary() {
         let long = "é".repeat(200);
@@ -1006,7 +983,6 @@ mod tests {
         assert_eq!(cut.chars().count(), 32, "whole characters only");
     }
 
-    /// A slot with a blank name still has to produce a usable label.
     #[test]
     fn a_nameless_slot_still_gets_a_label() {
         let info = ProgramInfo {
@@ -1020,16 +996,12 @@ mod tests {
         assert_eq!(entity_name(&info, false), "unnamed");
     }
 
-    /// A verbatim name goes over the wire verbatim: the round trip the operator sees is
-    /// get "Big strings" → edit → send, and the slot must still read "Big strings".
     #[test]
     fn a_spaced_name_survives_to_the_write() {
         assert_eq!(slot_label("Big strings").as_deref(), Some("Big strings"));
     }
 }
 
-/// The write path driven against a stand-in device, which is the only way to see what a
-/// put actually puts on the wire without an instrument on the end of it.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod wire_tests {
     use std::collections::VecDeque;
@@ -1040,38 +1012,17 @@ mod wire_tests {
     use nord_usb::wire::{cmd, ui, Message, Service};
     use nord_usb::Transport;
 
-    /// A device that agrees to everything, and remembers what it was told.
-    ///
-    /// Enough of one to drive a whole operation: the framing rule is that a reply carries
-    /// the request's command `+1` and leads with a status word, and nothing on the write
-    /// path reads a reply's payload. The read paths do, so the commands a scan sends —
-    /// `PARTITIONS`, `STATUS`, `BANKS`, `FOCUS`, `NEXT_SLOT`, `INFO` — are answered from
-    /// the geometry and contents below rather than with the blanket reply.
-    ///
-    /// ⚠️ The progress strings are fire-and-forget — the code that sends them never reads
-    /// a reply. Queueing one for those is how the stream desyncs, so they get none.
+    /// Minimal instrument state for exercising complete worker commands.
     struct Puppet {
         heard: Vec<Message>,
         replies: VecDeque<Vec<u8>>,
-        /// The status `INFO` answers with where [`Puppet::filled`] is not keeping the
-        /// contents. `1` is a vacant slot.
         info: u32,
-        /// Every read fails, the way an unplugged device's does.
         deaf: bool,
-        /// The banks this device actually has, as name and capacity. `INFO` answers
-        /// out-of-range past them whether or not it will name them.
         banks: Vec<(&'static str, u32)>,
-        /// Whether `BANKS` reports [`Puppet::banks`] or refuses to divide the class up.
         reports_geometry: bool,
-        /// `BANKS` answers success with a reply too short to decode, which is neither a
-        /// refusal nor a dead pipe.
         garbles_geometry: bool,
-        /// Occupied addresses and their names. `None` leaves `INFO` answering
-        /// [`Puppet::info`] for every slot and nothing to enumerate.
         filled: Option<Vec<(Location, &'static str)>>,
-        /// Whether `NEXT_SLOT` works, or answers [`op::ENUMERATION_DISABLED`].
         enumerates: bool,
-        /// What `FOCUS` reports. `None` answers "nothing loaded".
         focus: Option<Location>,
         refuses_first_write: bool,
     }
@@ -1112,7 +1063,6 @@ mod wire_tests {
             }
         }
 
-        /// A device with contents: the banks it divides them into, and what is in them.
         fn stocked(banks: &[(&'static str, u32)], filled: &[(Location, &'static str)]) -> Puppet {
             Puppet {
                 banks: banks.to_vec(),
@@ -1121,21 +1071,16 @@ mod wire_tests {
             }
         }
 
-        /// An instrument that will not answer for its own geometry. It still has the
-        /// banks — it just will not name them.
         fn mute_about_geometry(mut self) -> Puppet {
             self.reports_geometry = false;
             self
         }
 
-        /// An instrument whose `BANKS` reply cannot be decoded — a success that yields an
-        /// error, which is neither a refusal nor a dead pipe.
         fn garbling_geometry(mut self) -> Puppet {
             self.garbles_geometry = true;
             self
         }
 
-        /// An instrument that will not enumerate its contents.
         fn no_enumeration(mut self) -> Puppet {
             self.enumerates = false;
             self
@@ -1151,7 +1096,6 @@ mod wire_tests {
             self
         }
 
-        /// The contents of one address, where this device is keeping any.
         fn holds(&self, at: Location) -> Option<&'static str> {
             self.filled
                 .as_ref()?
@@ -1160,12 +1104,7 @@ mod wire_tests {
                 .map(|(_, name)| *name)
         }
 
-        /// A scan command's answer: its status and the payload behind it. `None` leaves
-        /// the blanket reply to stand.
-        ///
-        /// ⚠️ One service only, and the guard is load-bearing: the two number their
-        /// commands independently and they collide — `BANKS` and the UI's `GOODBYE` are
-        /// both `0x02`, `PARTITIONS` and `HELLO` both `0x00`.
+        /// Program and UI services reuse command numbers, so only answer Program frames.
         fn answer(&self, msg: &Message) -> Option<(u32, Vec<u8>)> {
             if !matches!(msg.service, Service::Program) {
                 return None;
@@ -1191,10 +1130,7 @@ mod wire_tests {
                     // total rather than a coincidence of the division.
                     Some((0, words(&[count, total.saturating_sub(count), count, 0, 0])))
                 }
-                // A refusal, and the code is immaterial: what the walk keys on is that
-                // the instrument answered rather than that the pipe failed.
                 cmd::BANKS if !self.reports_geometry => Some((2, Vec::new())),
-                // Success, and a body `Bank::decode_all` cannot read.
                 cmd::BANKS if self.garbles_geometry => Some((0, vec![0xff, 0xff])),
                 cmd::BANKS => {
                     let mut p = msg.args[0..4].to_vec();
@@ -1239,9 +1175,6 @@ mod wire_tests {
                         None => Some((1, words(&[from.bank, op::SLOT_BOUNDARY]))),
                     }
                 }
-                // Enough of a body to be read back: the occupant of a slot has to be
-                // recoverable before a replace will touch it, so a puppet that cannot
-                // serve a read cannot exercise a replace at all.
                 cmd::READ => {
                     let (offset, want) = (
                         u32::from_be_bytes(msg.args[8..12].try_into().unwrap()),
@@ -1274,10 +1207,7 @@ mod wire_tests {
             }
         }
 
-        /// The slot commands it was sent, in order.
-        ///
-        /// ⚠️ One service only. The two number their commands independently, and they
-        /// collide: `SESSION_CLOSE` and the UI's progress label are both `0x06`.
+        /// Program and UI services reuse command numbers, so return Program frames only.
         fn commands(&self) -> Vec<u32> {
             self.heard
                 .iter()
@@ -1291,17 +1221,11 @@ mod wire_tests {
         }
     }
 
-    /// Big-endian words, the way every argument list on this wire is laid out.
     fn words(of: &[u32]) -> Vec<u8> {
         of.iter().flat_map(|w| w.to_be_bytes()).collect()
     }
 
-    /// A `PARTITIONS` reply covering every class code: `[u8 count]` then a
-    /// `[u32 name_len][name][u32 allocation unit][25 further field bytes]` record per
-    /// partition, whose position in the table is the code [`ObjectClass::to_raw`] uses.
-    ///
-    /// The unit is a net storage block in a library and `1` where the counters are
-    /// byte-granular; nothing here reads the fields after it.
+    /// Encode all class partitions with their reported allocation units.
     fn partition_table() -> Vec<u8> {
         const COUNT: u32 = 8;
         const UNREAD_FIELDS: usize = 25;
@@ -1321,8 +1245,6 @@ mod wire_tests {
         p
     }
 
-    /// An `INFO` reply body: the fixed words, then the length-prefixed name, then the
-    /// `0xffffffff` that stands for "this device reported no checksum".
     fn info_payload(at: Location, name: &str) -> Vec<u8> {
         let mut p = words(&[at.bank, at.slot, 121]);
         p.extend_from_slice(b"ne5p");
@@ -1337,8 +1259,6 @@ mod wire_tests {
             let msg = Message::decode(buf)?;
             let spoken = matches!(msg.service, Service::Ui)
                 && matches!(msg.command, ui::LABEL | ui::PERCENT);
-            // A scan reads its replies, so those are answered from the device's state;
-            // everything else takes the blanket agreement.
             let (status, payload) = match self.answer(&msg) {
                 Some(answered) => answered,
                 None => (0, vec![0; 32]),
@@ -1374,8 +1294,6 @@ mod wire_tests {
         workspace.get(id).expect("just made").bytes.clone()
     }
 
-    /// Run one command against `puppet`, which a [`Device`] owns for the length of it and
-    /// hands back for the assertions.
     fn drive(puppet: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {
         let (tx, events) = std::sync::mpsc::channel();
         let emit = Emit::new(tx, egui::Context::default());
@@ -1535,7 +1453,6 @@ mod wire_tests {
         assert_eq!(written_name(&device), "Squabble B");
     }
 
-    /// A batch names every slot it writes into, not just the first.
     #[test]
     fn every_item_of_a_batch_is_named() {
         let bytes = a_program();
@@ -1569,8 +1486,6 @@ mod wire_tests {
         assert_eq!(opens, 2);
     }
 
-    /// ⚠️ A device that stopped answering is not a device that said no. Only the first
-    /// puts the app back into its unattached state.
     #[test]
     fn a_transport_that_fails_is_the_instrument_going_away() {
         let (flow, _) = drive(
@@ -1583,7 +1498,6 @@ mod wire_tests {
         assert!(flow == Flow::Lost);
     }
 
-    /// Two categories of unequal size — 80 addresses — holding two pianos between them.
     fn a_small_library() -> Puppet {
         Puppet::stocked(
             &[("Grand", 50), ("Upright", 30)],
@@ -1594,7 +1508,6 @@ mod wire_tests {
         )
     }
 
-    /// What one bank came back as: its number, how many rows it has, and what is in them.
     fn holdings(bank: &(u32, Vec<Option<String>>)) -> (u32, usize, Vec<(usize, &str)>) {
         let held = bank
             .1
@@ -1609,7 +1522,6 @@ mod wire_tests {
         DeviceCmd::ScanClass { class }
     }
 
-    /// Every bank a scan reported, in the order it reported them.
     fn scanned(events: Receiver<DeviceEvent>) -> Vec<(u32, Vec<Option<String>>)> {
         events
             .try_iter()
@@ -1626,7 +1538,6 @@ mod wire_tests {
             .collect()
     }
 
-    /// Everything the operator was told went wrong, joined for one assertion.
     fn refused(events: Receiver<DeviceEvent>) -> String {
         events
             .try_iter()
@@ -1646,9 +1557,6 @@ mod wire_tests {
             .count()
     }
 
-    /// ⚠️ The whole point of the cursor walk: an `INFO` per *occupied* slot rather than
-    /// per address. Eighty addresses holding two pianos is a handful of reads instead of
-    /// eighty, and the banks that come out are the same shape either way.
     #[test]
     fn a_scan_asks_only_about_the_slots_that_hold_something() {
         let mut device = a_small_library();
@@ -1664,14 +1572,9 @@ mod wire_tests {
             ]
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "the cursor was used");
-        // One read per thing found; the declared banks say where to walk, so nothing is
-        // spent discovering them.
         assert_eq!(counted(&device, cmd::INFO), 2, "not the 80 addresses");
     }
 
-    /// ⚠️ An instrument can refuse to enumerate at all — see [`op::ENUMERATION_DISABLED`]
-    /// for the conditions — so the walk has to fall back to asking about every address,
-    /// and come back with the same banks.
     #[test]
     fn a_device_that_refuses_to_enumerate_is_walked_slot_by_slot() {
         let mut device = a_small_library().no_enumeration();
@@ -1688,13 +1591,9 @@ mod wire_tests {
             "the same folder, found the long way"
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "it was tried");
-        // Every address of both banks. The cursor walk spends no `INFO` before the
-        // refusal: its first frame is the cursor request itself.
         assert_eq!(counted(&device, cmd::INFO), 80);
     }
 
-    /// The device's own banks decide the shape, names and all. Told a category of 50 and
-    /// one of 30, the walk must paint neither two banks of 50 nor one of 80.
     #[test]
     fn the_devices_own_geometry_shapes_the_scan() {
         let mut device = a_small_library();
@@ -1749,9 +1648,28 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::INFO), 0);
     }
 
-    /// The instrument's own bank list is the whole plan, so a class it refuses to divide
-    /// up is not walked at all: its refusal is the scan's error, and the operator is told
-    /// rather than shown a folder nothing on the instrument agrees with.
+    #[test]
+    fn a_bank_ending_before_its_declared_capacity_is_not_reported() {
+        let mut device = Puppet::new(3);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::ScanBank {
+                class: ObjectClass::Program,
+                bank: 1,
+                slots: Some(2),
+            },
+        );
+
+        assert!(flow == Flow::Continue);
+        let events: Vec<DeviceEvent> = events.try_iter().collect();
+        assert!(events.iter().any(
+            |event| matches!(event, DeviceEvent::OpFailed(why) if why.contains("became inconsistent"))
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DeviceEvent::BankScanned { .. })));
+    }
+
     #[test]
     fn a_class_whose_banks_are_refused_is_not_scanned() {
         let mut device = Puppet::stocked(
@@ -1770,9 +1688,6 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::INFO), 0, "and nothing was walked");
     }
 
-    /// ⚠️ A bank list that cannot be decoded is a fault, not a refusal: it stops the whole
-    /// geometry read, because a partly decoded division is one no walk should be planned
-    /// from.
     #[test]
     fn a_bank_list_that_will_not_decode_stops_the_scan() {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]).garbling_geometry();
@@ -1784,9 +1699,6 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::INFO), 0, "and nothing was walked");
     }
 
-    /// ⚠️ A bank the device states no capacity for ends where its contents end. Bounding
-    /// it by anything else reads a library of 60 back as some other number, with no error
-    /// anywhere and the folder's own header saying 60.
     #[test]
     fn an_unbounded_bank_is_read_to_its_last_item() {
         let filled: Vec<(Location, &'static str)> = (0..60)
@@ -1814,8 +1726,6 @@ mod wire_tests {
         assert_eq!(counted(&library, cmd::INFO), MOST_OCCUPIED as usize);
     }
 
-    /// ⚠️ A factory instrument's program banks are full, so the commonest scan there is
-    /// must not take the walk that costs two exchanges per occupied slot.
     #[test]
     fn a_full_class_is_read_slot_by_slot_and_a_sparse_one_by_cursor() {
         let full: Vec<(Location, &'static str)> = (0..2)
@@ -1855,8 +1765,6 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::WRITE_DATA), 0);
     }
 
-    /// The slot the panel is on is read while the class's session is open, so the browser
-    /// can mark it without a transaction of its own.
     #[test]
     fn a_scan_reports_the_slot_the_panel_has_loaded() {
         let panel = Location { bank: 1, slot: 2 };
@@ -1873,9 +1781,6 @@ mod wire_tests {
         assert_eq!(focused, vec![panel]);
     }
 
-    /// ⚠️ An address the instrument does not have must be refused *before* the occupant
-    /// of anything is deleted for it. The reason is the device's own — bank names and a
-    /// count — rather than a status code arriving mid-transfer.
     #[test]
     fn a_write_past_the_end_is_refused_before_anything_is_deleted() {
         let mut device = a_small_library();
@@ -1906,8 +1811,6 @@ mod wire_tests {
         );
     }
 
-    /// A destination the device does have is not refused, so the guard cannot become a
-    /// wall in front of every write.
     #[test]
     fn a_write_to_a_real_address_still_goes() {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]);
@@ -1925,10 +1828,8 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::WRITE_DATA), 1, "the bytes went");
     }
 
-    /// A refusal keeps the instrument: it is attached, it understood, and it declined.
     #[test]
     fn a_refusal_is_not_a_disconnection() {
-        // Status 3: the slot is outside this instrument's range.
         let (flow, _) = drive(
             &mut Puppet::new(3),
             DeviceCmd::SlotInfo {

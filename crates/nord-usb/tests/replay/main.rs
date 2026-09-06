@@ -53,8 +53,6 @@ fn framing(steps: &[Step]) -> Result<(), Failed> {
 /// Replay one script's sections in order, on one transport.
 fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
     let mut t = ReplayTransport::new(script.steps());
-    // What a `device geometry` section read, for the later sections a walk or a library
-    // write bounds itself by.
     let mut geometry = None;
 
     for (i, section) in script.sections.iter().enumerate() {

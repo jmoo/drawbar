@@ -31,11 +31,10 @@ pub enum Error {
     #[error("device reported partition {reported} for the requested partition {requested}")]
     UnexpectedPartition { requested: u32, reported: u32 },
 
-    /// The slot cursor contradicted the geometry the instrument itself declared, so the
-    /// walk can neither continue nor report what it has.
+    /// An inventory walk contradicted the geometry declared by the instrument.
     #[error(
-        "walking bank {bank}, which declares {slots} slots: the cursor answered \
-         {answered:?}, and a walk must advance within its bank and end inside it"
+        "walking bank {bank}, which declares {slots} slots, became inconsistent at \
+         {answered:?}"
     )]
     Enumeration {
         bank: u32,

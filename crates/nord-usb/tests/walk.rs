@@ -107,8 +107,6 @@ fn program_walk_finds_every_occupied_slot() {
     let found = walk("walk-program.script", ObjectClass::Program);
     assert_eq!(found.len(), 385);
 
-    // Every bank the instrument reports as populated is represented, and the walk
-    // leaves each one only after it runs out of occupied slots there.
     let banks: Vec<u32> = found.iter().map(|l| l.bank).collect();
     assert_eq!(*banks.first().unwrap(), 0);
     assert_eq!(*banks.last().unwrap(), 7);

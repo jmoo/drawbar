@@ -73,13 +73,7 @@ pub async fn drive(
     }
 }
 
-/// The banks a walk is bounded by, and the unit a library `put` reserves in: from the
-/// script's own `device geometry` section, else from the committed recording of that
-/// exchange, replayed offline.
-///
-/// A recording made before either was geometry-bounded has no geometry section to read.
-/// The tables are static configuration — confirmed on hardware — so the fixture stands
-/// in for the instrument those recordings were taken from.
+/// Older recordings use the committed hardware geometry when they carry none.
 async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Result<Vec<Bank>> {
     match geometry {
         Some(read) => read.banks(class).map(<[Bank]>::to_vec),
@@ -217,14 +211,14 @@ async fn drive_write(
                 text(args, 2)?,
                 number(args.get(3).map_or("", String::as_str))?,
             );
-            if !class.is_library() {
-                return rw_session!(t, class, |s| op::write(&mut s, at, &file, name, stamp))
-                    .map(|()| None);
-            }
             let unit = declared_unit(geometry, class).await?;
-            rw_session!(t, class, |s| op::write_library(
-                &mut s, unit, at, &file, name, stamp
-            ))
+            rw_session!(t, class, |s| async {
+                if unit.is_bytes() {
+                    op::write(&mut s, at, &file, name, stamp).await
+                } else {
+                    op::write_library(&mut s, unit, at, &file, name, stamp).await
+                }
+            })
             .map(|()| None)
         }
         "move" => {

@@ -315,12 +315,7 @@ fn open_usb() -> Result<Device<UsbTransport>, String> {
     Ok(Device::new(transport))
 }
 
-/// The instrument's own tables, read in a transaction of their own.
-///
-/// ⚠️ The first read has to happen here rather than inside the command that needs it: a
-/// recording is a sequence of intents, and partition frames buried in the middle of a
-/// `walk` or a `put` belong to a section that does not send them. Every later use — this
-/// crate's and [`Device::write`]'s — is answered from the cache.
+/// Cache geometry in its own intent so later recordings contain only their own frames.
 fn read_geometry(device: &mut Device<UsbTransport>) -> Result<&Geometry, String> {
     transact(device, "device geometry", |d| {
         nord_usb::block_on(d.geometry()).map(|_| ())
@@ -329,7 +324,6 @@ fn read_geometry(device: &mut Device<UsbTransport>) -> Result<&Geometry, String>
     nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
 }
 
-/// The banks bounding a walk of `class`, from those tables.
 fn declared_banks(
     device: &mut Device<UsbTransport>,
     class: ObjectClass,
@@ -741,12 +735,8 @@ pub fn send(
         None => None,
     };
 
-    // ⚠️ Read before the occupant is deleted: `Device::write` sizes a library reservation
-    // from the instrument's tables, that read must not land inside the write's own
-    // recorded section, and a failure here must find the slot still intact.
-    if class.is_library() {
-        read_geometry(&mut device)?;
-    }
+    // Read before deletion so geometry failure leaves the occupant intact.
+    read_geometry(&mut device)?;
 
     if existing.is_some() && !in_place {
         ui.note(format!("deleting {} to make room", shown(at)));

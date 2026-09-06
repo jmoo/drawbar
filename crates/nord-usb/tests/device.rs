@@ -479,6 +479,27 @@ fn an_unbounded_bank_walks_past_a_bounded_banks_capacity() {
     assert_eq!(found.unwrap(), hits);
 }
 
+#[test]
+fn an_unbounded_walk_that_exhausts_the_host_budget_is_an_error() {
+    let banks = [bank(0, Bank::UNBOUNDED)];
+    let hits: Vec<Location> = (0..=op::ENUMERATION_LIMIT as u32)
+        .map(|slot| Location { bank: 0, slot })
+        .collect();
+    let mut steps = cursor(from_boundary(0), Some(hits[0]));
+    for pair in hits.windows(2) {
+        steps.extend(cursor(pair[0], Some(pair[1])));
+    }
+
+    let (found, _) = walk(&banks, steps);
+    assert!(matches!(
+        found,
+        Err(Error::ScanLimit {
+            bank: 0,
+            limit
+        }) if limit == op::ENUMERATION_LIMIT as u32
+    ));
+}
+
 /// The frame sequence follows hardware recordings; the multi-block body is synthetic.
 #[test]
 fn a_library_write_reserves_the_shortfall_it_is_short_by() {
@@ -606,7 +627,6 @@ fn a_slot_class_write_sends_no_reserve_step() {
         ));
     }
     steps.extend(session_close());
-
     steps.extend(session_open(ObjectClass::SetList));
     steps.push(notify(ui::label("Downloading...").unwrap()));
     let mut begin = slot_args(at);

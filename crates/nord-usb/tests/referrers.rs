@@ -348,9 +348,6 @@ fn referrers_require_a_set_list_session() {
     assert!(matches!(err, nord_usb::Error::InvalidArgument(_)), "{err}");
 }
 
-/// A cursor that keeps advancing past the bank's declared capacity must not have the
-/// slots it did report passed off as the whole answer: "no set list is affected" is the
-/// one wrong thing to say before a move.
 #[test]
 fn a_walk_that_outruns_its_bank_is_an_error_rather_than_a_truncated_list() {
     let declared = [Bank {

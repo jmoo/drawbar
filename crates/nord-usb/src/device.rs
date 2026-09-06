@@ -187,10 +187,10 @@ impl<T: Transport> Device<T> {
         Ok(self.geometry.as_ref().expect("just read"))
     }
 
-    /// Write a file into a slot, preparing library space first where the class needs it.
+    /// Write a file using the allocation unit reported for its partition.
     ///
     /// A library write is refused `0x16` without a prepared block per storage block of
-    /// body, so a library class reserves in the same transaction as the transfer, sized
+    /// body, so block-allocated storage reserves in the transfer's transaction, sized
     /// by that partition's [`AllocationUnit`] and the body the file carries — the CBIN
     /// body, which is shorter than the file by its header.
     ///
@@ -205,24 +205,19 @@ impl<T: Transport> Device<T> {
         name: &str,
         timestamp: u32,
     ) -> Result<()> {
-        if class.is_library() {
-            let unit = self.geometry().await?.allocation_unit(class)?;
-            return self
-                .destructive(class, async |s| {
-                    op::write_library(s, unit, at, file, name, timestamp).await
-                })
-                .await;
-        }
-        self.destructive(class, async |s| op::write(s, at, file, name, timestamp).await)
-            .await
+        let unit = self.geometry().await?.allocation_unit(class)?;
+        self.destructive(class, async |s| {
+            if unit.is_bytes() {
+                op::write(s, at, file, name, timestamp).await
+            } else {
+                op::write_library(s, unit, at, file, name, timestamp).await
+            }
+        })
+        .await
     }
 }
 
-/// Run `f` and attempt cleanup on both paths, keeping `f`'s error over cleanup's.
-///
-/// `changed` collects the session's [`Session::instrument_changed`] whichever way the
-/// chain went: a notification that arrived is a fact about the instrument, not about the
-/// operation that happened to be running.
+/// Attempt cleanup on both paths; preserve the chain error and change notification.
 async fn bracket<T: Transport, C, R>(
     changed: &mut bool,
     mut session: Session<'_, T, C>,
