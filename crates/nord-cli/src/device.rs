@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use nord_usb::op;
 use nord_usb::transport::{Transport, UsbTransport};
 use nord_usb::wire::{Bank, Location, ProgramInfo, Status};
-use nord_usb::{op as usb_op, Device, Geometry, ObjectClass, Product, Session};
+use nord_usb::{op as usb_op, Device, Geometry, ObjectClass, Session};
 
 use crate::slot::{addr, noun, shown};
 use crate::ui::Ui;
@@ -307,18 +307,12 @@ fn transact<T>(
 }
 
 fn open_usb() -> Result<Device<UsbTransport>, String> {
-    let info = nord_usb::transport::usb::list()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no Clavia device found".to_string())?;
-    let product = Product::from_product_id(info.product_id());
-    let transport = UsbTransport::open(&info).map_err(|e| e.to_string())?;
+    let transport = UsbTransport::open_first().map_err(|e| e.to_string())?;
     let transport = match RECORDING.get().and_then(Option::as_deref) {
         Some(path) => transport.recording_to(path).map_err(|e| e.to_string())?,
         None => transport,
     };
-    Ok(Device::new(transport, product))
+    Ok(Device::new(transport))
 }
 
 /// The instrument's own tables, read in a transaction of their own.
@@ -1302,7 +1296,11 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
                 // The sentinel is not a capacity and must not be summed into one.
                 let bounded: Vec<&Bank> = banks.iter().filter(|b| b.is_bounded()).collect();
                 let slots = match bounded.len() == banks.len() {
-                    true => bounded.iter().map(|b| b.slots).sum::<u32>().to_string(),
+                    true => bounded
+                        .iter()
+                        .map(|bank| u64::from(bank.slots))
+                        .sum::<u64>()
+                        .to_string(),
                     false => "—".to_string(),
                 };
                 let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();

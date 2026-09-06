@@ -7,7 +7,7 @@
 use std::sync::mpsc::{self, Sender};
 
 use eframe::egui;
-use nord_usb::device::{Device, Product};
+use nord_usb::device::Device;
 use nord_usb::transport::{usb, UsbTransport};
 
 use super::worker::{self, Emit, Flow};
@@ -118,6 +118,6 @@ fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
         serial: info.serial_number().map(str::to_string),
         vendor_id: info.vendor_id(),
     };
-    let device = Device::new(transport, Product::from_product_id(info.product_id()));
+    let device = Device::new(transport);
     Ok((card, device))
 }

@@ -441,11 +441,15 @@ impl Partition {
     /// Confirmed on hardware.
     pub fn allocation_unit(&self) -> Result<AllocationUnit> {
         let word = read_u32(&self.fields, 0)?;
-        NonZeroU32::new(word).map(AllocationUnit).ok_or_else(|| {
+        let bytes = NonZeroU32::new(word).ok_or_else(|| {
             Error::InvalidArgument(format!(
                 "partition {} reports an allocation unit of 0, which sizes nothing",
                 self.index
             ))
+        })?;
+        Ok(AllocationUnit {
+            partition: self.index,
+            bytes,
         })
     }
 }
@@ -455,16 +459,23 @@ impl Partition {
 ///
 /// See [`Partition::allocation_unit`], which is the only source of one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AllocationUnit(NonZeroU32);
+pub struct AllocationUnit {
+    partition: u32,
+    bytes: NonZeroU32,
+}
 
 impl AllocationUnit {
     pub fn get(self) -> u32 {
-        self.0.get()
+        self.bytes.get()
     }
 
     /// Whether this partition's counters are byte-granular rather than block-granular.
     pub fn is_bytes(self) -> bool {
-        self.0.get() == 1
+        self.bytes.get() == 1
+    }
+
+    pub(crate) fn belongs_to(self, partition: u32) -> bool {
+        self.partition == partition
     }
 
     /// How many units a body of `bytes` occupies.
@@ -474,10 +485,10 @@ impl AllocationUnit {
     pub fn blocks_for(self, bytes: usize) -> Result<u32> {
         let bytes = u64::try_from(bytes)
             .map_err(|_| Error::InvalidArgument("the body is larger than u64".into()))?;
-        u32::try_from(bytes.div_ceil(u64::from(self.0.get()))).map_err(|_| {
+        u32::try_from(bytes.div_ceil(u64::from(self.bytes.get()))).map_err(|_| {
             Error::InvalidArgument(format!(
                 "a body of {bytes} bytes is more units of {} than the wire's u32 holds",
-                self.0.get()
+                self.bytes.get()
             ))
         })
     }

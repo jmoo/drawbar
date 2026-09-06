@@ -350,7 +350,7 @@ pub async fn write<T: Transport>(
     transfer_in(session, at, file, name, timestamp).await
 }
 
-/// Write an entity into a library slot, reclaiming the space it needs first.
+/// Write an entity into block-allocated storage, reclaiming the space it needs first.
 ///
 /// A library write is refused `0x16` without a prepared block per storage block of body,
 /// so the [`reserve`] and the transfer share one transaction. `unit` is the partition's
@@ -365,11 +365,17 @@ pub async fn write_library<T: Transport>(
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
-    let class = session.class();
-    if !class.is_library() {
+    let partition = session.class().to_raw();
+    if !unit.belongs_to(partition) {
         return Err(Error::InvalidArgument(format!(
-            "{} is a slot class, so it has no blocks to reserve: use write",
-            class.label()
+            "the allocation unit belongs to another partition, not {}",
+            session.class().label()
+        )));
+    }
+    if unit.is_bytes() {
+        return Err(Error::InvalidArgument(format!(
+            "{} is byte-allocated, so it has no blocks to reserve: use write",
+            session.class().label()
         )));
     }
     let blocks = unit.blocks_for(envelope::unwrap(file)?.body.0.len())?;
@@ -527,6 +533,20 @@ pub async fn banks<T: Transport, C>(
     let resp = session
         .request(Service::Program, 10, cmd::BANKS, &partition.to_be_bytes())
         .await?;
+    let payload = resp.payload();
+    if payload.len() < 4 {
+        return Err(Error::Truncated {
+            got: payload.len(),
+            need: 4,
+        });
+    }
+    let reported = u32::from_be_bytes(payload[..4].try_into().unwrap());
+    if reported != partition {
+        return Err(Error::UnexpectedPartition {
+            requested: partition,
+            reported,
+        });
+    }
     Bank::decode_all(&resp)
 }
 
@@ -594,6 +614,10 @@ pub const ENUMERATION_DISABLED: u32 = 0x11;
 /// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
 /// walking forward, its last when walking backward.
 pub const SLOT_BOUNDARY: u32 = 0xffff_ffff;
+
+/// Host safety budget for one occupied-slot walk. Exceeding it is an error, not a
+/// truncated inventory.
+pub const ENUMERATION_LIMIT: usize = 4096;
 
 /// The next occupied slot after `at`, or `None` once the walk runs off the end.
 ///
@@ -666,24 +690,31 @@ pub async fn occupied_slots<T: Transport, C>(
             bank: bank.index,
             slot: SLOT_BOUNDARY,
         };
-        let mut held = 0u32;
+        let mut previous = None;
         while let Some(next) = next_occupied(session, at).await? {
-            let advanced =
-                next.bank == bank.index && (at.slot == SLOT_BOUNDARY || next.slot > at.slot);
-            held += 1;
-            let overrun = match bank.is_bounded() {
-                true => held > bank.slots,
-                false => held >= Bank::UNBOUNDED,
+            let limit = match bank.is_bounded() {
+                true => bank.slots.min(Bank::UNBOUNDED),
+                false => Bank::UNBOUNDED,
             };
-            if !advanced || overrun {
+            let advanced = next.bank == bank.index
+                && next.slot < limit
+                && previous.is_none_or(|slot| next.slot > slot);
+            if !advanced {
                 return Err(Error::Enumeration {
                     bank: bank.index,
                     answered: next,
                     slots: bank.slots,
                 });
             }
+            if found.len() >= ENUMERATION_LIMIT {
+                return Err(Error::ScanLimit {
+                    bank: bank.index,
+                    limit: ENUMERATION_LIMIT as u32,
+                });
+            }
             found.push(next);
             at = next;
+            previous = Some(next.slot);
         }
     }
     Ok(found)

@@ -3,10 +3,8 @@
 //! Everything here is generic over [`Transport`], so the browser and the desktop run
 //! the same code and only the spawn glue is cfg'd.
 //!
-//! ⚠️ **Every session commits, including on the error path.** An abandoned transaction
-//! leaves the instrument mid-operation with its progress label still painted, and the
-//! only way out is a power cycle. [`Device::read`] and [`Device::destructive`] are what
-//! guarantee it, so nothing here opens a [`Session`] of its own.
+//! ⚠️ Every operation attempts explicit session cleanup, including after an error.
+//! [`Device::read`] and [`Device::destructive`] own that contract here.
 
 use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
@@ -246,33 +244,28 @@ async fn execute<T: Transport>(
     }
 }
 
-/// The unit a library class reserves in, from the instrument's own partition table.
-/// `None` for a slot class, whose counters are byte-granular and reserve nothing.
-async fn library_unit<T: Transport>(
+/// The unit this class allocates, from the instrument's own partition table.
+async fn write_unit<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
-) -> Result<Option<AllocationUnit>, Error> {
-    match class.is_library() {
-        true => device.geometry().await?.allocation_unit(class).map(Some),
-        false => Ok(None),
-    }
+) -> Result<AllocationUnit, Error> {
+    device.geometry().await?.allocation_unit(class)
 }
 
 /// Write a file into a slot of the class the session is open on.
 ///
-/// `unit` is what [`library_unit`] answered for that class, so a library reserves its
-/// blocks in this same transaction and a slot class sends the transfer alone.
+/// The reported allocation unit decides whether the write reserves blocks first.
 async fn store<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
-    unit: Option<AllocationUnit>,
+    unit: AllocationUnit,
     at: Location,
     file: &[u8],
     name: &str,
     timestamp: u32,
 ) -> Result<(), Error> {
-    match unit {
-        Some(unit) => op::write_library(s, unit, at, file, name, timestamp).await,
-        None => op::write(s, at, file, name, timestamp).await,
+    match unit.is_bytes() {
+        true => op::write(s, at, file, name, timestamp).await,
+        false => op::write_library(s, unit, at, file, name, timestamp).await,
     }
 }
 
@@ -280,17 +273,17 @@ async fn store<T: Transport>(
 /// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
-    unit: Option<AllocationUnit>,
+    unit: AllocationUnit,
     at: Location,
     what: &str,
     bytes: Vec<u8>,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
-    // ⚠️ Only a completed preflight may refuse the address. A failed preflight does
-    // not prove the write invalid; the authoritative info/write exchanges still follow.
-    if let Ok(Some(why)) = op::check_address(s, at).await {
-        return Ok(Err(format!("{}: {why}", shown(at))));
+    match op::check_address(s, at).await {
+        Ok(Some(why)) => return Ok(Err(format!("{}: {why}", shown(at)))),
+        Ok(None) | Err(Error::DeviceStatus(_)) => {}
+        Err(error) => return Err(error),
     }
     let class = s.class();
     let timestamp = unix_now()?;
@@ -300,7 +293,6 @@ async fn put<T: Transport>(
         Err(Error::DeviceStatus(1)) => None,
         Err(e) => return Ok(Err(spoil(gone, Some(at))(e))),
     };
-
     // Confirmed on hardware.
     // Library slots take their name from `BEGIN_WRITE`; buffer classes discard it.
     let write_name = slot_label(what)
@@ -352,9 +344,9 @@ async fn put<T: Transport>(
             )));
             let restore_name = existing
                 .as_ref()
-                .map(|info| info.name.clone())
+                .map(|info| info.name.as_str())
                 .unwrap_or_default();
-            match store(s, unit, at, &backup, &restore_name, timestamp).await {
+            match store(s, unit, at, &backup, restore_name, timestamp).await {
                 Ok(()) => Err(format!(
                     "{e} ({} was restored, and is unchanged)",
                     shown(at)
@@ -438,7 +430,7 @@ async fn put_one<T: Transport>(
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
-    let unit = library_unit(device, class).await?;
+    let unit = write_unit(device, class).await?;
     device
         .destructive(class, async |s| {
             put(s, unit, at, what, bytes, emit, gone).await
@@ -483,7 +475,7 @@ async fn batch<T: Transport>(
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Option<String>, Error> {
-    let unit = library_unit(device, class).await?;
+    let unit = write_unit(device, class).await?;
     device
         .destructive(class, async |s| {
             for item in items {
@@ -538,17 +530,8 @@ async fn slot_info<T: Transport>(
 /// A shorter per-frame limit for metadata walks; transfers keep the session default.
 const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 
-/// ⚠️ A ceiling on a walk, not a device fact. What really ends a walk is the device's own
-/// out-of-range answer; this bounds the total for an instrument that never gives one.
-const MOST_OCCUPIED: usize = 4096;
-
-/// How many vacant slots in a row end a walk over a bank whose capacity the device would
-/// not state.
-///
-/// ⚠️ A guard, not a device fact: such a bank has no stated end, so without this a device
-/// that answers "empty" rather than "out of range" past its last item would be asked
-/// [`MOST_OCCUPIED`] times.
-const VACANT_RUN: u32 = 32;
+/// Host safety limit for one complete class scan, not an instrument capacity.
+const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
 /// Every slot of one bank, in one session.
 ///
@@ -561,12 +544,18 @@ async fn scan_bank<T: Transport>(
     bank: u32,
     slots: Option<u32>,
 ) -> Result<Vec<Option<ProgramInfo>>, Error> {
+    if slots.is_some_and(|capacity| capacity > MOST_OCCUPIED) {
+        return Err(Error::ScanLimit {
+            bank: bank.saturating_sub(1),
+            limit: MOST_OCCUPIED,
+        });
+    }
     device
         .read(class, async |s| {
             s.set_read_limit(SCAN_READ_LIMIT);
             match slots {
                 Some(capacity) => walk_bank(s, bank, capacity).await,
-                None => walk_open_bank(s, bank).await,
+                None => walk_open_bank(s, bank, MOST_OCCUPIED).await,
             }
         })
         .await
@@ -602,11 +591,8 @@ async fn scan_class<T: Transport>(
     // Taken out of the cache before the class's own session opens, which borrows the
     // device for the length of the transaction.
     let declared = device.geometry().await?.banks(class)?.to_vec();
-    let plan = planned(&declared);
+    let plan = planned(&declared)?;
 
-    let mut banks = 0;
-    let mut items = 0;
-    let mut how = "slot by slot";
     device
         .read(class, async |s| {
             // Bounds the closing exchanges as well as the walk, which is the half a
@@ -639,60 +625,88 @@ async fn scan_class<T: Transport>(
 
             // The cursor is useful only for sparse content. A class holding an unbounded
             // bank declares no capacity to be sparse against, so it takes the cursor.
-            let capacity: Option<u32> = plan.iter().map(|planned| planned.slots).sum();
+            let capacity = plan
+                .iter()
+                .try_fold(0u32, |sum, planned| sum.checked_add(planned.slots?));
             let sparse = capacity.is_none_or(|capacity| worth_the_cursor(held, capacity));
             let found = match sparse {
                 true => occupied(s, &declared).await?,
                 false => None,
             };
 
-            if let Some(found) = found {
-                how = "by cursor";
-                for planned in &plan {
-                    let slots = shape(&found, planned);
-                    banks += 1;
-                    items += slots.iter().filter(|slot| slot.is_some()).count();
-                    emit.send(DeviceEvent::BankScanned {
-                        class,
-                        bank: planned.bank.get(),
-                        slots,
-                    });
+            let mut remaining = MOST_OCCUPIED;
+            let mut scanned = Vec::with_capacity(plan.len());
+            let how = match found {
+                Some(found) => {
+                    for planned in &plan {
+                        let slots = shape(&found, planned, remaining)?;
+                        remaining -= slots.len() as u32;
+                        scanned.push((planned.bank.get(), slots));
+                    }
+                    "by cursor"
                 }
-                return Ok(());
-            }
+                None => {
+                    for planned in &plan {
+                        let slots = match planned.slots {
+                            Some(capacity) if capacity <= remaining => {
+                                walk_bank(s, planned.bank.get(), capacity).await?
+                            }
+                            Some(_) => {
+                                return Err(Error::ScanLimit {
+                                    bank: planned.bank.get() - 1,
+                                    limit: MOST_OCCUPIED,
+                                })
+                            }
+                            None => walk_open_bank(s, planned.bank.get(), remaining).await?,
+                        };
+                        remaining -= slots.len() as u32;
+                        scanned.push((planned.bank.get(), slots));
+                    }
+                    "slot by slot"
+                }
+            };
 
-            for planned in &plan {
-                let slots = match planned.slots {
-                    Some(capacity) => walk_bank(s, planned.bank.get(), capacity).await?,
-                    None => walk_open_bank(s, planned.bank.get()).await?,
-                };
-                banks += 1;
-                items += slots.iter().filter(|slot| slot.is_some()).count();
-                emit.send(DeviceEvent::BankScanned {
-                    class,
-                    bank: planned.bank.get(),
-                    slots,
-                });
+            let items = scanned
+                .iter()
+                .map(|(_, slots)| slots.iter().filter(|slot| slot.is_some()).count())
+                .sum();
+            let banks = scanned.len() as u32;
+            for (bank, slots) in scanned {
+                emit.send(DeviceEvent::BankScanned { class, bank, slots });
             }
-            Ok(())
+            Ok(Walked { banks, items, how })
         })
         .await
-        .map(|()| Walked { banks, items, how })
 }
 
 /// The device's own banks, as a walk plan.
-fn planned(declared: &[Bank]) -> Vec<Planned> {
-    declared
-        .iter()
-        .map(|bank| Planned {
+fn planned(declared: &[Bank]) -> Result<Vec<Planned>, Error> {
+    let mut total = 0u32;
+    let mut plan = Vec::with_capacity(declared.len());
+    for bank in declared {
+        let slots = bank.is_bounded().then_some(bank.slots);
+        if let Some(slots) = slots {
+            total = total.checked_add(slots).ok_or(Error::ScanLimit {
+                bank: bank.index,
+                limit: MOST_OCCUPIED,
+            })?;
+            if total > MOST_OCCUPIED {
+                return Err(Error::ScanLimit {
+                    bank: bank.index,
+                    limit: MOST_OCCUPIED,
+                });
+            }
+        }
+        plan.push(Planned {
             bank: bank
                 .index
                 .checked_add(1)
                 .and_then(NonZeroU32::new)
                 .expect("a decoded bank index fits its panel number"),
-            slots: bank.is_bounded().then_some(bank.slots),
-        })
-        .collect()
+            slots,
+        });
+    }
+    Ok(plan)
 }
 
 /// Use cursor enumeration below half capacity, where its two exchanges per item win.
@@ -714,6 +728,18 @@ async fn occupied<T: Transport, C>(
         Err(Error::DeviceStatus(_)) => return Ok(None),
         Err(e) => return Err(e),
     };
+    if found.len() > MOST_OCCUPIED as usize {
+        return Err(Error::ScanLimit {
+            bank: found[MOST_OCCUPIED as usize].bank,
+            limit: MOST_OCCUPIED,
+        });
+    }
+    if let Some(at) = found.iter().find(|at| at.slot >= MOST_OCCUPIED) {
+        return Err(Error::ScanLimit {
+            bank: at.bank,
+            limit: MOST_OCCUPIED,
+        });
+    }
     let mut out = Vec::with_capacity(found.len());
     for at in found {
         match op::info(s, at).await {
@@ -728,22 +754,30 @@ async fn occupied<T: Transport, C>(
 
 /// One bank's rows, from what the cursor walk found across the whole class.
 ///
-/// ⚠️ **A bank is sized to its stated capacity, or to the last thing in it where the
-/// device stated none** — and [`walk_open_bank`] holds to the same rule. The two walks
-/// have to agree: a folder that gains or loses trailing rows depending on which one read
-/// it is one the operator cannot drag into with any confidence.
-fn shape(found: &[(Location, ProgramInfo)], planned: &Planned) -> Vec<Option<ProgramInfo>> {
+/// A bounded bank keeps its declared shape; an open bank ends after its last item.
+fn shape(
+    found: &[(Location, ProgramInfo)],
+    planned: &Planned,
+    limit: u32,
+) -> Result<Vec<Option<ProgramInfo>>, Error> {
     let bank = planned.bank.get() - 1;
     let mine: Vec<&(Location, ProgramInfo)> =
         found.iter().filter(|(at, _)| at.bank == bank).collect();
     let past = mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0);
-    let mut slots = vec![None; planned.slots.unwrap_or(past).max(past) as usize];
+    let len = planned.slots.unwrap_or(past).max(past);
+    if len > limit {
+        return Err(Error::ScanLimit {
+            bank,
+            limit: MOST_OCCUPIED,
+        });
+    }
+    let mut slots = vec![None; len as usize];
     for (at, info) in mine {
         if let Some(cell) = slots.get_mut(at.slot as usize) {
             *cell = Some(info.clone());
         }
     }
-    slots
+    Ok(slots)
 }
 
 /// One bank's worth of `INFO`, inside a session the caller owns.
@@ -752,6 +786,9 @@ async fn walk_bank<T: Transport, C>(
     bank: u32,
     slots: u32,
 ) -> Result<Vec<Option<ProgramInfo>>, Error> {
+    if slots == 0 {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for slot in 1..=slots {
         // A refusal keeps the session in step — request and reply still pair — so the
@@ -767,37 +804,35 @@ async fn walk_bank<T: Transport, C>(
 }
 
 /// One bank's worth of `INFO` where the device stated no capacity for it.
-///
-/// ⚠️ Sized to the last thing in it, which is the shape [`shape`] gives the same bank —
-/// see the invariant there. Ends on the device's out-of-range answer, on [`VACANT_RUN`]
-/// vacant slots in a row, or on the budget, in that order of preference.
 async fn walk_open_bank<T: Transport, C>(
     s: &mut Session<'_, T, C>,
     bank: u32,
+    limit: u32,
 ) -> Result<Vec<Option<ProgramInfo>>, Error> {
+    if limit == 0 {
+        return Err(Error::ScanLimit {
+            bank: bank.saturating_sub(1),
+            limit: MOST_OCCUPIED,
+        });
+    }
     let mut out = Vec::new();
-    let mut vacant = 0;
-    for slot in 1..=MOST_OCCUPIED as u32 {
+    for slot in 1..=limit {
         match op::info(s, Location::from_user(bank, slot)).await {
-            Ok(info) => {
-                vacant = 0;
-                out.push(Some(info));
-            }
-            Err(Error::DeviceStatus(1)) => {
-                vacant += 1;
-                if vacant >= VACANT_RUN {
-                    break;
+            Ok(info) => out.push(Some(info)),
+            Err(Error::DeviceStatus(1)) => out.push(None),
+            Err(Error::DeviceStatus(3)) => {
+                while matches!(out.last(), Some(None)) {
+                    out.pop();
                 }
-                out.push(None);
+                return Ok(out);
             }
-            Err(Error::DeviceStatus(3)) => break,
             Err(e) => return Err(e),
         }
     }
-    while matches!(out.last(), Some(None)) {
-        out.pop();
-    }
-    Ok(out)
+    Err(Error::ScanLimit {
+        bank: bank.saturating_sub(1),
+        limit: MOST_OCCUPIED,
+    })
 }
 
 /// One read in its own session: the slot's metadata, then its bytes.
@@ -1054,7 +1089,6 @@ mod wire_tests {
     use std::sync::mpsc::Receiver;
 
     use super::*;
-    use nord_usb::device::Product;
     use nord_usb::wire::{cmd, ui, Message, Service};
     use nord_usb::Transport;
 
@@ -1398,7 +1432,7 @@ mod wire_tests {
         let (tx, events) = std::sync::mpsc::channel();
         let emit = Emit::new(tx, egui::Context::default());
         let lent = std::mem::replace(puppet, Puppet::new(1));
-        let mut device = Device::new(lent, Product::Unknown(0));
+        let mut device = Device::new(lent);
         let flow = nord_usb::block_on(run(&mut device, cmd, &emit));
         *puppet = device.into_transport();
         (flow, events)
@@ -1440,6 +1474,7 @@ mod wire_tests {
                     bytes: a_program(),
                 },
             );
+
             assert!(flow == Flow::Continue, "the instrument is still there");
             assert_eq!(written_name(&device), "Africa-Split", "{}", class.label());
             assert_eq!(
@@ -1466,6 +1501,7 @@ mod wire_tests {
                 bytes: a_program(),
             },
         );
+
         assert_eq!(written_names(&device), ["Africa-Split", "Squabble B"]);
     }
 
@@ -1547,6 +1583,7 @@ mod wire_tests {
                 bytes: a_program(),
             },
         );
+
         assert_eq!(written_name(&device), "Squabble B");
     }
 
@@ -1574,13 +1611,14 @@ mod wire_tests {
             ["Africa-Split", "Squabble-B"],
             "one name per item"
         );
-        // And one session around the pair, which is what a batch is for.
+        // One geometry read and one destructive session around the pair, which is what
+        // a batch is for.
         let opens = device
             .commands()
             .into_iter()
             .filter(|command| *command == cmd::SESSION_OPEN)
             .count();
-        assert_eq!(opens, 1);
+        assert_eq!(opens, 2);
     }
 
     /// ⚠️ A device that stopped answering is not a device that said no. Only the first
@@ -1736,6 +1774,33 @@ mod wire_tests {
         assert_eq!(widths, vec![50, 30], "and its capacities");
     }
 
+    #[test]
+    fn an_oversized_geometry_is_refused_before_slot_reads() {
+        let mut device = Puppet::stocked(&[("Bank 1", MOST_OCCUPIED + 1)], &[]);
+        let (flow, events) = drive(&mut device, scan(ObjectClass::Program));
+
+        assert!(flow == Flow::Continue);
+        assert!(refused(events).contains("cannot be scanned completely"));
+        assert_eq!(counted(&device, cmd::INFO), 0);
+    }
+
+    #[test]
+    fn an_oversized_bank_scan_is_refused_before_slot_reads() {
+        let mut device = Puppet::new(1);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::ScanBank {
+                class: ObjectClass::Program,
+                bank: 1,
+                slots: Some(MOST_OCCUPIED + 1),
+            },
+        );
+
+        assert!(flow == Flow::Continue);
+        assert!(refused(events).contains("cannot be scanned completely"));
+        assert_eq!(counted(&device, cmd::INFO), 0);
+    }
+
     /// The instrument's own bank list is the whole plan, so a class it refuses to divide
     /// up is not walked at all: its refusal is the scan's error, and the operator is told
     /// rather than shown a folder nothing on the instrument agrees with.
@@ -1789,14 +1854,16 @@ mod wire_tests {
         assert!(banks[0].1.iter().all(Option::is_some));
     }
 
-    /// A bank with nothing in it and no stated capacity has one shape, whichever walk
-    /// found it. Two answers for the same folder is a folder nobody can drag into.
     #[test]
-    fn an_empty_unbounded_bank_looks_the_same_to_both_walks() {
-        let library = || Puppet::stocked(&[("Samp Lib", Bank::UNBOUNDED)], &[]);
-        let (_, by_cursor) = drive(&mut library(), scan(ObjectClass::Sample));
-        let (_, slot_by_slot) = drive(&mut library().no_enumeration(), scan(ObjectClass::Sample));
-        assert_eq!(scanned(by_cursor), scanned(slot_by_slot));
+    fn an_unbounded_bank_without_an_end_does_not_report_a_partial_scan() {
+        let at = Location { bank: 0, slot: 40 };
+        let mut library =
+            Puppet::stocked(&[("Samp Lib", Bank::UNBOUNDED)], &[(at, "Marimba")]).no_enumeration();
+        let (flow, events) = drive(&mut library, scan(ObjectClass::Sample));
+
+        assert!(flow == Flow::Continue);
+        assert!(refused(events).contains("cannot be scanned completely"));
+        assert_eq!(counted(&library, cmd::INFO), MOST_OCCUPIED as usize);
     }
 
     /// ⚠️ A factory instrument's program banks are full, so the commonest scan there is
@@ -1823,11 +1890,8 @@ mod wire_tests {
         assert!(counted(&sparse, cmd::INFO) < 100);
     }
 
-    /// ⚠️ The address preflight is read-only, so a preflight that could not be *made* must
-    /// not stop a write — nor look like the instrument going away, which would drop every
-    /// cached name in the browser over a reply that failed to decode.
     #[test]
-    fn a_preflight_that_cannot_be_made_does_not_stop_the_write() {
+    fn a_malformed_preflight_stops_the_write() {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]).garbling_geometry();
         let (flow, _) = drive(
             &mut device,
@@ -1840,7 +1904,7 @@ mod wire_tests {
             },
         );
         assert!(flow == Flow::Continue, "not a disconnection");
-        assert_eq!(counted(&device, cmd::WRITE_DATA), 1, "the bytes still went");
+        assert_eq!(counted(&device, cmd::WRITE_DATA), 0);
     }
 
     /// The slot the panel is on is read while the class's session is open, so the browser

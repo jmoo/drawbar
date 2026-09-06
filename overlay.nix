@@ -432,8 +432,7 @@ let
   # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
 
   corpusTree = builtins.fetchGit {
-    ref = "device-facade-walks";
-    rev = "f2bba8dec199ad02d1946fbfd15c67a5b972ab5a";
+    rev = "12981e60819d8cf3953815134ca9865c375647d0";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 

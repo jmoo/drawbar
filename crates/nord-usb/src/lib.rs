@@ -34,7 +34,7 @@ pub mod sleep;
 pub mod transport;
 pub mod wire;
 
-pub use device::{Device, Geometry, Product};
+pub use device::{Device, Geometry};
 pub use error::{Error, Result};
 pub use session::{ReadOnly, ReadWrite, Session};
 pub use transport::Transport;

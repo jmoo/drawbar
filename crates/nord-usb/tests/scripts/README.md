@@ -51,6 +51,8 @@ failed: a section that says nothing expects `ok`.
 | `ok` | the operation and its closing exchanges succeeded |
 | `err device-status <code>` | the device refused it with exactly that status (`0x15`, `1`) |
 | `err unexpected-response` | a reply answered the wrong command |
+| `err unexpected-location` | a reply echoed the wrong bank or slot |
+| `err unexpected-partition` | a bank table echoed the wrong partition |
 | `err enumeration` | the slot cursor contradicted the instrument's declared geometry |
 | `err transport` | the byte pipe failed |
 | `err replay` | the script and the code under test contradicted each other |

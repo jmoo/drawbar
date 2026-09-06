@@ -8,7 +8,7 @@
 #[path = "support/scripts.rs"]
 mod scripts;
 
-use nord_usb::device::{Device, Product};
+use nord_usb::device::Device;
 use nord_usb::transport::{Direction, ReplayTransport, Step};
 use nord_usb::wire::{cmd, ui, Bank, Message, Partition, Service};
 use nord_usb::{envelope, op, Error, Location, ObjectClass, Session};
@@ -31,7 +31,6 @@ fn request(command: u32, args: &[u8]) -> Step {
     out(Message::new(Service::Program, 10, command, args.to_vec()).encode())
 }
 
-/// A successful reply to `command`: status `0`, then the device's own payload.
 fn response(command: u32, payload: &[u8]) -> Step {
     r#in(
         Message::new(
@@ -56,7 +55,10 @@ fn refusal(command: u32, status: u32) -> Step {
     )
 }
 
-/// A fire-and-forget UI frame the device never answers.
+fn changed() -> Step {
+    r#in(Message::new(Service::Program, 10, cmd::CHANGED, Vec::new()).encode())
+}
+
 fn notify(msg: Message) -> Step {
     out(msg.encode())
 }
@@ -99,7 +101,6 @@ fn slot_args(at: Location) -> Vec<u8> {
     v
 }
 
-/// A chain that succeeded still owes the instrument its closing exchanges.
 #[test]
 fn a_read_bracket_closes_its_transaction() {
     let mut steps = session_open(ObjectClass::Program);
@@ -107,7 +108,7 @@ fn a_read_bracket_closes_its_transaction() {
     steps.push(response(cmd::FOCUS, &words(&[2, 13])));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
     let at = pollster::block_on(device.read(ObjectClass::Program, async |s| op::focus(s).await))
         .expect("the chain and its close both succeeded");
 
@@ -118,8 +119,6 @@ fn a_read_bracket_closes_its_transaction() {
     );
 }
 
-/// A device refusal leaves request and reply in step, so the bracket must still close —
-/// and report what the chain hit rather than what the close returned.
 #[test]
 fn a_read_bracket_closes_after_a_failed_chain_and_reports_the_chains_error() {
     let at = Location { bank: 0, slot: 4 };
@@ -128,9 +127,7 @@ fn a_read_bracket_closes_after_a_failed_chain_and_reports_the_chains_error() {
     steps.push(refusal(cmd::INFO, 1));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
-    // The script holds one `INFO`, so a chain that carried on past the refusal would
-    // fail against the script rather than against the device.
+    let mut device = Device::new(ReplayTransport::new(steps));
     let err = pollster::block_on(device.read(ObjectClass::SetList, async |s| {
         op::info(s, at).await?;
         op::info(s, at).await
@@ -144,11 +141,10 @@ fn a_read_bracket_closes_after_a_failed_chain_and_reports_the_chains_error() {
     );
 }
 
-/// The tables the Electro 5 reports, from the committed recording of that exchange.
 #[test]
 fn geometry_is_read_once_and_reports_the_instruments_own_tables() {
     let steps = scripts::fixture("device/geometry.script").steps();
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
 
     pollster::block_on(async {
         let geometry = device.geometry().await.expect("the recorded tables");
@@ -187,16 +183,13 @@ fn geometry_is_read_once_and_reports_the_instruments_own_tables() {
         "the geometry read did not consume the recording"
     );
 
-    // Nothing is left to read, so a second call answering at all proves it sent nothing.
     pollster::block_on(async { device.geometry().await.expect("the cached tables") });
 }
 
-/// A class the partition table does not list has no geometry, and asking is an error
-/// rather than a default that would size a destructive operation.
 #[test]
 fn a_class_the_instrument_does_not_have_is_an_error() {
     let steps = scripts::fixture("device/geometry.script").steps();
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
     pollster::block_on(async {
         let geometry = device.geometry().await.unwrap();
         assert!(geometry.banks(ObjectClass::Unknown(9)).is_err());
@@ -205,8 +198,6 @@ fn a_class_the_instrument_does_not_have_is_an_error() {
     assert!(device.transport().is_exhausted());
 }
 
-/// A refused `BANKS` is remembered as that partition's answer and re-reported, so a
-/// walk of that class fails rather than running unbounded.
 #[test]
 fn a_refused_bank_list_is_reported_for_that_class_alone() {
     let mut steps = session_open(ObjectClass::Program);
@@ -221,7 +212,7 @@ fn a_refused_bank_list_is_reported_for_that_class_alone() {
     steps.push(refusal(cmd::BANKS, 0x15));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
     pollster::block_on(async {
         let geometry = device.geometry().await.unwrap();
         assert_eq!(geometry.banks(ObjectClass::Unknown(0)).unwrap().len(), 2);
@@ -229,12 +220,35 @@ fn a_refused_bank_list_is_reported_for_that_class_alone() {
             geometry.banks(ObjectClass::Piano),
             Err(Error::DeviceStatus(0x15))
         ));
-        // The partition record still decodes; only its bank list was refused.
         assert_eq!(
             geometry.allocation_unit(ObjectClass::Piano).unwrap().get(),
             100
         );
     });
+    assert!(device.transport().is_exhausted());
+}
+
+#[test]
+fn a_bank_reply_for_another_partition_is_rejected() {
+    let mut steps = session_open(ObjectClass::Program);
+    steps.push(request(cmd::PARTITIONS, &[]));
+    steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1])));
+    steps.push(request(cmd::BANKS, &0u32.to_be_bytes()));
+    steps.push(response(cmd::BANKS, &banks_payload(1, &[("Bank 1", 50)])));
+    steps.extend(session_close());
+
+    let mut device = Device::new(ReplayTransport::new(steps));
+    let error = pollster::block_on(device.geometry())
+        .err()
+        .expect("the echo names partition 1");
+
+    assert!(matches!(
+        error,
+        Error::UnexpectedPartition {
+            requested: 0,
+            reported: 1
+        }
+    ));
     assert!(device.transport().is_exhausted());
 }
 
@@ -291,11 +305,11 @@ fn a_block_count_past_the_wires_u32_is_an_error() {
     let unit = partition_reporting(1).allocation_unit().unwrap();
     assert!(unit.is_bytes());
     assert_eq!(unit.blocks_for(u32::MAX as usize).unwrap(), u32::MAX);
-    assert!(unit.blocks_for(u32::MAX as usize + 1).is_err());
+    if let Ok(too_many) = usize::try_from(u64::from(u32::MAX) + 1) {
+        assert!(unit.blocks_for(too_many).is_err());
+    }
 }
 
-/// A unit of zero would size every write as needing nothing; a short record has no unit
-/// at all. Neither may be read as "one byte".
 #[test]
 fn a_partition_that_states_no_usable_unit_is_an_error() {
     assert!(partition_reporting(0).allocation_unit().is_err());
@@ -317,7 +331,6 @@ fn bank(index: u32, slots: u32) -> Bank {
     }
 }
 
-/// One cursor request from `at`, and the answer the device gives it.
 fn cursor(at: Location, answer: Option<Location>) -> Vec<Step> {
     let mut args = slot_args(at);
     // Direction, 0 = forward.
@@ -326,7 +339,6 @@ fn cursor(at: Location, answer: Option<Location>) -> Vec<Step> {
         request(cmd::NEXT_SLOT, &args),
         match answer {
             Some(found) => response(cmd::NEXT_SLOT, &slot_args(found)),
-            // Status 1 past the last occupied slot is how the device ends a bank.
             None => refusal(cmd::NEXT_SLOT, 1),
         },
     ]
@@ -339,8 +351,6 @@ fn from_boundary(bank: u32) -> Location {
     }
 }
 
-/// Replay one walk. `steps` is everything after the session opens, closing exchanges
-/// included where the walk is expected to reach them.
 fn walk(banks: &[Bank], steps: Vec<Step>) -> (nord_usb::Result<Vec<Location>>, bool) {
     let mut t = ReplayTransport::new(
         session_open(ObjectClass::Program)
@@ -353,8 +363,6 @@ fn walk(banks: &[Bank], steps: Vec<Step>) -> (nord_usb::Result<Vec<Location>>, b
         let found = op::occupied_slots(&mut s, banks).await;
         match found.is_ok() {
             true => s.commit().await.unwrap(),
-            // A walk that bailed owes nothing more; the frames it did not reach are the
-            // report.
             false => s.abort(),
         }
         found
@@ -363,8 +371,6 @@ fn walk(banks: &[Bank], steps: Vec<Step>) -> (nord_usb::Result<Vec<Location>>, b
     (found, exhausted)
 }
 
-/// The walk visits every declared bank and leaves each one where the device says the
-/// bank is over — an empty bank included.
 #[test]
 fn a_bounded_bank_ends_where_the_device_ends_it() {
     let banks = [bank(0, 3), bank(1, 3)];
@@ -380,8 +386,41 @@ fn a_bounded_bank_ends_where_the_device_ends_it() {
     assert_eq!(found.unwrap(), hits);
 }
 
-/// A bank cannot hold more objects than the instrument says it has slots for. Reporting
-/// the extras would mean trusting a cursor that has already contradicted the geometry.
+#[test]
+fn a_sparse_cursor_hit_must_fit_the_declared_bank() {
+    let banks = [bank(0, 2)];
+    let outside = Location {
+        bank: 0,
+        slot: 1_000,
+    };
+    let (found, _) = walk(&banks, cursor(from_boundary(0), Some(outside)));
+
+    assert!(matches!(
+        found,
+        Err(Error::Enumeration {
+            bank: 0,
+            answered,
+            slots: 2
+        }) if answered == outside
+    ));
+}
+
+#[test]
+fn the_boundary_sentinel_is_not_a_slot() {
+    let banks = [bank(0, 50)];
+    let boundary = from_boundary(0);
+    let (found, _) = walk(&banks, cursor(boundary, Some(boundary)));
+
+    assert!(matches!(
+        found,
+        Err(Error::Enumeration {
+            bank: 0,
+            answered,
+            slots: 50
+        }) if answered == boundary
+    ));
+}
+
 #[test]
 fn more_hits_than_the_bank_declares_is_an_error() {
     let banks = [bank(0, 2)];
@@ -408,7 +447,6 @@ fn more_hits_than_the_bank_declares_is_an_error() {
     );
 }
 
-/// A cursor answering the position it was asked about would spin forever.
 #[test]
 fn a_cursor_that_does_not_advance_is_an_error() {
     let banks = [bank(0, 50)];
@@ -423,8 +461,6 @@ fn a_cursor_that_does_not_advance_is_an_error() {
     );
 }
 
-/// The `(Native)` partitions report a sentinel instead of a capacity, so their banks
-/// must not be held to any stated one.
 #[test]
 fn an_unbounded_bank_walks_past_a_bounded_banks_capacity() {
     let banks = [bank(0, Bank::UNBOUNDED)];
@@ -443,12 +479,7 @@ fn an_unbounded_bank_walks_past_a_bounded_banks_capacity() {
     assert_eq!(found.unwrap(), hits);
 }
 
-/// A library write reserves in the same transaction as the transfer, and reclaims the
-/// shortfall between what the body needs and what the partition has free — the need
-/// measured in the unit the instrument reported, not a constant.
-///
-/// The Electro 5 recordings under `sample/put-*` are the hardware evidence for the
-/// frames; what is synthetic here is a body that spans more than one unit.
+/// The frame sequence follows hardware recordings; the multi-block body is synthetic.
 #[test]
 fn a_library_write_reserves_the_shortfall_it_is_short_by() {
     let at = Location { bank: 0, slot: 98 };
@@ -456,7 +487,6 @@ fn a_library_write_reserves_the_shortfall_it_is_short_by() {
     let file = envelope::wrap("nsmp", at, 1, &body).unwrap();
     let (name, timestamp) = ("two blocks", 1_787_522_949);
 
-    // Unit 100: a 250-byte body is three blocks, and one is free, so two are reclaimed.
     let mut steps = session_open(ObjectClass::Program);
     steps.push(request(cmd::PARTITIONS, &[]));
     steps.push(response(
@@ -506,7 +536,7 @@ fn a_library_write_reserves_the_shortfall_it_is_short_by() {
     steps.push(response(cmd::END_TRANSFER, &slot_args(at)));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
     pollster::block_on(device.write(ObjectClass::Sample, at, &file, name, timestamp))
         .expect("the reserve and the transfer share one transaction");
     assert!(
@@ -515,16 +545,12 @@ fn a_library_write_reserves_the_shortfall_it_is_short_by() {
     );
 }
 
-/// The two writes are not interchangeable — one reserves and one must not — so each
-/// refuses the other's class before a byte of the body is committed to.
 #[test]
 fn a_write_aimed_at_the_wrong_kind_of_class_is_refused_before_any_frame() {
     let at = Location { bank: 0, slot: 0 };
     let file = envelope::wrap("nsmp", at, 1, &[0u8; 8]).unwrap();
     let unit = partition_reporting(131_064).allocation_unit().unwrap();
 
-    // Each script holds the opening and closing exchanges and nothing else, so a write
-    // that reached the wire would fail against the script rather than return.
     let mut library = ReplayTransport::new(
         session_open(ObjectClass::Sample)
             .into_iter()
@@ -562,7 +588,6 @@ fn a_write_aimed_at_the_wrong_kind_of_class_is_refused_before_any_frame() {
     assert!(slots.is_exhausted(), "a refused write sent a frame");
 }
 
-/// A slot class has no blocks to reserve, so nothing precedes its transfer.
 #[test]
 fn a_slot_class_write_sends_no_reserve_step() {
     let at = Location { bank: 6, slot: 9 };
@@ -570,7 +595,19 @@ fn a_slot_class_write_sends_no_reserve_step() {
     let file = envelope::wrap("ne5t", at, 1, &body).unwrap();
     let (name, timestamp) = ("Friday", 1_787_428_287);
 
-    let mut steps = session_open(ObjectClass::SetList);
+    let mut steps = session_open(ObjectClass::Program);
+    steps.push(request(cmd::PARTITIONS, &[]));
+    steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1; 6])));
+    for partition in 0..6u32 {
+        steps.push(request(cmd::BANKS, &partition.to_be_bytes()));
+        steps.push(response(
+            cmd::BANKS,
+            &banks_payload(partition, &[("Bank 1", 50)]),
+        ));
+    }
+    steps.extend(session_close());
+
+    steps.extend(session_open(ObjectClass::SetList));
     steps.push(notify(ui::label("Downloading...").unwrap()));
     let mut begin = slot_args(at);
     begin.extend_from_slice(&words(&[body.len() as u32]));
@@ -589,20 +626,16 @@ fn a_slot_class_write_sends_no_reserve_step() {
     steps.push(response(cmd::END_TRANSFER, &slot_args(at)));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
     pollster::block_on(device.write(ObjectClass::SetList, at, &file, name, timestamp))
         .expect("a set list write is the transfer alone");
     assert!(device.transport().is_exhausted());
 }
 
-/// The device queues a `CHANGED` of its own when its contents change outside the
-/// session — a front-panel STORE does it — and the caller has to learn that whatever it
-/// read may already be stale. The flag outlives the transaction the notification arrived
-/// in, and reading it clears it.
 #[test]
 fn a_change_notification_reaches_the_caller_once() {
     let steps = scripts::fixture("session/changed_notification.script").steps();
-    let mut device = Device::new(ReplayTransport::new(steps), Product::Unknown(0));
+    let mut device = Device::new(ReplayTransport::new(steps));
 
     pollster::block_on(device.read(ObjectClass::Program, async |_| Ok(())))
         .expect("the notification is drained, not mistaken for the reply");
@@ -613,10 +646,34 @@ fn a_change_notification_reaches_the_caller_once() {
 }
 
 #[test]
-fn a_product_id_names_the_instrument_it_belongs_to() {
-    assert_eq!(
-        Product::from_product_id(nord_usb::transport::PRODUCT_ID_ELECTRO5),
-        Product::Electro5
-    );
-    assert_eq!(Product::from_product_id(0x1234), Product::Unknown(0x1234));
+fn a_change_notification_during_close_reaches_the_caller() {
+    for during in [cmd::SESSION_CLOSE, ui::GOODBYE] {
+        let mut steps = session_open(ObjectClass::Program);
+        steps.push(request(cmd::SESSION_CLOSE, &[]));
+        if during == cmd::SESSION_CLOSE {
+            steps.push(changed());
+        }
+        steps.push(response(cmd::SESSION_CLOSE, &[]));
+        steps.push(notify(Message::new(
+            Service::Ui,
+            ui::SUBSYSTEM,
+            ui::GOODBYE,
+            Vec::new(),
+        )));
+        if during == ui::GOODBYE {
+            steps.push(changed());
+        }
+        steps.push(r#in(
+            Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE + 1, vec![0; 4]).encode(),
+        ));
+
+        let mut device = Device::new(ReplayTransport::new(steps));
+        pollster::block_on(device.read(ObjectClass::Program, async |_| Ok(()))).unwrap();
+
+        assert!(
+            device.take_changed(),
+            "notification before {during:#x} reply"
+        );
+        assert!(device.transport().is_exhausted());
+    }
 }

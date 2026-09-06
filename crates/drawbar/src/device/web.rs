@@ -12,7 +12,7 @@ use std::sync::mpsc::Sender;
 
 use eframe::egui;
 use js_sys::Promise;
-use nord_usb::device::{Device, Product};
+use nord_usb::device::Device;
 use nord_usb::transport::{web::WebUsbTransport, VENDOR_ID};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
@@ -100,11 +100,10 @@ impl Link {
                 serial: chosen.serial_number(),
                 vendor_id: chosen.vendor_id(),
             };
-            let product = Product::from_product_id(chosen.product_id());
             match WebUsbTransport::open(chosen.clone()).await {
                 Ok(transport) => {
                     let mut state = inner.borrow_mut();
-                    state.device = Some(Device::new(transport, product));
+                    state.device = Some(Device::new(transport));
                     state.chosen = Some(chosen);
                     drop(state);
                     emit.send(DeviceEvent::Connected(card));
