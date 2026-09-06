@@ -1190,6 +1190,36 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     }
 }
 
+/// A decibel back to a linear gain with [`nsmp::zone::GAIN_BITS`] fractional bits,
+/// exponentiated wider than the field and rounded once, as the writer does it. Silence
+/// and a negative gain — `-inf` and a NaN — both come back zero.
+fn gain_units(decibels: f32) -> u64 {
+    (10f64.powf(f64::from(decibels) / 20.0) * f64::from(nsmp::zone::GAIN_UNITY)).round() as u64
+}
+
+/// The wide render of the same instrument, where the corpus holds one. Both wide
+/// generations state the gain the same way, so either serves.
+fn wide_twin(path: &std::path::Path) -> Option<&'static nord_format::cbin::Cbin<nsmp::SampleV3>> {
+    let stem = path.file_stem()?.to_string_lossy();
+    ["nsmp3", "nsmp4"].iter().find_map(|extension| {
+        let name = format!("{stem}.{extension}");
+        corpus().iter().find_map(|s| match &s.entity {
+            Entity::Sample(Sample::V3(wide)) if s.path.ends_with(&name) => Some(wide),
+            _ => None,
+        })
+    })
+}
+
+/// The gain the stroke `id` names was built from, read off a wide render's decibel.
+fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
+    let layout = nsmp::codec::Layout::from_version(wide.header.version);
+    let (_, stroke) = wide
+        .stroke_streams()
+        .into_iter()
+        .find(|(_, s)| s[3] == id)?;
+    Some(gain_units(nsmp::codec::zone_gain_db(stroke, layout)?))
+}
+
 /// The wide half of the law the test below states for v2: the same reciprocal of the
 /// same file peak, scaled by the gain the stroke's own decibel field round-trips to.
 ///
@@ -1226,8 +1256,7 @@ fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
         let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
         for (_, stroke) in streams {
             let decibels = nsmp::codec::zone_gain_db(stroke, layout).expect("a wide header");
-            let units = 10f64.powf(f64::from(decibels) / 20.0) * f64::from(nsmp::zone::GAIN_UNITY);
-            let mantissa = (reciprocal * units.round() as u64) >> (nsmp::zone::GAIN_BITS + 3);
+            let mantissa = (reciprocal * gain_units(decibels)) >> (nsmp::zone::GAIN_BITS + 3);
             assert_eq!(
                 stroke[9..12],
                 ((mantissa % (1 << 24)) as u32).to_be_bytes()[1..],
@@ -1240,12 +1269,18 @@ fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
     assert!(seen > 0, "no self-generated wide stroke");
 }
 
+/// The narrow half of that law, over every self-generated v2 specimen whatever its
+/// gain. Library instruments are left out: their strokes keep the mantissa of whatever
+/// file first encoded them.
+///
+/// A narrow header has no decibel field and the zone record states the gain mod `2^24`,
+/// so past a gain of 16 the record reads back quieter than the mantissa was built from.
+/// Where the corpus holds a wide render of the same instrument, its decibel is the gain
+/// this asserts against; the record is only trusted where there is no twin.
 #[test]
 fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
-    // Every self-generated v2 specimen, whatever its gain. Library instruments are left
-    // out: their strokes keep the mantissa of whatever file first encoded them.
     let layout = nsmp::codec::Layout::V2;
-    let mut seen = 0;
+    let (mut seen, mut twinned) = (0, 0);
     for (specimen, sample) in v2_samples() {
         if !specimen
             .path
@@ -1254,6 +1289,7 @@ fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
         {
             continue;
         }
+        let twin = wide_twin(&specimen.path);
         let zones = sample.zones().unwrap();
         let streams = sample.stroke_streams();
         let peak = streams
@@ -1262,19 +1298,30 @@ fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
             .max()
             .unwrap_or(0) as u32;
         for (_, stroke) in streams {
-            let gain = zones
-                .iter()
-                .find(|z| z.stroke_id == stroke[3])
-                .map_or(nsmp::zone::GAIN_UNITY, |z| z.gain);
+            let (gain, whence) = match twin.and_then(|wide| wide_stroke_gain(wide, stroke[3])) {
+                Some(units) => {
+                    twinned += 1;
+                    (units, "a wide twin's decibel")
+                }
+                None => (
+                    u64::from(
+                        zones
+                            .iter()
+                            .find(|z| z.stroke_id == stroke[3])
+                            .map_or(nsmp::zone::GAIN_UNITY, |z| z.gain),
+                    ),
+                    "the zone record",
+                ),
+            };
             let peak = u64::from(peak.max(1));
             let bits = 64 - peak.leading_zeros();
             let exact_power = u32::from(peak.is_power_of_two());
             let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
-            let mantissa = (reciprocal * u64::from(gain)) >> (nsmp::zone::GAIN_BITS + 3);
+            let mantissa = (reciprocal * gain) >> (nsmp::zone::GAIN_BITS + 3);
             assert_eq!(
                 stroke[9..12],
-                (mantissa as u32).to_be_bytes()[1..],
-                "{} stroke {} at gain {gain}",
+                ((mantissa % (1 << 24)) as u32).to_be_bytes()[1..],
+                "{} stroke {} at gain {gain} from {whence}",
                 specimen.path.display(),
                 stroke[3]
             );
@@ -1282,6 +1329,7 @@ fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
         }
     }
     assert!(seen > 0, "no self-generated v2 stroke");
+    assert!(twinned > 0, "no narrow stroke had a wide twin");
 }
 
 #[test]
