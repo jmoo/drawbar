@@ -6,9 +6,9 @@
 //! field lattice quantised the way the instrument's encoder quantises. What it is
 //! **not** is byte-identical to what Nord Sample Editor would produce for the same
 //! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
-//! `1e-8` per tap, which leaves a field in a few thousand one count off, the rule the
-//! editor uses to pick a mono stroke's quantiser shift is only partly known, and the
-//! encoder's own choice of predictor order per record is reproduced only under
+//! `1e-8` per tap, which leaves a field in a few thousand one count off, the mono
+//! quantiser shift is inferred from chosen plaintext, and the editor's own choice of
+//! predictor order per record is reproduced only under
 //! [`Predictor::Minimising`].
 //!
 //! So three claims: a file from here **round-trips through this crate's own decoder
@@ -95,19 +95,41 @@ const CHUNK: usize = 32;
 /// stereo stroke this is the whole of the shift rule.
 const PEAK_WIDTH: u8 = 14;
 
-/// Width a mono stroke's peak is shifted to instead. The editor spends this further bit
-/// on mono strokes by a rule this crate does not know — measured not to be the packet
-/// allocation, nor any statistic of the stream's values, and moved by where the stream
-/// resynchronises; the tighter cap stands in for it.
-const MONO_WIDTH: u8 = 13;
+/// Per-channel last-record widths that do not carry the extra quantiser bit.
+const DEAD_LAST_RECORD: [usize; 3] = [24, 29, 32];
 
-/// The width the quantiser shifts a stroke's peak to.
-const fn peak_width(channels: usize) -> u8 {
-    if channels == 1 {
-        MONO_WIDTH
-    } else {
-        PEAK_WIDTH
+/// Whether a mono stroke spends one more quantiser bit than its peak needs, narrowing
+/// its widest field below [`PEAK_WIDTH`].
+///
+/// At the 14-bit shift, a value outside the signed 13-bit range buys the bit only in
+/// the last record of a 1:1 run whose width is not in [`DEAD_LAST_RECORD`].
+/// Inferred from specimens; not confirmed on hardware.
+fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
+    let over = 1i64 << (PEAK_WIDTH - 2);
+    let shift = peak_shift(values, PEAK_WIDTH);
+    [(0, plan.warmup), (plan.resync_at, plan.resync)]
+        .into_iter()
+        .any(|(base, run)| {
+            let Some(&last) = chunks(run, plan.chunk()).last() else {
+                return false;
+            };
+            !DEAD_LAST_RECORD.contains(&(last / plan.channels))
+                && values[base + run - last..base + run].iter().any(|&v| {
+                    let v = v >> shift;
+                    v < -over || v >= over
+                })
+        })
+}
+
+/// The smallest nonnegative shift fitting every value in `width` bits.
+fn peak_shift(values: &[i64], width: u8) -> i32 {
+    let low = values.iter().copied().min().unwrap_or(0);
+    let high = values.iter().copied().max().unwrap_or(0);
+    let mut shift = 0i32;
+    while width_of(low >> shift, high >> shift) > width {
+        shift += 1;
     }
+    shift
 }
 
 /// Widest field a record header can declare, from its four-bit width. Padding stores
@@ -712,9 +734,8 @@ fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
 }
 
 /// Resample and choose the smallest nonnegative shift that fits the stroke's peak into
-/// [`peak_width`] bits: the format's own fourteen on a stereo stroke, where the editor
-/// shifts for nothing else, and the mono stand-in otherwise. `forced` lays the stroke
-/// out at that shift instead.
+/// [`PEAK_WIDTH`] bits, plus the further bit a mono stroke spends when
+/// [`spends_extra_bit`] says so. `forced` lays the stroke out at that shift instead.
 ///
 /// Each channel is resampled on its own lattice and the results interleaved, because
 /// that is what the stream carries; the shift and statistic B are one pair for the
@@ -753,12 +774,8 @@ fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
             };
         }
     }
-    let low = raw.iter().copied().min().unwrap_or(0);
-    let high = raw.iter().copied().max().unwrap_or(0);
-
-    let width = peak_width(channels);
-    let mut shift = 0i32;
-    while width_of(low >> shift, high >> shift) > width {
+    let mut shift = peak_shift(&raw, PEAK_WIDTH);
+    if channels == 1 && spends_extra_bit(&raw, plan) {
         shift += 1;
     }
     if let Some(bits) = forced {
@@ -1944,7 +1961,6 @@ mod tests {
             .collect();
         let mono = quantise(&left, &plan(frames, 1).unwrap(), None);
         let stereo = quantise(&both, &plan(frames, 2).unwrap(), None);
-        assert_eq!(mono.shift, 2);
         assert_eq!(stereo.shift, 1);
         let widest = stereo
             .values
@@ -1953,13 +1969,81 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(widest, PEAK_WIDTH);
+        // The mono stroke sees the same peak and may spend one further bit on top.
+        assert!((stereo.shift..=stereo.shift + 1).contains(&mono.shift));
+    }
+
+    /// A stroke whose only loud field sits at `field`, resynchronising at `resync`.
+    fn probe(resync: usize, field: usize) -> (Plan, Vec<i64>) {
+        let frames = 100_000;
+        let secondary = resync as f64 * f64::from(PITCH_NUM) / f64::from(PITCH_DEN);
+        let plan = Plan::new(frames, 1, secondary).unwrap();
+        assert_eq!(plan.resync_at, resync);
+        let mut values = vec![0i64; plan.fields];
+        values[field] = 1 << (PEAK_WIDTH - 2);
+        (plan, values)
     }
 
     #[test]
-    fn the_mono_extra_bit_does_not_weigh_the_packet_allocation() {
-        assert_eq!(header_shift(&sine(261.6256, 32_000.0, 4_920), 1), 3);
-        assert_eq!(header_shift(&sine(261.6256, 32_000.0, 4_200), 1), 3);
-        assert_eq!(header_shift(&sine(440.0, 12_000.0, 44_100), 1), 2);
+    fn only_a_run_s_last_record_buys_the_extra_bit() {
+        // The resync run at 5464 is 89 fields: [0, 32), [32, 64), [64, 89).
+        let (plan, values) = probe(5464, 5464 + 76);
+        assert!(spends_extra_bit(&values, &plan));
+        for offset in [12, 61, 89, 95] {
+            let (plan, values) = probe(5464, 5464 + offset);
+            assert!(!spends_extra_bit(&values, &plan), "run offset {offset}");
+        }
+    }
+
+    fn opening_run(last: usize, value: i64) -> (Plan, Vec<i64>) {
+        let warmup = if last == CHUNK { CHUNK } else { CHUNK + last };
+        let plan = Plan {
+            frames: 0,
+            channels: 1,
+            fields: warmup,
+            resync_at: warmup,
+            warmup,
+            resync: 0,
+            cells_before: 0,
+            cells_after: 0,
+            looped: None,
+        };
+        let mut values = vec![0; warmup];
+        values[warmup - 1] = value;
+        (plan, values)
+    }
+
+    #[test]
+    fn each_last_record_width_obeys_the_measured_rule() {
+        for (last, buys) in [
+            (24, false),
+            (25, true),
+            (26, true),
+            (27, true),
+            (28, true),
+            (29, false),
+            (30, true),
+            (31, true),
+            (32, false),
+        ] {
+            let (plan, values) = opening_run(last, 1 << (PEAK_WIDTH - 2));
+            assert_eq!(spends_extra_bit(&values, &plan), buys, "width {last}");
+        }
+    }
+
+    #[test]
+    fn the_extra_bit_uses_signed_thirteen_bit_bounds() {
+        for (value, buys) in [(-4097, true), (-4096, false), (4095, false), (4096, true)] {
+            let (plan, values) = opening_run(25, value);
+            assert_eq!(spends_extra_bit(&values, &plan), buys, "value {value}");
+        }
+    }
+
+    #[test]
+    fn the_extra_bit_narrows_the_stroke_the_header_declares() {
+        let loud = header_shift(&sine(440.0, 12_000.0, 44_100), 1);
+        let quiet = header_shift(&sine(440.0, 3_000.0, 44_100), 1);
+        assert_eq!(loud - quiet, 2);
     }
 
     fn header_shift(source: &[i16], channels: u16) -> i32 {
@@ -2002,7 +2086,7 @@ mod tests {
                     };
                     assert!((-limit..limit).contains(&v), "{spec:?} field {k} = {v}");
                 }
-                assert!(spec.width <= MONO_WIDTH || spec.order > 0);
+                assert!(spec.width <= PEAK_WIDTH || spec.order > 0);
             }
         }
     }
