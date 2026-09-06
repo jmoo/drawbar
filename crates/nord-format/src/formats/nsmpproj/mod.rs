@@ -63,6 +63,20 @@ pub const FIRST_ZONE_ID: u32 = 129;
 /// Inferred from specimens; not confirmed on hardware.
 pub const MIN_SECONDARY_START: f64 = 92.0;
 
+/// Lowest loop start the editor keeps, in frames, see [`repaired_loop_start`].
+/// Inferred from specimens; not confirmed on hardware.
+pub const MIN_LOOP_START: f64 = 92.0;
+
+/// The loop start the editor encodes from, given what the project states.
+///
+/// A loop is pushed up to [`MIN_LOOP_START`] on load and keeps its stated length, so
+/// its end moves with it. The repair runs before [`repaired_secondary_start`], whose
+/// ceiling reads the loop start.
+/// Inferred from specimens; not confirmed on hardware.
+pub fn repaired_loop_start(stated: f64) -> f64 {
+    stated.max(MIN_LOOP_START)
+}
+
 /// The `m_startSecondary` a fresh project states for a stroke over `end` frames.
 ///
 /// The editor's own value is an attack analysis within a percent of this on every
@@ -124,6 +138,8 @@ pub struct Stroke {
     pub start_secondary: f64,
     pub stop: f64,
     pub loop_enabled: bool,
+    /// `m_loopStart`, in file frames, as the project states it — the editor encodes
+    /// from [`encoded_loop_start`](Stroke::encoded_loop_start).
     pub loop_start: f64,
     /// `m_loopLengthLong`.
     pub loop_length: f64,
@@ -155,13 +171,19 @@ pub struct Stroke {
 }
 
 impl Stroke {
+    /// The loop start the editor encodes this stroke from, in file frames — see
+    /// [`repaired_loop_start`].
+    pub fn encoded_loop_start(&self) -> f64 {
+        repaired_loop_start(self.loop_start)
+    }
+
     /// The secondary start the editor encodes this stroke from, in file frames — see
     /// [`repaired_secondary_start`].
     pub fn encoded_secondary_start(&self) -> f64 {
         repaired_secondary_start(
             self.start_secondary,
             self.stop,
-            self.loop_enabled.then_some(self.loop_start),
+            self.loop_enabled.then(|| self.encoded_loop_start()),
         )
     }
 }
@@ -1126,6 +1148,41 @@ mod tests {
             repaired_secondary_start(5_512.5, 44_100.0, Some(8_000.0)),
             5_512.5
         );
+    }
+
+    #[test]
+    fn the_editor_pushes_a_loop_start_up_to_92_before_it_reads_it() {
+        assert_eq!(repaired_loop_start(0.0), 92.0);
+        assert_eq!(repaired_loop_start(91.5), 92.0);
+        assert_eq!(repaired_loop_start(f64::NAN), 92.0);
+        assert_eq!(repaired_loop_start(1_000.0), 1_000.0);
+
+        let stroke = |loop_start| Stroke {
+            zone_id: 129,
+            global_id: 1,
+            file_id: 1,
+            begin: 0.0,
+            end: 44_100.0,
+            start: 0.0,
+            start_secondary: 5_512.5,
+            stop: 44_100.0,
+            loop_enabled: true,
+            loop_start,
+            loop_length: 16_384.0,
+            loop_crossfade: 0.0,
+            loop_crossfade_mode: 0,
+            loop_decay_enabled: false,
+            loop_decay: 0.0,
+            loop_detune: 0,
+            short_loop_enabled: false,
+            short_loop_length: 0.0,
+            short_loop_crossfade: 0,
+            short_loop_uses_pitch: true,
+        };
+        // The repaired loop start is the ceiling the secondary start is repaired to.
+        assert_eq!(stroke(0.0).encoded_loop_start(), 92.0);
+        assert_eq!(stroke(0.0).encoded_secondary_start(), 92.0);
+        assert_eq!(stroke(8_000.0).encoded_secondary_start(), 5_512.5);
     }
 
     #[test]

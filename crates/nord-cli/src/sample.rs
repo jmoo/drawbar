@@ -863,11 +863,12 @@ fn zone_loop(
     } else {
         "m_loopLengthLong"
     };
-    let loop_start = frame(at, "loop start", stroke.loop_start, stop)?;
+    let stated = stroke.encoded_loop_start();
+    let loop_start = frame(at, "loop start", stated, stop)?;
     if !length.is_finite() || length <= 0.0 {
         return Err(format!("{at}'s {named} is {length}, which is not a loop"));
     }
-    let end = frame(at, "loop end", stroke.loop_start + length, stop)?;
+    let end = frame(at, "loop end", stated + length, stop)?;
     if loop_start < start {
         return Err(format!(
             "{at} loops from frame {loop_start} but its audio is trimmed to start at \
