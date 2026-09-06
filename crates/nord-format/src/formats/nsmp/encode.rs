@@ -6,9 +6,9 @@
 //! field lattice quantised the way the instrument's encoder quantises. What it is
 //! **not** is byte-identical to what Nord Sample Editor would produce for the same
 //! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
-//! `1e-8` per tap, which leaves a field in a few thousand one count off, the rule the
-//! editor uses to pick a mono stroke's quantiser shift is only partly known, and the
-//! encoder's own choice of predictor order per record is reproduced only under
+//! `1e-8` per tap, which leaves a field in a few thousand one count off, the mono
+//! quantiser shift is inferred from chosen plaintext, and the editor's own choice of
+//! predictor order per record is reproduced only under
 //! [`Predictor::Minimising`].
 //!
 //! So three claims: a file from here **round-trips through this crate's own decoder
@@ -95,24 +95,15 @@ const CHUNK: usize = 32;
 /// stereo stroke this is the whole of the shift rule.
 const PEAK_WIDTH: u8 = 14;
 
-/// Last-record field counts that do not carry the extra quantiser bit, per channel.
-/// A run's records are [`CHUNK`], [`CHUNK`] and a remainder of at least [`CELL`], so its
-/// last record is always 24..=32 fields and these are the three of the nine that never
-/// buy the bit — both ends of the range and one width in the middle.
+/// Per-channel last-record widths that do not carry the extra quantiser bit.
 const DEAD_LAST_RECORD: [usize; 3] = [24, 29, 32];
 
 /// Whether a mono stroke spends one more quantiser bit than its peak needs, narrowing
-/// its widest field a bit under [`PEAK_WIDTH`] and shrinking the stream. A stereo
-/// stroke never spends it.
+/// its widest field below [`PEAK_WIDTH`].
 ///
-/// `values` are the stroke's fields before any shift. Read them at the smallest shift
-/// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still of
-/// magnitude `2^13` or more there falls inside the **last record of one of the two 1:1
-/// runs** — the opening run at field 0, or the resync run — and that record is not one
-/// of [`DEAD_LAST_RECORD`] fields long. A field in an earlier record of a run, or out in
-/// the content cells, never buys it, and neither run's length is otherwise consulted.
-///
-/// Measured against the editor over every mono chosen plaintext with an exact stream.
+/// At the 14-bit shift, a value outside the signed 13-bit range buys the bit only in
+/// the last record of a 1:1 run whose width is not in [`DEAD_LAST_RECORD`].
+/// Inferred from specimens; not confirmed on hardware.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
     let over = 1i64 << (PEAK_WIDTH - 2);
     let shift = peak_shift(values, PEAK_WIDTH);
@@ -123,9 +114,10 @@ fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
                 return false;
             };
             !DEAD_LAST_RECORD.contains(&(last / plan.channels))
-                && values[base + run - last..base + run]
-                    .iter()
-                    .any(|&v| (v >> shift).abs() >= over)
+                && values[base + run - last..base + run].iter().any(|&v| {
+                    let v = v >> shift;
+                    v < -over || v >= over
+                })
         })
 }
 
@@ -2003,16 +1995,48 @@ mod tests {
         }
     }
 
+    fn opening_run(last: usize, value: i64) -> (Plan, Vec<i64>) {
+        let warmup = if last == CHUNK { CHUNK } else { CHUNK + last };
+        let plan = Plan {
+            frames: 0,
+            channels: 1,
+            fields: warmup,
+            resync_at: warmup,
+            warmup,
+            resync: 0,
+            cells_before: 0,
+            cells_after: 0,
+            looped: None,
+        };
+        let mut values = vec![0; warmup];
+        values[warmup - 1] = value;
+        (plan, values)
+    }
+
     #[test]
-    fn three_last_record_widths_never_buy_it() {
-        // 5464's opening run is 64 fields — [0, 32), [32, 64) — and a 32-field last
-        // record is dead, where 4762's 58-field run ends in a live 26-field one.
-        let (dead, values) = probe(5464, 40);
-        assert_eq!(dead.warmup, 64);
-        assert!(!spends_extra_bit(&values, &dead));
-        let (live, values) = probe(4762, 40);
-        assert_eq!(live.warmup, 58);
-        assert!(spends_extra_bit(&values, &live));
+    fn each_last_record_width_obeys_the_measured_rule() {
+        for (last, buys) in [
+            (24, false),
+            (25, true),
+            (26, true),
+            (27, true),
+            (28, true),
+            (29, false),
+            (30, true),
+            (31, true),
+            (32, false),
+        ] {
+            let (plan, values) = opening_run(last, 1 << (PEAK_WIDTH - 2));
+            assert_eq!(spends_extra_bit(&values, &plan), buys, "width {last}");
+        }
+    }
+
+    #[test]
+    fn the_extra_bit_uses_signed_thirteen_bit_bounds() {
+        for (value, buys) in [(-4097, true), (-4096, false), (4095, false), (4096, true)] {
+            let (plan, values) = opening_run(25, value);
+            assert_eq!(spends_extra_bit(&values, &plan), buys, "value {value}");
+        }
     }
 
     #[test]
