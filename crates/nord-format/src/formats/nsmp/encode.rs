@@ -197,17 +197,22 @@ const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
 /// `values` are the stroke's fields before any shift. Read them at the smallest shift
 /// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still
 /// outside the signed 13-bit range there falls inside the **last record of one of the
-/// two 1:1 runs** — the opening run at field 0, or the resync run — and that record's
-/// field count is not one [`dead_last_record`] names. A field in an earlier record of
-/// a run, or out in the content cells, never buys it, and neither run's length is
-/// otherwise consulted.
+/// stroke's 1:1 runs** and that record's field count is not one [`dead_last_record`]
+/// names. A field in an earlier record of a run, or out in the content cells, never
+/// buys it, and no run's length is otherwise consulted.
+///
+/// ⚠️ Every 1:1 run counts, the loop's included — a marked record opens a run of its
+/// own past the resync, and a field landing in its last record buys the bit exactly
+/// as one in the opening or resync run does. Reading only the first two under-shoots
+/// looped strokes, which quantise one bit coarser than the editor's.
+///
+/// The loop's run is coverage rather than evidence about widths: no specimen carries
+/// the bit there and nowhere else, so [`dead_last_record`] is read off the other two.
 ///
 /// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
 /// one: both quantise at the peak term alone.
 ///
-/// ⚠️ A stroke the clause fires on can still refuse when taking the bit would barely
-/// shrink the stream. Nothing here models that, so such a stroke quantises one bit
-/// coarser than the editor's; the threshold is not pinned.
+/// No saving threshold is modelled: no stroke measured refuses while the clause fires.
 ///
 /// Inferred from specimens; not confirmed on hardware, the Electro 5 playing v2 only.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
@@ -219,18 +224,23 @@ fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
     };
     let over = 1i64 << (PEAK_WIDTH - 2);
     let shift = peak_shift(values, PEAK_WIDTH);
-    [(0, plan.warmup), (plan.resync_at, plan.resync)]
-        .into_iter()
-        .any(|(base, run)| {
-            let Some(&last) = chunks(run, plan.chunk()).last() else {
-                return false;
-            };
-            !dead.contains(&(last / plan.channels))
-                && values[base + run - last..base + run].iter().any(|&v| {
-                    let v = v >> shift;
-                    v < -over || v >= over
-                })
-        })
+    [
+        Some((0, plan.warmup)),
+        Some((plan.resync_at, plan.resync)),
+        plan.looped.map(|points| (points.at, points.warmup)),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(base, run)| {
+        let Some(&last) = chunks(run, plan.chunk()).last() else {
+            return false;
+        };
+        !dead.contains(&(last / plan.channels))
+            && values[base + run - last..base + run].iter().any(|&v| {
+                let v = v >> shift;
+                v < -over || v >= over
+            })
+    })
 }
 
 /// The smallest nonnegative shift fitting every value in `width` bits.
@@ -2767,6 +2777,52 @@ mod tests {
         for last in 32..=48 {
             let (plan, values) = opening_run(Layout::V4, last, 1 << (PEAK_WIDTH - 2));
             assert!(!spends_extra_bit(&values, &plan), "width {last}");
+        }
+    }
+
+    /// A looped mono stroke whose only loud field sits in the last record of the run
+    /// the mark opens. The opening run is a full RMAX record, a width both generations
+    /// call dead, so nothing but the loop's run can buy the bit.
+    fn loop_run(layout: Layout, last: usize) -> (Plan, Vec<i64>) {
+        let at = layout.rmax();
+        let fields = at + last;
+        let plan = Plan {
+            layout,
+            frames: 0,
+            channels: 1,
+            fields,
+            resync_at: at,
+            warmup: at,
+            resync: 0,
+            cells_before: 0,
+            cells_after: 0,
+            looped: Some(Looped {
+                at,
+                lead: 0,
+                crossfade: 0,
+                warmup: last,
+                cells: 0,
+            }),
+        };
+        let mut values = vec![0; fields];
+        values[fields - 1] = 1 << (PEAK_WIDTH - 2);
+        (plan, values)
+    }
+
+    #[test]
+    fn the_run_a_loop_mark_opens_buys_the_extra_bit() {
+        for (layout, live, dead) in [(Layout::V2, 25, 29), (Layout::V3, 33, 41)] {
+            let (plan, values) = loop_run(layout, live);
+            assert!(spends_extra_bit(&values, &plan), "{layout:?} live");
+
+            let unmarked = Plan {
+                looped: None,
+                ..plan
+            };
+            assert!(!spends_extra_bit(&values, &unmarked), "{layout:?} unlooped");
+
+            let (plan, values) = loop_run(layout, dead);
+            assert!(!spends_extra_bit(&values, &plan), "{layout:?} dead");
         }
     }
 
