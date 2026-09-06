@@ -404,12 +404,13 @@ fn a_v2_preset_carries_the_velocity_depths_the_category_installed() {
         let project = project_named(&format!("{stem}.nsmpproj"));
         let installed = project.velocity_defaults().unwrap();
         let sty = sample.sty().unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let amplitude = nsmp::velocity_level(installed.amplitude)
+            .unwrap_or_else(|| panic!("{stem}: unsupported amplitude {}", installed.amplitude));
+        let timbre = nsmp::velocity_level(installed.timbre)
+            .unwrap_or_else(|| panic!("{stem}: unsupported timbre {}", installed.timbre));
         assert_eq!(
             (sty.velocity_to_amplitude(), sty.velocity_to_timbre()),
-            (
-                nsmp::velocity_level(installed.amplitude),
-                nsmp::velocity_level(installed.timbre)
-            ),
+            (amplitude, timbre),
             "{stem}: preset {installed:?}"
         );
         seen += 1;
@@ -425,7 +426,18 @@ fn the_instrument_eq_never_reaches_the_wide_preset() {
     let Entity::Sample(Sample::V3(base)) = &named("SP-00base.nsmp4").entity else {
         panic!("the SP base is not a wide sample");
     };
-    let quiet = base.stroke_streams();
+    let decode = |sample: &nord_format::cbin::Cbin<nsmp::SampleV3>| {
+        sample
+            .stroke_streams()
+            .into_iter()
+            .map(|(at, stroke)| {
+                nsmp::codec::decode(stroke, at, nsmp::codec::Layout::V4)
+                    .unwrap()
+                    .samples
+            })
+            .collect::<Vec<_>>()
+    };
+    let quiet = decode(base);
     let mut seen = 0;
     for stem in [
         "SP-eq1lcon",
@@ -458,11 +470,7 @@ fn the_instrument_eq_never_reaches_the_wide_preset() {
                 "{stem}"
             );
         }
-        assert_ne!(
-            sample.stroke_streams(),
-            quiet,
-            "{stem}: the band was set and the audio did not move"
-        );
+        assert_ne!(decode(sample), quiet, "{stem}: the EQ left PCM unchanged");
         seen += 1;
     }
     assert!(seen > 0, "no SP EQ specimen");

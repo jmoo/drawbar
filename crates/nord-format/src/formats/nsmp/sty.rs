@@ -59,15 +59,13 @@ const V2_VELOCITY_TO_TIMBRE: usize = 5;
 pub const VELOCITY_LEVELS: u8 = 3;
 
 /// The level [`StyV2::velocity_to_amplitude`] and [`StyV2::velocity_to_timbre`]
-/// take for a `samplib_attrs` velocity depth.
-///
-/// The loader installs the depth from the instrument's category and never above
-/// 3, so the top step is saturating rather than measured beyond that.
-pub fn velocity_level(depth: u8) -> u8 {
+/// take for a measured `samplib_attrs` velocity depth.
+pub fn velocity_level(depth: u8) -> Option<u8> {
     match depth {
-        0 => 0,
-        1 | 2 => 1,
-        _ => VELOCITY_LEVELS - 1,
+        0 => Some(0),
+        1 | 2 => Some(1),
+        3 => Some(VELOCITY_LEVELS - 1),
+        _ => None,
     }
 }
 
@@ -95,8 +93,8 @@ impl StyV2 {
         Ok(StyV2 { raw })
     }
 
-    /// Whether the instrument plays through its category's dynamics curve. The
-    /// curve itself is stored in no schema.
+    /// Whether the instrument plays through its category's dynamics curve. V2
+    /// stores only the enable; later schemas also name the curve.
     pub fn dynamics_enabled(&self) -> bool {
         self.raw[V2_DYNAMICS_ENABLE] != 0
     }
@@ -346,9 +344,10 @@ mod tests {
     fn a_velocity_depth_quantises_onto_three_levels() {
         assert_eq!(
             [0, 1, 2, 3].map(velocity_level),
-            [0, 1, 1, VELOCITY_LEVELS - 1]
+            [Some(0), Some(1), Some(1), Some(VELOCITY_LEVELS - 1)]
         );
-        assert_eq!(velocity_level(u8::MAX), VELOCITY_LEVELS - 1);
+        assert_eq!(velocity_level(4), None);
+        assert_eq!(velocity_level(u8::MAX), None);
     }
 
     #[test]
