@@ -6,10 +6,10 @@
 //! field lattice quantised the way the instrument's encoder quantises. What it is
 //! **not** is byte-identical to what Nord Sample Editor would produce for the same
 //! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
-//! `1e-8` per tap, which leaves a field in a few thousand one count off, the rule the
-//! editor uses to pick a mono stroke's quantiser shift is only partly known, and the
-//! encoder's own choice of predictor order per record is reproduced only under
-//! [`Predictor::Minimising`].
+//! `1e-8` per tap, which leaves a field in a few thousand one count off, a mono
+//! stroke's quantiser shift is picked by a rule with one known gap
+//! ([`spends_extra_bit`]), and the encoder's own choice of predictor order per record
+//! is reproduced only under [`Predictor::Minimising`].
 //!
 //! So three claims: a file from here **round-trips through this crate's own decoder
 //! exactly** under either predictor, it obeys every structural law the format is known
@@ -172,42 +172,49 @@ impl Units {
     }
 }
 
-/// Last-record field counts that do not carry the extra quantiser bit, per channel.
-/// A v2 run's records are RMAX, RMAX and a remainder of at least one cell, so its last
-/// record is always 24..=32 fields and these are the three of the nine that never buy
-/// the bit — both ends of the range and one width in the middle.
-const DEAD_LAST_RECORD: [usize; 3] = [24, 29, 32];
+/// Last-record field counts, per channel, that do not carry the extra quantiser bit —
+/// `None` for a generation whose mono strokes never spend it.
+///
+/// A run's records are RMAX-sized until a remainder, so the range a last record can
+/// take is the generation's: 24..=32 fields at v2 and 32..=48 at v3. Every width in
+/// both ranges has been read off a render, and these are the ones that never buy the
+/// bit. There is no arithmetic behind either set and no correspondence between them.
+///
+/// Inferred from specimens; not confirmed on hardware.
+const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
+    match layout {
+        Layout::V2 => Some(&[24, 29, 32]),
+        Layout::V3 => Some(&[32, 41, 43, 45, 47, 48]),
+        Layout::V4 => None,
+    }
+}
 
 /// Whether a stroke spends one more quantiser bit than its peak needs, narrowing its
 /// widest field a bit under [`PEAK_WIDTH`] and shrinking the stream.
 ///
-/// A stereo stroke never spends it, in any generation, and neither does a v4 mono one:
-/// both quantise at the peak term alone. Only v2 has a derived rule.
+/// `values` are the stroke's fields before any shift. Read them at the smallest shift
+/// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still of
+/// magnitude `2^13` or more there falls inside the **last record of one of the two 1:1
+/// runs** — the opening run at field 0, or the resync run — and that record's field
+/// count is not one [`dead_last_record`] names. A field in an earlier record of a run,
+/// or out in the content cells, never buys it, and neither run's length is otherwise
+/// consulted.
+///
+/// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
+/// one: both quantise at the peak term alone.
+///
+/// ⚠️ A stroke the clause fires on can still refuse when taking the bit would barely
+/// shrink the stream. Nothing here models that, so such a stroke quantises one bit
+/// coarser than the editor's; the threshold is not pinned.
 ///
 /// Inferred from specimens; not confirmed on hardware, the Electro 5 playing v2 only.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
     if plan.channels != 1 {
         return false;
     }
-    match plan.layout {
-        Layout::V2 => spends_extra_bit_v2(values, plan),
-        // The v3 rule is not derived. Until it is, a v3 mono stroke quantises at the
-        // peak term like a v4 one, which is wrong on some fraction of loud material.
-        Layout::V3 | Layout::V4 => false,
-    }
-}
-
-/// The v2 rule.
-///
-/// `values` are the stroke's fields before any shift. Read them at the smallest shift
-/// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still of
-/// magnitude `2^13` or more there falls inside the **last record of one of the two 1:1
-/// runs** — the opening run at field 0, or the resync run — and that record is not one
-/// of [`DEAD_LAST_RECORD`] fields long. A field in an earlier record of a run, or out in
-/// the content cells, never buys it, and neither run's length is otherwise consulted.
-///
-/// Measured against the editor over every mono chosen plaintext with an exact stream.
-fn spends_extra_bit_v2(values: &[i64], plan: &Plan) -> bool {
+    let Some(dead) = dead_last_record(plan.layout) else {
+        return false;
+    };
     let over = 1i64 << (PEAK_WIDTH - 2);
     let shift = peak_shift(values, PEAK_WIDTH);
     [(0, plan.warmup), (plan.resync_at, plan.resync)]
@@ -216,7 +223,7 @@ fn spends_extra_bit_v2(values: &[i64], plan: &Plan) -> bool {
             let Some(&last) = chunks(run, plan.chunk()).last() else {
                 return false;
             };
-            !DEAD_LAST_RECORD.contains(&(last / plan.channels))
+            !dead.contains(&(last / plan.channels))
                 && values[base + run - last..base + run]
                     .iter()
                     .any(|&v| (v >> shift).abs() >= over)
@@ -2530,10 +2537,10 @@ mod tests {
     }
 
     /// A stroke whose only loud field sits at `field`, resynchronising at `resync`.
-    fn probe(resync: usize, field: usize) -> (Plan, Vec<i64>) {
+    fn probe(layout: Layout, resync: usize, field: usize) -> (Plan, Vec<i64>) {
         let frames = 100_000;
         let secondary = resync as f64 * f64::from(PITCH_NUM) / f64::from(PITCH_DEN);
-        let plan = Plan::new(Layout::V2, frames, 1, secondary).unwrap();
+        let plan = Plan::new(layout, frames, 1, secondary).unwrap();
         assert_eq!(plan.resync_at, resync);
         let mut values = vec![0i64; plan.fields];
         values[field] = 1 << (PEAK_WIDTH - 2);
@@ -2543,10 +2550,10 @@ mod tests {
     #[test]
     fn only_a_run_s_last_record_buys_the_extra_bit() {
         // The resync run at 5464 is 89 fields: [0, 32), [32, 64), [64, 89).
-        let (plan, values) = probe(5464, 5464 + 76);
+        let (plan, values) = probe(Layout::V2, 5464, 5464 + 76);
         assert!(spends_extra_bit(&values, &plan));
         for offset in [12, 61, 89, 95] {
-            let (plan, values) = probe(5464, 5464 + offset);
+            let (plan, values) = probe(Layout::V2, 5464, 5464 + offset);
             assert!(!spends_extra_bit(&values, &plan), "run offset {offset}");
         }
     }
@@ -2555,12 +2562,45 @@ mod tests {
     fn three_last_record_widths_never_buy_it() {
         // 5464's opening run is 64 fields — [0, 32), [32, 64) — and a 32-field last
         // record is dead, where 4762's 58-field run ends in a live 26-field one.
-        let (dead, values) = probe(5464, 40);
+        let (dead, values) = probe(Layout::V2, 5464, 40);
         assert_eq!(dead.warmup, 64);
         assert!(!spends_extra_bit(&values, &dead));
-        let (live, values) = probe(4762, 40);
+        let (live, values) = probe(Layout::V2, 4762, 40);
         assert_eq!(live.warmup, 58);
         assert!(spends_extra_bit(&values, &live));
+    }
+
+    /// A v3 opening run of `width` fields is one record, and `resync mod 32` picks the
+    /// width, so this walks every last record a v3 run can end in.
+    fn v3_opening_run(width: usize) -> (Plan, Vec<i64>) {
+        let (plan, values) = probe(Layout::V3, 4096 + width - 32, width - 1);
+        assert_eq!(plan.warmup, width);
+        (plan, values)
+    }
+
+    #[test]
+    fn six_of_the_seventeen_v3_last_record_widths_never_buy_it() {
+        const LIVE: [usize; 11] = [33, 34, 35, 36, 37, 38, 39, 40, 42, 44, 46];
+        for width in 32..=48 {
+            let (plan, values) = v3_opening_run(width);
+            assert_eq!(
+                spends_extra_bit(&values, &plan),
+                LIVE.contains(&width),
+                "opening run of {width} fields"
+            );
+        }
+    }
+
+    #[test]
+    fn a_v4_mono_stroke_never_buys_the_extra_bit() {
+        for width in 32..=48 {
+            let (plan, values) = probe(Layout::V4, 4096 + width - 32, width - 1);
+            assert_eq!(plan.warmup, width);
+            assert!(
+                !spends_extra_bit(&values, &plan),
+                "opening run of {width} fields"
+            );
+        }
     }
 
     #[test]
