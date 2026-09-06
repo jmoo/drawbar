@@ -652,11 +652,28 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             gain: z.gain,
         })
         .collect();
-    let instrument = encode::multi_zone(&zones, &name, predictor(args.predict), layout)
-        .map_err(|e| e.to_string())?;
+    let map_gain = project.map_gain().map_err(|e| e.to_string())?;
+    let instrument = encode::multi_zone(
+        encode::Instrument {
+            name: &name,
+            map_gain,
+            predictor: predictor(args.predict),
+            layout,
+        },
+        &zones,
+    )
+    .map_err(|e| e.to_string())?;
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
     ui.out(format!("{} — {} zone(s)", ui.bold(&name), zones.len()));
+    let ceiling = 10f64.powf(encode::MAX_MAP_GAIN_DB / 20.0);
+    if map_gain > ceiling {
+        ui.note(ui.dim(format!(
+            "the map's own gain is {map_gain}, which the instrument clamps at \
+             +{:.3} dB as the editor does",
+            encode::MAX_MAP_GAIN_DB
+        )));
+    }
     let placed = instrument.zones().map_err(|e| e.to_string())?;
     for (index, zone) in resolved.iter().enumerate() {
         let stream = placed

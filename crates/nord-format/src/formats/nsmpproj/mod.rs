@@ -506,6 +506,12 @@ impl Project {
         flag(self.instrument()?, "m_loopDecayEnabled")
     }
 
+    /// `map_info.m_gain` — the instrument's own playing gain, a linear factor on top
+    /// of every zone's own.
+    pub fn map_gain(&self) -> Result<f64, ParseError> {
+        self.instrument()?.require("map_info")?.get("m_gain")
+    }
+
     pub fn set_name(&mut self, name: &str) -> Result<(), ParseError> {
         self.instrument_mut()?.set_field("m_name", name)
     }

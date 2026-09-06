@@ -354,6 +354,7 @@ pub struct Options {
     secondary_start: Option<f64>,
     shift: Option<u8>,
     layout: Layout,
+    map_gain: f64,
 }
 
 impl Options {
@@ -370,7 +371,15 @@ impl Options {
             secondary_start: None,
             shift: None,
             layout: Layout::V2,
+            map_gain: 1.0,
         }
+    }
+
+    /// The instrument's own playing gain, a linear ratio applied on top of every
+    /// zone's. Clamped at [`MAX_MAP_GAIN_DB`] as the editor clamps it.
+    pub fn map_gain(mut self, gain: f64) -> Options {
+        self.map_gain = gain;
+        self
     }
 
     /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`. The audio is the same
@@ -1577,9 +1586,11 @@ fn cat() -> Section {
 /// and the zone table behind it.
 ///
 /// `zones` is one record per zone, already high to low.
-fn map(zones: &[ZoneRecord]) -> Section {
+fn map(map_gain: u32, zones: &[ZoneRecord]) -> Result<Section, Error> {
     let mut payload = vec![0u8; super::zone::RECORDS_AT + super::zone::RECORD_LEN * zones.len()];
-    payload[..super::zone::COUNT_AT].copy_from_slice(&super::keymap::KeyTable::NEUTRAL.prefix());
+    let mut keys = super::keymap::KeyTable::NEUTRAL;
+    keys.instrument = super::keymap::Level::new(map_gain, 0)?;
+    payload[..super::zone::COUNT_AT].copy_from_slice(&keys.prefix());
     payload[super::zone::COUNT_AT] = zones.len() as u8;
     // Zones are stored high to low by top note.
     for (index, record) in zones.iter().enumerate() {
@@ -1594,11 +1605,11 @@ fn map(zones: &[ZoneRecord]) -> Section {
         // builder produces has one.
         payload[at + 10..at + 12].copy_from_slice(&super::zone::REL_STRENGTH_DEFAULT.to_be_bytes());
     }
-    Section {
+    Ok(Section {
         tag: *section::MAP,
         version: super::keymap::VERSION,
         payload,
-    }
+    })
 }
 
 /// The `sty` section: nine constant bytes.
@@ -1638,9 +1649,16 @@ struct WideSchema {
     sty_payload: &'static [u8],
 }
 
-/// The `map`'s gain-and-detune unit: unity gain, no detune. It opens the section as
-/// the instrument's own level and then repeats once per key.
-const LEVEL: [u8; 6] = [0x10, 0x00, 0x00, 0x00, 0x00, 0x00];
+/// The `map`'s gain-and-detune unit: a u24 linear gain then an s24 detune. It opens
+/// the section as the instrument's own level and then repeats once per key.
+const LEVEL_LEN: usize = 6;
+
+/// One such unit at `gain`, with no detune.
+fn level(gain: u32) -> [u8; LEVEL_LEN] {
+    let mut out = [0u8; LEVEL_LEN];
+    out[..3].copy_from_slice(&gain.to_be_bytes()[1..]);
+    out
+}
 
 const STY_V3_PAYLOAD: [u8; super::sty::V3_LEN] = [
     0x00, 0x00, 0x7f, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x7f, 0x00, 0x02, 0x00,
@@ -1666,7 +1684,7 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             container_payload: [0x00, 0x02, 0x00, 0x0c],
             hdr: 10,
             map: 14,
-            key_stride: LEVEL.len(),
+            key_stride: LEVEL_LEN,
             map_gap: &[],
             map_tail: &[0x00],
             sty: super::sty::VERSION_V3,
@@ -1677,7 +1695,7 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             container_payload: [0x00, 0x02, 0x00, 0x05],
             hdr: 11,
             map: 21,
-            key_stride: LEVEL.len() + 4,
+            key_stride: LEVEL_LEN + 4,
             map_gap: &[
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
                 0x02, 0x02, 0x02, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00,
@@ -1725,19 +1743,19 @@ fn cat4() -> Section4 {
 /// The wider schema's per-key record carries a partner quad as well as the level.
 /// The editor writes the identity there whatever the zone layout — only the vendor's
 /// own builder fills it in — so every quad names its own key.
-fn map4(schema: &WideSchema, zones: &[WideZoneRecord]) -> Section4 {
+fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section4 {
     let mut payload = Vec::with_capacity(
-        LEVEL.len()
+        LEVEL_LEN
             + KEYS * schema.key_stride
             + schema.map_gap.len()
             + 1
             + super::zone::WIDE_RECORD_LEN * zones.len()
             + schema.map_tail.len(),
     );
-    payload.extend_from_slice(&LEVEL);
+    payload.extend_from_slice(&level(map_gain));
     for key in 0..KEYS as u8 {
-        payload.extend_from_slice(&LEVEL);
-        payload.extend(std::iter::repeat_n(key, schema.key_stride - LEVEL.len()));
+        payload.extend_from_slice(&level(super::keymap::GAIN_UNITY));
+        payload.extend(std::iter::repeat_n(key, schema.key_stride - LEVEL_LEN));
     }
     payload.extend_from_slice(schema.map_gap);
     payload.push(zones.len() as u8);
@@ -1820,6 +1838,12 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
         .secondary_start
         .unwrap_or_else(|| default_secondary_start(frames, options.loops));
     multi_zone(
+        Instrument {
+            name: &options.name,
+            map_gain: options.map_gain,
+            predictor: options.predictor,
+            layout: options.layout,
+        },
         &[NewZone {
             source,
             channels: options.channels,
@@ -1831,10 +1855,22 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
             shift: options.shift,
             gain: 1.0,
         }],
-        &options.name,
-        options.predictor,
-        options.layout,
     )
+}
+
+/// Everything an instrument states apart from its zones.
+#[derive(Debug, Clone, Copy)]
+pub struct Instrument<'a> {
+    /// The name the `hdr` section carries.
+    pub name: &'a str,
+    /// The instrument's own playing gain, a linear ratio on top of every zone's. It
+    /// opens the `map` section in all three generations, and it is the one gain field
+    /// that clamps: [`MAX_MAP_GAIN_DB`] and no higher, whatever the caller asks for.
+    pub map_gain: f64,
+    /// How content records code their fields.
+    pub predictor: Predictor,
+    /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`.
+    pub layout: Layout,
 }
 
 /// Build an instrument that spans the keyboard: one `stk` per zone, in the order
@@ -1843,14 +1879,12 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
 /// Refuses an empty or overlapping zone list, a duplicate or unnameable stroke id,
 /// and everything [`instrument`] refuses about one zone's audio.
 pub fn multi_zone(
+    instrument: Instrument<'_>,
     zones: &[NewZone<'_>],
-    name: &str,
-    predictor: Predictor,
-    layout: Layout,
 ) -> Result<crate::Sample, Error> {
-    match wide_schema(layout) {
-        Some(schema) => wide_chain(zones, name, predictor, layout, &schema).map(crate::Sample::V3),
-        None => narrow_chain(zones, name, predictor).map(crate::Sample::V2),
+    match wide_schema(instrument.layout) {
+        Some(schema) => wide_chain(instrument, zones, &schema).map(crate::Sample::V3),
+        None => narrow_chain(instrument, zones).map(crate::Sample::V2),
     }
 }
 
@@ -1865,15 +1899,11 @@ fn container(layout: Layout) -> Header {
     }
 }
 
-fn narrow_chain(
-    zones: &[NewZone<'_>],
-    name: &str,
-    predictor: Predictor,
-) -> Result<Cbin<Sample>, Error> {
+fn narrow_chain(instrument: Instrument<'_>, zones: &[NewZone<'_>]) -> Result<Cbin<Sample>, Error> {
     let table = zone_table(zones)?;
-    let hdr = hdr(name)?;
+    let hdr = hdr(instrument.name)?;
     let cat = cat();
-    let map = map(&table);
+    let map = map(map_gain_units(instrument.map_gain)?, &table)?;
     // The directory a stroke carries counts words from the start of the body, and these
     // two decide where the first packet may start, so both are sized before any stream
     // is written.
@@ -1890,7 +1920,8 @@ fn narrow_chain(
         cat,
         map,
     ];
-    let (encoded, file_peak) = encode_strokes(Layout::V2, zones, predictor, cat_len, map_len)?;
+    let (encoded, file_peak) =
+        encode_strokes(Layout::V2, zones, instrument.predictor, cat_len, map_len)?;
     let mut body_at: usize = sections.iter().map(Section::encoded_len).sum();
     for (zone, stroke) in zones.iter().zip(&encoded) {
         let payload = stroke_payload(
@@ -1919,16 +1950,15 @@ fn narrow_chain(
 const STK4_VERSION: u32 = 11;
 
 fn wide_chain(
+    instrument: Instrument<'_>,
     zones: &[NewZone<'_>],
-    name: &str,
-    predictor: Predictor,
-    layout: Layout,
     schema: &WideSchema,
 ) -> Result<Cbin<SampleV3>, Error> {
+    let layout = instrument.layout;
     let table = wide_zone_table(zones)?;
-    let hdr = hdr4(schema, name)?;
+    let hdr = hdr4(schema, instrument.name)?;
     let cat = cat4();
-    let map = map4(schema, &table);
+    let map = map4(schema, map_gain_units(instrument.map_gain)?, &table);
     let cat_len = cat.payload.len();
     let map_len = map.payload.len();
 
@@ -1942,7 +1972,8 @@ fn wide_chain(
         cat,
         map,
     ];
-    let (encoded, file_peak) = encode_strokes(layout, zones, predictor, cat_len, map_len)?;
+    let (encoded, file_peak) =
+        encode_strokes(layout, zones, instrument.predictor, cat_len, map_len)?;
     let mut body_at: usize = sections.iter().map(Section4::encoded_len).sum();
     for (zone, stroke) in zones.iter().zip(&encoded) {
         let payload = stroke_payload(
@@ -2076,6 +2107,25 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
     Ok(table)
 }
 
+/// The ceiling the `map`'s own gain clamps at, in decibels. A project asking for more
+/// renders at this and is not repaired.
+///
+/// ⚠️ The clamp's value is exact and its threshold is bracketed: renders exist at 1.1
+/// unclamped and at 4 clamped, so where between them it starts is unmeasured.
+pub const MAX_MAP_GAIN_DB: f64 = 9.0;
+
+/// The `map`'s own gain as the section's opening u24, clamped.
+fn map_gain_units(gain: f64) -> Result<u32, Error> {
+    if !(0.0..=f64::from(u32::MAX)).contains(&gain) {
+        return Err(ParseError::OutOfBounds {
+            value: format!("a map gain of {gain}"),
+            bound: "a gain at or above zero".into(),
+        }
+        .into());
+    }
+    Ok(gain_units(gain.min(10f64.powf(MAX_MAP_GAIN_DB / 20.0))))
+}
+
 /// Largest zone gain this writes, exclusive.
 ///
 /// ⚠️ At and above it the two stores disagree: the narrow record's 24 bits wrap to
@@ -2138,7 +2188,17 @@ mod tests {
         name: &str,
         predictor: Predictor,
     ) -> Result<Cbin<Sample>, Error> {
-        multi_zone(zones, name, predictor, Layout::V2).map(narrow)
+        multi_zone(made(name, predictor, Layout::V2), zones).map(narrow)
+    }
+
+    /// An instrument at unity map gain, which is what all but one test wants.
+    fn made(name: &str, predictor: Predictor, layout: Layout) -> Instrument<'_> {
+        Instrument {
+            name,
+            map_gain: 1.0,
+            predictor,
+            layout,
+        }
     }
 
     fn plan(frames: usize, channels: usize) -> Result<Plan, Error> {
@@ -3510,10 +3570,8 @@ mod tests {
         let stored = [(96, 66), (65, floor)];
         for layout in [Layout::V3, Layout::V4] {
             let file = multi_zone(
+                made("Two", Predictor::Plain, layout),
                 &[zone(&high, 72, 96, 2), zone(&low, 48, 65, 1)],
-                "Two",
-                Predictor::Plain,
-                layout,
             )
             .unwrap();
             let zones = file.zones().unwrap();
@@ -3549,6 +3607,48 @@ mod tests {
         }
     }
 
+    /// Fixed-point words read off editor renders of one project at seven map gains.
+    /// The ceiling is exact; only where between 1.1 and 4 it starts is unmeasured.
+    #[test]
+    fn a_map_gain_is_the_word_the_editor_writes_and_clamps_at_the_ceiling() {
+        for (gain, units) in [
+            (0.01, 0x00_28_f6_u32),
+            (0.5, 0x08_00_00),
+            (1.0, 0x10_00_00),
+            (1.1, 0x11_99_9a),
+            (2.0, 0x20_00_00),
+            (4.0, 0x2d_18_19),
+            (16.0, 0x2d_18_19),
+        ] {
+            assert_eq!(map_gain_units(gain).unwrap(), units, "a map gain of {gain}");
+        }
+        assert!(map_gain_units(-1.0).is_err());
+        assert!(map_gain_units(f64::NAN).is_err());
+    }
+
+    /// The map gain opens the `map` section and reaches nothing else — not the zone
+    /// records, not statistic A, not a stream byte.
+    #[test]
+    fn a_map_gain_moves_the_map_section_alone() {
+        let source = sine(440.0, 12_000.0, 20_000);
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let unity = made("Map", Predictor::Plain, layout);
+            let quiet = Instrument {
+                map_gain: 0.5,
+                ..unity
+            };
+            let one = [zone(&source, 60, 127, 1)];
+            let before = multi_zone(unity, &one).unwrap().to_bytes().unwrap();
+            let after = multi_zone(quiet, &one).unwrap().to_bytes().unwrap();
+            assert_eq!(before.len(), after.len(), "{layout:?}");
+            let moved: Vec<_> = (0..before.len())
+                .filter(|&i| before[i] != after[i])
+                .collect();
+            // The gain's own top byte — 0x10 against 0x08 — and the container checksum.
+            assert!(moved.len() <= 1 + 4, "{layout:?}: {moved:?}");
+        }
+    }
+
     /// A wide zone gain reaches the stroke header's decibel field and statistic A, and
     /// nothing else: no byte of the 16-byte zone record moves with it.
     #[test]
@@ -3556,14 +3656,9 @@ mod tests {
         let source = sine(440.0, 12_000.0, 20_000);
         for layout in [Layout::V3, Layout::V4] {
             let one = zone(&source, 60, 127, 1);
-            let unity = multi_zone(&[one], "Gain", Predictor::Plain, layout).unwrap();
-            let halved = multi_zone(
-                &[NewZone { gain: 0.5, ..one }],
-                "Gain",
-                Predictor::Plain,
-                layout,
-            )
-            .unwrap();
+            let made = made("Gain", Predictor::Plain, layout);
+            let unity = multi_zone(made, &[one]).unwrap();
+            let halved = multi_zone(made, &[NewZone { gain: 0.5, ..one }]).unwrap();
             let (_, a) = unity.stroke_streams()[0];
             let (_, b) = halved.stroke_streams()[0];
             let mantissa = |s: &[u8]| u32::from_be_bytes([0, s[9], s[10], s[11]]);
@@ -3596,7 +3691,7 @@ mod tests {
                     ..zone(&source, 60, 127, 1)
                 };
                 assert!(
-                    multi_zone(&[loud], "Gain", Predictor::Plain, layout).is_err(),
+                    multi_zone(made("Gain", Predictor::Plain, layout), &[loud]).is_err(),
                     "{layout:?} at {gain}"
                 );
             }

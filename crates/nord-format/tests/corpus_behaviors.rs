@@ -1061,10 +1061,13 @@ fn built_v2(
     name: &str,
 ) -> Result<nord_format::cbin::Cbin<nsmp::Sample>, nord_format::error::Error> {
     match nsmp::encode::multi_zone(
+        nsmp::encode::Instrument {
+            name,
+            map_gain: 1.0,
+            predictor: nsmp::encode::Predictor::Minimising,
+            layout: nsmp::codec::Layout::V2,
+        },
         zones,
-        name,
-        nsmp::encode::Predictor::Minimising,
-        nsmp::codec::Layout::V2,
     )? {
         Sample::V2(file) => Ok(file),
         Sample::V3(_) => panic!("the narrow layout builds the narrow chain"),
@@ -1090,7 +1093,7 @@ impl BuiltZone {
             loops: None,
             secondary_start: self.secondary_start,
             shift: None,
-            gain: nsmp::zone::GAIN_UNITY,
+            gain: 1.0,
         }
     }
 }
