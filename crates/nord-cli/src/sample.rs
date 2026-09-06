@@ -606,23 +606,11 @@ struct ProjectZone {
     /// The project's `m_startSecondary` when the editor would not keep it, so a build
     /// says where it encoded from instead.
     repaired_secondary_start: Option<f64>,
-    /// The zone record's fixed-point gain.
-    gain: u32,
+    /// The zone's playing gain as a linear ratio.
+    gain: f64,
     /// Loop settings the project carries that the instrument has no field for, named
     /// so a build says what it dropped rather than dropping it quietly.
     dropped: Vec<String>,
-}
-
-/// A project's linear gain as the zone record's fixed-point one, to the nearest step.
-/// Whether the editor rounds or truncates here is unmeasured.
-fn zone_gain(at: &str, gain: f64) -> Result<u32, String> {
-    let scaled = gain * f64::from(nsmp::zone::GAIN_UNITY);
-    if !(0.0..f64::from(1u32 << 24)).contains(&scaled) {
-        return Err(format!(
-            "{at} sets gain {gain}, outside the 0 up to 16 a zone record holds"
-        ));
-    }
-    Ok(scaled.round() as u32)
 }
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
@@ -681,13 +669,9 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             note::name(zone.top_note),
             stroke_line(stream.stream, stream.at, layout)?,
         ));
-        let gain = if zone.gain == nsmp::zone::GAIN_UNITY {
-            String::new()
-        } else {
-            format!(
-                " gain {:.3}",
-                f64::from(zone.gain) / f64::from(nsmp::zone::GAIN_UNITY)
-            )
+        let gain = match zone.gain == 1.0 {
+            true => String::new(),
+            false => format!(" gain {:.3}", zone.gain),
         };
         ui.out(ui.dim(format!(
             "         stroke {}{gain} from {}",
@@ -759,7 +743,14 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                     layer.detune, layer.velocity.0, layer.velocity.1
                 ));
             }
-            let gain = zone_gain(&at, layer.gain)?;
+            if !(0.0..encode::MAX_ZONE_GAIN).contains(&layer.gain) {
+                return Err(format!(
+                    "{at} sets gain {}, outside the 0 up to {} this writes — at and \
+                     above it the zone record and statistic A disagree",
+                    layer.gain,
+                    encode::MAX_ZONE_GAIN
+                ));
+            }
             let stroke = strokes
                 .iter()
                 .find(|s| s.global_id == layer.global_id)
@@ -808,7 +799,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 secondary_start: encoded_secondary - start as f64,
                 repaired_secondary_start: (encoded_secondary != stroke.start_secondary)
                     .then_some(stroke.start_secondary),
-                gain,
+                gain: layer.gain,
                 dropped,
             })
         })

@@ -124,7 +124,8 @@ const STAT_A_EXP_AT: usize = 12;
 /// Statistic B: the content peak as a 24-bit big-endian value.
 const PEAK_AT: usize = 13;
 
-/// Where the wide stroke header's two float32s sit. Both big-endian.
+/// Where the wide stroke header's two float32s sit: the zone's playing gain in
+/// decibels, then the stroke's loop decay amount. Both big-endian.
 pub(super) const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
 
 /// What statistic A's exponent is offset by. `A = gain · 2^(41+s) / PEAK` with a 20-bit
@@ -318,16 +319,35 @@ pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
     Some(exponent + bits - EXPONENT_BIAS - exact_power)
 }
 
-/// Two unexplained wide-header floats, absent from V2.
-pub fn tail_floats(stroke: &[u8], layout: Layout) -> Option<[f32; 2]> {
+fn tail_float(stroke: &[u8], layout: Layout, at: usize) -> Option<f32> {
     if layout == Layout::V2 {
         return None;
     }
-    let at = |o: usize| -> Option<f32> {
-        let b = stroke.get(o..o + 4)?;
-        Some(f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    Some([at(TAIL_FLOATS_AT[0])?, at(TAIL_FLOATS_AT[1])?])
+    let b = stroke.get(at..at + 4)?;
+    Some(f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// The zone's playing gain in decibels, `None` on the narrow header, which has no
+/// such field — v2 keeps the same gain as a linear u24 in the zone record instead.
+///
+/// ⚠️ **Silence is `-inf` here**, which the linear field cannot express, and the
+/// value is neither clamped nor gridded: the editor writes `20·log10(g)` straight
+/// through, past +24 dB and below -40 dB alike.
+///
+/// Inferred from specimens; not confirmed on hardware.
+pub fn zone_gain_db(stroke: &[u8], layout: Layout) -> Option<f32> {
+    tail_float(stroke, layout, TAIL_FLOATS_AT[0])
+}
+
+/// The stroke's loop decay amount, verbatim in the project's own units, `None` on the
+/// narrow header, which drops the field.
+///
+/// ⚠️ It is stored whether or not the decay is switched on: nothing in the file says
+/// which, so a reader cannot tell an active decay from a default that was never used.
+///
+/// Inferred from specimens; not confirmed on hardware.
+pub fn loop_decay(stroke: &[u8], layout: Layout) -> Option<f32> {
+    tail_float(stroke, layout, TAIL_FLOATS_AT[1])
 }
 
 /// Four word pointers into a stroke chain, relative to the sample body.
@@ -898,15 +918,17 @@ mod tests {
         assert_eq!(peak(&silent, Layout::V2), Some(0xff_ffff));
     }
 
-    /// The two floats past the wide header's directory are read and reported; the
-    /// narrow header has neither.
+    /// The wide header's two floats are the zone gain in decibels and the loop decay
+    /// amount; the narrow header has neither.
     #[test]
-    fn the_wide_header_carries_two_floats_the_narrow_one_does_not() {
+    fn the_wide_header_carries_a_zone_gain_and_a_loop_decay() {
         let mut s = stroke(Layout::V3, 1, 22, 0, &[]);
-        s[TAIL_FLOATS_AT[0]..][..4].copy_from_slice(&0.0f32.to_be_bytes());
+        s[TAIL_FLOATS_AT[0]..][..4].copy_from_slice(&(-6.0206f32).to_be_bytes());
         s[TAIL_FLOATS_AT[1]..][..4].copy_from_slice(&20.0f32.to_be_bytes());
-        assert_eq!(tail_floats(&s, Layout::V3), Some([0.0, 20.0]));
-        assert_eq!(tail_floats(&s, Layout::V2), None);
+        assert_eq!(zone_gain_db(&s, Layout::V3), Some(-6.0206));
+        assert_eq!(loop_decay(&s, Layout::V3), Some(20.0));
+        assert_eq!(zone_gain_db(&s, Layout::V2), None);
+        assert_eq!(loop_decay(&s, Layout::V2), None);
     }
 
     #[test]

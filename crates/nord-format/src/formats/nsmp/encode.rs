@@ -1385,7 +1385,7 @@ fn stroke_header(
     // and a reader takes the terminator because that is what the record sizes follow.
     head[8] = zone.channels as u8;
 
-    let (mantissa, exponent) = statistic_a(file_peak, q.shift, zone.gain);
+    let (mantissa, exponent) = statistic_a(file_peak, q.shift, gain_units(zone.gain));
     head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
     head[12] = exponent;
     head[13..16].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
@@ -1408,9 +1408,9 @@ fn stroke_header(
             head[at + 2] = 0x80;
         }
     }
-    // The wide header's two float32 tails. The editor writes this pair on every
-    // stroke it renders; what they scale is unexplained.
-    for (at, value) in codec::TAIL_FLOATS_AT.iter().zip(WIDE_TAIL_FLOATS) {
+    // The wide header's two float32 tails; the narrow header is too short to hold them.
+    let tails = [gain_decibels(zone.gain), WIDE_LOOP_DECAY];
+    for (at, value) in codec::TAIL_FLOATS_AT.iter().zip(tails) {
         if let Some(slot) = head.get_mut(*at..at + 4) {
             slot.copy_from_slice(&value.to_be_bytes());
         }
@@ -1418,9 +1418,8 @@ fn stroke_header(
     head
 }
 
-/// The two float32s a wide stroke header carries at [`codec::TAIL_FLOATS_AT`].
-/// Unexplained: real programs hold this, and the panel cannot produce it.
-const WIDE_TAIL_FLOATS: [f32; 2] = [0.0, 20.0];
+/// The loop decay amount every stroke this writes carries, in the project's own units.
+const WIDE_LOOP_DECAY: f32 = 20.0;
 
 /// One zone's stream, and the quantiser statistics describing it.
 ///
@@ -1801,15 +1800,14 @@ pub struct NewZone<'a> {
     /// Quantiser shift to lay the stroke out at instead of the rule's choice, or `None`
     /// for the rule. Experimental — see [`Options::shift`].
     pub shift: Option<u8>,
-    /// Playback gain with [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits —
-    /// [`zone::GAIN_UNITY`](super::zone::GAIN_UNITY) is 1.0 — below `1 << 24`. Not
-    /// applied to the audio: it goes into the zone record and the stroke's statistic A,
-    /// and the instrument applies it when it plays.
+    /// Playback gain as a linear ratio, 1.0 for unity, below [`MAX_ZONE_GAIN`]. Not
+    /// applied to the audio: the instrument applies it when it plays.
     ///
-    /// ⚠️ The narrow chain alone stores it. No byte of a wide zone record is known to
-    /// hold a gain, so a wide build refuses anything but unity rather than write one
-    /// the instrument would not apply.
-    pub gain: u32,
+    /// Where it is stored moves with the generation, and the stroke's statistic A
+    /// carries it in every one. The narrow zone record holds it linearly to 20
+    /// fractional bits; a wide stroke header holds `20·log10(gain)` as a float32 and
+    /// no byte of a wide zone record moves with it.
+    pub gain: f64,
 }
 
 /// Build a one-zone instrument from PCM at [`codec::SOURCE_RATE`], mono or stereo
@@ -1831,7 +1829,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
             loops: options.loops,
             secondary_start,
             shift: options.shift,
-            gain: super::zone::GAIN_UNITY,
+            gain: 1.0,
         }],
         &options.name,
         options.predictor,
@@ -2004,15 +2002,6 @@ impl WideZoneRecord {
 /// down to one above the zone below it, and the lowest reaches the keyboard's floor.
 fn wide_zone_table(zones: &[NewZone<'_>]) -> Result<Vec<WideZoneRecord>, Error> {
     let table = zone_table(zones)?;
-    for (index, zone) in zones.iter().enumerate() {
-        if zone.gain != super::zone::GAIN_UNITY {
-            return Err(ParseError::AssertFail(format!(
-                "zone {index} sets a gain, and no byte of a wide zone record is known \
-                 to hold one"
-            ))
-            .into());
-        }
-    }
     Ok(table
         .iter()
         .enumerate()
@@ -2055,14 +2044,10 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
             }
             .into());
         }
-        if zone.gain >> 24 != 0 {
+        if !(0.0..MAX_ZONE_GAIN).contains(&zone.gain) {
             return Err(ParseError::OutOfBounds {
-                value: format!(
-                    "zone {index} gain {}/{}",
-                    zone.gain,
-                    super::zone::GAIN_UNITY
-                ),
-                bound: "below 16.0, the most a zone record's 24-bit gain holds".into(),
+                value: format!("zone {index} gain {}", zone.gain),
+                bound: format!("0 up to but not including {MAX_ZONE_GAIN}"),
             }
             .into());
         }
@@ -2085,10 +2070,30 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
         table.push(ZoneRecord {
             id,
             top_note: zone.top_note,
-            gain: zone.gain,
+            gain: gain_units(zone.gain),
         });
     }
     Ok(table)
+}
+
+/// Largest zone gain this writes, exclusive.
+///
+/// ⚠️ At and above it the two stores disagree: the narrow record's 24 bits wrap to
+/// silence while statistic A's mantissa saturates one count short of overflowing, by
+/// a rule no specimen pins. The editor writes such a file; this refuses to guess one.
+pub const MAX_ZONE_GAIN: f64 = 16.0;
+
+/// A zone gain as the narrow record and statistic A store it: linear, to
+/// [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits.
+fn gain_units(gain: f64) -> u32 {
+    (gain * f64::from(super::zone::GAIN_UNITY)).round() as u32
+}
+
+/// The same gain as a wide stroke header stores it: decibels, evaluated wider than the
+/// field and rounded once. Silence is `-inf`, which the field carries and the linear
+/// store cannot.
+fn gain_decibels(gain: f64) -> f32 {
+    (20.0 * gain.log10()) as f32
 }
 
 fn midi_note(name: &str, note: u8) -> Result<(), Error> {
@@ -2784,7 +2789,7 @@ mod tests {
             loops: None,
             secondary_start: default_secondary_start(source.len(), None),
             shift: None,
-            gain: GAIN_UNITY,
+            gain: 1.0,
         }
     }
 
@@ -2829,7 +2834,7 @@ mod tests {
         let source = sine(440.0, 12_000.0, 20_000);
         let unity = built(&[zone(&source, 60, 127, 1)], "Gain", Predictor::Plain).unwrap();
         let half = NewZone {
-            gain: GAIN_UNITY / 2,
+            gain: 0.5,
             ..zone(&source, 60, 127, 1)
         };
         let halved = built(&[half], "Gain", Predictor::Plain).unwrap();
@@ -2843,7 +2848,7 @@ mod tests {
         assert_eq!(halved.zones().unwrap()[0].gain, GAIN_UNITY / 2);
 
         let over = NewZone {
-            gain: 1 << 24,
+            gain: MAX_ZONE_GAIN,
             ..zone(&source, 60, 127, 1)
         };
         assert!(built(&[over], "Gain", Predictor::Plain).is_err());
@@ -3523,25 +3528,78 @@ mod tests {
         }
     }
 
+    /// Decibel words read off editor renders of one project at ten stroke gains. The
+    /// logarithm is evaluated wider than the field and rounded once: computing it in
+    /// float32 throughout moves the last byte on the powers of two.
     #[test]
-    fn a_wide_zone_refuses_a_gain_it_has_nowhere_to_put() {
+    fn a_zone_gain_in_decibels_is_the_word_the_editor_writes() {
+        for (gain, word) in [
+            (0.0, 0xff80_0000u32),
+            (0.01, 0xc220_0000),
+            (0.1, 0xc1a0_0000),
+            (0.5, 0xc0c0_a8c1),
+            (1.0, 0x0000_0000),
+            (1.1, 0x3f53_ee38),
+            (1.5, 0x4061_6595),
+            (2.0, 0x40c0_a8c1),
+            (4.0, 0x4140_a8c1),
+            (8.0, 0x4190_7e91),
+        ] {
+            assert_eq!(gain_decibels(gain).to_bits(), word, "a gain of {gain}");
+        }
+    }
+
+    /// A wide zone gain reaches the stroke header's decibel field and statistic A, and
+    /// nothing else: no byte of the 16-byte zone record moves with it.
+    #[test]
+    fn a_wide_zone_gain_lands_in_the_stroke_header() {
         let source = sine(440.0, 12_000.0, 20_000);
-        let quiet = NewZone {
-            gain: GAIN_UNITY / 2,
-            ..zone(&source, 60, 127, 1)
-        };
         for layout in [Layout::V3, Layout::V4] {
-            assert!(
-                multi_zone(&[quiet], "Gain", Predictor::Plain, layout).is_err(),
-                "{layout:?}"
-            );
-            assert!(multi_zone(
-                &[zone(&source, 60, 127, 1)],
+            let one = zone(&source, 60, 127, 1);
+            let unity = multi_zone(&[one], "Gain", Predictor::Plain, layout).unwrap();
+            let halved = multi_zone(
+                &[NewZone { gain: 0.5, ..one }],
                 "Gain",
                 Predictor::Plain,
-                layout
+                layout,
             )
-            .is_ok());
+            .unwrap();
+            let (_, a) = unity.stroke_streams()[0];
+            let (_, b) = halved.stroke_streams()[0];
+            let mantissa = |s: &[u8]| u32::from_be_bytes([0, s[9], s[10], s[11]]);
+            assert_eq!(mantissa(b), mantissa(a) / 2, "{layout:?}");
+            let gain_at = codec::TAIL_FLOATS_AT[0];
+            assert_eq!(a[..9], b[..9], "{layout:?}");
+            assert_eq!(a[12..gain_at], b[12..gain_at], "{layout:?}");
+            assert_eq!(a[gain_at + 4..], b[gain_at + 4..], "{layout:?}");
+            assert_eq!(
+                codec::zone_gain_db(b, layout),
+                Some(gain_decibels(0.5)),
+                "{layout:?}"
+            );
+            // Statistic A's mantissa, the decibel word and the container checksum are
+            // the whole of what a zone gain moves; the zone record does not.
+            let (before, after) = (unity.to_bytes().unwrap(), halved.to_bytes().unwrap());
+            let differing = before.iter().zip(&after).filter(|(x, y)| x != y).count();
+            assert_eq!(before.len(), after.len(), "{layout:?}");
+            assert!(differing <= 3 + 4 + 4, "{layout:?}: {differing} bytes");
+        }
+    }
+
+    #[test]
+    fn a_zone_gain_past_what_the_stores_agree_on_is_refused() {
+        let source = sine(440.0, 12_000.0, 20_000);
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            for gain in [MAX_ZONE_GAIN, MAX_ZONE_GAIN * 2.0, -1.0, f64::NAN] {
+                let loud = NewZone {
+                    gain,
+                    ..zone(&source, 60, 127, 1)
+                };
+                assert!(
+                    multi_zone(&[loud], "Gain", Predictor::Plain, layout).is_err(),
+                    "{layout:?} at {gain}"
+                );
+            }
         }
     }
 
