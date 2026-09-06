@@ -608,6 +608,8 @@ struct ProjectZone {
     repaired_secondary_start: Option<f64>,
     /// The zone's playing gain as a linear ratio.
     gain: f64,
+    /// The stroke's `m_loopDecay`, which only a wide header carries.
+    loop_decay: f32,
     /// Loop settings the project carries that the instrument has no field for, named
     /// so a build says what it dropped rather than dropping it quietly.
     dropped: Vec<String>,
@@ -650,6 +652,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             secondary_start: z.secondary_start,
             shift: args.shift,
             gain: z.gain,
+            loop_decay: z.loop_decay,
         })
         .collect();
     let map_gain = project.map_gain().map_err(|e| e.to_string())?;
@@ -817,6 +820,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 repaired_secondary_start: (encoded_secondary != stroke.start_secondary)
                     .then_some(stroke.start_secondary),
                 gain: layer.gain,
+                loop_decay: stroke.loop_decay as f32,
                 dropped,
             })
         })
@@ -896,7 +900,7 @@ fn zone_loop(
         dropped.push(format!("m_loopDetune = {}", stroke.loop_detune));
     }
     if stroke.loop_decay_enabled {
-        dropped.push(format!("m_loopDecay = {}", stroke.loop_decay));
+        dropped.push("m_loopDecayEnabled — the amount is written, the switch is not".into());
     }
     if short && !stroke.short_loop_uses_pitch {
         dropped.push("m_shortLoopUsesPitch = 0".into());

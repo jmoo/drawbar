@@ -1094,6 +1094,7 @@ impl BuiltZone {
             secondary_start: self.secondary_start,
             shift: None,
             gain: 1.0,
+            loop_decay: nsmp::encode::DEFAULT_LOOP_DECAY,
         }
     }
 }

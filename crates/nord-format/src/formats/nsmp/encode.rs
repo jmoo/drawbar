@@ -355,6 +355,7 @@ pub struct Options {
     shift: Option<u8>,
     layout: Layout,
     map_gain: f64,
+    loop_decay: f32,
 }
 
 impl Options {
@@ -372,7 +373,15 @@ impl Options {
             shift: None,
             layout: Layout::V2,
             map_gain: 1.0,
+            loop_decay: DEFAULT_LOOP_DECAY,
         }
+    }
+
+    /// The stroke's loop decay amount, in the project's own units. Reaches the wide
+    /// stroke header alone; the narrow chain has no field for it.
+    pub fn loop_decay(mut self, amount: f32) -> Options {
+        self.loop_decay = amount;
+        self
     }
 
     /// The instrument's own playing gain, a linear ratio applied on top of every
@@ -1418,7 +1427,7 @@ fn stroke_header(
         }
     }
     // The wide header's two float32 tails; the narrow header is too short to hold them.
-    let tails = [gain_decibels(zone.gain), WIDE_LOOP_DECAY];
+    let tails = [gain_decibels(zone.gain), zone.loop_decay];
     for (at, value) in codec::TAIL_FLOATS_AT.iter().zip(tails) {
         if let Some(slot) = head.get_mut(*at..at + 4) {
             slot.copy_from_slice(&value.to_be_bytes());
@@ -1427,8 +1436,8 @@ fn stroke_header(
     head
 }
 
-/// The loop decay amount every stroke this writes carries, in the project's own units.
-const WIDE_LOOP_DECAY: f32 = 20.0;
+/// The loop decay amount a project carries until something sets one.
+pub const DEFAULT_LOOP_DECAY: f32 = 20.0;
 
 /// One zone's stream, and the quantiser statistics describing it.
 ///
@@ -1818,6 +1827,13 @@ pub struct NewZone<'a> {
     /// Quantiser shift to lay the stroke out at instead of the rule's choice, or `None`
     /// for the rule. Experimental — see [`Options::shift`].
     pub shift: Option<u8>,
+    /// The stroke's loop decay amount — a project's `m_loopDecay` — in the project's
+    /// own units, [`DEFAULT_LOOP_DECAY`] until something sets one.
+    ///
+    /// ⚠️ A wide stroke header carries it whether or not the stroke loops and whether
+    /// or not the decay is switched on; nothing in the file says which. The narrow
+    /// chain drops the field altogether.
+    pub loop_decay: f32,
     /// Playback gain as a linear ratio, 1.0 for unity, below [`MAX_ZONE_GAIN`]. Not
     /// applied to the audio: the instrument applies it when it plays.
     ///
@@ -1854,6 +1870,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
             secondary_start,
             shift: options.shift,
             gain: 1.0,
+            loop_decay: options.loop_decay,
         }],
     )
 }
@@ -2850,6 +2867,7 @@ mod tests {
             secondary_start: default_secondary_start(source.len(), None),
             shift: None,
             gain: 1.0,
+            loop_decay: DEFAULT_LOOP_DECAY,
         }
     }
 
@@ -3678,6 +3696,47 @@ mod tests {
             let differing = before.iter().zip(&after).filter(|(x, y)| x != y).count();
             assert_eq!(before.len(), after.len(), "{layout:?}");
             assert!(differing <= 3 + 4 + 4, "{layout:?}: {differing} bytes");
+        }
+    }
+
+    /// The loop decay amount is the wide header's second float32, verbatim in the
+    /// project's own units, and the narrow header is too short to hold it at all.
+    #[test]
+    fn a_loop_decay_lands_in_the_wide_header_and_nowhere_narrow() {
+        let source = sine(440.0, 12_000.0, 20_000);
+        let at = codec::TAIL_FLOATS_AT[1];
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let one = zone(&source, 60, 127, 1);
+            let made = made("Decay", Predictor::Plain, layout);
+            let base = multi_zone(made, &[one]).unwrap();
+            let slower = multi_zone(
+                made,
+                &[NewZone {
+                    loop_decay: 60.0,
+                    ..one
+                }],
+            )
+            .unwrap();
+            let (_, a) = base.stroke_streams()[0];
+            let (_, b) = slower.stroke_streams()[0];
+            let wide = layout != Layout::V2;
+            assert_eq!(
+                codec::loop_decay(a, layout),
+                wide.then_some(DEFAULT_LOOP_DECAY),
+                "{layout:?}"
+            );
+            assert_eq!(
+                codec::loop_decay(b, layout),
+                wide.then_some(60.0),
+                "{layout:?}"
+            );
+            match wide {
+                false => assert_eq!(a, b),
+                true => {
+                    assert_eq!(a[..at], b[..at], "{layout:?}");
+                    assert_eq!(a[at + 4..], b[at + 4..], "{layout:?}");
+                }
+            }
         }
     }
 
