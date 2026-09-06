@@ -429,8 +429,8 @@ fn every_sample_preset_parses_under_its_own_schema() {
         let where_ = specimen.path.display();
         match sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}")) {
             nsmp::Sty::V2(_) => panic!("{where_}: a wide chain read a v2 preset"),
-            nsmp::Sty::V3(raw) => {
-                assert_eq!(raw.len(), nsmp::sty::V3_LEN);
+            nsmp::Sty::V3(block) => {
+                assert_eq!(block.raw.len(), nsmp::sty::V3_LEN);
                 v3 += 1;
             }
             nsmp::Sty::V4(block) => {

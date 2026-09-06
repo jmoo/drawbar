@@ -34,7 +34,8 @@ const REL_STRENGTH: usize = 10;
 pub const REL_STRENGTH_DEFAULT: u16 = 1;
 
 /// A high-to-low keyboard zone storing only its upper bound.
-/// Inferred from specimens; not confirmed on hardware.
+/// Confirmed on hardware: a note above a zone's top is silent, not clamped to the
+/// nearest zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     /// Highest MIDI note this zone answers to.

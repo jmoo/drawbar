@@ -337,12 +337,7 @@ impl Display for FieldError {
                     // Too wide to have named values; the stored bits are its only
                     // spelling.
                     0 => write!(f, " (accepts the stored bits, decimal or 0x…)"),
-                    n if n > 12 => write!(
-                        f,
-                        " (accepts {} .. {})",
-                        legal.first().unwrap(),
-                        legal.last().unwrap()
-                    ),
+                    n if n > 12 => write!(f, " (accepts {} .. {})", legal[0], legal[n - 1]),
                     _ => write!(f, " (accepts {})", legal.join(", ")),
                 }
             }

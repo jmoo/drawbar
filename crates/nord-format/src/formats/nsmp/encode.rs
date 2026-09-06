@@ -48,7 +48,8 @@
 //! generation: v2 and v3 alternate fields in one bitstream, v4 packs each channel's
 //! half into its own words and alternates those.
 //!
-//! Inferred from specimens; not confirmed on hardware.
+//! Confirmed on hardware for [`Layout::V2`]: a stereo encode plays with its channels
+//! in order and independent. The wide generations are inferred from specimens.
 //!
 //! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
 //! which is the whole of what the container stores about looping: the crossfade is
@@ -58,7 +59,8 @@
 //! loop's as a percentage of its length — and it arrives here already in frames,
 //! fraction and all.
 //!
-//! Inferred from specimens; not confirmed on hardware.
+//! Confirmed on hardware for [`Layout::V2`]: the Electro 5 sustains a looped encode to
+//! note-off, and the seam is clean. The wide generations are inferred from specimens.
 
 use super::codec::{self, Layout, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;

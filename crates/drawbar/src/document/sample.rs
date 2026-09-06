@@ -559,18 +559,21 @@ mod tests {
         assert_eq!(snapshot.generation, "v4");
     }
 
-    /// A two-zone v3 body, hand-built to the layout `map` v14 stores: the zone count,
-    /// then one 16-byte record per zone high to low, each holding root, top and low
-    /// notes and naming its stroke by global id at offset 8.
+    /// A two-zone v3 body, hand-built to the layout `map` v14 stores: a per-key table
+    /// the reader skips, the zone count at the offset the layout fixes, then one
+    /// 16-byte record per zone high to low, each holding root, top and low notes and
+    /// naming its stroke by global id at offset 8.
     fn v3_sample(version: u32) -> Cbin<nsmp::SampleV3> {
         use nord_format::formats::nsmp::section::{Section4, HDR4, MAP4, STK4};
+        use nord_format::formats::nsmp::zone::Wide;
 
         // `hdr`: the main name at 10, the sub name from 76.
         let mut hdr = vec![0u8; 140];
         hdr[10..23].copy_from_slice(b"Bass Clarinet");
         hdr[76..84].copy_from_slice(b"KG  mono");
 
-        let mut map = vec![2u8];
+        let mut map = vec![0u8; Wide::V14.count_at().unwrap()];
+        map.push(2);
         for (gid, root, top, low) in [(2u32, 72u8, 96u8, 61u8), (1, 60, 60, 17)] {
             let mut record = vec![0u8; 16];
             record[0] = root;
