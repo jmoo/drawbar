@@ -1157,7 +1157,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
 ///
 /// A region with nothing left to split is widened instead, and that sweep also runs
 /// front to back — from the record after the mark, which is left alone — spending each
-/// record up to [`WIDEN_CAP`] before moving on, so the last one widened takes only the
+/// record up to [`widen_cap`] before moving on, so the last one widened takes only the
 /// words still owed. A greedy sweep from the back finishes in fewer, wider records and
 /// is observably not what the editor writes.
 ///
@@ -1190,14 +1190,15 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
         }
     }
 
-    for cap in [WIDEN_CAP, MAX_STORED_WIDTH] {
+    let cap = widen_cap(units.layout);
+    for ceiling in [cap, MAX_STORED_WIDTH] {
         for spec in specs[opening + 1..].iter_mut() {
             if pad == 0 {
                 break;
             }
             let count = spec.count;
             let step = |width: u8| units.span(count, width + 1) - units.span(count, width);
-            while spec.width < cap && step(spec.width) <= pad {
+            while spec.width < ceiling && step(spec.width) <= pad {
                 pad -= step(spec.width);
                 spec.width += 1;
             }
@@ -1209,7 +1210,7 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
             bound: format!(
                 "a loop with {pad} more word(s) of room in it — the encoded loop has to \
                  be whole packets long, and no record of this one may be widened past \
-                 {WIDEN_CAP}; loop over more of the audio"
+                 {cap}; loop over more of the audio"
             ),
         }
         .into());
@@ -1217,12 +1218,26 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
     Ok(())
 }
 
-/// Widest the padding sweep writes a record at. No record of any loop region in any
-/// specimen declares more, and no render has needed the padding to go further; a
-/// region the cap cannot absorb is spent to [`MAX_STORED_WIDTH`] on a second sweep,
-/// which is this crate's own choice.
+/// Widest the padding sweep writes a record at, per generation. No record of any loop
+/// region in any specimen declares more, and a record still holding room under the
+/// generation's cap is never left unspent; a region the cap cannot absorb is spent to
+/// [`MAX_STORED_WIDTH`] on a second sweep, which is this crate's own choice.
+///
+/// v3 stops one width below v4, so this is a table rather than a constant. Nothing
+/// derives one entry from another.
+///
+/// ⚠️ A fixed cap and "the widest width the region's own records already reach" are
+/// indistinguishable on the specimens: the marked record needs exactly that width in
+/// every region measured.
+///
 /// Inferred from specimens; not confirmed on hardware.
-const WIDEN_CAP: u8 = 14;
+const fn widen_cap(layout: Layout) -> u8 {
+    match layout {
+        Layout::V2 => 14,
+        Layout::V3 => 13,
+        Layout::V4 => 14,
+    }
+}
 
 /// A packed stroke stream: the words, and where the header's directory points.
 struct Stream {
@@ -3375,38 +3390,48 @@ mod tests {
     /// to the cap before the next is touched, so the last one widened takes only the
     /// words still owed. Widening from the back instead finishes in fewer, wider
     /// records, which is not what the editor writes.
+    ///
+    /// The two wide generations lay the same mono region out in the same words, so the
+    /// widths they finish on differ only by the cap: v3 stops one width below v4 and
+    /// the deficit runs on into the next record.
     #[test]
     fn the_widen_fallback_spends_words_forward_from_the_mark() {
-        let units = Units {
-            layout: Layout::V4,
-            channels: 1,
-        };
-        let record = Spec {
-            one_to_one: false,
-            width: 1,
-            order: 0,
-            mark: false,
-            first: 0,
-            count: units.cell(),
-        };
-        let mut specs = vec![
-            Spec {
-                mark: true,
-                ..record
-            },
-            record,
-            record,
-            record,
-            record,
-            record,
-        ];
-        pad_to_packet(&mut specs, 0, units).unwrap();
-        assert_eq!(
-            specs.iter().map(|s| s.width).collect::<Vec<_>>(),
-            [1, WIDEN_CAP, 8, 1, 1, 1]
-        );
-        let words: usize = specs.iter().map(|s| s.span(units)).sum();
-        assert_eq!(words % units.packet_words(), 0);
+        for (layout, widths) in [
+            (Layout::V3, [1, 13, 9, 1, 1, 1]),
+            (Layout::V4, [1, 14, 8, 1, 1, 1]),
+        ] {
+            let units = Units {
+                layout,
+                channels: 1,
+            };
+            let record = Spec {
+                one_to_one: false,
+                width: 1,
+                order: 0,
+                mark: false,
+                first: 0,
+                count: units.cell(),
+            };
+            let mut specs = vec![
+                Spec {
+                    mark: true,
+                    ..record
+                },
+                record,
+                record,
+                record,
+                record,
+                record,
+            ];
+            pad_to_packet(&mut specs, 0, units).unwrap();
+            assert_eq!(
+                specs.iter().map(|s| s.width).collect::<Vec<_>>(),
+                widths,
+                "{layout:?}"
+            );
+            let words: usize = specs.iter().map(|s| s.span(units)).sum();
+            assert_eq!(words % units.packet_words(), 0, "{layout:?}");
+        }
     }
 
     #[test]
