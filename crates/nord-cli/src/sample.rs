@@ -179,6 +179,11 @@ pub struct EncodeArgs {
     #[arg(long)]
     pub predict: bool,
 
+    /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
+    /// audio is the same in all three; the container and the stream's units differ.
+    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub generation: u8,
+
     /// Quantise every stroke at this shift instead of the rule's. Experimental.
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
@@ -206,6 +211,11 @@ pub struct BuildArgs {
     /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
     #[arg(long)]
     pub predict: bool,
+
+    /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
+    /// audio is the same in all three; the container and the stream's units differ.
+    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub generation: u8,
 
     /// Quantise every stroke at this shift instead of the rule's. Experimental.
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
@@ -469,6 +479,25 @@ fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
     Ok(source)
 }
 
+/// The generation a `--generation` number names.
+fn layout(generation: u8) -> Result<codec::Layout, String> {
+    match generation {
+        2 => Ok(codec::Layout::V2),
+        3 => Ok(codec::Layout::V3),
+        4 => Ok(codec::Layout::V4),
+        n => Err(format!("--generation {n}: the format has 2, 3 and 4")),
+    }
+}
+
+/// The extension a generation's files carry.
+fn extension(layout: codec::Layout) -> &'static str {
+    match layout {
+        codec::Layout::V2 => "nsmp",
+        codec::Layout::V3 => "nsmp3",
+        codec::Layout::V4 => "nsmp4",
+    }
+}
+
 fn predictor(minimising: bool) -> encode::Predictor {
     if minimising {
         encode::Predictor::Minimising
@@ -516,7 +545,7 @@ fn loop_points(text: &str, crossfade: f64) -> Result<encode::Loop, String> {
 /// `nord sample encode`: a WAV into a one-zone v2 instrument.
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     experimental(args.experimental)?;
-    let layout = codec::Layout::V2;
+    let layout = layout(args.generation)?;
     let source = pcm_source(&args.wav)?;
 
     let stem = args
@@ -550,9 +579,10 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
         stroke_line(stroke, at, layout)?
     ));
 
-    let path = args
-        .out
-        .unwrap_or_else(|| args.wav.with_file_name(format!("{stem}.nsmp")));
+    let path = args.out.unwrap_or_else(|| {
+        args.wav
+            .with_file_name(format!("{stem}.{}", extension(layout)))
+    });
     write_file(ui, &path, &out)
 }
 
@@ -596,7 +626,7 @@ fn zone_gain(at: &str, gain: f64) -> Result<u32, String> {
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     experimental(args.experimental)?;
-    let layout = codec::Layout::V2;
+    let layout = layout(args.generation)?;
 
     let project = match nord_format::from_path(&args.project)
         .map_err(|e| format!("{}: {e}", args.project.display()))?
@@ -681,7 +711,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
 
     let path = args
         .out
-        .unwrap_or_else(|| args.project.with_extension("nsmp"));
+        .unwrap_or_else(|| args.project.with_extension(extension(layout)));
     write_file(ui, &path, &out)
 }
 
