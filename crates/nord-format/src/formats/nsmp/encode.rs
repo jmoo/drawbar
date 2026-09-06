@@ -1206,6 +1206,8 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
         }
     }
 
+    // No region is known whose deficit outlasts the cap, so the second ceiling is a
+    // guess at behaviour nothing has ever shown: spend the rest rather than refuse.
     let cap = widen_cap(units.layout);
     for ceiling in [cap, MAX_STORED_WIDTH] {
         for spec in specs[opening..].iter_mut() {
@@ -1237,23 +1239,18 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
     Ok(())
 }
 
-/// Widest the padding sweep writes a record at, per generation. No record of any loop
-/// region in any specimen declares more, and a record still holding room under the
-/// generation's cap is never left unspent; a region the cap cannot absorb is spent to
-/// [`MAX_STORED_WIDTH`] on a second sweep, which is this crate's own choice.
+/// Widest the padding sweep writes a content record at, per generation. It is the
+/// generation's own constant and not a property of the region: a record already one
+/// width under the cap is still widened past itself, up to the cap, and a record
+/// holding room under the cap is never left unspent.
 ///
-/// v3 stops one width below v4, so this is a table rather than a constant. Nothing
-/// derives one entry from another.
-///
-/// ⚠️ A fixed cap and "the widest width the region's own records already reach" are
-/// indistinguishable on the specimens: the marked record needs exactly that width in
-/// every region measured.
+/// v4 stops one width above the narrow chain and v3, so this is a table rather than a
+/// constant. Nothing derives one entry from another.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const fn widen_cap(layout: Layout) -> u8 {
     match layout {
-        Layout::V2 => 14,
-        Layout::V3 => 13,
+        Layout::V2 | Layout::V3 => 13,
         Layout::V4 => 14,
     }
 }
@@ -3498,6 +3495,55 @@ mod tests {
             assert_eq!(
                 specs.iter().map(|s| s.width).collect::<Vec<_>>(),
                 widths,
+                "{layout:?}"
+            );
+            let words: usize = specs.iter().map(|s| s.span(units)).sum();
+            assert_eq!(words % units.packet_words(), 0, "{layout:?}");
+        }
+    }
+
+    /// The cap is the generation's own constant, so a content record sitting one width
+    /// under it is widened past itself before the next record is reached — and only as
+    /// far as the cap, whatever room the record still has. Each region here opens with
+    /// its alignment run and is two words short of a whole packet: the narrow chain and
+    /// v3 spend those two words one to a record, v4 spends both on the first.
+    #[test]
+    fn the_widen_cap_is_the_generations_constant() {
+        for (layout, alignment, content, spent) in [
+            (Layout::V2, 2usize, 9usize, [13u8, 13]),
+            (Layout::V3, 1, 2, [13, 13]),
+            (Layout::V4, 1, 2, [14, 12]),
+        ] {
+            let units = Units {
+                layout,
+                channels: 1,
+            };
+            // Cell-sized, so the region has nothing left to split and must be widened.
+            let record = Spec {
+                one_to_one: false,
+                width: 12,
+                order: 0,
+                mark: false,
+                first: 0,
+                count: units.cell(),
+            };
+            let mut specs: Vec<Spec> = (0..alignment)
+                .map(|i| Spec {
+                    one_to_one: true,
+                    width: 3,
+                    mark: i == 0,
+                    ..record
+                })
+                .chain(std::iter::repeat_n(record, content))
+                .collect();
+            pad_to_packet(&mut specs, 0, units).unwrap();
+
+            let mut want = vec![3u8; alignment];
+            want.extend(spent);
+            want.resize(alignment + content, record.width);
+            assert_eq!(
+                specs.iter().map(|s| s.width).collect::<Vec<_>>(),
+                want,
                 "{layout:?}"
             );
             let words: usize = specs.iter().map(|s| s.span(units)).sum();
