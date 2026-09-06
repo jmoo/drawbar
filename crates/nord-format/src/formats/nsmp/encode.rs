@@ -270,8 +270,10 @@ const RING_OUT: usize = 127;
 /// Inferred from specimens; not confirmed on hardware.
 const RAMP_IN: usize = 35;
 
-/// Shortest modelled input; shorter streams use an unresolved opening.
-pub const MIN_FRAMES: usize = 4096;
+/// Shortest input the editor encodes: below it, it clamps a project's own extent
+/// rather than laying a shorter stream out. The opening, the count laws and the
+/// resync are the same object all the way down to it.
+pub const MIN_FRAMES: usize = 92;
 
 /// Fields a looped stroke carries past its loop end, repeating the loop's own opening
 /// so that playback is unchanged. The mark clears the loop start by the same amount,
@@ -2390,7 +2392,8 @@ mod tests {
         assert!(plan(MIN_FRAMES - 1, 1).is_err());
         assert!(plan(MIN_FRAMES, 1).is_ok());
         assert!(plan(usize::MAX, 1).is_err());
-        assert!(instrument(&vec![0i16; 1024], &Options::new("Test")).is_err());
+        assert!(instrument(&vec![0i16; MIN_FRAMES - 1], &Options::new("Test")).is_err());
+        assert!(instrument(&vec![0i16; MIN_FRAMES], &Options::new("Test")).is_ok());
     }
 
     #[test]
@@ -3280,8 +3283,8 @@ mod tests {
             stated(Loop::new(8_192, 40_000).crossfade(40_000.0)).is_err(),
             "not enough material before the fade"
         );
-        // Below the modelled opening, whatever the loop says.
-        assert!(looped(4_000, 1, Loop::new(100, 3_000)).is_err());
+        // Below the shortest stroke the editor encodes, whatever the loop says.
+        assert!(looped(MIN_FRAMES - 1, 1, Loop::new(10, 60)).is_err());
     }
 
     #[test]
