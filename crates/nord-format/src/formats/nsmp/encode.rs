@@ -1353,6 +1353,11 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units:
 /// 24-bit fraction in `[½, 1)` — three bits finer than the mantissa — before the gain
 /// multiplies it, and one floor follows; the mantissa leaves its normalised range
 /// freely in either direction, and the exponent never moves with it.
+///
+/// ⚠️ **`peak` is the file's, not the stroke's.** Every stroke of a multi-zone
+/// instrument reciprocates the largest statistic B in the file; only the shift and the
+/// zone's own gain are the stroke's. Reciprocating each stroke's own peak instead
+/// leaves every zone but the loudest playing at the wrong level.
 fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
     let peak = u64::from(peak.max(1));
     let bits = 64 - peak.leading_zeros() as i32;
@@ -1363,27 +1368,24 @@ fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
 }
 
 /// Build the fixed header and its body-relative, wrapping word directory.
-#[allow(clippy::too_many_arguments)]
 fn stroke_header(
     layout: Layout,
-    id: u32,
-    root_key: u8,
-    q: &Quantised,
-    stream: &Stream,
+    zone: &NewZone<'_>,
+    encoded: &Encoded,
     body_at: usize,
-    channels: usize,
-    gain: u32,
+    file_peak: u32,
 ) -> Vec<u8> {
+    let (q, stream) = (&encoded.q, &encoded.stream);
     let mut head = vec![0u8; layout.header_len()];
-    head[0..4].copy_from_slice(&id.to_be_bytes());
-    head[5] = root_key;
+    head[0..4].copy_from_slice(&zone.global_id.to_be_bytes());
+    head[5] = zone.root_key;
     // Unexplained: real programs hold this, and the panel cannot produce it.
     head[6..8].copy_from_slice(&[0x88, 0xba]);
     // The channel count, stated a second time — the terminator's cell size says it too,
     // and a reader takes the terminator because that is what the record sizes follow.
-    head[8] = channels as u8;
+    head[8] = zone.channels as u8;
 
-    let (mantissa, exponent) = statistic_a(q.peak.unsigned_abs(), q.shift, gain);
+    let (mantissa, exponent) = statistic_a(file_peak, q.shift, zone.gain);
     head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
     head[12] = exponent;
     head[13..16].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
@@ -1420,41 +1422,30 @@ fn stroke_header(
 /// Unexplained: real programs hold this, and the panel cannot produce it.
 const WIDE_TAIL_FLOATS: [f32; 2] = [0.0, 20.0];
 
-/// Encode one zone's stroke at body offset `body_at`, packed into `preamble` bytes
-/// plus whole packets.
+/// One zone's stream, and the quantiser statistics describing it.
 ///
-/// Both placements come from the sections already sized in front of this stroke, so
-/// only [`multi_zone`] can supply them: `body_at` is the base the word directory is
-/// written against, and a wrong one produces a file whose directory names records
-/// that are not there.
-#[allow(clippy::too_many_arguments)]
-fn stroke(
+/// A stroke header cannot be written until every zone is here: statistic A
+/// reciprocates the file's peak, so the last zone's audio decides the first zone's
+/// header.
+struct Encoded {
+    q: Quantised,
+    stream: Stream,
+}
+
+/// Lay out and pack one zone's stream, into `preamble` bytes plus whole packets.
+fn encode_stroke(
     layout: Layout,
-    source: &[i16],
-    channels: usize,
-    root_key: u8,
-    id: u32,
-    body_at: usize,
+    zone: &NewZone<'_>,
     preamble: usize,
     predictor: Predictor,
-    loops: Option<Loop>,
-    secondary_start: f64,
-    shift: Option<u8>,
-    gain: u32,
-) -> Result<Vec<u8>, Error> {
-    midi_note("root key", root_key)?;
-    let frames = frames_of(source, channels)?;
-    body_at
-        .checked_add(layout.header_len())
-        .ok_or_else(|| ParseError::OutOfBounds {
-            value: format!("body offset {body_at}"),
-            bound: "an addressable stroke header".into(),
-        })?;
-    let plan = match loops {
-        Some(points) => Plan::looped(layout, frames, channels, points, secondary_start)?,
-        None => Plan::new(layout, frames, channels, secondary_start)?,
+) -> Result<Encoded, Error> {
+    let channels = usize::from(zone.channels);
+    let frames = frames_of(zone.source, channels)?;
+    let plan = match zone.loops {
+        Some(points) => Plan::looped(layout, frames, channels, points, zone.secondary_start)?,
+        None => Plan::new(layout, frames, channels, zone.secondary_start)?,
     };
-    if let Some(bits) = shift {
+    if let Some(bits) = zone.shift {
         if i32::from(bits) > codec::SHIFT_LIMIT {
             return Err(ParseError::OutOfBounds {
                 value: format!("a quantiser shift of {bits} bits"),
@@ -1463,7 +1454,7 @@ fn stroke(
             .into());
         }
     }
-    let q = quantise(source, &plan, shift);
+    let q = quantise(zone.source, &plan, zone.shift);
     let low = q.values.iter().copied().min().unwrap_or(0);
     let high = q.values.iter().copied().max().unwrap_or(0);
     if width_of(i64::from(low), i64::from(high)) > MAX_STORED_WIDTH {
@@ -1487,9 +1478,55 @@ fn stroke(
             ))
         })?;
     let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
+    Ok(Encoded { q, stream })
+}
 
-    let mut payload = stroke_header(layout, id, root_key, &q, &stream, body_at, channels, gain);
-    payload.extend_from_slice(&stream.words);
+/// Every zone's stream in order, and the peak each of their headers reciprocates.
+fn encode_strokes(
+    layout: Layout,
+    zones: &[NewZone<'_>],
+    predictor: Predictor,
+    cat_len: usize,
+    map_len: usize,
+) -> Result<(Vec<Encoded>, u32), Error> {
+    let encoded = zones
+        .iter()
+        .enumerate()
+        .map(|(index, zone)| {
+            let preamble = super::stroke::header_len(layout, index, cat_len, map_len);
+            encode_stroke(layout, zone, preamble, predictor)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let peak = encoded
+        .iter()
+        .map(|e| e.q.peak.unsigned_abs())
+        .max()
+        .unwrap_or(1);
+    Ok((encoded, peak))
+}
+
+/// One zone's `stk` payload at body offset `body_at`.
+///
+/// `body_at` comes from the sections already sized in front of this stroke, so only
+/// the chain builders can supply it: it is the base the word directory is written
+/// against, and a wrong one produces a file whose directory names records that are
+/// not there.
+fn stroke_payload(
+    layout: Layout,
+    zone: &NewZone<'_>,
+    encoded: &Encoded,
+    body_at: usize,
+    file_peak: u32,
+) -> Result<Vec<u8>, Error> {
+    midi_note("root key", zone.root_key)?;
+    body_at
+        .checked_add(layout.header_len())
+        .ok_or_else(|| ParseError::OutOfBounds {
+            value: format!("body offset {body_at}"),
+            bound: "an addressable stroke header".into(),
+        })?;
+    let mut payload = stroke_header(layout, zone, encoded, body_at, file_peak);
+    payload.extend_from_slice(&encoded.stream.words);
     Ok(payload)
 }
 
@@ -1855,21 +1892,15 @@ fn narrow_chain(
         cat,
         map,
     ];
+    let (encoded, file_peak) = encode_strokes(Layout::V2, zones, predictor, cat_len, map_len)?;
     let mut body_at: usize = sections.iter().map(Section::encoded_len).sum();
-    for (index, zone) in zones.iter().enumerate() {
-        let payload = stroke(
+    for (zone, stroke) in zones.iter().zip(&encoded) {
+        let payload = stroke_payload(
             Layout::V2,
-            zone.source,
-            usize::from(zone.channels),
-            zone.root_key,
-            zone.global_id,
+            zone,
+            stroke,
             body_at + section::HEADER_LEN,
-            super::stroke::header_len(Layout::V2, index, cat_len, map_len),
-            predictor,
-            zone.loops,
-            zone.secondary_start,
-            zone.shift,
-            zone.gain,
+            file_peak,
         )?;
         body_at += section::HEADER_LEN + payload.len();
         sections.push(Section {
@@ -1913,21 +1944,15 @@ fn wide_chain(
         cat,
         map,
     ];
+    let (encoded, file_peak) = encode_strokes(layout, zones, predictor, cat_len, map_len)?;
     let mut body_at: usize = sections.iter().map(Section4::encoded_len).sum();
-    for (index, zone) in zones.iter().enumerate() {
-        let payload = stroke(
+    for (zone, stroke) in zones.iter().zip(&encoded) {
+        let payload = stroke_payload(
             layout,
-            zone.source,
-            usize::from(zone.channels),
-            zone.root_key,
-            zone.global_id,
+            zone,
+            stroke,
             body_at + section::HEADER4_LEN,
-            super::stroke::header_len(layout, index, cat_len, map_len),
-            predictor,
-            zone.loops,
-            zone.secondary_start,
-            zone.shift,
-            zone.gain,
+            file_peak,
         )?;
         body_at += section::HEADER4_LEN + payload.len();
         sections.push(Section4 {
@@ -2303,21 +2328,12 @@ mod tests {
         let source = vec![0i16; MIN_FRAMES];
         assert!(instrument(&source, &Options::new("Test").root_key(128)).is_err());
         assert!(instrument(&source, &Options::new("Test").top_note(255)).is_err());
-        assert!(stroke(
-            Layout::V2,
-            &source,
-            1,
-            128,
-            1,
-            0,
-            165,
-            Predictor::Plain,
-            None,
-            default_secondary_start(source.len(), None),
-            None,
-            GAIN_UNITY
-        )
-        .is_err());
+        let bad_root = NewZone {
+            root_key: 128,
+            ..zone(&source, 60, 127, 1)
+        };
+        let encoded = encode_stroke(Layout::V2, &bad_root, 165, Predictor::Plain).unwrap();
+        assert!(stroke_payload(Layout::V2, &bad_root, &encoded, 0, 1).is_err());
     }
 
     #[test]
@@ -2780,6 +2796,32 @@ mod tests {
         assert_eq!(statistic_a(1225, 0, 1_436_549), (1_200_837, 11));
         assert_eq!(statistic_a(4195, 2, 8_378_122), (8_180_401, 11));
         assert_eq!(statistic_a(1225, 0, 5_557_453), (4_645_576, 11));
+    }
+
+    /// Every zone of an instrument reciprocates the same peak — the file's — so a
+    /// quiet zone plays quietly rather than being normalised up to the loud one.
+    #[test]
+    fn statistic_a_reciprocates_the_loudest_zone_in_the_file() {
+        let loud = sine(440.0, 12_000.0, 20_000);
+        let quiet = sine(440.0, 3_000.0, 20_000);
+        let file = built(
+            &[zone(&loud, 72, 127, 1), zone(&quiet, 48, 71, 2)],
+            "Two",
+            Predictor::Plain,
+        )
+        .unwrap();
+        let field = |s: &[u8], at: usize| u32::from_be_bytes([0, s[at], s[at + 1], s[at + 2]]);
+        let streams = file.stroke_streams();
+        let (mantissa, peak) = (|s| field(s, 9), |s| field(s, 13));
+        let (first, second) = (streams[0].1, streams[1].1);
+        assert!(peak(first) > peak(second));
+        assert_eq!(mantissa(first), mantissa(second));
+        assert_eq!(
+            mantissa(second),
+            statistic_a(peak(first), 0, GAIN_UNITY).0,
+            "the quiet zone reciprocates the loud zone's peak"
+        );
+        assert_ne!(mantissa(second), statistic_a(peak(second), 0, GAIN_UNITY).0);
     }
 
     #[test]
