@@ -615,6 +615,10 @@ struct ProjectZone {
     dropped: Vec<String>,
 }
 
+/// The zone gain at which both of the instrument's gain stores overflow their 24 bits.
+/// The file still reproduces the editor's; what it states is no longer the project.
+const WRAPPING_ZONE_GAIN: f64 = 16.0;
+
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     experimental(args.experimental)?;
@@ -670,7 +674,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
 
     ui.out(format!("{} — {} zone(s)", ui.bold(&name), zones.len()));
     let ceiling = 10f64.powf(encode::MAX_MAP_GAIN_DB / 20.0);
-    if map_gain > ceiling {
+    if !(0.0..=ceiling).contains(&map_gain) {
         ui.note(ui.dim(format!(
             "the map's own gain is {map_gain}, which the instrument clamps at \
              +{:.3} dB as the editor does",
@@ -698,6 +702,15 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             zone.global_id,
             zone.source.display()
         )));
+        if zone.gain >= WRAPPING_ZONE_GAIN {
+            ui.warn(format!(
+                "zone{} sets gain {}, which overflows both of the instrument's gain \
+                 fields; the file will state a far quieter level, as the editor's own \
+                 render of this project does",
+                index + 1,
+                zone.gain
+            ));
+        }
         if !zone.dropped.is_empty() {
             ui.warn(format!(
                 "zone{} sets {}, which the instrument has nowhere to hold",
@@ -761,14 +774,6 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                      instrument applies those is not decoded, so nothing here reproduces \
                      them",
                     layer.detune, layer.velocity.0, layer.velocity.1
-                ));
-            }
-            if !(0.0..encode::MAX_ZONE_GAIN).contains(&layer.gain) {
-                return Err(format!(
-                    "{at} sets gain {}, outside the 0 up to {} this writes — at and \
-                     above it the zone record and statistic A disagree",
-                    layer.gain,
-                    encode::MAX_ZONE_GAIN
                 ));
             }
             let stroke = strokes

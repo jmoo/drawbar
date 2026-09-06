@@ -1389,17 +1389,25 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units:
 /// multiplies it, and one floor follows; the mantissa leaves its normalised range
 /// freely in either direction, and the exponent never moves with it.
 ///
+/// ⚠️ **`gain` is the decibel field's round trip, not the project's own float.** The
+/// two agree below `2^24` and part above it, where the mantissa wraps into its field
+/// and the file states a level far quieter than the project asked for. That is what
+/// the instrument plays; a caller that means to warn about it owns the warning.
+///
 /// ⚠️ **`peak` is the file's, not the stroke's.** Every stroke of a multi-zone
 /// instrument reciprocates the largest statistic B in the file; only the shift and the
 /// zone's own gain are the stroke's. Reciprocating each stroke's own peak instead
 /// leaves every zone but the loudest playing at the wrong level.
-fn statistic_a(peak: u32, shift: i32, gain: u32) -> (u32, u8) {
+fn statistic_a(peak: u32, shift: i32, gain: u64) -> (u32, u8) {
     let peak = u64::from(peak.max(1));
     let bits = 64 - peak.leading_zeros() as i32;
     let exact_power = i32::from(peak.is_power_of_two());
     let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
-    let mantissa = (reciprocal * u64::from(gain)) >> (super::zone::GAIN_BITS + 3);
-    (mantissa as u32, (22 + shift - bits + exact_power) as u8)
+    let mantissa = (reciprocal * gain) >> (super::zone::GAIN_BITS + 3);
+    (
+        (mantissa % (1 << 24)) as u32,
+        (22 + shift - bits + exact_power) as u8,
+    )
 }
 
 /// Build the fixed header and its body-relative, wrapping word directory.
@@ -1420,7 +1428,8 @@ fn stroke_header(
     // and a reader takes the terminator because that is what the record sizes follow.
     head[8] = zone.channels as u8;
 
-    let (mantissa, exponent) = statistic_a(file_peak, q.shift, gain_units(zone.gain));
+    let (mantissa, exponent) =
+        statistic_a(file_peak, q.shift, gain_units(gain_decibels(zone.gain)));
     head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
     head[12] = exponent;
     head[13..16].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
@@ -1937,7 +1946,7 @@ fn narrow_chain(instrument: Instrument<'_>, zones: &[NewZone<'_>]) -> Result<Cbi
     let table = zone_table(zones)?;
     let hdr = hdr(instrument.name)?;
     let cat = cat();
-    let map = map(map_gain_units(instrument.map_gain)?, &table)?;
+    let map = map(map_gain_units(instrument.map_gain), &table)?;
     // The directory a stroke carries counts words from the start of the body, and these
     // two decide where the first packet may start, so both are sized before any stream
     // is written.
@@ -1992,7 +2001,7 @@ fn wide_chain(
     let table = wide_zone_table(zones)?;
     let hdr = hdr4(schema, instrument.name)?;
     let cat = cat4();
-    let map = map4(schema, map_gain_units(instrument.map_gain)?, &table);
+    let map = map4(schema, map_gain_units(instrument.map_gain), &table);
     let cat_len = cat.payload.len();
     let map_len = map.payload.len();
 
@@ -2109,10 +2118,10 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
             }
             .into());
         }
-        if !(0.0..MAX_ZONE_GAIN).contains(&zone.gain) {
+        if !zone.gain.is_finite() || zone.gain > MAX_ZONE_GAIN {
             return Err(ParseError::OutOfBounds {
                 value: format!("zone {index} gain {}", zone.gain),
-                bound: format!("0 up to but not including {MAX_ZONE_GAIN}"),
+                bound: format!("a finite gain up to {MAX_ZONE_GAIN}"),
             }
             .into());
         }
@@ -2135,7 +2144,7 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
         table.push(ZoneRecord {
             id,
             top_note: zone.top_note,
-            gain: gain_units(zone.gain),
+            gain: zone_record_gain(zone.gain),
         });
     }
     Ok(table)
@@ -2143,41 +2152,63 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
 
 /// The ceiling the `map`'s own gain clamps at, in decibels. A project asking for more
 /// renders at this and is not repaired.
-///
-/// ⚠️ The clamp's value is exact and its threshold is bracketed: renders exist at 1.1
-/// unclamped and at 4 clamped, so where between them it starts is unmeasured.
 pub const MAX_MAP_GAIN_DB: f64 = 9.0;
 
-/// The `map`'s own gain as the section's opening u24, clamped.
-fn map_gain_units(gain: f64) -> Result<u32, Error> {
-    if !(0.0..=f64::from(u32::MAX)).contains(&gain) {
-        return Err(ParseError::OutOfBounds {
-            value: format!("a map gain of {gain}"),
-            bound: "a gain at or above zero".into(),
-        }
-        .into());
-    }
-    Ok(gain_units(gain.min(10f64.powf(MAX_MAP_GAIN_DB / 20.0))))
-}
+/// Largest zone gain whose stores this reproduces. Past it the u24s' wrap count is
+/// unmeasured; below it the wrap is the format's, not a mistake.
+pub const MAX_ZONE_GAIN: f64 = 1000.0;
 
-/// Largest zone gain this writes, exclusive.
+/// The zone's playing gain in decibels — the number a wide stroke header stores, and
+/// the number every other gain field is derived through.
 ///
-/// ⚠️ At and above it the two stores disagree: the narrow record's 24 bits wrap to
-/// silence while statistic A's mantissa saturates one count short of overflowing, by
-/// a rule no specimen pins. The editor writes such a file; this refuses to guess one.
-pub const MAX_ZONE_GAIN: f64 = 16.0;
-
-/// A zone gain as the narrow record and statistic A store it: linear, to
-/// [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits.
-fn gain_units(gain: f64) -> u32 {
-    (gain * f64::from(super::zone::GAIN_UNITY)).round() as u32
+/// The logarithm is evaluated wider than the field and rounded once; computing it in
+/// float32 throughout moves the last byte on the powers of two. Neither clamped nor
+/// gridded: silence is `-inf` and a negative gain is the default quiet NaN, which is
+/// what the map gain's ceiling comparison then fails against.
+fn gain_decibels(gain: f64) -> f32 {
+    let decibels = 20.0 * gain.log10();
+    match decibels.is_nan() {
+        true => f32::from_bits(0x7fc0_0000),
+        false => decibels as f32,
+    }
 }
 
-/// The same gain as a wide stroke header stores it: decibels, evaluated wider than the
-/// field and rounded once. Silence is `-inf`, which the field carries and the linear
-/// store cannot.
-fn gain_decibels(gain: f64) -> f32 {
-    (20.0 * gain.log10()) as f32
+/// The gain back from its decibel, linear with
+/// [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits, exponentiated wider
+/// than the decibel and rounded once.
+///
+/// ⚠️ **Not the identity on the linear gain it came from.** Below `2^24` the decibel's
+/// own precision is worth less than half a step and the two agree everywhere the corpus
+/// reaches; above it they part by up to tens of steps, and it is this value — not the
+/// project's — that statistic A is built from.
+fn gain_units(decibels: f32) -> u64 {
+    let units = 10f64.powf(f64::from(decibels) / 20.0) * f64::from(super::zone::GAIN_UNITY);
+    units.round() as u64
+}
+
+/// The `map`'s own gain as the section's opening u24. The one gain field that clamps.
+fn map_gain_units(gain: f64) -> u32 {
+    let ceiling = MAX_MAP_GAIN_DB as f32;
+    let decibels = gain_decibels(gain);
+    // The comparison, not the value, is what the ceiling is: a NaN decibel — which is
+    // what a negative gain gives — fails it and takes the ceiling rather than the floor.
+    let clamped = if decibels < ceiling {
+        decibels
+    } else {
+        ceiling
+    };
+    gain_units(clamped) as u32
+}
+
+/// A zone gain as the narrow zone record stores it: the project's own float, wrapping
+/// mod `2^24`, with a negative converting to zero rather than masking.
+///
+/// ⚠️ The record and statistic A part company here. The record takes the project's
+/// float and the mantissa takes the decibel round trip, so past a gain of 16 the two
+/// u24s in one file disagree and the record's reads back as a plausible quieter gain.
+fn zone_record_gain(gain: f64) -> u32 {
+    let units = (gain * f64::from(super::zone::GAIN_UNITY)).round() as u64;
+    (units % (1 << 24)) as u32
 }
 
 fn midi_note(name: &str, note: u8) -> Result<(), Error> {
@@ -2835,7 +2866,7 @@ mod tests {
     fn statistic_a_round_trips_the_shift() {
         for peak in [0u32, 1, 2, 255, 4095, 4096, 8191, 8192] {
             for shift in 0..6 {
-                let (mantissa, exponent) = statistic_a(peak, shift, GAIN_UNITY);
+                let (mantissa, exponent) = statistic_a(peak, shift, u64::from(GAIN_UNITY));
                 let mut stroke = vec![0u8; HEADER_LEN];
                 stroke[12] = exponent;
                 stroke[13..16].copy_from_slice(&peak.to_be_bytes()[1..]);
@@ -2891,9 +2922,15 @@ mod tests {
 
     #[test]
     fn statistic_a_scales_a_24_bit_reciprocal_by_the_gain() {
-        assert_eq!(statistic_a(4096, 2, GAIN_UNITY), (524_288, 12));
-        assert_eq!(statistic_a(4096, 2, GAIN_UNITY / 2), (262_144, 12));
-        assert_eq!(statistic_a(4096, 2, 2 * GAIN_UNITY), (1_048_576, 12));
+        assert_eq!(statistic_a(4096, 2, u64::from(GAIN_UNITY)), (524_288, 12));
+        assert_eq!(
+            statistic_a(4096, 2, u64::from(GAIN_UNITY / 2)),
+            (262_144, 12)
+        );
+        assert_eq!(
+            statistic_a(4096, 2, 2 * u64::from(GAIN_UNITY)),
+            (1_048_576, 12)
+        );
         assert_eq!(statistic_a(1225, 0, 1_436_549), (1_200_837, 11));
         assert_eq!(statistic_a(4195, 2, 8_378_122), (8_180_401, 11));
         assert_eq!(statistic_a(1225, 0, 5_557_453), (4_645_576, 11));
@@ -2919,10 +2956,13 @@ mod tests {
         assert_eq!(mantissa(first), mantissa(second));
         assert_eq!(
             mantissa(second),
-            statistic_a(peak(first), 0, GAIN_UNITY).0,
+            statistic_a(peak(first), 0, u64::from(GAIN_UNITY)).0,
             "the quiet zone reciprocates the loud zone's peak"
         );
-        assert_ne!(mantissa(second), statistic_a(peak(second), 0, GAIN_UNITY).0);
+        assert_ne!(
+            mantissa(second),
+            statistic_a(peak(second), 0, u64::from(GAIN_UNITY)).0
+        );
     }
 
     #[test]
@@ -2944,7 +2984,7 @@ mod tests {
         assert_eq!(halved.zones().unwrap()[0].gain, GAIN_UNITY / 2);
 
         let over = NewZone {
-            gain: MAX_ZONE_GAIN,
+            gain: MAX_ZONE_GAIN * 2.0,
             ..zone(&source, 60, 127, 1)
         };
         assert!(built(&[over], "Gain", Predictor::Plain).is_err());
@@ -3661,13 +3701,15 @@ mod tests {
         }
     }
 
-    /// Decibel words read off editor renders of one project at ten stroke gains. The
-    /// logarithm is evaluated wider than the field and rounded once: computing it in
-    /// float32 throughout moves the last byte on the powers of two.
+    /// Decibel words read off editor renders of one project at sixteen stroke gains,
+    /// four of them predicted before the render and landing on it. The logarithm is
+    /// evaluated wider than the field and rounded once: computing it in float32
+    /// throughout moves the last byte on the powers of two.
     #[test]
     fn a_zone_gain_in_decibels_is_the_word_the_editor_writes() {
         for (gain, word) in [
-            (0.0, 0xff80_0000u32),
+            (-1.0, 0x7fc0_0000u32),
+            (0.0, 0xff80_0000),
             (0.01, 0xc220_0000),
             (0.1, 0xc1a0_0000),
             (0.5, 0xc0c0_a8c1),
@@ -3677,28 +3719,95 @@ mod tests {
             (2.0, 0x40c0_a8c1),
             (4.0, 0x4140_a8c1),
             (8.0, 0x4190_7e91),
+            (16.0, 0x41c0_a8c1),
+            (20.5, 0x41d1_e170),
+            (63.75, 0x4210_5bc1),
+            (333.33, 0x4249_d478),
+            (1000.0, 0x4270_0000),
         ] {
             assert_eq!(gain_decibels(gain).to_bits(), word, "a gain of {gain}");
         }
     }
 
-    /// Fixed-point words read off editor renders of one project at seven map gains.
-    /// The ceiling is exact; only where between 1.1 and 4 it starts is unmeasured.
+    /// Statistic A's mantissa is built from the decibel and not from the project's
+    /// float. The two part company only past `2^24`, and these deltas are what the
+    /// editor writes there.
+    #[test]
+    fn the_gain_statistic_a_uses_is_the_decibels_round_trip() {
+        for (gain, delta) in [
+            (0.01, 0i64),
+            (1.1, 0),
+            (15.99, 0),
+            (16.0, -1),
+            (20.5, -1),
+            (24.0, 1),
+            (33.0, 2),
+            (48.0, -1),
+            (63.75, -3),
+            (100.0, 0),
+            (333.33, 39),
+            (1000.0, 0),
+        ] {
+            let plain = (gain * f64::from(GAIN_UNITY)).round() as i64;
+            let round_trip = gain_units(gain_decibels(gain)) as i64;
+            assert_eq!(round_trip - plain, delta, "a gain of {gain}");
+        }
+    }
+
+    /// Fixed-point words read off editor renders of one project at eleven map gains.
+    /// The ceiling is a clamp on the decibel: the knee sits on a round +9.000 dB
+    /// rather than on a round linear number, and a negative gain — whose decibel is a
+    /// NaN — fails the comparison and takes the ceiling rather than the floor.
     #[test]
     fn a_map_gain_is_the_word_the_editor_writes_and_clamps_at_the_ceiling() {
         for (gain, units) in [
-            (0.01, 0x00_28_f6_u32),
+            (-1.0, 0x2d_18_19_u32),
+            (0.0, 0x00_00_00),
+            (0.0001, 0x00_00_69),
+            (0.01, 0x00_28_f6),
             (0.5, 0x08_00_00),
             (1.0, 0x10_00_00),
             (1.1, 0x11_99_9a),
             (2.0, 0x20_00_00),
+            (2.8125, 0x2d_00_00),
+            (2.828125, 0x2d_18_19),
             (4.0, 0x2d_18_19),
             (16.0, 0x2d_18_19),
         ] {
-            assert_eq!(map_gain_units(gain).unwrap(), units, "a map gain of {gain}");
+            assert_eq!(map_gain_units(gain), units, "a map gain of {gain}");
         }
-        assert!(map_gain_units(-1.0).is_err());
-        assert!(map_gain_units(f64::NAN).is_err());
+    }
+
+    /// A zone gain past 16 overflows both u24 stores, by different rules: the record
+    /// takes the project's float and wraps, and the mantissa takes the decibel's round
+    /// trip and truncates into its field. Words read off editor renders.
+    #[test]
+    fn a_zone_gain_past_sixteen_wraps_in_both_stores() {
+        for (gain, record) in [
+            (-1.0, 0x00_00_00_u32),
+            (0.0, 0x00_00_00),
+            (15.99, 0xff_d7_0a),
+            (16.0, 0x00_00_00),
+            (33.0, 0x10_00_00),
+            (333.33, 0xd5_47_ae),
+            (1000.0, 0x80_00_00),
+        ] {
+            assert_eq!(zone_record_gain(gain), record, "a gain of {gain}");
+        }
+        // `WG-base`'s peak is 4096, so the reciprocal is 2^22 and every step below is
+        // exact in integers.
+        for (gain, mantissa) in [
+            (-1.0, 0x00_00_00_u32),
+            (0.0, 0x00_00_00),
+            (15.99, 0x7f_eb_85),
+            (16.0, 0x7f_ff_ff),
+            (33.0, 0x08_00_01),
+            (333.33, 0x6a_a3_ea),
+            (1000.0, 0x40_00_00),
+        ] {
+            let (got, _) = statistic_a(4096, 0, gain_units(gain_decibels(gain)));
+            assert_eq!(got, mantissa, "a gain of {gain}");
+        }
     }
 
     /// The map gain opens the `map` section and reaches nothing else — not the zone
@@ -3798,10 +3907,10 @@ mod tests {
     }
 
     #[test]
-    fn a_zone_gain_past_what_the_stores_agree_on_is_refused() {
+    fn a_zone_gain_past_the_measured_range_is_refused() {
         let source = sine(440.0, 12_000.0, 20_000);
         for layout in [Layout::V2, Layout::V3, Layout::V4] {
-            for gain in [MAX_ZONE_GAIN, MAX_ZONE_GAIN * 2.0, -1.0, f64::NAN] {
+            for gain in [MAX_ZONE_GAIN * 2.0, f64::NAN, f64::INFINITY] {
                 let loud = NewZone {
                     gain,
                     ..zone(&source, 60, 127, 1)
@@ -3811,6 +3920,11 @@ mod tests {
                     "{layout:?} at {gain}"
                 );
             }
+            let wrapping = NewZone {
+                gain: MAX_ZONE_GAIN,
+                ..zone(&source, 60, 127, 1)
+            };
+            assert!(multi_zone(made("Gain", Predictor::Plain, layout), &[wrapping]).is_ok());
         }
     }
 
