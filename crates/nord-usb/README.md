@@ -18,11 +18,18 @@ are optional features.
 ## Status
 
 The wire protocol is decoded and validated. Implemented and hardware-verified on
-macOS and Linux: inventory, object info, dependencies, program read/write, the
-slot organization set (move, delete, rename, duplicate, select), and reads of the
-live slots (class 6) and the settings singleton (class 7). Linux emits
-byte-identical request frames to macOS for every verb. Writes of the live and
-settings slots are additionally hardware-verified on macOS.
+macOS: inventory, object info, dependencies, the partition and bank geometry,
+focus, the occupied-slot walk, program and set-list read/write, the slot
+organization set (move, delete, rename, duplicate, select), reads and in-place
+writes of the live slots (class 6) and the settings singleton (class 7), and
+reads, deletes and writes of the piano (class 1) and sample (class 3) libraries —
+a library write sizes the instrument's cleaning pass from `STATUS`, runs it in
+the write's own session, and chunks the body. On Linux the read path and a
+multi-chunk sample write are hardware-verified, and every request frame is
+byte-identical to macOS.
+
+A slot's name is the `BEGIN_WRITE` argument and nothing later: `rename` is
+refused on the library classes and accepted-but-ignored on live and settings.
 
 Those two classes overwrite an occupied slot in place
 (`ObjectClass::overwrites_in_place`), so a caller must not compose their write out
@@ -39,9 +46,9 @@ ends it, so a frame whose length is a whole multiple of the OUT endpoint's
 never answers and the session is stranded — a `RENAME` carrying a 34-character
 name is exactly 64 bytes on this full-speed link, and 33 characters is not.
 
-Not implemented: bundle and backup transfer, firmware update, and the piano/sample
-library as first-class objects. Windows builds and passes the replay tests but has
-not been run against hardware.
+Not implemented: bundle and backup transfer, firmware update, and relink (`0x35` —
+decoded from captures, never driven). Windows builds and passes the replay tests
+but has not been run against hardware.
 
 ## Usage
 
