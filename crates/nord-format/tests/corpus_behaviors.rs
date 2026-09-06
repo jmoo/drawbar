@@ -576,7 +576,8 @@ fn nsmp_retune_is_surgical() {
 #[test]
 fn nsmp_overlong_name_is_refused_without_mutation() {
     let mut sample = v2_named("D1-one-zone.nsmp");
-    assert!(sample.set_name("a name that is far too long").is_err());
+    let over = "M".repeat(nsmp::MAX_NAME_LEN + 1);
+    assert!(sample.set_name(&over).is_err());
     assert_eq!(sample.name().unwrap(), "TEST");
 }
 
@@ -1410,5 +1411,52 @@ fn nsmp_the_kernel_matches_the_corpus_f32_tap_table() {
     assert_eq!(
         points.len(),
         nsmp::kernel::PHASES * (nsmp::kernel::TAPS + 2)
+    );
+}
+
+/// Renaming an instrument to the name it already holds must move no byte, in any
+/// generation. That is the whole of the name field's contract as a reader and a
+/// writer: the read stops at the terminator inside the generation's own span, and the
+/// write covers exactly that span. A writer sized to a shorter field passes this only
+/// for names short enough to fit it, and shipped libraries carry names that are not.
+#[test]
+fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
+    let mut seen = 0;
+    let mut longest = String::new();
+    for specimen in corpus() {
+        if !matches!(specimen.entity, Entity::Sample(_)) {
+            continue;
+        }
+        let where_ = specimen.path.display();
+        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes))
+            .unwrap_or_else(|e| panic!("{where_}: {e}"));
+        let Entity::Sample(sample) = &mut entity else {
+            unreachable!("re-read as a different entity");
+        };
+        let name = sample.name().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        // The oldest narrow `hdr` is 18 bytes and holds no name field at all.
+        if name.is_empty() {
+            continue;
+        }
+        sample
+            .set_name(&name)
+            .unwrap_or_else(|e| panic!("{where_}: renaming to {name:?}: {e}"));
+        let back = nord_format::to_bytes(&entity).unwrap_or_else(|e| panic!("{where_}: {e}"));
+        assert!(
+            back == specimen.bytes,
+            "{where_}: renaming to {name:?} moved a byte"
+        );
+        if name.len() > longest.len() {
+            longest = name;
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no named sample instrument");
+    /// What the editor's own name box accepts. Shipped libraries hold longer names,
+    /// and without one of those in reach the assertion above proves nothing.
+    const EDITOR_BOX: usize = 14;
+    assert!(
+        longest.len() > EDITOR_BOX,
+        "no name past the editor's own box to test a short writer against: {longest:?}"
     );
 }
