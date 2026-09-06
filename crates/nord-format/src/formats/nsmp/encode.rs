@@ -196,9 +196,9 @@ const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
 /// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still
 /// outside the signed 13-bit range there falls inside the **last record of one of the
 /// two 1:1 runs** — the opening run at field 0, or the resync run — and that record's
-/// field count is not one [`dead_last_record`] names. A field in an earlier record of a run,
-/// or out in the content cells, never buys it, and neither run's length is otherwise
-/// consulted.
+/// field count is not one [`dead_last_record`] names. A field in an earlier record of
+/// a run, or out in the content cells, never buys it, and neither run's length is
+/// otherwise consulted.
 ///
 /// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
 /// one: both quantise at the peak term alone.
