@@ -282,8 +282,9 @@ impl Cbin<SampleV3> {
             .collect()
     }
 
-    /// Keyboard zones, in stored order — high to low except `map` v14, which
-    /// stores low to high. Each zone is verified against the stroke it names.
+    /// Keyboard zones, in stored order, which is usually high to low; `map` v14
+    /// files occur in both orders and a record states its own notes. Each zone is
+    /// verified against the stroke it names.
     pub fn zones(&self) -> Result<Vec<ZoneV3>, Error> {
         let map = self.map()?;
         Ok(zone::read_v3(

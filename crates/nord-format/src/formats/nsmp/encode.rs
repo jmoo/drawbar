@@ -1596,9 +1596,6 @@ struct WideSchema {
     map_gap: &'static [u8],
     /// The unexplained run behind the last zone record.
     map_tail: &'static [u8],
-    /// Whether the zone records are stored low to high. Every other layout stores
-    /// them high to low.
-    zones_ascend: bool,
     sty: u32,
     /// The preset a project that touches none renders as.
     /// Unexplained: real programs hold this, and the panel cannot produce it.
@@ -1636,7 +1633,6 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             key_stride: LEVEL.len(),
             map_gap: &[],
             map_tail: &[0x00],
-            zones_ascend: true,
             sty: super::sty::VERSION_V3,
             sty_payload: &STY_V3_PAYLOAD,
         }),
@@ -1652,7 +1648,6 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
                 0x00, 0x00, 0x00,
             ],
             map_tail: &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
-            zones_ascend: false,
             sty: super::sty::VERSION_V4,
             sty_payload: &STY_V4_PAYLOAD,
         }),
@@ -1710,11 +1705,7 @@ fn map4(schema: &WideSchema, zones: &[WideZoneRecord]) -> Section4 {
     }
     payload.extend_from_slice(schema.map_gap);
     payload.push(zones.len() as u8);
-    let ordered: Vec<&WideZoneRecord> = match schema.zones_ascend {
-        true => zones.iter().rev().collect(),
-        false => zones.iter().collect(),
-    };
-    for record in ordered {
+    for record in zones {
         payload.extend_from_slice(&record.bytes());
     }
     payload.extend_from_slice(schema.map_tail);
@@ -3463,17 +3454,14 @@ mod tests {
     }
 
     /// Zones tile: each reaches down to one above the one below it, and the lowest to
-    /// the keyboard's floor. ⚠️ The v3 `map` stores its records low to high and the v4
-    /// one high to low, which is why the stored order is asserted per generation.
+    /// the keyboard's floor. Records are stored high to low in every generation.
     #[test]
     fn a_wide_zone_states_its_own_bottom() {
         let high = sine(880.0, 12_000.0, 12_000);
         let low = sine(220.0, 12_000.0, 15_000);
         let floor = super::super::zone::KEY_FLOOR;
-        for (layout, stored) in [
-            (Layout::V3, [(65, floor), (96, 66)]),
-            (Layout::V4, [(96, 66), (65, floor)]),
-        ] {
+        let stored = [(96, 66), (65, floor)];
+        for layout in [Layout::V3, Layout::V4] {
             let file = multi_zone(
                 &[zone(&high, 72, 96, 2), zone(&low, 48, 65, 1)],
                 "Two",

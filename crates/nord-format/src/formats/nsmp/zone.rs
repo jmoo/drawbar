@@ -190,8 +190,8 @@ pub enum Field {
 pub enum Wide {
     /// 11-byte records; zones tile, so no low note is stored.
     V12,
-    /// 16-byte records with a low note. ⚠️ Stored low to high, the opposite of
-    /// every other layout here.
+    /// 16-byte records with a low note. ⚠️ Both record orders occur here — a
+    /// record states its own notes, so nothing may be read off the order.
     V14,
     /// [`Wide::V14`]'s records, behind a per-key table naming the zones
     /// around each note.
@@ -261,6 +261,22 @@ impl Wide {
     /// Whether the layout carries a per-key table ahead of its zone records.
     pub const fn has_key_map(self) -> bool {
         matches!(self, Wide::V21)
+    }
+
+    /// Offset of the zone count within the `map` payload, where the layout fixes it.
+    ///
+    /// ⚠️ **Count forward, never back from the end of the section.** The run behind
+    /// the last record is not a fixed width — a v21 `map` carries either two trailing
+    /// bytes or six — so a table placed by subtracting the records from the section
+    /// length lands four bytes out and still decodes into plausible small integers.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
+    pub const fn count_at(self) -> Option<usize> {
+        match self {
+            Wide::V12 => None,
+            Wide::V14 => Some(774),
+            Wide::V21 => Some(1317),
+        }
     }
 }
 
@@ -414,9 +430,11 @@ pub struct Table {
 impl Table {
     /// Find the table and check every record against the strokes it names.
     ///
-    /// The table sits at the end of the payload behind a count byte, with an
-    /// unmodelled suffix of up to [`MAX_TAIL`] bytes; the fit is decided by that
-    /// count and by every record naming a stroke that holds its root key.
+    /// Where [`Wide::count_at`] fixes the count's offset the table is read from
+    /// there. The one layout that fixes none has its table found at the end of the
+    /// payload behind its count byte, with an unmodelled suffix of up to
+    /// [`MAX_TAIL`] bytes; the fit is decided by that count and by every record
+    /// naming a stroke that holds its root key.
     pub fn locate(
         map_version: u32,
         map: &[u8],
@@ -424,6 +442,15 @@ impl Table {
     ) -> Result<Table, ParseError> {
         let wide = Wide::from_version(map_version)?;
         let count = strokes.len();
+        if let Some(count_at) = wide.count_at() {
+            let table = Table {
+                wide,
+                at: count_at + 1,
+                count,
+            };
+            table.read(map, strokes)?;
+            return Ok(table);
+        }
         let mut first = None;
         for tail in 0..=MAX_TAIL {
             let table = count
@@ -751,10 +778,7 @@ mod tests {
     /// records, and an unmodelled tail — the shape every wide specimen has.
     fn wide_map(version: u32, zones: &[(u32, u8, u8, u8)], tail: usize) -> Vec<u8> {
         let wide = Wide::from_version(version).unwrap();
-        let preamble = match wide {
-            Wide::V21 => KEY_TABLE_AT + KEYS * KEY_STRIDE + 6 + 26,
-            Wide::V12 | Wide::V14 => 6 + 128 * 6,
-        };
+        let preamble = wide.count_at().unwrap_or(6 + 128 * 6);
         let mut m = vec![0u8; preamble + 1 + zones.len() * wide.record_len() + tail];
         if wide.has_key_map() {
             for key in 0..KEYS {
@@ -811,18 +835,42 @@ mod tests {
     #[test]
     fn wide_setters_move_exactly_one_byte() {
         for version in [12, 14, 21] {
+            let wide = Wide::from_version(version).unwrap();
             let zones = [(9u32, 60u8, 84u8, 48u8), (22, 72, 108, 85)];
             let before = wide_map(version, &zones, 1);
             let table = Table::locate(version, &before, &strokes(&zones)).unwrap();
 
-            for field in [Field::Top, Field::Root] {
+            for (field, at) in [(Field::Top, WIDE_TOP), (Field::Root, WIDE_ROOT)] {
                 let mut after = before.clone();
                 table.set(&mut after, 1, field, 55).unwrap();
                 let moved: Vec<_> = (0..before.len())
                     .filter(|&i| before[i] != after[i])
                     .collect();
-                assert_eq!(moved.len(), 1, "map v{version} {field:?}: {moved:?}");
+                let want = wide
+                    .count_at()
+                    .map(|count_at| vec![count_at + 1 + wide.record_len() + at]);
+                match want {
+                    Some(want) => assert_eq!(moved, want, "map v{version} {field:?}"),
+                    None => assert_eq!(moved.len(), 1, "map v{version} {field:?}: {moved:?}"),
+                }
             }
+        }
+    }
+
+    /// The trailer behind the records is not a fixed width, so the count's offset is
+    /// the layout's and never the section length less the records.
+    #[test]
+    fn a_wide_table_is_found_from_the_front() {
+        let zones = [(9u32, 60u8, 84u8, 48u8)];
+        for version in [14, 21] {
+            let short = wide_map(version, &zones, 1);
+            let mut long = wide_map(version, &zones, 32);
+            long[..short.len()].copy_from_slice(&short);
+            assert_eq!(
+                read_v3(version, &long, &strokes(&zones)).unwrap(),
+                read_v3(version, &short, &strokes(&zones)).unwrap(),
+                "map v{version}"
+            );
         }
     }
 
