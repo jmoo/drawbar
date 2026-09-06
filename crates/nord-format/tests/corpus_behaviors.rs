@@ -1190,6 +1190,56 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     }
 }
 
+/// The wide half of the law the test below states for v2: the same reciprocal of the
+/// same file peak, scaled by the gain the stroke's own decibel field round-trips to.
+///
+/// The round trip is the point. Below `2^24` it equals the project's own float and
+/// nothing distinguishes them; above it the two part by tens of steps, and the file
+/// follows the decibel.
+#[test]
+fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        // Library instruments are left out: their strokes keep the mantissa of
+        // whatever file first encoded them.
+        if !specimen
+            .path
+            .components()
+            .any(|c| c.as_os_str() == "samples")
+        {
+            continue;
+        }
+        let layout = nsmp::codec::Layout::from_version(sample.header.version);
+        let streams = sample.stroke_streams();
+        let peak = streams
+            .iter()
+            .filter_map(|(_, s)| nsmp::codec::peak(s, layout))
+            .map(|p| p.unsigned_abs())
+            .max()
+            .unwrap_or(0)
+            .max(1) as u64;
+        let bits = 64 - peak.leading_zeros();
+        let exact_power = u32::from(peak.is_power_of_two());
+        let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
+        for (_, stroke) in streams {
+            let decibels = nsmp::codec::zone_gain_db(stroke, layout).expect("a wide header");
+            let units = 10f64.powf(f64::from(decibels) / 20.0) * f64::from(nsmp::zone::GAIN_UNITY);
+            let mantissa = (reciprocal * units.round() as u64) >> (nsmp::zone::GAIN_BITS + 3);
+            assert_eq!(
+                stroke[9..12],
+                ((mantissa % (1 << 24)) as u32).to_be_bytes()[1..],
+                "{} at {decibels} dB",
+                specimen.path.display()
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "no self-generated wide stroke");
+}
+
 #[test]
 fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
     // Every self-generated v2 specimen, whatever its gain. Library instruments are left
