@@ -1512,11 +1512,9 @@ mod tests {
 
     #[test]
     fn a_directory_cannot_claim_an_unmarked_record_as_a_loop() {
-        let mut sample = encode::instrument(
-            &vec![0; encode::MIN_FRAMES],
-            &encode::Options::new("Unmarked"),
-        )
-        .unwrap();
+        let mut sample =
+            encode::instrument(&[0; encode::MIN_FRAMES], &encode::Options::new("Unmarked"))
+                .unwrap();
         let nord_format::Sample::V2(file) = &mut sample else {
             panic!("the default options build the narrow chain");
         };

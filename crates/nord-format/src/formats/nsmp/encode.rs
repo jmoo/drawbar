@@ -1151,8 +1151,14 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
 /// Pad the loop region out to whole packets the way the editor does: sweep its content
 /// records front to back, halving each one that covers more than one cell — the smaller
 /// half first — and carrying on into the second half, pass after pass, until the words
-/// fit. A region with nothing left to split is widened instead, from its last record
-/// back, which is this crate's own choice: no render has shown what the editor does then.
+/// fit.
+///
+/// A region with nothing left to split is widened instead, and that sweep also runs
+/// front to back — from the record after the mark, which is left alone — spending each
+/// record up to [`WIDEN_CAP`] before moving on, so the last one widened takes only the
+/// words still owed. A greedy sweep from the back finishes in fewer, wider records and
+/// is observably not what the editor writes.
+///
 /// Inferred from specimens; not confirmed on hardware.
 fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<(), Error> {
     let cell = units.cell();
@@ -1182,32 +1188,39 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
         }
     }
 
-    let mut at = specs.len() - 1;
-    while pad > 0 {
-        let spec = specs[at];
-        let wider = Spec {
-            width: spec.width + 1,
-            ..spec
-        };
-        if spec.width < MAX_STORED_WIDTH && wider.span(units) - spec.span(units) <= pad {
-            pad -= wider.span(units) - spec.span(units);
-            specs[at].width += 1;
-        } else if at > opening {
-            at -= 1;
-        } else {
-            return Err(ParseError::OutOfBounds {
-                value: format!("a loop of {} record(s)", specs.len() - opening),
-                bound: format!(
-                    "a loop with {pad} more word(s) of room in it — the encoded loop has \
-                     to be whole packets long, and this one cannot be widened that far; \
-                     loop over more of the audio"
-                ),
+    for cap in [WIDEN_CAP, MAX_STORED_WIDTH] {
+        for spec in specs[opening + 1..].iter_mut() {
+            if pad == 0 {
+                break;
             }
-            .into());
+            let count = spec.count;
+            let step = |width: u8| units.span(count, width + 1) - units.span(count, width);
+            while spec.width < cap && step(spec.width) <= pad {
+                pad -= step(spec.width);
+                spec.width += 1;
+            }
         }
+    }
+    if pad > 0 {
+        return Err(ParseError::OutOfBounds {
+            value: format!("a loop of {} record(s)", specs.len() - opening),
+            bound: format!(
+                "a loop with {pad} more word(s) of room in it — the encoded loop has to \
+                 be whole packets long, and no record of this one may be widened past \
+                 {WIDEN_CAP}; loop over more of the audio"
+            ),
+        }
+        .into());
     }
     Ok(())
 }
+
+/// Widest the padding sweep writes a record at. No record of any loop region in any
+/// specimen declares more, and no render has needed the padding to go further; a
+/// region the cap cannot absorb is spent to [`MAX_STORED_WIDTH`] on a second sweep,
+/// which is this crate's own choice.
+/// Inferred from specimens; not confirmed on hardware.
+const WIDEN_CAP: u8 = 14;
 
 /// A packed stroke stream: the words, and where the header's directory points.
 struct Stream {
@@ -2392,8 +2405,8 @@ mod tests {
         assert!(plan(MIN_FRAMES - 1, 1).is_err());
         assert!(plan(MIN_FRAMES, 1).is_ok());
         assert!(plan(usize::MAX, 1).is_err());
-        assert!(instrument(&vec![0i16; MIN_FRAMES - 1], &Options::new("Test")).is_err());
-        assert!(instrument(&vec![0i16; MIN_FRAMES], &Options::new("Test")).is_ok());
+        assert!(instrument(&[0i16; MIN_FRAMES - 1], &Options::new("Test")).is_err());
+        assert!(instrument(&[0i16; MIN_FRAMES], &Options::new("Test")).is_ok());
     }
 
     #[test]
@@ -2402,7 +2415,7 @@ mod tests {
         step[MIN_FRAMES / 2..].fill(i16::MAX);
         assert!(instrument(&step, &Options::new("Test").shift(0)).is_err());
         assert!(instrument(
-            &vec![0i16; MIN_FRAMES],
+            &[0i16; MIN_FRAMES],
             &Options::new("Test").shift(codec::SHIFT_LIMIT as u8 + 1)
         )
         .is_err());
@@ -3315,6 +3328,45 @@ mod tests {
 
     // Full-scale broadband material can exhaust the three spare bits per field before
     // a short loop reaches the next packet boundary.
+    /// A loop region with nothing left to split is widened forward from the record
+    /// after the mark — the marked record itself is left alone — each record spent up
+    /// to the cap before the next is touched, so the last one widened takes only the
+    /// words still owed. Widening from the back instead finishes in fewer, wider
+    /// records, which is not what the editor writes.
+    #[test]
+    fn the_widen_fallback_spends_words_forward_from_the_mark() {
+        let units = Units {
+            layout: Layout::V4,
+            channels: 1,
+        };
+        let record = Spec {
+            one_to_one: false,
+            width: 1,
+            order: 0,
+            mark: false,
+            first: 0,
+            count: units.cell(),
+        };
+        let mut specs = vec![
+            Spec {
+                mark: true,
+                ..record
+            },
+            record,
+            record,
+            record,
+            record,
+            record,
+        ];
+        pad_to_packet(&mut specs, 0, units).unwrap();
+        assert_eq!(
+            specs.iter().map(|s| s.width).collect::<Vec<_>>(),
+            [1, WIDEN_CAP, 8, 1, 1, 1]
+        );
+        let words: usize = specs.iter().map(|s| s.span(units)).sum();
+        assert_eq!(words % units.packet_words(), 0);
+    }
+
     #[test]
     fn a_loop_lands_on_a_packet_boundary_or_is_refused() {
         let mut source = Vec::with_capacity(60_000);

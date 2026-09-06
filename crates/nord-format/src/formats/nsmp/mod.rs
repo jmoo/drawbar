@@ -769,11 +769,9 @@ mod tests {
 
     #[test]
     fn an_unknown_map_version_cannot_use_the_keyboard_table() {
-        let crate::Sample::V2(mut sample) = encode::instrument(
-            &vec![0i16; encode::MIN_FRAMES],
-            &encode::Options::new("Test"),
-        )
-        .unwrap() else {
+        let crate::Sample::V2(mut sample) =
+            encode::instrument(&[0i16; encode::MIN_FRAMES], &encode::Options::new("Test")).unwrap()
+        else {
             panic!("the default options build the narrow chain");
         };
         let map = section::find_mut(&mut sample.body.sections, section::MAP).unwrap();
