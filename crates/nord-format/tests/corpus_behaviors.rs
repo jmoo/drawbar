@@ -995,12 +995,25 @@ fn nsmpproj_velocity_defaults_move_alone() {
         edited.set_velocity_defaults(defaults).unwrap();
         assert_eq!(edited.velocity_defaults().unwrap(), defaults);
         let after = edited.render();
-        let changed = before
+        assert_eq!(
+            before.lines().count(),
+            after.lines().count(),
+            "{}",
+            specimen.path.display()
+        );
+        // A project already holding one of the three moves two lines, not three.
+        const KEYS: [&str; 3] = ["m_atkVelocityAmount", "m_velAmpl", "m_velTimbre"];
+        let moved: Vec<&str> = before
             .lines()
             .zip(after.lines())
             .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(changed, 3, "{}", specimen.path.display());
+            .map(|(_, b)| b.trim())
+            .collect();
+        assert!(
+            moved.iter().all(|l| KEYS.iter().any(|k| l.starts_with(k))),
+            "{}: {moved:?}",
+            specimen.path.display()
+        );
     }
 }
 
