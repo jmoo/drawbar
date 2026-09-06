@@ -287,14 +287,26 @@ const RAMP_IN: usize = 35;
 /// resync are the same object all the way down to it.
 pub const MIN_FRAMES: usize = 92;
 
-/// Fields a looped stroke carries past its loop end, repeating the loop's own opening
-/// so that playback is unchanged. The mark clears the loop start by the same amount,
-/// which is why the loop's length survives it.
+/// Fields per channel a looped stroke carries past its loop end, repeating the loop's
+/// own opening so that playback is unchanged. The mark clears the loop start by the
+/// same amount, which is why the loop's length survives it.
 const LOOP_LEAD: usize = 5;
 
-/// Fields a loop's pre-roll needs before the mark: an opening 1:1 run and a resync run,
-/// both of which reach [`band`]'s widest.
-const MIN_PRE_LOOP: usize = 192;
+/// Fields per channel a loop's marked record clears the **resync point** by, at least.
+/// A loop whose ordinary [`LOOP_LEAD`] would land the mark nearer than this is pushed
+/// back by repeating more of itself, which moves the whole stream's length with it.
+///
+/// The floor is on the gap from the resync point, not on the mark's own position and
+/// not on the room left between the mark and the run in front of it: a resync run may
+/// reach the mark record with nothing between them.
+///
+/// Inferred from specimens; not confirmed on hardware.
+const fn min_resync_gap(layout: Layout) -> usize {
+    match layout {
+        Layout::V2 => 72,
+        Layout::V3 | Layout::V4 => 64,
+    }
+}
 
 /// Longest input the stroke header's 16-bit word directory can address unambiguously.
 const MAX_STREAM_WORDS: usize = WRAP;
@@ -472,7 +484,8 @@ pub struct Looped {
     /// Field the marked record opens at.
     pub at: usize,
     /// Fields repeated past the loop end, which is also how far `at` clears the loop
-    /// start. See [`LOOP_LEAD`].
+    /// start: [`LOOP_LEAD`] per channel, or more when the mark is pushed off the
+    /// resync point by [`min_resync_gap`].
     pub lead: usize,
     /// Fields of the loop's tail the crossfade rewrites.
     pub crossfade: usize,
@@ -575,9 +588,14 @@ impl Plan {
     /// [`Loop::end`], with the loop's own opening repeated past it, resynchronising at
     /// `secondary_start` as [`new`](Plan::new) does.
     ///
+    /// The marked record sits [`LOOP_LEAD`] fields per channel past the loop start, or
+    /// [`min_resync_gap`] past the resync point when that is further: a loop starting
+    /// near the resync is pushed back, and the stream grows by what it is pushed.
+    ///
     /// Refuses a loop the format cannot state — one outside the audio, one shorter than
     /// the run it has to open with, or a crossfade with no material in front of the loop
-    /// to fade from — and a secondary start that leaves no room ahead of the loop.
+    /// to fade from — and a secondary start past the loop start, which a project's own
+    /// is repaired to never be.
     pub fn looped(
         layout: Layout,
         frames: usize,
@@ -605,14 +623,27 @@ impl Plan {
         let end = start
             .checked_add(length)
             .ok_or_else(|| size_error(points.end))?;
-        // Ahead of the mark the stream still has to open and resync, so a loop that
-        // starts too early is pushed off the front by repeating more of itself.
         let units = Units { layout, channels };
         let (cell, chunk) = (units.cell(), units.chunk());
-        let lead = (LOOP_LEAD * channels).max((MIN_PRE_LOOP * channels).saturating_sub(start));
+        let resync_at = Plan::resync_at(secondary_start, channels)?;
+        if resync_at > start {
+            return Err(ParseError::OutOfBounds {
+                value: format!("a secondary start at field {resync_at}"),
+                bound: format!(
+                    "field {start}, where the loop starts, or earlier — the marked \
+                     record clears the resync point, so the loop cannot open ahead of it"
+                ),
+            }
+            .into());
+        }
+        // The mark clears the resync point by the generation's floor, so a loop that
+        // starts too near it is pushed back by repeating more of itself.
         let at = start
-            .checked_add(lead)
+            .checked_add(LOOP_LEAD * channels)
+            .zip(resync_at.checked_add(min_resync_gap(layout) * channels))
+            .map(|(ideal, floor)| ideal.max(floor))
             .ok_or_else(|| size_error(points.start))?;
+        let lead = at - start;
         let fields = end
             .checked_add(lead)
             .ok_or_else(|| size_error(points.end))?;
@@ -662,7 +693,6 @@ impl Plan {
             }
             .into());
         }
-        let resync_at = Plan::resync_at(secondary_start, channels)?;
         Plan::lay_out(
             layout,
             frames,
@@ -778,7 +808,7 @@ pub fn default_secondary_start(frames: usize, loops: Option<Loop>) -> f64 {
     nsmpproj::repaired_secondary_start(
         nsmpproj::default_secondary_start(stop),
         stop,
-        loops.map(|l| l.start as f64),
+        loops.map(|l| nsmpproj::repaired_loop_start(l.start as f64)),
     )
 }
 
@@ -2411,8 +2441,36 @@ mod tests {
                 "secondary start {at}"
             );
         }
-        assert!(Plan::looped(Layout::V2, 44_100, 1, Loop::new(8_192, 40_000), 8_192.0).is_err());
-        assert!(Plan::looped(Layout::V2, 44_100, 1, Loop::new(8_192, 40_000), 4_096.0).is_ok());
+        let looped = |at| Plan::looped(Layout::V2, 44_100, 1, Loop::new(8_192, 40_000), at);
+        assert!(looped(8_193.0).is_err(), "past the loop start");
+        assert!(looped(8_192.0).is_ok(), "at the loop start, mark pushed");
+        assert!(looped(4_096.0).is_ok());
+    }
+
+    /// The mark's two anchors, on a loop that clears the resync point and on ones that
+    /// do not, at both channel counts.
+    #[test]
+    fn a_loop_mark_clears_the_resync_point_by_the_generations_floor() {
+        // Loop start and secondary start in frames, then the field the mark lands on
+        // at V2, V3 and V4.
+        for (start, secondary, channels, marks) in [
+            (92, 92.0, 1, [145, 137, 137]),
+            (200, 150.0, 1, [191, 183, 183]),
+            (600, 500.0, 1, [481, 481, 481]),
+            (92, 92.0, 2, [290, 274, 274]),
+        ] {
+            let points = Loop::new(start, start + 16_384);
+            for (layout, mark) in [Layout::V2, Layout::V3, Layout::V4].into_iter().zip(marks) {
+                let plan = Plan::looped(layout, 88_200, channels, points, secondary).unwrap();
+                let looped = plan.looped.unwrap();
+                assert_eq!(
+                    looped.at, mark,
+                    "{layout:?} {channels}ch: a loop at frame {start} resyncing at {secondary}"
+                );
+                assert_eq!(looped.lead, mark - fields_of(start).unwrap() * channels);
+                assert_eq!(plan.fields, mark + fields_of(16_384).unwrap() * channels);
+            }
+        }
     }
 
     #[test]
@@ -3206,7 +3264,7 @@ mod tests {
         for (frames, start, end) in [
             (88_200, 16_384, 32_768),
             (88_200, 4_096, 20_480),
-            (88_200, 0, 16_384),
+            (88_200, 92, 16_476),
             (88_200, 43_981, 60_365),
             (44_100, 20_000, 44_100),
         ] {
