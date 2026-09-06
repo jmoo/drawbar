@@ -47,7 +47,12 @@ pub fn pcm16(samples: &[i16], rate: u32, channels: u16) -> Result<Vec<u8>, Error
             bound: "a WAV byte rate that fits u32".into(),
         })?;
 
-    let mut out = Vec::with_capacity(44 + data as usize);
+    let mut out = Vec::new();
+    out.try_reserve(44 + data as usize)
+        .map_err(|_| ParseError::OutOfBounds {
+            value: format!("{} samples", samples.len()),
+            bound: "a WAV whose allocation fits memory".into(),
+        })?;
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(36 + data).to_le_bytes());
     out.extend_from_slice(b"WAVEfmt ");
@@ -85,7 +90,8 @@ impl Pcm16 {
 /// Read uncompressed 16-bit PCM, preserving its stored channel count and rate.
 pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
     let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
-    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let u32_at =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
 
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(ParseError::AssertFail("not a RIFF/WAVE file".into()).into());
