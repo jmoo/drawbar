@@ -39,7 +39,8 @@
 //! are `2*24` fields, 1:1 records reach `2*32`, the terminator states `2*24`, and the
 //! predictor keeps a history per channel.
 //!
-//! Inferred from specimens; not confirmed on hardware.
+//! Confirmed on hardware: a stereo encode plays with its channels in order and
+//! independent.
 //!
 //! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
 //! which is the whole of what the container stores about looping: the crossfade is
@@ -49,7 +50,8 @@
 //! loop's as a percentage of its length — and it arrives here already in frames,
 //! fraction and all.
 //!
-//! Inferred from specimens; not confirmed on hardware.
+//! Confirmed on hardware: the Electro 5 sustains a looped encode to note-off, and the
+//! seam is clean.
 
 use super::codec::{self, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;

@@ -25,8 +25,11 @@ In brief:
   (every documented parameter placed; values raw except where the community
   maps enumerate them).
 - **Structurally decoded** — sample instruments (`nsmp`, `nsmp3`, `nsmp4`:
-  rename, retune, remap, and the encoded audio decoded back to samples in every
-  generation), piano libraries (`npno`: the CNSP prefix) and
+  rename, retune, remap, the per-key map and the sound preset, and the encoded
+  audio decoded back to samples in every generation; a v2 instrument is also
+  *built* from a Sample Editor project, loops and stereo included, matching the
+  editor's own renders to within its float rounding), piano libraries (`npno`:
+  the CNSP prefix) and
   Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
   strokes and audio files read and edited, new projects written).
 - **Container-verified stubs** — every other corpus format: 60+ CBIN tags
@@ -133,9 +136,11 @@ oracle by existing beside it.
 The sweep always reads `tests/fixtures/` — specimens this crate's own writers
 produced, with sidecars saying what was set, committed as the part of the
 corpus any checkout can carry.
-With `--features corpus` it also reads the private specimen corpus. Two more
-suites then check corpus-backed behaviors (`tests/corpus_behaviors.rs`) and verify
-that every registered bit affects its declared field (`tests/coverage.rs`).
+With `--features corpus` it also reads the private specimen corpus. Three more
+suites then run: corpus-backed format and codec behaviors
+(`tests/corpus_behaviors.rs`, `tests/codec_behaviors.rs`) and the blind-bit
+ledger (`tests/coverage.rs`) — every bit the instrument varies must answer to a
+registered field or be listed, by range, as reviewed debt.
 
 ```sh
 cargo test -p nord-format                       # open suite: unit + dispatch + fixtures sweep

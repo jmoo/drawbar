@@ -22,12 +22,12 @@ A command-line tool (`nord`) over [`nord-format`](../nord-format) and
 `inspect`, `verify` and `edit` work on files. The other nouns are the protocol's
 object classes, and normally talk to an attached instrument — but the read-only
 verbs (`get`, `info`, `deps`) and each noun's `edit` also take a file in place of
-a slot. `program` and `setlist` share one verb vocabulary:
+a slot. `program`, `setlist` and `sample` share one verb vocabulary:
 
 ```
 get put            transfer
 move rename duplicate delete select   organization
-info deps          interrogation
+info deps list focus   interrogation
 edit               content (program, setlist, live, settings, sample)
 ```
 
@@ -152,7 +152,11 @@ Close Nord Sound Manager first — it claims the vendor interface exclusively, a
 ```sh
 nord device status                      # inventory per class; --json for machines
 nord device info                        # what is attached, from the USB descriptors
+nord device geometry                    # partitions, banks and slot capacity, from the device
+nord device recover                     # release a session an interrupted run left open
 
+nord program list                       # every occupied slot, walked with the device's own cursor
+nord program focus                      # what the panel has loaded
 nord program get 7:4                    # summary to stdout
 nord program get 7:4 -o patch.ne5p      # write the .ne5p instead
 nord program put patch.ne5p 7:4 --yes
@@ -184,13 +188,22 @@ refuses without `--yes`**. Off a terminal, running it without the flag is a real
 dry run:
 
 ```
-$ nord program move 7:2 7:3
-moving "Africa Split" from bank 7 slot 2 to bank 7 slot 3 — OVERWRITING "Squabble B"
+$ nord program duplicate 7:2 7:3
+duplicating "Africa Split" from bank 7 slot 2 to bank 7 slot 3 — OVERWRITING "Squabble B"
 error: refusing to proceed without --yes
 ```
 
-`move` and `duplicate` name the *destination's* current occupant, not just the
-source — that is the thing about to be lost.
+`duplicate` names the *destination's* current occupant because that is what is
+about to be lost. `move` names it too, but as **SWAPPING WITH**: the instrument
+exchanges the two slots, so nothing is lost — and calling that an overwrite would
+invite deleting the one copy the swap preserves. A `move` also lists the set
+lists that reference the program, because the instrument rewrites them to follow
+it, and a factory set list is migrated to the current version by that rewrite,
+irreversibly.
+
+`put` names the slot after the file's stem, the way Nord Sound Manager does, and
+says so in pre-flight. Rename is refused on the library classes, so a sample's
+name is fixed at write time.
 
 Two other guards worth knowing about:
 
@@ -301,6 +314,22 @@ first, the way `inspect` lists them:
 nord sample edit inst.nsmp --fields
 nord sample edit inst.nsmp --set name="My Piano" --set zone2.top_note=C4 -o out.nsmp
 nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
+```
+
+### Sample audio
+
+`nord sample` also reaches the encoded audio. `decode` writes each zone as a
+WAV at the format's own field rate, `verify --deep` walks every stroke's stream
+against the codec's grammar, and — behind `--experimental` — `encode` turns a
+WAV into a v2 instrument the instrument plays, `build` renders a whole Sample
+Editor project (zones, loops, stereo), and `project new` writes a project from
+WAVs for the editor to open. Encoding v3/v4 instruments is not implemented.
+
+```sh
+nord sample decode inst.nsmp -o out/
+nord sample verify --deep inst.nsmp
+nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimba.nsmpproj
+nord sample build marimba.nsmpproj -o marimba.nsmp --experimental
 ```
 
 ### `nord edit` — files with no noun
