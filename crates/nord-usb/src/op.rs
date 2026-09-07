@@ -531,35 +531,43 @@ pub async fn banks<T: Transport, C>(
 /// to a bad address otherwise fails only once the transfer is under way, and a write to an
 /// occupied one is refused with status `0x4` after the caller has committed to it.
 ///
-/// `Ok(None)` means the address is fine. `Ok(Some(reason))` explains why it is not, in
-/// terms of the bank names the instrument itself uses — which for pianos are categories,
-/// so "no bank 7 (this class has 6: Grand, Upright, …)" is a far better error than a
-/// status code.
+/// `Ok(None)` means the address is fine. `Ok(Some(reason))` explains why it is not.
+///
+/// [`Geometry::check_address`](crate::device::Geometry::check_address) asks the same of
+/// geometry already read, and sends nothing.
 pub async fn check_address<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Option<String>> {
     let banks = banks(session, session.class().to_raw()).await?;
+    Ok(address_refusal(&banks, at))
+}
+
+/// Why `at` is not an address among `banks`, or `None` where it is.
+///
+/// The reason is in the bank names the instrument itself uses — which for pianos are
+/// categories, so "no bank 7 (this class has 6: Grand, Upright, …)" is a far better
+/// error than a status code.
+pub(crate) fn address_refusal(banks: &[Bank], at: Location) -> Option<String> {
     let Some(bank) = banks.get(at.bank as usize) else {
         let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
-        return Ok(Some(format!(
+        return Some(format!(
             "bank {} does not exist; this class has {} ({})",
             at.user_bank(),
             banks.len(),
             names.join(", ")
-        )));
+        ));
     };
     // The `(Native)` partitions report a sentinel rather than a capacity, so there is
     // nothing to check against there.
-    if bank.is_bounded() && at.slot >= bank.slots {
-        return Ok(Some(format!(
+    (bank.is_bounded() && at.slot >= bank.slots).then(|| {
+        format!(
             "\"{}\" holds {} slots, so slot {} is out of range",
             bank.name,
             bank.slots,
             at.user_slot()
-        )));
-    }
-    Ok(None)
+        )
+    })
 }
 
 /// The object the panel currently has loaded, for the session's class. **Read-only.**

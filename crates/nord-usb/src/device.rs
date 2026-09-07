@@ -77,6 +77,14 @@ impl Geometry {
         self.partition(class)?.allocation_unit()
     }
 
+    /// Whether an address exists on this instrument, from the tables already read.
+    ///
+    /// [`op::check_address`] is the same question asked of a fresh `BANKS` read; this is
+    /// the one to use where the geometry is in hand, because it costs no frame.
+    pub fn check_address(&self, class: ObjectClass, at: Location) -> Result<Option<String>> {
+        Ok(op::address_refusal(self.banks(class)?, at))
+    }
+
     fn entry(&self, class: ObjectClass) -> Result<&Entry> {
         self.entries
             .iter()

@@ -237,14 +237,9 @@ async fn execute<T: Transport>(
     }
 }
 
-async fn write_unit<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-) -> Result<AllocationUnit, Error> {
-    device.geometry().await?.allocation_unit(class)
-}
-
-/// Replace a slot inside the caller's session.
+/// Replace a slot inside the caller's session. The address is the caller's to check
+/// against the geometry first; this one sends frames.
+///
 /// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
@@ -255,11 +250,6 @@ async fn put<T: Transport>(
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
-    match op::check_address(s, at).await {
-        Ok(Some(why)) => return Ok(Err(format!("{}: {why}", shown(at)))),
-        Ok(None) | Err(Error::DeviceStatus(_)) => {}
-        Err(error) => return Err(error),
-    }
     let class = s.class();
     let timestamp = unix_now()?;
 
@@ -395,7 +385,11 @@ async fn put_one<T: Transport>(
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
-    let unit = write_unit(device, class).await?;
+    let geometry = device.geometry().await?;
+    if let Some(why) = geometry.check_address(class, at)? {
+        return Ok(Err(format!("{}: {why}", shown(at))));
+    }
+    let unit = geometry.allocation_unit(class)?;
     device
         .destructive(class, async |s| {
             put(s, unit, at, what, bytes, emit, gone).await
@@ -436,16 +430,24 @@ async fn batch<T: Transport>(
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Option<String>, Error> {
-    let unit = write_unit(device, class).await?;
+    let geometry = device.geometry().await?;
+    let unit = geometry.allocation_unit(class)?;
+    let mut refusals = Vec::with_capacity(items.len());
+    for item in items {
+        refusals.push(geometry.check_address(class, item.at)?);
+    }
     device
         .destructive(class, async |s| {
-            for item in items {
+            for (item, refused) in items.iter().zip(&refusals) {
                 emit.send(DeviceEvent::Note(format!(
                     "sending {:?} to {} ({} of {total})",
                     item.name,
                     shown(item.at),
                     *done + 1
                 )));
+                if let Some(why) = refused {
+                    return Ok(Some(format!("{}: {why}", shown(item.at))));
+                }
                 match put(s, unit, item.at, &item.name, item.bytes.clone(), emit, gone).await? {
                     Ok(note) => {
                         *done += 1;
@@ -1779,7 +1781,7 @@ mod wire_tests {
     }
 
     #[test]
-    fn a_malformed_preflight_stops_the_write() {
+    fn a_geometry_that_cannot_be_read_stops_the_write_before_any_frame_of_it() {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]).garbling_geometry();
         let (flow, _) = drive(
             &mut device,
@@ -1792,6 +1794,7 @@ mod wire_tests {
             },
         );
         assert!(flow == Flow::Continue, "not a disconnection");
+        assert_eq!(counted(&device, cmd::BEGIN_WRITE), 0);
         assert_eq!(counted(&device, cmd::WRITE_DATA), 0);
     }
 
