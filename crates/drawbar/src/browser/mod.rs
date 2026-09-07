@@ -37,11 +37,12 @@ pub use act::{apply, foreign_format, Act};
 pub use drag::{landing, Carried, Held, Item, Kind, Landing, Onto};
 pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
+pub use selection::Selection;
 pub use tree::new_menu;
 
 use act::{owed, write_warnings};
 use drag::ghost;
-use selection::{gesture, Gesture, Selection};
+use selection::{gesture, Gesture};
 use tree::{Branch, Sections};
 
 /// An in-place rename, waiting on Enter or Esc.
@@ -160,6 +161,38 @@ impl Browser {
         self.tree(ui, workspace, device, filter, &mut acts);
         ghost(ui.ctx());
         acts
+    }
+
+    /// What is picked. One selection, so a row picked in the library table is the row
+    /// the tree shows picked.
+    pub fn picked(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// How the list on this computer is labelled, for the views that show a count of it.
+    pub fn tags(&self) -> &Tags {
+        &self.tags
+    }
+
+    /// A click on a row drawn somewhere other than the tree: the same three gestures
+    /// over the same set.
+    ///
+    /// ⚠️ No rename is armed. The table has no in-place editor to arm one into, and an
+    /// editor nothing draws would sit there taking the next keystroke.
+    pub fn pick(
+        &mut self,
+        ui: &egui::Ui,
+        item: Item,
+        name: &str,
+        response: &egui::Response,
+        list: &[Item],
+    ) {
+        let click = Click {
+            item,
+            from: name,
+            list,
+        };
+        self.clicked(ui, click, response, egui::Rect::NOTHING);
     }
 
     fn select(&mut self, item: Item) {

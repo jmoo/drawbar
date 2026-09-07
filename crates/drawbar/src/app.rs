@@ -9,6 +9,7 @@ use eframe::egui;
 use crate::browser::{self, Browser};
 use crate::device::Device;
 use crate::document::Document;
+use crate::library::Library;
 use crate::log::Log;
 use crate::shell::Shell;
 use crate::tabs::{Spot, Tabs};
@@ -129,6 +130,7 @@ pub struct DrawbarApp {
     pub(crate) workspace: Workspace,
     pub(crate) device: Device,
     pub(crate) browser: Browser,
+    pub(crate) library: Library,
     pub(crate) shell: Shell,
     pub(crate) tabs: Tabs,
     pub(crate) document: Document,
@@ -161,6 +163,7 @@ impl DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
             browser: Browser::default(),
+            library: Library::default(),
             shell: Shell::default(),
             tabs: Tabs::default(),
             document: Document::default(),
@@ -314,16 +317,16 @@ impl DrawbarApp {
             .show(ctx, |ui| {
                 self.tabs.ui(ui, &self.workspace, acts);
                 match self.tabs.showing() {
-                    None => {
+                    // The library is what the centre shows when no tab claims it.
+                    None | Some(Spot::Library) => {
                         self.document.leave();
-                        crate::shell::placeholder(
+                        acts.extend(self.library.ui(
                             ui,
-                            "Double-click something in the browser to open it.",
-                        );
-                    }
-                    Some(Spot::Library) => {
-                        self.document.leave();
-                        crate::shell::placeholder(ui, "Library — stage 6 fills this in.");
+                            &mut self.browser,
+                            &self.workspace,
+                            &self.device,
+                            &self.shell,
+                        ));
                     }
                     Some(Spot::Keyboard) => {
                         self.document.leave();

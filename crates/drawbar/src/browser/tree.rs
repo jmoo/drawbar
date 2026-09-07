@@ -215,7 +215,7 @@ impl Browser {
                 .collect();
             for entity in workspace.listed() {
                 if self.folders.holding(entity.id).is_none() {
-                    self.local_row(ui, entity, 1, &loose, workspace, acts);
+                    self.local_row(ui, entity, 1, &loose, workspace, device, acts);
                 }
             }
             if loose.is_empty() && self.folders.all().is_empty() {
@@ -461,10 +461,11 @@ impl Browser {
             nothing(ui, 2, "empty — drag sounds in");
         }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
-            self.local_row(ui, entity, 2, &inside, workspace, acts);
+            self.local_row(ui, entity, 2, &inside, workspace, device, acts);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn local_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -472,6 +473,7 @@ impl Browser {
         depth: usize,
         list: &[Item],
         workspace: &Workspace,
+        device: &Device,
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Local(entity.id);
@@ -537,41 +539,72 @@ impl Browser {
             self.start_rename(item, &entity.name);
         }
 
-        response.context_menu(|ui| {
-            self.aim(item);
-            let picked = self.selection.locals();
-            if ui.button("Open").clicked() {
-                acts.push(Act::Open(item));
-                ui.close();
-            }
-            if ui.button("Export…").clicked() {
-                acts.push(Act::Save(entity.id));
-                ui.close();
-            }
-            if ui.button("Rename").clicked() {
-                self.start_rename(item, &entity.name);
-                ui.close();
-            }
-            if ui.button("Duplicate").clicked() {
-                acts.push(Act::DuplicateLocal(entity.id));
-                ui.close();
-            }
-            self.filing_menu(ui, entity.id, filed, acts);
-            self.tag_menu(ui, &picked, acts);
-            if ui
-                .button("Save as gig…")
-                .on_hover_text("what is picked, under a tag of its own")
-                .clicked()
-            {
-                acts.push(Act::SaveAsGig);
-                ui.close();
-            }
-            ui.separator();
-            if ui.button("Remove from list").clicked() {
-                acts.push(Act::Remove(entity.id));
-                ui.close();
-            }
-        });
+        response.context_menu(|ui| self.menu(ui, item, workspace, device, acts));
+    }
+
+    /// The menu a row offers, wherever it is drawn — the tree, or the library table.
+    ///
+    /// A folder and a tag are rows of the tree alone; their menus stay with the rows
+    /// that draw them.
+    pub fn menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        item: Item,
+        workspace: &Workspace,
+        device: &Device,
+        acts: &mut Vec<Act>,
+    ) {
+        self.aim(item);
+        match item {
+            Item::Local(id) => self.local_menu(ui, id, workspace, acts),
+            Item::Slot { class, at } => self.slot_menu(ui, class, at, device, acts),
+            Item::Folder(_) | Item::Tag(_) => {}
+        }
+    }
+
+    fn local_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: u64,
+        workspace: &Workspace,
+        acts: &mut Vec<Act>,
+    ) {
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        let item = Item::Local(id);
+        let picked = self.selection.locals();
+        if ui.button("Open").clicked() {
+            acts.push(Act::Open(item));
+            ui.close();
+        }
+        if ui.button("Export…").clicked() {
+            acts.push(Act::Save(id));
+            ui.close();
+        }
+        if ui.button("Rename").clicked() {
+            self.start_rename(item, &entity.name);
+            ui.close();
+        }
+        if ui.button("Duplicate").clicked() {
+            acts.push(Act::DuplicateLocal(id));
+            ui.close();
+        }
+        self.filing_menu(ui, id, self.folders.holding(id), acts);
+        ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
+        if ui
+            .button("Save as gig…")
+            .on_hover_text("what is picked, under a tag of its own")
+            .clicked()
+        {
+            acts.push(Act::SaveAsGig);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Remove from list").clicked() {
+            acts.push(Act::Remove(id));
+            ui.close();
+        }
     }
 
     /// Where an asset can be put, for the operators who would rather pick than drag.
@@ -604,27 +637,28 @@ impl Browser {
     }
 
     /// Every tag, checked where it is on everything picked, and one more.
-    fn tag_menu(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
-        ui.menu_button("Tag", |ui| {
-            for tag in self.tags.all() {
-                let on = self.tags.on_all(picked, tag.id);
-                if ui.selectable_label(on, &tag.name).clicked() {
-                    let ids = picked.to_vec();
-                    acts.push(match on {
-                        true => Act::Untag { ids, tag: tag.id },
-                        false => Act::Tag { ids, tag: tag.id },
-                    });
-                    ui.close();
-                }
-            }
-            if !self.tags.all().is_empty() {
-                ui.separator();
-            }
-            if ui.button("New tag…").clicked() {
-                acts.push(Act::SaveAsGig);
+    ///
+    /// The items alone, so the row's own menu and the library's footer can each put
+    /// their own label over them.
+    pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
+        for tag in self.tags.all() {
+            let on = self.tags.on_all(picked, tag.id);
+            if ui.selectable_label(on, &tag.name).clicked() {
+                let ids = picked.to_vec();
+                acts.push(match on {
+                    true => Act::Untag { ids, tag: tag.id },
+                    false => Act::Tag { ids, tag: tag.id },
+                });
                 ui.close();
             }
-        });
+        }
+        if !self.tags.all().is_empty() {
+            ui.separator();
+        }
+        if ui.button("New tag…").clicked() {
+            acts.push(Act::SaveAsGig);
+            ui.close();
+        }
     }
 
     // ---- the instrument ---------------------------------------------------------
@@ -979,65 +1013,83 @@ impl Browser {
             }
         }
 
-        let Some(name) = held else {
+        if held.is_none() {
+            return;
+        }
+        response.context_menu(|ui| self.menu(ui, item, workspace, device, acts));
+    }
+
+    /// What a slot offers. A vacant one offers nothing, so nothing is drawn for it.
+    fn slot_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        class: ObjectClass,
+        at: Location,
+        device: &Device,
+        acts: &mut Vec<Act>,
+    ) {
+        let Some(name) = device
+            .state
+            .slot(class, at)
+            .flatten()
+            .map(|info| info.name.trim().to_string())
+        else {
             return;
         };
+        // ⚠️ Pianos are large libraries fetched whole, so this browser only lists them.
+        if read_only(class) {
+            ui.label(
+                egui::RichText::new("Installed on the instrument; nothing to change here.").weak(),
+            );
+            return;
+        }
+        let item = Item::Slot { class, at };
         let free = device.state.first_free(class);
-        response.context_menu(|ui| {
-            self.aim(item);
-            if !fetchable {
-                ui.label(
-                    egui::RichText::new("Installed on the instrument; nothing to change here.")
-                        .weak(),
-                );
-                return;
-            }
-            if ui
-                .button("Open")
-                .on_hover_text("a view of this slot; nothing joins the list on this computer")
-                .clicked()
-            {
-                acts.push(Act::Open(item));
-                ui.close();
-            }
-            if ui.button("Copy to this computer").clicked() {
-                acts.push(Act::Copy { class, at });
-                ui.close();
-            }
-            if ui.button("Load on instrument").clicked() {
-                acts.push(Act::LoadOnInstrument { class, at });
-                ui.close();
-            }
-            ui.separator();
-            if ui.button("Rename").clicked() {
-                self.start_rename(item, &name);
-                ui.close();
-            }
-            if ui
-                .add_enabled(free.is_some(), egui::Button::new("Duplicate"))
-                .on_disabled_hover_text("every slot read so far is taken")
-                .clicked()
-            {
-                if let Some(to) = free {
-                    acts.push(Act::DuplicateSlot {
-                        class,
-                        from: at,
-                        to,
-                    });
-                }
-                ui.close();
-            }
-            ui.separator();
-            if ui.button("Delete…").clicked() {
-                self.ask = Some(Ask {
-                    title: format!("Delete “{name}” from {}?", place(class, at)),
-                    note: Some("It is removed from the instrument. There is no undo.".into()),
-                    verb: "Delete",
-                    act: Act::DeleteSlot { class, at },
+        if ui
+            .button("Open")
+            .on_hover_text("a view of this slot; nothing joins the list on this computer")
+            .clicked()
+        {
+            acts.push(Act::Open(item));
+            ui.close();
+        }
+        if ui.button("Copy to this computer").clicked() {
+            acts.push(Act::Copy { class, at });
+            ui.close();
+        }
+        if ui.button("Load on instrument").clicked() {
+            acts.push(Act::LoadOnInstrument { class, at });
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Rename").clicked() {
+            self.start_rename(item, &name);
+            ui.close();
+        }
+        if ui
+            .add_enabled(free.is_some(), egui::Button::new("Duplicate"))
+            .on_disabled_hover_text("every slot read so far is taken")
+            .clicked()
+        {
+            if let Some(to) = free {
+                acts.push(Act::DuplicateSlot {
+                    class,
+                    from: at,
+                    to,
                 });
-                ui.close();
             }
-        });
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Delete…").clicked() {
+            self.ask = Some(Ask {
+                title: format!("Delete “{name}” from {}?", place(class, at)),
+                note: Some("It is removed from the instrument. There is no undo.".into()),
+                verb: "Delete",
+                act: Act::DeleteSlot { class, at },
+            });
+            ui.close();
+        }
     }
 
     // ---- kinds and tags ---------------------------------------------------------
