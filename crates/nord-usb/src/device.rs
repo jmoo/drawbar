@@ -124,8 +124,10 @@ impl<T: Transport> Device<T> {
 
     /// Run a chain of read-only operations in one transaction.
     ///
-    /// Cleanup is attempted whether the chain succeeds or fails. When both fail, the
-    /// chain's error is reported.
+    /// Cleanup is attempted whether the chain succeeds or fails. When both fail the
+    /// chain's error is reported, except that a transport failure closing outranks a
+    /// device refusal in the chain: the instrument saying no is a reply, and the pipe
+    /// having failed is the finding the caller has to act on.
     ///
     /// ⚠️ The close is what clears the instrument's progress label. A transaction
     /// abandoned after a read has painted `"Uploading..."` leaves that label on the
@@ -143,7 +145,8 @@ impl<T: Transport> Device<T> {
     /// Run a chain that may mutate the instrument, in one transaction.
     ///
     /// The name is the consent: this is the only route to a [`ReadWrite`] session, and a
-    /// write can destroy an object the caller never named.
+    /// write can destroy an object the caller never named. It brackets its chain exactly
+    /// as [`Self::read`] does, error precedence included.
     pub async fn destructive<R>(
         &mut self,
         class: ObjectClass,
@@ -213,7 +216,8 @@ impl<T: Transport> Device<T> {
     }
 }
 
-/// Attempt cleanup on both paths; preserve the chain error and change notification.
+/// Attempt cleanup on both paths; preserve the change notification and report the error
+/// the caller has to act on.
 async fn bracket<T: Transport, C, R>(
     changed: &mut bool,
     mut session: Session<'_, T, C>,
@@ -222,8 +226,12 @@ async fn bracket<T: Transport, C, R>(
     let result = f(&mut session).await;
     let (closed, session_changed) = session.commit_observing_changed().await;
     *changed |= session_changed;
-    match result {
-        Ok(v) => closed.map(|()| v),
-        Err(e) => Err(e),
+    match (result, closed) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(close)) => Err(close),
+        // A refusal is a reply, so the pipe failing afterwards is the newer finding —
+        // and the one a caller watching for detachment must not miss.
+        (Err(Error::DeviceStatus(_)), Err(close @ Error::Transport(_))) => Err(close),
+        (Err(chain), _) => Err(chain),
     }
 }

@@ -141,6 +141,52 @@ fn a_read_bracket_closes_after_a_failed_chain_and_reports_the_chains_error() {
     );
 }
 
+/// A recording whose pipe dies once the host asks to close.
+struct DiesOnClose {
+    script: ReplayTransport,
+    closing: bool,
+}
+
+impl nord_usb::Transport for DiesOnClose {
+    async fn write(&mut self, buf: &[u8]) -> nord_usb::Result<()> {
+        let msg = Message::decode(buf)?;
+        self.closing |= msg.service == Service::Program && msg.command == cmd::SESSION_CLOSE;
+        match self.closing {
+            true => Ok(()),
+            false => self.script.write(buf).await,
+        }
+    }
+
+    async fn read(&mut self, max: usize) -> nord_usb::Result<Vec<u8>> {
+        match self.closing {
+            true => Err(Error::Transport("the cable was pulled".into())),
+            false => self.script.read(max).await,
+        }
+    }
+}
+
+#[test]
+fn a_pipe_that_fails_closing_outranks_the_chains_refusal() {
+    let at = Location { bank: 0, slot: 4 };
+    let mut steps = session_open(ObjectClass::Program);
+    steps.push(request(cmd::INFO, &slot_args(at)));
+    steps.push(refusal(cmd::INFO, 1));
+
+    let mut device = Device::new(DiesOnClose {
+        script: ReplayTransport::new(steps),
+        closing: false,
+    });
+    let error = pollster::block_on(device.read(ObjectClass::Program, async |s| {
+        op::info(s, at).await.map(|_| ())
+    }))
+    .expect_err("the slot was refused and then the pipe went");
+
+    assert!(
+        matches!(error, Error::Transport(_)),
+        "an empty slot outranked the instrument going away: {error}"
+    );
+}
+
 #[test]
 fn geometry_is_read_once_and_reports_the_instruments_own_tables() {
     let steps = scripts::fixture("device/geometry.script").steps();
