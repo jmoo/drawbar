@@ -145,11 +145,13 @@ pub struct EncodeArgs {
     #[arg(value_name = "WAV")]
     pub wav: PathBuf,
 
-    /// Where to write the instrument. Defaults to the WAV's name with `.nsmp`.
+    /// Where to write the instrument. Defaults to the WAV's name with the selected
+    /// generation's extension.
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
-    /// Instrument name, up to 14 bytes. Defaults to the WAV's file stem.
+    /// Instrument name. Defaults to the WAV's file stem. The `hdr` name field is
+    /// fixed-width and wider on the wide generations; a longer name is refused.
     #[arg(long)]
     pub name: Option<String>,
 
@@ -179,6 +181,11 @@ pub struct EncodeArgs {
     #[arg(long)]
     pub predict: bool,
 
+    /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
+    /// audio is the same in all three; the container and the stream's units differ.
+    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub generation: u8,
+
     /// Quantise every stroke at this shift instead of the rule's. Experimental.
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
@@ -195,17 +202,24 @@ pub struct BuildArgs {
     #[arg(value_name = "PROJECT")]
     pub project: PathBuf,
 
-    /// Where to write the instrument. Defaults to the project's path with `.nsmp`.
+    /// Where to write the instrument. Defaults to the project's path with the selected
+    /// generation's extension.
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
-    /// Instrument name, up to 14 bytes. Defaults to the project's own.
+    /// Instrument name. Defaults to the project's own. The `hdr` name field is
+    /// fixed-width and wider on the wide generations; a longer name is refused.
     #[arg(long)]
     pub name: Option<String>,
 
     /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
     #[arg(long)]
     pub predict: bool,
+
+    /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
+    /// audio is the same in all three; the container and the stream's units differ.
+    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub generation: u8,
 
     /// Quantise every stroke at this shift instead of the rule's. Experimental.
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
@@ -436,9 +450,9 @@ fn experimental(acknowledged: bool) -> Result<(), String> {
     }
     Err(
         "encoding is experimental: the file it writes is structurally sound and \
-         decodes back exactly, and single-zone unlooped output plays on an Electro 5, \
-         but it is not byte-identical to the editor's output. Pass --experimental to \
-         write it anyway."
+         decodes back exactly, and mono, stereo and looped v2 output plays on an \
+         Electro 5, but it is not byte-identical to the editor's output and v3/v4 \
+         playback is inferred. Pass --experimental to write it anyway."
             .into(),
     )
 }
@@ -469,6 +483,25 @@ fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
     Ok(source)
 }
 
+/// The generation a `--generation` number names.
+fn layout(generation: u8) -> Result<codec::Layout, String> {
+    match generation {
+        2 => Ok(codec::Layout::V2),
+        3 => Ok(codec::Layout::V3),
+        4 => Ok(codec::Layout::V4),
+        n => Err(format!("--generation {n}: the format has 2, 3 and 4")),
+    }
+}
+
+/// The extension a generation's files carry.
+fn extension(layout: codec::Layout) -> &'static str {
+    match layout {
+        codec::Layout::V2 => "nsmp",
+        codec::Layout::V3 => "nsmp3",
+        codec::Layout::V4 => "nsmp4",
+    }
+}
+
 fn predictor(minimising: bool) -> encode::Predictor {
     if minimising {
         encode::Predictor::Minimising
@@ -478,8 +511,7 @@ fn predictor(minimising: bool) -> encode::Predictor {
 }
 
 /// What one encoded stroke came out as, for the report.
-fn stroke_line(stream: &[u8], at: usize) -> Result<String, String> {
-    let layout = codec::Layout::V2;
+fn stroke_line(stream: &[u8], at: usize, layout: codec::Layout) -> Result<String, String> {
     let walk = codec::walk(stream, at, layout).map_err(|e| e.to_string())?;
     let audio = codec::decode(stream, at, layout).map_err(|e| e.to_string())?;
     let mut line = format!(
@@ -514,9 +546,10 @@ fn loop_points(text: &str, crossfade: f64) -> Result<encode::Loop, String> {
     Ok(encode::Loop::new(number(start, "start")?, number(end, "end")?).crossfade(crossfade))
 }
 
-/// `nord sample encode`: a WAV into a one-zone v2 instrument.
+/// `nord sample encode`: a WAV into a one-zone instrument of the selected generation.
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     experimental(args.experimental)?;
+    let layout = layout(args.generation)?;
     let source = pcm_source(&args.wav)?;
 
     let stem = args
@@ -528,7 +561,8 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
         .channels(source.channels)
-        .predictor(predictor(args.predict));
+        .predictor(predictor(args.predict))
+        .layout(layout);
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
     }
@@ -546,12 +580,13 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     ui.out(format!(
         "{} frames -> {}",
         source.frames(),
-        stroke_line(stroke, at)?
+        stroke_line(stroke, at, layout)?
     ));
 
-    let path = args
-        .out
-        .unwrap_or_else(|| args.wav.with_file_name(format!("{stem}.nsmp")));
+    let path = args.out.unwrap_or_else(|| {
+        args.wav
+            .with_file_name(format!("{stem}.{}", extension(layout)))
+    });
     write_file(ui, &path, &out)
 }
 
@@ -573,28 +608,23 @@ struct ProjectZone {
     /// The project's `m_startSecondary` when the editor would not keep it, so a build
     /// says where it encoded from instead.
     repaired_secondary_start: Option<f64>,
-    /// The zone record's fixed-point gain.
-    gain: u32,
+    /// The zone's playing gain as a linear ratio.
+    gain: f64,
+    /// The stroke's `m_loopDecay`, which only a wide header carries.
+    loop_decay: f32,
     /// Loop settings the project carries that the instrument has no field for, named
     /// so a build says what it dropped rather than dropping it quietly.
     dropped: Vec<String>,
 }
 
-/// A project's linear gain as the zone record's fixed-point one, to the nearest step.
-/// Whether the editor rounds or truncates here is unmeasured.
-fn zone_gain(at: &str, gain: f64) -> Result<u32, String> {
-    let scaled = gain * f64::from(nsmp::zone::GAIN_UNITY);
-    if !(0.0..f64::from(1u32 << 24)).contains(&scaled) {
-        return Err(format!(
-            "{at} sets gain {gain}, outside the 0 up to 16 a zone record holds"
-        ));
-    }
-    Ok(scaled.round() as u32)
-}
+/// The zone gain at which both of the instrument's gain stores overflow their 24 bits.
+/// The file still reproduces the editor's; what it states is no longer the project.
+const WRAPPING_ZONE_GAIN: f64 = 16.0;
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     experimental(args.experimental)?;
+    let layout = layout(args.generation)?;
 
     let project = match nord_format::from_path(&args.project)
         .map_err(|e| format!("{}: {e}", args.project.display()))?
@@ -609,8 +639,17 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         }
     };
 
+    let active_eq = project.active_eq().map_err(|e| e.to_string())?;
+    if !active_eq.is_empty() {
+        return Err(format!(
+            "the project enables {}, whose effect the editor bakes into the audio; \
+             disable it before building because this encoder cannot reproduce that processing",
+            active_eq.join(", ")
+        ));
+    }
+    let preset = project_preset(&project, layout)?;
     let dir = args.project.parent().unwrap_or_else(|| Path::new("."));
-    let resolved = project_zones(&project, dir)?;
+    let resolved = project_zones(&project, dir, layout)?;
     let name = match args.name {
         Some(name) => name,
         None => project.name().map_err(|e| e.to_string())?,
@@ -628,35 +667,62 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             secondary_start: z.secondary_start,
             shift: args.shift,
             gain: z.gain,
+            loop_decay: z.loop_decay,
         })
         .collect();
-    let instrument =
-        encode::multi_zone(&zones, &name, predictor(args.predict)).map_err(|e| e.to_string())?;
+    let map_gain = project.map_gain().map_err(|e| e.to_string())?;
+    let instrument = encode::multi_zone(
+        encode::Instrument {
+            name: &name,
+            map_gain,
+            predictor: predictor(args.predict),
+            layout,
+            preset,
+        },
+        &zones,
+    )
+    .map_err(|e| e.to_string())?;
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
     ui.out(format!("{} — {} zone(s)", ui.bold(&name), zones.len()));
+    let ceiling = 10f64.powf(encode::MAX_MAP_GAIN_DB / 20.0);
+    if !(0.0..=ceiling).contains(&map_gain) {
+        ui.note(ui.dim(format!(
+            "the map's own gain is {map_gain}, which the instrument clamps at \
+             +{:.3} dB as the editor does",
+            encode::MAX_MAP_GAIN_DB
+        )));
+    }
+    let placed = instrument.zones().map_err(|e| e.to_string())?;
     for (index, zone) in resolved.iter().enumerate() {
-        let (at, stream) = instrument.zone_stream(index).map_err(|e| e.to_string())?;
+        let stream = placed
+            .get(index)
+            .ok_or_else(|| format!("zone{} did not reach the file", index + 1))?;
         ui.out(format!(
             "  zone{:<2} root {:<4} top {:<4} {}",
             index + 1,
             note::name(zone.root_key),
             note::name(zone.top_note),
-            stroke_line(stream, at)?,
+            stroke_line(stream.stream, stream.at, layout)?,
         ));
-        let gain = if zone.gain == nsmp::zone::GAIN_UNITY {
-            String::new()
-        } else {
-            format!(
-                " gain {:.3}",
-                f64::from(zone.gain) / f64::from(nsmp::zone::GAIN_UNITY)
-            )
+        let gain = match zone.gain == 1.0 {
+            true => String::new(),
+            false => format!(" gain {:.3}", zone.gain),
         };
         ui.out(ui.dim(format!(
             "         stroke {}{gain} from {}",
             zone.global_id,
             zone.source.display()
         )));
+        if zone.gain >= WRAPPING_ZONE_GAIN {
+            ui.warn(format!(
+                "zone{} sets gain {}, which overflows both of the instrument's gain \
+                 fields; the file will state a far quieter level, as the editor's own \
+                 render of this project does",
+                index + 1,
+                zone.gain
+            ));
+        }
         if !zone.dropped.is_empty() {
             ui.warn(format!(
                 "zone{} sets {}, which the instrument has nowhere to hold",
@@ -676,8 +742,33 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
 
     let path = args
         .out
-        .unwrap_or_else(|| args.project.with_extension("nsmp"));
+        .unwrap_or_else(|| args.project.with_extension(extension(layout)));
     write_file(ui, &path, &out)
+}
+
+/// The part of a project's preset each generation can represent.
+fn project_preset(project: &Project, layout: codec::Layout) -> Result<encode::Preset, String> {
+    let mut preset = encode::Preset {
+        dynamics_enabled: project.dynamics_enabled().map_err(|e| e.to_string())?,
+        ..encode::Preset::default()
+    };
+    if layout == codec::Layout::V2 {
+        let defaults = project.velocity_defaults().map_err(|e| e.to_string())?;
+        preset.velocity_to_amplitude =
+            nsmp::velocity_level(defaults.amplitude).ok_or_else(|| {
+                format!(
+                    "m_velAmpl = {} has no decoded v2 preset level",
+                    defaults.amplitude
+                )
+            })?;
+        preset.velocity_to_timbre = nsmp::velocity_level(defaults.timbre).ok_or_else(|| {
+            format!(
+                "m_velTimbre = {} has no decoded v2 preset level",
+                defaults.timbre
+            )
+        })?;
+    }
+    Ok(preset)
 }
 
 /// Resolve a project's zones, highest first, into audio and keyboard placement.
@@ -685,7 +776,11 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
 /// Everything the editor can express that this writer does not lay out is refused by
 /// name here rather than dropped: the file it would otherwise produce would be a
 /// silent reinterpretation of the project.
-fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, String> {
+fn project_zones(
+    project: &Project,
+    dir: &Path,
+    layout: codec::Layout,
+) -> Result<Vec<ProjectZone>, String> {
     let say = |e: nord_format::error::ParseError| e.to_string();
     let files = project.audio_files().map_err(say)?;
     let strokes = project.strokes().map_err(say)?;
@@ -722,7 +817,6 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                     layer.detune, layer.velocity.0, layer.velocity.1
                 ));
             }
-            let gain = zone_gain(&at, layer.gain)?;
             let stroke = strokes
                 .iter()
                 .find(|s| s.global_id == layer.global_id)
@@ -754,7 +848,7 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                     path.display()
                 ));
             }
-            let (loops, mut dropped) = zone_loop(&at, stroke, start, stop)?;
+            let (loops, mut dropped) = zone_loop(&at, stroke, start, stop, layout)?;
             if loops.is_some() && instrument_decay {
                 dropped.push("the instrument's own m_loopDecayEnabled".into());
             }
@@ -771,7 +865,8 @@ fn project_zones(project: &Project, dir: &Path) -> Result<Vec<ProjectZone>, Stri
                 secondary_start: encoded_secondary - start as f64,
                 repaired_secondary_start: (encoded_secondary != stroke.start_secondary)
                     .then_some(stroke.start_secondary),
-                gain,
+                gain: layer.gain,
+                loop_decay: stroke.loop_decay as f32,
                 dropped,
             })
         })
@@ -794,6 +889,7 @@ fn zone_loop(
     stroke: &Stroke,
     start: usize,
     stop: usize,
+    layout: codec::Layout,
 ) -> Result<(Option<encode::Loop>, Vec<String>), String> {
     if !stroke.loop_enabled {
         return Ok((None, Vec::new()));
@@ -809,11 +905,12 @@ fn zone_loop(
     } else {
         "m_loopLengthLong"
     };
-    let loop_start = frame(at, "loop start", stroke.loop_start, stop)?;
+    let stated = stroke.encoded_loop_start();
+    let loop_start = frame(at, "loop start", stated, stop)?;
     if !length.is_finite() || length <= 0.0 {
         return Err(format!("{at}'s {named} is {length}, which is not a loop"));
     }
-    let end = frame(at, "loop end", stroke.loop_start + length, stop)?;
+    let end = frame(at, "loop end", stated + length, stop)?;
     if loop_start < start {
         return Err(format!(
             "{at} loops from frame {loop_start} but its audio is trimmed to start at \
@@ -851,7 +948,14 @@ fn zone_loop(
         dropped.push(format!("m_loopDetune = {}", stroke.loop_detune));
     }
     if stroke.loop_decay_enabled {
-        dropped.push(format!("m_loopDecay = {}", stroke.loop_decay));
+        dropped.push(match layout {
+            codec::Layout::V2 => {
+                format!("m_loopDecayEnabled and m_loopDecay = {}", stroke.loop_decay)
+            }
+            codec::Layout::V3 | codec::Layout::V4 => {
+                "m_loopDecayEnabled — the amount is written, the switch is not".into()
+            }
+        });
     }
     if short && !stroke.short_loop_uses_pitch {
         dropped.push("m_shortLoopUsesPitch = 0".into());
@@ -895,8 +999,8 @@ fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
         if zone.bottom_note != encoded_bottom {
             return Err(format!(
                 "{at} starts at note {}, but its encoded range would start at \
-                 {encoded_bottom}; v2 stores only top notes, so that gap or overlap \
-                 cannot be reproduced",
+                 {encoded_bottom}; the encoded keyboard map tiles its zones, so that \
+                 gap or overlap cannot be reproduced",
                 zone.bottom_note
             ));
         }
@@ -1016,7 +1120,7 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
         // wide generations pack to their own size and are not checked against this one.
         if let (codec::Layout::V2, Some(record)) = (layout, actual.first()) {
             let words = terminator - record.at;
-            if !words.is_multiple_of(nord_format::formats::nsmp::stroke::PACKET_LEN / 3) {
+            if !words.is_multiple_of(nsmp::stroke::packet_len(layout) / layout.word()) {
                 return Err(format!(
                     "stroke {index}: the loop covers {words} words, which is not whole packets"
                 ));
@@ -1361,7 +1465,8 @@ mod tests {
     #[test]
     fn a_projects_loop_maps_onto_the_one_the_container_holds() {
         let long = stroke_with(|s| s.loop_enabled = true);
-        let (points, dropped) = zone_loop("zone1", &long, 1_000, 88_200).unwrap();
+        let (points, dropped) =
+            zone_loop("zone1", &long, 1_000, 88_200, codec::Layout::V4).unwrap();
         assert_eq!(points, Some(encode::Loop::new(15_384, 31_768)));
         assert!(dropped.is_empty());
 
@@ -1373,7 +1478,7 @@ mod tests {
             s.loop_crossfade = 4_096.0;
             s.loop_crossfade_mode = 1;
         });
-        let (points, dropped) = zone_loop("zone1", &short, 0, 88_200).unwrap();
+        let (points, dropped) = zone_loop("zone1", &short, 0, 88_200, codec::Layout::V4).unwrap();
         assert_eq!(
             points,
             Some(encode::Loop::new(16_384, 17_408).crossfade(256.0))
@@ -1393,11 +1498,16 @@ mod tests {
             s.short_loop_length = 1_024.0;
             s.short_loop_crossfade = 0;
         });
-        let (points, _) = zone_loop("zone1", &unfaded, 0, 88_200).unwrap();
+        let (points, _) = zone_loop("zone1", &unfaded, 0, 88_200, codec::Layout::V4).unwrap();
         assert_eq!(points, Some(encode::Loop::new(16_384, 17_408)));
 
         let off = stroke_with(|_| {});
-        assert_eq!(zone_loop("zone1", &off, 0, 88_200).unwrap().0, None);
+        assert_eq!(
+            zone_loop("zone1", &off, 0, 88_200, codec::Layout::V4)
+                .unwrap()
+                .0,
+            None
+        );
     }
 
     #[test]
@@ -1405,7 +1515,7 @@ mod tests {
         let refused = |edit: fn(&mut Stroke)| {
             let mut s = stroke_with(|s| s.loop_enabled = true);
             edit(&mut s);
-            zone_loop("zone1", &s, 0, 88_200).unwrap_err()
+            zone_loop("zone1", &s, 0, 88_200, codec::Layout::V4).unwrap_err()
         };
         assert!(refused(|s| s.loop_crossfade_mode = 1).contains("m_loopXFModeLong"));
         assert!(refused(|s| s.loop_length = 0.0).contains("m_loopLengthLong"));
@@ -1413,16 +1523,19 @@ mod tests {
 
         // A trim that starts after the loop does leaves the loop nowhere to begin.
         let trimmed = stroke_with(|s| s.loop_enabled = true);
-        assert!(zone_loop("zone1", &trimmed, 20_000, 88_200).is_err());
+        assert!(zone_loop("zone1", &trimmed, 20_000, 88_200, codec::Layout::V4).is_err());
 
         let mut noisy = stroke_with(|s| s.loop_enabled = true);
         noisy.loop_detune = -50;
         noisy.loop_decay_enabled = true;
-        let (points, dropped) = zone_loop("zone1", &noisy, 0, 88_200).unwrap();
+        let (points, dropped) = zone_loop("zone1", &noisy, 0, 88_200, codec::Layout::V4).unwrap();
         assert!(points.is_some());
         assert_eq!(dropped.len(), 2, "{dropped:?}");
         assert!(dropped[0].contains("m_loopDetune"));
         assert!(dropped[1].contains("m_loopDecay"));
+
+        let (_, narrow) = zone_loop("zone1", &noisy, 0, 88_200, codec::Layout::V2).unwrap();
+        assert!(narrow[1].contains("m_loopDecay = 20"), "{narrow:?}");
     }
 
     /// The canonical LP rung, whose loop the editor stores at 16384..32768.
@@ -1463,11 +1576,12 @@ mod tests {
 
     #[test]
     fn a_directory_cannot_claim_an_unmarked_record_as_a_loop() {
-        let mut file = encode::instrument(
-            &vec![0; encode::MIN_FRAMES],
-            &encode::Options::new("Unmarked"),
-        )
-        .unwrap();
+        let mut sample =
+            encode::instrument(&[0; encode::MIN_FRAMES], &encode::Options::new("Unmarked"))
+                .unwrap();
+        let nord_format::Sample::V2(file) = &mut sample else {
+            panic!("the default options build the narrow chain");
+        };
         let stroke = nord_format::formats::nsmp::section::find_mut(
             &mut file.body.sections,
             nord_format::formats::nsmp::section::STK,
@@ -1476,7 +1590,6 @@ mod tests {
         let first = stroke.payload[20..22].to_vec();
         stroke.payload[38..40].copy_from_slice(&first);
 
-        let sample = nord_format::Sample::V2(file);
         assert!(deep_body(&sample)
             .unwrap_err()
             .contains("marked record disagrees"));

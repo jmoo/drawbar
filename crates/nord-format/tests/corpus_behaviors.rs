@@ -691,7 +691,8 @@ fn nsmp_retune_is_surgical() {
 #[test]
 fn nsmp_overlong_name_is_refused_without_mutation() {
     let mut sample = v2_named("D1-one-zone.nsmp");
-    assert!(sample.set_name("a name that is far too long").is_err());
+    let over = "M".repeat(nsmp::MAX_NAME_LEN + 1);
+    assert!(sample.set_name(&over).is_err());
     assert_eq!(sample.name().unwrap(), "TEST");
 }
 
@@ -1164,6 +1165,27 @@ fn built_zones(project: &nsmpproj::Project) -> Vec<BuiltZone> {
         .collect()
 }
 
+/// A narrow instrument from the zones a project resolves to, under the editor's own
+/// predictor choice.
+fn built_v2(
+    zones: &[nsmp::encode::NewZone<'_>],
+    name: &str,
+) -> Result<nord_format::cbin::Cbin<nsmp::Sample>, nord_format::error::Error> {
+    match nsmp::encode::multi_zone(
+        nsmp::encode::Instrument {
+            name,
+            map_gain: 1.0,
+            predictor: nsmp::encode::Predictor::Minimising,
+            layout: nsmp::codec::Layout::V2,
+            preset: nsmp::encode::Preset::default(),
+        },
+        zones,
+    )? {
+        Sample::V2(file) => Ok(file),
+        Sample::V3(_) => panic!("the narrow layout builds the narrow chain"),
+    }
+}
+
 struct BuiltZone {
     global_id: u32,
     root_key: u8,
@@ -1183,7 +1205,8 @@ impl BuiltZone {
             loops: None,
             secondary_start: self.secondary_start,
             shift: None,
-            gain: nsmp::zone::GAIN_UNITY,
+            gain: 1.0,
+            loop_decay: nsmp::encode::DEFAULT_LOOP_DECAY,
         }
     }
 }
@@ -1194,10 +1217,9 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
-        let built = nsmp::encode::multi_zone(
+        let built = built_v2(
             &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
-            nsmp::encode::Predictor::Minimising,
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));
 
@@ -1264,9 +1286,14 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
             let (at, stream) = twin.zone_stream(index).unwrap();
             let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2).unwrap();
             assert_eq!(
-                nsmp::encode::Plan::new(zone.audio.len(), 1, zone.secondary_start)
-                    .unwrap()
-                    .fields,
+                nsmp::encode::Plan::new(
+                    nsmp::codec::Layout::V2,
+                    zone.audio.len(),
+                    1,
+                    zone.secondary_start
+                )
+                .unwrap()
+                .fields,
                 editor.samples.len(),
                 "{name} zone {index}: {} frames",
                 zone.audio.len()
@@ -1275,12 +1302,97 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     }
 }
 
+/// A decibel back to a linear gain with [`nsmp::zone::GAIN_BITS`] fractional bits,
+/// exponentiated wider than the field and rounded once, as the writer does it. Silence
+/// and a negative gain — `-inf` and a NaN — both come back zero.
+fn gain_units(decibels: f32) -> u64 {
+    (10f64.powf(f64::from(decibels) / 20.0) * f64::from(nsmp::zone::GAIN_UNITY)).round() as u64
+}
+
+/// The wide render of the same instrument, where the corpus holds one. Both wide
+/// generations state the gain the same way, so either serves.
+fn wide_twin(path: &std::path::Path) -> Option<&'static nord_format::cbin::Cbin<nsmp::SampleV3>> {
+    let stem = path.file_stem()?.to_string_lossy();
+    ["nsmp3", "nsmp4"].iter().find_map(|extension| {
+        let name = format!("{stem}.{extension}");
+        corpus().iter().find_map(|s| match &s.entity {
+            Entity::Sample(Sample::V3(wide)) if s.path.ends_with(&name) => Some(wide),
+            _ => None,
+        })
+    })
+}
+
+/// The gain the stroke `id` names was built from, read off a wide render's decibel.
+fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
+    let layout = nsmp::codec::Layout::from_version(wide.header.version);
+    let (_, stroke) = wide
+        .stroke_streams()
+        .into_iter()
+        .find(|(_, s)| s[3] == id)?;
+    Some(gain_units(nsmp::codec::zone_gain_db(stroke, layout)?))
+}
+
+/// The wide half of the law the test below states for v2: the same reciprocal of the
+/// same file peak, scaled by the gain the stroke's own decibel field round-trips to.
+///
+/// The round trip is the point. Below `2^24` it equals the project's own float and
+/// nothing distinguishes them; above it the two part by tens of steps, and the file
+/// follows the decibel.
+#[test]
+fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
+    let mut seen = 0;
+    for specimen in corpus() {
+        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
+            continue;
+        };
+        // Library instruments are left out: their strokes keep the mantissa of
+        // whatever file first encoded them.
+        if !specimen
+            .path
+            .components()
+            .any(|c| c.as_os_str() == "samples")
+        {
+            continue;
+        }
+        let layout = nsmp::codec::Layout::from_version(sample.header.version);
+        let streams = sample.stroke_streams();
+        let peak = streams
+            .iter()
+            .filter_map(|(_, s)| nsmp::codec::peak(s, layout))
+            .map(|p| p.unsigned_abs())
+            .max()
+            .unwrap_or(0)
+            .max(1) as u64;
+        let bits = 64 - peak.leading_zeros();
+        let exact_power = u32::from(peak.is_power_of_two());
+        let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
+        for (_, stroke) in streams {
+            let decibels = nsmp::codec::zone_gain_db(stroke, layout).expect("a wide header");
+            let mantissa = (reciprocal * gain_units(decibels)) >> (nsmp::zone::GAIN_BITS + 3);
+            assert_eq!(
+                stroke[9..12],
+                ((mantissa % (1 << 24)) as u32).to_be_bytes()[1..],
+                "{} at {decibels} dB",
+                specimen.path.display()
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "no self-generated wide stroke");
+}
+
+/// The narrow half of that law, over every self-generated v2 specimen whatever its
+/// gain. Library instruments are left out: their strokes keep the mantissa of whatever
+/// file first encoded them.
+///
+/// A narrow header has no decibel field and the zone record states the gain mod `2^24`,
+/// so past a gain of 16 the record reads back quieter than the mantissa was built from.
+/// Where the corpus holds a wide render of the same instrument, its decibel is the gain
+/// this asserts against; the record is only trusted where there is no twin.
 #[test]
 fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
-    // Every self-generated v2 specimen, whatever its gain. Library instruments are left
-    // out: their strokes keep the mantissa of whatever file first encoded them.
     let layout = nsmp::codec::Layout::V2;
-    let mut seen = 0;
+    let (mut seen, mut twinned) = (0, 0);
     for (specimen, sample) in v2_samples() {
         if !specimen
             .path
@@ -1289,6 +1401,7 @@ fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
         {
             continue;
         }
+        let twin = wide_twin(&specimen.path);
         let zones = sample.zones().unwrap();
         let streams = sample.stroke_streams();
         let peak = streams
@@ -1297,19 +1410,30 @@ fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
             .max()
             .unwrap_or(0) as u32;
         for (_, stroke) in streams {
-            let gain = zones
-                .iter()
-                .find(|z| z.stroke_id == stroke[3])
-                .map_or(nsmp::zone::GAIN_UNITY, |z| z.gain);
+            let (gain, whence) = match twin.and_then(|wide| wide_stroke_gain(wide, stroke[3])) {
+                Some(units) => {
+                    twinned += 1;
+                    (units, "a wide twin's decibel")
+                }
+                None => (
+                    u64::from(
+                        zones
+                            .iter()
+                            .find(|z| z.stroke_id == stroke[3])
+                            .map_or(nsmp::zone::GAIN_UNITY, |z| z.gain),
+                    ),
+                    "the zone record",
+                ),
+            };
             let peak = u64::from(peak.max(1));
             let bits = 64 - peak.leading_zeros();
             let exact_power = u32::from(peak.is_power_of_two());
             let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
-            let mantissa = (reciprocal * u64::from(gain)) >> (nsmp::zone::GAIN_BITS + 3);
+            let mantissa = (reciprocal * gain) >> (nsmp::zone::GAIN_BITS + 3);
             assert_eq!(
                 stroke[9..12],
-                (mantissa as u32).to_be_bytes()[1..],
-                "{} stroke {} at gain {gain}",
+                ((mantissa % (1 << 24)) as u32).to_be_bytes()[1..],
+                "{} stroke {} at gain {gain} from {whence}",
                 specimen.path.display(),
                 stroke[3]
             );
@@ -1317,6 +1441,7 @@ fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
         }
     }
     assert!(seen > 0, "no self-generated v2 stroke");
+    assert!(twinned > 0, "no narrow stroke had a wide twin");
 }
 
 #[test]
@@ -1324,10 +1449,9 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
-        let built = nsmp::encode::multi_zone(
+        let built = built_v2(
             &zones.iter().map(BuiltZone::new_zone).collect::<Vec<_>>(),
             &project.name().unwrap(),
-            nsmp::encode::Predictor::Minimising,
         )
         .unwrap();
 
@@ -1340,9 +1464,9 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
             .payload
             .len();
         for (index, (at, stream)) in built.stroke_streams().iter().enumerate() {
-            let head = nsmp::stroke::header_len(index, cat_len, map_len);
+            let head = nsmp::stroke::header_len(nsmp::codec::Layout::V2, index, cat_len, map_len);
             assert_eq!(
-                (stream.len() - head) % nsmp::stroke::PACKET_LEN,
+                (stream.len() - head) % nsmp::stroke::packet_len(nsmp::codec::Layout::V2),
                 0,
                 "{name} stroke {index}: {} bytes over a {head}-byte header",
                 stream.len()
@@ -1514,5 +1638,52 @@ fn nsmp_the_kernel_matches_the_corpus_f32_tap_table() {
     assert_eq!(
         points.len(),
         nsmp::kernel::PHASES * (nsmp::kernel::TAPS + 2)
+    );
+}
+
+/// Renaming an instrument to the name it already holds must move no byte, in any
+/// generation. That is the whole of the name field's contract as a reader and a
+/// writer: the read stops at the terminator inside the generation's own span, and the
+/// write covers exactly that span. A writer sized to a shorter field passes this only
+/// for names short enough to fit it, and shipped libraries carry names that are not.
+#[test]
+fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
+    let mut seen = 0;
+    let mut longest = String::new();
+    for specimen in corpus() {
+        if !matches!(specimen.entity, Entity::Sample(_)) {
+            continue;
+        }
+        let where_ = specimen.path.display();
+        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes))
+            .unwrap_or_else(|e| panic!("{where_}: {e}"));
+        let Entity::Sample(sample) = &mut entity else {
+            unreachable!("re-read as a different entity");
+        };
+        let name = sample.name().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        // The oldest narrow `hdr` is 18 bytes and holds no name field at all.
+        if name.is_empty() {
+            continue;
+        }
+        sample
+            .set_name(&name)
+            .unwrap_or_else(|e| panic!("{where_}: renaming to {name:?}: {e}"));
+        let back = nord_format::to_bytes(&entity).unwrap_or_else(|e| panic!("{where_}: {e}"));
+        assert!(
+            back == specimen.bytes,
+            "{where_}: renaming to {name:?} moved a byte"
+        );
+        if name.len() > longest.len() {
+            longest = name;
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no named sample instrument");
+    /// What the editor's own name box accepts. Shipped libraries hold longer names,
+    /// and without one of those in reach the assertion above proves nothing.
+    const EDITOR_BOX: usize = 14;
+    assert!(
+        longest.len() > EDITOR_BOX,
+        "no name past the editor's own box to test a short writer against: {longest:?}"
     );
 }

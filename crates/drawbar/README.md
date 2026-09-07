@@ -184,10 +184,10 @@ typing — what is typed is clamped to the stops, because a knob cannot be turne
 them.
 
 Sample instruments show their name and the stretch of keyboard each zone covers, with
-root key and top note as note names (`C4` is middle C) — editable in every generation,
-with the audio itself carried verbatim. A zone's audio is decoded on request, drawn as
-a waveform and played; a library instrument is hundreds of megabytes, so nothing is
-decoded until asked.
+root key and top note as note names (`C4` is middle C). Zone edits cover the decoded
+Sample Library 2.0, `.nsmp3` and `.nsmp4` layouts; earlier `.nsmp` zone layouts remain
+read-only. Audio stays verbatim. A zone is decoded on request, drawn as a waveform and
+played; encoded audio can be large, so nothing is decoded until asked.
 
 Set lists are their four program slots, each editable as the `BANK:SLOT` pair the
 instrument shows. Sample Editor projects (`.nsmpproj`) show the instrument's name,

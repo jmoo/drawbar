@@ -387,7 +387,7 @@ mod tests {
     use super::*;
     use nord_format::cbin::Header;
     use nord_format::formats::ne5;
-    use nord_format::formats::nsmp::{section, SampleV3};
+    use nord_format::formats::nsmp::{self, section, SampleV3};
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project() -> Project {
@@ -413,17 +413,19 @@ mod tests {
     }
 
     fn sample_with_key_map() -> Sample {
-        let mut map = vec![0u8; 12 + 128 * 10 + 1 + 2 * 16 + 2];
+        let count_at = nsmp::zone::Wide::V21.count_at().unwrap();
+        let quad = |key: usize| 6 + key * 10 + 6;
+        let mut map = vec![0u8; count_at + 1 + 2 * 16 + 2];
         for key in 0..128 {
-            map[12 + key * 10..][..4].fill(key as u8);
+            map[quad(key)..][..4].fill(key as u8);
         }
-        let record = 12 + 128 * 10 + 1;
-        map[record - 1] = 2;
+        let record = count_at + 1;
+        map[count_at] = 2;
         for key in 48..=60 {
-            map[12 + key * 10..][..3].fill(62);
+            map[quad(key)..][..3].fill(62);
         }
         for key in 61..=84 {
-            map[12 + key * 10..][..3].fill(60);
+            map[quad(key)..][..3].fill(60);
         }
         for (i, (root, top, low, gid)) in [(60, 60, 48, 9u32), (62, 84, 61, 10)]
             .into_iter()

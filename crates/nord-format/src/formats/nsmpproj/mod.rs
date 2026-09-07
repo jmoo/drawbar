@@ -63,6 +63,20 @@ pub const FIRST_ZONE_ID: u32 = 129;
 /// Inferred from specimens; not confirmed on hardware.
 pub const MIN_SECONDARY_START: f64 = 92.0;
 
+/// Lowest loop start the editor keeps, in frames, see [`repaired_loop_start`].
+/// Inferred from specimens; not confirmed on hardware.
+pub const MIN_LOOP_START: f64 = 92.0;
+
+/// The loop start the editor encodes from, given what the project states.
+///
+/// A loop is pushed up to [`MIN_LOOP_START`] on load and keeps its stated length, so
+/// its end moves with it. The repair runs before [`repaired_secondary_start`], whose
+/// ceiling reads the loop start.
+/// Inferred from specimens; not confirmed on hardware.
+pub fn repaired_loop_start(stated: f64) -> f64 {
+    stated.max(MIN_LOOP_START)
+}
+
 /// The `m_startSecondary` a fresh project states for a stroke over `end` frames.
 ///
 /// The editor's own value is an attack analysis within a percent of this on every
@@ -124,6 +138,8 @@ pub struct Stroke {
     pub start_secondary: f64,
     pub stop: f64,
     pub loop_enabled: bool,
+    /// `m_loopStart`, in file frames, as the project states it — the editor encodes
+    /// from [`encoded_loop_start`](Stroke::encoded_loop_start).
     pub loop_start: f64,
     /// `m_loopLengthLong`.
     pub loop_length: f64,
@@ -135,7 +151,7 @@ pub struct Stroke {
     pub loop_crossfade_mode: u32,
     /// `m_loopDecayEnabled`. Reaches the instrument nowhere.
     pub loop_decay_enabled: bool,
-    /// `m_loopDecay`. Reaches the instrument nowhere.
+    /// `m_loopDecay`. Wide stroke headers carry the amount; v2 does not.
     pub loop_decay: f64,
     /// `m_loopDetune`. Reaches the instrument nowhere.
     pub loop_detune: i32,
@@ -155,13 +171,19 @@ pub struct Stroke {
 }
 
 impl Stroke {
+    /// The loop start the editor encodes this stroke from, in file frames — see
+    /// [`repaired_loop_start`].
+    pub fn encoded_loop_start(&self) -> f64 {
+        repaired_loop_start(self.loop_start)
+    }
+
     /// The secondary start the editor encodes this stroke from, in file frames — see
     /// [`repaired_secondary_start`].
     pub fn encoded_secondary_start(&self) -> f64 {
         repaired_secondary_start(
             self.start_secondary,
             self.stop,
-            self.loop_enabled.then_some(self.loop_start),
+            self.loop_enabled.then(|| self.encoded_loop_start()),
         )
     }
 }
@@ -506,6 +528,28 @@ impl Project {
         flag(self.instrument()?, "m_loopDecayEnabled")
     }
 
+    /// Whether the generated instrument loads with the category's dynamics curve.
+    pub fn dynamics_enabled(&self) -> Result<bool, ParseError> {
+        flag(self.instrument()?, "m_categoryDynamicsEnable")
+    }
+
+    /// Enabled EQ stages whose effect must be baked into the encoded audio.
+    pub fn active_eq(&self) -> Result<Vec<String>, ParseError> {
+        let instrument = self.instrument()?;
+        let mut active = active_eq_fields(instrument, "instrument")?;
+        for zone in instrument.require("map_info")?.blocks("map_zone") {
+            let id = zone.get::<u32>("m_zoneId")?;
+            active.extend(active_eq_fields(zone, &format!("zone {id}"))?);
+        }
+        Ok(active)
+    }
+
+    /// `map_info.m_gain` — the instrument's own playing gain, a linear factor on top
+    /// of every zone's own.
+    pub fn map_gain(&self) -> Result<f64, ParseError> {
+        self.instrument()?.require("map_info")?.get("m_gain")
+    }
+
     pub fn set_name(&mut self, name: &str) -> Result<(), ParseError> {
         self.instrument_mut()?.set_field("m_name", name)
     }
@@ -825,6 +869,28 @@ impl Project {
     }
 }
 
+fn active_eq_fields(node: &Node, scope: &str) -> Result<Vec<String>, ParseError> {
+    node.entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Field { key, value }
+                if key.starts_with("m_eq") && (key.contains("Enable") || key.contains("En_")) =>
+            {
+                Some((key, value))
+            }
+            _ => None,
+        })
+        .filter_map(|(key, value)| match value.parse::<u8>() {
+            Ok(0) => None,
+            Ok(_) => Some(Ok(format!("{scope}.{key}"))),
+            Err(_) => Some(Err(ParseError::AssertFail(format!(
+                "{}.{key} = {value:?} is not a u8",
+                node.name
+            )))),
+        })
+        .collect()
+}
+
 /// A `common_stroke` over a whole file, with the loop points the editor
 /// derives for an untouched import: the loop starts halfway, runs to one frame
 /// short of the end, and cross-fades over 15% of its length.
@@ -1123,6 +1189,41 @@ mod tests {
     }
 
     #[test]
+    fn the_editor_pushes_a_loop_start_up_to_92_before_it_reads_it() {
+        assert_eq!(repaired_loop_start(0.0), 92.0);
+        assert_eq!(repaired_loop_start(91.5), 92.0);
+        assert_eq!(repaired_loop_start(f64::NAN), 92.0);
+        assert_eq!(repaired_loop_start(1_000.0), 1_000.0);
+
+        let stroke = |loop_start| Stroke {
+            zone_id: 129,
+            global_id: 1,
+            file_id: 1,
+            begin: 0.0,
+            end: 44_100.0,
+            start: 0.0,
+            start_secondary: 5_512.5,
+            stop: 44_100.0,
+            loop_enabled: true,
+            loop_start,
+            loop_length: 16_384.0,
+            loop_crossfade: 0.0,
+            loop_crossfade_mode: 0,
+            loop_decay_enabled: false,
+            loop_decay: 0.0,
+            loop_detune: 0,
+            short_loop_enabled: false,
+            short_loop_length: 0.0,
+            short_loop_crossfade: 0,
+            short_loop_uses_pitch: true,
+        };
+        // The repaired loop start is the ceiling the secondary start is repaired to.
+        assert_eq!(stroke(0.0).encoded_loop_start(), 92.0);
+        assert_eq!(stroke(0.0).encoded_secondary_start(), 92.0);
+        assert_eq!(stroke(8_000.0).encoded_secondary_start(), 5_512.5);
+    }
+
+    #[test]
     fn the_editor_repairs_a_secondary_start_to_half_the_ceiling() {
         assert_eq!(repaired_secondary_start(1.0, 441.0, None), 110.25);
         assert_eq!(repaired_secondary_start(91.0, 44_100.0, None), 11_025.0);
@@ -1239,6 +1340,38 @@ mod tests {
         // The whole file still parses back to itself.
         let text = project.render();
         assert_eq!(Project::parse(&text).unwrap().render(), text);
+    }
+
+    #[test]
+    fn dynamics_and_active_eq_have_typed_views() {
+        let mut project = three_zones();
+        assert!(!project.dynamics_enabled().unwrap());
+        assert!(project.active_eq().unwrap().is_empty());
+
+        let instrument = project.instrument_mut().unwrap();
+        instrument
+            .set_field("m_categoryDynamicsEnable", "1")
+            .unwrap();
+        instrument.set_field("m_eqLowCutEnable", "1").unwrap();
+        let zone = instrument
+            .blocks_mut("map_info")
+            .next()
+            .unwrap()
+            .blocks_mut("map_zone")
+            .next()
+            .unwrap();
+        zone.set_field("m_eqMidEnable_0", "1").unwrap();
+        zone.set_field("m_eqMidVarGainEn_1", "1").unwrap();
+
+        assert!(project.dynamics_enabled().unwrap());
+        assert_eq!(
+            project.active_eq().unwrap(),
+            [
+                "instrument.m_eqLowCutEnable",
+                "zone 131.m_eqMidEnable_0",
+                "zone 131.m_eqMidVarGainEn_1"
+            ]
+        );
     }
 
     #[test]

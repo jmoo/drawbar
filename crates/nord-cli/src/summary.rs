@@ -7,7 +7,7 @@ use nord_format::cbin::Cbin;
 use nord_format::formats::ne5;
 use nord_format::formats::ne5::{Instrument, OrganModel};
 use nord_format::formats::nsmp::zone::VelocityWindow;
-use nord_format::formats::nsmp::{stroke, Sample};
+use nord_format::formats::nsmp::{codec, stroke, Sample};
 use nord_format::formats::nsmpproj;
 use nord_format::{Entity, Live, Program, Settings, Song};
 
@@ -622,7 +622,7 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
                 String::new()
             },
             ui.dim("encoded bytes"),
-            counted * stroke::PACKET_LEN,
+            counted * stroke::packet_len(codec::Layout::V2),
         ),
     ));
 }

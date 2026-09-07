@@ -162,10 +162,12 @@ fn same_source_generations_decode_within_one_quantiser_step() {
             Entity::Sample(Sample::V3(sample)) => sample.stroke_streams()[0],
             other => panic!("{}: {other:?}", specimen.path.display()),
         };
+        let directory = nsmp::codec::Directory::read(stroke).unwrap();
         (
             nsmp::codec::decode(stroke, stroke_at, layout)
                 .unwrap_or_else(|error| panic!("{}: {error}", specimen.path.display())),
             nsmp::codec::shift(stroke, layout).unwrap(),
+            directory.mark != directory.terminator,
         )
     };
     let by_name = |name: &str| {
@@ -188,17 +190,25 @@ fn same_source_generations_decode_within_one_quantiser_step() {
         };
         triplets += 1;
 
-        let (narrow, shift2) = decode(v2, nsmp::codec::Layout::V2);
-        let (wide, shift3) = decode(v3, nsmp::codec::Layout::V3);
-        let (widest, shift4) = decode(v4, nsmp::codec::Layout::V4);
-        assert_eq!(narrow.samples.len(), wide.samples.len(), "{stem}: v2/v3");
-        assert_eq!(narrow.samples.len(), widest.samples.len(), "{stem}: v2/v4");
+        let (narrow, shift2, marked) = decode(v2, nsmp::codec::Layout::V2);
+        let (wide, shift3, _) = decode(v3, nsmp::codec::Layout::V3);
+        let (widest, shift4, _) = decode(v4, nsmp::codec::Layout::V4);
 
         let step = |a: i32, b: i32| 4.max(1i32 << a.max(b).clamp(0, 30));
-        for (other, allowed) in [
-            (&wide, step(shift2, shift3)),
-            (&widest, step(shift2, shift4)),
+        for (side, other, allowed) in [
+            ("v2/v3", &wide, step(shift2, shift3)),
+            ("v2/v4", &widest, step(shift2, shift4)),
         ] {
+            // A loop mark clears the resync point by a floor of the generation's own,
+            // so a loop that starts near the resync repeats more of itself at v2 than
+            // it does wide. Only that repeat differs: the shorter stream is the longer
+            // one cut short.
+            assert!(
+                marked || narrow.samples.len() == other.samples.len(),
+                "{stem}: {side} lengths {} and {}, and nothing is marked",
+                narrow.samples.len(),
+                other.samples.len()
+            );
             let worst = narrow
                 .samples
                 .iter()
@@ -208,7 +218,7 @@ fn same_source_generations_decode_within_one_quantiser_step() {
                 .unwrap_or(0);
             assert!(
                 worst <= allowed,
-                "{stem}: difference {worst}, limit {allowed}"
+                "{stem}: {side} difference {worst}, limit {allowed}"
             );
         }
     }
@@ -313,6 +323,87 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     assert_eq!(differing, [0x18, 0x19, 0x1a, 0x1b, 0x410, 0x47d, 0x47e]);
 }
 
+/// `A-silence-C4`'s project: `m_start` 1, `m_stop` 4410, `m_startSecondary` 552.128186,
+/// over a WAV of digital silence, under the editor's own default top note.
+const SILENT_FRAMES: usize = 4409;
+const SILENT_SECONDARY_START: f64 = 552.128186 - 1.0;
+
+/// The same project rendered to `.nsmp3` and `.nsmp4`. Both come out byte-identical,
+/// checksum included, so the wide container, section schemas, stroke header and
+/// stream units are all pinned here at once.
+#[test]
+fn a_wide_silence_reproduces_the_editors_renders_exactly() {
+    for (layout, name) in [
+        (nsmp::codec::Layout::V3, "A-silence-C4.nsmp3"),
+        (nsmp::codec::Layout::V4, "A-silence-C4.nsmp4"),
+    ] {
+        let expected = &named(name).bytes;
+        let actual = nsmp::encode::instrument(
+            &vec![0i16; SILENT_FRAMES],
+            &nsmp::encode::Options::new("A-silence-C4")
+                .root_key(60)
+                .layout(layout)
+                .secondary_start(SILENT_SECONDARY_START),
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+        assert_eq!(actual.len(), expected.len(), "{name}: length");
+        let differing = (0..expected.len())
+            .filter(|&index| actual[index] != expected[index])
+            .collect::<Vec<_>>();
+        assert!(differing.is_empty(), "{name}: bytes {differing:?} differ");
+    }
+}
+
+/// A wide build states its own chain length, and the section chain is the one the
+/// editor writes down to the schema versions.
+#[test]
+fn a_wide_build_states_the_chain_length_its_meta_section_promises() {
+    for (layout, name) in [
+        (nsmp::codec::Layout::V3, "A-silence-C4.nsmp3"),
+        (nsmp::codec::Layout::V4, "A-silence-C4.nsmp4"),
+    ] {
+        let built = nsmp::encode::instrument(
+            &vec![0i16; SILENT_FRAMES],
+            &nsmp::encode::Options::new("A-silence-C4")
+                .root_key(60)
+                .layout(layout)
+                .secondary_start(SILENT_SECONDARY_START),
+        )
+        .unwrap();
+        let Sample::V3(built) = &built else {
+            panic!("{name}: the wide layouts build the wide chain");
+        };
+        assert_eq!(
+            built.meta().unwrap().chain_len as usize,
+            built.chain_len_before_meta(),
+            "{name}"
+        );
+
+        let twin = match nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap() {
+            Entity::Sample(Sample::V3(sample)) => sample,
+            other => panic!("{name} decoded as {other:?}"),
+        };
+        let chain = |body: &nsmp::SampleV3| -> Vec<(String, u32, usize)> {
+            body.sections
+                .iter()
+                .map(|s| (s.tag_str(), s.version, s.payload.len()))
+                .collect()
+        };
+        assert_eq!(
+            chain(&built.body),
+            chain(&twin.body),
+            "{name}: section chain"
+        );
+        assert_eq!(
+            built.zones().unwrap(),
+            twin.zones().unwrap(),
+            "{name}: zones"
+        );
+    }
+}
+
 const STEREO_SECONDARY_STARTS: [(usize, f64); 8] = [
     (4_096, 512.815658),
     (6_000, 751.194811),
@@ -336,7 +427,7 @@ fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
         assert_eq!(stream.channels, 2, "{name}");
         assert_eq!(stream.cell, Some(48), "{name}");
 
-        let plan = nsmp::encode::Plan::new(frames, 2, secondary).unwrap();
+        let plan = nsmp::encode::Plan::new(nsmp::codec::Layout::V2, frames, 2, secondary).unwrap();
         assert_eq!(stream.fields, plan.fields, "{name}: fields");
 
         let warmup = stream
@@ -456,8 +547,10 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
         }
     }
 
-    let mono = nsmp::encode::Plan::new(4_409, 1, MONO_SECONDARY_START).unwrap();
-    let both = nsmp::encode::Plan::new(4_409, 2, MONO_SECONDARY_START).unwrap();
+    let mono =
+        nsmp::encode::Plan::new(nsmp::codec::Layout::V2, 4_409, 1, MONO_SECONDARY_START).unwrap();
+    let both =
+        nsmp::encode::Plan::new(nsmp::codec::Layout::V2, 4_409, 2, MONO_SECONDARY_START).unwrap();
     assert_eq!(both.fields, 2 * mono.fields);
     assert_eq!(both.fields, landmarks("C-44k-16-stL.nsmp").2[0]);
     assert_eq!(both.resync_at, 2 * mono.resync_at);
@@ -470,7 +563,7 @@ fn count_laws_reproduce_editor_landmarks() {
         ("T-sil.nsmp", 44_100usize, 5_521.281862),
         ("A-impulse-C4.nsmp", 4_410, 552.128186),
     ] {
-        let plan = nsmp::encode::Plan::new(frames, 1, secondary).unwrap();
+        let plan = nsmp::encode::Plan::new(nsmp::codec::Layout::V2, frames, 1, secondary).unwrap();
         let sample = v2_named(name);
         let (stroke_at, stroke) = sample.stroke_streams()[0];
         let stream = nsmp::codec::walk(stroke, stroke_at, nsmp::codec::Layout::V2).unwrap();

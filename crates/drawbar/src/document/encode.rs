@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_long_filename_opens_the_panel_on_a_name_that_fits() {
-        let draft = Draft::new("an extremely long marimba name.wav");
+        let draft = Draft::new("an extremely long marimba sample name.wav");
         assert_eq!(draft.name.len(), MAX_NAME_LEN);
         let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
         assert!(instrument(&draft, &source).is_ok());

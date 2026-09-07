@@ -13,7 +13,7 @@
 //! and can retune, rename and remap them without touching a byte of audio, in either
 //! chain. The [`codec`] decodes that audio to samples in every generation — it is one
 //! codec in three sets of units, so a caller only picks the right [`codec::Layout`].
-//! [`encode`] builds a new instrument from PCM, v2 only.
+//! [`encode`] builds a new instrument from PCM in all three generations.
 
 /// A zone and the stroke stream that plays it, ready for [`codec::decode`].
 pub struct ZoneAudio<'a> {
@@ -102,16 +102,70 @@ impl cbin::Body for AnyBody {
     }
 }
 
-/// Offset of the instrument name within the `hdr` payload.
-const NAME_AT: usize = 12;
-
-/// Longest name this writer will emit.
+/// A fixed-width string field inside a `hdr` payload: where it starts, and where the
+/// next field does.
 ///
-/// The field is fixed-width and NUL-padded — a 4-character and a 14-character name give
-/// the same file length — but only 14 bytes have ever been observed in use, and what
-/// follows the name inside `hdr` is unmapped. Writing a longer one risks overwriting a
-/// field we cannot see, so refuse instead. Reading is unrestricted.
-pub const MAX_NAME_LEN: usize = 14;
+/// A `hdr` holds its strings NUL-terminated and zero-padded to the next field, never
+/// length-prefixed, so the field is the same size whatever it holds and the longest
+/// string it takes is its span less the terminator. The editor's own name box stops
+/// well short of that; shipped libraries do not.
+///
+/// Inferred from specimens; not confirmed on hardware.
+#[derive(Clone, Copy)]
+pub(super) struct StringField {
+    at: usize,
+    next: usize,
+}
+
+impl StringField {
+    /// The narrow chain's instrument name. The sub-name follows it.
+    pub(super) const NAME: StringField = StringField { at: 12, next: 44 };
+
+    /// The wide chain's main name, in both wide generations.
+    pub(super) const NAME_V3: StringField = StringField { at: 10, next: 76 };
+
+    /// Longest string this field holds, the terminator excluded.
+    pub(super) const fn capacity(self) -> usize {
+        self.next - self.at - 1
+    }
+
+    /// The string, up to its terminator.
+    ///
+    /// A payload that stops inside the field is read as far as it goes rather than
+    /// refused: the oldest narrow `hdr` is 18 bytes and carries no name at all, and it
+    /// reads back empty.
+    fn read(self, payload: &[u8]) -> String {
+        let span = self.at.min(payload.len())..self.next.min(payload.len());
+        nul_terminated(&payload[span])
+    }
+
+    /// Replaces the string, zero-filling the rest of the field.
+    pub(super) fn write(self, payload: &mut [u8], value: &str) -> Result<(), Error> {
+        if value.len() > self.capacity() {
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value:?} ({} bytes)", value.len()),
+                bound: format!("a name of at most {} bytes", self.capacity()),
+            }
+            .into());
+        }
+        let field = payload
+            .get_mut(self.at..self.next)
+            .ok_or_else(|| ParseError::AssertFail("hdr section holds no name field".into()))?;
+        field.fill(0);
+        field[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(())
+    }
+}
+
+/// What a NUL-terminated, zero-padded field holds. An unterminated field is the whole
+/// of it.
+fn nul_terminated(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// Longest instrument name the narrow chain holds.
+pub const MAX_NAME_LEN: usize = StringField::NAME.capacity();
 
 /// A sample instrument's body: the section chain, held in file order including
 /// repeats — `stk` appears once per zone. A file is a `Cbin<Sample>`.
@@ -173,20 +227,10 @@ impl cbin::Body for SampleV3 {
     }
 }
 
-/// Offset of the main name within the v3/v4 `hdr` payload.
-const NAME_V3_AT: usize = 10;
-
-/// End of the main-name field: the sub-name field starts here. The two fields
-/// are what the filename convention joins — `Bass Clarinet 2` + `KG  mono` →
-/// `Bass Clarinet 2_KG  mono 3.11`. Inferred from specimens; not confirmed on
-/// hardware.
-const NAME_V3_SUB_AT: usize = 76;
-
-/// Longest main name this writer will emit on the wide chain.
-///
-/// The whole field is writable here, unlike [`MAX_NAME_LEN`]: what follows it is
-/// the sub-name rather than unmapped bytes, so the bound is the field itself.
-pub const MAX_NAME_V3_LEN: usize = NAME_V3_SUB_AT - NAME_V3_AT;
+/// Longest main name the wide chain holds. The two fields around it are what the
+/// filename convention joins — `Bass Clarinet 2` + `KG  mono` → `Bass Clarinet
+/// 2_KG  mono 3.11`.
+pub const MAX_NAME_V3_LEN: usize = StringField::NAME_V3.capacity();
 
 impl Cbin<SampleV3> {
     fn hdr(&self) -> Result<&section::Section4, Error> {
@@ -194,28 +238,20 @@ impl Cbin<SampleV3> {
             .ok_or_else(|| ParseError::AssertFail("no hdr section".into()).into())
     }
 
-    fn hdr_field(&self, from: usize, to: Option<usize>) -> Result<String, Error> {
-        let hdr = self.hdr()?;
-        let field = match to {
-            Some(to) => hdr.payload.get(from..to),
-            None => hdr.payload.get(from..),
-        }
-        .ok_or_else(|| {
-            ParseError::AssertFail(format!("hdr section is {} bytes", hdr.payload.len()))
-        })?;
-        let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
-        Ok(String::from_utf8_lossy(&field[..end]).into_owned())
-    }
-
     /// The instrument's main name.
     pub fn name(&self) -> Result<String, Error> {
-        self.hdr_field(NAME_V3_AT, Some(NAME_V3_SUB_AT))
+        Ok(StringField::NAME_V3.read(&self.hdr()?.payload))
     }
 
     /// The sub name — the string after the `_` in the vendor's filenames.
     /// Empty on files that carry none.
+    ///
+    /// It starts where the main name's field ends. Where it ends is unmapped, so this
+    /// reads to the terminator with no field bound behind it and there is no setter.
     pub fn sub_name(&self) -> Result<String, Error> {
-        self.hdr_field(NAME_V3_SUB_AT, None)
+        let payload = &self.hdr()?.payload;
+        let from = StringField::NAME_V3.next.min(payload.len());
+        Ok(nul_terminated(&payload[from..]))
     }
 
     /// How many strokes the body carries — one `stk` section each.
@@ -246,8 +282,9 @@ impl Cbin<SampleV3> {
             .collect()
     }
 
-    /// Keyboard zones, in stored order — high to low except `map` v14, which
-    /// stores low to high. Each zone is verified against the stroke it names.
+    /// Keyboard zones, in stored order, which is usually high to low; `map` v14
+    /// files occur in both orders and a record states its own notes. Each zone is
+    /// verified against the stroke it names.
     pub fn zones(&self) -> Result<Vec<ZoneV3>, Error> {
         let map = self.map()?;
         Ok(zone::read_v3(
@@ -308,22 +345,9 @@ impl Cbin<SampleV3> {
     /// Renames in place, NUL-padding the rest of the main-name field. The
     /// sub-name is a separate field and is left alone.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
-        if name.len() > MAX_NAME_V3_LEN {
-            return Err(ParseError::OutOfBounds {
-                value: format!("{name:?} ({} bytes)", name.len()),
-                bound: format!("a name of at most {MAX_NAME_V3_LEN} bytes"),
-            }
-            .into());
-        }
         let hdr = section::find_mut4(&mut self.body.sections, section::HDR4)
             .ok_or_else(|| ParseError::AssertFail("no hdr section".into()))?;
-        let field = hdr
-            .payload
-            .get_mut(NAME_V3_AT..NAME_V3_SUB_AT)
-            .ok_or_else(|| ParseError::AssertFail("hdr section is too short for a name".into()))?;
-        field.fill(0);
-        field[..name.len()].copy_from_slice(name.as_bytes());
-        Ok(())
+        StringField::NAME_V3.write(&mut hdr.payload, name)
     }
 
     /// Whether this body's zones can be retuned and remapped.
@@ -475,32 +499,14 @@ impl Cbin<Sample> {
     /// The editor composes this from separate Main, Sub and Aux fields joined with `_`,
     /// so an empty Sub shows up as a doubled underscore rather than a typo.
     pub fn name(&self) -> Result<String, Error> {
-        let hdr = self.hdr()?;
-        let from = hdr.payload.get(NAME_AT..).ok_or_else(|| {
-            ParseError::AssertFail(format!("hdr section is {} bytes", hdr.payload.len()))
-        })?;
-        let end = from.iter().position(|&b| b == 0).unwrap_or(from.len());
-        Ok(String::from_utf8_lossy(&from[..end]).into_owned())
+        Ok(StringField::NAME.read(&self.hdr()?.payload))
     }
 
     /// Renames in place, NUL-padding the rest of the field.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
-        if name.len() > MAX_NAME_LEN {
-            return Err(ParseError::OutOfBounds {
-                value: format!("{name:?} ({} bytes)", name.len()),
-                bound: format!("a name of at most {MAX_NAME_LEN} bytes"),
-            }
-            .into());
-        }
         let hdr = section::find_mut(&mut self.body.sections, section::HDR)
             .ok_or_else(|| ParseError::AssertFail("no hdr section".into()))?;
-        let field = hdr
-            .payload
-            .get_mut(NAME_AT..NAME_AT + MAX_NAME_LEN)
-            .ok_or_else(|| ParseError::AssertFail("hdr section is too short for a name".into()))?;
-        field.fill(0);
-        field[..name.len()].copy_from_slice(name.as_bytes());
-        Ok(())
+        StringField::NAME.write(&mut hdr.payload, name)
     }
 
     /// Pre-2.0 libraries use a different zone layout; their section chain, name, and
@@ -763,16 +769,65 @@ mod tests {
 
     #[test]
     fn an_unknown_map_version_cannot_use_the_keyboard_table() {
-        let mut sample = encode::instrument(
-            &vec![0i16; encode::MIN_FRAMES],
-            &encode::Options::new("Test"),
-        )
-        .unwrap();
+        let crate::Sample::V2(mut sample) =
+            encode::instrument(&[0i16; encode::MIN_FRAMES], &encode::Options::new("Test")).unwrap()
+        else {
+            panic!("the default options build the narrow chain");
+        };
         let map = section::find_mut(&mut sample.body.sections, section::MAP).unwrap();
         map.version = keymap::VERSION + 1;
         let before = map.payload.clone();
         assert!(sample.key_table().is_err());
         assert!(sample.set_key_table(&KeyTable::NEUTRAL).is_err());
         assert_eq!(sample.map().unwrap().payload, before);
+    }
+
+    #[test]
+    fn a_name_field_holds_its_whole_span_less_the_terminator() {
+        assert_eq!(MAX_NAME_LEN, 31);
+        assert_eq!(MAX_NAME_V3_LEN, 65);
+    }
+
+    #[test]
+    fn a_rename_leaves_nothing_of_the_name_it_replaced() {
+        for field in [StringField::NAME, StringField::NAME_V3] {
+            let mut payload = vec![0u8; field.next];
+            let long = "M".repeat(field.capacity());
+            field.write(&mut payload, &long).unwrap();
+            field.write(&mut payload, "Short").unwrap();
+            assert_eq!(field.read(&payload), "Short");
+            assert!(payload[field.at + 5..field.next].iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn a_name_one_byte_past_the_field_is_refused() {
+        let field = StringField::NAME;
+        let mut payload = vec![0xffu8; field.next + 8];
+        let error = field
+            .write(&mut payload, &"M".repeat(field.capacity() + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 31 bytes"), "{error}");
+        assert!(payload[field.at..].iter().all(|&b| b == 0xff));
+    }
+
+    #[test]
+    fn a_name_filling_its_field_stops_at_the_field_that_follows() {
+        let field = StringField::NAME_V3;
+        let mut payload = vec![0u8; 112];
+        payload[field.next..field.next + 7].copy_from_slice(b"KG mono");
+        let long = "M".repeat(field.capacity());
+        field.write(&mut payload, &long).unwrap();
+        assert_eq!(field.read(&payload), long);
+        assert_eq!(nul_terminated(&payload[field.next..]), "KG mono");
+    }
+
+    /// The oldest narrow `hdr` is 18 bytes and stops inside the name field.
+    #[test]
+    fn a_header_with_no_name_field_reads_back_empty_and_refuses_a_rename() {
+        assert_eq!(StringField::NAME.read(&[0u8; 18]), "");
+        assert_eq!(StringField::NAME.read(&[]), "");
+        assert!(StringField::NAME.write(&mut [0u8; 18], "Name").is_err());
     }
 }

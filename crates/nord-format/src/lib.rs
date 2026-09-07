@@ -347,6 +347,16 @@ impl Sample {
             Sample::V3(s) => s.stroke_streams(),
         }
     }
+
+    /// Serializes, recomputing the checksum over the body it just produced.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        match self {
+            Sample::V2(s) => s.write_to(&mut out),
+            Sample::V3(s) => s.write_to(&mut out),
+        }?;
+        Ok(out.into_inner())
+    }
 }
 
 /// One decoded file.
