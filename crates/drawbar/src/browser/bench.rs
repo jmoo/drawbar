@@ -3,29 +3,27 @@
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
-use super::drag::{Carried, Item, Kind, Onto};
+use super::drag::{Held, Item, Kind, Onto};
 use super::Browser;
 use crate::device::Device;
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
-pub(in crate::browser) fn local(kind: Kind) -> Carried {
-    Carried {
-        from: Item::Local(1),
+pub(in crate::browser) fn local(kind: Kind) -> Held {
+    Held {
+        what: Item::Local(1),
         kind,
-        name: "Africa Split".into(),
         filed: None,
     }
 }
 
-pub(in crate::browser) fn slot(class: ObjectClass, bank: u32, slot: u32) -> Carried {
-    Carried {
-        from: Item::Slot {
+pub(in crate::browser) fn slot(class: ObjectClass, bank: u32, slot: u32) -> Held {
+    Held {
+        what: Item::Slot {
             class,
             at: Location { bank, slot },
         },
         kind: Kind::from_class(class),
-        name: "Squabble B".into(),
         filed: None,
     }
 }

@@ -3,9 +3,9 @@
 use eframe::egui;
 
 use super::act::{owed, Act};
-use super::drag::{Carried, Item, Kind, Onto};
+use super::drag::{Carried, Held, Item, Kind, Onto};
 use super::row::{row, Cells};
-use super::Browser;
+use super::{Browser, Click};
 use crate::device::{Connection, Device};
 use crate::strings::place;
 use crate::workspace::{Fresh, Workspace};
@@ -118,9 +118,14 @@ impl Browser {
                 for id in self.folder_ids() {
                     self.folder_rows(ui, id, workspace, device, acts);
                 }
+                let loose: Vec<Item> = workspace
+                    .listed()
+                    .filter(|entity| self.folders.holding(entity.id).is_none())
+                    .map(|entity| Item::Local(entity.id))
+                    .collect();
                 for entity in workspace.listed() {
                     if self.folders.holding(entity.id).is_none() {
-                        self.local_row(ui, entity, acts);
+                        self.local_row(ui, entity, &loose, workspace, acts);
                     }
                 }
                 if let Some(carried) = egui::DragAndDrop::payload::<Carried>(ui.ctx()) {
@@ -128,7 +133,7 @@ impl Browser {
                         ui,
                         false,
                         &Cells {
-                            name: match carried.filed.is_some() {
+                            name: match carried.head.filed.is_some() {
                                 true => "Drop here to take it out of its folder",
                                 false => "Drop here to copy it to this computer",
                             },
@@ -167,13 +172,15 @@ impl Browser {
             .map(|entity| entity.id)
             .collect();
 
+        let inside: Vec<Item> = members.iter().copied().map(Item::Local).collect();
+
         if self.rename.as_ref().is_some_and(|r| r.what == item) {
             if let Some(name) = self.rename_row(ui, &name) {
                 acts.push(Act::RenameFolder { id, name });
             }
             ui.indent(("folder_body", id), |ui| {
                 for entity in members.iter().filter_map(|id| workspace.get(*id)) {
-                    self.local_row(ui, entity, acts);
+                    self.local_row(ui, entity, &inside, workspace, acts);
                 }
             });
             return;
@@ -188,7 +195,7 @@ impl Browser {
                     ui.label(egui::RichText::new("empty — drag sounds in").small().weak());
                 }
                 for entity in members.iter().filter_map(|id| workspace.get(*id)) {
-                    self.local_row(ui, entity, acts);
+                    self.local_row(ui, entity, &inside, workspace, acts);
                 }
             });
 
@@ -248,11 +255,13 @@ impl Browser {
         &mut self,
         ui: &mut egui::Ui,
         entity: &crate::workspace::LocalEntity,
+        list: &[Item],
+        workspace: &Workspace,
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Local(entity.id);
         let kind = Kind::of(entity.entity.as_ref());
-        let selected = self.selection == Some(item);
+        let selected = self.selection.holds(item);
 
         // While a name is being typed the row stops sensing anything: a drag sense over
         // the field would take the clicks that place the cursor in it.
@@ -282,15 +291,13 @@ impl Browser {
         let response = drawn.response;
 
         if response.dragged() {
-            egui::DragAndDrop::set_payload(
-                ui.ctx(),
-                Carried {
-                    from: item,
-                    kind,
-                    name: entity.name.clone(),
-                    filed,
-                },
-            );
+            let head = Held {
+                what: item,
+                kind,
+                filed,
+            };
+            let carried: Carried = self.carrying(head, &entity.name, workspace);
+            egui::DragAndDrop::set_payload(ui.ctx(), carried);
         }
         // A drop onto a row is a drop onto the list; it is taken here so the column's
         // own zone does not act on it a second time.
@@ -299,7 +306,12 @@ impl Browser {
         if response.double_clicked() {
             acts.push(Act::Open(item));
         } else if response.clicked() {
-            self.clicked(item, &response, drawn.name, &entity.name);
+            let click = Click {
+                item,
+                from: &entity.name,
+                list,
+            };
+            self.clicked(ui, click, &response, drawn.name);
         }
         if selected && ui.input(|i| i.key_pressed(egui::Key::F2)) {
             self.start_rename(item, &entity.name);

@@ -97,7 +97,7 @@ impl Kind {
 }
 
 /// One row of the tree.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
     Local(u64),
     /// A grouping of local assets. Only a rename and a selection reach it; a folder is
@@ -109,15 +109,58 @@ pub enum Item {
     },
 }
 
-/// What is under the pointer while a drag is in progress.
-#[derive(Clone)]
-pub struct Carried {
-    pub from: Item,
+impl Item {
+    /// Locals, then folders, then slots by class and address — the order a selection is
+    /// walked in, and the order it comes back from the store in.
+    fn key(self) -> (u8, u32, u32, u64) {
+        match self {
+            Item::Local(id) => (0, 0, 0, id),
+            Item::Folder(id) => (1, 0, 0, id),
+            Item::Slot { class, at } => (2, class.to_raw(), at.bank, u64::from(at.slot)),
+        }
+    }
+}
+
+impl Ord for Item {
+    fn cmp(&self, other: &Item) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+impl PartialOrd for Item {
+    fn partial_cmp(&self, other: &Item) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// One row a drag is carrying, and what the rules need to know about it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Held {
+    pub what: Item,
     pub kind: Kind,
-    pub name: String,
     /// The folder it is in, for a local asset. What makes dragging one out of a folder
     /// mean something.
     pub filed: Option<u64>,
+}
+
+/// What is under the pointer while a drag is in progress.
+///
+/// ⚠️ `head` is the row the pointer went down on and `rest` is the selection it brought
+/// with it. The verdict is [`landing`] on the head alone; `rest` follows only where the
+/// verdict is one act repeated, which [`crate::browser::Browser::land`] decides.
+#[derive(Clone)]
+pub struct Carried {
+    pub head: Held,
+    /// What the ghost says: the pressed row, and how many came with it.
+    pub name: String,
+    pub rest: Vec<Held>,
+}
+
+impl Carried {
+    /// The pressed row and everything it brought, in that order.
+    pub fn all(&self) -> impl Iterator<Item = Held> + '_ {
+        std::iter::once(self.head).chain(self.rest.iter().copied())
+    }
 }
 
 /// Where a drop would land.
@@ -155,8 +198,8 @@ impl Landing {
 }
 
 /// Whether a drag can end where the pointer is, and what it would mean if it did.
-pub fn landing(carried: &Carried, onto: Onto) -> Landing {
-    match (carried.from, onto) {
+pub fn landing(carried: &Held, onto: Onto) -> Landing {
+    match (carried.what, onto) {
         // A folder is a way of seeing the list, not a row that moves.
         (Item::Folder(_), _) => Landing::No("a folder is not dragged"),
         // The loose part of the list is a target only for something that is in a folder,
@@ -343,7 +386,7 @@ mod tests {
     /// the copy lands when the instrument answers rather than when the pointer is let go.
     #[test]
     fn a_folder_takes_what_is_already_on_this_computer_and_nothing_else() {
-        let filed = |folder| Carried {
+        let filed = |folder| Held {
             filed: folder,
             ..local(Kind::Program)
         };
@@ -367,10 +410,9 @@ mod tests {
     /// that moves.
     #[test]
     fn a_folder_is_not_something_that_is_dragged() {
-        let carried = Carried {
-            from: Item::Folder(1),
+        let carried = Held {
+            what: Item::Folder(1),
             kind: Kind::Program,
-            name: "Sunday".into(),
             filed: None,
         };
         for onto in [

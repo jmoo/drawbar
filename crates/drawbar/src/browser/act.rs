@@ -672,7 +672,7 @@ mod tests {
 
         act(&mut browser, Act::RemoveFolder(id));
         assert!(browser.rename.is_none(), "the editor went with it");
-        assert!(browser.selection.is_none());
+        assert!(browser.selection.is_empty());
 
         // And the id `make` hands out again is a folder with no editor waiting on it.
         act(&mut browser, Act::NewFolder);

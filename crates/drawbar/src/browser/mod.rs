@@ -27,12 +27,14 @@ mod computer;
 mod drag;
 mod instrument;
 mod row;
+mod selection;
 
 pub use act::{apply, foreign_format, Act};
 pub use computer::new_menu;
-pub use drag::{landing, Carried, Item, Kind, Landing, Onto};
+pub use drag::{landing, Carried, Held, Item, Kind, Landing, Onto};
 pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
+pub use selection::{gesture, Gesture, Selection};
 
 use act::{owed, write_warnings};
 use drag::ghost;
@@ -43,6 +45,15 @@ struct Rename {
     text: String,
     /// The first frame, in which the field takes focus and selects what is in it.
     fresh: bool,
+}
+
+/// A click on a row: which row, what it is called, and the run a ⇧-click may fill.
+struct Click<'a> {
+    item: Item,
+    /// The name the rename editor would open on.
+    from: &'a str,
+    /// The rows of the list this one sits in, in the order they are drawn.
+    list: &'a [Item],
 }
 
 /// A question that has to be answered before something is lost.
@@ -57,8 +68,11 @@ struct Ask {
 ///
 /// Both halves are needed. Selecting is the whole row's job, so a row that answers a
 /// click anywhere would otherwise arm the editor on every second click.
-pub fn arms_rename(selected: bool, on_name: bool) -> bool {
-    selected && on_name
+///
+/// ⚠️ `sole` is the **only** row picked, not merely one of several. A click on a name
+/// inside a multi-selection collapses the selection onto that row instead.
+pub fn arms_rename(sole: bool, on_name: bool) -> bool {
+    sole && on_name
 }
 
 /// What Enter does to an in-place rename: nothing, or a new name.
@@ -74,7 +88,7 @@ pub fn renamed(original: &str, typed: &str) -> Option<String> {
 }
 
 pub struct Browser {
-    selection: Option<Item>,
+    selection: Selection,
     rename: Option<Rename>,
     ask: Option<Ask>,
     /// Where the divider sits between the two columns, as a share of the dock.
@@ -87,7 +101,7 @@ pub struct Browser {
 impl Default for Browser {
     fn default() -> Browser {
         Browser {
-            selection: None,
+            selection: Selection::default(),
             rename: None,
             ask: None,
             split: EVEN,
@@ -235,7 +249,7 @@ impl Browser {
         if !same {
             self.rename = None;
         }
-        self.selection = Some(item);
+        self.selection.only(item);
     }
 
     /// Take back an armed rename, because the row it belongs to is about to stop
@@ -244,32 +258,93 @@ impl Browser {
         if self.rename.as_ref().is_some_and(|r| r.what == what) {
             self.rename = None;
         }
-        if self.selection == Some(what) {
-            self.selection = None;
-        }
+        self.selection.forget(what);
     }
 
     fn start_rename(&mut self, what: Item, from: &str) {
-        self.selection = Some(what);
+        self.selection.only(what);
         self.rename = Some(Rename {
             what,
             text: from.to_string(),
             fresh: true,
         });
     }
-    /// What a plain click on a row does.
-    ///
-    /// ⚠️ Arming the rename editor needs the click to land on the **name**, not merely
-    /// on a row that was already selected. An editor armed by any second click sits
-    /// there with the whole name selected, so the next keystroke — one meant for the
-    /// document, or a stray one — replaces it, and the blur commits the replacement.
-    fn clicked(&mut self, item: Item, response: &egui::Response, name: egui::Rect, from: &str) {
+
+    /// What a click on a row does, and the list it can be extended across.
+    fn clicked(
+        &mut self,
+        ui: &egui::Ui,
+        click: Click,
+        response: &egui::Response,
+        name: egui::Rect,
+    ) {
+        match gesture(&ui.input(|input| input.modifiers)) {
+            Gesture::Plain => self.plain_click(click, response, name),
+            Gesture::Toggle => {
+                self.rename = None;
+                self.selection.toggle(click.item);
+            }
+            Gesture::Extend => {
+                self.rename = None;
+                self.selection.extend(click.item, click.list);
+            }
+        }
+    }
+
+    /// ⚠️ Arming the rename editor needs the click to land on the **name** of the
+    /// **only** picked row. An editor armed by any second click sits there with the
+    /// whole name selected, so the next keystroke — one meant for the document, or a
+    /// stray one — replaces it, and the blur commits the replacement.
+    fn plain_click(&mut self, click: Click, response: &egui::Response, name: egui::Rect) {
         let on_name = response
             .interact_pointer_pos()
             .is_some_and(|at| name.contains(at));
-        match arms_rename(self.selection == Some(item), on_name) {
-            true => self.start_rename(item, from),
-            false => self.select(item),
+        match arms_rename(self.selection.sole() == Some(click.item), on_name) {
+            true => self.start_rename(click.item, click.from),
+            false => self.select(click.item),
+        }
+    }
+
+    /// What one drag carries: the pressed row, and the rest of the selection when the
+    /// pressed row is in it.
+    fn carrying(&self, head: Held, name: &str, workspace: &Workspace) -> Carried {
+        let rest: Vec<Held> = match self.selection.holds(head.what) {
+            false => Vec::new(),
+            true => self
+                .selection
+                .items()
+                .filter(|item| *item != head.what)
+                .filter_map(|item| self.held(item, workspace))
+                .collect(),
+        };
+        Carried {
+            head,
+            name: match rest.len() {
+                0 => name.to_string(),
+                more => format!("{name}  +{more}"),
+            },
+            rest,
+        }
+    }
+
+    /// What the drag rules need to know about a row, or nothing for a row that is never
+    /// dragged.
+    fn held(&self, item: Item, workspace: &Workspace) -> Option<Held> {
+        match item {
+            Item::Local(id) => {
+                let entity = workspace.get(id)?;
+                Some(Held {
+                    what: item,
+                    kind: Kind::of(entity.entity.as_ref()),
+                    filed: self.folders.holding(id),
+                })
+            }
+            Item::Folder(_) => None,
+            Item::Slot { class, .. } => Some(Held {
+                what: item,
+                kind: Kind::from_class(class),
+                filed: None,
+            }),
         }
     }
 
@@ -326,7 +401,7 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         if let Some(carried) = response.dnd_hover_payload::<Carried>() {
-            if landing(&carried, onto).allowed() {
+            if landing(&carried.head, onto).allowed() {
                 ui.painter().rect_stroke(
                     response.rect,
                     3.0,
@@ -341,8 +416,31 @@ impl Browser {
         self.land(&carried, onto, acts);
     }
 
+    /// Run the drop, for the pressed row and for everything it carried.
+    ///
+    /// ⚠️ The rest of the selection follows only where the verdict is one act repeated.
+    /// A send and a rearrange name **one** destination, and handing several rows to one
+    /// slot would write them over each other; those take the pressed row alone.
     fn land(&mut self, carried: &Arc<Carried>, onto: Onto, acts: &mut Vec<Act>) {
-        match (landing(carried, onto), carried.from, onto) {
+        let verdict = landing(&carried.head, onto);
+        match verdict {
+            Landing::No(why) => acts.push(Act::Refused(format!(
+                "“{}” cannot go there — {why}.",
+                carried.name
+            ))),
+            Landing::Send | Landing::Rearrange => self.one(carried.head, verdict, onto, acts),
+            Landing::Copy | Landing::File | Landing::Unfile => {
+                for held in carried.all() {
+                    if landing(&held, onto) == verdict {
+                        self.one(held, verdict, onto, acts);
+                    }
+                }
+            }
+        }
+    }
+
+    fn one(&mut self, held: Held, verdict: Landing, onto: Onto, acts: &mut Vec<Act>) {
+        match (verdict, held.what, onto) {
             (Landing::Copy, Item::Slot { class, at }, _) => acts.push(Act::Copy { class, at }),
             (Landing::Rearrange, Item::Slot { at: from, .. }, Onto::Slot { class, at }) => acts
                 .push(Act::Rearrange {
@@ -360,10 +458,6 @@ impl Browser {
             (Landing::Unfile, Item::Local(id), Onto::Computer) => {
                 acts.push(Act::File { id, folder: None })
             }
-            (Landing::No(why), ..) => acts.push(Act::Refused(format!(
-                "“{}” cannot go there — {why}.",
-                carried.name
-            ))),
             // Every allowed pairing is spelled out above; a shape that reaches here is a
             // verdict about a drag that did not come from where it says it did.
             _ => {}
@@ -673,6 +767,75 @@ mod tests {
         paint(true);
     }
 
+    /// A drag from a row inside the selection brings the rest of it, and one from a row
+    /// outside brings only itself — the pressed row is what a drag is about.
+    #[test]
+    fn a_drag_from_a_picked_row_carries_the_whole_selection() {
+        let (mut browser, mut workspace, _device, _tabs, mut log) = bench();
+        let ids: Vec<u64> = (0..3)
+            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .collect();
+        let apart = workspace.create(Fresh::Live, &mut log).unwrap();
+        for id in &ids {
+            browser.selection.toggle(Item::Local(*id));
+        }
+
+        let head = browser
+            .held(Item::Local(ids[0]), &workspace)
+            .expect("a local is dragged");
+        let carried = browser.carrying(head, "Africa Split", &workspace);
+        assert_eq!(carried.rest.len(), 2);
+        assert_eq!(carried.all().count(), 3);
+        assert!(carried.name.contains("+2"), "{}", carried.name);
+
+        let outside = browser
+            .held(Item::Local(apart), &workspace)
+            .expect("a local is dragged");
+        let alone = browser.carrying(outside, "Squabble B", &workspace);
+        assert!(alone.rest.is_empty(), "a row nobody picked carries itself");
+        assert_eq!(alone.name, "Squabble B", "and says only its own name");
+    }
+
+    /// ⚠️ The rest of the selection follows only where the drop is one act repeated.
+    /// Filing three assets is three filings; sending three into one slot would write
+    /// them over each other, so a single destination takes the pressed row alone.
+    #[test]
+    fn a_drop_of_many_repeats_only_where_one_destination_does_not() {
+        let (mut browser, mut workspace, _device, _tabs, mut log) = bench();
+        let ids: Vec<u64> = (0..3)
+            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .collect();
+        for id in &ids {
+            browser.selection.toggle(Item::Local(*id));
+        }
+        let folder = browser.folders.make();
+        let head = browser.held(Item::Local(ids[0]), &workspace).unwrap();
+        let carried = Arc::new(browser.carrying(head, "Africa Split", &workspace));
+
+        let mut filed = Vec::new();
+        browser.land(&carried, Onto::Group(folder), &mut filed);
+        assert_eq!(filed.len(), 3, "every picked asset goes into the folder");
+        assert!(filed.iter().all(|act| matches!(
+            act,
+            Act::File {
+                folder: Some(_),
+                ..
+            }
+        )));
+
+        let mut sent = Vec::new();
+        browser.land(
+            &carried,
+            Onto::Slot {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 0 },
+            },
+            &mut sent,
+        );
+        assert_eq!(sent.len(), 1, "one slot takes one asset");
+        assert!(matches!(sent[0], Act::Send { id, .. } if id == ids[0]));
+    }
+
     /// ⚠️ The gesture that lost a program its name. An editor armed by any second click
     /// on a selected row sits there with everything selected, so the next keystroke
     /// replaces the name and the blur commits it.
@@ -686,6 +849,26 @@ mod tests {
         );
         assert!(!arms_rename(false, false));
         assert!(arms_rename(true, true), "the one gesture that renames");
+    }
+
+    /// ⚠️ A name inside a multi-selection does not arm the editor. A rename typed while
+    /// several rows are picked reads as a rename of all of them, and only one would take
+    /// it; the click collapses the selection onto that row instead.
+    #[test]
+    fn a_name_arms_the_editor_only_while_its_row_is_the_only_one_picked() {
+        let mut selection = Selection::default();
+        let row = Item::Local(1);
+        selection.only(row);
+        assert!(arms_rename(selection.sole() == Some(row), true));
+
+        selection.toggle(Item::Local(2));
+        assert!(
+            !arms_rename(selection.sole() == Some(row), true),
+            "two rows picked"
+        );
+        // The click that landed on it collapses onto it, and the next one does arm.
+        selection.only(row);
+        assert!(arms_rename(selection.sole() == Some(row), true));
     }
 
     /// The gesture end to end: arm the editor, type, press Enter, and the new name comes

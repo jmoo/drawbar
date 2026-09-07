@@ -4,9 +4,9 @@ use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::Act;
-use super::drag::{Carried, Item, Kind, Onto};
+use super::drag::{Carried, Held, Item, Kind, Onto};
 use super::row::{row, Cells};
-use super::{Ask, Browser};
+use super::{Ask, Browser, Click};
 use crate::app::dot;
 use crate::device::{occupancy, read_only, Device, BROWSED};
 use crate::strings::{folder, place, shown};
@@ -134,14 +134,16 @@ impl Browser {
             .show(ui, |ui| {
                 about(ui, device);
                 for class in BROWSED {
-                    self.class(ui, device, class, &viewed, acts);
+                    self.class(ui, workspace, device, class, &viewed, acts);
                 }
             });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn class(
         &mut self,
         ui: &mut egui::Ui,
+        workspace: &Workspace,
         device: &Device,
         class: ObjectClass,
         viewed: &[(ObjectClass, Location)],
@@ -188,7 +190,7 @@ impl Browser {
             // The live buffer and the settings singleton divide into one bank.
             let cut = banks.len() > 1;
             for bank in banks {
-                self.bank(ui, device, class, bank, cut, viewed, acts);
+                self.bank(ui, workspace, device, class, bank, cut, viewed, acts);
             }
         });
         // ⚠️ A jump at a slot the walk has never reached would hold the heading open for
@@ -222,6 +224,7 @@ impl Browser {
     fn bank(
         &mut self,
         ui: &mut egui::Ui,
+        workspace: &Workspace,
         device: &Device,
         class: ObjectClass,
         bank: u32,
@@ -239,10 +242,16 @@ impl Browser {
             .bank_name(class, bank)
             .filter(|name| worth_captioning(bank, name))
             .map(str::to_string);
+        let list: Vec<Item> = (0..count)
+            .map(|index| Item::Slot {
+                class,
+                at: Location::from_user(bank, index as u32 + 1),
+            })
+            .collect();
         let mut rows = |browser: &mut Browser, ui: &mut egui::Ui| {
             for index in 0..count {
                 let at = Location::from_user(bank, index as u32 + 1);
-                browser.slot_row(ui, device, class, at, viewed, acts);
+                browser.slot_row(ui, workspace, device, class, at, &list, viewed, acts);
             }
         };
         if !cut {
@@ -274,12 +283,15 @@ impl Browser {
             .show(ui, |ui| rows(self, ui));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn slot_row(
         &mut self,
         ui: &mut egui::Ui,
+        workspace: &Workspace,
         device: &Device,
         class: ObjectClass,
         at: Location,
+        list: &[Item],
         viewed: &[(ObjectClass, Location)],
         acts: &mut Vec<Act>,
     ) {
@@ -289,7 +301,7 @@ impl Browser {
             .flatten()
             .map(|info| info.name.trim().to_string());
         let item = Item::Slot { class, at };
-        let selected = self.selection == Some(item);
+        let selected = self.selection.holds(item);
 
         // While a name is being typed the row stops sensing anything: a drag sense over
         // the field would take the clicks that place the cursor in it.
@@ -328,7 +340,7 @@ impl Browser {
         // A jump can scroll only after its parent headings have exposed this row.
         if self.jump == Some((class, at)) {
             self.jump = None;
-            self.selection = Some(item);
+            self.selection.only(item);
             response.scroll_to_me(Some(egui::Align::Center));
         }
 
@@ -337,15 +349,13 @@ impl Browser {
 
         if let Some(name) = &held {
             if fetchable && response.dragged() {
-                egui::DragAndDrop::set_payload(
-                    ui.ctx(),
-                    Carried {
-                        from: item,
-                        kind: Kind::from_class(class),
-                        name: name.clone(),
-                        filed: None,
-                    },
-                );
+                let head = Held {
+                    what: item,
+                    kind: Kind::from_class(class),
+                    filed: None,
+                };
+                let carried: Carried = self.carrying(head, name, workspace);
+                egui::DragAndDrop::set_payload(ui.ctx(), carried);
             }
         }
         self.drop_zone(ui, &response, Onto::Slot { class, at }, acts);
@@ -356,7 +366,14 @@ impl Browser {
             }
         } else if response.clicked() {
             match (&held, fetchable) {
-                (Some(name), true) => self.clicked(item, &response, drawn.name, name),
+                (Some(name), true) => {
+                    let click = Click {
+                        item,
+                        from: name,
+                        list,
+                    };
+                    self.clicked(ui, click, &response, drawn.name);
+                }
                 _ => self.select(item),
             }
         }
@@ -485,12 +502,12 @@ mod tests {
         browser.jump = Some((ObjectClass::Program, at));
         frame(&mut browser);
         assert!(browser.jump.is_none(), "the jump landed");
-        assert!(
-            browser.selection
-                == Some(Item::Slot {
-                    class: ObjectClass::Program,
-                    at
-                })
+        assert_eq!(
+            browser.selection.sole(),
+            Some(Item::Slot {
+                class: ObjectClass::Program,
+                at
+            })
         );
 
         // Bank 12 was never read, so nothing will ever draw the row that clears this.
