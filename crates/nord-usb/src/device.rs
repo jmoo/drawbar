@@ -28,57 +28,48 @@ use crate::wire::{AllocationUnit, Bank, Location, ObjectClass, Partition};
 /// constant. The two `(Native)` partitions are carried and never consulted — they are a
 /// second view of a library this crate addresses through its user partition.
 pub struct Geometry {
-    partitions: Vec<Partition>,
-    /// One entry per partition, in the same order.
-    banks: Vec<BankList>,
+    entries: Vec<Entry>,
+}
+
+/// One partition and the banks the device reported for it.
+struct Entry {
+    partition: Partition,
+    banks: Vec<Bank>,
 }
 
 impl Geometry {
     /// Read both tables: `PARTITIONS`, then `BANKS` for each partition's index in table
     /// order.
     ///
-    /// A device that refuses `BANKS` for one partition still has geometry for the rest —
-    /// the refusal leaves the session in step — so it is recorded and re-reported by
-    /// [`Self::banks`] for that class alone. A transport failure fails the whole read.
+    /// A refused `BANKS` fails the whole read, as its [`Error::DeviceStatus`]: geometry
+    /// missing a partition bounds no walk and sizes no write, and there is nothing to
+    /// gain by carrying the hole to whichever caller trips over it.
     pub async fn read<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Self> {
-        let partitions = op::partitions(session).await?;
-        let mut banks = Vec::with_capacity(partitions.len());
-        for partition in &partitions {
-            banks.push(match op::banks(session, partition.index).await {
-                Ok(list) => Ok(list),
-                Err(Error::DeviceStatus(status)) => Err(status),
-                Err(e) => return Err(e),
-            });
+        let mut entries = Vec::new();
+        for partition in op::partitions(session).await? {
+            let banks = op::banks(session, partition.index).await?;
+            entries.push(Entry { partition, banks });
         }
-        Ok(Self { partitions, banks })
+        Ok(Self { entries })
     }
 
-    pub fn partitions(&self) -> &[Partition] {
-        &self.partitions
-    }
-
-    /// Every partition in table order with its banks, or the status the device refused
-    /// [`cmd::BANKS`](crate::wire::cmd::BANKS) with for that one. This is the whole
-    /// table, `(Native)` partitions included, rather than the classes this crate names.
-    pub fn entries(&self) -> impl Iterator<Item = (&Partition, std::result::Result<&[Bank], u32>)> {
-        self.partitions
+    /// Every partition in table order with its banks. This is the whole table,
+    /// `(Native)` partitions included, rather than the classes this crate names.
+    pub fn entries(&self) -> impl Iterator<Item = (&Partition, &[Bank])> {
+        self.entries
             .iter()
-            .zip(&self.banks)
-            .map(|(partition, banks)| (partition, banks.as_deref().map_err(|&status| status)))
+            .map(|entry| (&entry.partition, entry.banks.as_slice()))
     }
 
     /// The partition storing `class`. An instrument without one is an error, never a
     /// default: the whole point of reading the table is not to assume.
     pub fn partition(&self, class: ObjectClass) -> Result<&Partition> {
-        Ok(self.entry(class)?.0)
+        Ok(&self.entry(class)?.partition)
     }
 
     /// The banks a walk of `class` covers, in table order.
     pub fn banks(&self, class: ObjectClass) -> Result<&[Bank]> {
-        match self.entry(class)?.1 {
-            Ok(banks) => Ok(banks),
-            Err(status) => Err(Error::DeviceStatus(*status)),
-        }
+        Ok(&self.entry(class)?.banks)
     }
 
     /// The unit `class`'s [`Status`](crate::wire::Status) counters are denominated in.
@@ -86,20 +77,15 @@ impl Geometry {
         self.partition(class)?.allocation_unit()
     }
 
-    fn entry(&self, class: ObjectClass) -> Result<(&Partition, &BankList)> {
-        self.partitions
+    fn entry(&self, class: ObjectClass) -> Result<&Entry> {
+        self.entries
             .iter()
-            .zip(&self.banks)
-            .find(|(partition, _)| partition.index == class.to_raw())
+            .find(|entry| entry.partition.index == class.to_raw())
             .ok_or_else(|| {
                 Error::InvalidArgument(format!("the instrument has no {} partition", class.label()))
             })
     }
 }
-
-/// One partition's banks, or the status the device refused
-/// [`cmd::BANKS`](crate::wire::cmd::BANKS) with.
-type BankList = std::result::Result<Vec<Bank>, u32>;
 
 /// An attached instrument. See the module documentation for the shape.
 pub struct Device<T: Transport> {

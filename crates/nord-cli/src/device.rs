@@ -1291,29 +1291,17 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
         "code", "partition", "banks", "slots", "unit"
     )));
     for (p, banks) in geometry.entries() {
-        // A partition whose banks the device refused still has a row: the refusal is
-        // what there is to report about it.
-        let (count, slots, names) = match banks {
-            Ok(banks) => {
-                // The sentinel is not a capacity and must not be summed into one.
-                let bounded: Vec<&Bank> = banks.iter().filter(|b| b.is_bounded()).collect();
-                let slots = match bounded.len() == banks.len() {
-                    true => bounded
-                        .iter()
-                        .map(|bank| u64::from(bank.slots))
-                        .sum::<u64>()
-                        .to_string(),
-                    false => "—".to_string(),
-                };
-                let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
-                (banks.len().to_string(), slots, names.join(", "))
-            }
-            Err(status) => (
-                "—".to_string(),
-                "—".to_string(),
-                format!("the instrument refused its bank list with status {status:#x}"),
-            ),
+        // The sentinel is not a capacity and must not be summed into one.
+        let bounded: Vec<&Bank> = banks.iter().filter(|b| b.is_bounded()).collect();
+        let slots = match bounded.len() == banks.len() {
+            true => bounded
+                .iter()
+                .map(|bank| u64::from(bank.slots))
+                .sum::<u64>()
+                .to_string(),
+            false => "—".to_string(),
         };
+        let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
         // The allocation granularity is what `device status` counts in for this
         // partition: a storage block for the libraries, one byte everywhere else.
         let unit = match p.allocation_unit() {
@@ -1325,10 +1313,10 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
             "{:<4} {:<18} {:>6} {:>7} {:>10}  {}",
             p.index,
             p.name,
-            count,
+            banks.len(),
             slots,
             unit,
-            ui.dim(names),
+            ui.dim(names.join(", ")),
         ));
     }
     ui.note("");

@@ -199,33 +199,44 @@ fn a_class_the_instrument_does_not_have_is_an_error() {
 }
 
 #[test]
-fn a_refused_bank_list_is_reported_for_that_class_alone() {
-    let mut steps = session_open(ObjectClass::Program);
-    steps.push(request(cmd::PARTITIONS, &[]));
-    steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1, 100])));
-    steps.push(request(cmd::BANKS, &0u32.to_be_bytes()));
-    steps.push(response(
-        cmd::BANKS,
-        &banks_payload(0, &[("Bank 1", 50), ("Bank 2", 50)]),
-    ));
-    steps.push(request(cmd::BANKS, &1u32.to_be_bytes()));
-    steps.push(refusal(cmd::BANKS, 0x15));
-    steps.extend(session_close());
+fn a_refused_bank_list_fails_the_read_and_caches_nothing() {
+    let bank_tables = |banks: &[(&str, u32)]| {
+        let mut steps = session_open(ObjectClass::Program);
+        steps.push(request(cmd::PARTITIONS, &[]));
+        steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1, 100])));
+        steps.push(request(cmd::BANKS, &0u32.to_be_bytes()));
+        steps.push(response(cmd::BANKS, &banks_payload(0, banks)));
+        steps
+    };
 
-    let mut device = Device::new(ReplayTransport::new(steps));
+    let mut refused = bank_tables(&[("Bank 1", 50), ("Bank 2", 50)]);
+    refused.push(request(cmd::BANKS, &1u32.to_be_bytes()));
+    refused.push(refusal(cmd::BANKS, 0x15));
+    refused.extend(session_close());
+
+    let mut answered = bank_tables(&[("Bank 1", 50), ("Bank 2", 50)]);
+    answered.push(request(cmd::BANKS, &1u32.to_be_bytes()));
+    answered.push(response(cmd::BANKS, &banks_payload(1, &[("Grand", 20)])));
+    answered.extend(session_close());
+
+    let mut device = Device::new(ReplayTransport::new(
+        refused.into_iter().chain(answered).collect(),
+    ));
     pollster::block_on(async {
-        let geometry = device.geometry().await.unwrap();
-        assert_eq!(geometry.banks(ObjectClass::Unknown(0)).unwrap().len(), 2);
-        assert!(matches!(
-            geometry.banks(ObjectClass::Piano),
-            Err(Error::DeviceStatus(0x15))
-        ));
-        assert_eq!(
-            geometry.allocation_unit(ObjectClass::Piano).unwrap().get(),
-            100
-        );
+        let error = device
+            .geometry()
+            .await
+            .err()
+            .expect("a partition without banks is not geometry");
+        assert!(matches!(error, Error::DeviceStatus(0x15)), "{error}");
+
+        let geometry = device.geometry().await.expect("the second reading");
+        assert_eq!(geometry.banks(ObjectClass::Piano).unwrap().len(), 1);
     });
-    assert!(device.transport().is_exhausted());
+    assert!(
+        device.transport().is_exhausted(),
+        "the failed read was cached instead of being taken again"
+    );
 }
 
 #[test]
