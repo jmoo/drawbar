@@ -141,6 +141,8 @@ pub struct DrawbarApp {
 
 impl DrawbarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
+        // Without this every `Glyph` draws as egui's broken-image warning.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         // Both faces are dressed up front, so the system flipping from light to dark mid
         // session lands on this app's own colours rather than egui's defaults.
         cc.egui_ctx.set_visuals_of(egui::Theme::Dark, dark());

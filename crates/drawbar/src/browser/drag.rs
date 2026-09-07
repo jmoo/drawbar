@@ -8,6 +8,7 @@ use nord_format::Entity;
 use nord_usb::{Location, ObjectClass};
 
 use crate::device::read_only;
+use crate::icon::Glyph;
 
 /// What an asset is, which is what decides the folder it belongs in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,6 +19,9 @@ pub enum Kind {
     Piano,
     Live,
     Settings,
+    /// A Nord Sample Editor project (`.nsmpproj`) — a text file that generates a sample,
+    /// and the one kind with no folder on the instrument to send it to.
+    Project,
     /// Something the instrument has no folder for — a bundle, a preset of a kind no
     /// class holds, a file that did not decode at all.
     Other,
@@ -32,6 +36,7 @@ impl Kind {
             Some(Entity::Piano(_) | Entity::PianoLibrary(_)) => Kind::Piano,
             Some(Entity::Live(_)) => Kind::Live,
             Some(Entity::Settings(_)) => Kind::Settings,
+            Some(Entity::SampleProject(_)) => Kind::Project,
             _ => Kind::Other,
         }
     }
@@ -57,7 +62,7 @@ impl Kind {
             Kind::Piano => Some(ObjectClass::Piano),
             Kind::Live => Some(ObjectClass::Live),
             Kind::Settings => Some(ObjectClass::Settings),
-            Kind::Other => None,
+            Kind::Project | Kind::Other => None,
         }
     }
 
@@ -70,7 +75,23 @@ impl Kind {
             Kind::Piano => "piano",
             Kind::Live => "live",
             Kind::Settings => "settings",
+            Kind::Project => "project",
             Kind::Other => "file",
+        }
+    }
+
+    /// The one glyph this kind wears — in the rail, the table, a tab, the queue and the
+    /// slot map alike.
+    pub fn glyph(self) -> Glyph {
+        match self {
+            Kind::Program => Glyph::Disc3,
+            Kind::SetList => Glyph::ListMusic,
+            Kind::Sample => Glyph::AudioWaveform,
+            Kind::Piano => Glyph::Piano,
+            Kind::Live => Glyph::AudioLines,
+            Kind::Settings => Glyph::SlidersHorizontal,
+            Kind::Project => Glyph::FolderGit2,
+            Kind::Other => Glyph::HardDrive,
         }
     }
 }
@@ -367,6 +388,29 @@ mod tests {
         for class in BROWSED {
             assert_eq!(Kind::from_class(class).home(), Some(class), "{class:?}");
         }
-        assert_eq!(Kind::Other.home(), None);
+        for homeless in [Kind::Project, Kind::Other] {
+            assert_eq!(homeless.home(), None, "{homeless:?}");
+        }
+    }
+
+    /// One glyph per kind. Two kinds wearing the same one would read as one kind in the
+    /// rail, the table, a tab, the queue and the slot map at once.
+    #[test]
+    fn no_two_kinds_wear_the_same_glyph() {
+        let mut seen: Vec<Glyph> = Vec::new();
+        for kind in [
+            Kind::Program,
+            Kind::SetList,
+            Kind::Sample,
+            Kind::Piano,
+            Kind::Live,
+            Kind::Settings,
+            Kind::Project,
+            Kind::Other,
+        ] {
+            let glyph = kind.glyph();
+            assert!(!seen.contains(&glyph), "{kind:?} repeats {glyph:?}");
+            seen.push(glyph);
+        }
     }
 }

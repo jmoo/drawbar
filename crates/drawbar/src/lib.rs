@@ -13,6 +13,7 @@ pub mod document;
 pub mod drawbar_widget;
 pub mod fields;
 pub mod folders;
+pub mod icon;
 pub mod knob;
 pub mod led;
 pub mod log;
