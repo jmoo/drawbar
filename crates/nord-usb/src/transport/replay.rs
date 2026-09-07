@@ -492,7 +492,7 @@ impl Transport for ReplayTransport {
         }
     }
 
-    async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
+    async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
         let step = self
             .script
             .get(self.pos)
@@ -501,6 +501,12 @@ impl Transport for ReplayTransport {
             return Err(Error::Replay(
                 "host read, but the script expects the host to speak next".into(),
             ));
+        }
+        if step.bytes.len() > max {
+            return Err(Error::Replay(format!(
+                "device sent {} bytes, but the read buffer holds at most {max}",
+                step.bytes.len()
+            )));
         }
         self.pos += 1;
         Ok(step.bytes.clone())
@@ -635,6 +641,21 @@ mod tests {
     fn a_frame_may_carry_a_trailing_label() {
         let script = Script::parse("O 0011 # SESSION_OPEN\nI 22\n").unwrap();
         assert_eq!(script.steps()[0].bytes, vec![0x00, 0x11]);
+    }
+
+    #[test]
+    fn a_read_rejects_a_frame_larger_than_its_buffer() {
+        let mut transport = ReplayTransport::new(vec![Step {
+            direction: Direction::In,
+            bytes: vec![0; 2],
+        }]);
+        let err = pollster::block_on(transport.read(1)).expect_err("the frame is too large");
+        assert!(matches!(err, Error::Replay(_)));
+        assert_eq!(
+            transport.position(),
+            0,
+            "an oversized frame was not consumed"
+        );
     }
 
     #[test]

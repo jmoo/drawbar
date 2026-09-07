@@ -40,8 +40,12 @@ fn request(service: Service, command: u32, args: Vec<u8>) -> Step {
 }
 
 fn response(service: Service, command: u32, payload: &[u32]) -> Step {
+    response_with_status(service, command, 0, payload)
+}
+
+fn response_with_status(service: Service, command: u32, status: u32, payload: &[u32]) -> Step {
     let mut args = Vec::with_capacity((payload.len() + 1) * 4);
-    args.extend_from_slice(&0u32.to_be_bytes());
+    args.extend_from_slice(&status.to_be_bytes());
     for word in payload {
         args.extend_from_slice(&word.to_be_bytes());
     }
@@ -205,6 +209,125 @@ fn probe_limit_covers_close_without_changing_ordinary_reads() {
             Duration::from_secs(7),
             Duration::from_secs(7),
         ]
+    );
+}
+
+#[test]
+fn inventory_propagates_transport_failure_while_opening_a_class() {
+    let mut transport = ReplayTransport::new(Vec::new());
+    let err = pollster::block_on(op::inventory(&mut transport))
+        .expect_err("a failed transport cannot describe an empty inventory");
+    assert!(
+        matches!(err, nord_usb::Error::Replay(_)),
+        "wrong error: {err}"
+    );
+}
+
+#[test]
+fn inventory_propagates_a_malformed_status_after_closing_the_session() {
+    let mut transport = LimitTransport {
+        replies: VecDeque::from([
+            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
+            Some(response(Service::Program, cmd::SESSION_OPEN, &[]).bytes),
+            Some(response(Service::Program, cmd::STATUS, &[1, 2]).bytes),
+            Some(response(Service::Program, cmd::SESSION_CLOSE, &[]).bytes),
+            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
+        ]),
+        limits: Vec::new(),
+    };
+    let err = pollster::block_on(op::inventory(&mut transport))
+        .expect_err("a malformed status must not become an empty inventory");
+    assert!(matches!(
+        err,
+        nord_usb::Error::Truncated { got: 8, need: 12 }
+    ));
+    assert!(
+        transport.replies.is_empty(),
+        "the failed session was not closed"
+    );
+}
+
+#[test]
+fn inventory_skips_a_class_refused_by_the_device() {
+    let mut replies = VecDeque::new();
+    for _ in nord_usb::wire::ObjectClass::INVENTORY {
+        replies.extend([
+            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
+            Some(response(Service::Program, cmd::SESSION_OPEN, &[]).bytes),
+            Some(response_with_status(Service::Program, cmd::STATUS, 5, &[]).bytes),
+            Some(response(Service::Program, cmd::SESSION_CLOSE, &[]).bytes),
+            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
+        ]);
+    }
+    let mut transport = LimitTransport {
+        replies,
+        limits: Vec::new(),
+    };
+    let statuses = pollster::block_on(op::inventory(&mut transport)).unwrap();
+    assert!(statuses.is_empty());
+    assert!(transport.replies.is_empty());
+}
+
+/// The sample partition's block, so a one-byte body reserves exactly one block.
+fn sample_unit() -> nord_usb::wire::AllocationUnit {
+    let mut fields = 131_064u32.to_be_bytes().to_vec();
+    fields.resize(29, 0);
+    nord_usb::wire::Partition {
+        index: ObjectClass::Sample.to_raw(),
+        name: "Samp Lib".into(),
+        native: false,
+        fields,
+    }
+    .allocation_unit()
+    .unwrap()
+}
+
+#[test]
+fn write_stops_on_a_malformed_cleaning_reply_without_polling_again() {
+    let at = nord_usb::Location { bank: 0, slot: 0 };
+    let file = nord_usb::envelope::wrap("ne5p", at, 4, &[1]).unwrap();
+    let mut transport = session_frames(
+        ObjectClass::Sample,
+        vec![
+            request(
+                Service::Program,
+                cmd::STATUS,
+                ObjectClass::Sample.to_raw().to_be_bytes().to_vec(),
+            ),
+            response(Service::Program, cmd::STATUS, &[0, 0, 0, 0, 0]),
+            frame(
+                Direction::Out,
+                nord_usb::wire::ui::label("Cleaning...").unwrap(),
+            ),
+            frame(Direction::Out, nord_usb::wire::ui::percent(0)),
+            request(
+                Service::Program,
+                cmd::WRITE_PREPARE,
+                1u32.to_be_bytes().to_vec(),
+            ),
+            response(Service::Program, cmd::WRITE_PREPARE, &[]),
+            request(Service::Program, cmd::WRITE_PREPARE_2, vec![]),
+            response(Service::Program, cmd::WRITE_PREPARE_2, &[0, 0]),
+        ],
+    );
+    let err = pollster::block_on(async {
+        let session = Session::open(&mut transport, ObjectClass::Sample)
+            .await
+            .unwrap();
+        let mut session = session.allow_destructive_writes();
+        let err = op::write(&mut session, sample_unit(), at, &file, "sample", 0)
+            .await
+            .expect_err("a short cleaning reply is malformed");
+        session.commit().await.unwrap();
+        err
+    });
+    assert!(matches!(
+        err,
+        nord_usb::Error::Truncated { got: 8, need: 12 }
+    ));
+    assert!(
+        transport.is_exhausted(),
+        "a malformed cleaning reply triggered another poll"
     );
 }
 

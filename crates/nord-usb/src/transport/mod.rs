@@ -62,6 +62,7 @@ pub const READ_BUFFER: usize = 49152;
 /// 64 bytes hangs the same way on Live and Settings.
 ///
 /// A zero-length frame needs no terminator: it is one.
+#[cfg(any(feature = "nusb", all(feature = "web", target_arch = "wasm32"), test))]
 pub(crate) fn needs_terminator(written: usize, packet: usize) -> bool {
     written != 0 && written.is_multiple_of(packet)
 }
