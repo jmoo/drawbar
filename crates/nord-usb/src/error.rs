@@ -28,6 +28,23 @@ pub enum Error {
         reported: Location,
     },
 
+    #[error("device reported partition {reported} for the requested partition {requested}")]
+    UnexpectedPartition { requested: u32, reported: u32 },
+
+    /// An inventory walk contradicted the geometry declared by the instrument.
+    #[error(
+        "walking bank {bank}, which declares {slots} slots, became inconsistent at \
+         {answered:?}"
+    )]
+    Enumeration {
+        bank: u32,
+        answered: Location,
+        slots: u32,
+    },
+
+    #[error("bank {bank} cannot be scanned completely within {limit} slots")]
+    ScanLimit { bank: u32, limit: u32 },
+
     /// The byte pipe itself failed — a USB transfer error, a missing device, a claim
     /// refusal. Nothing about message *content* belongs here.
     #[error("transport: {0}")]
@@ -66,6 +83,9 @@ impl Error {
             Error::DeviceStatus(code) => format!("device-status {code:#x}"),
             Error::UnexpectedResponse { .. } => "unexpected-response".into(),
             Error::UnexpectedLocation { .. } => "unexpected-location".into(),
+            Error::UnexpectedPartition { .. } => "unexpected-partition".into(),
+            Error::Enumeration { .. } => "enumeration".into(),
+            Error::ScanLimit { .. } => "enumeration".into(),
             Error::Replay(_) => "replay".into(),
             _ => "transport".into(),
         }

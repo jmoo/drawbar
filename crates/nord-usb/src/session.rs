@@ -376,6 +376,15 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Run the closing exchanges. Always prefer this over dropping.
     pub async fn commit(mut self) -> Result<()> {
+        self.close().await
+    }
+
+    pub(crate) async fn commit_observing_changed(mut self) -> (Result<()>, bool) {
+        let result = self.close().await;
+        (result, self.device_changed)
+    }
+
+    async fn close(&mut self) -> Result<()> {
         // A failed exchange already released the session and reported its error.
         if self.closed {
             return Ok(());
@@ -402,7 +411,7 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// The consumed session's ordinary read behavior is unchanged.
     pub async fn commit_with_read_limit(mut self, limit: Duration) -> Result<()> {
         self.read_limit = limit;
-        self.commit().await
+        self.close().await
     }
 
     /// Abandon the transaction without running the closing exchanges.

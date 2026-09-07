@@ -27,6 +27,8 @@
 //! discriminator**, which is why this module records it at decode time rather than
 //! deriving it (see [`Message::decode_response`]).
 
+use std::num::NonZeroU32;
+
 use crate::error::{Error, Result};
 use nord_format::fields::Library;
 
@@ -372,6 +374,8 @@ pub struct Partition {
     ///
     /// Static configuration, not state — every value is unchanged by storing or deleting
     /// content.
+    ///
+    /// Confirmed on hardware.
     pub fields: Vec<u8>,
 }
 
@@ -437,10 +441,58 @@ impl Partition {
     /// differs by a whole block when it does.
     ///
     /// Confirmed on hardware.
-    pub fn allocation_unit(&self) -> Option<u32> {
-        self.fields
-            .get(..4)
-            .map(|w| u32::from_be_bytes(w.try_into().expect("four bytes")))
+    pub fn allocation_unit(&self) -> Result<AllocationUnit> {
+        let word = read_u32(&self.fields, 0)?;
+        let bytes = NonZeroU32::new(word).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "partition {} reports an allocation unit of 0, which sizes nothing",
+                self.index
+            ))
+        })?;
+        Ok(AllocationUnit {
+            partition: self.index,
+            bytes,
+        })
+    }
+}
+
+/// Net bytes per unit of whatever [`Status`] counts for a partition: `1` where the
+/// counters are byte-granular, the net storage block in a library.
+///
+/// See [`Partition::allocation_unit`], which is the only source of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocationUnit {
+    partition: u32,
+    bytes: NonZeroU32,
+}
+
+impl AllocationUnit {
+    pub fn get(self) -> u32 {
+        self.bytes.get()
+    }
+
+    /// Whether this partition's counters are byte-granular rather than block-granular.
+    pub fn is_bytes(self) -> bool {
+        self.bytes.get() == 1
+    }
+
+    pub(crate) fn belongs_to(self, partition: u32) -> bool {
+        self.partition == partition
+    }
+
+    /// How many units a body of `bytes` occupies.
+    ///
+    /// ⚠️ Rounds up. Undercounting makes [`cmd::BEGIN_WRITE`] refuse `0x16` even
+    /// straight after a cleaning pass that reclaimed what the undercount asked for.
+    pub fn blocks_for(self, bytes: usize) -> Result<u32> {
+        let bytes = u64::try_from(bytes)
+            .map_err(|_| Error::InvalidArgument("the body is larger than u64".into()))?;
+        u32::try_from(bytes.div_ceil(u64::from(self.bytes.get()))).map_err(|_| {
+            Error::InvalidArgument(format!(
+                "a body of {bytes} bytes is more units of {} than the wire's u32 holds",
+                self.bytes.get()
+            ))
+        })
     }
 }
 
