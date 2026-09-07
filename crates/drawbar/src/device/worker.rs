@@ -159,7 +159,7 @@ async fn execute<T: Transport>(
             class,
             at,
             body,
-            open,
+            why,
         } => {
             let (info, bytes) = read_object(device, class, at, body)
                 .await
@@ -174,7 +174,7 @@ async fn execute<T: Transport>(
                 name: entity_name(&info, body),
                 origin: Origin::Device { class, at },
                 bytes,
-                open,
+                why,
             });
             Ok(Some(note))
         }

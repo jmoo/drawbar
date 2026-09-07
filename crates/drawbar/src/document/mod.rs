@@ -262,21 +262,17 @@ impl Document {
         &mut self,
         id: u64,
         workspace: &Workspace,
-        device: &Device,
+        device: &mut Device,
         queue: &mut Queue,
         log: &mut Log,
     ) {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        let name = entity.name.clone();
-        match entity.origin.slot() {
+        let (name, origin) = (entity.name.clone(), entity.origin.slot());
+        match origin {
             Some((class, at)) if crate::device::sendable(class) => {
-                queue.enqueue(entity, class, at, device.state.slot(class, at).flatten());
-                log.say(format!(
-                    "“{name}” is waiting to be sent to {}.",
-                    strings::place(class, at)
-                ));
+                crate::queue::enqueue(workspace, device, queue, log, id, class, at)
             }
             // ⚠️ Never a file export. Cmd+S means "keep what I did", and for something
             // that lives here that has already happened.
@@ -876,13 +872,13 @@ mod tests {
             .unwrap();
 
         let mut queue = Queue::default();
-        let device = Device::new(ctx);
+        let mut device = Device::new(ctx);
         assert!(workspace.get(local).unwrap().dirty);
         assert!(workspace.get(from_device).unwrap().dirty);
         assert!(queue.is_empty(), "an edit asks for nothing");
 
         // Cmd+S queues what came off a slot.
-        document.stage(from_device, &workspace, &device, &mut queue, &mut log);
+        document.stage(from_device, &workspace, &mut device, &mut queue, &mut log);
         assert_eq!(queue.ids(), vec![from_device]);
         assert!(
             log.status().1.contains("waiting to be sent"),
@@ -891,7 +887,7 @@ mod tests {
         );
 
         // And on the local one it says so rather than exporting anything.
-        document.stage(local, &workspace, &device, &mut queue, &mut log);
+        document.stage(local, &workspace, &mut device, &mut queue, &mut log);
         assert!(
             log.status().1.contains("kept as you make them"),
             "{}",

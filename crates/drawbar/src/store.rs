@@ -329,7 +329,15 @@ mod tests {
         let held = before.get(edited).unwrap().bytes.clone();
         before.replace_bytes(edited, [held, vec![0]].concat(), &mut log);
         let mut queue = Queue::default();
-        queue.enqueue(before.get(owed).unwrap(), ObjectClass::Program, at(1), None);
+        crate::queue::enqueue(
+            &before,
+            &mut crate::device::Device::new(before.ctx().clone()),
+            &mut queue,
+            &mut log,
+            owed,
+            ObjectClass::Program,
+            at(1),
+        );
 
         let mut store = Fake::default();
         save(&mut store, &before, &queue, &mut log);

@@ -1256,11 +1256,14 @@ mod tests {
         let bytes = workspace.get(edited).unwrap().bytes.clone();
         workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
         let mut queue = Queue::default();
-        queue.enqueue(
-            workspace.get(owed).unwrap(),
+        crate::queue::enqueue(
+            &workspace,
+            &mut crate::device::Device::new(workspace.ctx().clone()),
+            &mut queue,
+            &mut log,
+            owed,
             ObjectClass::Program,
             at(1),
-            None,
         );
         assert!(precious(workspace.get(edited).unwrap(), &queue));
         assert!(precious(workspace.get(owed).unwrap(), &queue));

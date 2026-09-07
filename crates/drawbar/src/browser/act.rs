@@ -8,10 +8,10 @@ use nord_usb::{Location, ObjectClass};
 
 use super::drag::Item;
 use super::Browser;
-use crate::device::{write_warning, Device, DeviceCmd, Outgoing};
+use crate::device::{write_warning, Device, DeviceCmd, Outgoing, Purpose};
 use crate::filter::Narrow;
 use crate::log::Log;
-use crate::queue::Queue;
+use crate::queue::{enqueue, Queue};
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
@@ -235,7 +235,7 @@ pub fn apply(
                         class,
                         at,
                         body: false,
-                        open: true,
+                        why: Purpose::View,
                     },
                     log,
                 ),
@@ -245,7 +245,7 @@ pub fn apply(
                     class,
                     at,
                     body: false,
-                    open: false,
+                    why: Purpose::Copy,
                 },
                 log,
             ),
@@ -492,45 +492,13 @@ fn send(
     }
 }
 
-/// Put one asset in the queue for one slot, and say in the log what that displaced.
-fn enqueue(
-    workspace: &Workspace,
-    device: &Device,
-    queue: &mut Queue,
-    log: &mut Log,
-    id: u64,
-    class: ObjectClass,
-    at: Location,
-) {
-    let Some(entity) = workspace.get(id) else {
-        return;
-    };
-    let name = entity.name.clone();
-    let where_ = place(class, at);
-    let displaced = queue.enqueue(entity, class, at, device.state.slot(class, at).flatten());
-    if let Some((was, before)) = displaced.from {
-        log.say(format!(
-            "“{name}” is waiting for {where_} rather than {}.",
-            place(was, before)
-        ));
-        return;
-    }
-    if let Some(other) = displaced.instead_of.and_then(|id| workspace.get(id)) {
-        log.say(format!(
-            "“{name}” is waiting for {where_}; “{}” is not any more.",
-            other.name
-        ));
-        return;
-    }
-    log.say(format!("“{name}” is waiting to be sent to {where_}."));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::browser::bench::bench;
     use crate::device::BROWSED;
     use crate::strings::folder;
+    use crate::workspace::Origin;
 
     fn at(slot: u32) -> Location {
         Location { bank: 6, slot }
@@ -548,7 +516,7 @@ mod tests {
     /// goes out in the order the queue holds it.
     #[test]
     fn a_batch_is_grouped_into_one_command_per_folder() {
-        let (_browser, mut workspace, _device, _tabs, mut queue, mut log) = bench();
+        let (_browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
         let bytes = program(&mut workspace, &mut log);
         for (class, slot) in [
             (ObjectClass::Program, 0),
@@ -557,14 +525,22 @@ mod tests {
         ] {
             let id = workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
-                crate::workspace::Origin::Device {
+                Origin::Device {
                     class,
                     at: at(slot),
                 },
                 bytes.clone(),
                 &mut log,
             );
-            queue.enqueue(workspace.get(id).unwrap(), class, at(slot), None);
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                class,
+                at(slot),
+            );
         }
 
         let grouped = grouped(&queue, &workspace);
@@ -588,7 +564,7 @@ mod tests {
         let bytes = program(&mut workspace, &mut log);
         let id = workspace.ingest(
             "Africa-Split.ne5p".into(),
-            crate::workspace::Origin::Device {
+            Origin::Device {
                 class: ObjectClass::Program,
                 at,
             },
@@ -636,6 +612,115 @@ mod tests {
         assert_eq!(queue.ids(), vec![id], "still owed until the write lands");
     }
 
+    /// The queue goes out in the order it was built, one command per folder, and what
+    /// a stopped batch did not write is still waiting with the reason against it.
+    #[test]
+    fn a_batch_that_stops_leaves_the_rest_of_the_queue_waiting() {
+        use crate::device::DeviceEvent;
+
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B", "Bass Manual"]);
+        let bytes = program(&mut workspace, &mut log);
+        let ids: Vec<u64> = (0..3)
+            .map(|slot| {
+                let id = workspace.ingest(
+                    format!("sound {slot}"),
+                    Origin::Device {
+                        class,
+                        at: at(slot),
+                    },
+                    bytes.clone(),
+                    &mut log,
+                );
+                enqueue(
+                    &workspace,
+                    &mut device,
+                    &mut queue,
+                    &mut log,
+                    id,
+                    class,
+                    at(slot),
+                );
+                id
+            })
+            .collect();
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SendAll],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+        // Three reads of what is there, and then the one batch that writes them.
+        let batch = device
+            .queued()
+            .iter()
+            .find(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+            .expect("one command for the folder");
+        let DeviceCmd::SendAll { items, .. } = batch else {
+            unreachable!()
+        };
+        assert_eq!(
+            items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            ids,
+            "in the order the queue holds them"
+        );
+        assert_eq!(
+            device
+                .queued()
+                .iter()
+                .filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+                .count(),
+            1,
+        );
+
+        // The reads of what is in those slots go out first; each one finishing lets the
+        // next command start, so the batch is what the instrument is doing when it
+        // refuses.
+        let waiting = |device: &Device| {
+            device
+                .queued()
+                .iter()
+                .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+        };
+        while waiting(&device) {
+            device.pump();
+            if waiting(&device) {
+                device.pretend(DeviceEvent::Finished);
+                device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+            }
+        }
+
+        // The instrument takes the first and refuses the second.
+        device.pretend(DeviceEvent::Sent {
+            id: ids[0],
+            class,
+            at: at(0),
+        });
+        device.pretend(DeviceEvent::OpFailed(
+            "Programs 7:2 is occupied, and the instrument does not overwrite in place".into(),
+        ));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+        assert_eq!(queue.ids(), ids[1..], "what was not written is still owed");
+        let stopped = queue.entry(ids[1]).expect("the one it stopped on");
+        assert!(
+            stopped
+                .failure
+                .as_deref()
+                .is_some_and(|why| why.contains("7:2")),
+            "{:?}",
+            stopped.failure
+        );
+        assert!(queue.entry(ids[2]).unwrap().failure.is_none());
+        assert!(log.transcript().contains("7:2"), "the log names the slot");
+    }
+
     /// Sending a folder queues everything in it that came off a slot, and nothing that
     /// has nowhere to go back to.
     #[test]
@@ -653,7 +738,7 @@ mod tests {
         ] {
             let id = workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
-                crate::workspace::Origin::Device {
+                Origin::Device {
                     class,
                     at: at(slot),
                 },
@@ -693,8 +778,6 @@ mod tests {
     #[test]
     fn opening_a_slot_does_not_put_it_on_this_computer() {
         use crate::device::DeviceEvent;
-        use crate::workspace::Origin;
-
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let bytes = program(&mut workspace, &mut log);
         let at = Location { bank: 6, slot: 3 };
@@ -707,7 +790,7 @@ mod tests {
             name: "Africa-Split.ne5p".into(),
             origin,
             bytes,
-            open: true,
+            why: Purpose::View,
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -812,8 +895,6 @@ mod tests {
     #[test]
     fn opening_a_slot_that_is_already_open_activates_its_tab() {
         use crate::device::DeviceEvent;
-        use crate::workspace::Origin;
-
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let bytes = program(&mut workspace, &mut log);
         let class = ObjectClass::Program;
@@ -824,7 +905,7 @@ mod tests {
             name: "Africa-Split.ne5p".into(),
             origin: Origin::Device { class, at },
             bytes,
-            open: true,
+            why: Purpose::View,
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         let first = tabs.active().expect("a view opened");

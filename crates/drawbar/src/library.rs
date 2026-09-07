@@ -18,6 +18,7 @@ use crate::browser::{cell_ink, Act, Browser, Item, Kind};
 use crate::device::{sendable, Device, DeviceState, BROWSED};
 use crate::filter::{Filter, Place};
 use crate::icon::{icon, painted, Glyph};
+use crate::panel::Track;
 use crate::queue::Queue;
 use crate::shell::{Page, Shell};
 use crate::strings::{folder, place, shown};
@@ -400,52 +401,14 @@ impl Column {
     }
 }
 
-enum Track {
-    Px(f32),
-    Share(f32),
-}
-
 /// The gap between two columns.
 const GAP: f32 = 8.0;
 
-/// Where each column sits across `width`.
-///
-/// The fixed tracks are laid out first and the two shares split what is left. When even
-/// the fixed ones do not fit, every track and every gap shrinks by one factor — so a
-/// track may reach zero, but none is ever negative and none reaches past `width`.
+/// Where each column sits across `width`, laid out by [`crate::panel::tracks`].
 pub fn tracks(width: f32) -> [Range<f32>; 8] {
-    let gaps = GAP * (Column::ALL.len() as f32 - 1.0);
-    let fixed: f32 = Column::ALL
-        .iter()
-        .filter_map(|column| match column.track() {
-            Track::Px(px) => Some(px),
-            Track::Share(_) => None,
-        })
-        .sum();
-    let shares: f32 = Column::ALL
-        .iter()
-        .filter_map(|column| match column.track() {
-            Track::Share(share) => Some(share),
-            Track::Px(_) => None,
-        })
-        .sum();
-    let spare = (width - gaps - fixed).max(0.0);
-    let wanted = Column::ALL.map(|column| match column.track() {
-        Track::Px(px) => px,
-        Track::Share(share) => spare * share / shares,
-    });
-
-    let asked: f32 = wanted.iter().sum::<f32>() + gaps;
-    let scale = match asked > width {
-        true => (width / asked).max(0.0),
-        false => 1.0,
-    };
-    let mut x = 0.0;
-    std::array::from_fn(|index| {
-        let held = x..x + wanted[index] * scale;
-        x = held.end + GAP * scale;
-        held
-    })
+    let wanted = Column::ALL.map(Column::track);
+    let held = crate::panel::tracks(width, &wanted, GAP);
+    std::array::from_fn(|index| held[index].clone())
 }
 
 /// The rows the table shows: what the omnibox admits, in the order a column asks for.

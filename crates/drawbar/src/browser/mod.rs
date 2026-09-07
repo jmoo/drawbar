@@ -948,7 +948,7 @@ mod tests {
                 bytes,
                 &mut log,
             );
-            queue.enqueue(workspace.get(id).unwrap(), class, at, None);
+            crate::queue::enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
             ids.push(id);
         }
 

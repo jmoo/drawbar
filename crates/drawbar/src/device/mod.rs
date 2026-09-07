@@ -76,10 +76,7 @@ pub enum DeviceCmd {
         at: Location,
         /// The wire body verbatim, rather than a whole CBIN file.
         body: bool,
-        /// The copy opens in a tab as a **view** of the slot rather than joining the
-        /// local list, which is what a double-click asks for. Copying to this computer
-        /// is the same read with this off.
-        open: bool,
+        why: Purpose,
     },
     Put {
         /// The asset on this computer these bytes came from. It is what the
@@ -126,6 +123,20 @@ pub enum DeviceCmd {
     Disconnect,
 }
 
+/// What a read of a slot is for, which is what decides where its bytes go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Purpose {
+    /// A **view** of the slot, opened in a tab rather than joining the local list,
+    /// which is what a double-click asks for.
+    View,
+    /// A copy on this computer: a row in the list like any other.
+    Copy,
+    /// The occupant of a slot something is queued for, to be compared with what is
+    /// waiting. ⚠️ These bytes never reach the workspace — a copy nobody asked for is a
+    /// row nobody can account for.
+    Compare,
+}
+
 /// One object waiting to go back to the instrument.
 #[derive(Clone)]
 pub struct Outgoing {
@@ -166,9 +177,10 @@ impl DeviceCmd {
             DeviceCmd::ScanBank { bank, .. } => format!("scan bank {bank}"),
             DeviceCmd::SlotInfo { at, .. } => format!("info {}", shown(*at)),
             DeviceCmd::Deps { at, .. } => format!("deps {}", shown(*at)),
-            DeviceCmd::Get { at, body, .. } => match body {
-                true => format!("get {} (raw body)", shown(*at)),
-                false => format!("get {}", shown(*at)),
+            DeviceCmd::Get { at, body, why, .. } => match (body, why) {
+                (_, Purpose::Compare) => format!("get {} (to compare)", shown(*at)),
+                (true, _) => format!("get {} (raw body)", shown(*at)),
+                (false, _) => format!("get {}", shown(*at)),
             },
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
@@ -198,6 +210,12 @@ impl DeviceCmd {
             DeviceCmd::Deps { class, at } => {
                 words(READING, format!("what {} needs", place(*class, *at)))
             }
+            DeviceCmd::Get {
+                class,
+                at,
+                why: Purpose::Compare,
+                ..
+            } => words(READING, format!("what is in {}", place(*class, *at))),
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
@@ -295,8 +313,7 @@ pub enum DeviceEvent {
         name: String,
         origin: Origin,
         bytes: Vec<u8>,
-        /// The copy is a view of the slot rather than a new row on this computer.
-        open: bool,
+        why: Purpose,
     },
     /// One object landed on the instrument, so it is no longer owed. Every write path
     /// raises one — a lone put as much as a batch.
@@ -965,21 +982,27 @@ impl Device {
                     }
                     self.state.detail.deps = Some(deps);
                 }
+                // A view belongs to its tab, a copied read becomes a local entity, and
+                // an occupant read for a diff belongs to the queue and to nothing else.
                 DeviceEvent::Got {
                     name,
                     origin,
                     bytes,
-                    open,
-                } => {
-                    // A view belongs to its tab; a copied read becomes a local entity.
-                    let id = match open {
-                        true => workspace.view(name, origin, bytes, log),
-                        false => workspace.ingest(name, origin, bytes, log),
-                    };
-                    if open {
+                    why,
+                } => match why {
+                    Purpose::View => {
+                        let id = workspace.view(name, origin, bytes, log);
                         tabs.open(id, workspace);
                     }
-                }
+                    Purpose::Copy => {
+                        workspace.ingest(name, origin, bytes, log);
+                    }
+                    Purpose::Compare => {
+                        if let Some((class, at)) = origin.slot() {
+                            queue.arrived(class, at, &bytes, workspace);
+                        }
+                    }
+                },
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
                         "{} could not be restored; its bytes are in the local list as {name}",
@@ -1174,11 +1197,14 @@ mod tests {
         );
         let mut queue = Queue::default();
         for (id, slot) in [(landed, 3), (still_owed, 4)] {
-            queue.enqueue(
-                workspace.get(id).unwrap(),
+            crate::queue::enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
                 ObjectClass::Program,
                 at(slot),
-                None,
             );
         }
 

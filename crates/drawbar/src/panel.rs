@@ -1,5 +1,7 @@
 //! The header a dock wears, and the geometry every dock header shares.
 
+use std::ops::Range;
+
 use eframe::egui;
 
 use crate::icon::{icon, Glyph};
@@ -15,6 +17,59 @@ const GAP: f32 = 6.0;
 
 /// The collapse triangle's box.
 const CHEVRON: f32 = 12.0;
+
+/// What a column of a table asks for: a fixed width, or a share of what the fixed
+/// ones leave.
+pub enum Track {
+    Px(f32),
+    Share(f32),
+}
+
+/// Where each track sits across `width`, with `gap` between two of them.
+///
+/// The fixed tracks are laid out first and the shares split what is left. When even the
+/// fixed ones do not fit, every track and every gap shrinks by one factor — so a track
+/// may reach zero, but none is ever negative and none reaches past `width`.
+pub fn tracks(width: f32, wanted: &[Track], gap: f32) -> Vec<Range<f32>> {
+    let gaps = gap * (wanted.len().saturating_sub(1)) as f32;
+    let fixed: f32 = wanted
+        .iter()
+        .filter_map(|track| match track {
+            Track::Px(px) => Some(*px),
+            Track::Share(_) => None,
+        })
+        .sum();
+    let shares: f32 = wanted
+        .iter()
+        .filter_map(|track| match track {
+            Track::Share(share) => Some(*share),
+            Track::Px(_) => None,
+        })
+        .sum();
+    let spare = (width - gaps - fixed).max(0.0);
+    let asked: Vec<f32> = wanted
+        .iter()
+        .map(|track| match track {
+            Track::Px(px) => *px,
+            Track::Share(share) => spare * share / shares,
+        })
+        .collect();
+
+    let total: f32 = asked.iter().sum::<f32>() + gaps;
+    let scale = match total > width {
+        true => (width / total).max(0.0),
+        false => 1.0,
+    };
+    let mut x = 0.0;
+    asked
+        .iter()
+        .map(|held| {
+            let track = x..x + held * scale;
+            x = track.end + gap * scale;
+            track
+        })
+        .collect()
+}
 
 /// A header title: [`crate::app::micro`], uppercased.
 ///

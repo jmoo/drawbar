@@ -490,7 +490,7 @@ impl DrawbarApp {
         self.document.stage(
             id,
             &self.workspace,
-            &self.device,
+            &mut self.device,
             &mut self.queue,
             &mut self.log,
         );
@@ -804,16 +804,20 @@ impl DrawbarApp {
                 acts.push(Act::ToggleDock(Dock::Bottom));
             }
             let ink = ui.visuals().widgets.noninteractive.fg_stroke.color;
+            icon(ui, Glyph::GitCompareArrows, GLYPH, ink);
             for page in [Page::Queue, Page::Log] {
-                let title = match (page, waiting) {
-                    (Page::Queue, 0) => Page::Queue.title().to_string(),
-                    (Page::Queue, n) => format!("{} · {n}", Page::Queue.title()),
-                    (Page::Log, _) => Page::Log.title().to_string(),
-                };
                 let on = self.shell.dock_open && self.shell.page == page;
-                if ui.selectable_label(on, caps(&title).color(ink)).clicked() {
+                if ui
+                    .selectable_label(on, caps(page.title()).color(ink))
+                    .clicked()
+                {
                     picked = Some(page);
                 }
+            }
+            // What the queue amounts to, wherever the dock is: the summary is the
+            // reason to open it.
+            if waiting > 0 {
+                ui.label(crate::queue::heading(&self.queue, ui.visuals()));
             }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
