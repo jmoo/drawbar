@@ -5,7 +5,7 @@
 //! [`Section4`]s. Both are flat tag/version/length runs that must land exactly
 //! on the end of the body.
 
-use crate::error::ParseError;
+use crate::error::{try_vec, ParseError};
 
 /// Bytes of section header: 3-char tag, NUL, `u8` version, `u32` length.
 pub const HEADER_LEN: usize = 9;
@@ -78,13 +78,13 @@ fn missing_opener(expected: &[u8]) -> ParseError {
     ))
 }
 
-/// Walks the chain from the reader's position to its end.
+/// Walks the chain from the reader's position to its end, `remaining` bytes away.
 ///
 /// The chain must open with [`CONTAINER`] and land exactly on the end of the body. Both
 /// are strong integrity checks — a wrong length anywhere puts every later section at the
 /// wrong offset — so a short or overrunning walk is an error rather than a truncated
 /// result.
-pub fn read_chain(r: &mut impl std::io::Read) -> Result<Vec<Section>, ParseError> {
+pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Section>, ParseError> {
     let mut sections = Vec::new();
     let mut pos: u64 = 0;
     loop {
@@ -97,8 +97,9 @@ pub fn read_chain(r: &mut impl std::io::Read) -> Result<Vec<Section>, ParseError
             return Err(wrong_opener(CONTAINER, &head[..3]));
         }
         let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
+        let end = section_end(pos, HEADER_LEN, len, remaining, &head[..3])?;
         let payload = read_payload(r, len, pos, &head[..3])?;
-        pos += (HEADER_LEN + len) as u64;
+        pos = end;
         sections.push(Section {
             tag: [head[0], head[1], head[2]],
             version: head[4],
@@ -192,7 +193,10 @@ impl Section4 {
 
 /// Walks a v3/v4 chain from the reader's position to its end, under the same
 /// open-with-[`CONTAINER4`] and land-exactly rules as [`read_chain`].
-pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseError> {
+pub fn read_chain4(
+    r: &mut impl std::io::Read,
+    remaining: u64,
+) -> Result<Vec<Section4>, ParseError> {
     let mut sections = Vec::new();
     let mut pos: u64 = 0;
     loop {
@@ -208,8 +212,9 @@ pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseErr
             return Err(wrong_opener(CONTAINER4, &head[..4]));
         }
         let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
+        let end = section_end(pos, HEADER4_LEN, len, remaining, &head[..4])?;
         let payload = read_payload(r, len, pos, &head[..4])?;
-        pos += (HEADER4_LEN + len) as u64;
+        pos = end;
         sections.push(Section4 {
             tag: [head[0], head[1], head[2], head[3]],
             version: u32::from_be_bytes([head[4], head[5], head[6], head[7]]),
@@ -242,33 +247,40 @@ fn read_exact_or_end(
     Ok(true)
 }
 
-/// Read incrementally so a truncated payload cannot force its declared allocation.
+/// Where a section starting at `at` ends, refusing a declared length the body
+/// cannot hold before it is allocated.
+fn section_end(
+    at: u64,
+    header: usize,
+    len: usize,
+    remaining: u64,
+    tag: &[u8],
+) -> Result<u64, ParseError> {
+    match at
+        .checked_add(header as u64)
+        .and_then(|end| end.checked_add(len as u64))
+    {
+        Some(end) if end <= remaining => Ok(end),
+        _ => Err(body_ends_first(tag, at, len)),
+    }
+}
+
+fn body_ends_first(tag: &[u8], at: u64, len: usize) -> ParseError {
+    ParseError::AssertFail(format!(
+        "section {} at {at} declares {len} bytes but the body ends first",
+        String::from_utf8_lossy(tag),
+    ))
+}
+
 fn read_payload(
     r: &mut impl std::io::Read,
     len: usize,
     at: u64,
     tag: &[u8],
 ) -> Result<Vec<u8>, ParseError> {
-    let mut payload = Vec::new();
-    let mut remaining = len;
-    let mut scratch = [0u8; 8192];
-    while remaining > 0 {
-        let take = remaining.min(scratch.len());
-        payload
-            .try_reserve(take)
-            .map_err(|_| ParseError::OutOfBounds {
-                value: format!("{len} payload bytes"),
-                bound: "an allocation that fits memory".into(),
-            })?;
-        r.read_exact(&mut scratch[..take]).map_err(|_| {
-            ParseError::AssertFail(format!(
-                "section {} at {at} declares {len} bytes but the body ends first",
-                String::from_utf8_lossy(tag),
-            ))
-        })?;
-        payload.extend_from_slice(&scratch[..take]);
-        remaining -= take;
-    }
+    let mut payload = try_vec(len)?;
+    r.read_exact(&mut payload)
+        .map_err(|_| body_ends_first(tag, at, len))?;
     Ok(payload)
 }
 
@@ -327,6 +339,14 @@ impl std::fmt::Debug for Section {
 mod tests {
     use super::*;
 
+    fn walk(body: &[u8]) -> Result<Vec<Section>, ParseError> {
+        read_chain(&mut { body }, body.len() as u64)
+    }
+
+    fn walk4(body: &[u8]) -> Result<Vec<Section4>, ParseError> {
+        read_chain4(&mut { body }, body.len() as u64)
+    }
+
     fn section(tag: &[u8; 3], version: u8, payload: &[u8]) -> Vec<u8> {
         let mut v = tag.to_vec();
         v.push(0);
@@ -342,7 +362,7 @@ mod tests {
         bytes.extend(section(HDR, 9, &[1, 2, 3]));
         bytes.extend(section(STK, 9, &[4; 20]));
 
-        let chain = read_chain(&mut bytes.as_slice()).unwrap();
+        let chain = walk(&bytes).unwrap();
         assert_eq!(chain.len(), 3);
         assert_eq!(chain[0].payload.len(), 0);
         assert_eq!(chain[1].payload, vec![1, 2, 3]);
@@ -365,26 +385,32 @@ mod tests {
         // 0x00000102 = 258 read big-endian; little-endian would be 0x02010000.
         let mut bytes = opener();
         bytes.extend(section(HDR, 1, &[0; 258]));
-        let chain = read_chain(&mut bytes.as_slice()).unwrap();
+        let chain = walk(&bytes).unwrap();
         assert_eq!(chain[1].payload.len(), 258);
     }
 
     #[test]
-    fn a_payload_crossing_the_read_buffer_boundary_round_trips() {
-        let payload = vec![0x5a; 8193];
+    fn a_length_past_the_end_of_the_body_is_refused_without_allocating_it() {
+        let mut one_over = section(HDR, 1, &[7; 4]);
+        one_over[5..9].copy_from_slice(&5u32.to_be_bytes());
         let mut bytes = opener();
-        bytes.extend(section(HDR, 1, &payload));
-        let chain = read_chain(&mut bytes.as_slice()).unwrap();
-        assert_eq!(chain[1].payload, payload);
-    }
+        bytes.extend(one_over);
+        assert_eq!(
+            walk(&bytes).unwrap_err().to_string(),
+            "section hdr at 9 declares 5 bytes but the body ends first"
+        );
 
-    #[test]
-    fn overrunning_length_is_an_error() {
-        let mut hdr = section(HDR, 1, &[7; 4]);
-        hdr[5..9].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut huge = section(HDR, 1, &[7; 4]);
+        huge[5..9].copy_from_slice(&u32::MAX.to_be_bytes());
         let mut bytes = opener();
-        bytes.extend(hdr);
-        assert!(read_chain(&mut bytes.as_slice()).is_err());
+        bytes.extend(huge);
+        assert_eq!(
+            walk(&bytes).unwrap_err().to_string(),
+            format!(
+                "section hdr at 9 declares {} bytes but the body ends first",
+                u32::MAX
+            )
+        );
     }
 
     #[test]
@@ -392,20 +418,20 @@ mod tests {
         let mut bytes = opener();
         bytes.extend(section(HDR, 1, &[7; 4]));
         bytes.extend_from_slice(&[0, 0, 0]); // not enough for another header
-        assert!(read_chain(&mut bytes.as_slice()).is_err());
+        assert!(walk(&bytes).is_err());
     }
 
     #[test]
     fn a_chain_not_opening_with_its_container_names_the_expected_tag() {
         let bytes = section(HDR, 1, &[7; 4]);
         assert_eq!(
-            read_chain(&mut bytes.as_slice()).unwrap_err().to_string(),
+            walk(&bytes).unwrap_err().to_string(),
             "the body does not open with the NWS container section; found hdr"
         );
 
         let bytes = section4(HDR4, 1, &[7; 4]);
         assert_eq!(
-            read_chain4(&mut bytes.as_slice()).unwrap_err().to_string(),
+            walk4(&bytes).unwrap_err().to_string(),
             "the body does not open with the NSMP container section; found \\x00hdr"
         );
     }
@@ -413,11 +439,11 @@ mod tests {
     #[test]
     fn an_empty_body_reports_its_missing_container() {
         assert_eq!(
-            read_chain(&mut [].as_slice()).unwrap_err().to_string(),
+            walk(&[]).unwrap_err().to_string(),
             "the body does not open with the NWS container section; found end of body"
         );
         assert_eq!(
-            read_chain4(&mut [].as_slice()).unwrap_err().to_string(),
+            walk4(&[]).unwrap_err().to_string(),
             "the body does not open with the NSMP container section; found end of body"
         );
     }
@@ -427,7 +453,7 @@ mod tests {
         // A garbage tag's "length" is arbitrary: big-endian 0xfeffff3e here.
         let bytes = [0x00, 0x00, 0x00, 0x00, 0xff, 0xfe, 0xff, 0xff, 0x3e];
         assert_eq!(
-            read_chain(&mut bytes.as_slice()).unwrap_err().to_string(),
+            walk(&bytes).unwrap_err().to_string(),
             "the body does not open with the NWS container section; found \\x00\\x00\\x00"
         );
     }
@@ -446,7 +472,7 @@ mod tests {
         bytes.extend(section4(HDR4, 10, &[1; 112]));
         bytes.extend(section4(STK4, 11, &[4; 20]));
 
-        let chain = read_chain4(&mut bytes.as_slice()).unwrap();
+        let chain = walk4(&bytes).unwrap();
         assert_eq!(chain.len(), 3);
         assert_eq!(chain[0].payload.len(), 4);
         assert_eq!(chain[1].version, 10);
@@ -467,12 +493,12 @@ mod tests {
         hdr[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
         let mut bytes = opener4();
         bytes.extend(hdr);
-        assert!(read_chain4(&mut bytes.as_slice()).is_err());
+        assert!(walk4(&bytes).is_err());
 
         let mut bytes = opener4();
         bytes.extend(section4(HDR4, 1, &[7; 4]));
         bytes.extend_from_slice(&[0; 5]); // not enough for another header
-        assert!(read_chain4(&mut bytes.as_slice()).is_err());
+        assert!(walk4(&bytes).is_err());
     }
 
     #[cfg(target_pointer_width = "64")]
@@ -488,7 +514,7 @@ mod tests {
         bytes.extend(section(STK, 9, &[1]));
         bytes.extend(section(STK, 9, &[2]));
         bytes.extend(section(STK, 9, &[3]));
-        let chain = read_chain(&mut bytes.as_slice()).unwrap();
+        let chain = walk(&bytes).unwrap();
         assert_eq!(chain.len(), 4);
         assert_eq!(
             chain[1..].iter().map(|s| s.payload[0]).collect::<Vec<_>>(),

@@ -178,8 +178,9 @@ pub struct Sample {
 
 impl cbin::Body for Sample {
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<Self, Error> {
+        let remaining = r.remaining();
         Ok(Sample {
-            sections: section::read_chain(r)?,
+            sections: section::read_chain(r, remaining)?,
         })
     }
 
@@ -214,8 +215,9 @@ pub struct SampleV3 {
 
 impl cbin::Body for SampleV3 {
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<Self, Error> {
+        let remaining = r.remaining();
         Ok(SampleV3 {
-            sections: section::read_chain4(r)?,
+            sections: section::read_chain4(r, remaining)?,
         })
     }
 
