@@ -107,16 +107,20 @@ pub enum Item {
         class: ObjectClass,
         at: Location,
     },
+    /// A label on the local list. Like a folder it is renamed rather than dragged, and
+    /// unlike a folder an asset wears as many as it is given.
+    Tag(u64),
 }
 
 impl Item {
-    /// Locals, then folders, then slots by class and address — the order a selection is
-    /// walked in, and the order it comes back from the store in.
+    /// Locals, then folders, then slots by class and address, then tags — the order a
+    /// selection is walked in, and the order it comes back from the store in.
     fn key(self) -> (u8, u32, u32, u64) {
         match self {
             Item::Local(id) => (0, 0, 0, id),
             Item::Folder(id) => (1, 0, 0, id),
             Item::Slot { class, at } => (2, class.to_raw(), at.bank, u64::from(at.slot)),
+            Item::Tag(id) => (3, 0, 0, id),
         }
     }
 }
@@ -200,8 +204,8 @@ impl Landing {
 /// Whether a drag can end where the pointer is, and what it would mean if it did.
 pub fn landing(carried: &Held, onto: Onto) -> Landing {
     match (carried.what, onto) {
-        // A folder is a way of seeing the list, not a row that moves.
-        (Item::Folder(_), _) => Landing::No("a folder is not dragged"),
+        // A folder or a tag is a way of seeing the list, not a row that moves.
+        (Item::Folder(_) | Item::Tag(_), _) => Landing::No("that is a list, not a sound"),
         // The loose part of the list is a target only for something that is in a folder,
         // which is how one comes back out of one.
         (Item::Local(_), Onto::Computer) => match carried.filed {

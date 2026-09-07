@@ -18,6 +18,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::Device;
 use crate::folders::{self, Folders};
 use crate::strings::place;
+use crate::tags::{self, Tags};
 use crate::workspace::Workspace;
 
 mod act;
@@ -94,6 +95,7 @@ pub struct Browser {
     /// Where the divider sits between the two columns, as a share of the dock.
     split: f32,
     folders: Folders,
+    tags: Tags,
     /// A slot to scroll to and select, once the list holding it has been drawn.
     jump: Option<(ObjectClass, Location)>,
 }
@@ -106,6 +108,7 @@ impl Default for Browser {
             ask: None,
             split: EVEN,
             folders: Folders::default(),
+            tags: Tags::default(),
             jump: None,
         }
     }
@@ -138,17 +141,23 @@ impl Browser {
             .get_string(folders::KEY)
             .map(|text| Folders::read(&text))
             .unwrap_or_default();
+        self.tags = storage
+            .get_string(tags::KEY)
+            .map(|text| Tags::read(&text))
+            .unwrap_or_default();
     }
 
-    /// Reconcile the folders with the list that came back beside them. Call once, after
-    /// both stores have been read.
+    /// Reconcile the grouping and the labelling with the list that came back beside
+    /// them. Call once, after every store has been read.
     pub fn settle(&mut self, workspace: &Workspace) {
         self.folders.forget_missing(workspace);
+        self.tags.forget_missing(workspace);
     }
 
     pub fn keep(&self, storage: &mut dyn eframe::Storage) {
         storage.set_string(Browser::SPLIT, self.split.to_string());
         storage.set_string(folders::KEY, self.folders.written());
+        storage.set_string(tags::KEY, self.tags.written());
     }
 
     /// Draw the places a sound can live and collect what the user asked for.
@@ -339,7 +348,7 @@ impl Browser {
                     filed: self.folders.holding(id),
                 })
             }
-            Item::Folder(_) => None,
+            Item::Folder(_) | Item::Tag(_) => None,
             Item::Slot { class, .. } => Some(Held {
                 what: item,
                 kind: Kind::from_class(class),
@@ -968,6 +977,86 @@ mod tests {
         assert_eq!(browser.folders.holding(here), Some(folder));
         assert_eq!(browser.folders.holding(here + 99), None);
         assert_eq!(browser.folders.all().len(), 1, "the folder itself stays");
+    }
+
+    /// Two assets picked and saved as a gig wear that tag next session, and the third
+    /// does not. An asset the list came back without leaves no membership behind.
+    #[test]
+    fn a_tag_put_on_a_multi_selection_comes_back_next_session() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
+        let ids: Vec<u64> = (0..3)
+            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .collect();
+        browser.selection.toggle(Item::Local(ids[0]));
+        browser.selection.toggle(Item::Local(ids[1]));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SaveAsGig],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut log,
+        );
+        let Some(Item::Tag(tag)) = browser.rename.as_ref().map(|r| r.what) else {
+            panic!("a new gig opens its editor");
+        };
+        assert!(browser.tags.on_all(&ids[..2], tag));
+        assert!(!browser.tags.worn(ids[2]).contains(&tag));
+
+        let mut store = Fake::default();
+        browser.keep(&mut store);
+        let mut after = Browser::default();
+        after.restore(&store);
+        after.settle(&workspace);
+        assert_eq!(after.tags.name_of(tag), Some("New gig"));
+        assert!(after.tags.on_all(&ids[..2], tag));
+
+        workspace.remove(ids[0], &mut log);
+        after.settle(&workspace);
+        assert_eq!(after.tags.count(tag), 1, "the one still on the list");
+    }
+
+    /// ⚠️ A view is the only copy of what it holds and the store skips it, so a tag on
+    /// one would go with its tab. Tagging keeps it on this computer first, and the log
+    /// says that is what happened.
+    #[test]
+    fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
+        use crate::workspace::Origin;
+
+        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
+        let bytes = {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            let bytes = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            bytes
+        };
+        let id = workspace.view(
+            "Africa-Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 0 },
+            },
+            bytes,
+            &mut log,
+        );
+        let tag = browser.tags.make("Sunday");
+        assert!(workspace.is_view(id));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::Tag { ids: vec![id], tag }],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut log,
+        );
+        assert!(!workspace.is_view(id), "it is on this computer now");
+        assert!(browser.tags.worn(id).contains(&tag));
+        let said = log.transcript();
+        assert!(said.contains("kept on this computer first"), "{said}");
     }
 
     /// The warning reaches the modal a batch raises, once per format however many items

@@ -32,6 +32,25 @@ pub enum Act {
     Keep(u64),
     NewFolder,
     RemoveFolder(u64),
+    /// Put a tag on every one of these assets. A view is kept first.
+    Tag {
+        ids: Vec<u64>,
+        tag: u64,
+    },
+    /// Take a tag off every one of these assets.
+    Untag {
+        ids: Vec<u64>,
+        tag: u64,
+    },
+    /// A tag with nothing on it yet, its name waiting to be typed.
+    NewTag(String),
+    RenameTag {
+        id: u64,
+        name: String,
+    },
+    RemoveTag(u64),
+    /// What is picked, under a new tag, and nothing more.
+    SaveAsGig,
     /// Put an asset in a folder, or out of the one it is in.
     File {
         id: u64,
@@ -150,6 +169,39 @@ pub fn apply(
                 browser.folders.remove(id);
             }
             Act::File { id, folder } => browser.folders.file(id, folder),
+            Act::Tag { ids, tag } => tag_all(browser, workspace, log, &ids, tag),
+            Act::Untag { ids, tag } => {
+                for id in ids {
+                    browser.tags.set(id, tag, false);
+                }
+            }
+            Act::NewTag(wanted) => {
+                let id = browser.tags.make(&wanted);
+                // ⚠️ Edit the unique name chosen by `make`, not the generic seed it
+                // started from: two tags of one name are one row twice.
+                let name = browser.tags.name_of(id).unwrap_or_default().to_string();
+                browser.start_rename(Item::Tag(id), &name);
+            }
+            Act::RenameTag { id, name } => browser.tags.rename(id, name),
+            Act::RemoveTag(id) => {
+                // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
+                browser.forget_rename(Item::Tag(id));
+                browser.tags.remove(id);
+            }
+            Act::SaveAsGig => {
+                let ids = browser.selection.locals();
+                match ids.is_empty() {
+                    true => {
+                        log.say("Nothing on this computer is picked, so there is no gig to save.")
+                    }
+                    false => {
+                        let tag = browser.tags.make("New gig");
+                        tag_all(browser, workspace, log, &ids, tag);
+                        let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
+                        browser.start_rename(Item::Tag(tag), &name);
+                    }
+                }
+            }
             Act::SendFolder(id) => {
                 let members: Vec<u64> = browser
                     .folders
@@ -159,7 +211,7 @@ pub fn apply(
                     .collect();
                 send_batch(&members, workspace, device, log);
             }
-            Act::Open(Item::Folder(_)) => {}
+            Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
             Act::Open(Item::Local(id)) => tabs.open(id, workspace),
             // ⚠️ One view per slot prevents divergent copies queued back to one address.
             Act::Open(Item::Slot { class, at }) => match workspace.view_of(class, at) {
@@ -225,6 +277,7 @@ pub fn apply(
             Act::Remove(id) => {
                 tabs.close(Spot::Document(id));
                 browser.folders.forget(id);
+                browser.tags.forget(id);
                 workspace.remove(id, log);
             }
             Act::Save(id) => workspace.export(id),
@@ -243,6 +296,35 @@ pub fn apply(
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
         }
+    }
+}
+
+/// Put a tag on every one of these assets.
+///
+/// ⚠️ Membership is by workspace id and a view has none that survives a session — the
+/// store skips it and nothing lists it, so the tag would go with the tab. A view is
+/// kept first, the way [`Act::Keep`] keeps one, and the log says that is what happened.
+fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids: &[u64], tag: u64) {
+    let views: Vec<u64> = ids
+        .iter()
+        .copied()
+        .filter(|id| workspace.is_view(*id))
+        .collect();
+    for id in &views {
+        workspace.keep(*id, log);
+    }
+    if !views.is_empty() {
+        log.say(match views.len() {
+            1 => {
+                "A tag needs somewhere to hang, so it was kept on this computer first.".to_string()
+            }
+            n => format!(
+                "A tag needs somewhere to hang, so {n} views were kept on this computer first."
+            ),
+        });
+    }
+    for id in ids {
+        browser.tags.set(*id, tag, true);
     }
 }
 
