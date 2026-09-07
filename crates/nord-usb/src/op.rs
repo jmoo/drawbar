@@ -12,7 +12,7 @@ use crate::session::ReadWrite;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::wire::{
-    cmd, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
+    cmd, read_u32, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
     ProgramInfo, Service, Status,
 };
 
@@ -227,14 +227,12 @@ async fn transfer_out<T: Transport, C>(
 }
 
 fn read_payload(payload: &[u8], at: Location, offset: u32, length: u32) -> Result<&[u8]> {
-    if payload.len() < 16 {
-        return Err(Error::Truncated {
-            got: payload.len(),
-            need: 16,
-        });
-    }
-    let word = |start| u32::from_be_bytes(payload[start..start + 4].try_into().unwrap());
-    let echoed = (word(0), word(4), word(8), word(12));
+    let echoed = (
+        read_u32(payload, 0)?,
+        read_u32(payload, 4)?,
+        read_u32(payload, 8)?,
+        read_u32(payload, 12)?,
+    );
     let expected = (at.bank, at.slot, offset, length);
     if echoed != expected {
         return Err(Error::Transport(format!(
@@ -282,8 +280,8 @@ async fn clean_library<T: Transport>(
             .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
             .await?;
         let (requested, done, running) = cleaning_progress(resp.payload())?;
-        // Reply is `[requested, done, running]`. Ready is `running` returning to
-        // 0; `done` can end above the request, so the bar is clamped.
+        // Ready is `running` returning to 0; `done` can end above the request, so the
+        // bar is clamped.
         if running == 0 {
             if painted != Some(100) {
                 session.notify(&ui::percent(100)).await?;
@@ -302,17 +300,12 @@ async fn clean_library<T: Transport>(
     )))
 }
 
+/// The `[requested, done, running]` words a cleaning-progress reply carries.
 fn cleaning_progress(payload: &[u8]) -> Result<(u32, u32, u32)> {
-    if payload.len() < 12 {
-        return Err(Error::Truncated {
-            got: payload.len(),
-            need: 12,
-        });
-    }
     Ok((
-        u32::from_be_bytes(payload[0..4].try_into().unwrap()),
-        u32::from_be_bytes(payload[4..8].try_into().unwrap()),
-        u32::from_be_bytes(payload[8..12].try_into().unwrap()),
+        read_u32(payload, 0)?,
+        read_u32(payload, 4)?,
+        read_u32(payload, 8)?,
     ))
 }
 
