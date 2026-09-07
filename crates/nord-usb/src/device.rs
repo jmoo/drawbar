@@ -199,11 +199,7 @@ impl<T: Transport> Device<T> {
     ) -> Result<()> {
         let unit = self.geometry().await?.allocation_unit(class)?;
         self.destructive(class, async |s| {
-            if unit.is_bytes() {
-                op::write(s, at, file, name, timestamp).await
-            } else {
-                op::write_library(s, unit, at, file, name, timestamp).await
-            }
+            op::write(s, unit, at, file, name, timestamp).await
         })
         .await
     }

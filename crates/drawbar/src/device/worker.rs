@@ -244,21 +244,6 @@ async fn write_unit<T: Transport>(
     device.geometry().await?.allocation_unit(class)
 }
 
-/// Write using the partition's reported allocation unit.
-async fn store<T: Transport>(
-    s: &mut Session<'_, T, ReadWrite>,
-    unit: AllocationUnit,
-    at: Location,
-    file: &[u8],
-    name: &str,
-    timestamp: u32,
-) -> Result<(), Error> {
-    match unit.is_bytes() {
-        true => op::write(s, at, file, name, timestamp).await,
-        false => op::write_library(s, unit, at, file, name, timestamp).await,
-    }
-}
-
 /// Replace a slot inside the caller's session.
 /// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
@@ -318,7 +303,7 @@ async fn put<T: Transport>(
         }
     }
 
-    let written = store(s, unit, at, &bytes, &write_name, timestamp).await;
+    let written = op::write(s, unit, at, &bytes, &write_name, timestamp).await;
 
     Ok(match (written, backup) {
         (Ok(()), _) => Ok(wrote(class, at, what, &write_name)),
@@ -333,7 +318,7 @@ async fn put<T: Transport>(
                 .as_ref()
                 .map(|info| info.name.as_str())
                 .unwrap_or_default();
-            match store(s, unit, at, &backup, restore_name, timestamp).await {
+            match op::write(s, unit, at, &backup, restore_name, timestamp).await {
                 Ok(()) => Err(format!(
                     "{e} ({} was restored, and is unchanged)",
                     shown(at)

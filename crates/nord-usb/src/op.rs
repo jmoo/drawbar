@@ -4,6 +4,8 @@
 //! session and applying the primitive repeatedly. Operations include device-side
 //! progress messages but omit reads used only to refresh a host UI.
 
+use nord_format::cbin::{Cbin, RawBody};
+
 use crate::envelope;
 use crate::error::{Error, Result};
 use crate::session::ReadWrite;
@@ -315,8 +317,7 @@ async fn clean_library<T: Transport>(
 /// already free it sends nothing but the `STATUS` request.
 ///
 /// `blocks` is the body's length in units of the partition's [`AllocationUnit`]; a count
-/// from anywhere else sizes the reclaim wrongly. [`write_library`] does this for its
-/// caller.
+/// from anywhere else sizes the reclaim wrongly. [`write`] does this for its caller.
 pub async fn reserve<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     blocks: u32,
@@ -328,36 +329,16 @@ pub async fn reserve<T: Transport>(
     Ok(())
 }
 
-/// Write an entity into a slot class. `name` is what the slot ends up called — the file
+/// Write an entity into a slot. `name` is what the slot ends up called — the file
 /// carries none, and a placeholder becomes the slot's name.
 ///
-/// The transfer alone. A library class is refused here rather than sent without the
-/// [`reserve`] the device answers `0x16` without: [`write_library`] is that composition.
-pub async fn write<T: Transport>(
-    session: &mut Session<'_, T, ReadWrite>,
-    at: Location,
-    file: &[u8],
-    name: &str,
-    timestamp: u32,
-) -> Result<()> {
-    let class = session.class();
-    if class.is_library() {
-        return Err(Error::InvalidArgument(format!(
-            "{} is a library class, so its write must reserve first: use write_library",
-            class.label()
-        )));
-    }
-    transfer_in(session, at, file, name, timestamp).await
-}
-
-/// Write an entity into block-allocated storage, reclaiming the space it needs first.
-///
 /// A library write is refused `0x16` without a prepared block per storage block of body,
-/// so the [`reserve`] and the transfer share one transaction. `unit` is the partition's
-/// own [`AllocationUnit`] — [`Geometry::allocation_unit`](crate::device::Geometry::allocation_unit)
+/// so where `unit` counts blocks the [`reserve`] and the transfer share one transaction;
+/// a byte-granular partition sends the transfer alone. `unit` is the partition's own
+/// [`AllocationUnit`] — [`Geometry::allocation_unit`](crate::device::Geometry::allocation_unit)
 /// is where one comes from — and it sizes the reclaim from the CBIN body the file
 /// carries, which is shorter than the file by its header.
-pub async fn write_library<T: Transport>(
+pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
     at: Location,
@@ -365,33 +346,27 @@ pub async fn write_library<T: Transport>(
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
-    let partition = session.class().to_raw();
-    if !unit.belongs_to(partition) {
+    if !unit.belongs_to(session.class().to_raw()) {
         return Err(Error::InvalidArgument(format!(
             "the allocation unit belongs to another partition, not {}",
             session.class().label()
         )));
     }
-    if unit.is_bytes() {
-        return Err(Error::InvalidArgument(format!(
-            "{} is byte-allocated, so it has no blocks to reserve: use write",
-            session.class().label()
-        )));
+    let file = envelope::unwrap(file)?;
+    if !unit.is_bytes() {
+        reserve(session, unit.blocks_for(file.body.0.len())?).await?;
     }
-    let blocks = unit.blocks_for(envelope::unwrap(file)?.body.0.len())?;
-    reserve(session, blocks).await?;
-    transfer_in(session, at, file, name, timestamp).await
+    transfer_in(session, at, &file, name, timestamp).await
 }
 
 /// The write transfer itself, identical for every class.
 async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
-    file: &[u8],
+    file: &Cbin<RawBody>,
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
-    let file = envelope::unwrap(file)?;
     let body = &file.body.0;
     let chunk_size = write_chunk()?;
     let body_len = u32::try_from(body.len())

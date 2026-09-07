@@ -967,7 +967,7 @@ impl Status {
     /// Space a write can reach: what is free now plus what cleaning can reclaim.
     ///
     /// A partition reporting `free` 0 with a large `dirty` pool is entirely writable —
-    /// [`crate::op::write_library`] reclaims the shortfall before it begins.
+    /// [`crate::op::write`] reclaims the shortfall before it begins.
     pub fn available(&self) -> u64 {
         u64::from(self.free) + u64::from(self.dirty)
     }

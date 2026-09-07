@@ -578,46 +578,36 @@ fn a_library_write_reserves_the_shortfall_it_is_short_by() {
 }
 
 #[test]
-fn a_write_aimed_at_the_wrong_kind_of_class_is_refused_before_any_frame() {
+fn a_write_carrying_another_partitions_allocation_unit_is_refused_before_any_frame() {
     let at = Location { bank: 0, slot: 0 };
     let file = envelope::wrap("nsmp", at, 1, &[0u8; 8]).unwrap();
+    // Partition 3, whose sample-library block would size the reserve for every class.
     let unit = partition_reporting(131_064).allocation_unit().unwrap();
 
-    let mut library = ReplayTransport::new(
-        session_open(ObjectClass::Sample)
-            .into_iter()
-            .chain(session_close())
-            .collect(),
-    );
-    let mut slots = ReplayTransport::new(
-        session_open(ObjectClass::SetList)
-            .into_iter()
-            .chain(session_close())
-            .collect(),
-    );
-
-    let refused = |t: &mut ReplayTransport, class, library: bool| {
-        pollster::block_on(async {
-            let mut s = Session::open(t, class)
+    for class in [ObjectClass::SetList, ObjectClass::Program] {
+        let mut t = ReplayTransport::new(
+            session_open(class)
+                .into_iter()
+                .chain(session_close())
+                .collect(),
+        );
+        let err = pollster::block_on(async {
+            let mut s = Session::open(&mut t, class)
                 .await
                 .unwrap()
                 .allow_destructive_writes();
-            let r = match library {
-                true => op::write_library(&mut s, unit, at, &file, "Marimba", 0).await,
-                false => op::write(&mut s, at, &file, "Marimba", 0).await,
-            };
+            let r = op::write(&mut s, unit, at, &file, "Marimba", 0).await;
             s.commit().await.unwrap();
-            r.expect_err("the class is the wrong kind for this write")
-        })
-    };
+            r.expect_err("the unit describes another partition")
+        });
 
-    let err = refused(&mut library, ObjectClass::Sample, false);
-    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
-    assert!(library.is_exhausted(), "a refused write sent a frame");
-
-    let err = refused(&mut slots, ObjectClass::SetList, true);
-    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
-    assert!(slots.is_exhausted(), "a refused write sent a frame");
+        assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+        assert!(
+            t.is_exhausted(),
+            "a refused write sent a frame for {}",
+            class.label()
+        );
+    }
 }
 
 #[test]

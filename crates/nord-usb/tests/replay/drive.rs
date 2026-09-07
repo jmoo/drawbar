@@ -212,13 +212,9 @@ async fn drive_write(
                 number(args.get(3).map_or("", String::as_str))?,
             );
             let unit = declared_unit(geometry, class).await?;
-            rw_session!(t, class, |s| async {
-                if unit.is_bytes() {
-                    op::write(&mut s, at, &file, name, stamp).await
-                } else {
-                    op::write_library(&mut s, unit, at, &file, name, stamp).await
-                }
-            })
+            rw_session!(t, class, |s| op::write(
+                &mut s, unit, at, &file, name, stamp
+            ))
             .map(|()| None)
         }
         "move" => {
