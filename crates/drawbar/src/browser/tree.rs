@@ -16,6 +16,7 @@ use crate::device::{occupancy, read_only, Connection, Device, BROWSED};
 use crate::filter::{Filter, Narrow, Place};
 use crate::icon::Glyph;
 use crate::panel::panel_header;
+use crate::queue::{Queue, Queued};
 use crate::shell::Page;
 use crate::strings::{folder, place, shown};
 use crate::tabs::Spot;
@@ -159,6 +160,7 @@ impl Browser {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         filter: &Filter,
         acts: &mut Vec<Act>,
     ) {
@@ -168,7 +170,7 @@ impl Browser {
             .show(ui, |ui| {
                 let mut sections = self.sections;
                 if section(ui, "places", &mut sections.places) {
-                    self.places(ui, workspace, device, acts);
+                    self.places(ui, workspace, device, queue, acts);
                 }
                 if section(ui, "kinds", &mut sections.kinds) {
                     self.kinds(ui, filter, acts);
@@ -201,12 +203,13 @@ impl Browser {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         self.computer_row(ui, workspace, device, acts);
         if self.open.contains(&Branch::Computer) {
             for id in self.folder_ids() {
-                self.folder_row(ui, id, workspace, device, acts);
+                self.folder_row(ui, id, workspace, device, queue, acts);
             }
             let loose: Vec<Item> = workspace
                 .listed()
@@ -215,7 +218,7 @@ impl Browser {
                 .collect();
             for entity in workspace.listed() {
                 if self.folders.holding(entity.id).is_none() {
-                    self.local_row(ui, entity, 1, &loose, workspace, device, acts);
+                    self.local_row(ui, entity, 1, &loose, workspace, device, queue, acts);
                 }
             }
             if loose.is_empty() && self.folders.all().is_empty() {
@@ -224,11 +227,11 @@ impl Browser {
         }
 
         match device.state.connected() {
-            true => self.instrument_rows(ui, workspace, device, acts),
+            true => self.instrument_rows(ui, workspace, device, queue, acts),
             false => self.connect_row(ui, device, acts),
         }
 
-        let waiting = workspace.pending().len();
+        let waiting = queue.len();
         if waiting == 0 {
             return;
         }
@@ -355,6 +358,7 @@ impl Browser {
         id: u64,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Folder(id);
@@ -415,11 +419,11 @@ impl Browser {
             drawn.response.context_menu(|ui| {
                 self.aim(item);
                 // ⚠️ Unlike "Send all", this includes unchanged slot-backed items. The
-                // count distinguishes those scopes before the confirmation dialog.
+                // count says which scope this is before the queue is added to.
                 if ui
                     .add_enabled(
                         sendable > 0,
-                        egui::Button::new(format!("Send folder to keyboard ({sendable})")),
+                        egui::Button::new(format!("Queue folder for the keyboard ({sendable})")),
                     )
                     .on_hover_text("everything in here that came off a slot, changed or not")
                     .on_disabled_hover_text(
@@ -427,13 +431,7 @@ impl Browser {
                     )
                     .clicked()
                 {
-                    self.ask_send(
-                        workspace,
-                        device,
-                        &members,
-                        format!("Send everything in “{name}” to the instrument?"),
-                        Act::SendFolder(id),
-                    );
+                    acts.push(Act::SendFolder(id));
                     ui.close();
                 }
                 ui.add_enabled(false, egui::Button::new("Export as a bundle…"))
@@ -461,7 +459,7 @@ impl Browser {
             nothing(ui, 2, "empty — drag sounds in");
         }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
-            self.local_row(ui, entity, 2, &inside, workspace, device, acts);
+            self.local_row(ui, entity, 2, &inside, workspace, device, queue, acts);
         }
     }
 
@@ -474,6 +472,7 @@ impl Browser {
         list: &[Item],
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Local(entity.id);
@@ -492,7 +491,7 @@ impl Browser {
             return;
         }
 
-        let owed = entity.pending.then(|| destination(entity)).flatten();
+        let owed = queue.entry(entity.id).map(destination);
         let filed = self.folders.holding(entity.id);
         let wears = self.tags.worn(entity.id).len();
         let drawn = row(
@@ -668,6 +667,7 @@ impl Browser {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         let Some(product) = device.state.product().map(str::to_string) else {
@@ -708,7 +708,7 @@ impl Browser {
             .iter()
             .filter_map(|class| device.state.scan.progress(*class))
             .any(|progress| progress.running);
-        let waiting = workspace.pending().len();
+        let waiting = queue.len();
         drawn.response.context_menu(|ui| {
             if ui
                 .add_enabled(!reading, egui::Button::new("Read everything again"))
@@ -1176,10 +1176,9 @@ impl Browser {
     }
 }
 
-/// Where an asset is owed, for the note that says so.
-fn destination(entity: &LocalEntity) -> Option<String> {
-    let (class, at) = entity.origin.slot()?;
-    Some(format!("→ {}", place(class, at)))
+/// Where a queued asset is going, for the note that says so.
+fn destination(held: &Queued) -> String {
+    format!("→ {}", place(held.class, held.at))
 }
 
 #[cfg(test)]

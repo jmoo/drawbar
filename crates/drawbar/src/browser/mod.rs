@@ -20,6 +20,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::Device;
 use crate::filter::Filter;
 use crate::folders::{self, Folders};
+use crate::queue::Queue;
 use crate::strings::place;
 use crate::tags::{self, Tags};
 use crate::workspace::Workspace;
@@ -40,7 +41,7 @@ pub use row::{cell_ink, Cells, Drawn};
 pub use selection::Selection;
 pub use tree::new_menu;
 
-use act::{owed, write_warnings};
+use act::write_warnings;
 use drag::ghost;
 use selection::{gesture, Gesture};
 use tree::{Branch, Sections};
@@ -154,11 +155,12 @@ impl Browser {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         filter: &Filter,
     ) -> Vec<Act> {
         let mut acts = Vec::new();
         self.dialog(ui.ctx(), &mut acts);
-        self.tree(ui, workspace, device, filter, &mut acts);
+        self.tree(ui, workspace, device, queue, filter, &mut acts);
         ghost(ui.ctx());
         acts
     }
@@ -454,25 +456,23 @@ impl Browser {
         }
     }
 
-    /// The one question a batch asks: everything it is about to write, and what it
-    /// would replace.
-    ///
-    /// One question for every batch there is — the whole queue, or one folder's worth —
-    /// so a folder cannot become a way of writing to the instrument without being asked.
+    /// The one question a write asks: everything the queue is about to write, and what
+    /// each of it would replace.
     fn ask_send(
         &mut self,
         workspace: &Workspace,
         device: &Device,
-        ids: &[u64],
+        queue: &Queue,
         title: String,
         act: Act,
     ) {
         let mut lines = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
-        for entity in ids.iter().filter_map(|id| workspace.get(*id)) {
-            let Some((class, at)) = owed(entity) else {
+        for held in queue.entries() {
+            let Some(entity) = workspace.get(held.id) else {
                 continue;
             };
+            let (class, at) = (held.class, held.at);
             let where_ = place(class, at);
             for warning in write_warnings(class, &entity.tag(), &device.state.formats_in(class)) {
                 if !warnings.contains(&warning) {
@@ -547,6 +547,7 @@ mod tests {
         let mut log = crate::log::Log::default();
         let mut tabs = Tabs::default();
         let mut browser = Browser::default();
+        let mut queue = Queue::default();
 
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
             workspace.create(kind, &mut log).unwrap();
@@ -597,7 +598,7 @@ mod tests {
                 egui::SidePanel::left("places")
                     .exact_width(crate::shell::BROWSER)
                     .show(ctx, |ui| {
-                        let acts = browser.ui(ui, &workspace, &device, &Filter::default());
+                        let acts = browser.ui(ui, &workspace, &device, &queue, &Filter::default());
                         apply(
                             &mut browser,
                             &mut Shell::default(),
@@ -605,6 +606,7 @@ mod tests {
                             &mut workspace,
                             &mut device,
                             &mut tabs,
+                            &mut queue,
                             &mut log,
                         );
                     });
@@ -641,7 +643,7 @@ mod tests {
     /// outside brings only itself — the pressed row is what a drag is about.
     #[test]
     fn a_drag_from_a_picked_row_carries_the_whole_selection() {
-        let (mut browser, mut workspace, _device, _tabs, mut log) = bench();
+        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -671,7 +673,7 @@ mod tests {
     /// them over each other, so a single destination takes the pressed row alone.
     #[test]
     fn a_drop_of_many_repeats_only_where_one_destination_does_not() {
-        let (mut browser, mut workspace, _device, _tabs, mut log) = bench();
+        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -756,6 +758,7 @@ mod tests {
         let device = Device::new(ctx.clone());
         let mut log = crate::log::Log::default();
         let mut browser = Browser::default();
+        let queue = Queue::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
 
         let key = |key| egui::Event::Key {
@@ -782,7 +785,7 @@ mod tests {
             };
             let _ = ctx.run(input, |ctx| {
                 egui::SidePanel::left("places").show(ctx, |ui| {
-                    for act in browser.ui(ui, &workspace, &device, &Filter::default()) {
+                    for act in browser.ui(ui, &workspace, &device, &queue, &Filter::default()) {
                         if let Act::RenameLocal { name, .. } = act {
                             named = Some(name);
                         }
@@ -826,7 +829,7 @@ mod tests {
     /// membership behind to accumulate for as long as the app is installed.
     #[test]
     fn a_grouping_forgets_the_assets_the_list_came_back_without() {
-        let (mut browser, mut workspace, _device, _tabs, mut log) = bench();
+        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
         let here = workspace.create(Fresh::Program, &mut log).unwrap();
         let folder = browser.folders.make();
         browser.folders.file(here, Some(folder));
@@ -844,7 +847,7 @@ mod tests {
     /// does not. An asset the list came back without leaves no membership behind.
     #[test]
     fn a_tag_put_on_a_multi_selection_comes_back_next_session() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -858,6 +861,7 @@ mod tests {
             &mut workspace,
             &mut device,
             &mut tabs,
+            &mut queue,
             &mut log,
         );
         let Some(Item::Tag(tag)) = browser.rename.as_ref().map(|r| r.what) else {
@@ -886,7 +890,7 @@ mod tests {
     fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
         use crate::workspace::Origin;
 
-        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let bytes = {
             let id = workspace.create(Fresh::Program, &mut log).unwrap();
             let bytes = workspace.get(id).unwrap().bytes.clone();
@@ -912,6 +916,7 @@ mod tests {
             &mut workspace,
             &mut device,
             &mut tabs,
+            &mut queue,
             &mut log,
         );
         assert!(!workspace.is_view(id), "it is on this computer now");
@@ -927,7 +932,7 @@ mod tests {
     fn the_modal_says_when_a_batch_is_of_another_model() {
         use crate::workspace::Origin;
 
-        let (mut browser, mut workspace, mut device, _tabs, mut log) = bench();
+        let (mut browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
 
@@ -936,18 +941,18 @@ mod tests {
             let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
             let bytes = workspace.get(stage).unwrap().bytes.clone();
             workspace.remove(stage, &mut log);
-            ids.push(workspace.ingest(
+            let at = Location { bank: 6, slot };
+            let id = workspace.ingest(
                 format!("stage-{slot}.ns4p"),
-                Origin::Device {
-                    class,
-                    at: Location { bank: 6, slot },
-                },
+                Origin::Device { class, at },
                 bytes,
                 &mut log,
-            ));
+            );
+            queue.enqueue(workspace.get(id).unwrap(), class, at, None);
+            ids.push(id);
         }
 
-        browser.ask_send(&workspace, &device, &ids, "Send?".into(), Act::SendAll);
+        browser.ask_send(&workspace, &device, &queue, "Send?".into(), Act::SendAll);
         let note = browser.ask.as_ref().and_then(|ask| ask.note.clone());
         let note = note.expect("the modal has a note");
         assert_eq!(note.matches("This file is ns4p").count(), 1, "{note}");

@@ -11,6 +11,7 @@ use crate::device::Device;
 use crate::document::Document;
 use crate::library::Library;
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::shell::Shell;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
@@ -131,6 +132,7 @@ pub struct DrawbarApp {
     pub(crate) device: Device,
     pub(crate) browser: Browser,
     pub(crate) library: Library,
+    pub(crate) queue: Queue,
     pub(crate) shell: Shell,
     pub(crate) tabs: Tabs,
     pub(crate) document: Document,
@@ -164,6 +166,7 @@ impl DrawbarApp {
             device: Device::new(cc.egui_ctx.clone()),
             browser: Browser::default(),
             library: Library::default(),
+            queue: Queue::default(),
             shell: Shell::default(),
             tabs: Tabs::default(),
             document: Document::default(),
@@ -239,7 +242,7 @@ impl DrawbarApp {
         let Some(storage) = frame.storage_mut() else {
             return;
         };
-        crate::store::save(storage, &self.workspace, &mut self.log);
+        crate::store::save(storage, &self.workspace, &self.queue, &mut self.log);
         self.saved = self.workspace.revision();
         self.saved_at = now;
     }
@@ -254,7 +257,7 @@ impl eframe::App for DrawbarApp {
     /// eframe calls this on its own timer and on the way out, so an edit is kept
     /// without anyone asking for it to be.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        crate::store::save(storage, &self.workspace, &mut self.log);
+        crate::store::save(storage, &self.workspace, &self.queue, &mut self.log);
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
         // Not written from the frame that changed it, the way the theme is: a divider
         // moves on every frame of a drag, and the whole store is rewritten each time.
@@ -266,13 +269,17 @@ impl eframe::App for DrawbarApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.log.tick(ctx);
         self.workspace.poll(&mut self.log);
-        self.device
-            .poll(&mut self.log, &mut self.workspace, &mut self.tabs);
+        self.device.poll(
+            &mut self.log,
+            &mut self.workspace,
+            &mut self.tabs,
+            &mut self.queue,
+        );
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.
         self.workspace
-            .close_views(|id| self.tabs.holds(id), &mut self.log);
+            .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
         self.take_dropped_files(ctx);
         drop_hint(ctx);
         // Raised by a New → Sample Editor project pick, and answered before anything
@@ -298,6 +305,7 @@ impl eframe::App for DrawbarApp {
             &mut self.workspace,
             &mut self.device,
             &mut self.tabs,
+            &mut self.queue,
             &mut self.log,
         );
         // Last, so a command the user just asked for is ahead of the background read of
@@ -315,7 +323,7 @@ impl DrawbarApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(fill))
             .show(ctx, |ui| {
-                self.tabs.ui(ui, &self.workspace, acts);
+                self.tabs.ui(ui, &self.workspace, &self.queue, acts);
                 match self.tabs.showing() {
                     // The library is what the centre shows when no tab claims it.
                     None | Some(Spot::Library) => {
@@ -325,6 +333,7 @@ impl DrawbarApp {
                             &mut self.browser,
                             &self.workspace,
                             &self.device,
+                            &self.queue,
                             &self.shell,
                         ));
                     }

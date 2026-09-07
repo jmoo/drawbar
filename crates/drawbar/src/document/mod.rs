@@ -14,6 +14,7 @@ use crate::app::dot;
 use crate::device::Device;
 use crate::fields;
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::strings;
 use crate::workspace::{LocalEntity, Workspace};
 
@@ -256,17 +257,24 @@ impl Document {
         self.player.stop();
     }
 
-    /// Mark the open document as owed to the instrument, or say why it is not.
-    pub fn stage(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
+    /// Queue the open document for the slot it came off, or say why there is none.
+    pub fn stage(
+        &mut self,
+        id: u64,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &mut Queue,
+        log: &mut Log,
+    ) {
         let Some(entity) = workspace.get(id) else {
             return;
         };
         let name = entity.name.clone();
         match entity.origin.slot() {
             Some((class, at)) if crate::device::sendable(class) => {
-                workspace.mark_pending(id, true);
+                queue.enqueue(entity, class, at, device.state.slot(class, at).flatten());
                 log.say(format!(
-                    "“{name}” will be sent to {}.",
+                    "“{name}” is waiting to be sent to {}.",
                     strings::place(class, at)
                 ));
             }
@@ -508,15 +516,6 @@ impl Document {
             Ok(out) => {
                 self.error = None;
                 workspace.replace_bytes(id, out, log);
-                // An edit to something read off the instrument is owed back to it. It
-                // goes nowhere until the operator sends it.
-                if workspace
-                    .get(id)
-                    .and_then(|e| e.origin.slot())
-                    .is_some_and(|(class, _)| crate::device::sendable(class))
-                {
-                    workspace.mark_pending(id, true);
-                }
                 Ok(())
             }
             Err(why) => {
@@ -844,10 +843,10 @@ mod tests {
         assert!(document.error.is_none());
     }
 
-    /// An edit to something read off the instrument is owed back to it; an edit to
-    /// something that only lives here is not.
+    /// An edit changes what is here and asks for nothing: what goes back to the
+    /// instrument is what has been queued for it, and ⌘S is what queues one.
     #[test]
-    fn editing_a_device_document_marks_it_pending() {
+    fn an_edit_changes_a_document_and_keeping_it_queues_it() {
         use crate::workspace::Origin;
         use nord_usb::{Location, ObjectClass};
 
@@ -876,19 +875,29 @@ mod tests {
             .apply(from_device, set, &mut workspace, &mut log)
             .unwrap();
 
-        assert!(!workspace.get(local).unwrap().pending, "stays here");
-        assert!(workspace.get(from_device).unwrap().pending, "owed back");
-        let owed: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-        assert_eq!(owed, vec![from_device]);
+        let mut queue = Queue::default();
+        let device = Device::new(ctx);
+        assert!(workspace.get(local).unwrap().dirty);
+        assert!(workspace.get(from_device).unwrap().dirty);
+        assert!(queue.is_empty(), "an edit asks for nothing");
 
-        // Cmd+S on the local one says so rather than exporting anything.
-        document.stage(local, &mut workspace, &mut log);
+        // Cmd+S queues what came off a slot.
+        document.stage(from_device, &workspace, &device, &mut queue, &mut log);
+        assert_eq!(queue.ids(), vec![from_device]);
+        assert!(
+            log.status().1.contains("waiting to be sent"),
+            "{}",
+            log.status().1
+        );
+
+        // And on the local one it says so rather than exporting anything.
+        document.stage(local, &workspace, &device, &mut queue, &mut log);
         assert!(
             log.status().1.contains("kept as you make them"),
             "{}",
             log.status().1
         );
-        assert!(!workspace.get(local).unwrap().pending);
+        assert!(!queue.holds(local));
     }
 
     /// ⚠️ The strip and the body are two scroll regions in one `Ui`. While they shared
@@ -935,7 +944,7 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(crate::tabs::SCROLL)),
                         ui.make_persistent_id(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(ui, &workspace, &mut Vec::new());
+                    tabs.ui(ui, &workspace, &Queue::default(), &mut Vec::new());
                     ui.separator();
                     document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
                 });

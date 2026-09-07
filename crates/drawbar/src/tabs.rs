@@ -10,6 +10,7 @@ use nord_usb::ObjectClass;
 
 use crate::browser::{new_menu, Act, Kind};
 use crate::icon::{painted, Glyph};
+use crate::queue::Queue;
 use crate::workspace::Workspace;
 
 /// ⚠️ The strip's own scroll id. The strip and the document body are drawn into the same
@@ -163,7 +164,13 @@ impl Tabs {
     /// ⚠️ The scroll area is a direct child of the caller's `Ui`, and its salt is
     /// [`SCROLL`]: the document body below carries its own, and two unsalted areas in one
     /// `Ui` would share a state.
-    pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, acts: &mut Vec<Act>) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        queue: &Queue,
+        acts: &mut Vec<Act>,
+    ) {
         let rect = egui::Rect::from_min_size(
             egui::pos2(ui.max_rect().left(), ui.cursor().top()),
             egui::vec2(ui.available_width(), HEIGHT),
@@ -184,7 +191,7 @@ impl Tabs {
                 ui.horizontal(|ui| {
                     let visuals = ui.visuals().clone();
                     for tab in &self.open {
-                        let Some(face) = face(tab, workspace, &visuals) else {
+                        let Some(face) = face(tab, workspace, queue, &visuals) else {
                             continue;
                         };
                         let spot = tab.spot();
@@ -224,7 +231,7 @@ struct Face {
     hint: Option<&'static str>,
 }
 
-fn face(tab: &Tab, workspace: &Workspace, visuals: &egui::Visuals) -> Option<Face> {
+fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals) -> Option<Face> {
     match tab {
         Tab::Library => Some(Face {
             glyph: Glyph::LibraryBig,
@@ -242,7 +249,7 @@ fn face(tab: &Tab, workspace: &Workspace, visuals: &egui::Visuals) -> Option<Fac
         }),
         Tab::Document { id, .. } => {
             let entity = workspace.get(*id)?;
-            let mark = match (entity.pending, entity.dirty) {
+            let mark = match (queue.holds(*id), entity.dirty) {
                 (true, _) => Some((crate::app::warn(visuals), "waiting to be sent")),
                 (false, true) => Some((crate::app::good(visuals), "changed since it was opened")),
                 (false, false) => None,

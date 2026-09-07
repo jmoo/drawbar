@@ -17,6 +17,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
 use crate::newproject::Draft;
+use crate::queue::Queue;
 
 /// Where an entity came from.
 #[derive(Clone)]
@@ -158,8 +159,6 @@ pub struct LocalEntity {
     pub container: Option<Container>,
     pub verify: VerifyState,
     pub dirty: bool,
-    /// Owed back to the slot it came from, waiting on a Send.
-    pub pending: bool,
     /// Whether this is on this computer, as opposed to a view of a slot.
     ///
     /// A view is a working copy like any other — it is edited and sent back the same
@@ -196,7 +195,6 @@ impl LocalEntity {
             container,
             verify,
             dirty: false,
-            pending: false,
             kept: true,
             stamp,
         }
@@ -228,8 +226,8 @@ impl LocalEntity {
 /// goes: **an edited or owed view is precious, an untouched one is disposable.** An
 /// untouched view is the slot's own bytes, which the instrument still has; an edited one
 /// is the only copy there is.
-pub fn precious(entity: &LocalEntity) -> bool {
-    entity.dirty || entity.pending
+pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
+    entity.dirty || queue.holds(entity.id)
 }
 
 /// The filename an export suggests for a verbatim name: made path-safe, and given the
@@ -690,14 +688,14 @@ impl Workspace {
     /// edit — and the × sits beside the badge saying the edit is owed back to a slot.
     /// So an edited or owed view is promoted into the list instead, and only an
     /// untouched one is dropped.
-    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, log: &mut Log) {
+    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
         let mut rescued = Vec::new();
         let before = self.entities.len();
         self.entities.retain_mut(|entity| {
             if entity.kept || open(entity.id) {
                 return true;
             }
-            if !precious(entity) {
+            if !precious(entity, queue) {
                 return false;
             }
             entity.kept = true;
@@ -717,21 +715,6 @@ impl Workspace {
             self.selected = self.entities.last().map(|e| e.id);
         }
         self.revision += 1;
-    }
-
-    /// Mark an asset as owed back to the slot it came from, or paid.
-    pub fn mark_pending(&mut self, id: u64, pending: bool) {
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
-            if entity.pending != pending {
-                entity.pending = pending;
-                self.revision += 1;
-            }
-        }
-    }
-
-    /// Everything waiting to go back to the instrument, in the order it was opened.
-    pub fn pending(&self) -> Vec<&LocalEntity> {
-        self.entities.iter().filter(|e| e.pending).collect()
     }
 
     /// Rename an asset held here. Nothing leaves this computer.
@@ -922,7 +905,6 @@ impl Workspace {
         let verify = replaced.verify.clone();
         *entity = LocalEntity {
             dirty: true,
-            pending: entity.pending,
             kept: entity.kept,
             ..replaced
         };
@@ -1235,10 +1217,11 @@ mod tests {
         );
         let local = workspace.create(Fresh::Program, &mut log).unwrap();
 
-        workspace.close_views(|id| id == viewed, &mut log);
+        let queue = Queue::default();
+        workspace.close_views(|id| id == viewed, &queue, &mut log);
         assert!(workspace.get(viewed).is_some(), "its tab is still open");
 
-        workspace.close_views(|_| false, &mut log);
+        workspace.close_views(|_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_none());
         assert!(workspace.get(local).is_some(), "kept is kept");
         assert_eq!(workspace.selected().map(|e| e.id), Some(local));
@@ -1272,20 +1255,26 @@ mod tests {
 
         let bytes = workspace.get(edited).unwrap().bytes.clone();
         workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
-        workspace.mark_pending(owed, true);
-        assert!(precious(workspace.get(edited).unwrap()));
-        assert!(precious(workspace.get(owed).unwrap()));
-        assert!(!precious(workspace.get(untouched).unwrap()));
+        let mut queue = Queue::default();
+        queue.enqueue(
+            workspace.get(owed).unwrap(),
+            ObjectClass::Program,
+            at(1),
+            None,
+        );
+        assert!(precious(workspace.get(edited).unwrap(), &queue));
+        assert!(precious(workspace.get(owed).unwrap(), &queue));
+        assert!(!precious(workspace.get(untouched).unwrap(), &queue));
 
         // Every tab closes at once.
-        workspace.close_views(|_| false, &mut log);
+        workspace.close_views(|_| false, &queue, &mut log);
 
         assert!(workspace.get(untouched).is_none(), "the slot still has it");
         let listed: Vec<u64> = workspace.listed().map(|e| e.id).collect();
         assert_eq!(listed, vec![edited, owed], "and the changes survive");
         assert!(!workspace.is_view(edited) && !workspace.is_view(owed));
         // What was owed is still owed: promoting it must not pay a debt.
-        assert!(workspace.get(owed).unwrap().pending);
+        assert!(queue.holds(owed));
         assert!(log.status().1.contains("kept on this computer"));
     }
 
@@ -1373,7 +1362,6 @@ mod tests {
         let first = stamp(&workspace);
 
         workspace.rename(id, "Africa-Split".into());
-        workspace.mark_pending(id, true);
         assert_eq!(stamp(&workspace), first, "the bytes did not move");
 
         let (_, edited) =

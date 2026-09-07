@@ -10,12 +10,12 @@ use nord_usb::ObjectClass;
 
 use crate::app::{accent, micro, ui as ui_text, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
-use crate::device::{occupancy, sendable};
+use crate::device::occupancy;
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
 use crate::panel::{caps, chevron, panel_header, strip, HEADER};
-use crate::strings::{folder, place};
+use crate::strings::folder;
 use crate::tabs::Spot;
 
 /// The window's own bar: the mark, the menus, the instrument, the theme.
@@ -482,12 +482,18 @@ impl DrawbarApp {
         }
     }
 
-    /// Mark the open document as owed to the instrument, or say why it is not.
+    /// Queue the open document for the slot it came off, or say why there is none.
     fn stage_open(&mut self) {
         let Some(id) = self.tabs.active() else {
             return;
         };
-        self.document.stage(id, &mut self.workspace, &mut self.log);
+        self.document.stage(
+            id,
+            &self.workspace,
+            &self.device,
+            &mut self.queue,
+            &mut self.log,
+        );
     }
 
     fn menus(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
@@ -614,7 +620,7 @@ impl DrawbarApp {
         if item(ui, "Review send queue…", Some(key::QUEUE)) {
             acts.push(Act::ShowPage(Page::Queue));
         }
-        let waiting = self.workspace.pending().len();
+        let waiting = self.queue.len();
         if waiting > 0 && item(ui, &format!("Send all ({waiting})"), None) {
             acts.push(Act::AskSendAll);
         }
@@ -660,7 +666,7 @@ impl DrawbarApp {
                     if action(ui, Glyph::RefreshCw, "Read", false).clicked() && attached {
                         acts.push(Act::Resync);
                     }
-                    let waiting = self.workspace.pending().len();
+                    let waiting = self.queue.len();
                     let label = match waiting {
                         0 => "Send".to_string(),
                         n => format!("Send {n}"),
@@ -790,7 +796,7 @@ impl DrawbarApp {
     /// The dock's own header. [`panel_header`]'s geometry, with two titles to pick
     /// between rather than one.
     fn dock_header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-        let waiting = self.workspace.pending().len();
+        let waiting = self.queue.len();
         let mut picked = None;
         let mut clear = false;
         strip(ui, |ui| {
@@ -832,46 +838,9 @@ impl DrawbarApp {
         }
     }
 
-    /// Everything owed to the instrument, and where each of it goes.
-    fn queue_page(&self, ui: &mut egui::Ui) {
-        let waiting = self.workspace.pending();
-        if waiting.is_empty() {
-            ui.add_space(GAP);
-            along(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("Nothing is waiting to be sent.")
-                        .text_style(ui_text())
-                        .weak()
-                        .italics(),
-                );
-            });
-            return;
-        }
-        egui::ScrollArea::vertical()
-            .id_salt("queue_page")
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for entity in waiting {
-                    let Some((class, at)) = entity.origin.slot().filter(|(c, _)| sendable(*c))
-                    else {
-                        continue;
-                    };
-                    ui.horizontal(|ui| {
-                        ui.add_space(PAD);
-                        ui.spacing_mut().item_spacing.x = GAP;
-                        ui.label(egui::RichText::new(&entity.name).text_style(ui_text()));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_space(PAD);
-                            ui.label(
-                                egui::RichText::new(place(class, at))
-                                    .monospace()
-                                    .size(10.0)
-                                    .weak(),
-                            );
-                        });
-                    });
-                }
-            });
+    /// Everything owed to the instrument, and what each of it runs into.
+    fn queue_page(&mut self, ui: &mut egui::Ui) {
+        crate::queue::page(ui, &mut self.queue, &self.workspace);
     }
 
     /// The browser dock: this computer and the instrument, under one header.
@@ -895,10 +864,13 @@ impl DrawbarApp {
                 return;
             }
             panel_header(ui, "browser", Some(&mut self.shell.browser_open), None);
-            acts.extend(
-                self.browser
-                    .ui(ui, &self.workspace, &self.device, &self.shell.filter),
-            );
+            acts.extend(self.browser.ui(
+                ui,
+                &self.workspace,
+                &self.device,
+                &self.queue,
+                &self.shell.filter,
+            ));
         });
     }
 

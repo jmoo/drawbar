@@ -11,6 +11,7 @@ use super::Browser;
 use crate::device::{write_warning, Device, DeviceCmd, Outgoing};
 use crate::filter::Narrow;
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
@@ -57,7 +58,7 @@ pub enum Act {
         id: u64,
         folder: Option<u64>,
     },
-    /// Write every sendable asset in a folder back where it came from. Already agreed to.
+    /// Queue every sendable asset in a folder for the slot it came off.
     SendFolder(u64),
     Copy {
         class: ObjectClass,
@@ -67,13 +68,14 @@ pub enum Act {
         class: ObjectClass,
         at: Location,
     },
-    /// Put a local asset into a slot, asking first if something is already there.
+    /// Queue a local asset for a slot, asking first where the write itself has a
+    /// warning to carry.
     Send {
         id: u64,
         class: ObjectClass,
         at: Location,
     },
-    /// Write everything waiting, grouped by folder. Already agreed to.
+    /// Write everything in the queue, grouped by folder. Already agreed to.
     SendAll,
     /// Put the "send everything waiting" question, which `SendAll` is the answer to.
     AskSendAll,
@@ -143,6 +145,7 @@ pub fn apply(
     workspace: &mut Workspace,
     device: &mut Device,
     tabs: &mut Tabs,
+    queue: &mut Queue,
     log: &mut Log,
 ) {
     for act in acts {
@@ -216,7 +219,11 @@ pub fn apply(
                     .iter()
                     .map(|entity| entity.id)
                     .collect();
-                send_batch(&members, workspace, device, log);
+                for id in members {
+                    if let Some((class, at)) = workspace.get(id).and_then(owed) {
+                        enqueue(workspace, device, queue, log, id, class, at);
+                    }
+                }
             }
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
             Act::Open(Item::Local(id)) => tabs.open(id, workspace),
@@ -246,22 +253,18 @@ pub fn apply(
                 device.send(DeviceCmd::Select { class, at }, log)
             }
             Act::Send { id, class, at } => {
-                send(browser, workspace, device, log, id, class, at, true)
+                send(browser, workspace, device, queue, log, id, class, at, true)
             }
             Act::Replace { id, class, at } => {
-                send(browser, workspace, device, log, id, class, at, false)
+                send(browser, workspace, device, queue, log, id, class, at, false)
             }
-            Act::SendAll => {
-                let waiting: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-                send_batch(&waiting, workspace, device, log);
-            }
+            Act::SendAll => send_batch(queue, workspace, device, log),
             Act::AskSendAll => {
-                let waiting: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-                let title = match waiting.len() {
+                let title = match queue.len() {
                     1 => "Send 1 sound to the instrument?".to_string(),
                     n => format!("Send {n} sounds to the instrument?"),
                 };
-                browser.ask_send(workspace, device, &waiting, title, Act::SendAll);
+                browser.ask_send(workspace, device, queue, title, Act::SendAll);
             }
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
@@ -283,6 +286,7 @@ pub fn apply(
             Act::DeleteSlot { class, at } => device.send(DeviceCmd::Delete { class, at }, log),
             Act::Remove(id) => {
                 tabs.close(Spot::Document(id));
+                queue.forget(id);
                 browser.folders.forget(id);
                 browser.tags.forget(id);
                 workspace.remove(id, log);
@@ -340,16 +344,14 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
     }
 }
 
-/// Write a set of assets back, one command per folder.
+/// Drain the queue, one command per folder.
 ///
-/// The one write path a batch takes, whether the batch is everything waiting or one of
-/// this computer's own folders: same refusal, same grouping, same per-item flow.
-fn send_batch(ids: &[u64], workspace: &Workspace, device: &mut Device, log: &mut Log) {
+/// The one write path there is: same refusal, same grouping, same per-item flow. What
+/// is written leaves the queue when its [`crate::device::DeviceEvent::Sent`] lands, so a
+/// batch that stops halfway leaves the rest of the queue where it was.
+fn send_batch(queue: &Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
     // Validate the whole batch before the first delete-then-write.
-    for entity in ids.iter().filter_map(|id| workspace.get(*id)) {
-        if owed(entity).is_none() {
-            continue;
-        }
+    for entity in queue.ids().iter().filter_map(|id| workspace.get(*id)) {
         if let Err(e) = nord_usb::envelope::unwrap(&entity.bytes) {
             log.error(format!("{}: {e}", entity.name));
             log.trouble(format!(
@@ -359,29 +361,29 @@ fn send_batch(ids: &[u64], workspace: &Workspace, device: &mut Device, log: &mut
             return;
         }
     }
-    for (class, items) in grouped(ids, workspace) {
+    for (class, items) in grouped(queue, workspace) {
         device.send(DeviceCmd::SendAll { class, items }, log);
     }
 }
 
-/// The assets named, gathered per folder in the order the list holds them.
+/// What is waiting, gathered per folder in the order the queue holds it.
 ///
 /// A session belongs to a folder, so a folder is the unit a batch is cut into.
-fn grouped(ids: &[u64], workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
+fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
     let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
-    for entity in ids.iter().filter_map(|id| workspace.get(*id)) {
-        let Some((class, at)) = owed(entity) else {
+    for held in queue.entries() {
+        let Some(entity) = workspace.get(held.id) else {
             continue;
         };
         let item = Outgoing {
             id: entity.id,
-            at,
+            at: held.at,
             name: entity.name.clone(),
             bytes: entity.bytes.clone(),
         };
-        match by_class.iter_mut().find(|(held, _)| *held == class) {
+        match by_class.iter_mut().find(|(class, _)| *class == held.class) {
             Some((_, items)) => items.push(item),
-            None => by_class.push((class, vec![item])),
+            None => by_class.push((held.class, vec![item])),
         }
     }
     by_class
@@ -438,15 +440,21 @@ pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     crate::device::sendable(class).then_some((class, at))
 }
 
-/// Put a local asset into a slot.
+/// Queue a local asset for a slot.
 ///
-/// `ask` is false once the replace question has been answered, which is what keeps the
-/// answer from raising the question again.
+/// `ask` is false once the question has been answered, which is what keeps the answer
+/// from raising it again.
+///
+/// ⚠️ The question is now only about what a **write** carries — a foreign format, a
+/// settings write reloading the panel — and not about the slot being taken. Queueing is
+/// reversible and the queue shows the occupant, so an occupied slot no longer earns a
+/// modal; the one question before anything is actually written is [`Act::AskSendAll`].
 #[allow(clippy::too_many_arguments)]
 fn send(
     browser: &mut Browser,
     workspace: &Workspace,
     device: &mut Device,
+    queue: &mut Queue,
     log: &mut Log,
     id: u64,
     class: ObjectClass,
@@ -456,8 +464,8 @@ fn send(
     let Some(entity) = workspace.get(id) else {
         return;
     };
-    // Refused before the transport is touched: bytes that are not what they claim to be
-    // must not reach a delete-then-write.
+    // Refused before anything is queued: bytes that are not what they claim to be must
+    // never reach a delete-then-write.
     if let Err(e) = nord_usb::envelope::unwrap(&entity.bytes) {
         log.error(format!("{}: {e}", entity.name));
         log.trouble(format!(
@@ -466,30 +474,55 @@ fn send(
         ));
         return;
     }
+    let note = write_note(class, &entity.tag(), &device.state.formats_in(class));
     let occupant = device
         .state
         .slot(class, at)
         .flatten()
         .map(|info| info.name.trim().to_string());
-    match (ask, occupant) {
-        (true, Some(occupant)) => browser.ask_replace(
+    match (ask, note, occupant) {
+        (true, Some(note), Some(occupant)) => browser.ask_replace(
             &occupant,
             &entity.name,
             place(class, at),
-            write_note(class, &entity.tag(), &device.state.formats_in(class)),
+            Some(note),
             Act::Replace { id, class, at },
         ),
-        _ => device.send(
-            DeviceCmd::Put {
-                id,
-                class,
-                at,
-                name: entity.name.clone(),
-                bytes: entity.bytes.clone(),
-            },
-            log,
-        ),
+        _ => enqueue(workspace, device, queue, log, id, class, at),
     }
+}
+
+/// Put one asset in the queue for one slot, and say in the log what that displaced.
+fn enqueue(
+    workspace: &Workspace,
+    device: &Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    id: u64,
+    class: ObjectClass,
+    at: Location,
+) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    let name = entity.name.clone();
+    let where_ = place(class, at);
+    let displaced = queue.enqueue(entity, class, at, device.state.slot(class, at).flatten());
+    if let Some((was, before)) = displaced.from {
+        log.say(format!(
+            "“{name}” is waiting for {where_} rather than {}.",
+            place(was, before)
+        ));
+        return;
+    }
+    if let Some(other) = displaced.instead_of.and_then(|id| workspace.get(id)) {
+        log.say(format!(
+            "“{name}” is waiting for {where_}; “{}” is not any more.",
+            other.name
+        ));
+        return;
+    }
+    log.say(format!("“{name}” is waiting to be sent to {where_}."));
 }
 
 #[cfg(test)]
@@ -498,126 +531,118 @@ mod tests {
     use crate::browser::bench::bench;
     use crate::device::BROWSED;
     use crate::strings::folder;
-    use crate::tabs::Tabs;
-    use eframe::egui;
 
-    /// A batch is one command per folder, because a session belongs to a folder — and
-    /// something that cannot be written is not queued at all.
+    fn at(slot: u32) -> Location {
+        Location { bank: 6, slot }
+    }
+
+    /// One program's bytes, with nothing left in the list to show for them.
+    fn program(workspace: &mut Workspace, log: &mut Log) -> Vec<u8> {
+        let id = workspace.create(Fresh::Program, log).unwrap();
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        workspace.remove(id, log);
+        bytes
+    }
+
+    /// A batch is one command per folder, because a session belongs to a folder, and it
+    /// goes out in the order the queue holds it.
     #[test]
     fn a_batch_is_grouped_into_one_command_per_folder() {
-        use crate::workspace::{Fresh, Origin};
-
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut log = crate::log::Log::default();
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
-        let at = |slot| Location { bank: 6, slot };
+        let (_browser, mut workspace, _device, _tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::Program, 1),
             (ObjectClass::SetList, 0),
-            // A piano is installed by the instrument, so it must not reach the queue.
-            (ObjectClass::Piano, 0),
         ] {
             let id = workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
-                Origin::Device {
+                crate::workspace::Origin::Device {
                     class,
                     at: at(slot),
                 },
                 bytes.clone(),
                 &mut log,
             );
-            workspace.mark_pending(id, true);
+            queue.enqueue(workspace.get(id).unwrap(), class, at(slot), None);
         }
 
-        let waiting: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-        let queued = grouped(&waiting, &workspace);
-        assert_eq!(queued.len(), 2, "one command per folder");
-        let programs = queued
+        let grouped = grouped(&queue, &workspace);
+        assert_eq!(grouped.len(), 2, "one command per folder");
+        let programs = grouped
             .iter()
             .find(|(class, _)| *class == ObjectClass::Program)
             .expect("programs are queued");
         assert_eq!(programs.1.len(), 2);
-        assert!(queued.iter().all(|(class, _)| *class != ObjectClass::Piano));
+        let slots: Vec<u32> = programs.1.iter().map(|item| item.at.slot).collect();
+        assert_eq!(slots, vec![0, 1], "in the order the queue holds them");
     }
 
-    /// A lone send names the asset it is sending, so the write can pay off that one
-    /// document's debt the way a batch pays off its own.
+    /// A send queues; the write happens when the queue is drained, and it names the
+    /// asset each item came from so the debt it pays is that one's.
     #[test]
-    fn sending_one_document_names_the_asset_it_sends() {
-        use crate::workspace::{Fresh, Origin};
-
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = crate::log::Log::default();
-        let mut tabs = Tabs::default();
-        let mut browser = Browser::default();
+    fn a_send_queues_and_the_drain_names_the_asset_it_writes() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
-
         let at = Location { bank: 6, slot: 1 };
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let bytes = program(&mut workspace, &mut log);
         let id = workspace.ingest(
             "Africa-Split.ne5p".into(),
-            Origin::Device {
+            crate::workspace::Origin::Device {
                 class: ObjectClass::Program,
                 at,
             },
             bytes,
             &mut log,
         );
-        workspace.mark_pending(id, true);
 
-        // The slot is empty in the scan, so nothing is asked and the put goes straight out.
-        apply(
-            &mut browser,
-            &mut Shell::default(),
+        let mut act = |acts, device: &mut Device, queue: &mut Queue| {
+            apply(
+                &mut browser,
+                &mut Shell::default(),
+                acts,
+                &mut workspace,
+                device,
+                &mut tabs,
+                queue,
+                &mut log,
+            )
+        };
+        // The slot is empty in the scan and a program carries no write warning, so
+        // nothing is asked.
+        act(
             vec![Act::Send {
                 id,
                 class: ObjectClass::Program,
                 at,
             }],
-            &mut workspace,
             &mut device,
-            &mut tabs,
-            &mut log,
+            &mut queue,
         );
-        let queued = device.queued().front().expect("a put was queued");
-        match queued {
-            DeviceCmd::Put { id: sending, .. } => assert_eq!(*sending, id),
+        assert_eq!(queue.ids(), vec![id], "queued rather than written");
+        assert!(device.queued().is_empty(), "and nothing has been asked for");
+
+        act(vec![Act::SendAll], &mut device, &mut queue);
+        match device.queued().front().expect("a batch was queued") {
+            DeviceCmd::SendAll { class, items } => {
+                assert_eq!(*class, ObjectClass::Program);
+                assert_eq!(
+                    items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                    vec![id]
+                );
+            }
             other => panic!("{}", other.label()),
         }
+        assert_eq!(queue.ids(), vec![id], "still owed until the write lands");
     }
 
-    /// Sending a folder is the batch the queue already runs: the same grouping into one
-    /// command per instrument folder, and the same refusal of anything that cannot be
-    /// written.
+    /// Sending a folder queues everything in it that came off a slot, and nothing that
+    /// has nowhere to go back to.
     #[test]
-    fn a_folder_sends_only_what_can_go_back_to_a_slot() {
-        use crate::workspace::{Fresh, Origin};
-
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx);
-        let mut log = crate::log::Log::default();
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
-        let at = |slot| Location { bank: 6, slot };
-        let mut ids = Vec::new();
+    fn a_folder_queues_only_what_can_go_back_to_a_slot() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
+        let folder = browser.folders.make();
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),
@@ -626,21 +651,32 @@ mod tests {
             // A piano is installed by the instrument, so it must not reach the queue.
             (ObjectClass::Piano, 0),
         ] {
-            ids.push(workspace.ingest(
+            let id = workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
-                Origin::Device {
+                crate::workspace::Origin::Device {
                     class,
                     at: at(slot),
                 },
                 bytes.clone(),
                 &mut log,
-            ));
+            );
+            browser.folders.file(id, Some(folder));
         }
         // Never off an instrument, so there is nowhere to send it back to.
-        ids.push(workspace.create(Fresh::Program, &mut log).unwrap());
+        let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.folders.file(fresh, Some(folder));
 
-        let queued = grouped(&ids, &workspace);
-        let classes: Vec<ObjectClass> = queued.iter().map(|(class, _)| *class).collect();
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SendFolder(folder)],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+        let classes: Vec<ObjectClass> = queue.entries().iter().map(|held| held.class).collect();
         assert_eq!(
             classes,
             vec![
@@ -649,10 +685,7 @@ mod tests {
                 ObjectClass::Live
             ]
         );
-        assert!(queued.iter().all(|(_, items)| items.len() == 1));
-        // A folder holding nothing sendable queues nothing at all: the piano, and the
-        // one that never came off an instrument.
-        assert!(grouped(&ids[3..], &workspace).is_empty());
+        assert!(!queue.holds(fresh), "it never came off a slot");
     }
 
     /// A double-click on a slot opens a view: a tab and a document, and no new row in
@@ -660,20 +693,10 @@ mod tests {
     #[test]
     fn opening_a_slot_does_not_put_it_on_this_computer() {
         use crate::device::DeviceEvent;
-        use crate::workspace::{Fresh, Origin};
+        use crate::workspace::Origin;
 
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = crate::log::Log::default();
-        let mut tabs = Tabs::default();
-        let mut browser = Browser::default();
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
         let at = Location { bank: 6, slot: 3 };
         let origin = Origin::Device {
             class: ObjectClass::Program,
@@ -686,7 +709,7 @@ mod tests {
             bytes,
             open: true,
         });
-        device.poll(&mut log, &mut workspace, &mut tabs);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
         let id = tabs.active().expect("a view opens in a tab");
         assert!(workspace.is_view(id));
@@ -705,6 +728,7 @@ mod tests {
             &mut workspace,
             &mut device,
             &mut tabs,
+            &mut queue,
             &mut log,
         );
         assert!(!workspace.is_view(id));
@@ -717,7 +741,7 @@ mod tests {
     /// avoid.
     #[test]
     fn a_new_folder_opens_its_editor_on_the_name_it_was_given() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let mut new_folder = |browser: &mut Browser| {
             apply(
                 browser,
@@ -726,6 +750,7 @@ mod tests {
                 &mut workspace,
                 &mut device,
                 &mut tabs,
+                &mut queue,
                 &mut log,
             );
             let rename = browser.rename.as_ref().expect("the editor is armed");
@@ -747,7 +772,7 @@ mod tests {
     /// will be drawn to close it, and the next folder to take its id would inherit it.
     #[test]
     fn removing_a_folder_mid_rename_takes_the_editor_with_it() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let mut act = |browser: &mut Browser, act| {
             apply(
                 browser,
@@ -756,6 +781,7 @@ mod tests {
                 &mut workspace,
                 &mut device,
                 &mut tabs,
+                &mut queue,
                 &mut log,
             )
         };
@@ -788,13 +814,8 @@ mod tests {
         use crate::device::DeviceEvent;
         use crate::workspace::Origin;
 
-        let (mut browser, mut workspace, mut device, mut tabs, mut log) = bench();
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
         let class = ObjectClass::Program;
         let at = Location { bank: 6, slot: 3 };
         device.pretend_scanned(class, 7, &["", "", "", "Africa Split"]);
@@ -805,7 +826,7 @@ mod tests {
             bytes,
             open: true,
         });
-        device.poll(&mut log, &mut workspace, &mut tabs);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         let first = tabs.active().expect("a view opened");
 
         // Another double-click on the same slot.
@@ -817,6 +838,7 @@ mod tests {
             &mut workspace,
             &mut device,
             &mut tabs,
+            &mut queue,
             &mut log,
         );
         assert!(device.queued().is_empty(), "nothing was read again");
@@ -835,6 +857,7 @@ mod tests {
             &mut workspace,
             &mut device,
             &mut tabs,
+            &mut queue,
             &mut log,
         );
         assert_eq!(device.queued().len(), 1);
@@ -873,12 +896,7 @@ mod tests {
     /// One button for the whole column, and it asks for every folder.
     #[test]
     fn a_sync_reads_every_folder_again() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = crate::log::Log::default();
-        let mut tabs = Tabs::default();
-        let mut browser = Browser::default();
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
 
         apply(
@@ -888,6 +906,7 @@ mod tests {
             &mut workspace,
             &mut device,
             &mut tabs,
+            &mut queue,
             &mut log,
         );
         for class in BROWSED {

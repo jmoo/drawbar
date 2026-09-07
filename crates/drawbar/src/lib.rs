@@ -22,6 +22,7 @@ pub mod log;
 pub mod newproject;
 pub mod note;
 pub mod panel;
+pub mod queue;
 pub mod shell;
 pub mod store;
 pub mod strings;

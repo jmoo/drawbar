@@ -18,6 +18,7 @@ use crate::browser::{cell_ink, Act, Browser, Item, Kind};
 use crate::device::{sendable, Device, DeviceState, BROWSED};
 use crate::filter::{Filter, Place};
 use crate::icon::{icon, painted, Glyph};
+use crate::queue::Queue;
 use crate::shell::{Page, Shell};
 use crate::strings::{folder, place, shown};
 use crate::tags::Tags;
@@ -594,6 +595,7 @@ impl Library {
         browser: &mut Browser,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         shell: &Shell,
     ) -> Vec<Act> {
         // The bar, the head and the rows are flush: the table's own lines are the only
@@ -603,7 +605,7 @@ impl Library {
         let held = rows(workspace, &device.state, browser.tags(), &shell.filter);
         let held = arrange(held, &shell.omnibox, self.by, self.order);
 
-        bar(ui, &held, workspace, browser.tags(), &shell.filter);
+        bar(ui, &held, queue, browser.tags(), &shell.filter);
         let picked: Vec<&Row> = held
             .iter()
             .filter(|row| browser.picked().holds(row.item))
@@ -731,12 +733,12 @@ impl Library {
 }
 
 /// 28 px: what the library is over, the tags narrowing it, and what wants attention.
-fn bar(ui: &mut egui::Ui, rows: &[Row], workspace: &Workspace, tags: &Tags, filter: &Filter) {
+fn bar(ui: &mut egui::Ui, rows: &[Row], queue: &Queue, tags: &Tags, filter: &Filter) {
     let differ = rows
         .iter()
         .filter(|row| row.where_ == Where::Both(Some(false)))
         .count();
-    let waiting = workspace.pending().len();
+    let waiting = queue.len();
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), BAR), egui::Sense::hover());
     let mut inner = ui.new_child(
@@ -1422,6 +1424,7 @@ mod tests {
         let mut tabs = Tabs::default();
         let mut browser = Browser::default();
         let mut library = Library::default();
+        let mut queue = Queue::default();
         let shell = Shell::default();
 
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
@@ -1463,7 +1466,8 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new())
                         .show(ctx, |ui| {
-                            let acts = library.ui(ui, &mut browser, &workspace, &device, &shell);
+                            let acts =
+                                library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
                             apply(
                                 &mut browser,
                                 &mut Shell::default(),
@@ -1471,6 +1475,7 @@ mod tests {
                                 &mut workspace,
                                 &mut device,
                                 &mut tabs,
+                                &mut queue,
                                 &mut log,
                             );
                         });

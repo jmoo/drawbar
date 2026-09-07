@@ -7,6 +7,7 @@
 
 use crate::base64;
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::workspace::{Origin, Saved, Workspace};
 use nord_usb::{Location, ObjectClass};
 
@@ -39,12 +40,17 @@ const BUDGET: usize = 3 * 1024 * 1024;
 /// must rate-limit writes because dragging mutates the list every frame.
 ///
 /// What is written comes back kept — see [`load`].
-pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, log: &mut Log) {
+pub fn save(
+    storage: &mut dyn eframe::Storage,
+    workspace: &Workspace,
+    queue: &Queue,
+    log: &mut Log,
+) {
     let mut out = format!("{VERSION}\n{}\n", workspace.next_id());
     let mut skipped = 0;
     let mut dropped = 0;
     for entity in workspace.entities() {
-        if !entity.kept && !crate::workspace::precious(entity) {
+        if !entity.kept && !crate::workspace::precious(entity, queue) {
             continue;
         }
         if entity.bytes.len() > MAX_ENTITY {
@@ -277,7 +283,7 @@ mod tests {
         before.create(Fresh::Settings, &mut log).unwrap();
 
         let mut store = Fake::default();
-        save(&mut store, &before, &mut log);
+        save(&mut store, &before, &Queue::default(), &mut log);
 
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
@@ -322,10 +328,11 @@ mod tests {
         let untouched = view(&mut before, 2, &mut log);
         let held = before.get(edited).unwrap().bytes.clone();
         before.replace_bytes(edited, [held, vec![0]].concat(), &mut log);
-        before.mark_pending(owed, true);
+        let mut queue = Queue::default();
+        queue.enqueue(before.get(owed).unwrap(), ObjectClass::Program, at(1), None);
 
         let mut store = Fake::default();
-        save(&mut store, &before, &mut log);
+        save(&mut store, &before, &queue, &mut log);
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
 
@@ -356,7 +363,7 @@ mod tests {
             &mut log,
         );
         let mut store = Fake::default();
-        save(&mut store, &before, &mut log);
+        save(&mut store, &before, &Queue::default(), &mut log);
         assert!(log.status().1.contains("too big"), "{}", log.status().1);
 
         let (mut after, mut log) = workspace();

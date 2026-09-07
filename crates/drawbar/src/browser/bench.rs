@@ -6,6 +6,7 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::{Held, Item, Kind, Onto};
 use super::Browser;
 use crate::device::Device;
+use crate::queue::Queue;
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
@@ -46,13 +47,14 @@ pub(in crate::browser) fn context() -> egui::Context {
 }
 
 /// Everything an act needs run against it.
-pub(in crate::browser) fn bench() -> (Browser, Workspace, Device, Tabs, crate::log::Log) {
+pub(in crate::browser) fn bench() -> (Browser, Workspace, Device, Tabs, Queue, crate::log::Log) {
     let ctx = context();
     (
         Browser::default(),
         Workspace::new(ctx.clone()),
         Device::new(ctx),
         Tabs::default(),
+        Queue::default(),
         crate::log::Log::default(),
     )
 }

@@ -18,6 +18,7 @@ use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::strings::{folder, place, shown};
 use crate::tabs::Tabs;
 use crate::workspace::{Origin, Workspace};
@@ -641,6 +642,9 @@ pub struct Device {
     /// The loaded slots the running command overwrites. A batch can touch one per
     /// class, so this is a list rather than a single slot.
     reselect: Vec<(ObjectClass, Location)>,
+    /// The class the running command writes into, so a refusal can be put against the
+    /// entry of the queue it stopped on.
+    writing: Option<ObjectClass>,
 }
 
 impl Device {
@@ -656,6 +660,7 @@ impl Device {
             reading: None,
             rescan: Vec::new(),
             reselect: Vec::new(),
+            writing: None,
         }
     }
 
@@ -772,6 +777,10 @@ impl Device {
                 .collect(),
             _ => Vec::new(),
         };
+        self.writing = match &cmd {
+            DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
+            _ => None,
+        };
         if let DeviceCmd::Select { class, at } = &cmd {
             self.state.selected.insert(class.to_raw(), *at);
         }
@@ -857,7 +866,13 @@ impl Device {
 
     /// Drain the worker's events into the cache, the local list and the tabs. Call once
     /// a frame.
-    pub fn poll(&mut self, log: &mut Log, workspace: &mut Workspace, tabs: &mut Tabs) {
+    pub fn poll(
+        &mut self,
+        log: &mut Log,
+        workspace: &mut Workspace,
+        tabs: &mut Tabs,
+        queue: &mut Queue,
+    ) {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 DeviceEvent::Connected(card) => {
@@ -890,6 +905,7 @@ impl Device {
                     self.reading = None;
                     self.rescan.clear();
                     self.reselect.clear();
+                    self.writing = None;
                 }
                 DeviceEvent::Started(what) => log.info(what),
                 DeviceEvent::Finished => {
@@ -904,6 +920,7 @@ impl Device {
                     for (class, bank) in std::mem::take(&mut self.rescan) {
                         self.pending.push_back(DeviceCmd::ScanBank { class, bank });
                     }
+                    self.writing = None;
                     self.state.in_flight = None;
                 }
                 DeviceEvent::ClassStatus {
@@ -976,7 +993,7 @@ impl Device {
                 }
                 // It landed, so it is no longer owed. Only that object: the rest of a
                 // batch is still waiting on its own write.
-                DeviceEvent::Sent { id, .. } => workspace.mark_pending(id, false),
+                DeviceEvent::Sent { id, .. } => queue.forget(id),
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
                     log.info(text);
@@ -985,6 +1002,9 @@ impl Device {
                     }
                 }
                 DeviceEvent::OpFailed(text) => {
+                    if let Some(class) = self.writing {
+                        queue.stumbled(class, &text);
+                    }
                     log.error(text);
                     match &self.state.in_flight {
                         Some(words) => {
@@ -1030,14 +1050,14 @@ mod tests {
             banks: Vec::new(),
             unit: Some(pretend_allocation_unit(class, 131_064)),
         });
-        device.poll(&mut log, &mut workspace, &mut tabs);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
         assert_eq!(
             device.state.allocation_unit(class).map(|unit| unit.get()),
             Some(131_064)
         );
 
         device.pretend(DeviceEvent::Disconnected { lost: false });
-        device.poll(&mut log, &mut workspace, &mut tabs);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
         assert_eq!(device.state.allocation_unit(class), None);
     }
 
@@ -1152,20 +1172,26 @@ mod tests {
             bytes,
             &mut log,
         );
-        workspace.mark_pending(landed, true);
-        workspace.mark_pending(still_owed, true);
+        let mut queue = Queue::default();
+        for (id, slot) in [(landed, 3), (still_owed, 4)] {
+            queue.enqueue(
+                workspace.get(id).unwrap(),
+                ObjectClass::Program,
+                at(slot),
+                None,
+            );
+        }
 
         device.pretend(DeviceEvent::Sent {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
         });
-        device.poll(&mut log, &mut workspace, &mut tabs);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
-        assert!(!workspace.get(landed).unwrap().pending, "it was written");
-        assert!(workspace.get(still_owed).unwrap().pending, "still waiting");
-        let owed: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-        assert_eq!(owed, vec![still_owed]);
+        assert!(!queue.holds(landed), "it was written");
+        assert!(queue.holds(still_owed), "still waiting");
+        assert_eq!(queue.ids(), vec![still_owed]);
     }
 
     /// A library id resolves to a name only where the instrument has actually said so:
