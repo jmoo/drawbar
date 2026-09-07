@@ -458,7 +458,7 @@ fn address(row: &Row) -> (bool, u32, u32, u32) {
 // ---- the consequence of a selection -----------------------------------------------
 
 /// What sending the picked rows would do, in one sentence.
-pub fn consequence(rows: &[&Row], device: &DeviceState) -> String {
+pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String {
     let mut going: Vec<(ObjectClass, Location)> =
         rows.iter().filter_map(|row| row.destination()).collect();
     going.sort_unstable_by_key(|(class, at)| (class.to_raw(), at.bank, at.slot));
@@ -475,6 +475,13 @@ pub fn consequence(rows: &[&Row], device: &DeviceState) -> String {
             1 => "1 slot occupied".to_string(),
             n => format!("{n} slots occupied"),
         });
+    }
+    let waiting = rows
+        .iter()
+        .filter(|row| matches!(row.item, Item::Local(id) if queue.holds(id)))
+        .count();
+    if waiting > 0 {
+        said.push(format!("{waiting} already waiting"));
     }
     for class in [ObjectClass::Piano, ObjectClass::Sample] {
         let short = rows
@@ -580,7 +587,7 @@ impl Library {
                 .resizable(false)
                 .frame(egui::Frame::new())
                 .show_inside(ui, |ui| {
-                    footer(ui, &picked, browser, &device.state, &mut acts)
+                    footer(ui, &picked, browser, &device.state, queue, &mut acts)
                 });
         }
         self.table(ui, &held, browser, workspace, device, &mut acts);
@@ -1008,6 +1015,7 @@ fn footer(
     picked: &[&Row],
     browser: &mut Browser,
     device: &DeviceState,
+    queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
     let locals: Vec<u64> = picked
@@ -1029,7 +1037,7 @@ fn footer(
                         .strong(),
                 );
                 ui.label(
-                    egui::RichText::new(consequence(picked, device))
+                    egui::RichText::new(consequence(picked, device, queue))
                         .text_style(ui_text())
                         .weak(),
                 );
@@ -1321,11 +1329,14 @@ mod tests {
     }
 
     /// The sentence the footer says: where the picked rows go, how many of those slots
-    /// are taken, and what nothing has named.
+    /// are taken, what is already waiting, and what nothing has named.
     #[test]
     fn the_footer_says_where_a_selection_goes_and_what_it_would_replace() {
         let ctx = egui::Context::default();
-        let mut device = Device::new(ctx);
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = crate::log::Log::default();
+        let mut queue = Queue::default();
         // Four destinations, two of them already holding something.
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "Squabble B"]);
 
@@ -1346,8 +1357,28 @@ mod tests {
         };
         let picked: Vec<&Row> = going.iter().collect();
         assert_eq!(
-            consequence(&picked, &device.state),
+            consequence(&picked, &device.state, &queue),
             "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not named"
+        );
+
+        // One of them is already in the queue, which the sentence says rather than
+        // counting it twice over.
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        going[3].item = Item::Local(id);
+        crate::queue::enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            ObjectClass::Program,
+            at(6, 3),
+        );
+        let picked: Vec<&Row> = going.iter().collect();
+        assert!(
+            consequence(&picked, &device.state, &queue).contains("1 already waiting"),
+            "{}",
+            consequence(&picked, &device.state, &queue)
         );
 
         // A row already on the instrument goes nowhere, so nothing is claimed for it.
@@ -1364,11 +1395,11 @@ mod tests {
             at: at(6, 0),
         };
         assert_eq!(
-            consequence(&only.iter().collect::<Vec<_>>(), &device.state),
+            consequence(&only.iter().collect::<Vec<_>>(), &device.state, &queue),
             "Nothing picked goes to the instrument."
         );
         assert_eq!(
-            consequence(&[], &device.state),
+            consequence(&[], &device.state, &queue),
             "Nothing picked goes to the instrument."
         );
     }
