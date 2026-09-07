@@ -4,9 +4,8 @@
 # touches, from the versions at the merge-base — so the run converges and the
 # job re-runs itself on every later push or retitle while the label is on.
 #
-# The push uses GITHUB_TOKEN, so it triggers no other workflows: fine, because
-# ci.yml's release job publishes from the merged result on master, not from
-# this branch.
+# The app token lets the pushed commit trigger CI and receive its own required
+# checks. A GITHUB_TOKEN push would leave those checks waiting on the new head.
 name: bump
 
 on:
@@ -23,18 +22,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write # cache-nix-action purges superseded caches
-      contents: write
+      contents: read
     steps:
       - name: same-repo branches only
         if: github.event.pull_request.head.repo.full_name != github.repository
         run: |
           echo "::error::cannot push to a fork — run scripts/bump.bash locally"
           exit 1
+      - name: mint an app token
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
       # The branch itself, not the merge ref: the bump commit is pushed to it.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0 # merge-base with the base branch, and the release tags
+          token: ${{ steps.token.outputs.token }}
       - uses: nixbuild/nix-quick-install-action@v35
         with:
           nix_conf: |

@@ -61,9 +61,23 @@
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             };
 
-            # `nix flake check`: formatting (treefmt, below) and clippy. Tests run inside
-            # the package builds — `nix build .#nord.all` is the other half of CI.
-            checks.clippy = pkgs.nord.clippy;
+            # Rust tests run in the package builds: `nix build .#nord.all`.
+            checks = {
+              bump =
+                pkgs.runCommand "check-bump"
+                  {
+                    nativeBuildInputs = with pkgs; [
+                      cargo
+                      git
+                      jq
+                    ];
+                  }
+                  ''
+                    bash ${./scripts}/check-bump.bash
+                    touch "$out"
+                  '';
+              clippy = pkgs.nord.clippy;
+            };
 
             legacyPackages = pkgs;
 

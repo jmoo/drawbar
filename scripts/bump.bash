@@ -91,19 +91,23 @@ else
     commits="$(commits_for "$crate" "$tag")"
     level="$(bump_level <<<"$commits")"
     [[ $level == none ]] && continue
-    new_version[$crate]="$(next_version "$(crate_version "$crate")" "$level")"
+    wanted="$(next_version "${tag#"$crate"-v}" "$level")"
+    version_at_least "$(crate_version "$crate")" "$wanted" && continue
+    new_version[$crate]="$wanted"
     reason[$crate]="$level: $(wc -l <<<"$commits" | tr -d ' ') commit(s) since $tag"
     bumped=$((bumped + 1))
   done
 fi
 
 # The version a dependent bumps from: in title mode the merge-base, so the run
-# converges; in catch-up mode the working tree.
+# converges; in catch-up mode the last release.
 base_version() {
   if [[ -n $merge_base ]]; then
     manifest_version_at "$merge_base" "$(crate_dir "$1")"
   else
-    crate_version "$1"
+    local tag
+    tag="$(latest_tag "$1")"
+    echo "${tag#"$1"-v}"
   fi
 }
 
@@ -117,7 +121,11 @@ while ((grew)); do
       [[ -z $dependent || -n ${new_version[$dependent]:-} ]] && continue
       [[ -z "$(latest_tag "$dependent")" ]] && continue
       dependent_level="$(max_level patch "$(unreleased_level "$dependent")")"
-      new_version[$dependent]="$(next_version "$(base_version "$dependent")" "$dependent_level")"
+      wanted="$(next_version "$(base_version "$dependent")" "$dependent_level")"
+      if [[ -z $merge_base ]] && version_at_least "$(crate_version "$dependent")" "$wanted"; then
+        continue
+      fi
+      new_version[$dependent]="$wanted"
       reason[$dependent]="$dependent_level: depends on $crate"
       [[ $dependent_level == patch ]] ||
         reason[$dependent]="$dependent_level: depends on $crate, and has unreleased $dependent_level commits"
