@@ -4,8 +4,9 @@ Parse and write **Clavia / Nord** keyboard binary file formats from Rust.
 
 This is the pure format-logic crate of the drawbar toolkit: the `CBIN` container
 (both header generations, each with its checksum), and per-model entity layouts
-declared once with `#[bitbody]`. It depends only on [`crcxx`] (plus `zip` behind
-the `bundle` feature for backup bundles) and does no USB, OS, or I/O beyond
+declared once with `#[bitbody]`. Its dependencies are [`crcxx`],
+[`thiserror`], and the matching `nord-bits-derive` crate (plus `zip` behind the
+`bundle` feature for backup bundles). It does no USB, OS, or I/O beyond
 `Read`/`Seek`/`Write` — so it's trivially testable against a specimen corpus and
 reusable by higher layers (a device/USB crate, a CLI) without dragging in a
 transport stack.
@@ -37,7 +38,7 @@ In brief:
   Electro 2 library, all carried verbatim. ZIP backup bundles parse behind the
   `bundle` feature (read-only).
 
-Everything that parses **round-trips byte-for-byte**, verified against a
+Writable entities **round-trip byte-for-byte**, verified against a
 change-one-knob specimen corpus. **Both `CBIN` container generations are read and
 written** — type-1 (crc32 over the body) and the older type-0 (trailing crc16 over
 the whole file), so factory files round-trip too — and `inspect` reports container
@@ -161,5 +162,6 @@ hardware these formats come from. All reverse engineering is of files produced b
 Nord hardware, for interoperability.
 
 [`crcxx`]: https://docs.rs/crcxx
+[`thiserror`]: https://docs.rs/thiserror
 [`Entity`]: https://docs.rs/nord-format
 [`formats`]: https://docs.rs/nord-format/latest/nord_format/formats/
