@@ -7,7 +7,8 @@ a minimal dependency library that can read and write Nord keyboard files on Linu
 It is suitable to back any project that supports FFI with Rust (e.g. JS via wasm, Python via PyO3).
 
 As well as being a reference implementation, this repo also serves as documentation of Nord file structure
-and protocols. Byte mapping tables are generated from code and can be browsed via rustdoc (`cargo doc --open`).
+and protocols. Byte mapping tables are generated from code and can be browsed via rustdoc
+(`cd crates && nix develop -c cargo doc --no-deps --open`).
 
 ## In this repo
 
@@ -38,20 +39,23 @@ This is still alpha software and should be used with caution. Drawbar is a black
 it does not lean on decompilation of Clavia software. Instead, protocols and formats are decoded by interaction
 with real Nord devices.
 
-Drawbar began as a project to reverse engineer the Nord Electro 5. It can now recognize most Clavia file types
-and read/write most stage models as well (Stage 2, 3, and 4) thanks to documentation created by other community
-reverse engineering efforts. It can also read and write most Nord sample files, including
+Drawbar began with the Nord Electro 5. Its program, live, song, and settings layouts are decoded,
+as are Stage 2, 3, and 4 programs and selected presets, using community documentation and specimen evidence.
+Many other formats are recognized and preserved verbatim without decoding their parameters;
+see the [format support tiers](crates/nord-format/README.md#what-it-handles).
+Sample support includes
 encoding v2/v3/v4 instruments that round-trip through this crate's decoder; v2 plays on an
-Electro 5, while v3/v4 are inferred from specimens. The USB protocol is also mostly
-understood and implemented, although only tested on one device.
+Electro 5, while v3/v4 are inferred from specimens. The
+[USB status](crates/nord-usb/README.md#status) lists implemented operations and their hardware validation.
 
-Only the Electro 5 has had thorough on device testing and validation, but all codecs are tested round-trip
-against a corpus of >10,000 real Nord file specimens found in the wild. This includes files from most Clavia products and
-captured replays of usb communication.
+Hardware validation has focused on the Electro 5. Public tests use self-generated fixtures and
+USB replay scripts; optional private corpus tests check byte-exact file round trips, field isolation,
+and captured protocol exchanges. Round-trip tests establish preservation of file bytes;
+they do not establish that every decoded parameter or newly encoded sound behaves correctly on hardware.
 
 ## Disclaimer
 
 Not affiliated with, authorized, or endorsed by Clavia DMI AB. (https://www.nordkeyboards.com)
 "Nord", "Clavia", and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
-hardware these formats come from. All Clavia / Nord artifacts included in this repo
-are synthetic test artifacts produced by the author of this repo.
+hardware these formats come from. Committed fixtures are self-generated files and
+protocol captures. Proprietary sound libraries and firmware are not distributed here.

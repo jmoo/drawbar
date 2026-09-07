@@ -92,7 +92,7 @@ done < <(crates_in_publish_order)
 if ((${#under_bumped[@]})); then
   echo "refusing to publish a version that understates its own changes:" >&2
   printf '  %s\n' "${under_bumped[@]}" >&2
-  echo "run scripts/bump.bash on master — catch-up mode bumps from the full history — then re-run" >&2
+  echo "run scripts/bump.bash on master — it bumps from the full history since each release tag — then re-run" >&2
   exit 1
 fi
 

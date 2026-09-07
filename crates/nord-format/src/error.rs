@@ -80,3 +80,16 @@ pub enum Error {
     #[error(transparent)]
     Zip(#[from] zip::result::ZipError),
 }
+
+/// A zeroed buffer of `len` bytes, reporting an allocation the platform cannot
+/// make instead of aborting the process on it.
+pub(crate) fn try_vec(len: usize) -> std::result::Result<Vec<u8>, ParseError> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| ParseError::OutOfBounds {
+            value: format!("{len} bytes"),
+            bound: "an allocation that fits memory".into(),
+        })?;
+    buf.resize(len, 0);
+    Ok(buf)
+}

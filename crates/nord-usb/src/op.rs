@@ -12,7 +12,7 @@ use crate::session::ReadWrite;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::wire::{
-    cmd, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
+    cmd, read_u32, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
     ProgramInfo, Service, Status,
 };
 
@@ -37,24 +37,23 @@ pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<
 /// Query every class worth reporting, one transaction each.
 ///
 /// Each class needs its own session because the class is fixed at `SESSION_OPEN`.
-/// A class that errors is skipped rather than failing the sweep — instruments differ
-/// in which classes they answer for.
+/// Two refusals are skipped rather than failing the sweep, because instruments differ
+/// in which classes they answer for: a refused `SESSION_OPEN` ([`Error::ClassRefused`])
+/// and a refused `STATUS`. Every other error, a refused `HELLO` included, propagates.
 pub async fn inventory<T: Transport>(transport: &mut T) -> Result<Vec<Status>> {
     let mut out = Vec::new();
     for class in ObjectClass::INVENTORY {
         let mut session = match Session::open(transport, class).await {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(Error::ClassRefused { .. }) => continue,
+            Err(e) => return Err(e),
         };
-        match status(&mut session).await {
-            Ok(s) => {
-                session.commit().await?;
-                out.push(s);
-            }
-            // A skipped class still owes the instrument its closing exchanges.
-            Err(_) => {
-                session.commit().await?;
-            }
+        let result = status(&mut session).await;
+        session.commit().await?;
+        match result {
+            Ok(s) => out.push(s),
+            Err(Error::DeviceStatus(_)) => {}
+            Err(e) => return Err(e),
         }
     }
     Ok(out)
@@ -228,14 +227,12 @@ async fn transfer_out<T: Transport, C>(
 }
 
 fn read_payload(payload: &[u8], at: Location, offset: u32, length: u32) -> Result<&[u8]> {
-    if payload.len() < 16 {
-        return Err(Error::Truncated {
-            got: payload.len(),
-            need: 16,
-        });
-    }
-    let word = |start| u32::from_be_bytes(payload[start..start + 4].try_into().unwrap());
-    let echoed = (word(0), word(4), word(8), word(12));
+    let echoed = (
+        read_u32(payload, 0)?,
+        read_u32(payload, 4)?,
+        read_u32(payload, 8)?,
+        read_u32(payload, 12)?,
+    );
     let expected = (at.bank, at.slot, offset, length);
     if echoed != expected {
         return Err(Error::Transport(format!(
@@ -282,30 +279,34 @@ async fn clean_library<T: Transport>(
         let resp = session
             .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
             .await?;
-        let p = resp.payload();
-        if p.len() >= 12 {
-            // Reply is `[requested, done, running]`. Ready is `running` returning to
-            // 0; `done` can end above the request, so the bar is clamped.
-            let requested = u32::from_be_bytes(p[0..4].try_into().unwrap());
-            let done = u32::from_be_bytes(p[4..8].try_into().unwrap());
-            let running = u32::from_be_bytes(p[8..12].try_into().unwrap());
-            if running == 0 {
-                if painted != Some(100) {
-                    session.notify(&ui::percent(100)).await?;
-                }
-                return Ok(());
+        let (requested, done, running) = cleaning_progress(resp.payload())?;
+        // Ready is `running` returning to 0; `done` can end above the request, so the
+        // bar is clamped.
+        if running == 0 {
+            if painted != Some(100) {
+                session.notify(&ui::percent(100)).await?;
             }
-            let pct = (done as u64 * 100 / requested.max(1) as u64).min(99) as u16;
-            if painted != Some(pct) {
-                session.notify(&ui::percent(pct)).await?;
-                painted = Some(pct);
-            }
+            return Ok(());
+        }
+        let pct = (done as u64 * 100 / requested.max(1) as u64).min(99) as u16;
+        if painted != Some(pct) {
+            session.notify(&ui::percent(pct)).await?;
+            painted = Some(pct);
         }
     }
     Err(Error::Transport(format!(
         "the library's cleaning pass did not report ready within {} polls",
         CLEANING_POLLS
     )))
+}
+
+/// The `[requested, done, running]` words a cleaning-progress reply carries.
+fn cleaning_progress(payload: &[u8]) -> Result<(u32, u32, u32)> {
+    Ok((
+        read_u32(payload, 0)?,
+        read_u32(payload, 4)?,
+        read_u32(payload, 8)?,
+    ))
 }
 
 /// Make room for `blocks` storage blocks in a library partition, in the session that is
@@ -934,5 +935,11 @@ mod tests {
             parse_chunk("NORD_READ_CHUNK", None, READ_CHUNK.into()).unwrap(),
             READ_CHUNK.into()
         );
+    }
+
+    #[test]
+    fn cleaning_progress_requires_all_three_words() {
+        let err = cleaning_progress(&[0; 11]).expect_err("a partial cleaning reply");
+        assert!(matches!(err, Error::Truncated { got: 11, need: 12 }));
     }
 }

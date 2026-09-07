@@ -111,11 +111,3 @@ version_at_least() {
   done
   return 0
 }
-
-# The `[package] version` of the manifest at `$2/Cargo.toml` as of ref `$1`;
-# empty when the crate does not exist there.
-manifest_version_at() {
-  git -C "$repo" show "$1:$2/Cargo.toml" 2>/dev/null |
-    awk -F'"' '/^\[/ { in_package = ($0 == "[package]") }
-               in_package && /^version = / { print $2; exit }'
-}

@@ -150,7 +150,13 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
             ),
         );
     }
-    row("name:", format!("none {}", ui.dim("(files store no name)")));
+    row(
+        "name:",
+        format!(
+            "none {}",
+            ui.dim("(the CBIN header has no name; inspect reads the body)")
+        ),
+    );
     row("format:", format);
     row("version:", read.header.version.to_string());
     row(

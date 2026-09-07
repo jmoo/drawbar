@@ -1,6 +1,6 @@
 use thiserror::Error as ThisError;
 
-use crate::wire::Location;
+use crate::wire::{Location, ObjectClass};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -18,6 +18,11 @@ pub enum Error {
 
     #[error("device reported status {0:#x}")]
     DeviceStatus(u32),
+
+    /// The device refused `SESSION_OPEN` for this class: it does not serve the class.
+    /// A refusal of any other command stays a [`Error::DeviceStatus`].
+    #[error("the device refused a session for {class:?} with status {status:#x}")]
+    ClassRefused { class: ObjectClass, status: u32 },
 
     #[error("expected a response to command {expected:#x}, got {got:#x}")]
     UnexpectedResponse { expected: u32, got: u32 },
@@ -81,6 +86,7 @@ impl Error {
     pub fn expect_kind(&self) -> String {
         match self {
             Error::DeviceStatus(code) => format!("device-status {code:#x}"),
+            Error::ClassRefused { status, .. } => format!("class-refused {status:#x}"),
             Error::UnexpectedResponse { .. } => "unexpected-response".into(),
             Error::UnexpectedLocation { .. } => "unexpected-location".into(),
             Error::UnexpectedPartition { .. } => "unexpected-partition".into(),

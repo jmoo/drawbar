@@ -48,12 +48,13 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
         }
     };
 
-    // An empty report means no class answered, not that every class is empty.
+    // An empty report means every class refused, not that every class is empty: a
+    // failed connection is an error of its own and never arrives here.
     if report.is_empty() {
         return Err(
-            "no object class answered — either the instrument is not in a usable \
-             session state (a power cycle clears it), or the connection failed. \
-             `nord device info` shows what is on the bus."
+            "every object class refused — the instrument is not in a usable session \
+             state, and a power cycle clears it. `nord device info` shows what is on \
+             the bus."
                 .into(),
         );
     }

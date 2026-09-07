@@ -50,6 +50,7 @@ failed: a section that says nothing expects `ok`.
 |---|---|
 | `ok` | the operation and its closing exchanges succeeded |
 | `err device-status <code>` | the device refused it with exactly that status (`0x15`, `1`) |
+| `err class-refused <code>` | the device refused a session for the class with that status |
 | `err unexpected-response` | a reply answered the wrong command |
 | `err unexpected-location` | a reply echoed the wrong bank or slot |
 | `err unexpected-partition` | a bank table echoed the wrong partition |

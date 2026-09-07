@@ -4,10 +4,10 @@
 //!
 //! # How far each format goes
 //!
-//! Every format reads and writes byte-exactly — `to_bytes(from_stream(x)) == x` —
+//! Writable formats round-trip byte-exactly — `to_bytes(from_stream(x)) == x` —
 //! and a read verifies its container: CBIN header and checksum for the CBIN
-//! formats, the envelope for the SysEx/MIDI carriers. What differs is how much of
-//! the body decodes, in three tiers:
+//! formats, the envelope for the SysEx/MIDI carriers. Archives are read-only.
+//! What differs is how much of the body decodes, in three tiers:
 //!
 //! - **Decoded** — the body is a bit-mapped struct of named fields. The struct's
 //!   own doc carries its byte map, a read gates on the schema versions the
@@ -16,10 +16,10 @@
 //!   live slot, song and settings ([`ne5`]); the Stage 2, 3 and 4 programs and
 //!   live slots ([`ns2`], [`ns3`], [`ns4`]); the Stage 3 synth preset; and the
 //!   Stage 4 synth, piano and organ presets.
-//! - **Structurally decoded** — the body's framing decodes and is editable, but
-//!   the payloads stay verbatim: sample instruments ([`nsmp`] — section chain,
-//!   zones and stroke metadata, never the audio) and piano libraries ([`npno`] —
-//!   the CNSP prefix over a verbatim body).
+//! - **Structurally decoded** — the body's framing decodes and is editable; sample
+//!   instruments ([`nsmp`] — section chain, zones, stroke metadata, and encoded
+//!   audio) expose decoded audio on request, while piano libraries ([`npno`] —
+//!   the CNSP prefix) keep their body verbatim.
 //! - **Container-verified stubs** — everything else: body kept verbatim, waiting
 //!   to be reverse-engineered. Each stub module's doc records what is known of it.
 //!

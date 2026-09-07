@@ -328,7 +328,7 @@ impl ProgramInfo {
 /// Fixed-size field block trailing each partition record.
 const PARTITION_FIELDS: usize = 29;
 
-fn read_u32(buf: &[u8], at: usize) -> Result<u32> {
+pub(crate) fn read_u32(buf: &[u8], at: usize) -> Result<u32> {
     let end = at.checked_add(4).ok_or(Error::Truncated {
         got: buf.len(),
         need: usize::MAX,

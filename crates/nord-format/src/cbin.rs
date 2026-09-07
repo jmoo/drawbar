@@ -30,7 +30,7 @@
 //! belongs to the body type.
 
 use crate::crc::{Crc16Stream, Crc32Stream};
-use crate::error::{Error, ParseError};
+use crate::error::{try_vec, Error, ParseError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub const MAGIC: &[u8; 4] = b"CBIN";
@@ -411,13 +411,11 @@ pub struct RawBody(pub Vec<u8>);
 
 impl Body for RawBody {
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<RawBody, Error> {
-        let len = usize::try_from(r.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the body is too large for this platform",
-            )
+        let len = usize::try_from(r.len()).map_err(|_| ParseError::OutOfBounds {
+            value: format!("{} body bytes", r.len()),
+            bound: "a length that fits this platform's usize".into(),
         })?;
-        let mut bytes = vec![0u8; len];
+        let mut bytes = try_vec(len)?;
         r.read_exact(&mut bytes)?;
         Ok(RawBody(bytes))
     }
