@@ -109,12 +109,8 @@ async fn execute<T: Transport>(
         // Handled by `run`; the transport is closed by the caller, which owns it.
         DeviceCmd::Disconnect => Ok(None),
 
-        DeviceCmd::ScanBank {
-            class,
-            bank,
-            slots: capacity,
-        } => {
-            let slots = scan_bank(device, class, bank, capacity)
+        DeviceCmd::ScanBank { class, bank } => {
+            let slots = scan_bank(device, class, bank)
                 .await
                 .map_err(spoil(gone, None))?;
             let filled = slots.iter().filter(|s| s.is_some()).count();
@@ -494,14 +490,32 @@ const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 /// Host safety limit for one complete class scan, not an instrument capacity.
 const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
-/// Scan the declared capacity, or scan to the device boundary when it reported none.
+/// Scan the capacity the instrument declares for this bank, or to the device boundary
+/// where it declared the unbounded sentinel.
+///
+/// The capacity comes from the [`Device`]'s own geometry rather than from the UI's cache
+/// of it: a rescan after a mutation runs before the class has necessarily been walked,
+/// and walking a bounded bank as if it were open costs one `INFO` per address up to the
+/// host budget.
 async fn scan_bank<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     bank: u32,
-    slots: Option<u32>,
 ) -> Result<Vec<Option<ProgramInfo>>, Error> {
-    if slots.is_some_and(|capacity| capacity > MOST_OCCUPIED) {
+    let declared = device
+        .geometry()
+        .await?
+        .banks(class)?
+        .iter()
+        .find(|held| held.index + 1 == bank)
+        .ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "the instrument declares no bank {bank} in {}",
+                class.label()
+            ))
+        })?;
+    let capacity = declared.is_bounded().then_some(declared.slots);
+    if capacity.is_some_and(|capacity| capacity > MOST_OCCUPIED) {
         return Err(Error::ScanLimit {
             bank: bank.saturating_sub(1),
             limit: MOST_OCCUPIED,
@@ -510,7 +524,7 @@ async fn scan_bank<T: Transport>(
     device
         .read(class, async |s| {
             s.set_read_limit(SCAN_READ_LIMIT);
-            match slots {
+            match capacity {
                 Some(capacity) => walk_bank(s, bank, capacity).await,
                 None => walk_open_bank(s, bank, MOST_OCCUPIED).await,
             }
@@ -601,7 +615,11 @@ async fn scan_class<T: Transport>(
                         None => walk_open_bank(s, planned.bank.get(), remaining).await?,
                     },
                 };
-                remaining -= slots.len() as u32;
+                let taken = u32::try_from(slots.len()).unwrap_or(u32::MAX);
+                remaining = remaining.checked_sub(taken).ok_or(Error::ScanLimit {
+                    bank: planned.bank.get() - 1,
+                    limit: MOST_OCCUPIED,
+                })?;
                 items += slots.iter().filter(|slot| slot.is_some()).count();
                 emit.send(DeviceEvent::BankScanned {
                     class,
@@ -1665,19 +1683,39 @@ mod wire_tests {
 
     #[test]
     fn an_oversized_bank_scan_is_refused_before_slot_reads() {
-        let mut device = Puppet::new(1);
+        let mut device = Puppet::stocked(&[("Bank 1", MOST_OCCUPIED + 1)], &[]);
         let (flow, events) = drive(
             &mut device,
             DeviceCmd::ScanBank {
                 class: ObjectClass::Program,
                 bank: 1,
-                slots: Some(MOST_OCCUPIED + 1),
             },
         );
 
         assert!(flow == Flow::Continue);
         assert!(refused(events).contains("cannot be scanned completely"));
         assert_eq!(counted(&device, cmd::INFO), 0);
+    }
+
+    #[test]
+    fn a_rescan_takes_the_banks_capacity_from_the_instrument() {
+        let at = Location { bank: 0, slot: 1 };
+        let mut device = Puppet::stocked(&[("Bank 1", 4)], &[(at, "Africa Split")]);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::ScanBank {
+                class: ObjectClass::Program,
+                bank: 1,
+            },
+        );
+
+        assert!(flow == Flow::Continue);
+        assert_eq!(
+            scanned(events),
+            vec![(1, vec![None, Some("Africa Split".to_string()), None, None])],
+            "the declared four slots, not a walk to the host budget"
+        );
+        assert_eq!(counted(&device, cmd::INFO), 4);
     }
 
     #[test]
@@ -1688,7 +1726,6 @@ mod wire_tests {
             DeviceCmd::ScanBank {
                 class: ObjectClass::Program,
                 bank: 1,
-                slots: Some(2),
             },
         );
 

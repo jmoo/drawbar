@@ -672,11 +672,11 @@ pub async fn occupied_slots<T: Transport, C>(
             slot: SLOT_BOUNDARY,
         };
         let mut previous = None;
+        let limit = match bank.is_bounded() {
+            true => bank.slots,
+            false => Bank::UNBOUNDED,
+        };
         while let Some(next) = next_occupied(session, at).await? {
-            let limit = match bank.is_bounded() {
-                true => bank.slots.min(Bank::UNBOUNDED),
-                false => Bank::UNBOUNDED,
-            };
             let advanced = next.bank == bank.index
                 && next.slot < limit
                 && previous.is_none_or(|slot| next.slot > slot);

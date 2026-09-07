@@ -61,8 +61,6 @@ pub enum DeviceCmd {
     ScanBank {
         class: ObjectClass,
         bank: u32,
-        /// The capacity the device declared for it, `None` where it declared none.
-        slots: Option<u32>,
     },
     SlotInfo {
         class: ObjectClass,
@@ -422,17 +420,6 @@ impl DeviceState {
             .name
             .trim();
         (!name.is_empty()).then_some(name)
-    }
-
-    /// How many slots the device says a bank holds. `None` where it did not say, or
-    /// where it answered the sentinel the unbounded library views carry.
-    pub fn slots_in(&self, class: ObjectClass, bank: u32) -> Option<u32> {
-        self.geometry
-            .get(&class.to_raw())?
-            .iter()
-            .find(|held| held.index + 1 == bank)
-            .filter(|held| held.is_bounded())
-            .map(|held| held.slots)
     }
 
     /// The slot the panel had loaded in a class when it was last read.
@@ -854,9 +841,7 @@ impl Device {
                         self.pending.push_back(DeviceCmd::Select { class, at });
                     }
                     for (class, bank) in std::mem::take(&mut self.rescan) {
-                        let slots = self.state.slots_in(class, bank);
-                        self.pending
-                            .push_back(DeviceCmd::ScanBank { class, bank, slots });
+                        self.pending.push_back(DeviceCmd::ScanBank { class, bank });
                     }
                     self.state.in_flight = None;
                 }
