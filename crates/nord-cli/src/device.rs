@@ -743,7 +743,7 @@ pub fn send(
         transact(
             &mut device,
             format!("{} delete {}", noun(class), addr(at)),
-            |d| nord_usb::block_on(d.destructive(class, async |s| usb_op::delete(s, at).await)),
+            |d| nord_usb::block_on(delete_for_replacement(d, class, at)),
         )
         .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
     }
@@ -867,6 +867,18 @@ fn rescue(
             backup.len(),
         ),
     }
+}
+
+/// Validate the write allocation before removing an occupant that may need restoring.
+async fn delete_for_replacement<T: Transport>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+    at: Location,
+) -> nord_usb::Result<()> {
+    device.geometry().await?.allocation_unit(class)?;
+    device
+        .destructive(class, async |s| usb_op::delete(s, at).await)
+        .await
 }
 
 /// What a failed write left in the slot, for the line that reports it.
@@ -1769,6 +1781,61 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_refuses_unusable_geometry_before_deleting() {
+        use nord_usb::transport::{Direction, ReplayTransport, Script};
+        use nord_usb::wire::{cmd, Message, Partition, Service};
+
+        let script = Script::parse(include_str!(
+            "../../nord-usb/tests/scripts/device/geometry.script"
+        ))
+        .unwrap();
+        for class in [ObjectClass::Program, ObjectClass::Unknown(9)] {
+            let mut steps = script.steps();
+            for step in &mut steps {
+                if step.direction != Direction::In {
+                    continue;
+                }
+                let mut reply = Message::decode_response(&step.bytes).unwrap();
+                if reply.service != Service::Program || reply.command != cmd::PARTITIONS + 1 {
+                    continue;
+                }
+                let partitions = Partition::decode_all(&reply).unwrap();
+                reply.args = vec![0, 0, 0, 0, partitions.len() as u8];
+                for mut partition in partitions {
+                    if partition.index == ObjectClass::Program.to_raw() {
+                        partition.fields[..4].fill(0);
+                    }
+                    reply
+                        .args
+                        .extend_from_slice(&(partition.name.len() as u32).to_be_bytes());
+                    reply.args.extend_from_slice(partition.name.as_bytes());
+                    reply.args.extend_from_slice(&partition.fields);
+                }
+                step.bytes = reply.encode();
+            }
+            let mut device = Device::new(ReplayTransport::new(steps));
+            nord_usb::block_on(async {
+                device
+                    .geometry()
+                    .await
+                    .expect("the tables themselves are readable");
+                let error =
+                    delete_for_replacement(&mut device, class, Location { bank: 0, slot: 0 })
+                        .await
+                        .expect_err("an unusable write allocation must leave the occupant alone");
+                assert!(
+                    matches!(error, nord_usb::Error::InvalidArgument(_)),
+                    "{class:?}: {error}"
+                );
+            });
+            assert!(
+                device.transport().is_exhausted(),
+                "{class:?}: the geometry session must close"
+            );
+        }
+    }
 
     /// The rescue file is the last copy of a program that no longer exists on the
     /// instrument, so it has to be named something a person can act on.
