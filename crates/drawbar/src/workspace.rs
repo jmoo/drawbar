@@ -599,6 +599,12 @@ impl Workspace {
     }
 
     /// Counts changes to the list, not to any one asset.
+    /// The context the app draws in, for the acts that ask the window itself for
+    /// something rather than the list.
+    pub fn ctx(&self) -> &egui::Context {
+        &self.ctx
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }

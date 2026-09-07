@@ -208,6 +208,24 @@ pub(crate) fn unescape(text: &str) -> String {
     out
 }
 
+/// A store in a map, for the tests that need one to write into and read back.
+#[cfg(test)]
+#[derive(Default)]
+pub struct Fake(std::collections::HashMap<String, String>);
+
+#[cfg(test)]
+impl eframe::Storage for Fake {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+
+    fn flush(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,20 +256,6 @@ mod tests {
         for name in ["plain", "with\ttab", "with\nnewline", "back\\slash", "\\t"] {
             assert_eq!(unescape(&escape(name)), name);
         }
-    }
-
-    /// A store that holds nothing readable is a store, not a crash.
-    #[derive(Default)]
-    struct Fake(std::collections::HashMap<String, String>);
-
-    impl eframe::Storage for Fake {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-        fn set_string(&mut self, key: &str, value: String) {
-            self.0.insert(key.to_string(), value);
-        }
-        fn flush(&mut self) {}
     }
 
     fn workspace() -> (Workspace, Log) {

@@ -486,6 +486,7 @@ impl Browser {
 mod tests {
     use super::*;
     use crate::browser::bench::bench;
+    use crate::shell::Shell;
     use crate::tabs::Tabs;
     use crate::workspace::Fresh;
 
@@ -539,6 +540,7 @@ mod tests {
                     let acts = browser.ui(ui, &workspace, &device);
                     apply(
                         &mut browser,
+                        &mut Shell::default(),
                         acts,
                         &mut workspace,
                         &mut device,

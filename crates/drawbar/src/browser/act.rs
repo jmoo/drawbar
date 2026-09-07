@@ -10,6 +10,7 @@ use super::drag::Item;
 use super::Browser;
 use crate::device::{write_warning, Device, DeviceCmd, Outgoing};
 use crate::log::Log;
+use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -54,6 +55,8 @@ pub enum Act {
     },
     /// Write everything waiting, grouped by folder. Already agreed to.
     SendAll,
+    /// Put the "send everything waiting" question, which `SendAll` is the answer to.
+    AskSendAll,
     /// The same as a Send, already agreed to. Nothing asks twice.
     Replace {
         id: u64,
@@ -90,13 +93,28 @@ pub enum Act {
     },
     Remove(u64),
     Save(u64),
+    /// Back to the bytes the tab opened with.
+    Revert(u64),
+    /// Bring a view of the centre forward.
+    ShowTab(Spot),
+    /// Shut whatever the centre is on.
+    CloseTab,
+    ToggleDock(Dock),
+    /// Open the bottom dock on one of its pages.
+    ShowPage(Page),
+    /// The whole activity log onto the clipboard.
+    CopyLog,
+    /// Ask the window to close. Never reached on the web, where the tab is the window.
+    Quit,
     /// Nothing happened, and this is why.
     Refused(String),
 }
 
 /// Run what the browser asked for.
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     browser: &mut Browser,
+    shell: &mut Shell,
     acts: Vec<Act>,
     workspace: &mut Workspace,
     device: &mut Device,
@@ -178,6 +196,14 @@ pub fn apply(
                 let waiting: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
                 send_batch(&waiting, workspace, device, log);
             }
+            Act::AskSendAll => {
+                let waiting: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
+                let title = match waiting.len() {
+                    1 => "Send 1 sound to the instrument?".to_string(),
+                    n => format!("Send {n} sounds to the instrument?"),
+                };
+                browser.ask_send(workspace, device, &waiting, title, Act::SendAll);
+            }
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
@@ -202,6 +228,19 @@ pub fn apply(
                 workspace.remove(id, log);
             }
             Act::Save(id) => workspace.export(id),
+            Act::Revert(id) => workspace.restore_bytes(id, tabs.opened(id).to_vec(), log),
+            Act::ShowTab(spot) => tabs.show(spot),
+            Act::CloseTab => {
+                if let Some(spot) = tabs.showing() {
+                    tabs.close(spot);
+                }
+            }
+            Act::ToggleDock(dock) => shell.toggle(dock),
+            Act::ShowPage(page) => shell.show_page(page),
+            Act::CopyLog => workspace.ctx().copy_text(log.transcript()),
+            Act::Quit => workspace
+                .ctx()
+                .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
         }
     }
@@ -365,7 +404,7 @@ mod tests {
     use crate::browser::bench::bench;
     use crate::device::BROWSED;
     use crate::strings::folder;
-    use crate::tabs::{Spot, Tabs};
+    use crate::tabs::Tabs;
     use eframe::egui;
 
     /// A batch is one command per folder, because a session belongs to a folder — and
@@ -449,6 +488,7 @@ mod tests {
         // The slot is empty in the scan, so nothing is asked and the put goes straight out.
         apply(
             &mut browser,
+            &mut Shell::default(),
             vec![Act::Send {
                 id,
                 class: ObjectClass::Program,
@@ -566,6 +606,7 @@ mod tests {
 
         apply(
             &mut browser,
+            &mut Shell::default(),
             vec![Act::Keep(id)],
             &mut workspace,
             &mut device,
@@ -586,6 +627,7 @@ mod tests {
         let mut new_folder = |browser: &mut Browser| {
             apply(
                 browser,
+                &mut Shell::default(),
                 vec![Act::NewFolder],
                 &mut workspace,
                 &mut device,
@@ -615,6 +657,7 @@ mod tests {
         let mut act = |browser: &mut Browser, act| {
             apply(
                 browser,
+                &mut Shell::default(),
                 vec![act],
                 &mut workspace,
                 &mut device,
@@ -675,6 +718,7 @@ mod tests {
         tabs.close(Spot::Document(first));
         apply(
             &mut browser,
+            &mut Shell::default(),
             vec![Act::Open(Item::Slot { class, at })],
             &mut workspace,
             &mut device,
@@ -689,6 +733,7 @@ mod tests {
         let elsewhere = Location { bank: 6, slot: 4 };
         apply(
             &mut browser,
+            &mut Shell::default(),
             vec![Act::Open(Item::Slot {
                 class,
                 at: elsewhere,
@@ -744,6 +789,7 @@ mod tests {
 
         apply(
             &mut browser,
+            &mut Shell::default(),
             vec![Act::Resync],
             &mut workspace,
             &mut device,

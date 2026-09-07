@@ -1,8 +1,8 @@
-//! The app shell: theme, the three regions, and the routing between them.
+//! The app: the theme both faces share, and the routing between the regions.
 //!
-//! The sidebar is the browser — this computer and the instrument. The centre is a tab
-//! per open document. The bottom is one line of plain words, which opens into the full
-//! activity log when there is a reason to read it.
+//! The regions themselves — the title bar, the toolbar, the three docks, the status
+//! bar — are [`crate::shell`]; [`DrawbarApp::update`] is the order they claim space in
+//! and nothing else.
 
 use eframe::egui;
 
@@ -10,7 +10,8 @@ use crate::browser::{self, Browser};
 use crate::device::Device;
 use crate::document::Document;
 use crate::log::Log;
-use crate::tabs::Tabs;
+use crate::shell::Shell;
+use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
 
 /// A theme-specific success color with enough contrast for small text.
@@ -62,7 +63,7 @@ pub enum ThemeChoice {
 
 impl ThemeChoice {
     /// Where the choice is kept between sessions.
-    const KEY: &'static str = "drawbar.theme";
+    pub(crate) const KEY: &'static str = "drawbar.theme";
 
     fn read(text: &str) -> ThemeChoice {
         match text {
@@ -72,7 +73,7 @@ impl ThemeChoice {
         }
     }
 
-    fn stored(self) -> &'static str {
+    pub(crate) fn stored(self) -> &'static str {
         match self {
             ThemeChoice::System => "system",
             ThemeChoice::Light => "light",
@@ -80,7 +81,7 @@ impl ThemeChoice {
         }
     }
 
-    fn next(self) -> ThemeChoice {
+    pub(crate) fn next(self) -> ThemeChoice {
         match self {
             ThemeChoice::System => ThemeChoice::Light,
             ThemeChoice::Light => ThemeChoice::Dark,
@@ -88,9 +89,8 @@ impl ThemeChoice {
         }
     }
 
-    /// ⚠️ A word, not a sun or a moon: the bundled fonts have no glyph for either, and a
-    /// missing one renders as an empty box.
-    fn label(self) -> &'static str {
+    /// The three words beside the sun or the moon.
+    pub(crate) fn label(self) -> &'static str {
         match self {
             ThemeChoice::System => "Theme: auto",
             ThemeChoice::Light => "Theme: light",
@@ -98,7 +98,7 @@ impl ThemeChoice {
         }
     }
 
-    fn hint(self) -> &'static str {
+    pub(crate) fn hint(self) -> &'static str {
         match self {
             ThemeChoice::System => "following the system — click for light",
             ThemeChoice::Light => "held light — click for dark",
@@ -106,7 +106,7 @@ impl ThemeChoice {
         }
     }
 
-    fn preference(self) -> egui::ThemePreference {
+    pub(crate) fn preference(self) -> egui::ThemePreference {
         match self {
             ThemeChoice::System => egui::ThemePreference::System,
             ThemeChoice::Light => egui::ThemePreference::Light,
@@ -126,13 +126,14 @@ pub fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
 }
 
 pub struct DrawbarApp {
-    workspace: Workspace,
-    device: Device,
-    browser: Browser,
-    tabs: Tabs,
-    document: Document,
-    log: Log,
-    theme: ThemeChoice,
+    pub(crate) workspace: Workspace,
+    pub(crate) device: Device,
+    pub(crate) browser: Browser,
+    pub(crate) shell: Shell,
+    pub(crate) tabs: Tabs,
+    pub(crate) document: Document,
+    pub(crate) log: Log,
+    pub(crate) theme: ThemeChoice,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last caught up, on egui's own clock.
@@ -147,9 +148,10 @@ impl DrawbarApp {
         // session lands on this app's own colours rather than egui's defaults.
         cc.egui_ctx.set_visuals_of(egui::Theme::Dark, dark());
         cc.egui_ctx.set_visuals_of(egui::Theme::Light, light());
-        // Metrics live on the style, not on either face, so the theme swap moves
-        // colours and nothing else.
-        cc.egui_ctx.style_mut(metrics);
+        // ⚠️ Both faces, not the one showing: egui keeps a `Style` per theme, and a
+        // face that never learned the named text styles panics the frame that resolves
+        // one.
+        cc.egui_ctx.all_styles_mut(metrics);
         let theme = cc
             .storage
             .and_then(|storage| storage.get_string(ThemeChoice::KEY))
@@ -159,6 +161,7 @@ impl DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
             browser: Browser::default(),
+            shell: Shell::default(),
             tabs: Tabs::default(),
             document: Document::default(),
             log: Log::default(),
@@ -169,6 +172,7 @@ impl DrawbarApp {
         if let Some(storage) = cc.storage {
             crate::store::load(storage, &mut app.workspace, &mut app.log);
             app.browser.restore(storage);
+            app.shell.restore(storage);
             // Both stores are read; only now does the grouping know what survived.
             app.browser.settle(&app.workspace);
         }
@@ -236,49 +240,6 @@ impl DrawbarApp {
         self.saved = self.workspace.revision();
         self.saved_at = now;
     }
-
-    /// One line of plain words, and the whole log behind it.
-    fn status_strip(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status")
-            .resizable(self.log.open)
-            .default_height(if self.log.open { 200.0 } else { 28.0 })
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let line = match &self.device.state.in_flight {
-                        Some(words) => {
-                            ui.spinner();
-                            egui::RichText::new(&words.doing)
-                        }
-                        None => {
-                            let (level, text) = self.log.status();
-                            egui::RichText::new(text).color(level.color(ui.visuals()))
-                        }
-                    };
-                    if ui
-                        .add(egui::Label::new(line).sense(egui::Sense::click()))
-                        .clicked()
-                    {
-                        self.log.open = !self.log.open;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = match self.log.open {
-                            true => "Hide details",
-                            false => "Details",
-                        };
-                        if ui.small_button(label).clicked() {
-                            self.log.open = !self.log.open;
-                        }
-                        if self.log.open && ui.small_button("Clear").clicked() {
-                            self.log.clear();
-                        }
-                    });
-                });
-                if self.log.open {
-                    ui.separator();
-                    self.log.ui(ui);
-                }
-            });
-    }
 }
 
 impl eframe::App for DrawbarApp {
@@ -295,6 +256,7 @@ impl eframe::App for DrawbarApp {
         // Not written from the frame that changed it, the way the theme is: a divider
         // moves on every frame of a drag, and the whole store is rewritten each time.
         self.browser.keep(storage);
+        self.shell.keep(storage);
         self.saved = self.workspace.revision();
     }
 
@@ -316,79 +278,19 @@ impl eframe::App for DrawbarApp {
             self.tabs.open(made, &self.workspace);
         }
 
-        egui::TopBottomPanel::top("title").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("drawbar");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button(self.theme.label())
-                        .on_hover_text(self.theme.hint())
-                        .clicked()
-                    {
-                        self.theme = self.theme.next();
-                        ctx.set_theme(self.theme.preference());
-                        // Save immediately; eframe persistence otherwise waits for another frame.
-                        if let Some(storage) = frame.storage_mut() {
-                            storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
-                        }
-                    }
-                });
-            });
-        });
-
-        self.status_strip(ctx);
-
+        // Outside in. A panel claims its space from what the ones before it left.
         let mut acts = Vec::new();
-        egui::SidePanel::left("places")
-            .resizable(true)
-            .default_width(520.0)
-            .show(ctx, |ui| {
-                acts = self.browser.ui(ui, &self.workspace, &self.device);
-            });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.tabs.ui(ui, &self.workspace, &mut acts);
-            ui.separator();
-            let Some(id) = self.tabs.active() else {
-                self.document.leave();
-                ui.label(
-                    egui::RichText::new("Double-click something in the sidebar to open it.")
-                        .weak()
-                        .italics(),
-                );
-                return;
-            };
-            // ⚠️ A view's tab looks like a local document; the banner is the only visible
-            // indication that its bytes still belong to the instrument.
-            if self.workspace.is_view(id) {
-                if let Some(act) = viewing_banner(ui, id, &self.workspace) {
-                    acts.push(act);
-                }
-            }
-            // ⚠️ Never a file export. Cmd+S means "keep what I did", which for something
-            // read off the instrument is a promise to send it back.
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-                self.document.stage(id, &mut self.workspace, &mut self.log);
-            }
-            let sent = self.document.ui(
-                ui,
-                id,
-                self.tabs.opened(id),
-                &mut self.workspace,
-                &mut self.device,
-                &mut self.log,
-            );
-            if let Some(send) = sent {
-                acts.push(browser::Act::Send {
-                    id: send.id,
-                    class: send.class,
-                    at: send.at,
-                });
-            }
-        });
+        self.titlebar(ctx, frame, &mut acts);
+        self.toolbar(ctx, &mut acts);
+        self.status_bar(ctx, &mut acts);
+        self.bottom_dock(ctx, &mut acts);
+        self.browser_dock(ctx, &mut acts);
+        self.inspector_dock(ctx, &mut acts);
+        self.centre(ctx, &mut acts);
 
         browser::apply(
             &mut self.browser,
+            &mut self.shell,
             acts,
             &mut self.workspace,
             &mut self.device,
@@ -400,6 +302,61 @@ impl eframe::App for DrawbarApp {
         self.device.pump();
 
         self.keep_up(ctx, frame);
+    }
+}
+
+impl DrawbarApp {
+    /// The tab strip, and whatever the tab in front is a view of.
+    fn centre(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
+        let fill = ctx.style().visuals.panel_fill;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(fill))
+            .show(ctx, |ui| {
+                self.tabs.ui(ui, &self.workspace, acts);
+                match self.tabs.showing() {
+                    None => {
+                        self.document.leave();
+                        crate::shell::placeholder(
+                            ui,
+                            "Double-click something in the browser to open it.",
+                        );
+                    }
+                    Some(Spot::Library) => {
+                        self.document.leave();
+                        crate::shell::placeholder(ui, "Library — stage 6 fills this in.");
+                    }
+                    Some(Spot::Keyboard) => {
+                        self.document.leave();
+                        crate::shell::placeholder(ui, "Keyboard — stage 8 fills this in.");
+                    }
+                    Some(Spot::Document(id)) => self.open_document(ui, id, acts),
+                }
+            });
+    }
+
+    fn open_document(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<browser::Act>) {
+        // ⚠️ A view's tab looks like a local document; the banner is the only visible
+        // indication that its bytes still belong to the instrument.
+        if self.workspace.is_view(id) {
+            if let Some(act) = viewing_banner(ui, id, &self.workspace) {
+                acts.push(act);
+            }
+        }
+        let sent = self.document.ui(
+            ui,
+            id,
+            self.tabs.opened(id),
+            &mut self.workspace,
+            &mut self.device,
+            &mut self.log,
+        );
+        if let Some(send) = sent {
+            acts.push(browser::Act::Send {
+                id: send.id,
+                class: send.class,
+                at: send.at,
+            });
+        }
     }
 }
 

@@ -126,12 +126,7 @@ impl Browser {
             acts.push(Act::Resync);
         }
         if send_all {
-            let waiting: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-            let title = match waiting.len() {
-                1 => "Send 1 sound to the instrument?".to_string(),
-                n => format!("Send {n} sounds to the instrument?"),
-            };
-            self.ask_send(workspace, device, &waiting, title, Act::SendAll);
+            acts.push(Act::AskSendAll);
         }
         egui::ScrollArea::vertical()
             .id_salt("instrument_scroll")

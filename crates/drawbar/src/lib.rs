@@ -19,6 +19,8 @@ pub mod led;
 pub mod log;
 pub mod newproject;
 pub mod note;
+pub mod panel;
+pub mod shell;
 pub mod store;
 pub mod strings;
 pub mod tabs;
