@@ -552,7 +552,11 @@ async fn scan_class<T: Transport>(
     class: ObjectClass,
     emit: &Emit,
 ) -> Result<Walked, Error> {
-    let declared = device.geometry().await?.banks(class)?.to_vec();
+    let geometry = device.geometry().await?;
+    let declared = geometry.banks(class)?.to_vec();
+    // A class whose partition reports no unit still has banks to walk; what it costs a
+    // count is simply not known.
+    let unit = geometry.allocation_unit(class).ok();
     let plan = planned(&declared)?;
 
     device
@@ -565,6 +569,7 @@ async fn scan_class<T: Transport>(
             emit.send(DeviceEvent::Geometry {
                 class,
                 banks: declared.clone(),
+                unit,
             });
             emit.send(DeviceEvent::ClassStatus {
                 class,

@@ -11,6 +11,7 @@ use nord_usb::ObjectClass;
 use crate::app::{accent, micro, ui as ui_text, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
 use crate::device::{occupancy, sendable};
+use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
 use crate::panel::{caps, chevron, panel_header, strip, HEADER};
@@ -86,6 +87,9 @@ pub struct Shell {
     /// What has been typed into the omnibox. Filtering the library by it is stage 6;
     /// nothing reads this yet.
     pub omnibox: String,
+    /// What the library is narrowed to. The tree's kind and tag rows set it; stage 6's
+    /// table reads it.
+    pub filter: Filter,
 }
 
 impl Default for Shell {
@@ -96,6 +100,7 @@ impl Default for Shell {
             dock_open: false,
             page: Page::default(),
             omnibox: String::new(),
+            filter: Filter::default(),
         }
     }
 }
@@ -736,7 +741,9 @@ impl DrawbarApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut first = true;
                         for class in [ObjectClass::Sample, ObjectClass::Program] {
-                            let Some(room) = occupancy(class, &self.device.state.inventory) else {
+                            let unit = self.device.state.allocation_unit(class);
+                            let Some(room) = occupancy(class, &self.device.state.inventory, unit)
+                            else {
                                 continue;
                             };
                             if !first {
@@ -888,7 +895,10 @@ impl DrawbarApp {
                 return;
             }
             panel_header(ui, "browser", Some(&mut self.shell.browser_open), None);
-            acts.extend(self.browser.ui(ui, &self.workspace, &self.device));
+            acts.extend(
+                self.browser
+                    .ui(ui, &self.workspace, &self.device, &self.shell.filter),
+            );
         });
     }
 
@@ -1110,6 +1120,7 @@ mod tests {
             dock_open: true,
             page: Page::Log,
             omnibox: "typed and not kept".into(),
+            filter: Filter::default(),
         };
         before.keep(&mut store);
 

@@ -9,6 +9,7 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::Item;
 use super::Browser;
 use crate::device::{write_warning, Device, DeviceCmd, Outgoing};
+use crate::filter::Narrow;
 use crate::log::Log;
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
@@ -116,6 +117,10 @@ pub enum Act {
     Revert(u64),
     /// Bring a view of the centre forward.
     ShowTab(Spot),
+    /// The keyboard tab, switched to one class.
+    ShowClass(ObjectClass),
+    /// Turn one of the library's filters on or off.
+    Narrow(Narrow),
     /// Shut whatever the centre is on.
     CloseTab,
     ToggleDock(Dock),
@@ -187,6 +192,8 @@ pub fn apply(
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Tag(id));
                 browser.tags.remove(id);
+                // ⚠️ And a tag nobody can see must stop narrowing the library from nowhere.
+                shell.filter.forget_tag(id);
             }
             Act::SaveAsGig => {
                 let ids = browser.selection.locals();
@@ -283,6 +290,11 @@ pub fn apply(
             Act::Save(id) => workspace.export(id),
             Act::Revert(id) => workspace.restore_bytes(id, tabs.opened(id).to_vec(), log),
             Act::ShowTab(spot) => tabs.show(spot),
+            Act::ShowClass(class) => {
+                tabs.show(Spot::Keyboard);
+                tabs.keyboard_on(class);
+            }
+            Act::Narrow(narrow) => shell.filter.narrow(narrow),
             Act::CloseTab => {
                 if let Some(spot) = tabs.showing() {
                     tabs.close(spot);
@@ -754,7 +766,7 @@ mod tests {
 
         act(&mut browser, Act::RemoveFolder(id));
         assert!(browser.rename.is_none(), "the editor went with it");
-        assert!(browser.selection.is_empty());
+        assert!(browser.selection.sole().is_none());
 
         // And the id `make` hands out again is a folder with no editor waiting on it.
         act(&mut browser, Act::NewFolder);

@@ -12,6 +12,7 @@ pub mod device;
 pub mod document;
 pub mod drawbar_widget;
 pub mod fields;
+pub mod filter;
 pub mod folders;
 pub mod icon;
 pub mod knob;

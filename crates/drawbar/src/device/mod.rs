@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use nord_usb::wire::{Bank, Dependency, ProgramInfo, Status};
+use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
@@ -258,10 +258,14 @@ pub enum DeviceEvent {
         /// Banks to expect, as the instrument's own bank list divides the class.
         banks: Option<u32>,
     },
-    /// The device's own division of a class into banks, read at the head of its walk.
+    /// The device's own division of a class into banks, read at the head of its walk,
+    /// with what one unit of whatever `STATUS` counts for its partition is worth.
     Geometry {
         class: ObjectClass,
         banks: Vec<Bank>,
+        /// `None` where the partition reports no unit, which is *not known* rather than
+        /// *nothing*.
+        unit: Option<AllocationUnit>,
     },
     /// The slot the panel has loaded in a class; `None` when focus is supported but
     /// nothing is loaded. Never sent for a class that answers `0x15` (focus n/a).
@@ -377,6 +381,8 @@ pub struct DeviceState {
     focus: HashMap<u32, Option<Location>>,
     /// The device's own banks, per class: their names and their capacities.
     geometry: HashMap<u32, Vec<Bank>>,
+    /// Net bytes per unit of what `STATUS` counts, per class.
+    units: HashMap<u32, AllocationUnit>,
     banks: HashMap<(u32, u32), Vec<Option<ProgramInfo>>>,
     pub detail: Detail,
 }
@@ -465,6 +471,14 @@ impl DeviceState {
         self.banks.get(&(class.to_raw(), bank)).map(Vec::as_slice)
     }
 
+    /// What one unit of whatever `STATUS` counts is worth for this class's partition.
+    ///
+    /// ⚠️ `None` is *not read yet*, never *byte-granular*: a slot-addressed partition
+    /// reports a unit of 1, which is a unit like any other.
+    pub fn allocation_unit(&self, class: ObjectClass) -> Option<AllocationUnit> {
+        self.units.get(&class.to_raw()).copied()
+    }
+
     /// The banks of a class that have been read, in order.
     pub fn banks_of(&self, class: ObjectClass) -> Vec<u32> {
         let mut banks: Vec<u32> = self
@@ -520,6 +534,7 @@ impl DeviceState {
         self.banks.clear();
         self.focus.clear();
         self.geometry.clear();
+        self.units.clear();
         self.inventory.clear();
         self.detail = Detail::default();
         self.scan.clear();
@@ -532,12 +547,50 @@ impl DeviceState {
 ///
 /// Slot counts only: the inventory also reports opaque block totals, and a class whose
 /// items differ in size (pianos, samples) cannot be divided into slots at all.
-pub fn occupancy(class: ObjectClass, inventory: &[Status]) -> Option<String> {
+pub fn occupancy(
+    class: ObjectClass,
+    inventory: &[Status],
+    unit: Option<AllocationUnit>,
+) -> Option<String> {
     let status = inventory.iter().find(|status| status.class == class)?;
-    Some(match status.slots() {
-        Some(slots) => format!("{}/{slots}", status.count),
-        None => format!("{} items", status.count),
-    })
+    if let Some(slots) = status.slots() {
+        return Some(format!("{}/{slots}", status.count));
+    }
+    // A library counts blocks, and one block is the partition's allocation unit of net
+    // bytes. Until that unit has arrived the count is all there is to say.
+    let Some(unit) = unit else {
+        return Some(format!("{} items", status.count));
+    };
+    Some(format!(
+        "{}/{} MB",
+        megabytes(u64::from(status.used), unit),
+        megabytes(status.total(), unit)
+    ))
+}
+
+/// What a count of a partition's own units comes to, in whole megabytes.
+fn megabytes(units: u64, unit: AllocationUnit) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    let bytes = units.saturating_mul(u64::from(unit.get()));
+    // To the nearest, so a library one byte over a boundary does not read a whole
+    // megabyte larger than the panel says.
+    (bytes + MIB / 2) / MIB
+}
+
+/// The allocation unit a partition reporting `bytes` per unit would hand back.
+///
+/// ⚠️ Built the one way there is to build one — out of a partition record — so a test
+/// cannot invent a unit the wire could not carry.
+#[cfg(test)]
+pub fn pretend_allocation_unit(class: ObjectClass, bytes: u32) -> AllocationUnit {
+    nord_usb::wire::Partition {
+        index: class.to_raw(),
+        name: String::new(),
+        native: false,
+        fields: bytes.to_be_bytes().to_vec(),
+    }
+    .allocation_unit()
+    .expect("a partition reporting a unit of at least one")
 }
 
 /// Whether the browser offers to change a class at all.
@@ -773,6 +826,14 @@ impl Device {
         self.state.banks.insert((class.to_raw(), bank), slots);
     }
 
+    /// Give a class the allocation unit its partition would have reported.
+    #[cfg(test)]
+    pub fn pretend_unit(&mut self, class: ObjectClass, bytes: u32) {
+        self.state
+            .units
+            .insert(class.to_raw(), pretend_allocation_unit(class, bytes));
+    }
+
     /// Give a class the banks the device would have reported, for a headless render.
     #[cfg(test)]
     pub fn pretend_geometry(&mut self, class: ObjectClass, banks: &[(&str, u32)]) {
@@ -854,8 +915,12 @@ impl Device {
                     self.state.inventory.push(status);
                     self.state.scan.expect(class, banks);
                 }
-                DeviceEvent::Geometry { class, banks } => {
+                DeviceEvent::Geometry { class, banks, unit } => {
                     self.state.geometry.insert(class.to_raw(), banks);
+                    match unit {
+                        Some(unit) => self.state.units.insert(class.to_raw(), unit),
+                        None => self.state.units.remove(&class.to_raw()),
+                    };
                 }
                 DeviceEvent::Focus { class, at } => {
                     self.state.focus.insert(class.to_raw(), at);
@@ -943,6 +1008,84 @@ impl Device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unit a count is measured in arrives with the geometry, at the head of the
+    /// class's walk, and is forgotten when the instrument goes.
+    #[test]
+    fn the_geometry_a_walk_reports_carries_the_unit_a_count_is_measured_in() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let class = ObjectClass::Sample;
+        assert_eq!(
+            device.state.allocation_unit(class),
+            None,
+            "nothing read yet"
+        );
+
+        device.pretend(DeviceEvent::Geometry {
+            class,
+            banks: Vec::new(),
+            unit: Some(pretend_allocation_unit(class, 131_064)),
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs);
+        assert_eq!(
+            device.state.allocation_unit(class).map(|unit| unit.get()),
+            Some(131_064)
+        );
+
+        device.pretend(DeviceEvent::Disconnected { lost: false });
+        device.poll(&mut log, &mut workspace, &mut tabs);
+        assert_eq!(device.state.allocation_unit(class), None);
+    }
+
+    /// ⚠️ A library counts blocks, not bytes, and one block is its partition's
+    /// allocation unit. Until that unit has arrived the count is all the row can say —
+    /// a block count read as bytes would be off by five orders of magnitude.
+    #[test]
+    fn a_library_reads_in_bytes_only_once_its_allocation_unit_has_arrived() {
+        let class = ObjectClass::Sample;
+        // The shape an Electro 5 answers with: 1 472 of the partition's 1 536 blocks
+        // in use, each 131 064 net bytes.
+        let inventory = [Status {
+            class,
+            count: 84,
+            free: 60,
+            used: 1472,
+            dirty: 0,
+            spare: 4,
+        }];
+        assert_eq!(
+            occupancy(class, &inventory, None).as_deref(),
+            Some("84 items"),
+            "the count alone until the unit lands"
+        );
+        assert_eq!(
+            occupancy(
+                class,
+                &inventory,
+                Some(pretend_allocation_unit(class, 131_064))
+            )
+            .as_deref(),
+            Some("184/192 MB")
+        );
+
+        // A slot-addressed class divides into slots, so it never reaches the unit at all.
+        let programs = [Status {
+            class: ObjectClass::Program,
+            count: 128,
+            free: 272 * 121,
+            used: 128 * 121,
+            dirty: 0,
+            spare: 0,
+        }];
+        assert_eq!(
+            occupancy(ObjectClass::Program, &programs, None).as_deref(),
+            Some("128/400")
+        );
+    }
 
     /// The buffer classes take a write like any other slot; only a library the
     /// instrument installs for itself is off limits.

@@ -1,21 +1,24 @@
-//! The sidebar: the two places a sound can live, and the moving of sounds between them.
+//! The browser dock: one tree over the places a sound can live, the kinds there are,
+//! and the tags on the list.
 //!
 //! Nothing here touches the instrument. Rendering reads the caches and answers with a
 //! list of [`Act`]s, which [`apply`] then runs against the workspace, the device and the
 //! tabs — so a row can be drawn while the thing it stands for is about to change.
 //!
-//! This file holds the state the two columns share — the selection, the in-place rename,
-//! the one modal, the divider between them. The columns themselves are `computer` and
-//! `instrument`; the drag vocabulary is `drag`, the row they are both painted from is
-//! `row`, and the grouping of the local list lives outside the browser entirely, in
-//! [`crate::folders`].
+//! This file holds the state every row shares — what is picked, the in-place rename, the
+//! one modal, which branches are open. The tree itself is `tree`, the drag vocabulary is
+//! `drag`, the row it is painted from is `row`, and the grouping and labelling of the
+//! local list live outside the browser entirely, in [`crate::folders`] and
+//! [`crate::tags`].
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
 use crate::device::Device;
+use crate::filter::Filter;
 use crate::folders::{self, Folders};
 use crate::strings::place;
 use crate::tags::{self, Tags};
@@ -24,21 +27,22 @@ use crate::workspace::Workspace;
 mod act;
 #[cfg(test)]
 mod bench;
-mod computer;
 mod drag;
 mod instrument;
 mod row;
 mod selection;
+mod tree;
 
 pub use act::{apply, foreign_format, Act};
-pub use computer::new_menu;
 pub use drag::{landing, Carried, Held, Item, Kind, Landing, Onto};
 pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
-pub use selection::{gesture, Gesture, Selection};
+pub use tree::new_menu;
 
 use act::{owed, write_warnings};
 use drag::ghost;
+use selection::{gesture, Gesture, Selection};
+use tree::{Branch, Sections};
 
 /// An in-place rename, waiting on Enter or Esc.
 struct Rename {
@@ -92,11 +96,14 @@ pub struct Browser {
     selection: Selection,
     rename: Option<Rename>,
     ask: Option<Ask>,
-    /// Where the divider sits between the two columns, as a share of the dock.
-    split: f32,
     folders: Folders,
     tags: Tags,
-    /// A slot to scroll to and select, once the list holding it has been drawn.
+    /// Which of the three sections are showing.
+    sections: Sections,
+    /// The branches of the tree that are open. The two places are, so a panel that has
+    /// never been touched shows what is in them.
+    open: BTreeSet<Branch>,
+    /// A slot to scroll to and select, once the branches holding it have been drawn.
     jump: Option<(ObjectClass, Location)>,
 }
 
@@ -106,37 +113,18 @@ impl Default for Browser {
             selection: Selection::default(),
             rename: None,
             ask: None,
-            split: EVEN,
             folders: Folders::default(),
             tags: Tags::default(),
+            sections: Sections::default(),
+            open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
         }
     }
 }
 
-/// The divider's home: half the dock each.
-const EVEN: f32 = 0.5;
-
-/// Neither column may be dragged out of existence.
-const LEAST: f32 = 0.15;
-
-/// The strip the divider answers on.
-const HANDLE: f32 = 7.0;
-
 impl Browser {
-    /// Where the divider is kept between sessions.
-    pub const SPLIT: &'static str = "drawbar.dock_split";
-
-    /// Put the divider and the folders back where they were left.
-    ///
-    /// Anything the store cannot account for is the even split: a fraction outside the
-    /// stops would be one column showing and the other a sliver.
+    /// Put the grouping and the labelling back where they were left.
     pub fn restore(&mut self, storage: &dyn eframe::Storage) {
-        self.split = storage
-            .get_string(Browser::SPLIT)
-            .and_then(|text| text.parse::<f32>().ok())
-            .filter(|share| (LEAST..=1.0 - LEAST).contains(share))
-            .unwrap_or(EVEN);
         self.folders = storage
             .get_string(folders::KEY)
             .map(|text| Folders::read(&text))
@@ -155,102 +143,23 @@ impl Browser {
     }
 
     pub fn keep(&self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(Browser::SPLIT, self.split.to_string());
         storage.set_string(folders::KEY, self.folders.written());
         storage.set_string(tags::KEY, self.tags.written());
     }
 
-    /// Draw the places a sound can live and collect what the user asked for.
-    /// The instrument gets a column once there is an instrument.
-    pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, device: &Device) -> Vec<Act> {
-        let mut acts = Vec::new();
-        self.dialog(ui.ctx(), &mut acts);
-        match device.state.connected() {
-            true => self.dock(ui, workspace, device, &mut acts),
-            false => self.computer(ui, workspace, device, &mut acts),
-        }
-        ghost(ui.ctx());
-        acts
-    }
-
-    /// The two columns and the divider between them.
-    ///
-    /// ⚠️ A share of the width rather than a number of points. The sidebar the two live
-    /// in is itself resizable, and a column pinned to points eats the other one as the
-    /// sidebar narrows — at which point the divider has nothing left to give back.
-    fn dock(
+    /// Draw the tree and collect what the user asked for.
+    pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
-        acts: &mut Vec<Act>,
-    ) {
-        let whole = ui.available_rect_before_wrap();
-        let usable = (whole.width() - HANDLE).max(1.0);
-        let left = usable * self.split;
-        let divider = egui::Rect::from_min_size(
-            egui::pos2(whole.left() + left, whole.top()),
-            egui::vec2(HANDLE, whole.height()),
-        );
-
-        let dragging = ui
-            .interact(
-                divider,
-                ui.id().with("dock_divider"),
-                egui::Sense::click_and_drag(),
-            )
-            .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
-        if dragging.dragged() {
-            self.split = ((left + dragging.drag_delta().x) / usable).clamp(LEAST, 1.0 - LEAST);
-        }
-        // Somewhere to put it back to, for a divider that has been dragged into a corner.
-        if dragging.double_clicked() {
-            self.split = EVEN;
-        }
-
-        let ends = |from: f32, to: f32| {
-            egui::Rect::from_min_max(
-                egui::pos2(from, whole.top()),
-                egui::pos2(to, whole.bottom()),
-            )
-        };
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(ends(whole.left(), divider.left())),
-            |ui| self.computer(ui, workspace, device, acts),
-        );
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(ends(divider.right(), whole.right())),
-            |ui| self.instrument(ui, workspace, device, acts),
-        );
-
-        let visuals = ui.visuals();
-        let stroke = match dragging.hovered() || dragging.dragged() {
-            true => egui::Stroke::new(2.0_f32, visuals.selection.stroke.color),
-            false => visuals.widgets.noninteractive.bg_stroke,
-        };
-        ui.painter()
-            .vline(divider.center().x, whole.y_range(), stroke);
-        ui.advance_cursor_after_rect(whole);
-    }
-
-    /// A column heading, and the strip of buttons beside it.
-    ///
-    /// Wrapped, because the strip is in a column the operator can drag to any width and
-    /// a button pushed off the right edge is a button that is gone.
-    fn heading(
-        &mut self,
-        ui: &mut egui::Ui,
-        title: &str,
-        buttons: impl FnOnce(&mut egui::Ui),
-    ) -> egui::Response {
-        let head = ui
-            .horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(title).strong());
-                buttons(ui);
-            })
-            .response;
-        ui.separator();
-        head
+        filter: &Filter,
+    ) -> Vec<Act> {
+        let mut acts = Vec::new();
+        self.dialog(ui.ctx(), &mut acts);
+        self.tree(ui, workspace, device, filter, &mut acts);
+        ghost(ui.ctx());
+        acts
     }
 
     fn select(&mut self, item: Item) {
@@ -364,10 +273,11 @@ impl Browser {
     /// ⚠️ **Only Enter renames.** Clicking away cancels. An editor that commits on blur
     /// turns a stray keystroke into a rename nobody asked for, and the name is the only
     /// record of what an object is — files store no name of their own.
-    fn rename_row(&mut self, ui: &mut egui::Ui, original: &str) -> Option<String> {
+    fn rename_row(&mut self, ui: &mut egui::Ui, indent: f32, original: &str) -> Option<String> {
         let rename = self.rename.as_mut()?;
         let output = ui
             .horizontal(|ui| {
+                ui.add_space(indent);
                 egui::TextEdit::singleline(&mut rename.text)
                     .desired_width(ui.available_width())
                     .show(ui)
@@ -588,17 +498,17 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::bench;
+    use crate::browser::bench::{bench, context};
     use crate::shell::Shell;
     use crate::tabs::Tabs;
     use crate::workspace::Fresh;
 
-    /// Paint the two columns headlessly. What this catches is a layout that panics or
-    /// an id that collides, neither of which a unit test on the rules would see.
+    /// Paint the tree headlessly. What this catches is a layout that panics or an id
+    /// that collides, neither of which a unit test on the rules would see.
     fn paint(with_device: bool) {
         use crate::workspace::{Fresh, Origin};
 
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = crate::log::Log::default();
@@ -614,6 +524,10 @@ mod tests {
         browser.folders.make();
         let filed = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(filed, Some(full));
+        // A tag on something, and one on nothing: the two shapes the section holds.
+        let sunday = browser.tags.make("Sunday");
+        browser.tags.make("Loud");
+        browser.tags.set(filed, sunday, true);
         let bytes = workspace.get(filed).unwrap().bytes.clone();
         workspace.view(
             "Africa-Split.ne5p".into(),
@@ -634,121 +548,35 @@ mod tests {
             // Named banks, which is what a piano's categories arrive as.
             device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
             device.pretend_geometry(ObjectClass::Piano, &[("Grand", 1), ("Upright", 1)]);
+            device.pretend_unit(ObjectClass::Piano, 261_632);
+            // Every branch of the instrument open, so every row shape is painted.
+            for class in crate::device::BROWSED {
+                browser.open.insert(Branch::Class(class.to_raw()));
+                for bank in 0..=8 {
+                    browser.open.insert(Branch::Bank(class.to_raw(), bank));
+                }
+            }
         }
 
         // Twice: the second pass runs with the widget state the first left behind.
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::SidePanel::left("places").show(ctx, |ui| {
-                    let acts = browser.ui(ui, &workspace, &device);
-                    apply(
-                        &mut browser,
-                        &mut Shell::default(),
-                        acts,
-                        &mut workspace,
-                        &mut device,
-                        &mut tabs,
-                        &mut log,
-                    );
-                });
-            });
-        }
-    }
-
-    /// The divider does what dragging it says, and stops before either column is gone.
-    ///
-    /// ⚠️ The share is what is kept, not a width: the sidebar the two live in is itself
-    /// resizable, so the same fraction has to survive the dock changing size under it.
-    #[test]
-    fn the_divider_moves_and_stops_short_of_squeezing_a_column_out() {
-        use crate::workspace::Fresh;
-
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = crate::log::Log::default();
-        let mut browser = Browser::default();
-        workspace.create(Fresh::Program, &mut log).unwrap();
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
-
-        // Far enough left to ask for more than the stop allows.
-        let travel = -400.0;
-        let button = |pos, pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::default(),
-        };
-
-        let mut divider = egui::pos2(0.0, 0.0);
-        let mut frame = 0;
-        while frame < 5 {
-            let grip = divider;
-            let moved = grip + egui::vec2(travel, 0.0);
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 720.0),
-                )),
-                events: match frame {
-                    0 => Vec::new(),
-                    1 => vec![egui::Event::PointerMoved(grip)],
-                    2 => vec![button(grip, true)],
-                    3 => vec![egui::Event::PointerMoved(moved)],
-                    _ => vec![button(moved, false)],
-                },
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
                 egui::SidePanel::left("places")
-                    .exact_width(600.0)
+                    .exact_width(crate::shell::BROWSER)
                     .show(ctx, |ui| {
-                        // The same rect the dock lays itself out in, so the test grabs
-                        // the divider where the divider actually is.
-                        let whole = ui.available_rect_before_wrap();
-                        divider = egui::pos2(
-                            whole.left() + (whole.width() - HANDLE) * browser.split + HANDLE / 2.0,
-                            whole.center().y,
+                        let acts = browser.ui(ui, &workspace, &device, &Filter::default());
+                        apply(
+                            &mut browser,
+                            &mut Shell::default(),
+                            acts,
+                            &mut workspace,
+                            &mut device,
+                            &mut tabs,
+                            &mut log,
                         );
-                        let _ = browser.ui(ui, &workspace, &device);
                     });
             });
-            frame += 1;
         }
-
-        assert!(browser.split < EVEN, "it moved: {}", browser.split);
-        assert_eq!(browser.split, LEAST, "and stopped at the stop");
-    }
-
-    /// A share the store cannot account for is the even split, never one column and a
-    /// sliver of the other.
-    #[test]
-    fn a_divider_comes_back_where_it_was_left_or_not_at_all() {
-        let restored = |held: Option<&str>| {
-            let mut store = Fake::default();
-            if let Some(held) = held {
-                eframe::Storage::set_string(&mut store, Browser::SPLIT, held.to_string());
-            }
-            let mut browser = Browser::default();
-            browser.restore(&store);
-            browser.split
-        };
-        assert_eq!(restored(Some("0.3")), 0.3);
-        assert_eq!(restored(None), EVEN);
-        for nonsense in ["0.0", "1.0", "-3", "wide", "", "NaN"] {
-            assert_eq!(restored(Some(nonsense)), EVEN, "{nonsense:?}");
-        }
-
-        // And what is written comes back as itself.
-        let mut store = Fake::default();
-        let browser = Browser {
-            split: 0.42,
-            ..Browser::default()
-        };
-        browser.keep(&mut store);
-        let mut after = Browser::default();
-        after.restore(&store);
-        assert_eq!(after.split, 0.42);
     }
 
     /// A store that answers for one key at a time, which is what the two things the
@@ -767,12 +595,12 @@ mod tests {
     }
 
     #[test]
-    fn the_two_columns_paint_with_nothing_attached() {
+    fn the_tree_paints_with_nothing_attached() {
         paint(false);
     }
 
     #[test]
-    fn the_two_columns_paint_with_a_tree_to_show() {
+    fn the_tree_paints_with_an_instrument_to_show() {
         paint(true);
     }
 
@@ -890,7 +718,7 @@ mod tests {
     fn typing_a_name_and_pressing_enter_renames_the_row() {
         use crate::workspace::Fresh;
 
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut workspace = Workspace::new(ctx.clone());
         let device = Device::new(ctx.clone());
         let mut log = crate::log::Log::default();
@@ -921,7 +749,7 @@ mod tests {
             };
             let _ = ctx.run(input, |ctx| {
                 egui::SidePanel::left("places").show(ctx, |ui| {
-                    for act in browser.ui(ui, &workspace, &device) {
+                    for act in browser.ui(ui, &workspace, &device, &Filter::default()) {
                         if let Act::RenameLocal { name, .. } = act {
                             named = Some(name);
                         }

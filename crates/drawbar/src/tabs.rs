@@ -6,6 +6,7 @@
 //! the keyboard are views of what is already there, so they hold nothing.
 
 use eframe::egui;
+use nord_usb::ObjectClass;
 
 use crate::browser::{new_menu, Act, Kind};
 use crate::icon::{painted, Glyph};
@@ -52,6 +53,10 @@ impl Tab {
 pub struct Tabs {
     open: Vec<Tab>,
     active: Option<Spot>,
+    /// Which class the keyboard tab is switched to, as the tree last asked. There is one
+    /// keyboard tab, so the class it is on is the tab's state rather than a tab of its
+    /// own.
+    keyboard: Option<ObjectClass>,
 }
 
 impl Tabs {
@@ -80,6 +85,17 @@ impl Tabs {
             (false, Spot::Document(_)) => return,
         }
         self.active = Some(spot);
+    }
+
+    /// Switch the keyboard tab to a class. Bringing the tab forward is [`Tabs::show`];
+    /// this says what it opens on.
+    pub fn keyboard_on(&mut self, class: ObjectClass) {
+        self.keyboard = Some(class);
+    }
+
+    /// The class the keyboard tab is switched to, if anything has asked for one.
+    pub fn keyboard_class(&self) -> Option<ObjectClass> {
+        self.keyboard
     }
 
     pub fn close(&mut self, spot: Spot) {

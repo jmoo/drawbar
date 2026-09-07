@@ -9,6 +9,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::device::read_only;
 use crate::icon::Glyph;
+use crate::strings::folder;
 
 /// What an asset is, which is what decides the folder it belongs in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,6 +78,17 @@ impl Kind {
             Kind::Settings => "settings",
             Kind::Project => "project",
             Kind::Other => "file",
+        }
+    }
+
+    /// What the tree calls a whole kind of thing.
+    pub fn plural(self) -> &'static str {
+        match self.home() {
+            Some(class) => folder(class),
+            None => match self {
+                Kind::Project => "Sample Editor projects",
+                _ => "Other",
+            },
         }
     }
 

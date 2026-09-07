@@ -55,14 +55,6 @@ impl Selection {
         self.set.contains(&item)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.set.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.set.len()
-    }
-
     pub fn items(&self) -> impl Iterator<Item = Item> + '_ {
         self.set.iter().copied()
     }
@@ -119,11 +111,6 @@ impl Selection {
             self.anchor = None;
         }
     }
-
-    pub fn clear(&mut self) {
-        self.anchor = None;
-        self.set.clear();
-    }
 }
 
 #[cfg(test)]
@@ -141,7 +128,7 @@ mod tests {
         let mut selection = Selection::default();
         selection.only(Item::Local(1));
         selection.toggle(Item::Local(2));
-        assert_eq!(selection.len(), 2);
+        assert_eq!(selection.items().count(), 2);
 
         selection.only(Item::Local(3));
         assert_eq!(selection.sole(), Some(Item::Local(3)));
@@ -160,7 +147,7 @@ mod tests {
         assert_eq!(selection.sole(), Some(Item::Local(1)));
         // And a row can be taken out of a set of one, leaving nothing picked.
         selection.toggle(Item::Local(1));
-        assert!(selection.is_empty());
+        assert_eq!(selection.items().count(), 0);
     }
 
     /// ⇧-click fills the run between the anchor and the row it landed on, either way
@@ -201,7 +188,7 @@ mod tests {
 
         // And it re-anchored there, so a second one does span.
         selection.extend(rows[0], &rows);
-        assert_eq!(selection.len(), 3);
+        assert_eq!(selection.items().count(), 3);
     }
 
     /// ⌘ wins over ⇧, and a bare click is a bare click whatever else is held.
