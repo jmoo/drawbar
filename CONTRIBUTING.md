@@ -44,7 +44,7 @@ addresses, protocol direction, and conversions where untrusted bytes enter.
 Do not rely on debug assertions for conditions needed in release builds. Make
 invalid generic parameters fail at compile time when Rust permits it.
 
-Prefer declarative code that states the format or operation directly:
+Prefer code whose shape states the format or operation directly:
 
 - tables and field declarations over repeated control flow;
 - exhaustive matches over boolean state machines;
@@ -120,9 +120,8 @@ Git records history. Private RFCs record extended design rationale. Neither
 belongs inline as a story about the current code.
 
 Use `///` for a contract a caller can rely on without reading the body. Use
-`//` for a surprise encountered while reading the body. Keep internal comments
-to one or two lines unless the code genuinely needs a longer proof, and do not
-turn an internal essay into API documentation merely to preserve it.
+`//` for a surprise encountered while reading the body. Do not turn an internal
+essay into API documentation merely to preserve it.
 
 Reverse-engineered claims use one of these exact provenance forms:
 
@@ -145,8 +144,7 @@ when the answer is no.
 Apply the toilet test: a failure read in isolation should say what user-visible
 behavior, invariant, or external contract broke. If the only diagnosis is
 “output changed,” followed by inspecting a large diff and reblessing it, the
-test is a change detector rather than a specification. Change-detector tests
-are harmful.
+test is a change detector rather than a specification.
 
 Do not add snapshots of debug output, generated field dumps, corpus census
 results, current distributions, or other broad serializations of the present
