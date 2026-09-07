@@ -479,7 +479,8 @@ async fn batch<T: Transport>(
         .await
 }
 
-/// Status `1`, `3`, and `4` meanings are confirmed on hardware.
+/// The sentence for an error, in terms of the slot the operation was aimed at.
+// Confirmed on hardware.
 fn explain(e: Error, at: Location) -> String {
     match e {
         Error::DeviceStatus(1) => format!("{} is empty", shown(at)),

@@ -172,10 +172,16 @@ impl<T: Transport> Device<T> {
 
     /// The instrument's [`Geometry`], read on first use and kept.
     ///
-    /// The tables are static configuration — storing and deleting content leaves every
-    /// field of both unchanged — so one read serves the life of the `Device`.
+    /// Storing and deleting content leaves every field of the partition table unchanged.
     ///
     /// Confirmed on hardware.
+    ///
+    /// The bank table is kept on the same assumption. The sample bank declares a
+    /// capacity equal to its highest occupied slot plus one, which a high-water mark
+    /// would also produce, and no recording holds a `BANKS` reply from after a store
+    /// that moves a bank's top slot.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
     pub async fn geometry(&mut self) -> Result<&Geometry> {
         if self.geometry.is_none() {
             // Any class opens a session; both tables are device-wide.

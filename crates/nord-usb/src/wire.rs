@@ -374,6 +374,8 @@ pub struct Partition {
     ///
     /// Static configuration, not state — every value is unchanged by storing or deleting
     /// content.
+    ///
+    /// Confirmed on hardware.
     pub fields: Vec<u8>,
 }
 
