@@ -10,6 +10,42 @@ use crate::device::{Connection, Device};
 use crate::strings::place;
 use crate::workspace::{Fresh, Workspace};
 
+/// The New menu: every kind this app can build from nothing, and the project that is
+/// laid out from audio files rather than started from a default.
+///
+/// Written once, because the browser's heading, the File menu, the toolbar and the tab
+/// strip all offer it and they must offer the same thing.
+pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+    for family in &Fresh::FAMILIES {
+        ui.menu_button(family.label, |ui| {
+            for kind in family.kinds {
+                let mut entry = ui.button(kind.label());
+                if let Some(note) = kind.note() {
+                    entry = entry.on_hover_text(note);
+                }
+                if entry.clicked() {
+                    acts.push(Act::New(*kind));
+                    ui.close();
+                }
+            }
+        });
+    }
+    ui.separator();
+    // Not a family: a project is laid out from audio files rather than started from a
+    // default, so it asks for them before it exists.
+    if ui
+        .button("Sample Editor project…")
+        .on_hover_text(
+            "pick the WAVs it plays; the project stores their names and the editor looks \
+             for them beside it",
+        )
+        .clicked()
+    {
+        acts.push(Act::NewProject);
+        ui.close();
+    }
+}
+
 impl Browser {
     pub(super) fn computer(
         &mut self,
@@ -19,44 +55,14 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         let mut open_files = false;
-        let mut fresh = None;
-        let mut new_project = false;
+        let mut made = Vec::new();
         let mut new_folder = false;
         let mut connect = false;
         let attached = device.state.connected();
         let connecting = matches!(device.state.connection, Connection::Connecting);
         let head = self.heading(ui, "This computer", |ui| {
             open_files = ui.small_button("Open…").clicked();
-            ui.menu_button("New", |ui| {
-                for family in &Fresh::FAMILIES {
-                    ui.menu_button(family.label, |ui| {
-                        for kind in family.kinds {
-                            let mut entry = ui.button(kind.label());
-                            if let Some(note) = kind.note() {
-                                entry = entry.on_hover_text(note);
-                            }
-                            if entry.clicked() {
-                                fresh = Some(*kind);
-                                ui.close();
-                            }
-                        }
-                    });
-                }
-                ui.separator();
-                // Not a family: a project is laid out from audio files rather than
-                // started from a default, so it asks for them before it exists.
-                if ui
-                    .button("Sample Editor project…")
-                    .on_hover_text(
-                        "pick the WAVs it plays; the project stores their names and the \
-                         editor looks for them beside it",
-                    )
-                    .clicked()
-                {
-                    new_project = true;
-                    ui.close();
-                }
-            });
+            ui.menu_button("New", |ui| new_menu(ui, &mut made));
             new_folder = ui
                 .small_button("New folder")
                 .on_hover_text(
@@ -87,12 +93,7 @@ impl Browser {
         if open_files {
             acts.push(Act::OpenFiles);
         }
-        if let Some(kind) = fresh {
-            acts.push(Act::New(kind));
-        }
-        if new_project {
-            acts.push(Act::NewProject);
-        }
+        acts.append(&mut made);
         if new_folder {
             acts.push(Act::NewFolder);
         }

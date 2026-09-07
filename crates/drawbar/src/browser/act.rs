@@ -11,7 +11,7 @@ use super::Browser;
 use crate::device::{write_warning, Device, DeviceCmd, Outgoing};
 use crate::log::Log;
 use crate::strings::place;
-use crate::tabs::Tabs;
+use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Workspace};
 
 /// What the browser asks the rest of the app to do.
@@ -197,7 +197,7 @@ pub fn apply(
             }
             Act::DeleteSlot { class, at } => device.send(DeviceCmd::Delete { class, at }, log),
             Act::Remove(id) => {
-                tabs.close(id);
+                tabs.close(Spot::Document(id));
                 browser.folders.forget(id);
                 workspace.remove(id, log);
             }
@@ -365,7 +365,7 @@ mod tests {
     use crate::browser::bench::bench;
     use crate::device::BROWSED;
     use crate::strings::folder;
-    use crate::tabs::Tabs;
+    use crate::tabs::{Spot, Tabs};
     use eframe::egui;
 
     /// A batch is one command per folder, because a session belongs to a folder — and
@@ -672,7 +672,7 @@ mod tests {
         let first = tabs.active().expect("a view opened");
 
         // Another double-click on the same slot.
-        tabs.close(first);
+        tabs.close(Spot::Document(first));
         apply(
             &mut browser,
             vec![Act::Open(Item::Slot { class, at })],

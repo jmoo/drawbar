@@ -897,6 +897,7 @@ mod tests {
     #[test]
     fn the_tab_strip_and_the_document_body_scroll_on_their_own() {
         let ctx = egui::Context::default();
+        ctx.style_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();
@@ -934,7 +935,7 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(crate::tabs::SCROLL)),
                         ui.make_persistent_id(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(ui, &workspace);
+                    tabs.ui(ui, &workspace, &mut Vec::new());
                     ui.separator();
                     document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
                 });

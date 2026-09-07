@@ -173,15 +173,32 @@ impl Glyph {
             Glyph::X => egui::include_image!("../assets/icons/x.svg"),
         }
     }
+
+    /// This glyph as an image, for the widgets and the painters that take one.
+    pub fn image(self) -> egui::Image<'static> {
+        egui::Image::new(self.source())
+    }
 }
 
 /// Draw `glyph` in a `size` by `size` box, painted in `tint`.
 pub fn icon(ui: &mut egui::Ui, glyph: Glyph, size: f32, tint: egui::Color32) -> egui::Response {
-    ui.add(
-        egui::Image::new(glyph.source())
-            .fit_to_exact_size(egui::vec2(size, size))
-            .tint(tint),
-    )
+    ui.add(sized(glyph, size, tint))
+}
+
+/// Draw `glyph` into `rect`, painted in `tint`, claiming no space of its own.
+///
+/// For the strips that compute their own geometry; [`icon`] is the one to reach for
+/// inside a layout.
+pub fn painted(ui: &egui::Ui, glyph: Glyph, rect: egui::Rect, tint: egui::Color32) {
+    glyph.image().tint(tint).paint_at(ui, rect);
+}
+
+/// A glyph fixed to a square box, for a button that carries one.
+pub fn sized(glyph: Glyph, size: f32, tint: egui::Color32) -> egui::Image<'static> {
+    glyph
+        .image()
+        .fit_to_exact_size(egui::vec2(size, size))
+        .tint(tint)
 }
 
 #[cfg(test)]

@@ -347,7 +347,7 @@ impl eframe::App for DrawbarApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.tabs.ui(ui, &self.workspace);
+            self.tabs.ui(ui, &self.workspace, &mut acts);
             ui.separator();
             let Some(id) = self.tabs.active() else {
                 self.document.leave();
@@ -508,7 +508,7 @@ pub fn micro() -> egui::TextStyle {
 /// The metrics both faces share: the room a control is given, and the room around it.
 ///
 /// Theme-independent on purpose — flipping light to dark must not move anything.
-fn metrics(style: &mut egui::Style) {
+pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(8.0, 4.0);
     // A button was 1px taller than its own text; a strip of them read as a solid bar.

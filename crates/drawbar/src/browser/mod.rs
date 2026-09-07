@@ -29,7 +29,9 @@ mod instrument;
 mod row;
 
 pub use act::{apply, foreign_format, Act};
+pub use computer::new_menu;
 pub use drag::{landing, Carried, Item, Kind, Landing, Onto};
+pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
 
 use act::{owed, write_warnings};
