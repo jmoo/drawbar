@@ -25,11 +25,12 @@ writes of the live slots (class 6) and the settings singleton (class 7), and
 reads, deletes and writes of the piano (class 1) and sample (class 3) libraries —
 a library write sizes the instrument's cleaning pass from `STATUS`, runs it in
 the write's own session, and chunks the body. On Linux the read path and a
-multi-chunk sample write are hardware-verified, and every request frame is
-byte-identical to macOS.
+multi-chunk sample write are hardware-verified. Across 14 recorded read-only
+commands, every request frame is byte-identical to its macOS counterpart.
 
-A slot's name is the `BEGIN_WRITE` argument and nothing later: `rename` is
-refused on the library classes and accepted-but-ignored on live and settings.
+`BEGIN_WRITE` is the only frame in a write that carries a name. The library
+classes take their immutable name there because they refuse `rename`; live and
+settings discard it, just as they accept but ignore `rename`.
 
 Those two classes overwrite an occupied slot in place
 (`ObjectClass::overwrites_in_place`), so a caller must not compose their write out

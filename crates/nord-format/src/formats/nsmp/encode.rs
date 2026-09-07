@@ -53,11 +53,11 @@
 //!
 //! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
 //! which is the whole of what the container stores about looping: the crossfade is
-//! baked into the audio here, and loop detune, loop decay and the short loop's
-//! pitch-tracking flag reach the file nowhere at all. The fade's frame count is the
-//! caller's to work out — a project states the long loop's in frames and the short
-//! loop's as a percentage of its length — and it arrives here already in frames,
-//! fraction and all.
+//! baked into the audio here, while loop detune, the decay switch and the short loop's
+//! pitch-tracking flag reach nowhere. Wide headers carry the decay amount. The fade's
+//! frame count is the caller's to work out — a project states the long loop's in frames
+//! and the short loop's as a percentage of its length — and it arrives here already in
+//! frames, fraction and all.
 //!
 //! Confirmed on hardware for [`Layout::V2`]: the Electro 5 sustains a looped encode to
 //! note-off, and the seam is clean. The wide generations are inferred from specimens.
@@ -1236,23 +1236,19 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
         }
     }
 
-    // No region is known whose deficit outlasts the cap, so the second ceiling is a
-    // guess at behaviour nothing has ever shown: spend the rest rather than refuse.
     let cap = widen_cap(units.layout);
-    for ceiling in [cap, MAX_STORED_WIDTH] {
-        for spec in specs[opening..].iter_mut() {
-            if pad == 0 {
-                break;
-            }
-            if spec.one_to_one {
-                continue;
-            }
-            let count = spec.count;
-            let step = |width: u8| units.span(count, width + 1) - units.span(count, width);
-            while spec.width < ceiling && step(spec.width) <= pad {
-                pad -= step(spec.width);
-                spec.width += 1;
-            }
+    for spec in specs[opening..].iter_mut() {
+        if pad == 0 {
+            break;
+        }
+        if spec.one_to_one {
+            continue;
+        }
+        let count = spec.count;
+        let step = |width: u8| units.span(count, width + 1) - units.span(count, width);
+        while spec.width < cap && step(spec.width) <= pad {
+            pad -= step(spec.width);
+            spec.width += 1;
         }
     }
     if pad > 0 {
@@ -1708,14 +1704,29 @@ fn map(map_gain: u32, zones: &[ZoneRecord]) -> Result<Section, Error> {
     })
 }
 
-/// The `sty` section: nine constant bytes.
-/// Unexplained: real programs hold this, and the panel cannot produce it.
-fn sty() -> Section {
-    Section {
+/// The narrow `sty` preset, including every project value its schema stores.
+fn sty(preset: Preset) -> Result<Section, Error> {
+    if preset.velocity_to_amplitude >= super::sty::VELOCITY_LEVELS
+        || preset.velocity_to_timbre >= super::sty::VELOCITY_LEVELS
+    {
+        return Err(ParseError::OutOfBounds {
+            value: format!(
+                "velocity levels {} and {}",
+                preset.velocity_to_amplitude, preset.velocity_to_timbre
+            ),
+            bound: format!("levels below {}", super::sty::VELOCITY_LEVELS),
+        }
+        .into());
+    }
+    let mut payload = vec![0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00];
+    payload[3] = u8::from(preset.dynamics_enabled);
+    payload[4] = preset.velocity_to_amplitude;
+    payload[5] = preset.velocity_to_timbre;
+    Ok(Section {
         tag: *section::STY,
         version: STY_VERSION,
-        payload: vec![0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00],
-    }
+        payload,
+    })
 }
 
 /// Everything a `.nsmp3` chain and a `.nsmp4` chain do not share.
@@ -1770,6 +1781,9 @@ const STY_V4_PAYLOAD: [u8; super::sty::V4_LEN_LONG] = [
     0x1e, 0x1e, 0x00, 0x00, 0x00, 0x7f, 0x7f, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
+
+const STY_V3_DYNAMICS: [(usize, u8); 4] = [(4, 43), (12, 74), (14, 1), (16, 74)];
+const STY_V4_DYNAMICS: [(usize, u8); 5] = [(3, 1), (4, 1), (85, 74), (86, 82), (87, 90)];
 
 /// The schema for a wide generation, `None` for the narrow chain.
 fn wide_schema(layout: Layout) -> Option<WideSchema> {
@@ -1866,12 +1880,23 @@ fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section
     }
 }
 
-/// The wide `sty` section.
-fn sty4(schema: &WideSchema) -> Section4 {
+/// The wide `sty` preset, including the dynamics group a project controls.
+fn sty4(schema: &WideSchema, layout: Layout, preset: Preset) -> Section4 {
+    let mut payload = schema.sty_payload.to_vec();
+    if preset.dynamics_enabled {
+        let dynamics = match layout {
+            Layout::V2 => unreachable!("a narrow layout has no wide preset"),
+            Layout::V3 => &STY_V3_DYNAMICS[..],
+            Layout::V4 => &STY_V4_DYNAMICS[..],
+        };
+        for &(at, value) in dynamics {
+            payload[at] = value;
+        }
+    }
     Section4 {
         tag: *section::STY4,
         version: schema.sty,
-        payload: schema.sty_payload.to_vec(),
+        payload,
     }
 }
 
@@ -1946,6 +1971,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
             map_gain: options.map_gain,
             predictor: options.predictor,
             layout: options.layout,
+            preset: Preset::default(),
         },
         &[NewZone {
             source,
@@ -1975,6 +2001,29 @@ pub struct Instrument<'a> {
     pub predictor: Predictor,
     /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`.
     pub layout: Layout,
+    /// The sound preset values a project can carry into the instrument.
+    pub preset: Preset,
+}
+
+/// Project preset values with a decoded destination in at least one generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preset {
+    /// Whether the instrument loads with its category's dynamics curve.
+    pub dynamics_enabled: bool,
+    /// The narrow preset's velocity-to-amplitude level.
+    pub velocity_to_amplitude: u8,
+    /// The narrow preset's velocity-to-timbre level.
+    pub velocity_to_timbre: u8,
+}
+
+impl Default for Preset {
+    fn default() -> Preset {
+        Preset {
+            dynamics_enabled: false,
+            velocity_to_amplitude: 1,
+            velocity_to_timbre: 1,
+        }
+    }
 }
 
 /// Build an instrument that spans the keyboard: one `stk` per zone, in the order
@@ -2042,7 +2091,7 @@ fn narrow_chain(instrument: Instrument<'_>, zones: &[NewZone<'_>]) -> Result<Cbi
             payload,
         });
     }
-    sections.push(sty());
+    sections.push(sty(instrument.preset)?);
 
     Ok(Cbin {
         header: container(Layout::V2),
@@ -2094,7 +2143,7 @@ fn wide_chain(
             payload,
         });
     }
-    sections.push(sty4(schema));
+    sections.push(sty4(schema, layout, instrument.preset));
     let chain_len: usize = sections.iter().map(Section4::encoded_len).sum();
     sections.push(meta4(chain_len));
 
@@ -2324,6 +2373,7 @@ mod tests {
             map_gain: 1.0,
             predictor,
             layout,
+            preset: Preset::default(),
         }
     }
 
@@ -3289,7 +3339,6 @@ mod tests {
         let source = sine(220.0, 18_000.0, 88_200);
         for (start, end) in [
             (16_384, 32_768),
-            (16_384, 17_408),
             (43_981, 60_365),
             (4_096, 20_480),
             (65_536, 81_920),
@@ -3298,7 +3347,7 @@ mod tests {
                 &source,
                 &Options::new("Looped").loops(Loop::new(start, end)),
             )
-            .unwrap();
+            .unwrap_or_else(|e| panic!("loop {start}..{end}: {e}"));
             let (at, stroke) = file.stroke_streams()[0];
             let walk = codec::walk(stroke, at, codec::Layout::V2).unwrap();
             let mark = walk.records.iter().find(|r| r.mark).unwrap();
@@ -3610,6 +3659,35 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_that_needs_width_past_the_measured_cap_is_refused() {
+        let units = Units {
+            layout: Layout::V3,
+            channels: 1,
+        };
+        let record = Spec {
+            one_to_one: false,
+            width: widen_cap(Layout::V3),
+            order: 0,
+            mark: false,
+            first: 0,
+            count: units.cell(),
+        };
+        let mut specs = vec![
+            Spec {
+                one_to_one: true,
+                width: 1,
+                mark: true,
+                ..record
+            },
+            record,
+            record,
+        ];
+        let before = specs.clone();
+        assert!(pad_to_packet(&mut specs, 0, units).is_err());
+        assert_eq!(specs, before);
+    }
+
+    #[test]
     fn a_loop_lands_on_a_packet_boundary_or_is_refused() {
         let mut source = Vec::with_capacity(60_000);
         let mut state = 12_345u64;
@@ -3648,7 +3726,8 @@ mod tests {
                 }
             }
         }
-        assert!(placed > 40, "{placed} placed, {refused} refused");
+        assert!(placed > 0, "no loop was placed");
+        assert!(refused > 0, "no loop was refused");
     }
 
     fn stereo(hz: f64, ratio: f64, amplitude: f64, frames: usize) -> Vec<i16> {
@@ -4030,6 +4109,43 @@ mod tests {
                 .collect();
             // The gain's own top byte — 0x10 against 0x08 — and the container checksum.
             assert!(moved.len() <= 1 + 4, "{layout:?}: {moved:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_preset_reaches_each_generation_in_its_own_schema() {
+        let source = sine(440.0, 12_000.0, 20_000);
+        let preset = Preset {
+            dynamics_enabled: true,
+            velocity_to_amplitude: 2,
+            velocity_to_timbre: 0,
+        };
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let instrument = Instrument {
+                preset,
+                ..made("Preset", Predictor::Plain, layout)
+            };
+            let sample = multi_zone(instrument, &[zone(&source, 60, 127, 1)]).unwrap();
+            match sample {
+                crate::Sample::V2(file) => {
+                    let sty = section::find(&file.body.sections, section::STY).unwrap();
+                    assert_eq!(sty.payload, [0, 1, 0, 1, 2, 0, 0, 0, 0]);
+                }
+                crate::Sample::V3(file) => {
+                    let sty = section::find4(&file.body.sections, section::STY4).unwrap();
+                    match layout {
+                        Layout::V3 => {
+                            assert_eq!((sty.payload[4], sty.payload[12]), (43, 74));
+                            assert_eq!((sty.payload[14], sty.payload[16]), (1, 74));
+                        }
+                        Layout::V4 => {
+                            assert_eq!((sty.payload[3], sty.payload[4]), (1, 1));
+                            assert_eq!(sty.payload[85..88], [74, 82, 90]);
+                        }
+                        Layout::V2 => unreachable!(),
+                    }
+                }
+            }
         }
     }
 

@@ -151,7 +151,7 @@ pub struct Stroke {
     pub loop_crossfade_mode: u32,
     /// `m_loopDecayEnabled`. Reaches the instrument nowhere.
     pub loop_decay_enabled: bool,
-    /// `m_loopDecay`. Reaches the instrument nowhere.
+    /// `m_loopDecay`. Wide stroke headers carry the amount; v2 does not.
     pub loop_decay: f64,
     /// `m_loopDetune`. Reaches the instrument nowhere.
     pub loop_detune: i32,
@@ -528,6 +528,22 @@ impl Project {
         flag(self.instrument()?, "m_loopDecayEnabled")
     }
 
+    /// Whether the generated instrument loads with the category's dynamics curve.
+    pub fn dynamics_enabled(&self) -> Result<bool, ParseError> {
+        flag(self.instrument()?, "m_categoryDynamicsEnable")
+    }
+
+    /// Enabled EQ stages whose effect must be baked into the encoded audio.
+    pub fn active_eq(&self) -> Result<Vec<String>, ParseError> {
+        let instrument = self.instrument()?;
+        let mut active = active_eq_fields(instrument, "instrument")?;
+        for zone in instrument.require("map_info")?.blocks("map_zone") {
+            let id = zone.get::<u32>("m_zoneId")?;
+            active.extend(active_eq_fields(zone, &format!("zone {id}"))?);
+        }
+        Ok(active)
+    }
+
     /// `map_info.m_gain` — the instrument's own playing gain, a linear factor on top
     /// of every zone's own.
     pub fn map_gain(&self) -> Result<f64, ParseError> {
@@ -851,6 +867,28 @@ impl Project {
 
         Ok(Project { root })
     }
+}
+
+fn active_eq_fields(node: &Node, scope: &str) -> Result<Vec<String>, ParseError> {
+    node.entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Field { key, value }
+                if key.starts_with("m_eq") && (key.contains("Enable") || key.contains("En_")) =>
+            {
+                Some((key, value))
+            }
+            _ => None,
+        })
+        .filter_map(|(key, value)| match value.parse::<u8>() {
+            Ok(0) => None,
+            Ok(_) => Some(Ok(format!("{scope}.{key}"))),
+            Err(_) => Some(Err(ParseError::AssertFail(format!(
+                "{}.{key} = {value:?} is not a u8",
+                node.name
+            )))),
+        })
+        .collect()
 }
 
 /// A `common_stroke` over a whole file, with the loop points the editor
@@ -1302,6 +1340,38 @@ mod tests {
         // The whole file still parses back to itself.
         let text = project.render();
         assert_eq!(Project::parse(&text).unwrap().render(), text);
+    }
+
+    #[test]
+    fn dynamics_and_active_eq_have_typed_views() {
+        let mut project = three_zones();
+        assert!(!project.dynamics_enabled().unwrap());
+        assert!(project.active_eq().unwrap().is_empty());
+
+        let instrument = project.instrument_mut().unwrap();
+        instrument
+            .set_field("m_categoryDynamicsEnable", "1")
+            .unwrap();
+        instrument.set_field("m_eqLowCutEnable", "1").unwrap();
+        let zone = instrument
+            .blocks_mut("map_info")
+            .next()
+            .unwrap()
+            .blocks_mut("map_zone")
+            .next()
+            .unwrap();
+        zone.set_field("m_eqMidEnable_0", "1").unwrap();
+        zone.set_field("m_eqMidVarGainEn_1", "1").unwrap();
+
+        assert!(project.dynamics_enabled().unwrap());
+        assert_eq!(
+            project.active_eq().unwrap(),
+            [
+                "instrument.m_eqLowCutEnable",
+                "zone 131.m_eqMidEnable_0",
+                "zone 131.m_eqMidVarGainEn_1"
+            ]
+        );
     }
 
     #[test]

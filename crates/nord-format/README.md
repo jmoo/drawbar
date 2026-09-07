@@ -26,9 +26,9 @@ In brief:
   maps enumerate them).
 - **Structurally decoded** — sample instruments (`nsmp`, `nsmp3`, `nsmp4`:
   rename, retune, remap, the per-key map and the sound preset, and the encoded
-  audio decoded back to samples in every generation; a v2 instrument is also
-  *built* from a Sample Editor project, loops and stereo included, matching the
-  editor's own renders to within its float rounding), piano libraries (`npno`:
+  audio decoded back to samples in every generation; instruments are also
+  *built* from PCM or a Sample Editor project, loops and stereo included), piano
+  libraries (`npno`:
   the CNSP prefix) and
   Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
   strokes and audio files read and edited, new projects written).

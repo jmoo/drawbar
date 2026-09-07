@@ -13,7 +13,7 @@
 //! and can retune, rename and remap them without touching a byte of audio, in either
 //! chain. The [`codec`] decodes that audio to samples in every generation — it is one
 //! codec in three sets of units, so a caller only picks the right [`codec::Layout`].
-//! [`encode`] builds a new instrument from PCM, v2 only.
+//! [`encode`] builds a new instrument from PCM in all three generations.
 
 /// A zone and the stroke stream that plays it, ready for [`codec::decode`].
 pub struct ZoneAudio<'a> {
