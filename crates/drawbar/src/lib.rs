@@ -17,6 +17,7 @@ pub mod folders;
 pub mod icon;
 pub mod knob;
 pub mod led;
+pub mod library;
 pub mod log;
 pub mod newproject;
 pub mod note;

@@ -660,7 +660,7 @@ fn current_model(fields: &[Field]) -> Option<u32> {
 
 /// A library id as the registry spells it — decimal from the field list, hex where a
 /// person typed it.
-fn library_id(value: &str) -> Option<u32> {
+pub(crate) fn library_id(value: &str) -> Option<u32> {
     let text = value.trim();
     match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),

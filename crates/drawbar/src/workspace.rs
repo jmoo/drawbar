@@ -108,21 +108,27 @@ pub struct Container {
     /// `crc32:` or `crc16:` — the two generations keep it in different places.
     pub checksum_label: &'static str,
     pub checksum: String,
+    /// The body's CRC-32, which is what a type-1 container carries and what the device
+    /// reports for a slot — so a file and the slot it came off compare without either
+    /// body being hashed again.
+    ///
+    /// `None` for a type-0 container, whose checksum is a CRC-16 over the whole file.
+    pub body_crc32: Option<u32>,
 }
 
 impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
         // `Header` omits the generation-specific checksum field.
-        let (checksum_label, checksum) = match info.header.generation {
+        let (checksum_label, checksum, body_crc32) = match info.header.generation {
             Generation::V0 => {
                 let tail = bytes.get(bytes.len().checked_sub(2)?..)?;
                 let crc = u16::from_le_bytes(tail.try_into().ok()?);
-                ("crc16:", format!("{crc:#06x}"))
+                ("crc16:", format!("{crc:#06x}"), None)
             }
             Generation::V1 => {
                 let crc = u32::from_le_bytes(bytes.get(0x18..0x1c)?.try_into().ok()?);
-                ("crc32:", format!("{crc:#010x}"))
+                ("crc32:", format!("{crc:#010x}"), Some(crc))
             }
         };
         Some(Container {
@@ -131,6 +137,7 @@ impl Container {
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
+            body_crc32,
         })
     }
 
@@ -1094,6 +1101,22 @@ mod tests {
         assert_eq!(container.header.generation, Generation::V1);
         assert_eq!(container.body_len, ne5::program::BODY_LEN as u64);
         assert_eq!(container.checksum_label, "crc32:");
+    }
+
+    /// ⚠️ The checksum a type-1 container carries **is** the device's own body CRC-32,
+    /// which is what lets a file and a slot be compared from the header alone. Hashing
+    /// every listed asset once a frame would stall the library on a sample library, so
+    /// the equality is proved here rather than recomputed there.
+    #[test]
+    fn the_container_carries_the_body_checksum_the_instrument_reports() {
+        let bytes = Fresh::Program.bytes().unwrap();
+        let entity = ingest("untitled.ne5p", bytes.clone());
+        let stored = entity
+            .container
+            .and_then(|container| container.body_crc32)
+            .expect("a type-1 container carries one");
+        let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
+        assert_eq!(stored, nord_usb::envelope::crc32(&body.body.0));
     }
 
     /// Each fresh default carries its own tag, and each one round-trips.
