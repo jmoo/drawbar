@@ -592,46 +592,40 @@ async fn scan_class<T: Transport>(
             };
 
             let mut remaining = MOST_OCCUPIED;
-            let mut scanned = Vec::with_capacity(plan.len());
-            let how = match found {
-                Some(found) => {
-                    for planned in &plan {
-                        let slots = shape(&found, planned, remaining)?;
-                        remaining -= slots.len() as u32;
-                        scanned.push((planned.bank.get(), slots));
-                    }
-                    "by cursor"
-                }
-                None => {
-                    for planned in &plan {
-                        let slots = match planned.slots {
-                            Some(capacity) if capacity <= remaining => {
-                                walk_bank(s, planned.bank.get(), capacity).await?
-                            }
-                            Some(_) => {
-                                return Err(Error::ScanLimit {
-                                    bank: planned.bank.get() - 1,
-                                    limit: MOST_OCCUPIED,
-                                })
-                            }
-                            None => walk_open_bank(s, planned.bank.get(), remaining).await?,
-                        };
-                        remaining -= slots.len() as u32;
-                        scanned.push((planned.bank.get(), slots));
-                    }
-                    "slot by slot"
-                }
+            let mut items = 0;
+            let how = match &found {
+                Some(_) => "by cursor",
+                None => "slot by slot",
             };
-
-            let items = scanned
-                .iter()
-                .map(|(_, slots)| slots.iter().filter(|slot| slot.is_some()).count())
-                .sum();
-            let banks = scanned.len() as u32;
-            for (bank, slots) in scanned {
-                emit.send(DeviceEvent::BankScanned { class, bank, slots });
+            for planned in &plan {
+                let slots = match &found {
+                    Some(found) => shape(found, planned, remaining)?,
+                    None => match planned.slots {
+                        Some(capacity) if capacity <= remaining => {
+                            walk_bank(s, planned.bank.get(), capacity).await?
+                        }
+                        Some(_) => {
+                            return Err(Error::ScanLimit {
+                                bank: planned.bank.get() - 1,
+                                limit: MOST_OCCUPIED,
+                            })
+                        }
+                        None => walk_open_bank(s, planned.bank.get(), remaining).await?,
+                    },
+                };
+                remaining -= slots.len() as u32;
+                items += slots.iter().filter(|slot| slot.is_some()).count();
+                emit.send(DeviceEvent::BankScanned {
+                    class,
+                    bank: planned.bank.get(),
+                    slots,
+                });
             }
-            Ok(Walked { banks, items, how })
+            Ok(Walked {
+                banks: plan.len() as u32,
+                items,
+                how,
+            })
         })
         .await
 }
@@ -1555,6 +1549,56 @@ mod wire_tests {
             .into_iter()
             .filter(|held| *held == command)
             .count()
+    }
+
+    #[test]
+    fn a_scan_publishes_a_bank_before_reading_the_next_one() {
+        struct ObserveProgress {
+            puppet: Puppet,
+            events: Receiver<DeviceEvent>,
+            first_bank_arrived: bool,
+        }
+
+        impl Transport for ObserveProgress {
+            async fn write(&mut self, buf: &[u8]) -> nord_usb::Result<()> {
+                let msg = Message::decode(buf)?;
+                if msg.service == Service::Program
+                    && msg.command == cmd::INFO
+                    && msg.args[..4] == 1u32.to_be_bytes()
+                {
+                    self.first_bank_arrived = self.events.try_iter().any(|event| {
+                        matches!(event, DeviceEvent::BankScanned { class: ObjectClass::Program, bank: 1, slots }
+                            if slots.first().and_then(Option::as_ref).is_some_and(|info| info.name == "First"))
+                    });
+                }
+                self.puppet.write(buf).await
+            }
+
+            async fn read(&mut self, max: usize) -> nord_usb::Result<Vec<u8>> {
+                self.puppet.read(max).await
+            }
+        }
+
+        let (tx, events) = std::sync::mpsc::channel();
+        let emit = Emit::new(tx, egui::Context::default());
+        let puppet = Puppet::stocked(
+            &[("Bank 1", 1), ("Bank 2", 1)],
+            &[
+                (Location { bank: 0, slot: 0 }, "First"),
+                (Location { bank: 1, slot: 0 }, "Second"),
+            ],
+        );
+        let mut device = Device::new(ObserveProgress {
+            puppet,
+            events,
+            first_bank_arrived: false,
+        });
+        let flow = nord_usb::block_on(run(&mut device, scan(ObjectClass::Program), &emit));
+        assert!(flow == Flow::Continue);
+        assert!(
+            device.transport().first_bank_arrived,
+            "the first bank's names and progress were withheld until the second bank finished"
+        );
     }
 
     #[test]
