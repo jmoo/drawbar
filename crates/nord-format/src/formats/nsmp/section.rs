@@ -49,10 +49,11 @@ impl Section {
     }
 
     pub fn write_to(&self, w: &mut impl std::io::Write) -> Result<(), ParseError> {
+        let len = wire_len(self.payload.len())?;
         let head = |w: &mut dyn std::io::Write| -> std::io::Result<()> {
             w.write_all(&self.tag)?;
             w.write_all(&[0, self.version])?;
-            w.write_all(&(self.payload.len() as u32).to_be_bytes())?;
+            w.write_all(&len.to_be_bytes())?;
             w.write_all(&self.payload)
         };
         head(w).map_err(|e| ParseError::AssertFail(format!("writing a section: {e}")))
@@ -96,13 +97,7 @@ pub fn read_chain(r: &mut impl std::io::Read) -> Result<Vec<Section>, ParseError
             return Err(wrong_opener(CONTAINER, &head[..3]));
         }
         let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
-        let mut payload = vec![0u8; len];
-        r.read_exact(&mut payload).map_err(|_| {
-            ParseError::AssertFail(format!(
-                "section {} at {pos} declares {len} bytes but the body ends first",
-                String::from_utf8_lossy(&head[..3]),
-            ))
-        })?;
+        let payload = read_payload(r, len, pos, &head[..3])?;
         pos += (HEADER_LEN + len) as u64;
         sections.push(Section {
             tag: [head[0], head[1], head[2]],
@@ -184,10 +179,11 @@ impl Section4 {
     }
 
     pub fn write_to(&self, w: &mut impl std::io::Write) -> Result<(), ParseError> {
+        let len = wire_len(self.payload.len())?;
         let head = |w: &mut dyn std::io::Write| -> std::io::Result<()> {
             w.write_all(&self.tag)?;
             w.write_all(&self.version.to_be_bytes())?;
-            w.write_all(&(self.payload.len() as u32).to_be_bytes())?;
+            w.write_all(&len.to_be_bytes())?;
             w.write_all(&self.payload)
         };
         head(w).map_err(|e| ParseError::AssertFail(format!("writing a section: {e}")))
@@ -212,13 +208,7 @@ pub fn read_chain4(r: &mut impl std::io::Read) -> Result<Vec<Section4>, ParseErr
             return Err(wrong_opener(CONTAINER4, &head[..4]));
         }
         let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
-        let mut payload = vec![0u8; len];
-        r.read_exact(&mut payload).map_err(|_| {
-            ParseError::AssertFail(format!(
-                "section {} at {pos} declares {len} bytes but the body ends first",
-                String::from_utf8_lossy(&head[..4]),
-            ))
-        })?;
+        let payload = read_payload(r, len, pos, &head[..4])?;
         pos += (HEADER4_LEN + len) as u64;
         sections.push(Section4 {
             tag: [head[0], head[1], head[2], head[3]],
@@ -250,6 +240,43 @@ fn read_exact_or_end(
         }
     }
     Ok(true)
+}
+
+/// Read incrementally so a truncated payload cannot force its declared allocation.
+fn read_payload(
+    r: &mut impl std::io::Read,
+    len: usize,
+    at: u64,
+    tag: &[u8],
+) -> Result<Vec<u8>, ParseError> {
+    let mut payload = Vec::new();
+    let mut remaining = len;
+    let mut scratch = [0u8; 8192];
+    while remaining > 0 {
+        let take = remaining.min(scratch.len());
+        payload
+            .try_reserve(take)
+            .map_err(|_| ParseError::OutOfBounds {
+                value: format!("{len} payload bytes"),
+                bound: "an allocation that fits memory".into(),
+            })?;
+        r.read_exact(&mut scratch[..take]).map_err(|_| {
+            ParseError::AssertFail(format!(
+                "section {} at {at} declares {len} bytes but the body ends first",
+                String::from_utf8_lossy(tag),
+            ))
+        })?;
+        payload.extend_from_slice(&scratch[..take]);
+        remaining -= take;
+    }
+    Ok(payload)
+}
+
+fn wire_len(len: usize) -> Result<u32, ParseError> {
+    u32::try_from(len).map_err(|_| ParseError::OutOfBounds {
+        value: format!("{len} payload bytes"),
+        bound: "a payload length that fits u32".into(),
+    })
 }
 
 /// Finds the single v3/v4 section with `tag`.
@@ -343,9 +370,18 @@ mod tests {
     }
 
     #[test]
+    fn a_payload_crossing_the_read_buffer_boundary_round_trips() {
+        let payload = vec![0x5a; 8193];
+        let mut bytes = opener();
+        bytes.extend(section(HDR, 1, &payload));
+        let chain = read_chain(&mut bytes.as_slice()).unwrap();
+        assert_eq!(chain[1].payload, payload);
+    }
+
+    #[test]
     fn overrunning_length_is_an_error() {
         let mut hdr = section(HDR, 1, &[7; 4]);
-        hdr[8] = 200; // claim 200 payload bytes where 4 exist
+        hdr[5..9].copy_from_slice(&u32::MAX.to_be_bytes());
         let mut bytes = opener();
         bytes.extend(hdr);
         assert!(read_chain(&mut bytes.as_slice()).is_err());
@@ -428,7 +464,7 @@ mod tests {
         let opener4 = || section4(CONTAINER4, 30, &[0, 2, 0, 0x0c]);
 
         let mut hdr = section4(HDR4, 1, &[7; 4]);
-        hdr[11] = 200; // claim 200 payload bytes where 4 exist
+        hdr[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
         let mut bytes = opener4();
         bytes.extend(hdr);
         assert!(read_chain4(&mut bytes.as_slice()).is_err());
@@ -437,6 +473,13 @@ mod tests {
         bytes.extend(section4(HDR4, 1, &[7; 4]));
         bytes.extend_from_slice(&[0; 5]); // not enough for another header
         assert!(read_chain4(&mut bytes.as_slice()).is_err());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_section_writer_refuses_lengths_that_do_not_fit_the_wire() {
+        assert_eq!(wire_len(u32::MAX as usize).unwrap(), u32::MAX);
+        assert!(wire_len(u32::MAX as usize + 1).is_err());
     }
 
     #[test]

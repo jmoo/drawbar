@@ -417,7 +417,14 @@ impl Body for RawBody {
                 "the body is too large for this platform",
             )
         })?;
-        let mut bytes = vec![0u8; len];
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| ParseError::OutOfBounds {
+                value: format!("{len} body bytes"),
+                bound: "an allocation that fits memory".into(),
+            })?;
+        bytes.resize(len, 0);
         r.read_exact(&mut bytes)?;
         Ok(RawBody(bytes))
     }
