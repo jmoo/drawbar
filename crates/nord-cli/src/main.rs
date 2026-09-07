@@ -295,7 +295,8 @@ enum SampleAction {
     /// The project supplies the zones, their root keys, top notes and trim points,
     /// and the WAVs they play — paths inside it resolve from the project's own
     /// directory. Unsupported layer, detune, velocity and enabled EQ settings are
-    /// refused by name. The same `--experimental` caveat as `encode` applies.
+    /// refused by name. Settings with no instrument representation are reported when
+    /// ignored. The same `--experimental` caveat as `encode` applies.
     Build(sample::BuildArgs),
 
     /// Round-trip a sample instrument, in a file or a slot, and with `--deep` also
