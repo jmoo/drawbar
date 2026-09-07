@@ -1,8 +1,9 @@
 # Put the `bump` label on a PR and the versions it calls for get committed to
-# the branch: scripts/bump.bash reads the level from the PR title (the squashed
-# commit that will land on master) and applies it to the crates the diff
-# touches, from the versions at the merge-base — so the run converges and the
-# job re-runs itself on every later push or retitle while the label is on.
+# the branch: scripts/bump.bash raises every crate to what its commits since its
+# last release tag call for, counting the PR title (the squashed commit that will
+# land on master) on the crates the diff touches. A manifest already at or past
+# that version is left alone, so the run converges as the job re-runs itself on
+# every later push or retitle while the label is on.
 #
 # The app token lets the pushed commit trigger CI and receive its own required
 # checks. A GITHUB_TOKEN push would leave those checks waiting on the new head.

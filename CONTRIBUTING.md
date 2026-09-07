@@ -241,15 +241,15 @@ Each crate's version lives only in its `Cargo.toml`. `scripts/bump.bash` derives
 release levels from Conventional Commits since the crate's last release tag:
 breaking changes bump major (minor for a 0.x crate), `feat` bumps minor, and
 `fix`, `perf`, or `revert` bumps patch. Only commits touching a crate count; a
-dependent of a bumped crate receives at least a patch bump.
+crate whose release is still unpublished gives each dependent at least a patch
+bump, and every requirement on it is rewritten to the version it ends up at.
 
-The `bump` PR label runs `scripts/bump.bash --title` with the eventual squash
-title, updates affected versions and dependents, refreshes `Cargo.lock`, and
-pushes a release commit. It reruns on pushes and title changes and converges
-from merge-base versions. Each crate takes the higher of the title's level and
-the level required by its already-unreleased commits. For a fork, run the same
-command locally. Running `scripts/bump.bash` without `--title` on `master`
-catches up from release tags.
+There is one path: raise each crate to the version its commits call for, and
+leave a manifest already at or past it alone. `--title` adds the eventual squash
+commit's level on the crates the PR's diff touches. The `bump` PR label runs
+`scripts/bump.bash --title`, refreshes `Cargo.lock`, and pushes a release
+commit; it reruns on pushes and title changes and converges. For a fork, run the
+same command locally. Running `scripts/bump.bash` on `master` catches up.
 
 After the check, build, and corpus jobs pass on `master`, the release job runs
 `scripts/release.bash`. Before publishing anything, it rejects a crate whose
