@@ -491,18 +491,38 @@ fn light() -> egui::Visuals {
     visuals
 }
 
+/// The text of the shell itself: menus, tabs, rail rows and cells.
+///
+/// A function rather than a const because [`egui::TextStyle::Name`] holds an `Arc<str>`.
+pub fn ui() -> egui::TextStyle {
+    egui::TextStyle::Name("ui".into())
+}
+
+/// The smallest text: panel headers and column heads, which are also uppercased.
+pub fn micro() -> egui::TextStyle {
+    egui::TextStyle::Name("micro".into())
+}
+
 /// The metrics both faces share: the room a control is given, and the room around it.
 ///
 /// Theme-independent on purpose — flipping light to dark must not move anything.
 fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
-    // Fields sat 3px apart, which read as one block rather than a list of fields.
-    spacing.item_spacing = egui::vec2(8.0, 6.0);
+    spacing.item_spacing = egui::vec2(8.0, 4.0);
     // A button was 1px taller than its own text; a strip of them read as a solid bar.
     spacing.button_padding = egui::vec2(7.0, 3.0);
-    // The three regions get room to the window edge and to each other.
-    spacing.window_margin = egui::Margin::same(10);
-    spacing.menu_margin = egui::Margin::same(8);
+    // Panels own their inner padding, so the shared margin claims none of it.
+    spacing.window_margin = egui::Margin::same(0);
+    spacing.menu_margin = egui::Margin::same(4);
+    spacing.indent = 18.0;
+    spacing.interact_size.y = 18.0;
+    spacing.scroll.bar_width = 8.0;
+    style
+        .text_styles
+        .insert(ui(), egui::FontId::proportional(11.5));
+    style
+        .text_styles
+        .insert(micro(), egui::FontId::proportional(9.5));
 }
 
 #[cfg(test)]
@@ -612,7 +632,16 @@ mod tests {
         let mut style = egui::Style::default();
         metrics(&mut style);
         // Both faces read one style, so there is nothing here to disagree about.
-        assert_eq!(style.spacing.item_spacing, egui::vec2(8.0, 6.0));
-        assert_eq!(style.spacing.button_padding, egui::vec2(7.0, 3.0));
+        let spacing = &style.spacing;
+        assert_eq!(spacing.item_spacing, egui::vec2(8.0, 4.0));
+        assert_eq!(spacing.button_padding, egui::vec2(7.0, 3.0));
+        assert_eq!(spacing.window_margin, egui::Margin::same(0));
+        assert_eq!(spacing.menu_margin, egui::Margin::same(4));
+        assert_eq!(spacing.indent, 18.0);
+        assert_eq!(spacing.interact_size.y, 18.0);
+        assert_eq!(spacing.scroll.bar_width, 8.0);
+        // Both named styles must be registered, or resolving one panics mid-frame.
+        assert_eq!(style.text_styles[&ui()], egui::FontId::proportional(11.5));
+        assert_eq!(style.text_styles[&micro()], egui::FontId::proportional(9.5));
     }
 }

@@ -30,6 +30,18 @@ pub struct Drawn {
 /// The width the location column takes, so names line up under each other.
 const AT_W: f32 = 42.0;
 
+/// The ink for a cell that carries a colour of its own — a state word, a dependency, a
+/// count, an address.
+///
+/// ⚠️ The signal colours measure 2.3–4.3:1 against `selection.bg_fill`. A selected row
+/// gives every one of them the selection's own ink instead.
+pub fn cell_ink(selected: bool, own: egui::Color32, visuals: &egui::Visuals) -> egui::Color32 {
+    match selected {
+        true => visuals.selection.stroke.color,
+        false => own,
+    }
+}
+
 /// One row of a list: a full-width click target with its text painted into it.
 ///
 /// ⚠️ Nothing inside is a widget. A label allocates a hover rect of its own, which then
@@ -72,13 +84,11 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     // One gutter, two marks that never meet: only a local asset is dirty, and only a slot
     // is loaded on the panel.
     if cells.dirty {
-        painter.circle_filled(gutter, 3.5, crate::app::warn(ui.visuals()));
+        let mark = cell_ink(selected, crate::app::warn(visuals), visuals);
+        painter.circle_filled(gutter, 3.5, mark);
     } else if cells.loaded {
-        painter.circle_stroke(
-            gutter,
-            3.0,
-            egui::Stroke::new(1.5_f32, crate::app::good(ui.visuals())),
-        );
+        let mark = cell_ink(selected, crate::app::good(visuals), visuals);
+        painter.circle_stroke(gutter, 3.0, egui::Stroke::new(1.5_f32, mark));
     }
     x += 10.0;
 
@@ -109,4 +119,28 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         );
     }
     Drawn { response, name }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_coloured_cell_keeps_its_colour_until_its_row_is_selected() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            for own in [
+                crate::app::good(&visuals),
+                crate::app::warn(&visuals),
+                crate::app::bad(&visuals),
+                crate::app::accent(&visuals),
+                crate::app::unlit(&visuals),
+            ] {
+                assert_eq!(cell_ink(false, own, &visuals), own);
+                assert_eq!(
+                    cell_ink(true, own, &visuals),
+                    visuals.selection.stroke.color
+                );
+            }
+        }
+    }
 }

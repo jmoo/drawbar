@@ -30,7 +30,7 @@ mod row;
 
 pub use act::{apply, foreign_format, Act};
 pub use drag::{landing, Carried, Item, Kind, Landing, Onto};
-pub use row::{Cells, Drawn};
+pub use row::{cell_ink, Cells, Drawn};
 
 use act::{owed, write_warnings};
 use drag::ghost;
