@@ -37,14 +37,15 @@ pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<
 /// Query every class worth reporting, one transaction each.
 ///
 /// Each class needs its own session because the class is fixed at `SESSION_OPEN`.
-/// A class refusal is skipped rather than failing the sweep — instruments differ in
-/// which classes they answer for. Transport and malformed-reply errors propagate.
+/// Two refusals are skipped rather than failing the sweep, because instruments differ
+/// in which classes they answer for: a refused `SESSION_OPEN` ([`Error::ClassRefused`])
+/// and a refused `STATUS`. Every other error, a refused `HELLO` included, propagates.
 pub async fn inventory<T: Transport>(transport: &mut T) -> Result<Vec<Status>> {
     let mut out = Vec::new();
     for class in ObjectClass::INVENTORY {
         let mut session = match Session::open(transport, class).await {
             Ok(s) => s,
-            Err(Error::DeviceStatus(_)) => continue,
+            Err(Error::ClassRefused { .. }) => continue,
             Err(e) => return Err(e),
         };
         let result = status(&mut session).await;

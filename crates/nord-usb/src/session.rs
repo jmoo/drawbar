@@ -99,7 +99,12 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             Err(e) => {
                 // The HELLO landed, so the UI session is open and must be released.
                 s.release().await;
-                Err(e)
+                Err(match e {
+                    Error::DeviceStatus(status) if status != STALE_SESSION => {
+                        Error::ClassRefused { class, status }
+                    }
+                    other => other,
+                })
             }
         }
     }

@@ -248,7 +248,7 @@ fn inventory_propagates_a_malformed_status_after_closing_the_session() {
 }
 
 #[test]
-fn inventory_skips_a_class_refused_by_the_device() {
+fn inventory_skips_a_class_that_refuses_its_status() {
     let mut replies = VecDeque::new();
     for _ in nord_usb::wire::ObjectClass::INVENTORY {
         replies.extend([
@@ -280,6 +280,49 @@ fn sample_unit() -> nord_usb::wire::AllocationUnit {
     }
     .allocation_unit()
     .unwrap()
+}
+
+#[test]
+fn inventory_skips_a_class_whose_session_the_device_refuses() {
+    let mut replies = VecDeque::new();
+    for _ in nord_usb::wire::ObjectClass::INVENTORY {
+        replies.extend([
+            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
+            Some(response_with_status(Service::Program, cmd::SESSION_OPEN, 5, &[]).bytes),
+            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
+        ]);
+    }
+    let mut transport = LimitTransport {
+        replies,
+        limits: Vec::new(),
+    };
+    let statuses = pollster::block_on(op::inventory(&mut transport)).unwrap();
+    assert!(statuses.is_empty());
+    assert!(
+        transport.replies.is_empty(),
+        "a refused open must still release the UI session before the next class"
+    );
+}
+
+#[test]
+fn inventory_propagates_a_refused_hello_rather_than_reporting_nothing() {
+    let mut transport = LimitTransport {
+        replies: VecDeque::from([
+            Some(response_with_status(Service::Ui, nord_usb::wire::ui::HELLO, 5, &[]).bytes),
+            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
+        ]),
+        limits: Vec::new(),
+    };
+    let err = pollster::block_on(op::inventory(&mut transport))
+        .expect_err("a refused HELLO is not one class declining to answer");
+    assert!(
+        matches!(err, nord_usb::Error::DeviceStatus(5)),
+        "wrong error: {err}"
+    );
+    assert!(
+        transport.replies.is_empty(),
+        "the sweep carried on to another class after the UI refused it"
+    );
 }
 
 #[test]

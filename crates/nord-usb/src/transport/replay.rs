@@ -70,6 +70,7 @@ pub enum Expect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrKind {
     DeviceStatus(u32),
+    ClassRefused(u32),
     UnexpectedResponse,
     UnexpectedLocation,
     UnexpectedPartition,
@@ -135,6 +136,7 @@ impl ErrKind {
     pub fn matches(&self, e: &Error) -> bool {
         match (self, e) {
             (ErrKind::DeviceStatus(want), Error::DeviceStatus(got)) => want == got,
+            (ErrKind::ClassRefused(want), Error::ClassRefused { status, .. }) => want == status,
             (ErrKind::UnexpectedResponse, Error::UnexpectedResponse { .. }) => true,
             (ErrKind::UnexpectedLocation, Error::UnexpectedLocation { .. }) => true,
             (ErrKind::UnexpectedPartition, Error::UnexpectedPartition { .. }) => true,
@@ -157,6 +159,12 @@ impl ErrKind {
             ("device-status", code) => parse_u32(code)
                 .map(ErrKind::DeviceStatus)
                 .ok_or_else(|| format!("bad device status {code:?}")),
+            ("class-refused", "") => Err("class-refused needs its code, e.g. \
+                                         'err class-refused 0x5'"
+                .into()),
+            ("class-refused", code) => parse_u32(code)
+                .map(ErrKind::ClassRefused)
+                .ok_or_else(|| format!("bad class refusal status {code:?}")),
             ("unexpected-response", "") => Ok(ErrKind::UnexpectedResponse),
             ("unexpected-location", "") => Ok(ErrKind::UnexpectedLocation),
             ("unexpected-partition", "") => Ok(ErrKind::UnexpectedPartition),
@@ -165,7 +173,8 @@ impl ErrKind {
             ("replay", "") => Ok(ErrKind::Replay),
             (kind, _) => Err(format!(
                 "unknown failure {kind:?}; the vocabulary is device-status <code>, \
-                unexpected-response, unexpected-location, unexpected-partition, enumeration, \
+                class-refused <code>, unexpected-response, unexpected-location, \
+                unexpected-partition, enumeration, \
                 transport, replay"
             )),
         }
@@ -176,6 +185,7 @@ impl std::fmt::Display for ErrKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ErrKind::DeviceStatus(code) => write!(f, "device-status {code:#x}"),
+            ErrKind::ClassRefused(code) => write!(f, "class-refused {code:#x}"),
             ErrKind::UnexpectedResponse => f.write_str("unexpected-response"),
             ErrKind::UnexpectedLocation => f.write_str("unexpected-location"),
             ErrKind::UnexpectedPartition => f.write_str("unexpected-partition"),

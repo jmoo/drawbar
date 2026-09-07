@@ -1,7 +1,7 @@
 # source: synthetic
 # note: a refused SESSION_OPEN must still release the UI session the HELLO opened.
 # intent: program status
-# expect: err device-status 0x5
+# expect: err class-refused 0x5
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec
 O 000000160000000c0000000a0000000400000004a218
