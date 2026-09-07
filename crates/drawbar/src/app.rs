@@ -145,6 +145,9 @@ impl DrawbarApp {
         // session lands on this app's own colours rather than egui's defaults.
         cc.egui_ctx.set_visuals_of(egui::Theme::Dark, dark());
         cc.egui_ctx.set_visuals_of(egui::Theme::Light, light());
+        // Metrics live on the style, not on either face, so the theme swap moves
+        // colours and nothing else.
+        cc.egui_ctx.style_mut(metrics);
         let theme = cc
             .storage
             .and_then(|storage| storage.get_string(ThemeChoice::KEY))
@@ -456,12 +459,18 @@ fn dark() -> egui::Visuals {
     visuals.panel_fill = egui::Color32::from_rgb(0x16, 0x17, 0x19);
     visuals.window_fill = egui::Color32::from_rgb(0x1c, 0x1d, 0x20);
     visuals.faint_bg_color = egui::Color32::from_rgb(0x22, 0x23, 0x26);
+    // A group's border is the only thing between one section and the next, so it is
+    // lifted clear of egui's own hairline.
+    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x4e);
+    // Body ink and caption ink, each a step up from egui's dark defaults.
+    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xa0);
     visuals.selection.bg_fill = egui::Color32::from_rgb(0x7a, 0x24, 0x24);
     // ⚠️ This also colors drop targets and focused knobs; inheriting egui's blue would
     // introduce a second accent.
     visuals.selection.stroke.color = egui::Color32::from_rgb(0xff, 0xdf, 0xd8);
     // Slot numbers and knob captions use the weak text color.
-    visuals.weak_text_alpha = 0.7;
+    visuals.weak_text_alpha = 0.85;
     visuals.hyperlink_color = bad(&visuals);
     visuals
 }
@@ -476,10 +485,24 @@ fn light() -> egui::Visuals {
     visuals.selection.stroke.color = egui::Color32::from_rgb(0x3a, 0x14, 0x10);
     visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x28);
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
-    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x9e);
-    visuals.weak_text_alpha = 0.75;
+    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x8a);
+    visuals.weak_text_alpha = 0.9;
     visuals.hyperlink_color = bad(&visuals);
     visuals
+}
+
+/// The metrics both faces share: the room a control is given, and the room around it.
+///
+/// Theme-independent on purpose — flipping light to dark must not move anything.
+fn metrics(style: &mut egui::Style) {
+    let spacing = &mut style.spacing;
+    // Fields sat 3px apart, which read as one block rather than a list of fields.
+    spacing.item_spacing = egui::vec2(8.0, 6.0);
+    // A button was 1px taller than its own text; a strip of them read as a solid bar.
+    spacing.button_padding = egui::vec2(7.0, 3.0);
+    // The three regions get room to the window edge and to each other.
+    spacing.window_margin = egui::Margin::same(10);
+    spacing.menu_margin = egui::Margin::same(8);
 }
 
 #[cfg(test)]
@@ -572,5 +595,24 @@ mod tests {
             let body = contrast(visuals.text_color(), panel);
             assert!(body >= 4.5, "{where_} body: {body:.2}:1");
         }
+    }
+
+    #[test]
+    fn a_group_border_separates_it_from_the_panel_behind_it() {
+        for visuals in [dark(), light()] {
+            let (where_, panel) = (named(&visuals), visuals.panel_fill);
+            let border = visuals.widgets.noninteractive.bg_stroke.color;
+            let ratio = contrast(border, panel);
+            assert!(ratio >= 1.9, "{where_} group border: {ratio:.2}:1");
+        }
+    }
+
+    #[test]
+    fn the_shared_metrics_do_not_depend_on_the_theme() {
+        let mut style = egui::Style::default();
+        metrics(&mut style);
+        // Both faces read one style, so there is nothing here to disagree about.
+        assert_eq!(style.spacing.item_spacing, egui::vec2(8.0, 6.0));
+        assert_eq!(style.spacing.button_padding, egui::vec2(7.0, 3.0));
     }
 }
