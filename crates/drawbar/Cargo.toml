@@ -2,7 +2,7 @@
 name = "drawbar"
 description = "Desktop and browser app for Clavia / Nord keyboards — view, edit, and transfer sounds over USB"
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 version = "0.4.0"
