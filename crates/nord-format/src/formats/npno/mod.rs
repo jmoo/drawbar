@@ -727,6 +727,10 @@ impl<'a> Library<'a> {
 
     /// Two libraries, one covering the keys below `key` and one covering `key` and
     /// above, each cut the way [`Library::cut_range`] cuts.
+    ///
+    /// A root whose keys straddle `key` lands in both halves — each half has to be
+    /// playable on its own — so the two together hold more strokes than the one they
+    /// came from.
     pub fn split_at(&self, key: u8) -> (Library<'a>, Library<'a>) {
         let mut low = self.clone();
         let mut high = self.clone();

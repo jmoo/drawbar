@@ -7,16 +7,16 @@
 //! > reads.
 //!
 //! The nouns are the protocol's object classes: `nord program`, `nord sample`,
-//! `nord setlist` and `nord live` are [`slot_action`] with the class fixed, `nord
-//! settings` carries the subset its singleton can answer (`get`, `info`, `edit`),
-//! and the hidden `nord raw --class N` is [`slot_action`] with the class given as a
-//! number.
+//! `nord piano`, `nord setlist` and `nord live` are [`slot_action`] with the class
+//! fixed, `nord settings` carries the subset its singleton can answer (`get`,
+//! `info`, `edit`), and the hidden `nord raw --class N` is [`slot_action`] with the
+//! class given as a number.
 //! `inspect`/`verify`/`edit` dispatch on the format rather than on a class, so they
 //! sit at the top level — `edit` is how the formats with no noun of their own (the
 //! Stage bodies, the Sample Editor project) are edited.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
-//! its own, which today is pianos (1).
+//! its own.
 
 mod device;
 mod edit;
@@ -24,6 +24,7 @@ mod editors;
 mod file;
 mod file_edit;
 mod note;
+mod piano;
 mod sample;
 mod slot;
 mod summary;
@@ -126,6 +127,13 @@ enum Command {
     Sample {
         #[command(subcommand)]
         action: SampleAction,
+    },
+
+    /// Piano libraries — the library on the instrument (object class 1), or
+    /// `.npno` files.
+    Piano {
+        #[command(subcommand)]
+        action: PianoAction,
     },
 
     /// The class-generic primitives, addressed by object-class number.
@@ -311,6 +319,47 @@ enum SampleAction {
         #[command(subcommand)]
         action: SampleProjectAction,
     },
+}
+
+/// `nord piano`: every class-generic verb, plus the ones that read and reshape a
+/// library file.
+///
+/// A library is tens of megabytes, so the file verbs take a file and nothing else:
+/// move one to or from the instrument with `get` and `put` first.
+#[derive(Subcommand)]
+enum PianoAction {
+    #[command(flatten)]
+    Slot(SlotAction),
+
+    /// Report a library's directory: its roots, the layers each holds per bank, the
+    /// keys it covers, its channels and its size. Read-only.
+    Inspect(piano::InspectArgs),
+
+    /// Decode one stroke to a WAV, at the rate the instrument plays it and with no
+    /// gain applied.
+    ///
+    /// A stroke is one recording: a root note, a bank and a velocity layer. Name it
+    /// by index with `--stroke`, or by the key it plays with `--key`, narrowing
+    /// with `--bank` and `--layer` when a key selects more than one.
+    Decode(piano::DecodeArgs),
+
+    /// Change what a library says rather than what it holds: its name, a key's fine
+    /// tune, and which root a key plays.
+    ///
+    /// Nothing here touches audio. A key can only be routed to a root the directory
+    /// actually records.
+    Edit(piano::EditArgs),
+
+    /// Write a smaller library: without a bank, without the quieter velocity
+    /// layers, or covering fewer keys.
+    ///
+    /// The strokes that survive move byte for byte, so a trim is a re-lay rather
+    /// than a re-encode. Keys whose root loses every stroke are left playing
+    /// nothing, and the count is reported.
+    Trim(piano::TrimArgs),
+
+    /// Cut a library in two at a key, writing both halves.
+    Split(piano::SplitArgs),
 }
 
 /// `nord sample project`: the editor's own save file, which no object class holds.
@@ -720,6 +769,14 @@ fn main() -> ExitCode {
             SampleAction::Project { action } => match action {
                 SampleProjectAction::New(args) => sample::project_new(&ui, args),
             },
+        },
+        Command::Piano { action } => match action {
+            PianoAction::Slot(action) => slot_action(&ui, action, ObjectClass::Piano),
+            PianoAction::Inspect(args) => piano::inspect(&ui, args),
+            PianoAction::Decode(args) => piano::decode(&ui, args),
+            PianoAction::Edit(args) => piano::edit(&ui, args),
+            PianoAction::Trim(args) => piano::trim(&ui, args),
+            PianoAction::Split(args) => piano::split(&ui, args),
         },
         Command::Setlist { action } => match action {
             SetlistAction::Slot(action) => slot_action(&ui, action, ObjectClass::SetList),

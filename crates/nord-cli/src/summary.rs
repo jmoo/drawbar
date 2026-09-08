@@ -716,6 +716,19 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 let covered = map.iter().filter(|&&b| b != 0xFF).count();
                 ui.out(field(ui, 2, "notes", format!("{covered} covered")));
             }
+            if let Ok(library) = p.library() {
+                ui.out(field(
+                    ui,
+                    2,
+                    "strokes",
+                    format!(
+                        "{} over {} root(s), {} channel(s)",
+                        library.strokes().len(),
+                        library.roots().len(),
+                        library.channels(),
+                    ),
+                ));
+            }
         }
         Entity::Sample(nord_format::Sample::V2(s)) => sample(ui, s),
         Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
