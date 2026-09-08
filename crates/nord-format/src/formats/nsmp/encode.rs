@@ -7,9 +7,9 @@
 //! field one count from the editor's. No structural field moves with it, and neither
 //! does the pitch, the length, or anything else about what the instrument plays.
 //!
-//! Byte for byte means under [`Predictor::Minimising`], the record coding the editor
-//! picks. [`Predictor::Plain`] states every content field outright: the same audio in
-//! a larger file, and not the editor's bytes.
+//! The record coding the editor picks, [`Predictor::Minimising`], is the default here.
+//! [`Predictor::Plain`] opts out and states every content field outright: the same
+//! audio in a file several times larger on smooth material, and not the editor's bytes.
 //!
 //! Under either predictor a file from here **round-trips through this crate's own
 //! decoder exactly** and obeys every structural law the format is known to have.
@@ -324,11 +324,11 @@ const DIFFERENCE: [&[i32]; 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Predictor {
     /// Store every content field outright at order zero.
-    #[default]
     Plain,
     /// Choose the narrowest predictor per cell, the lowest order among equals — the
     /// editor's own choice. Smaller than plain records and exact through this crate's
     /// decoder.
+    #[default]
     Minimising,
 }
 
@@ -385,14 +385,14 @@ pub struct Options {
 }
 
 impl Options {
-    /// Defaults: the name given, root key C4, the editor's own top note, plain records,
-    /// no loop, the v2 generation.
+    /// Defaults: the name given, root key C4, the editor's own top note, the editor's
+    /// record coding, no loop, the v2 generation.
     pub fn new(name: impl Into<String>) -> Options {
         Options {
             name: name.into(),
             root_key: 60,
             top_note: None,
-            predictor: Predictor::Plain,
+            predictor: Predictor::default(),
             loops: None,
             channels: 1,
             secondary_start: None,
@@ -3235,7 +3235,7 @@ mod tests {
                 zone(&sine(110.0, 9000.0, 8000), 48, 53, 1),
             ],
             "Three",
-            Predictor::Plain,
+            Predictor::default(),
         )
         .unwrap();
 
