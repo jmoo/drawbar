@@ -528,7 +528,10 @@ const ROW: f32 = 24.0;
 const HEAD: f32 = 20.0;
 const BAR: f32 = 28.0;
 
-/// The room the bar and the footer keep at each end.
+/// The room the bar, the table and the footer keep at each end.
+///
+/// ⚠️ The table's is the tree's own row indent. Without it the first track starts at the
+/// panel's edge and the mark's left stroke is painted half outside the window.
 const PAD: f32 = 8.0;
 
 /// A kind glyph in a row, and the smaller ones beside a count.
@@ -603,6 +606,16 @@ impl Library {
         device: &Device,
         acts: &mut Vec<Act>,
     ) {
+        // The head and every row start where a row of the tree starts, so the whole grid
+        // moves together and the scroll bar stays at the panel's own edge.
+        let room = ui.available_rect_before_wrap();
+        let mut inset = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(room.with_min_x(room.left() + PAD))
+                .layout(*ui.layout()),
+        );
+        let ui = &mut inset;
+
         // The head and the rows are laid out to one width, so a scroll bar the rows make
         // room for must come off the head as well.
         let body = ui.available_height() - HEAD;
@@ -1054,17 +1067,14 @@ fn footer(
 /// The one line the table shows when nothing survives the narrowing.
 fn nothing(ui: &mut egui::Ui) {
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add_space(PAD);
-        ui.label(
-            egui::RichText::new(
-                "Nothing here — drop Nord files in, attach an instrument, or ask for less.",
-            )
-            .text_style(micro())
-            .weak()
-            .italics(),
-        );
-    });
+    ui.label(
+        egui::RichText::new(
+            "Nothing here — drop Nord files in, attach an instrument, or ask for less.",
+        )
+        .text_style(micro())
+        .weak()
+        .italics(),
+    );
 }
 
 #[cfg(test)]
@@ -1416,7 +1426,8 @@ mod tests {
             workspace.create(kind, &mut log).unwrap();
         }
 
-        let box_x = tracks(WIDTH)[Column::Mark.index()].start + MARK / 2.0;
+        // The table starts PAD in, and the mark is the first track inside it.
+        let box_x = PAD + tracks(WIDTH - PAD)[Column::Mark.index()].start + MARK / 2.0;
         let on_box = |index: f32| egui::pos2(box_x, BAR + HEAD + ROW * (index + 0.5));
         let mut frames = Vec::new();
         for index in [0.0_f32, 1.0] {

@@ -16,7 +16,7 @@ use crate::device::occupancy;
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
-use crate::panel::{caps, chevron, dock_header, flat, strip, HEADER};
+use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK};
 use crate::strings::folder;
 use crate::tabs::Spot;
 
@@ -55,6 +55,13 @@ const BUTTON: f32 = 22.0;
 
 /// The omnibox's least width. Below this it is a box nobody can read a name in.
 const OMNIBOX: f32 = 300.0;
+
+/// The least width a drop-down takes, whatever is in it.
+///
+/// ⚠️ A menu sizes itself to its widest item, so without this each one is as wide as
+/// whatever happens to be enabled — and the longest item, "Instrument panel" with ⌥⌘I,
+/// leaves its key text against its label. This is that item with a gap between the two.
+const MENU: f32 = 240.0;
 
 /// Which dock a toggle is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,16 +106,16 @@ pub struct Shell {
     pub tags_open: bool,
     pub info_open: bool,
     /// How far each dock was last dragged. A side dock's is its width, the bottom
-    /// dock's is its body under [`HEADER`].
+    /// dock's is its body under [`DOCK`].
     pub browser_width: f32,
     pub inspector_width: f32,
     pub dock_body: f32,
     pub page: Page,
-    /// What has been typed into the omnibox. Filtering the library by it is stage 6;
-    /// nothing reads this yet.
+    /// What has been typed into the omnibox: the name the library's table is narrowed
+    /// by.
     pub omnibox: String,
-    /// What the library is narrowed to. The tree's kind and tag rows set it; stage 6's
-    /// table reads it.
+    /// What else the library is narrowed to, as the tree's kind, tag and place rows ask
+    /// for it.
     pub filter: Filter,
 }
 
@@ -329,6 +336,14 @@ fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
         true => ctx.format_shortcut(&shortcut),
         false => String::new(),
     }
+}
+
+/// One of the title bar's drop-downs, no narrower than [`MENU`] however little is in it.
+fn drop_down(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
+    ui.menu_button(title, |ui| {
+        ui.set_min_width(MENU);
+        contents(ui);
+    });
 }
 
 /// A menu item, closing the menu when it is picked.
@@ -585,10 +600,10 @@ impl DrawbarApp {
     }
 
     fn menus(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
-        ui.menu_button("File", |ui| self.file_menu(ui, acts));
-        ui.menu_button("View", |ui| self.view_menu(ui, frame, acts));
-        ui.menu_button("Instrument", |ui| self.instrument_menu(ui, acts));
-        ui.menu_button("Help", |ui| {
+        drop_down(ui, "File", |ui| self.file_menu(ui, acts));
+        drop_down(ui, "View", |ui| self.view_menu(ui, frame, acts));
+        drop_down(ui, "Instrument", |ui| self.instrument_menu(ui, acts));
+        drop_down(ui, "Help", |ui| {
             if item(ui, "Copy activity log", None) {
                 acts.push(Act::CopyLog);
             }
@@ -793,8 +808,7 @@ impl DrawbarApp {
         rule(ui, 16.0);
     }
 
-    /// ⚠️ It holds what is typed and nothing else. Filtering the library by it is stage
-    /// 6; a box that looked like it filtered and did not would be worse than none.
+    /// The name search the library's table is narrowed by.
     fn omnibox(&mut self, ui: &mut egui::Ui) {
         // Three toggles at 24, their gaps, and the padding they keep from the edge.
         const TOGGLES: f32 = 3.0 * 24.0 + 3.0 * GAP + PAD;
@@ -807,7 +821,10 @@ impl DrawbarApp {
                 egui::vec2(width, BUTTON),
                 egui::TextEdit::singleline(&mut self.shell.omnibox)
                     .background_color(paper)
-                    .hint_text(egui::RichText::new("Find a sound").text_style(ui_text())),
+                    // What is typed and the hint under it share one line down the middle
+                    // of a box a third taller than the text in it.
+                    .vertical_align(egui::Align::Center)
+                    .hint_text(egui::RichText::new("Search…").text_style(ui_text())),
             );
         });
     }
@@ -875,13 +892,13 @@ impl DrawbarApp {
         let fill = ctx.style().visuals.panel_fill;
         let shut = egui::TopBottomPanel::bottom("dock_shut")
             .resizable(false)
-            .exact_height(HEADER)
+            .exact_height(DOCK)
             .frame(bare(fill));
-        let most = (ctx.available_rect().height() - CENTRE_TALL).max(HEADER + BODY_LEAST);
+        let most = (ctx.available_rect().height() - CENTRE_TALL).max(DOCK + BODY_LEAST);
         let full = egui::TopBottomPanel::bottom("dock")
             .resizable(true)
-            .default_height(HEADER + self.shell.dock_body)
-            .height_range((HEADER + BODY_LEAST)..=most)
+            .default_height(DOCK + self.shell.dock_body)
+            .height_range((DOCK + BODY_LEAST)..=most)
             .frame(bare(fill));
         egui::TopBottomPanel::show_animated_between(ctx, open, shut, full, |ui, how| {
             claim(ui);
@@ -896,7 +913,7 @@ impl DrawbarApp {
             }
         });
         if let Some(rect) = laid_out(ctx, "dock") {
-            self.shell.dock_body = rect.height() - HEADER;
+            self.shell.dock_body = rect.height() - DOCK;
         }
     }
 
@@ -1078,7 +1095,7 @@ fn reopen(ui: &mut egui::Ui, glyph: Glyph, hint: &str) -> egui::Response {
     let ink = ui.visuals().widgets.inactive.fg_stroke.color;
     let rect = ui.max_rect();
     let box_ = egui::Rect::from_center_size(
-        egui::pos2(rect.center().x, rect.top() + HEADER / 2.0),
+        egui::pos2(rect.center().x, rect.top() + DOCK / 2.0),
         egui::Vec2::splat(GLYPH),
     );
     crate::icon::painted(ui, glyph, box_, ink);
@@ -1203,13 +1220,11 @@ mod tests {
         assert_eq!(at("titlebar").height(), TITLEBAR);
         assert_eq!(at("toolbar").height(), TOOLBAR);
         assert_eq!(at("status").height(), STATUS);
-        assert_eq!(at("dock").height(), HEADER + DOCK_BODY);
+        assert_eq!(at("dock").height(), DOCK + DOCK_BODY);
         assert_eq!(at("browser").width(), BROWSER);
         assert_eq!(at("inspector").width(), INSPECTOR);
-        // The dock's header is its top 24 px, and it is inside the window with the rest.
-        let header = at("dock")
-            .split_top_bottom_at_y(at("dock").top() + HEADER)
-            .0;
+        // The dock's header is its top [`DOCK`], inside the window with the rest.
+        let header = at("dock").split_top_bottom_at_y(at("dock").top() + DOCK).0;
         assert!(screen.contains_rect(header), "the dock header: {header:?}");
 
         assert!(centre.width() > 0.0, "the centre: {centre:?}");
@@ -1407,7 +1422,7 @@ mod tests {
         let painted = drawn(&ctx, &mut app);
 
         assert_eq!(painted.region("browser").unwrap().width(), 190.0);
-        assert_eq!(painted.region("dock").unwrap().height(), HEADER + 130.0);
+        assert_eq!(painted.region("dock").unwrap().height(), DOCK + 130.0);
         assert_eq!(app.shell.browser_width, 190.0);
         assert_eq!(app.shell.dock_body, 130.0);
     }

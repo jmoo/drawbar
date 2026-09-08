@@ -7,8 +7,12 @@ use eframe::egui;
 
 use crate::icon::{icon, Glyph};
 
-/// How tall a panel header is, wherever it is drawn.
+/// How tall a section header is, wherever it is drawn.
 pub const HEADER: f32 = 24.0;
+
+/// How tall a dock's own header is: the tab strip's height, so the strip and the header
+/// of every dock beside it read as one line across the window.
+pub const DOCK: f32 = crate::tabs::HEIGHT;
 
 /// The room a header keeps at each end.
 const PAD: f32 = 8.0;
@@ -94,7 +98,7 @@ pub fn panel_header(
     open: Option<&mut bool>,
     badge: Option<(&str, egui::Color32)>,
 ) -> egui::Response {
-    bar(ui, egui::Color32::TRANSPARENT, |ui| {
+    bar(ui, HEADER, egui::Color32::TRANSPARENT, |ui| {
         if let Some(open) = open {
             if chevron(ui, *open).clicked() {
                 *open = !*open;
@@ -120,7 +124,7 @@ pub fn panel_header(
 /// triangle of its own would read as one of the sections beneath it.
 pub fn dock_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
     let fill = ui.visuals().faint_bg_color;
-    let response = bar(ui, fill, |ui| {
+    let response = bar(ui, DOCK, fill, |ui| {
         let ink = crate::app::caption(ui.visuals());
         icon(
             ui,
@@ -137,22 +141,26 @@ pub fn dock_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
     response
 }
 
-/// The bar a header is drawn into: full bleed, padded at each end, laid out left to
-/// right. The response is the whole bar, so a header can be clicked as one thing.
+/// A dock header carrying its own controls: [`dock_header`]'s bar, with what the bottom
+/// dock puts on it in place of a plain title.
 pub fn strip<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
     let fill = ui.visuals().faint_bg_color;
-    bar(ui, fill, contents)
+    bar(ui, DOCK, fill, contents)
 }
 
+/// The bar a header is drawn into: full bleed, padded at each end, laid out left to
+/// right. The response is the whole bar, so a header can be clicked as one thing.
+///
 /// `resting` is what the bar wears when the pointer is elsewhere; under the pointer it
 /// is `faint_bg_color` whatever it wears at rest.
 fn bar<R>(
     ui: &mut egui::Ui,
+    height: f32,
     resting: egui::Color32,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), HEADER),
+        egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
     );
     let fill = match response.hovered() {
@@ -208,22 +216,30 @@ mod tests {
         assert_eq!(caps("Browser").text(), "BROWSER");
     }
 
-    /// A header is full bleed and exactly 24 px, so a dock's body always starts at the
-    /// same place and a header's fill reaches both edges of the panel it heads.
+    /// A header is full bleed and exactly as tall as its kind, so a dock's body always
+    /// starts at the same place and a header's fill reaches both edges of the panel it
+    /// heads.
+    ///
+    /// ⚠️ A dock's header is the tab strip's height: the strip and the header of every
+    /// dock beside it are one line across the window.
     #[test]
     fn a_header_claims_its_own_height_and_the_whole_width() {
         let ctx = egui::Context::default();
-        let mut drawn = egui::Rect::ZERO;
+        let mut section = egui::Rect::ZERO;
+        let mut dock = egui::Rect::ZERO;
         let mut width = 0.0;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             ctx.style_mut(crate::app::metrics);
             egui::CentralPanel::default().show(ctx, |ui| {
                 width = ui.available_width();
-                drawn = panel_header(ui, "browser", None, None).rect;
+                section = panel_header(ui, "places", None, None).rect;
+                dock = dock_header(ui, "browser").rect;
             });
         });
-        assert_eq!(drawn.height(), HEADER);
-        assert_eq!(drawn.width(), width);
+        assert_eq!(section.height(), HEADER);
+        assert_eq!(dock.height(), crate::tabs::HEIGHT);
+        assert_eq!(section.width(), width);
+        assert_eq!(dock.width(), width);
     }
 
     /// What a frame painted over `rect`, innermost last.
