@@ -1,9 +1,11 @@
 //! The dock shell: the regions the window is cut into, what is collapsed, and the
 //! menus, toolbar and status bar that sit around the centre.
 //!
-//! Panels claim space in the order [`crate::app::DrawbarApp::update`] adds them, and
-//! every one of them is an exact size that does not resize: the layout is the design's,
-//! not a drag's. Each contents pads itself, so a panel header can bleed to both edges.
+//! Panels claim space in the order [`crate::app::DrawbarApp::update`] adds them. The
+//! three open docks resize by dragging the edge they show the centre, between the least
+//! each is worth opening to and whatever leaves the centre [`CENTRE_WIDE`] by
+//! [`CENTRE_TALL`]; a collapsed rail is [`SHUT`] and does not. Each contents pads
+//! itself, so a panel header can bleed to both edges.
 
 use eframe::egui;
 use nord_usb::ObjectClass;
@@ -27,13 +29,20 @@ pub const TOOLBAR: f32 = 32.0;
 /// One line of plain words at the foot of the window.
 pub const STATUS: f32 = 22.0;
 
-/// The bottom dock's body, under its header.
+/// The bottom dock's body, under its header, and the least it is worth opening to.
 pub const DOCK_BODY: f32 = 184.0;
+const BODY_LEAST: f32 = 120.0;
 
-/// The side docks, open and shut. Fixed widths: the design's proportions are the point.
+/// The side docks open, shut, and the least either is worth opening to.
 pub const BROWSER: f32 = 232.0;
 pub const INSPECTOR: f32 = 244.0;
 pub const SHUT: f32 = 30.0;
+const SIDE_LEAST: f32 = 180.0;
+
+/// What the centre keeps however far a dock is dragged. The most a dock may be dragged
+/// to is whatever leaves this, so it is read off the room left rather than stored.
+const CENTRE_WIDE: f32 = 300.0;
+const CENTRE_TALL: f32 = 200.0;
 
 /// The room the bars keep at each end, and the gap between their parts.
 const PAD: f32 = 8.0;
@@ -89,6 +98,11 @@ pub struct Shell {
     pub deps_open: bool,
     pub tags_open: bool,
     pub info_open: bool,
+    /// How far each dock was last dragged. A side dock's is its width, the bottom
+    /// dock's is its body under [`HEADER`].
+    pub browser_width: f32,
+    pub inspector_width: f32,
+    pub dock_body: f32,
     pub page: Page,
     /// What has been typed into the omnibox. Filtering the library by it is stage 6;
     /// nothing reads this yet.
@@ -108,6 +122,9 @@ impl Default for Shell {
             deps_open: true,
             tags_open: true,
             info_open: false,
+            browser_width: BROWSER,
+            inspector_width: INSPECTOR,
+            dock_body: DOCK_BODY,
             page: Page::default(),
             omnibox: String::new(),
             filter: Filter::default(),
@@ -119,7 +136,7 @@ impl Shell {
     /// Where the layout is kept between sessions, beside the browser's own keys.
     pub const KEY: &'static str = "drawbar.docks";
 
-    const VERSION: &'static str = "drawbar docks 2";
+    const VERSION: &'static str = "drawbar docks 3";
 
     pub fn open(&self, dock: Dock) -> bool {
         match dock {
@@ -167,6 +184,15 @@ impl Shell {
                 (Some("deps"), Some(open)) => held.deps_open = open == "1",
                 (Some("tags"), Some(open)) => held.tags_open = open == "1",
                 (Some("info"), Some(open)) => held.info_open = open == "1",
+                (Some("browser_width"), Some(text)) => {
+                    held.browser_width = size(text, SIDE_LEAST, BROWSER)
+                }
+                (Some("inspector_width"), Some(text)) => {
+                    held.inspector_width = size(text, SIDE_LEAST, INSPECTOR)
+                }
+                (Some("dock_body"), Some(text)) => {
+                    held.dock_body = size(text, BODY_LEAST, DOCK_BODY)
+                }
                 (Some("page"), Some(page)) => {
                     held.page = match page == Page::Log.stored() {
                         true => Page::Log,
@@ -183,6 +209,9 @@ impl Shell {
         self.deps_open = held.deps_open;
         self.tags_open = held.tags_open;
         self.info_open = held.info_open;
+        self.browser_width = held.browser_width;
+        self.inspector_width = held.inspector_width;
+        self.dock_body = held.dock_body;
         self.page = held.page;
     }
 
@@ -195,7 +224,8 @@ impl Shell {
             Shell::KEY,
             format!(
                 "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nroom\t{}\ndeps\t{}\n\
-                 tags\t{}\ninfo\t{}\npage\t{}\n",
+                 tags\t{}\ninfo\t{}\nbrowser_width\t{}\ninspector_width\t{}\n\
+                 dock_body\t{}\npage\t{}\n",
                 Shell::VERSION,
                 bit(self.browser_open),
                 bit(self.inspector_open),
@@ -204,9 +234,22 @@ impl Shell {
                 bit(self.deps_open),
                 bit(self.tags_open),
                 bit(self.info_open),
+                self.browser_width,
+                self.inspector_width,
+                self.dock_body,
                 self.page.stored(),
             ),
         );
+    }
+}
+
+/// A size the last session left. One this build would not have laid out — under the
+/// least the dock opens to, or not a number at all — is not a size, so the default
+/// stands. The most is the screen's, and egui clamps to it every frame.
+fn size(text: &str, least: f32, default: f32) -> f32 {
+    match text.parse::<f32>() {
+        Ok(size) if size.is_finite() && size >= least => size,
+        _ => default,
     }
 }
 
@@ -840,11 +883,14 @@ impl DrawbarApp {
             .resizable(false)
             .exact_height(HEADER)
             .frame(bare(fill));
+        let most = (ctx.available_rect().height() - CENTRE_TALL).max(HEADER + BODY_LEAST);
         let full = egui::TopBottomPanel::bottom("dock")
-            .resizable(false)
-            .exact_height(HEADER + DOCK_BODY)
+            .resizable(true)
+            .default_height(HEADER + self.shell.dock_body)
+            .height_range((HEADER + BODY_LEAST)..=most)
             .frame(bare(fill));
         egui::TopBottomPanel::show_animated_between(ctx, open, shut, full, |ui, how| {
+            claim(ui);
             edge(ui, Side::Top);
             self.dock_header(ui, acts);
             if how < 1.0 {
@@ -855,6 +901,9 @@ impl DrawbarApp {
                 Page::Log => self.log.ui(ui),
             }
         });
+        if let Some(rect) = laid_out(ctx, "dock") {
+            self.shell.dock_body = rect.height() - HEADER;
+        }
     }
 
     /// The dock's own header. [`panel_header`]'s geometry, with two titles to pick
@@ -933,11 +982,15 @@ impl DrawbarApp {
             .resizable(false)
             .exact_width(SHUT)
             .frame(bare(fill));
+        let most =
+            (ctx.available_rect().width() - self.inspector_room() - CENTRE_WIDE).max(SIDE_LEAST);
         let full = egui::SidePanel::left("browser")
-            .resizable(false)
-            .exact_width(BROWSER)
+            .resizable(true)
+            .default_width(self.shell.browser_width)
+            .width_range(SIDE_LEAST..=most)
             .frame(bare(fill));
         egui::SidePanel::show_animated_between(ctx, open, shut, full, |ui, how| {
+            claim(ui);
             edge(ui, Side::Right);
             if how < 1.0 {
                 if reopen(ui, Glyph::PanelLeftOpen, "show the browser").clicked() {
@@ -954,6 +1007,19 @@ impl DrawbarApp {
                 &self.shell.filter,
             ));
         });
+        if let Some(rect) = laid_out(ctx, "browser") {
+            self.shell.browser_width = rect.width();
+        }
+    }
+
+    /// What the instrument dock will claim once the browser has taken its own: the
+    /// browser's most is read before that dock is added, so it has to be asked for.
+    fn inspector_room(&self) -> f32 {
+        match (self.attached(), self.shell.inspector_open) {
+            (false, _) => 0.0,
+            (true, true) => self.shell.inspector_width,
+            (true, false) => SHUT,
+        }
     }
 
     /// The inspector dock: how much room there is, what the selection needs, and what it
@@ -968,11 +1034,14 @@ impl DrawbarApp {
             .resizable(false)
             .exact_width(SHUT)
             .frame(bare(fill));
+        let most = (ctx.available_rect().width() - CENTRE_WIDE).max(SIDE_LEAST);
         let full = egui::SidePanel::right("inspector")
-            .resizable(false)
-            .exact_width(INSPECTOR)
+            .resizable(true)
+            .default_width(self.shell.inspector_width)
+            .width_range(SIDE_LEAST..=most)
             .frame(bare(fill));
         egui::SidePanel::show_animated_between(ctx, open, shut, full, |ui, how| {
+            claim(ui);
             edge(ui, Side::Left);
             if how < 1.0 {
                 if reopen(ui, Glyph::PanelRightOpen, "show the instrument").clicked() {
@@ -990,7 +1059,24 @@ impl DrawbarApp {
                 &self.queue,
             ));
         });
+        if let Some(rect) = laid_out(ctx, "inspector") {
+            self.shell.inspector_width = rect.width();
+        }
     }
+}
+
+/// Claim the whole of the panel being drawn.
+///
+/// ⚠️ egui remembers a resizable panel's size as the size of what was put into it, so a
+/// dock holding less than it shows would come back the least it is allowed to be.
+fn claim(ui: &mut egui::Ui) {
+    ui.set_min_size(ui.max_rect().size());
+}
+
+/// Where a dock ended up this frame. A collapsed dock draws under another id, so what
+/// this answers is the size it will open back to.
+fn laid_out(ctx: &egui::Context, id: &str) -> Option<egui::Rect> {
+    egui::containers::panel::PanelState::load(ctx, egui::Id::new(id)).map(|state| state.rect)
 }
 
 /// A shut side dock: the width of one glyph, and the glyph that opens it again.
@@ -1243,6 +1329,9 @@ mod tests {
             deps_open: false,
             tags_open: true,
             info_open: true,
+            browser_width: 301.0,
+            inspector_width: 199.0,
+            dock_body: 260.0,
             page: Page::Log,
             omnibox: "typed and not kept".into(),
             filter: Filter::default(),
@@ -1256,8 +1345,77 @@ mod tests {
         assert!(after.dock_open);
         assert!(after.room_open && after.tags_open && after.info_open);
         assert!(!after.deps_open, "a shut inspector panel comes back shut");
+        assert_eq!(after.browser_width, 301.0);
+        assert_eq!(after.inspector_width, 199.0);
+        assert_eq!(after.dock_body, 260.0);
         assert_eq!(after.page, Page::Log);
         assert!(after.omnibox.is_empty(), "a search is not a layout");
+    }
+
+    /// A stored size this build would never have laid out is not a size, so the dock
+    /// opens to the width the design gives it rather than to a sliver or to nonsense.
+    #[test]
+    fn a_size_outside_what_a_dock_opens_to_comes_back_as_the_default() {
+        let mut store = Fake::default();
+        store.set_string(
+            Shell::KEY,
+            format!(
+                "{}\nbrowser_width\t12\ninspector_width\twide\ndock_body\tNaN\n",
+                Shell::VERSION
+            ),
+        );
+        let mut shell = Shell::default();
+        shell.restore(&store);
+        assert_eq!(shell.browser_width, BROWSER, "under the least it opens to");
+        assert_eq!(shell.inspector_width, INSPECTOR, "not a number");
+        assert_eq!(shell.dock_body, DOCK_BODY, "not a size");
+    }
+
+    /// However far a dock was dragged last session, the centre keeps its own room: the
+    /// most a dock may claim is read off the window every frame.
+    #[test]
+    fn docks_wider_than_the_window_still_leave_the_centre_its_room() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.dock_open = true;
+        app.shell.browser_width = 5_000.0;
+        app.shell.inspector_width = 5_000.0;
+        app.shell.dock_body = 5_000.0;
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let painted = drawn(&ctx, &mut app);
+
+        assert!(
+            painted.centre.width() >= CENTRE_WIDE,
+            "the centre: {:?}",
+            painted.centre
+        );
+        assert!(
+            painted.centre.height() >= CENTRE_TALL,
+            "the centre: {:?}",
+            painted.centre
+        );
+        assert!(app.shell.browser_width >= SIDE_LEAST);
+        assert!(app.shell.dock_body >= BODY_LEAST);
+    }
+
+    /// A dock keeps the size it was left at across a frame, so what is written out is
+    /// what the window actually showed rather than the design's default.
+    #[test]
+    fn a_dock_drawn_narrower_writes_the_size_it_was_drawn_at() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.dock_open = true;
+        app.shell.browser_width = 190.0;
+        app.shell.dock_body = 130.0;
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let painted = drawn(&ctx, &mut app);
+
+        assert_eq!(painted.region("browser").unwrap().width(), 190.0);
+        assert_eq!(painted.region("dock").unwrap().height(), HEADER + 130.0);
+        assert_eq!(app.shell.browser_width, 190.0);
+        assert_eq!(app.shell.dock_body, 130.0);
     }
 
     /// A version nobody wrote is a layout nobody can explain, so the defaults stand.
