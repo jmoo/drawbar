@@ -321,17 +321,23 @@ nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
 
 `nord sample` also reaches the encoded audio. `decode` writes each zone as a
 WAV at the format's own field rate, `verify --deep` walks every stroke's stream
-against the codec's grammar, and — behind `--experimental` — `encode` turns a
-WAV into a sample instrument, `build` renders a whole Sample Editor project
-(zones, loops, stereo), and `project new` writes a project from WAVs for the
-editor to open. `--generation` selects v2, v3 or v4; only v2 playback is
-hardware-verified.
+against the codec's grammar, `encode` turns a WAV into a sample instrument,
+`build` renders a whole Sample Editor project (zones, loops, stereo), and
+`project new` writes a project from WAVs for the editor to open.
+
+Under `--predict`, which is the record coding Nord Sample Editor itself picks, a
+build is the editor's own output byte for byte apart from a float residue in the
+resampling kernel: the odd audio field lands one count out, and nothing the
+instrument plays changes. `--generation` selects v2, v3 or v4. Only v2 has been
+played on hardware — mono, stereo and looped — so v3 and v4 must acknowledge
+`--unverified`.
 
 ```sh
 nord sample decode inst.nsmp -o out/
 nord sample verify --deep inst.nsmp
 nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimba.nsmpproj
-nord sample build marimba.nsmpproj --generation 4 -o marimba.nsmp4 --experimental
+nord sample build marimba.nsmpproj --predict -o marimba.nsmp
+nord sample build marimba.nsmpproj --generation 4 -o marimba.nsmp4 --unverified
 ```
 
 ### `nord edit` — files with no noun
