@@ -17,7 +17,7 @@ use std::sync::Arc;
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::Device;
+use crate::device::{read_only, Device};
 use crate::filter::Filter;
 use crate::folders::{self, Folders};
 use crate::queue::Queue;
@@ -291,8 +291,11 @@ impl Browser {
     }
 
     /// What the drag rules need to know about a row, or nothing for a row that is never
-    /// dragged.
-    fn held(&self, item: Item, workspace: &Workspace) -> Option<Held> {
+    /// dragged — wherever the row was drawn, the tree or the library's table.
+    ///
+    /// ⚠️ Pianos are libraries the instrument installs and indexes for itself, so a slot
+    /// in one is not something a drag can pick up and copy back.
+    pub(crate) fn held(&self, item: Item, workspace: &Workspace) -> Option<Held> {
         match item {
             Item::Local(id) => {
                 let entity = workspace.get(id)?;
@@ -303,7 +306,7 @@ impl Browser {
                 })
             }
             Item::Folder(_) | Item::Tag(_) => None,
-            Item::Slot { class, .. } => Some(Held {
+            Item::Slot { class, .. } => (!read_only(class)).then_some(Held {
                 what: item,
                 kind: Kind::from_class(class),
                 filed: None,

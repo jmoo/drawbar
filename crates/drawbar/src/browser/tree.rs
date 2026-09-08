@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::{owed, Act, Bulk};
-use super::drag::{Held, Item, Kind, Onto};
+use super::drag::{Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device, BROWSED};
@@ -500,7 +500,6 @@ impl Browser {
         }
 
         let owed = queue.entry(entity.id).map(destination);
-        let filed = self.folders.holding(entity.id);
         let wears = self.tags.worn(entity.id).len();
         let drawn = row(
             ui,
@@ -520,13 +519,10 @@ impl Browser {
         let response = drawn.response;
 
         if response.dragged() {
-            let head = Held {
-                what: item,
-                kind,
-                filed,
-            };
-            let carried = self.carrying(head, &entity.name, workspace);
-            egui::DragAndDrop::set_payload(ui.ctx(), carried);
+            if let Some(head) = self.held(item, workspace) {
+                let carried = self.carrying(head, &entity.name, workspace);
+                egui::DragAndDrop::set_payload(ui.ctx(), carried);
+            }
         }
         // A drop onto a row is a drop onto the list; it is taken here so the branch's
         // own zone does not act on it a second time.
@@ -1000,14 +996,11 @@ impl Browser {
         let fetchable = !read_only(class);
 
         if let Some(name) = &held {
-            if fetchable && response.dragged() {
-                let head = Held {
-                    what: item,
-                    kind: Kind::from_class(class),
-                    filed: None,
-                };
-                let carried = self.carrying(head, name, workspace);
-                egui::DragAndDrop::set_payload(ui.ctx(), carried);
+            if response.dragged() {
+                if let Some(head) = self.held(item, workspace) {
+                    let carried = self.carrying(head, name, workspace);
+                    egui::DragAndDrop::set_payload(ui.ctx(), carried);
+                }
             }
         }
         self.drop_zone(ui, &response, Onto::Slot { class, at }, acts);

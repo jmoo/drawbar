@@ -822,7 +822,8 @@ fn paint(
     acts: &mut Vec<Act>,
 ) {
     let selected = browser.picked().holds(row.item);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, ROW), egui::Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, ROW), egui::Sense::click_and_drag());
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let fill = match (selected, response.hovered()) {
@@ -928,6 +929,15 @@ fn paint(
             false => quiet,
         },
     );
+
+    // A row of the table is dragged like a row of the tree: the same payload, so it
+    // lands on the same targets and means the same thing there.
+    if response.dragged() {
+        if let Some(head) = browser.held(row.item, workspace) {
+            let carried = browser.carrying(head, &row.name, workspace);
+            egui::DragAndDrop::set_payload(ui.ctx(), carried);
+        }
+    }
 
     let checked = checkbox
         .map(|box_| box_.on_hover_text(tooltip(row, Column::Mark, browser.tags())))
@@ -1463,6 +1473,106 @@ mod tests {
             browser.picked().items().count(),
             2,
             "both boxes were ticked, and neither click dropped the other row"
+        );
+    }
+
+    /// ⚠️ A row of the table is a row of the tree: it starts the same drag, and a drop
+    /// files the asset exactly as a drag from the tree's own row does. Two drag paths
+    /// would be two sets of rules for one gesture.
+    #[test]
+    fn a_row_dragged_from_the_table_onto_a_folder_files_the_asset() {
+        const WIDTH: f32 = 900.0;
+
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut browser = Browser::default();
+        let mut library = Library::default();
+        let mut queue = Queue::default();
+        let shell = Shell::default();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::NewFolder],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        // The one row of the table, in its name column; and the folder row of the tree,
+        // under the section header and the 22 px row for this computer.
+        let from = egui::pos2(crate::shell::BROWSER + PAD + 60.0, BAR + HEAD + ROW / 2.0);
+        let onto = egui::pos2(100.0, crate::panel::HEADER + 22.0 + 10.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // The new folder opens its rename editor, and Escape closes it; then the pointer
+        // presses on the table's row, carries it over the folder, and lets go.
+        let frames: [Vec<egui::Event>; 6] = [
+            Vec::new(),
+            vec![escape],
+            vec![egui::Event::PointerMoved(from)],
+            vec![button(from, true)],
+            vec![egui::Event::PointerMoved(onto)],
+            vec![button(onto, false)],
+        ];
+
+        let mut asked = Vec::new();
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(WIDTH, 540.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::SidePanel::left("places")
+                    .exact_width(crate::shell::BROWSER)
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        asked.extend(browser.ui(
+                            ui,
+                            &workspace,
+                            &device,
+                            &queue,
+                            &Filter::default(),
+                        ));
+                    });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                    });
+            });
+        }
+
+        let filed: Vec<(u64, Option<u64>)> = asked
+            .iter()
+            .filter_map(|act| match act {
+                Act::File { id, folder } => Some((*id, *folder)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(filed.as_slice(), [(dragged, Some(_))] if *dragged == id),
+            "the drag filed the row it started on: {filed:?}"
         );
     }
 
