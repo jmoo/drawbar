@@ -158,6 +158,7 @@ impl DrawbarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
         // Without this every `Glyph` draws as egui's broken-image warning.
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        cc.egui_ctx.set_fonts(fonts());
         // Both faces are dressed up front, so the system flipping from light to dark mid
         // session lands on this app's own colours rather than egui's defaults.
         cc.egui_ctx.set_visuals_of(egui::Theme::Dark, dark());
@@ -491,6 +492,42 @@ fn light() -> egui::Visuals {
     visuals
 }
 
+/// The one family with weight in it, for the word-mark and nothing else.
+pub fn bold() -> egui::FontFamily {
+    egui::FontFamily::Name("bold".into())
+}
+
+/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces.
+///
+/// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
+/// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
+/// heavier weight to ask for and no 400 to set the body in.
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
+    for (family, face, ttf) in [
+        (
+            egui::FontFamily::Proportional,
+            "Ubuntu",
+            include_bytes!("../assets/fonts/Ubuntu-R.ttf").as_slice(),
+        ),
+        (
+            bold(),
+            "Ubuntu-Bold",
+            include_bytes!("../assets/fonts/Ubuntu-B.ttf").as_slice(),
+        ),
+    ] {
+        fonts.font_data.insert(
+            face.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(ttf)),
+        );
+        let mut faces = bundled.clone();
+        faces.insert(0, face.to_owned());
+        fonts.families.insert(family, faces);
+    }
+    fonts
+}
+
 /// The text of the shell itself: menus, tabs, rail rows and cells.
 ///
 /// A function rather than a const because [`egui::TextStyle::Name`] holds an `Arc<str>`.
@@ -657,6 +694,22 @@ mod tests {
             let ratio = contrast(border, panel);
             assert!(ratio >= 1.9, "{where_} group border: {ratio:.2}:1");
         }
+    }
+
+    #[test]
+    fn each_family_leads_with_its_ubuntu_face_over_the_same_fallbacks() {
+        let fonts = fonts();
+        assert!(fonts.font_data.contains_key("Ubuntu"));
+        assert!(fonts.font_data.contains_key("Ubuntu-Bold"));
+        let body = &fonts.families[&egui::FontFamily::Proportional];
+        let mark = &fonts.families[&bold()];
+        assert_eq!(body.first().map(String::as_str), Some("Ubuntu"));
+        assert_eq!(mark.first().map(String::as_str), Some("Ubuntu-Bold"));
+        assert_eq!(body[1..], mark[1..]);
+        assert!(
+            !body[1..].is_empty(),
+            "a glyph Ubuntu lacks would draw as tofu"
+        );
     }
 
     #[test]

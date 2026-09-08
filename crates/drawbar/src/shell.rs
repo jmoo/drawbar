@@ -10,7 +10,7 @@
 use eframe::egui;
 use nord_usb::ObjectClass;
 
-use crate::app::{accent, ui as ui_text, DrawbarApp, ThemeChoice};
+use crate::app::{accent, bold, ui as ui_text, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
 use crate::device::occupancy;
 use crate::filter::Filter;
@@ -450,7 +450,7 @@ impl DrawbarApp {
                 edge(ui, Side::Bottom);
                 along(ui, |ui| {
                     icon(ui, Glyph::SlidersVertical, 14.0, accent(ui.visuals()));
-                    ui.label(egui::RichText::new("drawbar").size(12.0));
+                    ui.label(egui::RichText::new("drawbar").font(egui::FontId::new(12.0, bold())));
                     self.shortcuts(ui, acts);
                     ui.scope(|ui| {
                         flat(ui);

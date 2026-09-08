@@ -47,7 +47,7 @@ let
           # The committed specimens and replay scripts, whatever their extensions.
           || hasInfix "/tests/fixtures/" path
           || hasInfix "/tests/scripts/" path
-          # The vendored Lucide glyphs, which drawbar `include_bytes!`s.
+          # The vendored glyphs and fonts, which drawbar `include_bytes!`s.
           || hasInfix "/drawbar/assets/" path
         );
     };
