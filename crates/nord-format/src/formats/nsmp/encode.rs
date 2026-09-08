@@ -1,23 +1,23 @@
-//! Building a sample instrument from PCM — tier "instrument-valid".
+//! Building a sample instrument from PCM.
 //!
-//! The inverse of [`codec`](super::codec), and honest about how far the inverse goes.
-//! What this emits is a file whose container, section chain, stroke header, count
-//! laws and record grammar are the format's, and whose audio is the source on the
-//! field lattice quantised the way the instrument's encoder quantises. What it is
-//! **not** is byte-identical to what Nord Sample Editor would produce for the same
-//! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
-//! `1e-8` per tap, which leaves a field in a few thousand one count off, the mono
-//! quantiser shift is inferred from chosen plaintext and has one known gap
-//! ([`spends_extra_bit`]), and the editor's own choice of predictor order per record
-//! is reproduced only under [`Predictor::Minimising`].
+//! The inverse of [`codec`](super::codec). What this emits is what Nord Sample Editor
+//! writes for the same input, byte for byte, apart from one residue: the resampling
+//! [`kernel`](super::kernel) is the instrument's to within a few `1e-8` per tap, and a
+//! handful of taps the editor evaluates a ulp off the closed form leave the occasional
+//! field one count from the editor's. No structural field moves with it, and neither
+//! does the pitch, the length, or anything else about what the instrument plays.
 //!
-//! So three claims: a file from here **round-trips through this crate's own decoder
-//! exactly** under either predictor, it obeys every structural law the format is known
-//! to have, and **the Electro 5 loads and plays one** under either predictor, at the pitch
-//! the decoder renders.
+//! Byte for byte means under [`Predictor::Minimising`], the record coding the editor
+//! picks. [`Predictor::Plain`] states every content field outright: the same audio in
+//! a larger file, and not the editor's bytes.
 //!
-//! Confirmed on hardware for [`Layout::V2`], which is what the Electro 5 plays. The
-//! wide generations are inferred from specimens; not confirmed on hardware.
+//! Under either predictor a file from here **round-trips through this crate's own
+//! decoder exactly** and obeys every structural law the format is known to have.
+//!
+//! Confirmed on hardware for [`Layout::V2`]: the Electro 5 loads and plays one under
+//! either predictor, at the pitch the decoder renders. The wide generations reproduce
+//! the editor's own renders but no instrument here plays them, so their playback is
+//! inferred from specimens; not confirmed on hardware.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
