@@ -61,13 +61,7 @@ impl Selection {
 
     /// The assets on this computer among what is picked, in id order.
     pub fn locals(&self) -> Vec<u64> {
-        self.set
-            .iter()
-            .filter_map(|item| match item {
-                Item::Local(id) => Some(*id),
-                _ => None,
-            })
-            .collect()
+        self.items().filter_map(Item::local).collect()
     }
 
     /// A plain click: this row and nothing else.

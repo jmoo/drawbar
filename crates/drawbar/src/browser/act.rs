@@ -60,6 +60,9 @@ pub enum Act {
     },
     /// Queue every sendable asset in a folder for the slot it came off.
     SendFolder(u64),
+    /// Queue every one of these assets for the slot it came off. One with none is
+    /// skipped, and the log says how many were.
+    SendChecked(Vec<u64>),
     Copy {
         class: ObjectClass,
         at: Location,
@@ -134,6 +137,92 @@ pub enum Act {
     Quit,
     /// Nothing happened, and this is why.
     Refused(String),
+}
+
+/// What can be asked of everything checked at once, in the order both the library's
+/// footer and a checked row's menu offer it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bulk {
+    Queue,
+    Copy,
+    Export,
+    Tag,
+    Delete,
+}
+
+impl Bulk {
+    pub const ALL: [Bulk; 5] = [
+        Bulk::Queue,
+        Bulk::Copy,
+        Bulk::Export,
+        Bulk::Tag,
+        Bulk::Delete,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Bulk::Queue => "Queue for sending",
+            Bulk::Copy => "Copy to this computer",
+            Bulk::Export => "Export…",
+            Bulk::Tag => "Tag…",
+            Bulk::Delete => "Delete…",
+        }
+    }
+
+    /// Why the control is dead, which is what a hover over it says.
+    pub fn nothing(self) -> &'static str {
+        match self {
+            Bulk::Queue | Bulk::Export | Bulk::Tag => "nothing checked is on this computer",
+            Bulk::Copy => "nothing checked is on the instrument",
+            Bulk::Delete => "nothing is checked",
+        }
+    }
+}
+
+/// What one of those asks for over everything checked.
+///
+/// [`Bulk::Tag`] answers with the ids a tag would hang on rather than with acts: which
+/// tag is picked from a menu of its own, and only then is there an act.
+pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
+    match action {
+        Bulk::Queue => match checked
+            .iter()
+            .copied()
+            .filter_map(Item::local)
+            .collect::<Vec<_>>()
+        {
+            ids if ids.is_empty() => Vec::new(),
+            ids => vec![Act::SendChecked(ids)],
+        },
+        Bulk::Copy => checked
+            .iter()
+            .filter_map(|item| match item {
+                Item::Slot { class, at } => Some(Act::Copy {
+                    class: *class,
+                    at: *at,
+                }),
+                _ => None,
+            })
+            .collect(),
+        Bulk::Export => checked
+            .iter()
+            .copied()
+            .filter_map(Item::local)
+            .map(Act::Save)
+            .collect(),
+        Bulk::Tag => Vec::new(),
+        Bulk::Delete => checked
+            .iter()
+            .filter_map(|item| match item {
+                Item::Local(id) => Some(Act::Remove(*id)),
+                Item::Slot { class, at } => Some(Act::DeleteSlot {
+                    class: *class,
+                    at: *at,
+                }),
+                Item::Folder(_) | Item::Tag(_) => None,
+            })
+            .collect(),
+    }
 }
 
 /// Run what the browser asked for.
@@ -223,6 +312,24 @@ pub fn apply(
                     if let Some((class, at)) = workspace.get(id).and_then(owed) {
                         enqueue(workspace, device, queue, log, id, class, at);
                     }
+                }
+            }
+            Act::SendChecked(ids) => {
+                let mut nowhere = 0;
+                for id in ids {
+                    match workspace.get(id).and_then(owed) {
+                        Some((class, at)) => enqueue(workspace, device, queue, log, id, class, at),
+                        None => nowhere += 1,
+                    }
+                }
+                if nowhere > 0 {
+                    log.say(match nowhere {
+                        1 => "1 of them never came off a slot, so it is waiting for nowhere."
+                            .to_string(),
+                        n => format!(
+                            "{n} of them never came off a slot, so they are waiting for nowhere."
+                        ),
+                    });
                 }
             }
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
@@ -510,6 +617,113 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.clone();
         workspace.remove(id, log);
         bytes
+    }
+
+    /// A fixture checked set: two assets on this computer, one of them off a slot, and
+    /// two slots on the instrument.
+    fn checked() -> Vec<Item> {
+        vec![
+            Item::Local(1),
+            Item::Local(2),
+            Item::Slot {
+                class: ObjectClass::Program,
+                at: at(0),
+            },
+            Item::Slot {
+                class: ObjectClass::SetList,
+                at: at(3),
+            },
+        ]
+    }
+
+    /// Each of the things offered over a checked set asks only about the half of it that
+    /// half is about: queueing and exporting reach this computer's, copying reaches the
+    /// instrument's, and deleting reaches all of it.
+    #[test]
+    fn each_action_over_a_checked_set_asks_only_about_the_rows_it_is_for() {
+        let checked = checked();
+
+        let queued = bulk(Bulk::Queue, &checked);
+        assert!(
+            matches!(queued.as_slice(), [Act::SendChecked(ids)] if *ids == vec![1, 2]),
+            "one queueing, over this computer's rows"
+        );
+        assert_eq!(bulk(Bulk::Copy, &checked).len(), 2, "one per slot");
+        assert!(bulk(Bulk::Copy, &checked)
+            .iter()
+            .all(|act| matches!(act, Act::Copy { .. })));
+        assert!(
+            matches!(
+                bulk(Bulk::Export, &checked).as_slice(),
+                [Act::Save(1), Act::Save(2)]
+            ),
+            "one export per asset on this computer"
+        );
+        assert!(
+            bulk(Bulk::Tag, &checked).is_empty(),
+            "a tag is picked first"
+        );
+        assert!(matches!(
+            bulk(Bulk::Delete, &checked).as_slice(),
+            [
+                Act::Remove(1),
+                Act::Remove(2),
+                Act::DeleteSlot { .. },
+                Act::DeleteSlot { .. }
+            ]
+        ));
+    }
+
+    /// A control the checked set gives nothing to do is a control that is offered dead,
+    /// which is what an empty answer says.
+    #[test]
+    fn an_action_with_nothing_to_act_on_asks_for_nothing() {
+        let slots = vec![Item::Slot {
+            class: ObjectClass::Program,
+            at: at(0),
+        }];
+        let locals = vec![Item::Local(1)];
+        assert!(bulk(Bulk::Queue, &slots).is_empty());
+        assert!(bulk(Bulk::Export, &slots).is_empty());
+        assert!(bulk(Bulk::Copy, &locals).is_empty());
+        assert!(bulk(Bulk::Delete, &[]).is_empty());
+    }
+
+    /// Queueing a checked set takes the same path one Send does, and an asset that never
+    /// came off a slot has nowhere to go, so it is skipped and counted rather than
+    /// queued for an address nobody chose.
+    #[test]
+    fn queueing_a_checked_set_skips_what_has_nowhere_to_go_and_says_how_many() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
+        let owed = workspace.ingest(
+            "Africa Split.ne5p".to_string(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(0),
+            },
+            bytes.clone(),
+            &mut log,
+        );
+        let nowhere = workspace.ingest("Untitled.ne5p".to_string(), Origin::Fresh, bytes, &mut log);
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            bulk(Bulk::Queue, &[Item::Local(owed), Item::Local(nowhere)]),
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert_eq!(queue.ids(), vec![owed], "only the one with a slot to go to");
+        assert!(
+            log.transcript().contains("1 of them never came off a slot"),
+            "{}",
+            log.transcript()
+        );
     }
 
     /// A batch is one command per folder, because a session belongs to a folder, and it

@@ -34,7 +34,7 @@ mod row;
 mod selection;
 mod tree;
 
-pub use act::{apply, foreign_format, Act};
+pub use act::{apply, bulk, foreign_format, Act, Bulk};
 pub use drag::{landing, Carried, Held, Item, Kind, Landing, Onto};
 pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
@@ -63,12 +63,13 @@ struct Click<'a> {
     list: &'a [Item],
 }
 
-/// A question that has to be answered before something is lost.
+/// A question that has to be answered before something is lost, and everything the
+/// answer commits to. One question covers a whole checked set.
 struct Ask {
     title: String,
     note: Option<String>,
     verb: &'static str,
-    act: Act,
+    acts: Vec<Act>,
 }
 
 /// Whether a plain click starts a rename rather than moving the selection.
@@ -195,6 +196,15 @@ impl Browser {
             list,
         };
         self.clicked(ui, click, response, egui::Rect::NOTHING);
+    }
+
+    /// A click on a row's own box: that row in or out of what is checked.
+    ///
+    /// ⚠️ A box is a checkbox, so a plain click on it is the ⌘ gesture. A click on the
+    /// row itself still means what [`gesture`] says it means.
+    pub fn check(&mut self, item: Item) {
+        self.rename = None;
+        self.selection.toggle(item);
     }
 
     fn select(&mut self, item: Item) {
@@ -448,7 +458,7 @@ impl Browser {
         match decision {
             Some(true) => {
                 if let Some(ask) = self.ask.take() {
-                    acts.push(ask.act);
+                    acts.extend(ask.acts);
                 }
             }
             Some(false) => self.ask = None,
@@ -501,7 +511,7 @@ impl Browser {
             title,
             note: Some(note.join("\n")),
             verb: "Send",
-            act,
+            acts: vec![act],
         });
     }
 
@@ -523,7 +533,71 @@ impl Browser {
                 None => note,
             }),
             verb: "Replace",
-            act,
+            acts: vec![act],
+        });
+    }
+
+    /// One of the things that can be asked of everything checked, drawn the same in the
+    /// library's footer and in a checked row's own menu.
+    ///
+    /// A dead control is one the checked set gives nothing to do. Deleting asks first,
+    /// once, for the whole set.
+    pub(crate) fn bulk_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: Bulk,
+        checked: &[Item],
+        acts: &mut Vec<Act>,
+    ) {
+        if action == Bulk::Tag {
+            let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
+            ui.add_enabled_ui(!locals.is_empty(), |ui| {
+                ui.menu_button(action.label(), |ui| self.tag_items(ui, &locals, acts))
+                    .response
+                    .on_disabled_hover_text(action.nothing());
+            });
+            return;
+        }
+        let wanted = bulk(action, checked);
+        if !ui
+            .add_enabled(!wanted.is_empty(), egui::Button::new(action.label()))
+            .on_disabled_hover_text(action.nothing())
+            .clicked()
+        {
+            return;
+        }
+        match action {
+            Bulk::Delete => self.ask_discard(checked, wanted),
+            _ => acts.extend(wanted),
+        }
+        ui.close();
+    }
+
+    /// Ask once before a whole checked set is deleted, naming what each half of it
+    /// costs: a slot is emptied on the instrument, a local only leaves the list.
+    fn ask_discard(&mut self, checked: &[Item], acts: Vec<Act>) {
+        let slots = checked
+            .iter()
+            .filter(|item| matches!(item, Item::Slot { .. }))
+            .count();
+        let locals = checked.iter().filter(|item| item.local().is_some()).count();
+        let mut note = Vec::new();
+        if slots > 0 {
+            note.push(format!(
+                "{slots} on the instrument are removed from it. There is no undo."
+            ));
+        }
+        if locals > 0 {
+            note.push(format!(
+                "{locals} leave the list on this computer; the files themselves stay where \
+                 they are."
+            ));
+        }
+        self.ask = Some(Ask {
+            title: format!("Delete {} checked items?", slots + locals),
+            note: Some(note.join("\n\n")),
+            verb: "Delete",
+            acts,
         });
     }
 }

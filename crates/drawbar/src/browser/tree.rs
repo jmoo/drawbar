@@ -8,7 +8,7 @@
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
-use super::act::{owed, Act};
+use super::act::{owed, Act, Bulk};
 use super::drag::{Held, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
@@ -543,6 +543,9 @@ impl Browser {
 
     /// The menu a row offers, wherever it is drawn — the tree, or the library table.
     ///
+    /// A row inside a checked set of several offers what the library's footer offers,
+    /// because the menu is about the set rather than about the row under the pointer.
+    ///
     /// A folder and a tag are rows of the tree alone; their menus stay with the rows
     /// that draw them.
     pub fn menu(
@@ -554,6 +557,13 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         self.aim(item);
+        let checked: Vec<Item> = self.selection.items().collect();
+        if checked.len() > 1 && self.selection.holds(item) {
+            for action in Bulk::ALL {
+                self.bulk_item(ui, action, &checked, acts);
+            }
+            return;
+        }
         match item {
             Item::Local(id) => self.local_menu(ui, id, workspace, acts),
             Item::Slot { class, at } => self.slot_menu(ui, class, at, device, acts),
@@ -1086,7 +1096,7 @@ impl Browser {
                 title: format!("Delete “{name}” from {}?", place(class, at)),
                 note: Some("It is removed from the instrument. There is no undo.".into()),
                 verb: "Delete",
-                act: Act::DeleteSlot { class, at },
+                acts: vec![Act::DeleteSlot { class, at }],
             });
             ui.close();
         }

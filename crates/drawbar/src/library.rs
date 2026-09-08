@@ -14,7 +14,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, Act, Browser, Item, Kind};
+use crate::browser::{cell_ink, Act, Browser, Bulk, Item, Kind};
 use crate::device::{sendable, Device, DeviceState, BROWSED};
 use crate::filter::{Filter, Place};
 use crate::icon::{icon, painted, Glyph};
@@ -844,7 +844,7 @@ fn paint(
         );
     };
 
-    mark(ui, cell(Column::Mark), selected);
+    let checkbox = mark(ui, cell(Column::Mark), selected, &response);
     let glyph = cell(Column::Glyph);
     if glyph.width() > 0.0 {
         painted(
@@ -916,11 +916,16 @@ fn paint(
         },
     );
 
+    let checked = checkbox
+        .map(|box_| box_.on_hover_text(tooltip(row, Column::Mark, browser.tags())))
+        .is_some_and(|box_| box_.clicked());
     let response = match under(&response, rect, tracks) {
         Some(column) => response.on_hover_text(tooltip(row, column, browser.tags())),
         None => response,
     };
-    if response.double_clicked() {
+    if checked {
+        browser.check(row.item);
+    } else if response.double_clicked() {
         acts.push(Act::Open(row.item));
     } else if response.clicked() {
         browser.pick(ui, row.item, &row.name, &response, list);
@@ -928,10 +933,16 @@ fn paint(
     response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, acts));
 }
 
-/// The 11 px box that says whether a row is picked.
-fn mark(ui: &egui::Ui, box_: egui::Rect, picked: bool) {
+/// The 11 px box that says whether a row is checked, and takes the click that changes
+/// it. A column too narrow to draw the box offers none.
+fn mark(
+    ui: &egui::Ui,
+    box_: egui::Rect,
+    picked: bool,
+    row: &egui::Response,
+) -> Option<egui::Response> {
     if box_.width() < MARK {
-        return;
+        return None;
     }
     let visuals = ui.visuals().clone();
     let at = egui::Rect::from_center_size(
@@ -957,6 +968,7 @@ fn mark(ui: &egui::Ui, box_: egui::Rect, picked: bool) {
             );
         }
     }
+    Some(ui.interact(at, row.id.with("mark"), egui::Sense::click()))
 }
 
 /// The whole of a cell, which is what a hover asks for.
@@ -965,7 +977,9 @@ fn mark(ui: &egui::Ui, box_: egui::Rect, picked: bool) {
 /// and the hover is where the names are.
 fn tooltip(row: &Row, column: Column, tags: &Tags) -> String {
     match column {
-        Column::Mark => "click to pick, ⌘-click for another, ⇧-click for a run".to_string(),
+        Column::Mark => {
+            "check it to act on several at once; a click on the row picks it alone".to_string()
+        }
         Column::Glyph => row.kind.chip().to_string(),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
@@ -995,8 +1009,8 @@ fn worn(row: &Row, tags: &Tags) -> Vec<String> {
         .collect()
 }
 
-/// The strip under the table: what is picked, what sending it would do, and the three
-/// things that can be done to it.
+/// The strip under the table: what is checked, what sending it would do, and everything
+/// that can be asked of the whole set.
 fn footer(
     ui: &mut egui::Ui,
     picked: &[&Row],
@@ -1005,13 +1019,7 @@ fn footer(
     queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
-    let locals: Vec<u64> = picked
-        .iter()
-        .filter_map(|row| match row.item {
-            Item::Local(id) => Some(id),
-            _ => None,
-        })
-        .collect();
+    let checked: Vec<Item> = picked.iter().map(|row| row.item).collect();
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0_f32, accent(ui.visuals())))
         .inner_margin(egui::Margin::symmetric(8, 4))
@@ -1029,17 +1037,15 @@ fn footer(
                         .weak(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().button_padding.y = 0.0;
                     if ui.small_button("Review send queue").clicked() {
                         acts.push(Act::ShowPage(Page::Queue));
                     }
-                    if ui
-                        .add_enabled(!locals.is_empty(), egui::Button::new("Export…").small())
-                        .on_disabled_hover_text("nothing picked is on this computer")
-                        .clicked()
-                    {
-                        acts.extend(locals.iter().map(|id| Act::Save(*id)));
+                    // Backwards: the strip runs right to left, so [`Bulk::ALL`]'s first
+                    // action has to be drawn last to sit furthest left.
+                    for action in Bulk::ALL.iter().rev() {
+                        browser.bulk_item(ui, *action, &checked, acts);
                     }
-                    ui.menu_button("Tag…", |ui| browser.tag_items(ui, &locals, acts));
                 });
             });
         });
@@ -1388,6 +1394,64 @@ mod tests {
         assert_eq!(
             consequence(&[], &device.state, &queue),
             "Nothing picked goes to the instrument."
+        );
+    }
+
+    /// A box is a checkbox: a plain click on one puts its row in the checked set and
+    /// leaves whatever was checked before it alone, so several rows are checked with no
+    /// modifier held.
+    #[test]
+    fn a_click_on_a_row_box_checks_it_beside_what_is_already_checked() {
+        const WIDTH: f32 = 900.0;
+
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut browser = Browser::default();
+        let mut library = Library::default();
+        let queue = Queue::default();
+        let shell = Shell::default();
+        for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
+            workspace.create(kind, &mut log).unwrap();
+        }
+
+        let box_x = tracks(WIDTH)[Column::Mark.index()].start + MARK / 2.0;
+        let on_box = |index: f32| egui::pos2(box_x, BAR + HEAD + ROW * (index + 0.5));
+        let mut frames = Vec::new();
+        for index in [0.0_f32, 1.0] {
+            let press = move |pressed| egui::Event::PointerButton {
+                pos: on_box(index),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frames.push(vec![egui::Event::PointerMoved(on_box(index))]);
+            frames.push(vec![press(true), press(false)]);
+            frames.push(Vec::new());
+        }
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(WIDTH, 540.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                    });
+            });
+        }
+
+        assert_eq!(
+            browser.picked().items().count(),
+            2,
+            "both boxes were ticked, and neither click dropped the other row"
         );
     }
 

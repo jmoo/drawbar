@@ -125,6 +125,14 @@ pub enum Item {
 }
 
 impl Item {
+    /// The asset on this computer this row stands for, if it is one.
+    pub fn local(self) -> Option<u64> {
+        match self {
+            Item::Local(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Locals, then folders, then slots by class and address, then tags — the order a
     /// selection is walked in, and the order it comes back from the store in.
     fn key(self) -> (u8, u32, u32, u64) {
