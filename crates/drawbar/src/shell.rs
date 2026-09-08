@@ -83,6 +83,10 @@ pub struct Shell {
     pub browser_open: bool,
     pub inspector_open: bool,
     pub dock_open: bool,
+    /// The inspector's three panels, each collapsed on its own.
+    pub room_open: bool,
+    pub deps_open: bool,
+    pub tags_open: bool,
     pub page: Page,
     /// What has been typed into the omnibox. Filtering the library by it is stage 6;
     /// nothing reads this yet.
@@ -98,6 +102,9 @@ impl Default for Shell {
             browser_open: true,
             inspector_open: true,
             dock_open: false,
+            room_open: true,
+            deps_open: true,
+            tags_open: true,
             page: Page::default(),
             omnibox: String::new(),
             filter: Filter::default(),
@@ -109,7 +116,7 @@ impl Shell {
     /// Where the layout is kept between sessions, beside the browser's own keys.
     pub const KEY: &'static str = "drawbar.docks";
 
-    const VERSION: &'static str = "drawbar docks 1";
+    const VERSION: &'static str = "drawbar docks 2";
 
     pub fn open(&self, dock: Dock) -> bool {
         match dock {
@@ -153,6 +160,9 @@ impl Shell {
                 (Some("browser"), Some(open)) => held.browser_open = open == "1",
                 (Some("inspector"), Some(open)) => held.inspector_open = open == "1",
                 (Some("dock"), Some(open)) => held.dock_open = open == "1",
+                (Some("room"), Some(open)) => held.room_open = open == "1",
+                (Some("deps"), Some(open)) => held.deps_open = open == "1",
+                (Some("tags"), Some(open)) => held.tags_open = open == "1",
                 (Some("page"), Some(page)) => {
                     held.page = match page == Page::Log.stored() {
                         true => Page::Log,
@@ -165,6 +175,9 @@ impl Shell {
         self.browser_open = held.browser_open;
         self.inspector_open = held.inspector_open;
         self.dock_open = held.dock_open;
+        self.room_open = held.room_open;
+        self.deps_open = held.deps_open;
+        self.tags_open = held.tags_open;
         self.page = held.page;
     }
 
@@ -176,11 +189,15 @@ impl Shell {
         storage.set_string(
             Shell::KEY,
             format!(
-                "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\npage\t{}\n",
+                "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nroom\t{}\ndeps\t{}\n\
+                 tags\t{}\npage\t{}\n",
                 Shell::VERSION,
                 bit(self.browser_open),
                 bit(self.inspector_open),
                 bit(self.dock_open),
+                bit(self.room_open),
+                bit(self.deps_open),
+                bit(self.tags_open),
                 self.page.stored(),
             ),
         );
@@ -878,7 +895,8 @@ impl DrawbarApp {
         });
     }
 
-    /// The inspector dock. Until stage 8 it holds what the instrument said about itself.
+    /// The inspector dock: how much room there is, what the selection needs, and what it
+    /// is labelled with.
     pub(crate) fn inspector_dock(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let open = self.shell.inspector_open;
         let fill = ctx.style().visuals.panel_fill;
@@ -898,21 +916,17 @@ impl DrawbarApp {
                 }
                 return;
             }
-            panel_header(ui, "instrument", Some(&mut self.shell.inspector_open), None);
-            match self.device.state.connected() {
-                true => crate::browser::about(ui, &self.device),
-                false => {
-                    ui.add_space(GAP);
-                    along(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("Nothing is attached.")
-                                .text_style(ui_text())
-                                .weak()
-                                .italics(),
-                        );
-                    });
-                }
-            }
+            // The dock's own header keeps the collapse gesture every dock has; the three
+            // under it collapse only themselves.
+            panel_header(ui, "inspector", Some(&mut self.shell.inspector_open), None);
+            acts.extend(crate::inspector::ui(
+                ui,
+                &mut self.shell,
+                &mut self.browser,
+                &self.workspace,
+                &self.device,
+                &self.queue,
+            ));
         });
     }
 }
@@ -1081,6 +1095,9 @@ mod tests {
             browser_open: false,
             inspector_open: true,
             dock_open: true,
+            room_open: true,
+            deps_open: false,
+            tags_open: true,
             page: Page::Log,
             omnibox: "typed and not kept".into(),
             filter: Filter::default(),
@@ -1092,6 +1109,8 @@ mod tests {
         assert!(!after.browser_open);
         assert!(after.inspector_open);
         assert!(after.dock_open);
+        assert!(after.room_open && after.tags_open);
+        assert!(!after.deps_open, "a shut inspector panel comes back shut");
         assert_eq!(after.page, Page::Log);
         assert!(after.omnibox.is_empty(), "a search is not a layout");
     }

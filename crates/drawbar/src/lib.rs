@@ -15,6 +15,7 @@ pub mod fields;
 pub mod filter;
 pub mod folders;
 pub mod icon;
+pub mod inspector;
 pub mod keyboard;
 pub mod knob;
 pub mod led;
