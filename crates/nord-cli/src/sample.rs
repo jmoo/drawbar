@@ -177,10 +177,11 @@ pub struct EncodeArgs {
     )]
     pub loop_crossfade: usize,
 
-    /// Use the narrowest predictor order per cell: the editor's own record coding,
-    /// and a smaller file. Decoded back exactly either way.
+    /// State every content field outright instead of the editor's own record
+    /// coding: order-zero records in a larger file, and not the editor's bytes.
+    /// Decoded back exactly either way.
     #[arg(long)]
-    pub predict: bool,
+    pub plain: bool,
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
     /// audio is the same in all three; the container and the stream's units differ.
@@ -215,10 +216,11 @@ pub struct BuildArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Use the narrowest predictor order per cell: the editor's own record coding,
-    /// and a smaller file. Decoded back exactly either way.
+    /// State every content field outright instead of the editor's own record
+    /// coding: order-zero records in a larger file, and not the editor's bytes.
+    /// Decoded back exactly either way.
     #[arg(long)]
-    pub predict: bool,
+    pub plain: bool,
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
     /// audio is the same in all three; the container and the stream's units differ.
@@ -498,11 +500,11 @@ fn layout(generation: u8) -> Result<codec::Layout, String> {
     }
 }
 
-fn predictor(minimising: bool) -> encode::Predictor {
-    if minimising {
-        encode::Predictor::Minimising
-    } else {
+fn predictor(plain: bool) -> encode::Predictor {
+    if plain {
         encode::Predictor::Plain
+    } else {
+        encode::Predictor::Minimising
     }
 }
 
@@ -557,7 +559,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
         .channels(source.channels)
-        .predictor(predictor(args.predict))
+        .predictor(predictor(args.plain))
         .layout(layout);
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
@@ -671,7 +673,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         encode::Instrument {
             name: &name,
             map_gain,
-            predictor: predictor(args.predict),
+            predictor: predictor(args.plain),
             layout,
             preset,
         },
@@ -1314,7 +1316,7 @@ mod tests {
             top_note: None,
             loop_points: None,
             loop_crossfade: 0,
-            predict: false,
+            plain: false,
             generation,
             shift: None,
             unverified,

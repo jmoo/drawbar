@@ -284,12 +284,12 @@ enum SampleAction {
 
     /// Build a one-zone sample instrument from a 44.1 kHz mono or stereo 16-bit WAV.
     ///
-    /// Under `--predict` the v2 result is what Nord Sample Editor writes for the same
-    /// input, byte for byte, apart from a float residue in the resampling kernel that
-    /// leaves the odd audio field one count out and changes nothing the instrument
-    /// plays; mono, stereo and looped v2 encodes play on an Electro 5. The wide
-    /// generations reproduce the editor's renders but have never been played, so they
-    /// need `--unverified`.
+    /// The v2 result is what Nord Sample Editor writes for the same input, byte for
+    /// byte, apart from a float residue in the resampling kernel that leaves the odd
+    /// audio field one count out and changes nothing the instrument plays; mono,
+    /// stereo and looped v2 encodes play on an Electro 5. The wide generations
+    /// reproduce the editor's renders but have never been played, so they need
+    /// `--unverified`.
     Encode(sample::EncodeArgs),
 
     /// Build a sample instrument from a Nord Sample Editor project.

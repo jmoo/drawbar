@@ -30,8 +30,8 @@ pub struct Draft {
     pub name: String,
     pub root_key: u8,
     pub top_note: u8,
-    /// Narrowest predictor order per cell rather than every field stated outright.
-    pub predict: bool,
+    /// Every content field stated outright rather than the editor's own record coding.
+    pub plain: bool,
     pub layout: Layout,
 }
 
@@ -44,7 +44,7 @@ impl Draft {
             name: fits(stem),
             root_key: 60,
             top_note: 84,
-            predict: false,
+            plain: false,
             layout: Layout::V2,
         }
     }
@@ -127,9 +127,9 @@ pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
         .top_note(draft.top_note)
         .channels(pcm.channels)
         .layout(draft.layout)
-        .predictor(match draft.predict {
-            true => encode::Predictor::Minimising,
-            false => encode::Predictor::Plain,
+        .predictor(match draft.plain {
+            true => encode::Predictor::Plain,
+            false => encode::Predictor::Minimising,
         });
     let instrument = encode::instrument(&pcm.samples, &options).map_err(|e| e.to_string())?;
     instrument.to_bytes().map_err(|e| e.to_string())
@@ -159,11 +159,10 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
     ui.label(egui::RichText::new("This is a WAV, not a Nord file.").strong());
     ui.label(
         egui::RichText::new(
-            "It can be encoded into a one-zone sample instrument. With Predict on — the \
-             record coding Nord Sample Editor itself picks — the file is the editor's \
-             own output apart from a float residue in the resampling kernel that \
-             changes nothing the instrument plays. Instruments encoded this way have \
-             been played on hardware.",
+            "It can be encoded into a one-zone sample instrument. The file is Nord \
+             Sample Editor's own output apart from a float residue in the resampling \
+             kernel that changes nothing the instrument plays. Instruments encoded \
+             this way have been played on hardware.",
         )
         .small()
         .weak(),
@@ -237,10 +236,12 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
         }
         ui.horizontal(|ui| {
             ui.add_space(120.0);
-            ui.checkbox(&mut draft.predict, "Predict").on_hover_text(
-                "the narrowest predictor order per cell — the editor's own record \
-                     coding: a smaller file, decoded back exactly either way",
-            );
+            ui.checkbox(&mut draft.plain, "Plain records")
+                .on_hover_text(
+                    "state every content field outright instead of the editor's own \
+                     record coding: the same audio in a larger file, and not the \
+                     editor's bytes",
+                );
         });
     });
 
