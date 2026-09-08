@@ -218,6 +218,22 @@ fn entity_kind(entity: &Entity) -> &'static str {
     }
 }
 
+/// A trim or a split writes a new library; overwriting the one it reads would
+/// leave nothing to compare against, and no flag says that was meant.
+fn refuse_in_place(input: &Path, output: &Path) -> Result<(), String> {
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    if same(input, output) {
+        return Err(format!(
+            "{} is the input; give -o another path",
+            output.display()
+        ));
+    }
+    Ok(())
+}
+
 fn to_bytes(library: &Library<'_>, path: &Path) -> Result<Vec<u8>, String> {
     library
         .to_piano()
@@ -597,6 +613,7 @@ fn parse_tune(value: &str) -> Result<i8, String> {
 }
 
 pub fn trim(ui: &Ui, args: TrimArgs) -> Result<(), String> {
+    refuse_in_place(&args.file, &args.out)?;
     let (original, piano) = read(&args.file)?;
     let mut library = piano.library().map_err(|e| e.to_string())?;
     if args.drop_bank.is_empty() && args.layers.is_none() && args.range.is_none() {
@@ -856,6 +873,7 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
         .unwrap_or_else(|| "piano".to_string());
     for (label, half) in [("low", &low), ("high", &high)] {
         let path = args.out.join(format!("{stem} {label}.npno"));
+        refuse_in_place(&args.file, &path)?;
         let bytes = to_bytes(half, &args.file)?;
         write_file(ui, &path, &bytes)?;
         let covered: Vec<u8> = (0..128u8)
