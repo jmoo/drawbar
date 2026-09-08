@@ -264,7 +264,7 @@ fn agrees(entity: &LocalEntity, info: &ProgramInfo) -> Option<bool> {
 }
 
 /// The library a file names, and the name the instrument gave it if it has been asked.
-fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
+pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
     let Some(fields) = entity.entity.as_ref().and_then(crate::fields::fields_of) else {
         return Needs::Nothing;
     };
@@ -902,7 +902,7 @@ fn paint(
     }
     write(
         cell(Column::Size),
-        &measure(row.size),
+        &crate::room::measure(row.size),
         egui::FontId::monospace(MONO),
         quiet,
     );
@@ -993,19 +993,6 @@ fn worn(row: &Row, tags: &Tags) -> Vec<String> {
         .filter_map(|tag| tags.name_of(*tag))
         .map(str::to_string)
         .collect()
-}
-
-/// A size in the widest unit that leaves a figure worth reading.
-fn measure(bytes: u64) -> String {
-    const K: f64 = 1024.0;
-    let held = bytes as f64;
-    if held < K {
-        return format!("{bytes} B");
-    }
-    if held < K * K {
-        return format!("{:.1} kB", held / K);
-    }
-    format!("{:.1} MB", held / (K * K))
 }
 
 /// The strip under the table: what is picked, what sending it would do, and the three

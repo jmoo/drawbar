@@ -890,6 +890,7 @@ impl Device {
         tabs: &mut Tabs,
         queue: &mut Queue,
     ) {
+        let now = workspace.ctx().input(|input| input.time);
         while let Ok(event) = self.events.try_recv() {
             match event {
                 DeviceEvent::Connected(card) => {
@@ -928,6 +929,7 @@ impl Device {
                 DeviceEvent::Finished => {
                     if let Some(class) = self.reading.take() {
                         self.state.scan.finished(class);
+                        self.state.scan.heard(class, now);
                     }
                     // The panel is still playing what it read before the write, so it is
                     // asked to load the slot again. `select` is read-only.
@@ -964,6 +966,7 @@ impl Device {
                         self.state.banks.insert((class.to_raw(), bank), slots);
                     }
                     self.state.scan.bank(class, bank);
+                    self.state.scan.heard(class, now);
                 }
                 DeviceEvent::SlotInfo { at, info, .. } => {
                     self.state.detail = Detail {

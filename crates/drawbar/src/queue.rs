@@ -394,12 +394,18 @@ fn diff(ui: &mut egui::Ui, held: &Queued) {
         edge.top()..=edge.bottom(),
         egui::Stroke::new(1.0_f32, border),
     );
+    table(ui, &held.diff);
+}
+
+/// The four column heads, and under them either the fields two bodies do not agree on or
+/// the one line every other shape of difference comes to.
+pub fn table(ui: &mut egui::Ui, diff: &Diff) {
     let width = ui.available_width() - PAD;
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
     diff_head(ui, width, &tracks);
 
-    let Diff::Fields(fields) = &held.diff else {
-        let (glyph, tint, said) = summarise(&held.diff, ui.visuals());
+    let Diff::Fields(fields) = diff else {
+        let (glyph, tint, said) = summarise(diff, ui.visuals());
         return one_row(ui, width, &tracks, glyph, tint, &said);
     };
     egui::ScrollArea::vertical()

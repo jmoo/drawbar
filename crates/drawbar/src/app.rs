@@ -9,6 +9,7 @@ use eframe::egui;
 use crate::browser::{self, Browser};
 use crate::device::Device;
 use crate::document::Document;
+use crate::keyboard::Keyboard;
 use crate::library::Library;
 use crate::log::Log;
 use crate::queue::Queue;
@@ -132,6 +133,7 @@ pub struct DrawbarApp {
     pub(crate) device: Device,
     pub(crate) browser: Browser,
     pub(crate) library: Library,
+    pub(crate) keyboard: Keyboard,
     pub(crate) queue: Queue,
     pub(crate) shell: Shell,
     pub(crate) tabs: Tabs,
@@ -166,6 +168,7 @@ impl DrawbarApp {
             device: Device::new(cc.egui_ctx.clone()),
             browser: Browser::default(),
             library: Library::default(),
+            keyboard: Keyboard::default(),
             queue: Queue::default(),
             shell: Shell::default(),
             tabs: Tabs::default(),
@@ -339,7 +342,14 @@ impl DrawbarApp {
                     }
                     Some(Spot::Keyboard) => {
                         self.document.leave();
-                        crate::shell::placeholder(ui, "Keyboard — stage 8 fills this in.");
+                        acts.extend(self.keyboard.ui(
+                            ui,
+                            &mut self.browser,
+                            &self.workspace,
+                            &self.device,
+                            &self.queue,
+                            &self.tabs,
+                        ));
                     }
                     Some(Spot::Document(id)) => self.open_document(ui, id, acts),
                 }

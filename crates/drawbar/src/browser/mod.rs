@@ -260,7 +260,7 @@ impl Browser {
 
     /// What one drag carries: the pressed row, and the rest of the selection when the
     /// pressed row is in it.
-    fn carrying(&self, head: Held, name: &str, workspace: &Workspace) -> Carried {
+    pub(crate) fn carrying(&self, head: Held, name: &str, workspace: &Workspace) -> Carried {
         let rest: Vec<Held> = match self.selection.holds(head.what) {
             false => Vec::new(),
             true => self
@@ -347,7 +347,7 @@ impl Browser {
     ///
     /// A target that would refuse does not light up; dropping on it anyway says why in
     /// the status strip rather than silently doing nothing.
-    fn drop_zone(
+    pub(crate) fn drop_zone(
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,

@@ -8,7 +8,7 @@
 use eframe::egui;
 use nord_usb::ObjectClass;
 
-use crate::app::{accent, micro, ui as ui_text, DrawbarApp, ThemeChoice};
+use crate::app::{accent, ui as ui_text, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
 use crate::device::occupancy;
 use crate::filter::Filter;
@@ -928,19 +928,6 @@ fn reopen(ui: &mut egui::Ui, glyph: Glyph, hint: &str) -> egui::Response {
     crate::icon::painted(ui, glyph, box_, ink);
     ui.interact(box_, ui.id().with("reopen"), egui::Sense::click())
         .on_hover_text(hint)
-}
-
-/// The one line the centre shows for a view stage 6 and stage 8 have not built yet.
-pub fn placeholder(ui: &mut egui::Ui, what: &str) {
-    ui.add_space(GAP);
-    along(ui, |ui| {
-        ui.label(
-            egui::RichText::new(what)
-                .text_style(micro())
-                .weak()
-                .italics(),
-        );
-    });
 }
 
 #[cfg(test)]
