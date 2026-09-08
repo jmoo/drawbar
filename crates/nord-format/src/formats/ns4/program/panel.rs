@@ -1,14 +1,9 @@
-//! The Stage 4 program as its panel is divided.
+//! Stage 4 program controls and their documented enable dependencies.
 //!
-//! Three sections, each with its layers, each layer with its own effects chain — the
-//! shape the body's nested bodies already have, plus the two things they do not say:
-//! which layer's fields are the ones the instrument is playing, and where the loose
-//! fields at the top level belong.
-//!
-//! A layer's enable and volume are **not** in its nested body — the file packs those with
-//! the other layers' — so each layer's group names them beside the body's own fields.
-//! Morph slots are named by nothing: most of this body's fields are morph targets, and
-//! each belongs to the parameter its name binds it to.
+//! See [the panel audit](https://github.com/jmoo/drawbar/blob/master/docs/ns4-panel.md)
+//! for manual references and the limits imposed by undecoded selectors.
+//! Scene relevance conservatively includes both scenes until the active-scene bit's
+//! polarity is established. Morph targets remain attached to their parameters.
 
 use crate::panel::{Group, Match, Panel, Relevance};
 
@@ -23,49 +18,412 @@ macro_rules! switched_on {
     };
 }
 
-/// One keyboard-zone boundary: its note and its crossfade, under its own enable.
-macro_rules! split_point {
-    ($title:expr, $zones:expr) => {
+macro_rules! enabled_in_either_scene {
+    ($field:expr) => {
+        Some(Relevance {
+            any_of: &[
+                Match {
+                    field: $field,
+                    is: &["true"],
+                },
+                Match {
+                    field: concat!($field, "_scene_2"),
+                    is: &["true"],
+                },
+            ],
+        })
+    };
+}
+
+macro_rules! controls {
+    ($title:expr, $when:expr, $prefix:expr, [$($field:literal),* $(,)?]) => {
         Group {
             title: $title,
             selected_by: None,
-            when: switched_on!(concat!("kb_zones_", $zones, "_split_point_enabled")),
-            members: &[
-                concat!("kb_zones_", $zones, "_split_point"),
-                concat!("kb_zones_", $zones, "_split_point_xfade"),
-            ],
+            when: $when,
+            members: &[$(concat!($prefix, $field)),*],
             groups: &[],
         }
     };
 }
 
-/// One layer of a section: its enable lives with its siblings, so the group carries the
-/// volume, the layer body and the effects chain that follows it.
-macro_rules! layer {
-    ($title:expr, $enable:expr, $members:expr, $fx:expr) => {
+macro_rules! split_point {
+    ($title:expr, $zones:expr) => {
+        controls!(
+            $title,
+            switched_on!(concat!("kb_zones_", $zones, "_split_point_enabled")),
+            concat!("kb_zones_", $zones),
+            ["_split_point", "_split_point_xfade"]
+        )
+    };
+}
+
+macro_rules! effects {
+    ($prefix:expr) => {
+        Group {
+            title: "Effects",
+            selected_by: None,
+            when: switched_on!("fx_enabled"),
+            members: &[
+                concat!($prefix, "mod_1_enabled"),
+                concat!($prefix, "mod_2_enabled"),
+                concat!($prefix, "amp_sim_eq_enabled"),
+                concat!($prefix, "comp_enabled"),
+                concat!($prefix, "delay_enabled"),
+                concat!($prefix, "reverb_enabled"),
+            ],
+            groups: &[
+                controls!(
+                    "Mod 1",
+                    switched_on!(concat!($prefix, "mod_1_enabled")),
+                    $prefix,
+                    [
+                        "mod_1_mode",
+                        "mod_1_master_clock_enabled",
+                        "mod_1_rate",
+                        "mod_1_amount"
+                    ]
+                ),
+                controls!(
+                    "Mod 2",
+                    switched_on!(concat!($prefix, "mod_2_enabled")),
+                    $prefix,
+                    ["mod_2_mode", "mod_2_rate", "mod_2_amount"]
+                ),
+                controls!(
+                    "Amp / EQ",
+                    switched_on!(concat!($prefix, "amp_sim_eq_enabled")),
+                    $prefix,
+                    [
+                        "amp_sim_eq_mode",
+                        "amp_sim_eq_treb",
+                        "amp_sim_eq_mid",
+                        "amp_sim_eq_bass",
+                        "amp_sim_eq_freq",
+                        "amp_sim_eq_drive"
+                    ]
+                ),
+                controls!(
+                    "Compressor",
+                    switched_on!(concat!($prefix, "comp_enabled")),
+                    $prefix,
+                    ["comp_amount", "comp_response"]
+                ),
+                controls!(
+                    "Delay",
+                    switched_on!(concat!($prefix, "delay_enabled")),
+                    $prefix,
+                    [
+                        "delay_tempo_master_clock_enabled",
+                        "delay_tempo",
+                        "delay_mix",
+                        "delay_normal_analog",
+                        "delay_ping_pong_enabled",
+                        "delay_filter_type",
+                        "delay_feedback",
+                        "delay_effects"
+                    ]
+                ),
+                controls!(
+                    "Reverb",
+                    switched_on!(concat!($prefix, "reverb_enabled")),
+                    $prefix,
+                    ["reverb_amount", "reverb_dark_bright", "reverb_type"]
+                ),
+            ],
+        }
+    };
+}
+
+macro_rules! organ_layer {
+    ($title:expr, $layer:literal) => {
         Group {
             title: $title,
             selected_by: None,
-            when: switched_on!($enable),
-            members: $members,
-            groups: &[Group {
-                title: "Effects",
-                selected_by: None,
-                when: None,
-                members: &[$fx],
-                groups: &[],
-            }],
+            when: enabled_in_either_scene!(concat!("organ_", $layer, "_layer_enabled")),
+            members: &[
+                concat!("organ_", $layer, "_volume"),
+                concat!("organ_", $layer, ".octave_shift"),
+                concat!("organ_", $layer, ".sustain_pedal_enabled"),
+                concat!("organ_", $layer, ".model"),
+                concat!("organ_", $layer, ".preset_enabled"),
+                concat!("organ_", $layer, ".drawbar_1"),
+                concat!("organ_", $layer, ".drawbar_2"),
+                concat!("organ_", $layer, ".drawbar_3"),
+                concat!("organ_", $layer, ".drawbar_4"),
+                concat!("organ_", $layer, ".drawbar_5"),
+                concat!("organ_", $layer, ".drawbar_6"),
+                concat!("organ_", $layer, ".drawbar_7"),
+                concat!("organ_", $layer, ".drawbar_8"),
+                concat!("organ_", $layer, ".drawbar_9"),
+                concat!("organ_", $layer, ".vib_chorus_enabled"),
+                concat!("organ_", $layer, ".percussion_enabled"),
+            ],
+            groups: &[
+                controls!(
+                    "Keyboard zones",
+                    switched_on!("split_enabled"),
+                    concat!("organ_", $layer, "."),
+                    ["kb_zones"]
+                ),
+                controls!(
+                    "Percussion",
+                    switched_on!(concat!("organ_", $layer, ".percussion_enabled")),
+                    concat!("organ_", $layer, "."),
+                    [
+                        "percussion_harmonic_3rd_enabled",
+                        "percussion_decay_fast_enabled",
+                        "percussion_volume_soft_enabled"
+                    ]
+                ),
+            ],
+        }
+    };
+}
+
+macro_rules! piano_layer {
+    ($title:expr, $layer:literal) => {
+        Group {
+            title: $title,
+            selected_by: None,
+            when: enabled_in_either_scene!(concat!("piano_", $layer, "_layer_enabled")),
+            members: &[
+                concat!("piano_", $layer, "_volume"),
+                concat!("piano_", $layer, ".octave_shift"),
+                concat!("piano_", $layer, ".pitch_stick_enabled"),
+                concat!("piano_", $layer, ".sustain_pedal_enabled"),
+                concat!("piano_", $layer, ".piano_type"),
+                concat!("piano_", $layer, ".model_slot"),
+                concat!("piano_", $layer, ".model_variation"),
+                concat!("piano_", $layer, ".model_id"),
+                concat!("piano_", $layer, ".soft_rel_enabled"),
+                concat!("piano_", $layer, ".string_res_enabled"),
+                concat!("piano_", $layer, ".pedal_noise_enabled"),
+                concat!("piano_", $layer, ".touch"),
+                concat!("piano_", $layer, ".unison_level"),
+                concat!("piano_", $layer, ".dyn_comp"),
+                concat!("piano_", $layer, ".timbre"),
+            ],
+            groups: &[
+                controls!(
+                    "Keyboard zones",
+                    switched_on!("split_enabled"),
+                    concat!("piano_", $layer, "."),
+                    ["kb_zones"]
+                ),
+                effects!(concat!("piano_", $layer, "_fx.")),
+            ],
+        }
+    };
+}
+
+macro_rules! synth_layer {
+    ($title:expr, $layer:literal) => {
+        Group {
+            title: $title,
+            selected_by: None,
+            when: enabled_in_either_scene!(concat!("synth_", $layer, "_layer_enabled")),
+            members: &[
+                concat!("synth_", $layer, "_volume"),
+                concat!("synth_", $layer, "_performance.extern_enabled"),
+                concat!("synth_", $layer, "_performance.octave_shift"),
+                concat!("synth_", $layer, "_performance.pitch_stick_enabled"),
+                concat!("synth_", $layer, "_performance.sustain_pedal_enabled"),
+            ],
+            groups: &[
+                controls!(
+                    "Keyboard zones",
+                    switched_on!("split_enabled"),
+                    concat!("synth_", $layer, "_performance."),
+                    ["kb_zones"]
+                ),
+                controls!(
+                    "Extern",
+                    switched_on!(concat!("synth_", $layer, "_performance.extern_enabled")),
+                    concat!("synth_", $layer, "_performance."),
+                    ["extern_program", "extern_cc_val1", "extern_cc_val2"]
+                ),
+                Group {
+                    title: "Internal sound",
+                    selected_by: None,
+                    when: Some(Relevance {
+                        any_of: &[Match {
+                            field: concat!("synth_", $layer, "_performance.extern_enabled"),
+                            is: &["false"],
+                        }],
+                    }),
+                    members: &[
+                        concat!("synth_", $layer, "_pan"),
+                        concat!("synth_", $layer, "_performance.samples_analog"),
+                        concat!("synth_", $layer, "_performance.sample_slot"),
+                        concat!("synth_", $layer, "_performance.sample_id"),
+                        concat!("synth_", $layer, "_performance.mono_enabled"),
+                        concat!("synth_", $layer, "_performance.legato_enabled"),
+                        concat!("synth_", $layer, "_performance.unison_level"),
+                        concat!("synth_", $layer, "_performance.vibrato_mode"),
+                        concat!("synth_", $layer, "_performance.vibrato_delay"),
+                        concat!("synth_", $layer, "_performance.kb_sync_enabled"),
+                        concat!("synth_", $layer, "_performance.arpeggiator_run_enabled"),
+                        concat!("synth_", $layer, "_voice.filter_enabled"),
+                    ],
+                    groups: &[
+                        controls!(
+                            "Pitch stick",
+                            switched_on!(concat!(
+                                "synth_",
+                                $layer,
+                                "_performance.pitch_stick_enabled"
+                            )),
+                            concat!("synth_", $layer, "_performance."),
+                            ["pitch_stick_range"]
+                        ),
+                        controls!(
+                            "Mono / legato",
+                            Some(Relevance {
+                                any_of: &[
+                                    Match {
+                                        field: concat!(
+                                            "synth_",
+                                            $layer,
+                                            "_performance.mono_enabled"
+                                        ),
+                                        is: &["true"]
+                                    },
+                                    Match {
+                                        field: concat!(
+                                            "synth_",
+                                            $layer,
+                                            "_performance.legato_enabled"
+                                        ),
+                                        is: &["true"]
+                                    },
+                                ]
+                            }),
+                            concat!("synth_", $layer, "_performance."),
+                            ["voice_priority", "glide"]
+                        ),
+                        controls!(
+                            "Keyboard hold",
+                            switched_on!("synth_kb_hold_enabled"),
+                            concat!("synth_", $layer, "_performance."),
+                            ["kb_hold"]
+                        ),
+                        Group {
+                            title: "Arpeggiator / gate",
+                            selected_by: None,
+                            when: switched_on!(concat!(
+                                "synth_",
+                                $layer,
+                                "_performance.arpeggiator_run_enabled"
+                            )),
+                            members: &[
+                                concat!("synth_", $layer, "_performance.arpeggiator_mode"),
+                                concat!("synth_", $layer, "_performance.arp_pattern_enabled"),
+                                concat!("synth_", $layer, "_performance.arp_range_env"),
+                                concat!("synth_", $layer, "_performance.arp_direction"),
+                                concat!("synth_", $layer, "_performance.arp_zigzag_enabled"),
+                                concat!("synth_", $layer, "_performance.arp_master_clock_enabled"),
+                                concat!("synth_", $layer, "_performance.arp_rate_time"),
+                            ],
+                            groups: &[controls!(
+                                "Pattern",
+                                switched_on!(concat!(
+                                    "synth_",
+                                    $layer,
+                                    "_performance.arp_pattern_enabled"
+                                )),
+                                concat!("synth_", $layer, "_performance."),
+                                [
+                                    "arp_pattern_length",
+                                    "arpeggiator_accent",
+                                    "arpeggiator_gate",
+                                    "arpeggiator_pan"
+                                ]
+                            )],
+                        },
+                        controls!(
+                            "Oscillators",
+                            None,
+                            concat!("synth_", $layer, "_voice."),
+                            [
+                                "analog_type_knob_1",
+                                "analog_cat_knob_2",
+                                "analog_wave_partial_knob_3",
+                                "osc_ctrl",
+                                "pitch_fine",
+                                "pitch_coarse",
+                                "osc_env_attack",
+                                "osc_env_decay",
+                                "osc_env_release",
+                                "osc_env_amount",
+                                "osc_env_to_pitch_enabled",
+                                "osc_env_velocity_enabled",
+                                "sample_options",
+                                "sample_bright_enabled"
+                            ]
+                        ),
+                        controls!(
+                            "LFO",
+                            None,
+                            concat!("synth_", $layer, "_voice."),
+                            [
+                                "lfo_target",
+                                "lfo_shape",
+                                "lfo_master_clock_enabled",
+                                "lfo_rate_time",
+                                "lfo_mod_amount"
+                            ]
+                        ),
+                        controls!(
+                            "Amp envelope",
+                            None,
+                            concat!("synth_", $layer, "_voice."),
+                            [
+                                "amp_env_attack",
+                                "amp_env_decay",
+                                "amp_env_release",
+                                "amp_env_velocity"
+                            ]
+                        ),
+                        controls!(
+                            "Filter",
+                            switched_on!(concat!("synth_", $layer, "_voice.filter_enabled")),
+                            concat!("synth_", $layer, "_voice."),
+                            [
+                                "filter_type",
+                                "filter_freq",
+                                "filter_resonance_freq_hp",
+                                "filter_resonance_wheel",
+                                "filter_resonance_aftertouch",
+                                "filter_resonance_ctrl_pedal",
+                                "filter_track",
+                                "filter_drive",
+                                "filter_env_amount",
+                                "filter_env_attack",
+                                "filter_env_decay",
+                                "filter_env_release",
+                                "filter_velocity_enabled"
+                            ]
+                        ),
+                        controls!(
+                            "Vibrato",
+                            None,
+                            concat!("synth_", $layer, "_voice."),
+                            ["vibrato_rate", "vibrato_amount"]
+                        ),
+                        effects!(concat!("synth_", $layer, "_fx.")),
+                    ],
+                },
+            ],
         }
     };
 }
 
 pub const PANEL: Panel = Panel {
+    notice: Some("Scene selection and some mode mappings are unverified. Controls include settings from both scenes; Global effect edits do not synchronize layers."),
     exhaustive: false,
     groups: &[
         Group {
-            // The switches that decide which of the sections below mean anything. They
-            // lead, and they stay out of the groups they govern — a switch inside the
-            // section it turns off is a switch nobody can turn back on.
             title: "Sections",
             selected_by: None,
             when: None,
@@ -74,6 +432,7 @@ pub const PANEL: Panel = Panel {
                 "piano_section_enabled",
                 "synth_section_enabled",
                 "fx_enabled",
+                "synth_kb_hold_enabled",
             ],
             groups: &[],
         },
@@ -81,32 +440,36 @@ pub const PANEL: Panel = Panel {
             title: "Keyboard & split",
             selected_by: None,
             when: None,
-            members: &[
-                "split_enabled",
-                "program_transpose_enabled",
-                "program_transpose_amount",
+            members: &["split_enabled", "program_transpose_enabled"],
+            groups: &[
+                controls!(
+                    "Transpose",
+                    switched_on!("program_transpose_enabled"),
+                    "",
+                    ["program_transpose_amount"]
+                ),
+                Group {
+                    title: "Split points",
+                    selected_by: None,
+                    when: switched_on!("split_enabled"),
+                    // Each boundary's own enable, outside the group it governs.
+                    members: &[
+                        "kb_zones_1_2_split_point_enabled",
+                        "kb_zones_2_3_split_point_enabled",
+                        "kb_zones_3_4_split_point_enabled",
+                    ],
+                    groups: &[
+                        split_point!("Zones 1–2", "1_2"),
+                        split_point!("Zones 2–3", "2_3"),
+                        split_point!("Zones 3–4", "3_4"),
+                    ],
+                },
             ],
-            groups: &[Group {
-                title: "Split points",
-                selected_by: None,
-                when: switched_on!("split_enabled"),
-                // Each boundary's own enable, outside the group it governs.
-                members: &[
-                    "kb_zones_1_2_split_point_enabled",
-                    "kb_zones_2_3_split_point_enabled",
-                    "kb_zones_3_4_split_point_enabled",
-                ],
-                groups: &[
-                    split_point!("Zones 1–2", "1_2"),
-                    split_point!("Zones 2–3", "2_3"),
-                    split_point!("Zones 3–4", "3_4"),
-                ],
-            }],
         },
         Group {
             title: "Organ",
             selected_by: None,
-            when: switched_on!("organ_section_enabled"),
+            when: enabled_in_either_scene!("organ_section_enabled"),
             members: &[
                 "organ_a_layer_enabled",
                 "organ_b_layer_enabled",
@@ -115,109 +478,64 @@ pub const PANEL: Panel = Panel {
                 "organ_rotary_speaker_enabled",
             ],
             groups: &[
-                Group {
-                    title: "Layer A",
-                    selected_by: None,
-                    when: switched_on!("organ_a_layer_enabled"),
-                    members: &["organ_a_volume", "organ_a.*"],
-                    groups: &[],
-                },
-                Group {
-                    title: "Layer B",
-                    selected_by: None,
-                    when: switched_on!("organ_b_layer_enabled"),
-                    members: &["organ_b_volume", "organ_b.*"],
-                    groups: &[],
-                },
-                Group {
-                    title: "Rotary speaker",
-                    selected_by: None,
-                    when: switched_on!("organ_rotary_speaker_enabled"),
-                    members: &[
-                        "rotary_speaker_drive",
-                        "rotary_speaker_slow_fast",
-                        "rotary_speaker_stop_enabled",
-                        "rotary_speaker_stop_position",
-                    ],
-                    groups: &[],
-                },
-                Group {
-                    // Both organ layers play through one chain, so it belongs to the
-                    // section rather than to either layer.
-                    title: "Effects",
-                    selected_by: None,
-                    when: None,
-                    members: &["organ_fx.*"],
-                    groups: &[],
-                },
+                organ_layer!("Layer A", "a"),
+                organ_layer!("Layer B", "b"),
+                effects!("organ_fx."),
             ],
         },
         Group {
             title: "Piano",
             selected_by: None,
-            when: switched_on!("piano_section_enabled"),
+            when: enabled_in_either_scene!("piano_section_enabled"),
             members: &["piano_a_layer_enabled", "piano_b_layer_enabled"],
             groups: &[
-                layer!(
-                    "Layer A",
-                    "piano_a_layer_enabled",
-                    &["piano_a_volume", "piano_a.*"],
-                    "piano_a_fx.*"
-                ),
-                layer!(
-                    "Layer B",
-                    "piano_b_layer_enabled",
-                    &["piano_b_volume", "piano_b.*"],
-                    "piano_b_fx.*"
-                ),
+                piano_layer!("Layer A", "a"),
+                piano_layer!("Layer B", "b"),
             ],
         },
         Group {
             title: "Synth",
             selected_by: None,
-            when: switched_on!("synth_section_enabled"),
+            when: enabled_in_either_scene!("synth_section_enabled"),
             members: &[
                 "synth_a_layer_enabled",
                 "synth_b_layer_enabled",
                 "synth_c_layer_enabled",
                 "synth_arp_group_enabled",
-                "synth_kb_hold_enabled",
             ],
             groups: &[
-                layer!(
-                    "Layer A",
-                    "synth_a_layer_enabled",
-                    &[
-                        "synth_a_volume",
-                        "synth_a_pan",
-                        "synth_a_performance.*",
-                        "synth_a_voice.*"
-                    ],
-                    "synth_a_fx.*"
-                ),
-                layer!(
-                    "Layer B",
-                    "synth_b_layer_enabled",
-                    &[
-                        "synth_b_volume",
-                        "synth_b_pan",
-                        "synth_b_performance.*",
-                        "synth_b_voice.*"
-                    ],
-                    "synth_b_fx.*"
-                ),
-                layer!(
-                    "Layer C",
-                    "synth_c_layer_enabled",
-                    &[
-                        "synth_c_volume",
-                        "synth_c_pan",
-                        "synth_c_performance.*",
-                        "synth_c_voice.*"
-                    ],
-                    "synth_c_fx.*"
-                ),
+                synth_layer!("Layer A", "a"),
+                synth_layer!("Layer B", "b"),
+                synth_layer!("Layer C", "c"),
             ],
+        },
+        Group {
+            title: "Rotary speaker",
+            selected_by: None,
+            // To Rotary also routes piano and synth layers here; its selector encoding is unknown.
+            when: None,
+            members: &[
+                "rotary_speaker_drive",
+                "rotary_speaker_slow_fast",
+                "rotary_speaker_stop_enabled",
+            ],
+            groups: &[Group {
+                title: "Stop mode",
+                selected_by: None,
+                when: switched_on!("rotary_speaker_stop_enabled"),
+                members: &[],
+                groups: &[controls!(
+                    "Stop position",
+                    Some(Relevance {
+                        any_of: &[Match {
+                            field: "rotary_speaker_slow_fast",
+                            is: &["Slow"],
+                        }]
+                    }),
+                    "",
+                    ["rotary_speaker_stop_position"]
+                )],
+            }],
         },
         Group {
             title: "Effects, globally",
@@ -231,10 +549,6 @@ pub const PANEL: Panel = Panel {
             groups: &[],
         },
         Group {
-            // The program stores a second set of section and layer enables, and a flag
-            // that reads as which set is live. ⚠️ Which value of `active_layer_scene`
-            // means scene 2 is not established, so nothing here is conditional on it —
-            // asserting the wrong way round would hide the half that is playing.
             title: "Scene 2",
             selected_by: None,
             when: None,
@@ -269,6 +583,285 @@ mod tests {
             body.set_field(path, value).expect(path);
         }
         body.fields()
+    }
+
+    fn relevant(fields: &[Field], path: &str) -> bool {
+        fn find(sections: &[Section<'_>], path: &str) -> Option<bool> {
+            sections.iter().find_map(|section| {
+                if section.fields.iter().any(|field| field.path == path) {
+                    Some(section.relevant)
+                } else {
+                    find(&section.groups, path)
+                }
+            })
+        }
+        find(&PANEL.resolve(fields).sections, path)
+            .unwrap_or_else(|| panic!("no panel control for {path}"))
+    }
+
+    #[test]
+    fn scene_two_only_layers_remain_accessible_without_assuming_scene_bit_polarity() {
+        for (section, layer) in [
+            ("organ", "a"),
+            ("organ", "b"),
+            ("piano", "a"),
+            ("piano", "b"),
+            ("synth", "a"),
+            ("synth", "b"),
+            ("synth", "c"),
+        ] {
+            let section_enable = format!("{section}_section_enabled_scene_2");
+            let layer_enable = format!("{section}_{layer}_layer_enabled_scene_2");
+            let volume = format!("{section}_{layer}_volume");
+            for scene in ["false", "true"] {
+                let fields = program(&[
+                    (&section_enable, "true"),
+                    (&layer_enable, "true"),
+                    ("active_layer_scene", scene),
+                ]);
+                assert!(relevant(&fields, &volume), "{volume}, scene bit {scene}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_effect_needs_the_master_switch_and_its_own_enable() {
+        for prefix in [
+            "organ_fx",
+            "piano_a_fx",
+            "piano_b_fx",
+            "synth_a_fx",
+            "synth_b_fx",
+            "synth_c_fx",
+        ] {
+            for (effect, parameter) in [
+                ("mod_1", "mod_1_rate"),
+                ("mod_2", "mod_2_amount"),
+                ("amp_sim_eq", "amp_sim_eq_drive"),
+                ("comp", "comp_amount"),
+                ("delay", "delay_feedback"),
+                ("reverb", "reverb_amount"),
+            ] {
+                let enable = format!("{prefix}.{effect}_enabled");
+                let path = format!("{prefix}.{parameter}");
+                for master in ["false", "true"] {
+                    for enabled in ["false", "true"] {
+                        let fields = program(&[
+                            ("organ_section_enabled", "true"),
+                            ("organ_a_layer_enabled", "true"),
+                            ("piano_section_enabled", "true"),
+                            ("piano_a_layer_enabled", "true"),
+                            ("piano_b_layer_enabled", "true"),
+                            ("synth_section_enabled", "true"),
+                            ("synth_a_layer_enabled", "true"),
+                            ("synth_b_layer_enabled", "true"),
+                            ("synth_c_layer_enabled", "true"),
+                            ("fx_enabled", master),
+                            (&enable, enabled),
+                        ]);
+                        assert_eq!(
+                            relevant(&fields, &path),
+                            master == "true" && enabled == "true",
+                            "{path}: master={master}, effect={enabled}"
+                        );
+                        assert_eq!(
+                            relevant(&fields, &enable),
+                            master == "true",
+                            "{enable} must remain reachable"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extern_replaces_internal_sound_but_keeps_keyboard_routing() {
+        for layer in ["a", "b", "c"] {
+            let enable = format!("synth_{layer}_layer_enabled");
+            let prefix = format!("synth_{layer}_performance");
+            let extern_enable = format!("{prefix}.extern_enabled");
+            let filter_enable = format!("synth_{layer}_voice.filter_enabled");
+            let delay_enable = format!("synth_{layer}_fx.delay_enabled");
+            for external in ["false", "true"] {
+                let fields = program(&[
+                    ("synth_section_enabled", "true"),
+                    (&enable, "true"),
+                    ("split_enabled", "true"),
+                    (&extern_enable, external),
+                    (&filter_enable, "true"),
+                    ("fx_enabled", "true"),
+                    (&delay_enable, "true"),
+                ]);
+                for parameter in [
+                    "kb_zones",
+                    "octave_shift",
+                    "pitch_stick_enabled",
+                    "sustain_pedal_enabled",
+                    "extern_enabled",
+                ] {
+                    assert!(
+                        relevant(&fields, &format!("{prefix}.{parameter}")),
+                        "{layer}: {parameter}"
+                    );
+                }
+                assert_eq!(
+                    relevant(&fields, &format!("{prefix}.extern_cc_val1")),
+                    external == "true"
+                );
+                for path in [
+                    format!("synth_{layer}_voice.filter_freq"),
+                    format!("synth_{layer}_voice.amp_env_attack"),
+                    format!("synth_{layer}_fx.delay_feedback"),
+                ] {
+                    assert_eq!(relevant(&fields, &path), external == "false", "{path}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filter_and_pattern_controls_follow_their_independent_enables() {
+        for layer in ["a", "b", "c"] {
+            let layer_enable = format!("synth_{layer}_layer_enabled");
+            let filter_enable = format!("synth_{layer}_voice.filter_enabled");
+            let arp_enable = format!("synth_{layer}_performance.arpeggiator_run_enabled");
+            let pattern_enable = format!("synth_{layer}_performance.arp_pattern_enabled");
+            for filter in ["false", "true"] {
+                for arp in ["false", "true"] {
+                    for pattern in ["false", "true"] {
+                        let fields = program(&[
+                            ("synth_section_enabled", "true"),
+                            (&layer_enable, "true"),
+                            (&filter_enable, filter),
+                            (&arp_enable, arp),
+                            (&pattern_enable, pattern),
+                        ]);
+                        assert!(relevant(&fields, &filter_enable));
+                        assert!(relevant(&fields, &arp_enable));
+                        assert!(relevant(
+                            &fields,
+                            &format!("synth_{layer}_performance.kb_sync_enabled")
+                        ));
+                        assert_eq!(
+                            relevant(&fields, &format!("synth_{layer}_voice.filter_env_amount")),
+                            filter == "true"
+                        );
+                        assert_eq!(
+                            relevant(&fields, &format!("synth_{layer}_performance.arp_rate_time")),
+                            arp == "true"
+                        );
+                        assert_eq!(relevant(&fields, &pattern_enable), arp == "true");
+                        assert_eq!(
+                            relevant(
+                                &fields,
+                                &format!("synth_{layer}_performance.arpeggiator_gate")
+                            ),
+                            arp == "true" && pattern == "true",
+                            "{layer}: arp={arp}, pattern={pattern}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn glide_and_note_priority_require_mono_or_legato() {
+        for mono in ["false", "true"] {
+            for legato in ["false", "true"] {
+                let fields = program(&[
+                    ("synth_section_enabled", "true"),
+                    ("synth_a_layer_enabled", "true"),
+                    ("synth_a_performance.mono_enabled", mono),
+                    ("synth_a_performance.legato_enabled", legato),
+                ]);
+                for parameter in ["glide", "voice_priority"] {
+                    assert_eq!(
+                        relevant(&fields, &format!("synth_a_performance.{parameter}")),
+                        mono == "true" || legato == "true",
+                        "{parameter}: mono={mono}, legato={legato}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotary_controls_remain_accessible_with_the_organ_off() {
+        for stop in ["false", "true"] {
+            for speed in ["Slow", "Fast"] {
+                let fields = program(&[
+                    ("rotary_speaker_stop_enabled", stop),
+                    ("rotary_speaker_slow_fast", speed),
+                ]);
+                for path in [
+                    "rotary_speaker_drive",
+                    "rotary_speaker_slow_fast",
+                    "rotary_speaker_stop_enabled",
+                ] {
+                    assert!(
+                        relevant(&fields, path),
+                        "{path} is shared with piano and synth routing"
+                    );
+                }
+                assert_eq!(
+                    relevant(&fields, "rotary_speaker_stop_position"),
+                    stop == "true" && speed == "Slow"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn percussion_options_and_pitch_range_follow_their_switches() {
+        for enabled in ["false", "true"] {
+            let fields = program(&[
+                ("organ_section_enabled", "true"),
+                ("organ_a_layer_enabled", "true"),
+                ("organ_a.percussion_enabled", enabled),
+                ("synth_section_enabled", "true"),
+                ("synth_a_layer_enabled", "true"),
+                ("synth_a_performance.pitch_stick_enabled", enabled),
+            ]);
+            assert!(relevant(&fields, "organ_a.percussion_enabled"));
+            assert!(relevant(&fields, "synth_a_performance.pitch_stick_enabled"));
+            assert_eq!(
+                relevant(&fields, "organ_a.percussion_decay_fast_enabled"),
+                enabled == "true"
+            );
+            assert_eq!(
+                relevant(&fields, "synth_a_performance.pitch_stick_range"),
+                enabled == "true"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_hold_can_be_released_with_the_synth_section_off() {
+        let fields = program(&[("synth_kb_hold_enabled", "true")]);
+        assert!(relevant(&fields, "synth_kb_hold_enabled"));
+    }
+
+    #[test]
+    fn transpose_and_split_boundaries_require_their_enables() {
+        for enabled in ["false", "true"] {
+            let fields = program(&[
+                ("program_transpose_enabled", enabled),
+                ("split_enabled", enabled),
+                ("kb_zones_1_2_split_point_enabled", "true"),
+            ]);
+            assert!(relevant(&fields, "program_transpose_enabled"));
+            assert_eq!(
+                relevant(&fields, "program_transpose_amount"),
+                enabled == "true"
+            );
+            assert_eq!(
+                relevant(&fields, "kb_zones_1_2_split_point_xfade"),
+                enabled == "true"
+            );
+            assert!(!relevant(&fields, "kb_zones_2_3_split_point_xfade"));
+        }
     }
 
     /// ⚠️ The first group with this title, in layout order — three sections have a

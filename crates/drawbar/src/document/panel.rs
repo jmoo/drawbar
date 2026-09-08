@@ -36,6 +36,9 @@ pub fn program(
     piano: &mut PianoLookup,
     sets: &mut Sets,
 ) {
+    if let Some(notice) = layout.notice {
+        ui.label(egui::RichText::new(notice).small());
+    }
     let resolved = layout.resolve(fields);
     let folded = fields.len() > FOLD_ABOVE;
     for section in &resolved.sections {

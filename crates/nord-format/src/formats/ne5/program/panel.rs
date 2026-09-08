@@ -76,6 +76,7 @@ macro_rules! switched_on {
 }
 
 pub const PANEL: Panel = Panel {
+    notice: None,
     exhaustive: false,
     groups: &[
         Group {
