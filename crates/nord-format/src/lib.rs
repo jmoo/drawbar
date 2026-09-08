@@ -277,6 +277,15 @@ impl Sample {
         }
     }
 
+    /// Which section chain this body's sections form. A narrow body whose `map`
+    /// version names no chain we have a specimen of reports the error.
+    pub fn chain(&self) -> Result<nsmp::Chain, Error> {
+        match self {
+            Sample::V2(s) => s.chain(),
+            Sample::V3(_) => Ok(nsmp::Chain::Wide),
+        }
+    }
+
     /// Which generation's units this body's stroke streams are in.
     pub fn layout(&self) -> nsmp::codec::Layout {
         match self {

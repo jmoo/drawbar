@@ -1593,7 +1593,8 @@ fn encode_strokes(
         .iter()
         .enumerate()
         .map(|(index, zone)| {
-            let preamble = super::stroke::header_len(layout, index, cat_len, map_len);
+            let chain = super::Chain::written_for(layout);
+            let preamble = super::stroke::header_len(layout, chain, index, cat_len, map_len);
             encode_stroke(layout, zone, preamble, predictor)
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -2618,7 +2619,13 @@ mod tests {
             .payload
             .len();
         let stroke = section::find(&file.body.sections, section::STK).unwrap();
-        let head = super::super::stroke::header_len(Layout::V2, 0, cat_len, map_len);
+        let head = super::super::stroke::header_len(
+            Layout::V2,
+            super::super::Chain::Library2,
+            0,
+            cat_len,
+            map_len,
+        );
         assert_eq!((stroke.payload.len() - head) % PACKET_LEN, 0);
         assert_eq!(&stroke.payload[stroke.payload.len() - 3..], &[0x80, 0, 24]);
     }
@@ -3271,7 +3278,13 @@ mod tests {
                 .filter(|s| s.is(section::STK))
                 .enumerate()
             {
-                let head = super::super::stroke::header_len(Layout::V2, index, cat_len, map_len);
+                let head = super::super::stroke::header_len(
+                    Layout::V2,
+                    super::super::Chain::Library2,
+                    index,
+                    cat_len,
+                    map_len,
+                );
                 assert_eq!(
                     (section.payload.len() - head) % PACKET_LEN,
                     0,

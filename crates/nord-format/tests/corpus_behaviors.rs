@@ -663,6 +663,75 @@ fn nsmp_strokes_match_zones() {
     assert!(seen > 0, "no readable v2 strokes in the corpus");
 }
 
+/// The libraries before Sample Library 2.0 write a narrower chain under a `map`
+/// version of their own: no `cat`, an 18-byte `hdr` with no name field, and a zone
+/// record three bytes shorter. The content version does not separate the two chains,
+/// so this sweeps by [`nsmp::Chain`] and asserts what each side of it holds.
+#[test]
+fn pre_library_2_instruments_decode_their_narrower_zone_table() {
+    let mut early = 0;
+    let mut library2 = 0;
+    for (specimen, sample) in v2_samples() {
+        let where_ = specimen.path.display();
+        let chain = sample.chain().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        if chain == nsmp::Chain::Library2 {
+            library2 += 1;
+            continue;
+        }
+        assert_eq!(chain, nsmp::Chain::Early, "{where_}");
+        early += 1;
+
+        assert!(
+            !chain.names_instrument() && sample.name().unwrap().is_empty(),
+            "{where_}: this chain has no name field"
+        );
+        let mut copy = nsmp::from_bytes(&specimen.bytes).unwrap();
+        assert!(
+            copy.set_name("Renamed").is_err(),
+            "{where_}: renamed an instrument with nowhere to put a name"
+        );
+        assert!(
+            sample.categories().is_empty(),
+            "{where_}: this chain has no cat section"
+        );
+
+        let zones = sample.zones().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        let strokes = sample.strokes().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        assert_eq!(zones.len(), strokes.len(), "{where_}");
+        assert_eq!(
+            zones.len() * chain.zone_record_len() + nsmp::zone::RECORDS_AT,
+            v2_map_payload(sample).len(),
+            "{where_}: the map is not the zone table's own length"
+        );
+        for pair in zones.windows(2) {
+            assert!(
+                pair[0].top_note > pair[1].top_note,
+                "{where_}: zones are not stored high to low"
+            );
+        }
+        for (zone, stroke) in zones.iter().zip(&strokes) {
+            assert!(zone.top_note <= 127, "{where_}");
+            assert!(stroke.root_key <= 127, "{where_}");
+            assert!(
+                stroke.packets.is_some(),
+                "{where_}: stroke length is not this chain's header plus whole packets"
+            );
+            assert_eq!(
+                zone.rel_strength,
+                nsmp::zone::REL_STRENGTH_DEFAULT,
+                "{where_}"
+            );
+        }
+        assert!(sample.sty().is_ok(), "{where_}: sty");
+        assert!(sample.key_table().is_ok(), "{where_}: keyboard map");
+    }
+    assert!(early > 0, "no pre-2.0 instrument in the corpus");
+    assert!(
+        library2 > 0,
+        "no Sample Library 2.0 instrument in the corpus"
+    );
+}
+
 /// A zone record names its stroke in one byte and a stroke's own id is a u32, so
 /// library instruments exist whose ids alias. Pairing on the whole u32 loses those
 /// zones, and does it silently on everything with fewer than 256 strokes.
@@ -1493,7 +1562,13 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
             .payload
             .len();
         for (index, (at, stream)) in built.stroke_streams().iter().enumerate() {
-            let head = nsmp::stroke::header_len(nsmp::codec::Layout::V2, index, cat_len, map_len);
+            let head = nsmp::stroke::header_len(
+                nsmp::codec::Layout::V2,
+                nsmp::Chain::Library2,
+                index,
+                cat_len,
+                map_len,
+            );
             assert_eq!(
                 (stream.len() - head) % nsmp::stroke::packet_len(nsmp::codec::Layout::V2),
                 0,
@@ -1539,9 +1614,6 @@ fn v2_map_payload(sample: &nord_format::cbin::Cbin<nsmp::Sample>) -> Vec<u8> {
 fn v2_keyboard_maps_round_trip_byte_exactly() {
     let mut seen = 0;
     for (specimen, sample) in v2_samples() {
-        if sample.header.version < nsmp::LIBRARY_2_VERSION {
-            continue;
-        }
         let payload = v2_map_payload(sample);
         let table = sample
             .key_table()
@@ -1551,7 +1623,7 @@ fn v2_keyboard_maps_round_trip_byte_exactly() {
         assert_eq!(copy, payload, "{}", specimen.path.display());
         seen += 1;
     }
-    assert!(seen > 0, "no Sample Library 2.0 instrument in the corpus");
+    assert!(seen > 0, "no narrow instrument in the corpus");
 }
 
 #[test]

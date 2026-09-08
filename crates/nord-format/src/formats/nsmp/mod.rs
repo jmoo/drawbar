@@ -64,13 +64,78 @@ pub const V3_FROM_VERSION: u32 = 300;
 /// [`codec::Layout`] rather than to the reader.
 pub const V4_FROM_VERSION: u32 = 400;
 
-/// Content version of the first Sample Library whose v2 layout this reader decodes.
+/// Content version of the first Sample Library laid out as [`Chain::Library2`].
 ///
 /// The number tracks the *library release*, not the codec, so the versions below this
 /// are older libraries rather than older codecs — 8 above all, plus a 4/5/100/140/150
-/// tail we hold no specimen of. They are still `NWS`-chain files; only what sits
-/// inside the sections differs.
+/// tail. They are still `NWS`-chain files; only what sits inside the sections differs,
+/// and [`Chain`] is what a reader gates on.
 pub const LIBRARY_2_VERSION: u32 = 200;
+
+/// Which section chain a body's sections form, and the shapes that follow from it.
+///
+/// The narrow chain has two schemas and the content version does not separate them —
+/// it tracks the library release, and releases on both sides of the change carry a
+/// spread of numbers. The gate is the `map` section's own version, which the other
+/// section versions agree with on every specimen.
+///
+/// Inferred from specimens; not confirmed on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chain {
+    /// `NWS` 8 / `hdr` 8 / `map` 9 / `stk` 8 / `sty` 5, and no `cat` section at all.
+    /// The `hdr` is 18 bytes with no name field: these instruments carry no name,
+    /// and the library's filename is the only one they have.
+    Early,
+    /// `NWS` 11 / `hdr` 9 / `cat` 5 / `map` 10 / `stk` 9 / `sty` 5, the `hdr` naming
+    /// the instrument.
+    Library2,
+    /// The `NSMP` chain of the wide generations.
+    Wide,
+}
+
+impl Chain {
+    /// The narrow chain a `map` section version selects.
+    pub fn from_map_version(version: u8) -> Result<Chain, ParseError> {
+        match version {
+            keymap::VERSION_EARLY => Ok(Chain::Early),
+            keymap::VERSION => Ok(Chain::Library2),
+            other => Err(ParseError::AssertFail(format!(
+                "map section version {other} has no zone table layout derived from a specimen"
+            ))),
+        }
+    }
+
+    /// Bytes per zone record. [`Chain::Library2`] appends a flag and two zero bytes
+    /// to the twelve [`Chain::Early`] carries; every field they share is at the same
+    /// offset.
+    pub const fn zone_record_len(self) -> usize {
+        match self {
+            Chain::Early => 12,
+            Chain::Library2 | Chain::Wide => 15,
+        }
+    }
+
+    /// The chain [`encode`] emits for a stream layout. It writes the current schemas
+    /// only: [`Chain::Early`] is read, never produced.
+    pub const fn written_for(layout: codec::Layout) -> Chain {
+        match layout {
+            codec::Layout::V2 => Chain::Library2,
+            codec::Layout::V3 | codec::Layout::V4 => Chain::Wide,
+        }
+    }
+
+    /// Whether the `hdr` carries an instrument name.
+    pub const fn names_instrument(self) -> bool {
+        !matches!(self, Chain::Early)
+    }
+
+    /// Whether a looped stroke also sets the mark bit on the record its directory
+    /// points at. [`Chain::Early`] never does — the pointer alone marks the loop —
+    /// so a reader that requires the flag rejects those libraries outright.
+    pub const fn flags_the_marked_record(self) -> bool {
+        !matches!(self, Chain::Early)
+    }
+}
 
 /// A body decoded by generation: v2 in full, v3/v4 as a section chain with
 /// strokes verbatim.
@@ -497,8 +562,8 @@ fn stroke_id(section: &Section) -> Option<u32> {
 /// Whether a stroke is the one a zone record names.
 ///
 /// ⚠️ The record holds one byte and the stroke holds a u32, so the pairing is modulo
-/// 256. Library instruments whose ids run past 255 exist, and comparing the whole u32
-/// hands those files a zone table that does not read.
+/// 256. Library instruments whose ids run past 255 exist in both narrow chains, and
+/// comparing the whole u32 hands those files a zone table that does not read.
 fn names_stroke(id: u32, named: u8) -> bool {
     id as u8 == named
 }
@@ -515,6 +580,10 @@ impl Cbin<Sample> {
     ///
     /// The editor composes this from separate Main, Sub and Aux fields joined with `_`,
     /// so an empty Sub shows up as a doubled underscore rather than a typo.
+    ///
+    /// ⚠️ Empty on [`Chain::Early`], whose 18-byte `hdr` has no name field at all —
+    /// those instruments carry no name and [`Self::set_name`] has nowhere to put one.
+    /// Ask [`Self::chain`] before reporting the empty string as the name.
     pub fn name(&self) -> Result<String, Error> {
         Ok(StringField::NAME.read(&self.hdr()?.payload))
     }
@@ -526,24 +595,16 @@ impl Cbin<Sample> {
         StringField::NAME.write(&mut hdr.payload, name)
     }
 
-    /// Pre-2.0 libraries use a different zone layout; their section chain, name, and
-    /// checksum remain readable.
-    fn require_known_layout(&self) -> Result<(), Error> {
-        if self.header.version < LIBRARY_2_VERSION {
-            return Err(ParseError::AssertFail(format!(
-                "content version {} predates Sample Library 2.0 and lays out its zone \
-                 table differently; only the section chain and name are decoded",
-                self.header.version
-            ))
-            .into());
-        }
-        Ok(())
+    /// Which narrow chain this body's sections form, from the `map` section's own
+    /// version. An unknown one refuses rather than decoding on a guess; the section
+    /// chain, the name and the checksum still read.
+    pub fn chain(&self) -> Result<Chain, Error> {
+        Ok(Chain::from_map_version(self.map()?.version)?)
     }
 
     /// Keyboard zones, high to low.
     pub fn zones(&self) -> Result<Vec<Zone>, Error> {
-        self.require_known_layout()?;
-        Ok(zone::read(&self.map()?.payload)?)
+        Ok(zone::read(self.chain()?, &self.map()?.payload)?)
     }
 
     /// The instrument's default sound preset — nine enum-quantised bytes.
@@ -562,28 +623,28 @@ impl Cbin<Sample> {
 
     /// Sets one zone's top note. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        self.require_known_layout()?;
+        let chain = self.chain()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
-        zone::set_top_note(&mut map.payload, index, note)?;
+        zone::set_top_note(chain, &mut map.payload, index, note)?;
         Ok(())
     }
 
     /// The keyboard map: the instrument's gain and detune, and one record per
     /// MIDI note.
     pub fn key_table(&self) -> Result<KeyTable, Error> {
-        self.require_known_layout()?;
-        let map = self.map()?;
-        keymap::require_version(map.version)?;
-        Ok(KeyTable::read(&map.payload)?)
+        // Both narrow chains carry the same table ahead of their zone tables; a `map`
+        // this crate does not recognise may carry something else.
+        self.chain()?;
+        Ok(KeyTable::read(&self.map()?.payload)?)
     }
 
     /// Replaces the keyboard map. The zone table and the strokes are untouched.
     pub fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
-        self.require_known_layout()?;
+        // As in `key_table`: the table is shared, an unrecognised `map` is refused.
+        self.chain()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
-        keymap::require_version(map.version)?;
         table.write(&mut map.payload)?;
         Ok(())
     }
@@ -594,7 +655,6 @@ impl Cbin<Sample> {
     /// pass have those ids running parallel to the sections. Zipping this against
     /// `zones()` is therefore safe; indexing it as "the nth `stk` section" is not.
     pub fn strokes(&self) -> Result<Vec<Stroke>, Error> {
-        self.require_known_layout()?;
         let zones = self.zones()?;
         let by_id = self.strokes_in_file_order()?;
         zones
@@ -666,11 +726,12 @@ impl Cbin<Sample> {
     /// to happen here, before anything reorders them.
     fn strokes_in_file_order(&self) -> Result<Vec<(u32, Stroke)>, Error> {
         // The first stroke's header is the remainder of a preamble it shares with
-        // these two, so their sizes are what fixes where its audio starts.
+        // these two, so their sizes are what fixes where its audio starts. The
+        // pre-2.0 chain has no `cat` and a budget that is larger by as much.
+        let chain = self.chain()?;
         let map_len = self.map()?.payload.len();
-        let cat_len = section::find(&self.body.sections, section::CAT)
-            .map(|s| s.payload.len())
-            .ok_or_else(|| ParseError::AssertFail("no cat section".into()))?;
+        let cat_len =
+            section::find(&self.body.sections, section::CAT).map_or(0, |s| s.payload.len());
         self.stroke_sections()
             .enumerate()
             .map(|(i, s)| {
@@ -684,7 +745,7 @@ impl Cbin<Sample> {
                             s.payload.len()
                         ))
                     })?;
-                Ok((id, stroke::read(&s.payload, i, cat_len, map_len)?))
+                Ok((id, stroke::read(&s.payload, chain, i, cat_len, map_len)?))
             })
             .collect()
     }
@@ -765,14 +826,28 @@ impl fmt::Debug for Sample {
 mod tests {
     use super::*;
 
+    /// The content version tracks the library release and both chains ship several,
+    /// so the `map` section's own version is the gate.
     #[test]
-    fn pre_v2_layout_cannot_use_the_modern_zone_setter() {
-        let mut sample = Cbin {
-            header: Header::new(FORMAT, (0, 0), LIBRARY_2_VERSION - 1),
-            body: Sample { sections: vec![] },
+    fn the_map_version_selects_the_chain_and_an_unknown_one_refuses() {
+        assert_eq!(Chain::from_map_version(9).unwrap(), Chain::Early);
+        assert_eq!(Chain::from_map_version(10).unwrap(), Chain::Library2);
+        assert!(Chain::from_map_version(11).is_err());
+    }
+
+    #[test]
+    fn an_unknown_map_version_cannot_use_the_zone_setter() {
+        let crate::Sample::V2(mut sample) =
+            encode::instrument(&[0i16; encode::MIN_FRAMES], &encode::Options::new("Test")).unwrap()
+        else {
+            panic!("the default options build the narrow chain");
         };
-        let error = sample.set_zone_top_note(0, 60).unwrap_err().to_string();
-        assert!(error.contains("predates Sample Library 2.0"), "{error}");
+        let map = section::find_mut(&mut sample.body.sections, section::MAP).unwrap();
+        map.version = keymap::VERSION + 1;
+        let before = map.payload.clone();
+        assert!(sample.zones().is_err());
+        assert!(sample.set_zone_top_note(0, 60).is_err());
+        assert_eq!(sample.map().unwrap().payload, before);
     }
 
     #[test]
