@@ -127,6 +127,13 @@ fn on_triangle(drawn: &Drawn) -> bool {
     box_.expand(3.0).contains(at)
 }
 
+/// Turn one of the library's filters, and bring the library forward to show what it
+/// left. A narrowing nobody can see is a narrowing that will surprise whoever finds it.
+fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
+    acts.push(Act::ShowTab(Spot::Library));
+    acts.push(Act::Narrow(narrow));
+}
+
 /// A line where a branch has nothing to show.
 fn nothing(ui: &mut egui::Ui, depth: usize, said: &str) {
     row(
@@ -170,7 +177,7 @@ impl Browser {
             .show(ui, |ui| {
                 let mut sections = self.sections;
                 if section(ui, "places", &mut sections.places) {
-                    self.places(ui, workspace, device, queue, acts);
+                    self.places(ui, workspace, device, queue, filter, acts);
                 }
                 if section(ui, "kinds", &mut sections.kinds) {
                     self.kinds(ui, filter, acts);
@@ -198,15 +205,17 @@ impl Browser {
 
     // ---- places -----------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn places(
         &mut self,
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
+        filter: &Filter,
         acts: &mut Vec<Act>,
     ) {
-        self.computer_row(ui, workspace, device, acts);
+        self.computer_row(ui, workspace, device, filter, acts);
         if self.open.contains(&Branch::Computer) {
             for id in self.folder_ids() {
                 self.folder_row(ui, id, workspace, device, queue, acts);
@@ -227,7 +236,7 @@ impl Browser {
         }
 
         match device.state.connected() {
-            true => self.instrument_rows(ui, workspace, device, queue, acts),
+            true => self.instrument_rows(ui, workspace, device, queue, filter, acts),
             false => self.connect_row(ui, device, acts),
         }
 
@@ -261,11 +270,13 @@ impl Browser {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
+        filter: &Filter,
         acts: &mut Vec<Act>,
     ) {
+        let here = Narrow::Place(Place::Computer);
         let drawn = row(
             ui,
-            false,
+            filter.on(here),
             &Cells {
                 indent: indent(0, true),
                 open: Some(self.open.contains(&Branch::Computer)),
@@ -281,10 +292,7 @@ impl Browser {
         if drawn.response.clicked() {
             match on_triangle(&drawn) {
                 true => self.twist(Branch::Computer),
-                false => {
-                    acts.push(Act::ShowTab(Spot::Library));
-                    acts.push(Act::Narrow(Narrow::Place(Place::Computer)));
-                }
+                false => narrow(acts, here),
             }
         }
         let attached = device.state.connected();
@@ -672,12 +680,14 @@ impl Browser {
 
     // ---- the instrument ---------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn instrument_rows(
         &mut self,
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
+        filter: &Filter,
         acts: &mut Vec<Act>,
     ) {
         let Some(product) = device.state.product().map(str::to_string) else {
@@ -690,7 +700,7 @@ impl Browser {
         );
         let drawn = row(
             ui,
-            false,
+            filter.on(Narrow::Place(Place::Keyboard)),
             &Cells {
                 indent: indent(0, true),
                 open: Some(self.open.contains(&Branch::Instrument)),
@@ -708,6 +718,8 @@ impl Browser {
         if response.clicked() {
             match on_triangle(&drawn) {
                 true => self.twist(Branch::Instrument),
+                // ⚠️ Not [`narrow`]: the instrument's own tab is what this row opens, so
+                // the narrowing it asks for is already in front.
                 false => {
                     acts.push(Act::ShowTab(Spot::Keyboard));
                     acts.push(Act::Narrow(Narrow::Place(Place::Keyboard)));
@@ -1106,10 +1118,10 @@ impl Browser {
 
     fn kinds(&mut self, ui: &mut egui::Ui, filter: &Filter, acts: &mut Vec<Act>) {
         for kind in KINDS {
-            let narrow = Narrow::Kind(kind);
+            let asked = Narrow::Kind(kind);
             let drawn = row(
                 ui,
-                filter.on(narrow),
+                filter.on(asked),
                 &Cells {
                     indent: indent(0, false),
                     glyph: Some(kind.glyph()),
@@ -1118,7 +1130,7 @@ impl Browser {
                 },
             );
             if drawn.response.clicked() {
-                acts.push(Act::Narrow(narrow));
+                narrow(acts, asked);
             }
         }
     }
@@ -1135,10 +1147,10 @@ impl Browser {
                 }
                 continue;
             }
-            let narrow = Narrow::Tag(id);
+            let asked = Narrow::Tag(id);
             let drawn = row(
                 ui,
-                filter.on(narrow),
+                filter.on(asked),
                 &Cells {
                     indent: indent(0, false),
                     glyph: Some(Glyph::Tag),
@@ -1148,7 +1160,7 @@ impl Browser {
                 },
             );
             if drawn.response.clicked() {
-                acts.push(Act::Narrow(narrow));
+                narrow(acts, asked);
             }
             drawn.response.context_menu(|ui| {
                 if ui.button("Rename").clicked() {
@@ -1194,6 +1206,78 @@ fn destination(held: &Queued) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::act::apply;
+    use crate::browser::bench::{bench, context};
+    use crate::shell::Shell;
+
+    /// ⚠️ A filter turned while a document is in front narrows a table nobody is looking
+    /// at. Every row of the tree that narrows brings the library forward with it.
+    #[test]
+    fn narrowing_the_library_brings_it_forward() {
+        for asked in [
+            Narrow::Kind(Kind::Program),
+            Narrow::Tag(1),
+            Narrow::Place(Place::Computer),
+        ] {
+            let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+            let mut shell = Shell::default();
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            tabs.open(id, &workspace);
+
+            let mut acts = Vec::new();
+            narrow(&mut acts, asked);
+            apply(
+                &mut browser,
+                &mut shell,
+                acts,
+                &mut workspace,
+                &mut device,
+                &mut tabs,
+                &mut queue,
+                &mut log,
+            );
+            assert!(shell.filter.on(asked), "{asked:?}");
+            assert_eq!(tabs.showing(), Some(Spot::Library), "{asked:?}");
+        }
+    }
+
+    /// ⚠️ A place row narrows the library like a kind or a tag row, so it reads as on
+    /// like one. Without it nothing in the window says where the narrowing came from.
+    #[test]
+    fn the_place_row_reads_as_on_while_the_library_is_over_that_place() {
+        fn selections(shape: &egui::Shape, want: egui::Color32) -> usize {
+            match shape {
+                egui::Shape::Rect(drawn) => usize::from(drawn.fill == want),
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().map(|shape| selections(shape, want)).sum()
+                }
+                _ => 0,
+            }
+        }
+
+        let ctx = context();
+        let (mut browser, workspace, device, _tabs, queue, _log) = bench();
+        let lit = ctx.style().visuals.selection.bg_fill;
+        let mut on = |filter: &Filter| -> usize {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::SidePanel::left("places")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, filter);
+                    });
+            });
+            output
+                .shapes
+                .iter()
+                .map(|clipped| selections(&clipped.shape, lit))
+                .sum()
+        };
+
+        assert_eq!(on(&Filter::default()), 0, "nothing is narrowed to a place");
+        let mut filter = Filter::default();
+        filter.narrow(Narrow::Place(Place::Computer));
+        assert_eq!(on(&filter), 1, "This computer is the one row lit");
+    }
 
     /// A caption earns its line by saying something the location column does not. The
     /// piano categories do; "Bank 1" over the rows already labelled `1:…` does not.

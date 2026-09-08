@@ -56,6 +56,13 @@ const BUTTON: f32 = 22.0;
 /// The omnibox's least width. Below this it is a box nobody can read a name in.
 const OMNIBOX: f32 = 300.0;
 
+/// The omnibox's own widget id.
+///
+/// ⚠️ The controls before it come and go with the instrument. An id counted off its
+/// neighbours would change under it as one attaches, and the box would lose the focus
+/// and the cursor mid-word.
+const SEARCH: &str = "omnibox";
+
 /// The least width a drop-down takes, whatever is in it.
 ///
 /// ⚠️ A menu sizes itself to its widest item, so without this each one is as wide as
@@ -336,6 +343,15 @@ fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
         true => ctx.format_shortcut(&shortcut),
         false => String::new(),
     }
+}
+
+/// Whether a frame of the omnibox has to bring the library forward.
+///
+/// Any change to what is typed does. The box narrows the library's table and nothing
+/// else, so a search run behind a document tab is a search nobody can see — including
+/// the first keystroke into an empty box.
+fn searched(before: &str, after: &str) -> bool {
+    before != after
 }
 
 /// One of the title bar's drop-downs, no narrower than [`MENU`] however little is in it.
@@ -769,7 +785,7 @@ impl DrawbarApp {
                     rule(ui, 16.0);
                     self.instrument_actions(ui, acts);
 
-                    self.omnibox(ui);
+                    self.omnibox(ui, acts);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         for (glyph, dock, hint) in [
                             (Glyph::PanelRight, Dock::Inspector, "the instrument"),
@@ -809,17 +825,19 @@ impl DrawbarApp {
     }
 
     /// The name search the library's table is narrowed by.
-    fn omnibox(&mut self, ui: &mut egui::Ui) {
+    fn omnibox(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         // Three toggles at 24, their gaps, and the padding they keep from the edge.
         const TOGGLES: f32 = 3.0 * 24.0 + 3.0 * GAP + PAD;
         let width = (ui.available_width() - TOGGLES).max(OMNIBOX);
         let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
         let paper = ui.visuals().extreme_bg_color;
+        let before = self.shell.omnibox.clone();
         ui.scope(|ui| {
             ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border);
             ui.add_sized(
                 egui::vec2(width, BUTTON),
                 egui::TextEdit::singleline(&mut self.shell.omnibox)
+                    .id(egui::Id::new(SEARCH))
                     .background_color(paper)
                     // What is typed and the hint under it share one line down the middle
                     // of a box a third taller than the text in it.
@@ -827,6 +845,9 @@ impl DrawbarApp {
                     .hint_text(egui::RichText::new("Search…").text_style(ui_text())),
             );
         });
+        if searched(&before, &self.shell.omnibox) {
+            acts.push(Act::ShowTab(Spot::Library));
+        }
     }
 
     /// 22 px: what just happened, and how much room is left.
@@ -1158,6 +1179,11 @@ mod tests {
     /// One frame at 900 × 540, answering with the centre's rect, every panel's, and the
     /// text the frame put on screen.
     fn drawn(ctx: &egui::Context, app: &mut DrawbarApp) -> Painted {
+        frame_of(ctx, app, Vec::new())
+    }
+
+    /// One frame with something arriving in it.
+    fn frame_of(ctx: &egui::Context, app: &mut DrawbarApp, events: Vec<egui::Event>) -> Painted {
         fn words(shape: &egui::Shape, into: &mut Vec<String>) {
             match shape {
                 egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
@@ -1168,6 +1194,7 @@ mod tests {
 
         let mut frame = eframe::Frame::_new_kittest();
         let input = egui::RawInput {
+            events,
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
             ..Default::default()
         };
@@ -1291,6 +1318,45 @@ mod tests {
             alone.centre,
             answering.centre,
         );
+    }
+
+    /// Every change to what is typed brings the library forward, the first keystroke
+    /// into an empty box and clearing it included. A frame that typed nothing is not a
+    /// change.
+    #[test]
+    fn a_change_in_the_omnibox_is_what_brings_the_library_forward() {
+        assert!(searched("", "a"), "the first keystroke");
+        assert!(searched("afr", "afri"));
+        assert!(searched("afri", "afr"), "and a backspace");
+        assert!(searched("afr", ""), "and clearing it");
+        assert!(!searched("afr", "afr"));
+        assert!(!searched("", ""));
+    }
+
+    /// ⚠️ The omnibox narrows the library's table and nothing else. Typing into it with a
+    /// document in front would otherwise search where nobody can see the result.
+    #[test]
+    fn typing_a_search_with_a_document_in_front_brings_the_library_forward() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        app.tabs.open(id, &app.workspace);
+        let _ = drawn(&ctx, &mut app);
+        assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
+
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH)));
+        let _ = frame_of(&ctx, &mut app, vec![egui::Event::Text("afr".into())]);
+        assert_eq!(app.shell.omnibox, "afr");
+        assert_eq!(app.tabs.showing(), Some(Spot::Library));
+
+        // And the frame after it, which typed nothing, leaves the tab where the user put
+        // it.
+        app.tabs.show(Spot::Document(id));
+        let _ = drawn(&ctx, &mut app);
+        assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
     }
 
     /// What was collapsed comes back collapsed in the next session's window.
