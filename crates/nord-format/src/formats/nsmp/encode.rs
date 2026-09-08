@@ -16,7 +16,7 @@
 //!
 //! Confirmed on hardware for [`Layout::V2`]: the Electro 5 loads and plays one under
 //! either predictor, at the pitch the decoder renders. The wide generations reproduce
-//! the editor's own renders but no instrument here plays them, so their playback is
+//! the editor's own renders, but the Electro 5 plays only v2, so their playback is
 //! inferred from specimens; not confirmed on hardware.
 //!
 //! ```no_run

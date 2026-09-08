@@ -6,8 +6,8 @@
 //! three generations, and that is the panel this module draws.
 //!
 //! ⚠️ Only a v2 instrument has been played on hardware. The wide generations reproduce
-//! what Nord Sample Editor renders but no instrument here plays them, so the panel marks
-//! them unverified where the operator can read it.
+//! what Nord Sample Editor renders, but no instrument that plays them has been
+//! available, so the panel marks them unverified where the operator can read it.
 
 use eframe::egui;
 use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
@@ -149,7 +149,7 @@ fn generation_note(layout: Layout) -> &'static str {
         Layout::V2 => "played on hardware: mono, stereo and looped",
         Layout::V3 | Layout::V4 => {
             "unverified: this reproduces the editor's own render, but no instrument \
-             here plays this generation"
+             that plays this generation has played one"
         }
     }
 }

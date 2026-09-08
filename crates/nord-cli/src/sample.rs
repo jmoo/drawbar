@@ -192,8 +192,8 @@ pub struct EncodeArgs {
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
 
-    /// Acknowledge that no instrument here has played a v3 or v4 encode. Required
-    /// with `--generation 3` and `--generation 4`.
+    /// Acknowledge that no v3 or v4 encode has been played on an instrument.
+    /// Required with `--generation 3` and `--generation 4`.
     #[arg(long)]
     pub unverified: bool,
 }
@@ -230,8 +230,8 @@ pub struct BuildArgs {
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
 
-    /// Acknowledge that no instrument here has played a v3 or v4 encode. Required
-    /// with `--generation 3` and `--generation 4`.
+    /// Acknowledge that no v3 or v4 encode has been played on an instrument.
+    /// Required with `--generation 3` and `--generation 4`.
     #[arg(long)]
     pub unverified: bool,
 }
@@ -456,9 +456,9 @@ fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), Strin
         return Ok(());
     }
     Err(format!(
-        "no instrument here plays a v{generation} sample, so no v{generation} encode has \
-         been played: what is known about the file is that it matches what Nord Sample \
-         Editor renders. Pass --unverified to write it anyway."
+        "no v{generation} encode has been played: no instrument that plays that \
+         generation has been available, so all that is known about the file is that it \
+         matches what Nord Sample Editor renders. Pass --unverified to write it anyway."
     ))
 }
 
