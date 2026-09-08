@@ -1,7 +1,7 @@
 //! The inspector: how much room the instrument has, what the selection needs, and what
 //! it is labelled with.
 //!
-//! Three panels, each collapsed on its own and each kept between sessions beside the
+//! Four panels, each collapsed on its own and each kept between sessions beside the
 //! docks. Nothing here reads anything the rest of the app has not already been told —
 //! a panel with nothing behind it says so rather than filling itself in.
 
@@ -32,7 +32,7 @@ const PIP: f32 = 9.0;
 /// The mono readout beside a meter, and the words under one.
 const MONO: f32 = 10.5;
 
-/// The three panels, in the order the design stacks them.
+/// The four panels, in the order the design stacks them.
 pub fn ui(
     ui: &mut egui::Ui,
     shell: &mut Shell,
@@ -53,6 +53,10 @@ pub fn ui(
     panel_header(ui, "tags", Some(&mut shell.tags_open), None);
     if shell.tags_open {
         tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
+    }
+    panel_header(ui, "info", Some(&mut shell.info_open), None);
+    if shell.info_open {
+        body(ui, |ui| crate::browser::about(ui, device));
     }
     acts
 }
@@ -99,9 +103,7 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
         }
         if let Some(said) = room::constraint(queue, workspace, &device.state) {
             ui.label(egui::RichText::new(said).text_style(ui_text()).weak());
-            ui.add_space(GAP);
         }
-        crate::browser::about(ui, device);
     });
 }
 
@@ -350,9 +352,12 @@ mod tests {
 
     /// Every panel draws, with an instrument answering and with nothing attached at all.
     #[test]
-    fn the_three_panels_paint_with_and_without_an_instrument() {
+    fn the_four_panels_paint_with_and_without_an_instrument() {
         let ctx = context();
-        let mut shell = Shell::default();
+        let mut shell = Shell {
+            info_open: true,
+            ..Shell::default()
+        };
         paint(&mut shell, &Device::new(ctx.clone()), &[]);
 
         let (device, at) = attached(&ctx);
@@ -363,6 +368,7 @@ mod tests {
             room_open: false,
             deps_open: false,
             tags_open: false,
+            info_open: false,
             ..Shell::default()
         };
         paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
@@ -464,6 +470,7 @@ mod tests {
             room_open: false,
             deps_open: true,
             tags_open: false,
+            info_open: true,
             ..Shell::default()
         };
         before.keep(&mut store);
@@ -473,5 +480,9 @@ mod tests {
         assert!(!after.room_open);
         assert!(after.deps_open);
         assert!(!after.tags_open);
+        assert!(
+            after.info_open,
+            "the info panel is kept like the three above it"
+        );
     }
 }

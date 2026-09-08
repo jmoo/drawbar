@@ -88,6 +88,7 @@ pub struct Shell {
     pub room_open: bool,
     pub deps_open: bool,
     pub tags_open: bool,
+    pub info_open: bool,
     pub page: Page,
     /// What has been typed into the omnibox. Filtering the library by it is stage 6;
     /// nothing reads this yet.
@@ -106,6 +107,7 @@ impl Default for Shell {
             room_open: true,
             deps_open: true,
             tags_open: true,
+            info_open: false,
             page: Page::default(),
             omnibox: String::new(),
             filter: Filter::default(),
@@ -164,6 +166,7 @@ impl Shell {
                 (Some("room"), Some(open)) => held.room_open = open == "1",
                 (Some("deps"), Some(open)) => held.deps_open = open == "1",
                 (Some("tags"), Some(open)) => held.tags_open = open == "1",
+                (Some("info"), Some(open)) => held.info_open = open == "1",
                 (Some("page"), Some(page)) => {
                     held.page = match page == Page::Log.stored() {
                         true => Page::Log,
@@ -179,6 +182,7 @@ impl Shell {
         self.room_open = held.room_open;
         self.deps_open = held.deps_open;
         self.tags_open = held.tags_open;
+        self.info_open = held.info_open;
         self.page = held.page;
     }
 
@@ -191,7 +195,7 @@ impl Shell {
             Shell::KEY,
             format!(
                 "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nroom\t{}\ndeps\t{}\n\
-                 tags\t{}\npage\t{}\n",
+                 tags\t{}\ninfo\t{}\npage\t{}\n",
                 Shell::VERSION,
                 bit(self.browser_open),
                 bit(self.inspector_open),
@@ -199,6 +203,7 @@ impl Shell {
                 bit(self.room_open),
                 bit(self.deps_open),
                 bit(self.tags_open),
+                bit(self.info_open),
                 self.page.stored(),
             ),
         );
@@ -1237,6 +1242,7 @@ mod tests {
             room_open: true,
             deps_open: false,
             tags_open: true,
+            info_open: true,
             page: Page::Log,
             omnibox: "typed and not kept".into(),
             filter: Filter::default(),
@@ -1248,7 +1254,7 @@ mod tests {
         assert!(!after.browser_open);
         assert!(after.inspector_open);
         assert!(after.dock_open);
-        assert!(after.room_open && after.tags_open);
+        assert!(after.room_open && after.tags_open && after.info_open);
         assert!(!after.deps_open, "a shut inspector panel comes back shut");
         assert_eq!(after.page, Page::Log);
         assert!(after.omnibox.is_empty(), "a search is not a layout");
