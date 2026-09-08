@@ -667,10 +667,10 @@ pub fn trim(ui: &Ui, args: TrimArgs) -> Result<(), String> {
     let trimmed = to_bytes(&library, &args.file)?;
     write_file(ui, &args.out, &trimmed)?;
     report_size(ui, original.len(), trimmed.len());
-    if total.roots_removed > 0 {
+    if total.keys_uncovered > 0 {
         ui.note(format!(
-            "{} root(s) lost every stroke, so {} key(s) now play nothing",
-            total.roots_removed, total.keys_uncovered
+            "{} key(s) are left playing nothing, and {} root(s) dropped out entirely",
+            total.keys_uncovered, total.roots_removed
         ));
     }
     Ok(())
