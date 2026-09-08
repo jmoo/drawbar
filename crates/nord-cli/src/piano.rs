@@ -162,6 +162,17 @@ pub struct TrimArgs {
 }
 
 #[derive(Args)]
+pub struct VerifyArgs {
+    /// The piano libraries to check.
+    #[arg(required = true, value_name = "FILE")]
+    pub files: Vec<PathBuf>,
+
+    /// Also decode every stroke, checking each block against the one before it.
+    #[arg(long)]
+    pub deep: bool,
+}
+
+#[derive(Args)]
 pub struct SplitArgs {
     /// The piano library to split.
     #[arg(value_name = "FILE")]
@@ -706,6 +717,110 @@ fn parse_range(spec: &str) -> Result<(u8, u8), String> {
         ));
     }
     Ok((lo, hi))
+}
+
+/// Rebuild each library from its model and compare, and with `--deep` decode every
+/// stroke it holds.
+pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
+    let mut failed = 0usize;
+    let mut strokes = 0usize;
+    let mut frames = 0usize;
+    let mut overlap = 0usize;
+    for path in &args.files {
+        match verify_one(path, args.deep) {
+            Ok(counted) => {
+                strokes += counted.strokes;
+                frames += counted.frames;
+                overlap += counted.overlap;
+                ui.out(format!(
+                    "ok     {} ({})",
+                    path.display(),
+                    counted.line(args.deep)
+                ));
+            }
+            Err(line) => {
+                failed += 1;
+                ui.out(format!(
+                    "{} {} ({line})",
+                    ui.danger("FAILED"),
+                    path.display()
+                ));
+            }
+        }
+    }
+    if args.deep {
+        ui.note(format!(
+            "{strokes} stroke(s), {frames} frame(s) decoded, {overlap} repeated sample(s) \
+             matched the block before"
+        ));
+    }
+    match failed {
+        0 => Ok(()),
+        n => Err(format!(
+            "{n} of {} file(s) did not check out",
+            args.files.len()
+        )),
+    }
+}
+
+#[derive(Default)]
+struct Counted {
+    strokes: usize,
+    frames: usize,
+    overlap: usize,
+    bytes: usize,
+}
+
+impl Counted {
+    fn line(&self, deep: bool) -> String {
+        if deep {
+            format!(
+                "{} bytes, {} stroke(s), {} frame(s), {} repeated sample(s) matched",
+                self.bytes, self.strokes, self.frames, self.overlap
+            )
+        } else {
+            format!("{} bytes, {} stroke(s)", self.bytes, self.strokes)
+        }
+    }
+}
+
+fn verify_one(path: &Path, deep: bool) -> Result<Counted, String> {
+    let (original, piano) = read(path)?;
+    let library = piano.library().map_err(|e| e.to_string())?;
+    let rebuilt = to_bytes(&library, path)?;
+    if rebuilt != original {
+        let at = rebuilt
+            .iter()
+            .zip(&original)
+            .position(|(a, b)| a != b)
+            .map(|i| format!("{i:#x}"))
+            .unwrap_or_else(|| "the length".to_string());
+        return Err(format!(
+            "the rebuild differs at {at}; in {} bytes, out {}",
+            original.len(),
+            rebuilt.len()
+        ));
+    }
+    let mut counted = Counted {
+        strokes: library.strokes().len(),
+        bytes: original.len(),
+        ..Counted::default()
+    };
+    if deep {
+        for stroke in library.strokes() {
+            let audio = codec::decode(stroke, library.channels())
+                .map_err(|e| format!("{stroke:?}: {e}"))?;
+            if audio.clipped > 0 {
+                return Err(format!(
+                    "{stroke:?}: {} sample(s) left int16",
+                    audio.clipped
+                ));
+            }
+            counted.frames += audio.frames();
+            counted.overlap += audio.overlap_checked;
+        }
+    }
+    Ok(counted)
 }
 
 pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {

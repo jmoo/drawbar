@@ -360,6 +360,16 @@ enum PianoAction {
 
     /// Cut a library in two at a key, writing both halves.
     Split(piano::SplitArgs),
+
+    /// Rebuild each library from its parsed model and check the bytes come back
+    /// identical; with `--deep` also decode every stroke it holds.
+    ///
+    /// The rebuild recomputes the per-root counts, every audio offset, the
+    /// alignment gap and the container checksum, so an identical result says the
+    /// model accounts for the whole file. `--deep` adds the codec's own checks:
+    /// each block repeats the previous block's last frames bit-exactly, and the
+    /// frames a stroke owns come to the count its record states.
+    Verify(piano::VerifyArgs),
 }
 
 /// `nord sample project`: the editor's own save file, which no object class holds.
@@ -777,6 +787,7 @@ fn main() -> ExitCode {
             PianoAction::Edit(args) => piano::edit(&ui, args),
             PianoAction::Trim(args) => piano::trim(&ui, args),
             PianoAction::Split(args) => piano::split(&ui, args),
+            PianoAction::Verify(args) => piano::verify(&ui, args),
         },
         Command::Setlist { action } => match action {
             SetlistAction::Slot(action) => slot_action(&ui, action, ObjectClass::SetList),
