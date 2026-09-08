@@ -490,16 +490,16 @@ impl DrawbarApp {
         if hit(&key::BROWSER) {
             acts.push(Act::ToggleDock(Dock::Browser));
         }
-        if hit(&key::INSPECTOR) {
+        if self.attached() && hit(&key::INSPECTOR) {
             acts.push(Act::ToggleDock(Dock::Inspector));
         }
         if hit(&key::DOCK) {
             acts.push(Act::ToggleDock(Dock::Bottom));
         }
-        if hit(&key::QUEUE) {
+        if self.attached() && hit(&key::QUEUE) {
             acts.push(Act::ShowPage(Page::Queue));
         }
-        if self.device.state.connected() && hit(&key::RESYNC) {
+        if self.attached() && hit(&key::RESYNC) {
             acts.push(Act::Resync);
         }
         if WINDOWED && hit(&key::CLOSE) {
@@ -511,7 +511,7 @@ impl DrawbarApp {
         if WINDOWED && hit(&key::LIBRARY) {
             acts.push(Act::ShowTab(Spot::Library));
         }
-        if WINDOWED && self.device.state.connected() && hit(&key::KEYBOARD) {
+        if WINDOWED && self.attached() && hit(&key::KEYBOARD) {
             acts.push(Act::ShowTab(Spot::Keyboard));
         }
         if WINDOWED && hit(&key::DOCUMENT) {
@@ -598,7 +598,7 @@ impl DrawbarApp {
         ) {
             acts.push(Act::ShowTab(Spot::Library));
         }
-        if self.device.state.connected()
+        if self.attached()
             && marked(
                 ui,
                 "Keyboard",
@@ -621,9 +621,12 @@ impl DrawbarApp {
         ui.separator();
         for (label, dock, shortcut) in [
             ("Browser panel", Dock::Browser, key::BROWSER),
-            ("Inspector panel", Dock::Inspector, key::INSPECTOR),
+            ("Instrument panel", Dock::Inspector, key::INSPECTOR),
             ("Bottom dock", Dock::Bottom, key::DOCK),
         ] {
+            if dock == Dock::Inspector && !self.attached() {
+                continue;
+            }
             if marked(ui, label, self.shell.open(dock), Some(shortcut)) {
                 acts.push(Act::ToggleDock(dock));
             }
@@ -638,26 +641,25 @@ impl DrawbarApp {
         });
     }
 
+    /// ⚠️ Nothing but Connect… until one answers. Every other item here acts on an
+    /// instrument, and the send queue is only ever owed to one.
     fn instrument_menu(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-        match self.device.state.connected() {
-            false => {
-                if item(ui, "Connect…", None) {
-                    acts.push(Act::Connect);
-                }
+        if !self.attached() {
+            if item(ui, "Connect…", None) {
+                acts.push(Act::Connect);
             }
-            true => {
-                if item(ui, "Disconnect", None) {
-                    acts.push(Act::Disconnect);
-                }
-                ui.separator();
-                if item(ui, "Read everything", Some(key::RESYNC)) {
-                    acts.push(Act::Resync);
-                }
-                if let Some(class) = self.open_class() {
-                    if item(ui, &format!("Read {} again", folder(class)), None) {
-                        acts.push(Act::ReadAgain(class));
-                    }
-                }
+            return;
+        }
+        if item(ui, "Disconnect", None) {
+            acts.push(Act::Disconnect);
+        }
+        ui.separator();
+        if item(ui, "Read everything", Some(key::RESYNC)) {
+            acts.push(Act::Resync);
+        }
+        if let Some(class) = self.open_class() {
+            if item(ui, &format!("Read {} again", folder(class)), None) {
+                acts.push(Act::ReadAgain(class));
             }
         }
         ui.separator();
@@ -708,28 +710,18 @@ impl DrawbarApp {
                         }
                     }
                     rule(ui, 16.0);
-
-                    let attached = self.device.state.connected();
-                    if action(ui, Glyph::RefreshCw, "Read", false).clicked() && attached {
-                        acts.push(Act::Resync);
-                    }
-                    let waiting = self.queue.len();
-                    let label = match waiting {
-                        0 => "Send".to_string(),
-                        n => format!("Send {n}"),
-                    };
-                    if action(ui, Glyph::Upload, &label, waiting > 0).clicked() && waiting > 0 {
-                        acts.push(Act::AskSendAll);
-                    }
-                    rule(ui, 16.0);
+                    self.instrument_actions(ui, acts);
 
                     self.omnibox(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         for (glyph, dock, hint) in [
-                            (Glyph::PanelRight, Dock::Inspector, "the inspector"),
+                            (Glyph::PanelRight, Dock::Inspector, "the instrument"),
                             (Glyph::PanelBottom, Dock::Bottom, "the bottom dock"),
                             (Glyph::PanelLeft, Dock::Browser, "the browser"),
                         ] {
+                            if dock == Dock::Inspector && !self.attached() {
+                                continue;
+                            }
                             if glyph_button(ui, glyph, self.shell.open(dock), hint).clicked() {
                                 acts.push(Act::ToggleDock(dock));
                             }
@@ -737,6 +729,26 @@ impl DrawbarApp {
                     });
                 });
             });
+    }
+
+    /// Read, and what is owed. Both act on an instrument, so neither is drawn without
+    /// one, and the rule that would separate them from the omnibox goes with them.
+    fn instrument_actions(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        if !self.attached() {
+            return;
+        }
+        if action(ui, Glyph::RefreshCw, "Read", false).clicked() {
+            acts.push(Act::Resync);
+        }
+        let waiting = self.queue.len();
+        let label = match waiting {
+            0 => "Send".to_string(),
+            n => format!("Send {n}"),
+        };
+        if action(ui, Glyph::Upload, &label, waiting > 0).clicked() && waiting > 0 {
+            acts.push(Act::AskSendAll);
+        }
+        rule(ui, 16.0);
     }
 
     /// ⚠️ It holds what is typed and nothing else. Filtering the library by it is stage
@@ -833,7 +845,7 @@ impl DrawbarApp {
             if how < 1.0 {
                 return;
             }
-            match self.shell.page {
+            match self.page() {
                 Page::Queue => self.queue_page(ui),
                 Page::Log => self.log.ui(ui),
             }
@@ -844,15 +856,20 @@ impl DrawbarApp {
     /// between rather than one.
     fn dock_header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let waiting = self.queue.len();
+        let pages: &[Page] = match self.attached() {
+            true => &[Page::Queue, Page::Log],
+            false => &[Page::Log],
+        };
         let mut picked = None;
         let mut clear = false;
         strip(ui, |ui| {
+            flat(ui);
             if chevron(ui, self.shell.dock_open).clicked() {
                 acts.push(Act::ToggleDock(Dock::Bottom));
             }
-            let ink = ui.visuals().widgets.noninteractive.fg_stroke.color;
+            let ink = crate::app::caption(ui.visuals());
             icon(ui, Glyph::GitCompareArrows, GLYPH, ink);
-            for page in [Page::Queue, Page::Log] {
+            for page in pages.iter().copied() {
                 let on = self.shell.dock_open && self.shell.page == page;
                 if ui
                     .selectable_label(on, caps(page.title()).color(ink))
@@ -868,7 +885,7 @@ impl DrawbarApp {
             }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
-                |ui| match self.shell.page {
+                |ui| match self.page() {
                     Page::Log => clear = ui.small_button("Clear").clicked(),
                     Page::Queue => {
                         if waiting > 0 {
@@ -886,6 +903,15 @@ impl DrawbarApp {
         }
         if clear {
             self.log.clear();
+        }
+    }
+
+    /// Which page the bottom dock is on. Nothing is owed to an instrument that is not
+    /// there, so with none attached the log is the only page there is.
+    fn page(&self) -> Page {
+        match self.attached() {
+            true => self.shell.page,
+            false => Page::Log,
         }
     }
 
@@ -928,6 +954,9 @@ impl DrawbarApp {
     /// The inspector dock: how much room there is, what the selection needs, and what it
     /// is labelled with.
     pub(crate) fn inspector_dock(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        if !self.attached() {
+            return;
+        }
         let open = self.shell.inspector_open;
         let fill = ctx.style().visuals.panel_fill;
         let shut = egui::SidePanel::right("inspector_shut")
@@ -997,19 +1026,59 @@ mod tests {
         DrawbarApp::new(&cc)
     }
 
-    /// One frame at 900 × 540, answering with the centre's rect and every panel's.
-    fn drawn(ctx: &egui::Context, app: &mut DrawbarApp) -> (egui::Rect, Vec<(String, egui::Rect)>) {
+    /// An instrument answering, which is what the full layout needs to draw.
+    fn attach(app: &mut DrawbarApp) {
+        app.device
+            .pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
+    }
+
+    /// What one frame at 900 × 540 laid out and what it wrote.
+    struct Painted {
+        centre: egui::Rect,
+        panels: Vec<(String, egui::Rect)>,
+        /// Every string the frame painted, headers and button labels included.
+        words: Vec<String>,
+    }
+
+    impl Painted {
+        fn wrote(&self, word: &str) -> bool {
+            self.words.iter().any(|said| said == word)
+        }
+
+        fn region(&self, want: &str) -> Option<egui::Rect> {
+            self.panels
+                .iter()
+                .find(|(id, _)| id == want)
+                .map(|(_, rect)| *rect)
+        }
+    }
+
+    /// One frame at 900 × 540, answering with the centre's rect, every panel's, and the
+    /// text the frame put on screen.
+    fn drawn(ctx: &egui::Context, app: &mut DrawbarApp) -> Painted {
+        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
+                _ => {}
+            }
+        }
+
         let mut frame = eframe::Frame::_new_kittest();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
             ..Default::default()
         };
         let mut centre = egui::Rect::NOTHING;
-        let _ = ctx.run(input, |ctx| {
+        let output = ctx.run(input, |ctx| {
             app.update(ctx, &mut frame);
             // Panels shrink this as they are added; the central panel does not.
             centre = ctx.available_rect();
         });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            words(&clipped.shape, &mut said);
+        }
         let panels = REGIONS
             .iter()
             .filter_map(|id| {
@@ -1017,7 +1086,11 @@ mod tests {
                 Some((id.to_string(), state.rect))
             })
             .collect();
-        (centre, panels)
+        Painted {
+            centre,
+            panels,
+            words: said,
+        }
     }
 
     /// Every fixed region fits inside the window the design is drawn to, and the centre
@@ -1027,25 +1100,21 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
+        attach(&mut app);
         // Twice: the first frame is what the second lays itself out against.
         let _ = drawn(&ctx, &mut app);
-        let (centre, panels) = drawn(&ctx, &mut app);
+        let painted = drawn(&ctx, &mut app);
+        let (centre, panels) = (painted.centre, &painted.panels);
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN);
         assert_eq!(panels.len(), REGIONS.len(), "every region drew: {panels:?}");
-        for (id, rect) in &panels {
+        for (id, rect) in panels {
             assert!(
                 screen.contains_rect(*rect),
                 "{id} is outside the window: {rect:?}"
             );
         }
-        let at = |want: &str| {
-            panels
-                .iter()
-                .find(|(id, _)| id == want)
-                .map(|(_, rect)| *rect)
-                .unwrap()
-        };
+        let at = |want: &str| painted.region(want).unwrap();
         assert_eq!(at("titlebar").height(), TITLEBAR);
         assert_eq!(at("toolbar").height(), TOOLBAR);
         assert_eq!(at("status").height(), STATUS);
@@ -1069,17 +1138,59 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
+        attach(&mut app);
 
         ctx.set_theme(egui::ThemePreference::Dark);
         let _ = drawn(&ctx, &mut app);
-        let (dark_centre, dark_panels) = drawn(&ctx, &mut app);
+        let dark = drawn(&ctx, &mut app);
 
         ctx.set_theme(egui::ThemePreference::Light);
         let _ = drawn(&ctx, &mut app);
-        let (light_centre, light_panels) = drawn(&ctx, &mut app);
+        let light = drawn(&ctx, &mut app);
 
-        assert_eq!(dark_centre, light_centre);
-        assert_eq!(dark_panels, light_panels);
+        assert_eq!(dark.centre, light.centre);
+        assert_eq!(dark.panels, light.panels);
+    }
+
+    /// ⚠️ With nothing attached there is nothing to read from, nothing to send to and no
+    /// room to report. Every control that acts on an instrument is absent rather than
+    /// dead, and the centre takes the width the instrument dock would have claimed.
+    #[test]
+    fn no_instrument_means_no_instrument_controls() {
+        const ONLY_WITH_ONE: [&str; 4] = ["Read", "Send", "SEND QUEUE", "INSTRUMENT"];
+
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.dock_open = true;
+        let _ = drawn(&ctx, &mut app);
+        let alone = drawn(&ctx, &mut app);
+
+        assert!(!app.attached(), "nothing was attached");
+        for control in ONLY_WITH_ONE {
+            assert!(
+                !alone.wrote(control),
+                "{control} is painted with none attached"
+            );
+        }
+        assert!(alone.wrote("ACTIVITY LOG"), "the log is the one page left");
+        assert!(alone.region("inspector").is_none(), "{:?}", alone.panels);
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let answering = drawn(&ctx, &mut app);
+        for control in ONLY_WITH_ONE {
+            assert!(
+                answering.wrote(control),
+                "{control} is missing with one attached"
+            );
+        }
+        assert!(answering.region("inspector").is_some());
+        assert!(
+            answering.centre.width() < alone.centre.width(),
+            "the centre kept the instrument dock's width: {:?} then {:?}",
+            alone.centre,
+            answering.centre,
+        );
     }
 
     /// What was collapsed comes back collapsed in the next session's window.
