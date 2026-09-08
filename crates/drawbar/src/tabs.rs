@@ -99,6 +99,19 @@ impl Tabs {
         self.keyboard
     }
 
+    /// Move the tab at `from` to sit where the one at `to` is, the rest closing up
+    /// behind it. An index the strip does not hold moves nothing.
+    ///
+    /// The library and the keyboard move like any other tab: the order is the strip's,
+    /// not a rule about which views are allowed where.
+    pub fn reorder(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.open.len() || to >= self.open.len() {
+            return;
+        }
+        let tab = self.open.remove(from);
+        self.open.insert(to, tab);
+    }
+
     pub fn close(&mut self, spot: Spot) {
         self.open.retain(|tab| tab.spot() != spot);
         if self.active == Some(spot) {
@@ -180,6 +193,8 @@ impl Tabs {
 
         let mut close = None;
         let mut activate = None;
+        let mut dropped = None;
+        let mut painted: Vec<(usize, egui::Rect)> = Vec::new();
         egui::ScrollArea::horizontal()
             .id_salt(SCROLL)
             .max_height(HEIGHT)
@@ -190,13 +205,24 @@ impl Tabs {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 ui.horizontal(|ui| {
                     let visuals = ui.visuals().clone();
-                    for tab in &self.open {
+                    for (index, tab) in self.open.iter().enumerate() {
                         let Some(face) = face(tab, workspace, queue, &visuals) else {
                             continue;
                         };
                         let spot = tab.spot();
                         let drawn = paint(ui, &face, self.active == Some(spot));
+                        painted.push((index, drawn.tab.rect));
                         let mut label = drawn.tab;
+                        if label.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                        if let Some(at) = label
+                            .drag_stopped()
+                            .then(|| ui.ctx().pointer_interact_pos())
+                            .flatten()
+                        {
+                            dropped = Some((index, at.x));
+                        }
                         if let Some(hint) = face.hint {
                             label = label.on_hover_text(hint);
                         }
@@ -216,7 +242,29 @@ impl Tabs {
         if let Some(spot) = close {
             self.close(spot);
         }
+        if let Some((from, x)) = dropped {
+            if let Some(to) = landing(&painted, x) {
+                self.reorder(from, to);
+            }
+        }
     }
+}
+
+/// Which tab a drag was let go over: the one the pointer is inside, or the tab at
+/// whichever end it was carried past.
+fn landing(painted: &[(usize, egui::Rect)], x: f32) -> Option<usize> {
+    let (first, left) = painted.first()?;
+    let (last, right) = painted.last()?;
+    if x < left.left() {
+        return Some(*first);
+    }
+    if x > right.right() {
+        return Some(*last);
+    }
+    painted
+        .iter()
+        .find(|(_, rect)| rect.x_range().contains(x))
+        .map(|(index, _)| *index)
 }
 
 /// A tab as it is drawn: what it wears, what it says, and what it is owed.
@@ -308,7 +356,8 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
         false => 0.0,
     };
     let width = PAD + GLYPH + GAP + galley.size().x + GAP + marked + SHUT + PAD;
-    let (rect, tab) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click());
+    let (rect, tab) =
+        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let painter = ui.painter().clone();
 
     if active {
@@ -474,6 +523,127 @@ mod tests {
         tabs.show(Spot::Document(7));
         assert_eq!(tabs.showing(), Some(Spot::Library));
         assert!(!tabs.holds(7));
+    }
+
+    /// Moving a tab closes the strip up behind it, wherever it came from and wherever it
+    /// lands. The library and the keyboard are tabs like any other.
+    #[test]
+    fn reordering_moves_one_tab_and_closes_the_strip_up_behind_it() {
+        let (mut tabs, ws) = (Tabs::default(), workspace());
+        tabs.show(Spot::Library);
+        tabs.open(1, &ws);
+        tabs.open(2, &ws);
+        let order = |tabs: &Tabs| tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
+
+        tabs.reorder(0, 2);
+        assert_eq!(
+            order(&tabs),
+            vec![Spot::Document(1), Spot::Document(2), Spot::Library]
+        );
+        tabs.reorder(2, 1);
+        assert_eq!(
+            order(&tabs),
+            vec![Spot::Document(1), Spot::Library, Spot::Document(2)]
+        );
+        assert_eq!(
+            tabs.showing(),
+            Some(Spot::Document(2)),
+            "moving is not showing"
+        );
+    }
+
+    /// An index the strip does not hold is not a move, so nothing is dropped and nothing
+    /// panics on the way.
+    #[test]
+    fn reordering_past_the_end_of_the_strip_moves_nothing() {
+        let (mut tabs, ws) = (Tabs::default(), workspace());
+        tabs.open(1, &ws);
+        tabs.open(2, &ws);
+        let before = tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
+        for (from, to) in [(0, 0), (0, 2), (5, 1), (9, 9)] {
+            tabs.reorder(from, to);
+        }
+        assert_eq!(tabs.open.iter().map(Tab::spot).collect::<Vec<_>>(), before);
+    }
+
+    /// Where a drop lands: the tab under the pointer, or the tab at whichever end it was
+    /// carried past.
+    #[test]
+    fn a_drop_lands_on_the_tab_under_it_or_on_the_end_it_passed() {
+        let box_ = |left: f32, right: f32| {
+            egui::Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(right, HEIGHT))
+        };
+        let painted = [(0, box_(0.0, 60.0)), (1, box_(60.0, 130.0))];
+        assert_eq!(landing(&painted, 30.0), Some(0));
+        assert_eq!(landing(&painted, 100.0), Some(1));
+        assert_eq!(landing(&painted, -40.0), Some(0), "carried off the left");
+        assert_eq!(landing(&painted, 900.0), Some(1), "carried off the right");
+        assert_eq!(landing(&[], 30.0), None, "an empty strip takes no drop");
+    }
+
+    /// Dragging a tab across its neighbour and letting go swaps the two. Nothing is
+    /// activated by it: a release that moved is a drop, not a click.
+    #[test]
+    fn dragging_a_tab_across_its_neighbour_swaps_them() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(crate::app::metrics);
+        let mut ws = Workspace::new(ctx.clone());
+        let mut log = crate::log::Log::default();
+        let first = ws
+            .create(crate::workspace::Fresh::Program, &mut log)
+            .unwrap();
+        let second = ws.create(crate::workspace::Fresh::Live, &mut log).unwrap();
+        let mut tabs = Tabs::default();
+        tabs.open(first, &ws);
+        tabs.open(second, &ws);
+
+        // Inside the first tab, which starts at the strip's left edge, and far past the
+        // right of the last one.
+        let (from, to) = (
+            egui::pos2(2.0, HEIGHT / 2.0),
+            egui::pos2(4_000.0, HEIGHT / 2.0),
+        );
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frames: [Vec<egui::Event>; 5] = [
+            vec![egui::Event::PointerMoved(from)],
+            vec![button(from, true)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![button(to, false)],
+            Vec::new(),
+        ];
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        tabs.ui(ui, &ws, &Queue::default(), &mut Vec::new());
+                    });
+            });
+        }
+
+        assert_eq!(
+            tabs.open.iter().map(Tab::spot).collect::<Vec<_>>(),
+            vec![Spot::Document(second), Spot::Document(first)],
+            "the dragged tab landed past its neighbour"
+        );
+        assert_eq!(
+            tabs.showing(),
+            Some(Spot::Document(second)),
+            "a drop is not a click, so what was in front stayed in front"
+        );
     }
 
     /// Pruning drops documents the list no longer holds; the two singletons are views of
