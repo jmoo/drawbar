@@ -488,6 +488,21 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
     read_from(&mut std::io::Cursor::new(bytes))
 }
 
+/// The global id a `stk` payload leads with.
+fn stroke_id(section: &Section) -> Option<u32> {
+    let b = section.payload.get(0..4)?;
+    Some(u32::from_be_bytes(b.try_into().ok()?))
+}
+
+/// Whether a stroke is the one a zone record names.
+///
+/// ⚠️ The record holds one byte and the stroke holds a u32, so the pairing is modulo
+/// 256. Library instruments whose ids run past 255 exist, and comparing the whole u32
+/// hands those files a zone table that does not read.
+fn names_stroke(id: u32, named: u8) -> bool {
+    id as u8 == named
+}
+
 impl Cbin<Sample> {
     /// Serializes, recomputing the checksum over the body it just produced.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
@@ -587,7 +602,7 @@ impl Cbin<Sample> {
             .map(|z| {
                 by_id
                     .iter()
-                    .find(|(id, _)| *id == u32::from(z.stroke_id))
+                    .find(|(id, _)| names_stroke(*id, z.stroke_id))
                     .map(|(_, s)| *s)
                     .ok_or_else(|| {
                         ParseError::AssertFail(format!(
@@ -629,15 +644,11 @@ impl Cbin<Sample> {
         let zone = zones
             .get(index)
             .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
-        let wanted = u32::from(zone.stroke_id);
+        let wanted = zone.stroke_id;
         let mut at = 0;
         for section in &self.body.sections {
             if section.is(section::STK)
-                && section
-                    .payload
-                    .get(0..4)
-                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                    == Some(wanted)
+                && stroke_id(section).is_some_and(|id| names_stroke(id, wanted))
             {
                 return Ok((at + section::HEADER_LEN, section.payload.as_slice()));
             }
@@ -688,18 +699,13 @@ impl Cbin<Sample> {
         let zone = zones
             .get(index)
             .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
-        let wanted = u32::from(zone.stroke_id);
+        let wanted = zone.stroke_id;
         let section = self
             .body
             .sections
             .iter_mut()
             .filter(|s| s.is(section::STK))
-            .find(|s| {
-                s.payload
-                    .get(0..4)
-                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                    == Some(wanted)
-            })
+            .find(|s| stroke_id(s).is_some_and(|id| names_stroke(id, wanted)))
             .ok_or_else(|| {
                 ParseError::AssertFail(format!(
                     "zone {index} names stroke {wanted}, which the file does not contain"

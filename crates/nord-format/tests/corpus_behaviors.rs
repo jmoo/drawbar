@@ -663,6 +663,35 @@ fn nsmp_strokes_match_zones() {
     assert!(seen > 0, "no readable v2 strokes in the corpus");
 }
 
+/// A zone record names its stroke in one byte and a stroke's own id is a u32, so
+/// library instruments exist whose ids alias. Pairing on the whole u32 loses those
+/// zones, and does it silently on everything with fewer than 256 strokes.
+#[test]
+fn zones_pair_with_strokes_whose_ids_run_past_a_byte() {
+    let mut aliased = 0;
+    for (specimen, sample) in v2_samples() {
+        let where_ = specimen.path.display();
+        let ids: Vec<u32> = sample
+            .stroke_streams()
+            .iter()
+            .map(|(_, s)| u32::from_be_bytes(s[0..4].try_into().unwrap()))
+            .collect();
+        if ids.iter().all(|id| *id <= u32::from(u8::MAX)) {
+            continue;
+        }
+        aliased += 1;
+        assert_eq!(
+            sample
+                .strokes()
+                .unwrap_or_else(|e| panic!("{where_}: {e}"))
+                .len(),
+            sample.zones().unwrap().len(),
+            "{where_}"
+        );
+    }
+    assert!(aliased > 0, "no instrument with a stroke id past 255");
+}
+
 /// Rename and remap reproduce the file written by the sample editor.
 #[test]
 fn nsmp_edits_reproduce_editor_output() {
