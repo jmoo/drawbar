@@ -220,10 +220,12 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
             .into());
         }
         let block_frames = header.frames(block_bytes, channels);
-        if block_frames <= OVERLAP {
+        // The frames before the repeat have to cover it and still leave the four
+        // the next block's predictor continues from.
+        if block_frames < OVERLAP + MAX_ORDER {
             return Err(ParseError::AssertFail(format!(
-                "block {index} holds {block_frames} frames, which is no more than the \
-                 {OVERLAP} it repeats from the block before"
+                "block {index} holds {block_frames} frames, too few for the {OVERLAP} it \
+                 repeats from the block before plus the {MAX_ORDER} the next one seeds from"
             ))
             .into());
         }
