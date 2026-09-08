@@ -533,7 +533,7 @@ fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let visuals = ui.visuals().clone();
     ui.painter().rect_filled(rect, 0.0, visuals.faint_bg_color);
-    let ink = visuals.widgets.noninteractive.fg_stroke.color;
+    let ink = crate::app::caption(&visuals);
     for (head, track) in ["field", "on this computer", "", "on the keyboard"]
         .iter()
         .zip(tracks)

@@ -47,6 +47,14 @@ pub fn accent(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
+/// The ink a MICRO-caps header wears: a step quieter than the body ink beneath it.
+pub fn caption(visuals: &egui::Visuals) -> egui::Color32 {
+    match visuals.dark_mode {
+        true => egui::Color32::from_gray(0xa0),
+        false => egui::Color32::from_gray(0x28),
+    }
+}
+
 /// The unlit half of a control, kept visible against either panel.
 pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
     match visuals.dark_mode {
@@ -319,6 +327,9 @@ impl eframe::App for DrawbarApp {
     }
 }
 
+/// The room a document editor keeps inside the centre.
+const EDITOR_MARGIN: i8 = 8;
+
 impl DrawbarApp {
     /// The tab strip, and whatever the tab in front is a view of.
     fn centre(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
@@ -356,29 +367,35 @@ impl DrawbarApp {
             });
     }
 
+    /// A document is the one thing in the centre that is a page rather than a region, so
+    /// it is the one thing given a margin. Panels and headers stay full bleed.
     fn open_document(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<browser::Act>) {
-        // ⚠️ A view's tab looks like a local document; the banner is the only visible
-        // indication that its bytes still belong to the instrument.
-        if self.workspace.is_view(id) {
-            if let Some(act) = viewing_banner(ui, id, &self.workspace) {
-                acts.push(act);
-            }
-        }
-        let sent = self.document.ui(
-            ui,
-            id,
-            self.tabs.opened(id),
-            &mut self.workspace,
-            &mut self.device,
-            &mut self.log,
-        );
-        if let Some(send) = sent {
-            acts.push(browser::Act::Send {
-                id: send.id,
-                class: send.class,
-                at: send.at,
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(EDITOR_MARGIN))
+            .show(ui, |ui| {
+                // ⚠️ A view's tab looks like a local document; the banner is the only
+                // visible indication that its bytes still belong to the instrument.
+                if self.workspace.is_view(id) {
+                    if let Some(act) = viewing_banner(ui, id, &self.workspace) {
+                        acts.push(act);
+                    }
+                }
+                let sent = self.document.ui(
+                    ui,
+                    id,
+                    self.tabs.opened(id),
+                    &mut self.workspace,
+                    &mut self.device,
+                    &mut self.log,
+                );
+                if let Some(send) = sent {
+                    acts.push(browser::Act::Send {
+                        id: send.id,
+                        class: send.class,
+                        at: send.at,
+                    });
+                }
             });
-        }
     }
 }
 
@@ -443,9 +460,11 @@ fn dark() -> egui::Visuals {
     // A group's border is the only thing between one section and the next, so it is
     // lifted clear of egui's own hairline.
     visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x4e);
-    // Body ink and caption ink, each a step up from egui's dark defaults.
+    // ⚠️ Both slots carry the body ink: `noninteractive` is what `Visuals::text_color`
+    // answers, so a painted row and a button would otherwise disagree. The quieter
+    // caption ink is `caption`.
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xa0);
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
     visuals.selection.bg_fill = egui::Color32::from_rgb(0x7a, 0x24, 0x24);
     // ⚠️ This also colors drop targets and focused knobs; inheriting egui's blue would
     // introduce a second accent.
@@ -464,7 +483,7 @@ fn light() -> egui::Visuals {
     visuals.faint_bg_color = egui::Color32::from_rgb(0xdc, 0xd8, 0xce);
     visuals.selection.bg_fill = egui::Color32::from_rgb(0xe9, 0xa9, 0x9f);
     visuals.selection.stroke.color = egui::Color32::from_rgb(0x3a, 0x14, 0x10);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x28);
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x1c);
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
     visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x8a);
     visuals.weak_text_alpha = 0.9;
@@ -595,6 +614,38 @@ mod tests {
             assert!(weak >= 3.0, "{where_} weak: {weak:.2}:1");
             let body = contrast(visuals.text_color(), panel);
             assert!(body >= 4.5, "{where_} body: {body:.2}:1");
+        }
+    }
+
+    /// The light face is read on paper, where a mid grey is a whisper. Its body ink is
+    /// `#1c1c1c` and its captions `#282828`, and neither is allowed to drift back up.
+    #[test]
+    fn the_light_face_writes_in_ink_rather_than_pencil() {
+        let light = light();
+        let panel = light.panel_fill;
+        assert_eq!(light.text_color(), egui::Color32::from_gray(0x1c));
+        assert_eq!(caption(&light), egui::Color32::from_gray(0x28));
+
+        let body = contrast(light.text_color(), panel);
+        assert!(body >= 12.0, "light body: {body:.2}:1");
+        let heading = contrast(caption(&light), panel);
+        assert!(heading >= 12.0, "light caption: {heading:.2}:1");
+        // Weak text carries a whole sentence in the inspector, so it holds body-text
+        // contrast rather than the 3.0 a large mark would get away with.
+        let weak = contrast(light.weak_text_color(), panel);
+        assert!(weak >= 4.5, "light weak: {weak:.2}:1");
+    }
+
+    /// A caption sits over the same panel as the body it heads, and is quieter than it
+    /// without becoming a grey nobody can read.
+    #[test]
+    fn a_caption_is_quieter_than_the_body_under_it_in_both_themes() {
+        for visuals in [dark(), light()] {
+            let (where_, panel) = (named(&visuals), visuals.panel_fill);
+            let heading = contrast(caption(&visuals), panel);
+            let body = contrast(visuals.text_color(), panel);
+            assert!(heading >= 4.5, "{where_} caption: {heading:.2}:1");
+            assert!(heading < body, "{where_}: {heading:.2}:1 vs {body:.2}:1");
         }
     }
 

@@ -14,7 +14,7 @@ use crate::device::occupancy;
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
-use crate::panel::{caps, chevron, panel_header, strip, HEADER};
+use crate::panel::{caps, chevron, dock_header, flat, strip, HEADER};
 use crate::strings::folder;
 use crate::tabs::Spot;
 
@@ -39,8 +39,9 @@ pub const SHUT: f32 = 30.0;
 const PAD: f32 = 8.0;
 const GAP: f32 = 6.0;
 
-/// A glyph in a bar, and the height of a control beside it.
+/// A glyph in a bar, the check beside a menu item, and the height of a control.
 const GLYPH: f32 = 13.0;
+const CHECK: f32 = 12.0;
 const BUTTON: f32 = 22.0;
 
 /// The omnibox's least width. Below this it is a box nobody can read a name in.
@@ -297,13 +298,22 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
 }
 
 /// A menu item that also says whether what it names is showing.
+///
+/// ⚠️ A check at the left rather than a selected button: `Button::selected` fills the
+/// row with `selection.bg_fill`, which is the instrument's red and reads as a warning
+/// across a menu of ordinary items.
 fn marked(
     ui: &mut egui::Ui,
     label: &str,
     on: bool,
     shortcut: Option<egui::KeyboardShortcut>,
 ) -> bool {
-    let mut button = egui::Button::new(label).selected(on);
+    let tint = match on {
+        true => accent(ui.visuals()),
+        false => egui::Color32::TRANSPARENT,
+    };
+    let mut button = egui::Button::image_and_text(sized(Glyph::Check, CHECK, tint), label)
+        .image_tint_follows_text_color(false);
     if let Some(shortcut) = shortcut {
         button = button.shortcut_text(keyed(ui.ctx(), shortcut));
     }
@@ -316,50 +326,66 @@ fn marked(
 
 /// One of the toolbar's labelled actions.
 ///
-/// ⚠️ An accented action carries the accent in its glyph and its border and nowhere
-/// else: accent on panel measures 4.1:1, which fails as 11 px text.
+/// ⚠️ An accented action carries the accent in its glyph alone: accent on panel measures
+/// 4.1:1, which fails as 11 px text.
 fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, accented: bool) -> egui::Response {
-    let visuals = ui.visuals();
-    let quiet = visuals.widgets.inactive.fg_stroke.color;
-    let (mark, border, ink) = match accented {
-        true => (
-            accent(visuals),
-            accent(visuals),
-            visuals.widgets.active.fg_stroke.color,
-        ),
-        false => (quiet, visuals.widgets.noninteractive.bg_stroke.color, quiet),
-    };
-    ui.add(
-        egui::Button::image_and_text(
-            sized(glyph, GLYPH, mark),
-            egui::RichText::new(label).text_style(ui_text()).color(ink),
+    ui.scope(|ui| {
+        flat(ui);
+        let visuals = ui.visuals();
+        let quiet = visuals.widgets.inactive.fg_stroke.color;
+        let (mark, ink) = match accented {
+            true => (accent(visuals), visuals.widgets.active.fg_stroke.color),
+            false => (quiet, quiet),
+        };
+        ui.add(
+            egui::Button::image_and_text(
+                sized(glyph, GLYPH, mark),
+                egui::RichText::new(label).text_style(ui_text()).color(ink),
+            )
+            .image_tint_follows_text_color(false)
+            .corner_radius(2.0)
+            .min_size(egui::vec2(0.0, BUTTON)),
         )
-        .image_tint_follows_text_color(false)
-        .stroke(egui::Stroke::new(1.0_f32, border))
-        .corner_radius(2.0)
-        .min_size(egui::vec2(0.0, BUTTON)),
-    )
+    })
+    .inner
 }
 
-/// A 24 × 22 button carrying one glyph.
+/// A 24 × 22 button carrying one glyph. `on` is a toggle whose dock is open, which is
+/// the one state that fills without the pointer on it.
 fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, on: bool, hint: &str) -> egui::Response {
-    let visuals = ui.visuals();
-    let ink = match on {
-        true => visuals.widgets.active.fg_stroke.color,
-        false => visuals.widgets.inactive.fg_stroke.color,
-    };
-    let held = on.then_some(visuals.widgets.active.bg_fill);
-    let mut button = egui::Button::image(sized(glyph, GLYPH, ink))
-        .image_tint_follows_text_color(false)
-        .corner_radius(2.0)
-        .min_size(egui::vec2(24.0, BUTTON));
-    if let Some(fill) = held {
-        button = button.fill(fill);
-    }
-    ui.add(button).on_hover_text(hint)
+    ui.scope(|ui| {
+        flat(ui);
+        let widgets = &mut ui.visuals_mut().widgets;
+        if on {
+            widgets.inactive.weak_bg_fill = widgets.active.weak_bg_fill;
+        }
+        let visuals = ui.visuals();
+        let ink = match on {
+            true => visuals.widgets.active.fg_stroke.color,
+            false => visuals.widgets.inactive.fg_stroke.color,
+        };
+        ui.add(
+            egui::Button::image(sized(glyph, GLYPH, ink))
+                .image_tint_follows_text_color(false)
+                .corner_radius(2.0)
+                .min_size(egui::vec2(24.0, BUTTON)),
+        )
+    })
+    .inner
+    .on_hover_text(hint)
 }
 
 impl DrawbarApp {
+    /// Whether an instrument is answering.
+    ///
+    /// ⚠️ The single gate on everything that only means something with one attached: the
+    /// Read and Send actions, the send queue, the instrument dock and its toggle, and the
+    /// menu items naming any of them. A control for an instrument that is not there is a
+    /// control that can only disappoint.
+    pub(crate) fn attached(&self) -> bool {
+        self.device.state.connected()
+    }
+
     /// 30 px: the mark, the menu bar, the instrument, the theme.
     pub(crate) fn titlebar(
         &mut self,
@@ -376,10 +402,14 @@ impl DrawbarApp {
                 edge(ui, Side::Bottom);
                 along(ui, |ui| {
                     icon(ui, Glyph::SlidersVertical, 14.0, accent(ui.visuals()));
-                    ui.label(egui::RichText::new("drawbar").size(12.0).strong());
+                    ui.label(egui::RichText::new("drawbar").size(12.0));
                     self.shortcuts(ui, acts);
-                    self.menus(ui, frame, acts);
+                    ui.scope(|ui| {
+                        flat(ui);
+                        self.menus(ui, frame, acts);
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        flat(ui);
                         self.theme_chip(ui, frame);
                         self.instrument_chip(ui);
                     });
@@ -394,11 +424,8 @@ impl DrawbarApp {
         };
         let visuals = ui.visuals();
         let ink = visuals.widgets.inactive.fg_stroke.color;
-        let border = visuals.widgets.noninteractive.bg_stroke.color;
         let lit = crate::app::good(visuals);
         egui::Frame::new()
-            .stroke(egui::Stroke::new(1.0_f32, border))
-            .corner_radius(2.0)
             .inner_margin(egui::Margin::symmetric(6, 2))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
@@ -664,12 +691,15 @@ impl DrawbarApp {
                     if glyph_button(ui, Glyph::FolderOpen, false, "open files…").clicked() {
                         acts.push(Act::OpenFiles);
                     }
-                    let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-                    ui.menu_image_button(sized(Glyph::FilePlus2, GLYPH, ink), |ui| {
-                        new_menu(ui, acts);
-                    })
-                    .response
-                    .on_hover_text("something new on this computer");
+                    ui.scope(|ui| {
+                        flat(ui);
+                        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
+                        ui.menu_image_button(sized(Glyph::FilePlus2, GLYPH, ink), |ui| {
+                            new_menu(ui, acts);
+                        })
+                        .response
+                        .on_hover_text("something new on this computer");
+                    });
                     let open = self.tabs.active();
                     if glyph_button(ui, Glyph::Save, false, "export the open document…").clicked()
                     {
@@ -884,7 +914,7 @@ impl DrawbarApp {
                 }
                 return;
             }
-            panel_header(ui, "browser", Some(&mut self.shell.browser_open), None);
+            dock_header(ui, "browser");
             acts.extend(self.browser.ui(
                 ui,
                 &self.workspace,
@@ -911,14 +941,12 @@ impl DrawbarApp {
         egui::SidePanel::show_animated_between(ctx, open, shut, full, |ui, how| {
             edge(ui, Side::Left);
             if how < 1.0 {
-                if reopen(ui, Glyph::PanelRightOpen, "show the inspector").clicked() {
+                if reopen(ui, Glyph::PanelRightOpen, "show the instrument").clicked() {
                     acts.push(Act::ToggleDock(Dock::Inspector));
                 }
                 return;
             }
-            // The dock's own header keeps the collapse gesture every dock has; the three
-            // under it collapse only themselves.
-            panel_header(ui, "inspector", Some(&mut self.shell.inspector_open), None);
+            dock_header(ui, "instrument");
             acts.extend(crate::inspector::ui(
                 ui,
                 &mut self.shell,

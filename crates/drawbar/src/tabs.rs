@@ -290,7 +290,7 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     let visuals = ui.visuals().clone();
     let ink = match active {
         true => visuals.widgets.active.fg_stroke.color,
-        false => visuals.widgets.noninteractive.fg_stroke.color,
+        false => crate::app::caption(&visuals),
     };
     let mut text = egui::RichText::new(&face.name).text_style(crate::app::ui());
     if face.borrowed {
@@ -355,12 +355,15 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
 
 /// The one after the last tab: whatever the File menu's New offers.
 fn plus(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-    let ink = ui.visuals().widgets.noninteractive.fg_stroke.color;
-    ui.menu_image_button(crate::icon::sized(Glyph::Plus, GLYPH, ink), |ui| {
-        new_menu(ui, acts);
-    })
-    .response
-    .on_hover_text("something new on this computer");
+    ui.scope(|ui| {
+        crate::panel::flat(ui);
+        let ink = crate::app::caption(ui.visuals());
+        ui.menu_image_button(crate::icon::sized(Glyph::Plus, GLYPH, ink), |ui| {
+            new_menu(ui, acts);
+        })
+        .response
+        .on_hover_text("something new on this computer");
+    });
 }
 
 #[cfg(test)]

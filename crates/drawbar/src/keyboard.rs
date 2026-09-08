@@ -296,7 +296,7 @@ fn bank_row(ui: &mut egui::Ui, on: u32, banks: &[u32], said: &str) -> Option<u32
     let names: Vec<String> = banks.iter().map(u32::to_string).collect();
     let mut picked = None;
     band(ui, BANKS, None, |ui| {
-        let ink = ui.visuals().widgets.noninteractive.fg_stroke.color;
+        let ink = crate::app::caption(ui.visuals());
         ui.label(caps("bank").color(ink));
         for (bank, name) in banks.iter().zip(&names) {
             if chip(
@@ -584,7 +584,7 @@ fn head(ui: &mut egui::Ui, class: ObjectClass, width: f32, tracks: &[Range<f32>]
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, visuals.faint_bg_color);
-    let ink = visuals.widgets.noninteractive.fg_stroke.color;
+    let ink = crate::app::caption(&visuals);
     for (head, track) in ["at", "name", "size", column(class), ""].iter().zip(tracks) {
         cut(
             &painter,

@@ -1,4 +1,5 @@
-//! The header a dock wears, and the geometry every dock header shares.
+//! The header a dock wears, the geometry every dock header shares, and how a button in
+//! a bar wears the bar it sits in.
 
 use std::ops::Range;
 
@@ -15,8 +16,12 @@ const PAD: f32 = 8.0;
 /// The gap between a header's parts.
 const GAP: f32 = 6.0;
 
-/// The collapse triangle's box.
+/// The collapse triangle's box, and the grip a dock header wears before its title.
 const CHEVRON: f32 = 12.0;
+const GRIP: f32 = 12.0;
+
+/// How much of the caption ink the grip keeps. It is decoration, not a control.
+const GRIP_ALPHA: f32 = 0.6;
 
 /// What a column of a table asks for: a fixed width, or a share of what the fixed
 /// ones leave.
@@ -79,21 +84,23 @@ pub fn caps(text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase()).text_style(crate::app::micro())
 }
 
-/// 24 px, faint_bg, an optional collapse triangle, a MICRO-caps title, an optional badge.
+/// A section header: a collapse triangle, a MICRO-caps title, an optional badge.
+///
+/// It wears whatever panel it is on and lifts to `faint_bg_color` under the pointer
+/// alone. A dock's own header is [`dock_header`], which is not a control.
 pub fn panel_header(
     ui: &mut egui::Ui,
     title: &str,
     open: Option<&mut bool>,
     badge: Option<(&str, egui::Color32)>,
 ) -> egui::Response {
-    strip(ui, |ui| {
+    bar(ui, egui::Color32::TRANSPARENT, |ui| {
         if let Some(open) = open {
             if chevron(ui, *open).clicked() {
                 *open = !*open;
             }
         }
-        let ink = ui.visuals().widgets.noninteractive.fg_stroke.color;
-        ui.label(caps(title).color(ink));
+        ui.label(caps(title).color(crate::app::caption(ui.visuals())));
         let Some((badge, tint)) = badge else {
             return;
         };
@@ -107,15 +114,52 @@ pub fn panel_header(
     })
 }
 
+/// A dock's own header: a grip, a MICRO-caps title, and nothing to click.
+///
+/// ⚠️ Collapsing a dock is its toolbar toggle and the View menu. A header carrying a
+/// triangle of its own would read as one of the sections beneath it.
+pub fn dock_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
+    let fill = ui.visuals().faint_bg_color;
+    let response = bar(ui, fill, |ui| {
+        let ink = crate::app::caption(ui.visuals());
+        icon(
+            ui,
+            Glyph::GripVertical,
+            GRIP,
+            ink.gamma_multiply(GRIP_ALPHA),
+        );
+        ui.label(caps(title).color(ink));
+    });
+    let stroke = egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    let rect = response.rect;
+    ui.painter()
+        .hline(rect.x_range(), rect.bottom() - 0.5, stroke);
+    response
+}
+
 /// The bar a header is drawn into: full bleed, padded at each end, laid out left to
 /// right. The response is the whole bar, so a header can be clicked as one thing.
 pub fn strip<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
+    let fill = ui.visuals().faint_bg_color;
+    bar(ui, fill, contents)
+}
+
+/// `resting` is what the bar wears when the pointer is elsewhere; under the pointer it
+/// is `faint_bg_color` whatever it wears at rest.
+fn bar<R>(
+    ui: &mut egui::Ui,
+    resting: egui::Color32,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), HEADER),
         egui::Sense::click(),
     );
-    ui.painter()
-        .rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+    let fill = match response.hovered() {
+        true => ui.visuals().faint_bg_color,
+        false => resting,
+    };
+    ui.painter().rect_filled(rect, 0.0, fill);
     let mut inner = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect.shrink2(egui::vec2(PAD, 0.0)))
@@ -126,19 +170,32 @@ pub fn strip<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) ->
     response
 }
 
-/// The triangle that says which way a dock will go, and answers a click of its own.
+/// The triangle that says which way a section will go, and answers a click of its own.
 pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     let glyph = match open {
         true => Glyph::ChevronDown,
         false => Glyph::ChevronRight,
     };
-    let drawn = icon(
-        ui,
-        glyph,
-        CHEVRON,
-        ui.visuals().widgets.noninteractive.fg_stroke.color,
-    );
+    let drawn = icon(ui, glyph, CHEVRON, crate::app::caption(ui.visuals()));
     ui.interact(drawn.rect, drawn.id.with("chevron"), egui::Sense::click())
+}
+
+/// Dress the buttons in a bar to wear the bar: no fill and no border until the pointer
+/// is on one, which is then the only thing on the bar that is lit.
+///
+/// Scope this into a child `Ui` — it edits the visuals every widget after it reads.
+pub fn flat(ui: &mut egui::Ui) {
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+    for state in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.bg_stroke = egui::Stroke::NONE;
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +224,83 @@ mod tests {
         });
         assert_eq!(drawn.height(), HEADER);
         assert_eq!(drawn.width(), width);
+    }
+
+    /// What a frame painted over `rect`, innermost last.
+    fn fills(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Color32> {
+        fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Color32>) {
+            match shape {
+                egui::Shape::Rect(drawn) if drawn.rect == rect => into.push(drawn.fill),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, rect, into)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, rect, &mut found);
+        }
+        found
+    }
+
+    /// One frame with the pointer over the header or away from it, answering with what
+    /// the header painted behind itself.
+    fn header_fill(
+        ctx: &egui::Context,
+        under_pointer: bool,
+        header: impl Fn(&mut egui::Ui) -> egui::Response,
+    ) -> Vec<egui::Color32> {
+        let at = std::cell::Cell::new(egui::Pos2::ZERO);
+        let mut fill = Vec::new();
+        // The first frame only learns where the header is; the second points at it.
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                events: match under_pointer {
+                    true => vec![egui::Event::PointerMoved(at.get())],
+                    false => Vec::new(),
+                },
+                ..Default::default()
+            };
+            let mut rect = egui::Rect::NOTHING;
+            let output = ctx.run(input, |ctx| {
+                ctx.style_mut(crate::app::metrics);
+                egui::CentralPanel::default().show(ctx, |ui| rect = header(ui).rect);
+            });
+            at.set(rect.center());
+            fill = fills(&output, rect);
+        }
+        fill
+    }
+
+    /// ⚠️ A section header is part of the panel it heads until the pointer is on it.
+    /// Three permanently grey bars down a dock read as three separate panels rather than
+    /// as the headings of one.
+    #[test]
+    fn a_section_header_wears_the_panel_until_the_pointer_is_on_it() {
+        let ctx = egui::Context::default();
+        let section = |ui: &mut egui::Ui| panel_header(ui, "places", None, None);
+        assert_eq!(
+            header_fill(&ctx, false, section),
+            vec![egui::Color32::TRANSPARENT],
+        );
+        assert_eq!(
+            header_fill(&ctx, true, section),
+            vec![ctx.style().visuals.faint_bg_color],
+        );
+    }
+
+    /// A dock's header is the one bar that keeps its own colour: it names the dock rather
+    /// than a section of it, and there is nothing on it to click.
+    #[test]
+    fn a_dock_header_keeps_its_own_colour_whether_or_not_it_is_pointed_at() {
+        let ctx = egui::Context::default();
+        let faint = ctx.style().visuals.faint_bg_color;
+        for pointed in [false, true] {
+            assert_eq!(
+                header_fill(&ctx, pointed, |ui| dock_header(ui, "browser")),
+                vec![faint],
+                "pointed at: {pointed}",
+            );
+        }
     }
 
     /// The triangle is the collapse control, so a click on it is what moves the dock —

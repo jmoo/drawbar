@@ -638,7 +638,7 @@ impl Library {
         let visuals = ui.visuals().clone();
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 0.0, visuals.faint_bg_color);
-        let quiet = visuals.widgets.noninteractive.fg_stroke.color;
+        let quiet = crate::app::caption(&visuals);
         let strong = visuals.widgets.active.fg_stroke.color;
 
         for (column, track) in Column::ALL.iter().zip(tracks) {
