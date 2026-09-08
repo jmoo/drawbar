@@ -67,6 +67,15 @@ impl Layout {
         }
     }
 
+    /// The file extension a generation's instruments carry, without the dot.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Layout::V2 => "nsmp",
+            Layout::V3 => "nsmp3",
+            Layout::V4 => "nsmp4",
+        }
+    }
+
     /// Whether stereo channels occupy alternating, independently padded word streams.
     /// True only for V4; only 1:1 records gain padding because content tiles whole words.
     pub const fn splits_wide_openings(self) -> bool {
