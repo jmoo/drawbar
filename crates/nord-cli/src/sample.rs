@@ -1075,14 +1075,14 @@ fn deep(bytes: &[u8]) -> Result<String, String> {
 
 fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
     let layout = body.layout();
+    let chain = body.chain().map_err(|e| e.to_string())?;
     let streams = body.stroke_streams();
     let mut records = 0usize;
-    let mut marked = 0usize;
+    let mut looped = 0usize;
     for (index, (at, stroke)) in streams.iter().enumerate() {
         let stream =
             codec::walk(stroke, *at, layout).map_err(|e| format!("stroke {index}: {e}"))?;
         records += stream.records.len();
-        marked += stream.records.iter().filter(|r| r.mark).count();
         let directory = codec::Directory::read(stroke)
             .ok_or_else(|| format!("stroke {index} is too short for its word directory"))?;
         let words = (stroke.len() - layout.header_len()) / layout.word();
@@ -1102,25 +1102,54 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
         {
             return Err(format!("stroke {index}: resync does not name a record"));
         }
-        let actual: Vec<_> = stream.records.iter().filter(|r| r.mark).collect();
-        let mark_is_terminator = names(directory.mark, stream.terminator);
-        let mark_agrees = match actual.as_slice() {
-            [] => mark_is_terminator,
-            [record] => !mark_is_terminator && names(directory.mark, record.at),
-            _ => false,
-        };
-        if !mark_agrees {
+        // ⚠️ A directory pointer is a u16 count of words, so on a stroke longer than
+        // WRAP words it answers for every record that far apart; which one it means
+        // takes the walk, and a pointer at the terminator can still alias a record.
+        let ends_at_mark = names(directory.mark, stream.terminator);
+        let named_by_mark: Vec<_> = stream
+            .records
+            .iter()
+            .filter(|r| names(directory.mark, r.at))
+            .collect();
+        let flagged: Vec<_> = stream.records.iter().filter(|r| r.mark).collect();
+        if flagged.len() > 1 {
             return Err(format!(
-                "stroke {index}: marked record disagrees with the directory"
+                "stroke {index}: {} records carry the mark bit",
+                flagged.len()
             ));
         }
+        if let [record] = flagged.as_slice() {
+            if ends_at_mark || !names(directory.mark, record.at) {
+                return Err(format!(
+                    "stroke {index}: the marked record is not the one the directory names"
+                ));
+            }
+        }
+        if ends_at_mark {
+            continue;
+        }
+        let Some(mark) = named_by_mark.first() else {
+            return Err(format!(
+                "stroke {index}: the mark names neither a record nor the terminator"
+            ));
+        };
+        if chain.flags_the_marked_record() && flagged.is_empty() {
+            return Err(format!(
+                "stroke {index}: the loop mark names a record that does not carry the mark bit"
+            ));
+        }
+        looped += 1;
         // A loop opens a fresh packet, so the words it covers form whole packets. The
         // wide generations pack to their own size and are not checked against this one.
-        if let (codec::Layout::V2, Some(record)) = (layout, actual.first()) {
-            let words = terminator - record.at;
-            if !words.is_multiple_of(nsmp::stroke::packet_len(layout) / layout.word()) {
+        if layout == codec::Layout::V2 {
+            let packet = nsmp::stroke::packet_len(layout) / layout.word();
+            if !named_by_mark
+                .iter()
+                .any(|r| (terminator - r.at).is_multiple_of(packet))
+            {
                 return Err(format!(
-                    "stroke {index}: the loop covers {words} words, which is not whole packets"
+                    "stroke {index}: the loop covers {} words, which is not whole packets",
+                    terminator - mark.at
                 ));
             }
         }
@@ -1130,8 +1159,8 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
         body.generation(),
         streams.len()
     );
-    if marked > 0 {
-        note.push_str(&format!(", {marked} marked"));
+    if looped > 0 {
+        note.push_str(&format!(", {looped} looped"));
     }
     Ok(note)
 }
@@ -1641,6 +1670,6 @@ mod tests {
 
         assert!(deep_body(&sample)
             .unwrap_err()
-            .contains("marked record disagrees"));
+            .contains("does not carry the mark bit"));
     }
 }
