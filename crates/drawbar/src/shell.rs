@@ -308,7 +308,6 @@ mod key {
     pub const EXPORT: Shortcut = Shortcut::new(With::COMMAND.plus(With::SHIFT), Key::E);
     pub const CLOSE: Shortcut = Shortcut::new(With::COMMAND, Key::W);
     pub const QUIT: Shortcut = Shortcut::new(With::COMMAND, Key::Q);
-    pub const LIBRARY: Shortcut = Shortcut::new(With::COMMAND, Key::Num1);
     pub const KEYBOARD: Shortcut = Shortcut::new(With::COMMAND, Key::Num2);
     pub const DOCUMENT: Shortcut = Shortcut::new(With::COMMAND, Key::Num3);
     pub const BROWSER: Shortcut = Shortcut::new(With::COMMAND.plus(With::ALT), Key::B);
@@ -320,7 +319,7 @@ mod key {
 
 /// Whether this build may bind a key a browser tab keeps for itself.
 ///
-/// ⚠️ ⌘W, ⌘Q and ⌘1–⌘3 reach the tab, not the page. On the web those items work by
+/// ⚠️ ⌘W, ⌘Q and ⌘2–⌘3 reach the tab, not the page. On the web those items work by
 /// click alone.
 const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 
@@ -556,9 +555,6 @@ impl DrawbarApp {
         if WINDOWED && hit(&key::QUIT) {
             acts.push(Act::Quit);
         }
-        if WINDOWED && hit(&key::LIBRARY) {
-            acts.push(Act::ShowTab(Spot::Library));
-        }
         if WINDOWED && self.attached() && hit(&key::KEYBOARD) {
             acts.push(Act::ShowTab(Spot::Keyboard));
         }
@@ -628,7 +624,11 @@ impl DrawbarApp {
             }
             ui.separator();
         }
-        if self.tabs.showing().is_some() && item(ui, "Close tab", Some(key::CLOSE)) {
+        let closable = self
+            .tabs
+            .showing()
+            .is_some_and(|spot| spot != Spot::Library);
+        if closable && item(ui, "Close tab", Some(key::CLOSE)) {
             acts.push(Act::CloseTab);
         }
         if WINDOWED && item(ui, "Quit", Some(key::QUIT)) {
@@ -636,16 +636,10 @@ impl DrawbarApp {
         }
     }
 
+    /// ⚠️ No Library item. The library is always open and always the first tab, so the
+    /// menu would offer a view that is one click away and can never be missing.
     fn view_menu(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
         let showing = self.tabs.showing();
-        if marked(
-            ui,
-            "Library",
-            showing == Some(Spot::Library),
-            Some(key::LIBRARY),
-        ) {
-            acts.push(Act::ShowTab(Spot::Library));
-        }
         if self.attached()
             && marked(
                 ui,

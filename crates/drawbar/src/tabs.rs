@@ -50,14 +50,25 @@ impl Tab {
     }
 }
 
-#[derive(Default)]
 pub struct Tabs {
+    /// ⚠️ [`Tab::Library`] is the first of these and stays there: it is what the centre
+    /// falls back to, so nothing closes it and nothing moves it.
     open: Vec<Tab>,
     active: Option<Spot>,
     /// Which class the keyboard tab is switched to, as the tree last asked. There is one
     /// keyboard tab, so the class it is on is the tab's state rather than a tab of its
     /// own.
     keyboard: Option<ObjectClass>,
+}
+
+impl Default for Tabs {
+    fn default() -> Tabs {
+        Tabs {
+            open: vec![Tab::Library],
+            active: Some(Spot::Library),
+            keyboard: None,
+        }
+    }
 }
 
 impl Tabs {
@@ -73,17 +84,17 @@ impl Tabs {
         self.active = Some(Spot::Document(id));
     }
 
-    /// Bring a tab forward, making it if it is one of the singletons.
+    /// Bring a tab forward, opening the keyboard if that is what is asked for.
     ///
-    /// ⚠️ There is one library and one keyboard, so showing either is opening it. A
-    /// document is not made here: only [`Tabs::open`] has the bytes a document tab holds.
+    /// ⚠️ There is one keyboard, so showing it is opening it. The library is always
+    /// open, and a document is not made here: only [`Tabs::open`] has the bytes a
+    /// document tab holds.
     pub fn show(&mut self, spot: Spot) {
         let held = self.open.iter().any(|tab| tab.spot() == spot);
         match (held, spot) {
             (true, _) => {}
-            (false, Spot::Library) => self.open.push(Tab::Library),
             (false, Spot::Keyboard) => self.open.push(Tab::Keyboard),
-            (false, Spot::Document(_)) => return,
+            (false, Spot::Library | Spot::Document(_)) => return,
         }
         self.active = Some(spot);
     }
@@ -102,17 +113,24 @@ impl Tabs {
     /// Move the tab at `from` to sit where the one at `to` is, the rest closing up
     /// behind it. An index the strip does not hold moves nothing.
     ///
-    /// The library and the keyboard move like any other tab: the order is the strip's,
-    /// not a rule about which views are allowed where.
+    /// The keyboard moves like any other tab. ⚠️ The library is the first tab and stays
+    /// there: it is never what moves, and a tab let go over it lands after it.
     pub fn reorder(&mut self, from: usize, to: usize) {
-        if from == to || from >= self.open.len() || to >= self.open.len() {
+        let to = to.max(1);
+        if from == 0 || from == to || from >= self.open.len() || to >= self.open.len() {
             return;
         }
         let tab = self.open.remove(from);
         self.open.insert(to, tab);
     }
 
+    /// Shut a tab, falling back to whatever is nearest the front.
+    ///
+    /// ⚠️ The library is where every close lands, so asking to close it does nothing.
     pub fn close(&mut self, spot: Spot) {
+        if spot == Spot::Library {
+            return;
+        }
         self.open.retain(|tab| tab.spot() != spot);
         if self.active == Some(spot) {
             self.active = self.open.last().map(Tab::spot);
@@ -229,7 +247,7 @@ impl Tabs {
                         if label.clicked() {
                             activate = Some(spot);
                         }
-                        if drawn.close.clicked() {
+                        if drawn.close.is_some_and(|shut| shut.clicked()) {
                             close = Some(spot);
                         }
                     }
@@ -277,6 +295,8 @@ struct Face {
     /// The dot, and what it means.
     mark: Option<(egui::Color32, &'static str)>,
     hint: Option<&'static str>,
+    /// The × at the end. The library has none: it is what a close falls back to.
+    shut: bool,
 }
 
 fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals) -> Option<Face> {
@@ -287,6 +307,7 @@ fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals
             borrowed: false,
             mark: None,
             hint: None,
+            shut: false,
         }),
         Tab::Keyboard => Some(Face {
             glyph: Glyph::Keyboard,
@@ -294,6 +315,7 @@ fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals
             borrowed: false,
             mark: None,
             hint: None,
+            shut: true,
         }),
         Tab::Document { id, .. } => {
             let entity = workspace.get(*id)?;
@@ -310,6 +332,7 @@ fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals
                 hint: workspace
                     .is_view(*id)
                     .then_some("the instrument's copy, viewed in place"),
+                shut: true,
             })
         }
     }
@@ -318,7 +341,8 @@ fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals
 /// What a click on a drawn tab landed on.
 struct Drawn {
     tab: egui::Response,
-    close: egui::Response,
+    /// The ×, on every tab that has one.
+    close: Option<egui::Response>,
 }
 
 /// The kind glyph's box.
@@ -352,10 +376,14 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     );
 
     let marked = match face.mark.is_some() {
-        true => DOT + GAP,
+        true => GAP + DOT,
         false => 0.0,
     };
-    let width = PAD + GLYPH + GAP + galley.size().x + GAP + marked + SHUT + PAD;
+    let closes = match face.shut {
+        true => GAP + SHUT,
+        false => 0.0,
+    };
+    let width = PAD + GLYPH + GAP + galley.size().x + marked + closes + PAD;
     let (rect, tab) =
         ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let painter = ui.painter().clone();
@@ -388,17 +416,20 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
         galley.clone(),
         egui::Color32::PLACEHOLDER,
     );
-    x += galley.size().x + GAP;
+    x += galley.size().x;
     if let Some((color, why)) = face.mark {
+        x += GAP;
         let at = box_(x, DOT);
         painter.circle_filled(at.center(), DOT / 2.0, color);
         ui.interact(at, tab.id.with("mark"), egui::Sense::hover())
             .on_hover_text(why);
-        x += DOT + GAP;
+        x += DOT;
     }
-    let shut = box_(x, SHUT);
-    painted(ui, Glyph::X, shut, ink.gamma_multiply(0.5));
-    let close = ui.interact(shut, tab.id.with("close"), egui::Sense::click());
+    let close = face.shut.then(|| {
+        let shut = box_(x + GAP, SHUT);
+        painted(ui, Glyph::X, shut, ink.gamma_multiply(0.5));
+        ui.interact(shut, tab.id.with("close"), egui::Sense::click())
+    });
     Drawn { tab, close }
 }
 
@@ -430,12 +461,12 @@ mod tests {
         tabs.open(1, &ws);
         tabs.open(2, &ws);
         tabs.open(1, &ws);
-        assert_eq!(tabs.open.len(), 2);
+        assert_eq!(tabs.open.len(), 3, "the library, and the two documents");
         assert_eq!(tabs.active(), Some(1));
     }
 
-    /// Closing what is in front falls back to another tab rather than to nothing, and
-    /// closing the last one leaves nothing showing.
+    /// Closing what is in front falls back to another tab, and closing the last document
+    /// falls back to the library.
     #[test]
     fn closing_the_active_tab_falls_back_to_another() {
         let (mut tabs, ws) = (Tabs::default(), workspace());
@@ -445,6 +476,27 @@ mod tests {
         assert_eq!(tabs.active(), Some(1));
         tabs.close(Spot::Document(1));
         assert_eq!(tabs.active(), None);
+        assert_eq!(tabs.showing(), Some(Spot::Library));
+    }
+
+    /// ⚠️ The library is where a close lands, so it is not itself closable — and the
+    /// strip is never empty, whatever is asked of it.
+    #[test]
+    fn closing_the_library_does_nothing_and_leaves_the_strip_standing() {
+        let (mut tabs, ws) = (Tabs::default(), workspace());
+        tabs.open(1, &ws);
+        tabs.show(Spot::Keyboard);
+        for spot in [
+            Spot::Library,
+            Spot::Document(1),
+            Spot::Keyboard,
+            Spot::Library,
+        ] {
+            tabs.close(spot);
+        }
+        let left: Vec<Spot> = tabs.open.iter().map(Tab::spot).collect();
+        assert_eq!(left, vec![Spot::Library]);
+        assert_eq!(tabs.showing(), Some(Spot::Library));
     }
 
     /// Closing a tab that is not in front leaves the front one showing.
@@ -503,7 +555,6 @@ mod tests {
     #[test]
     fn the_library_and_the_keyboard_are_each_one_tab() {
         let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.show(Spot::Library);
         tabs.open(1, &ws);
         tabs.show(Spot::Keyboard);
         tabs.show(Spot::Library);
@@ -526,28 +577,60 @@ mod tests {
     }
 
     /// Moving a tab closes the strip up behind it, wherever it came from and wherever it
-    /// lands. The library and the keyboard are tabs like any other.
+    /// lands. ⚠️ The library stays first: neither end of a move may be it.
     #[test]
     fn reordering_moves_one_tab_and_closes_the_strip_up_behind_it() {
         let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.show(Spot::Library);
         tabs.open(1, &ws);
         tabs.open(2, &ws);
+        tabs.show(Spot::Keyboard);
         let order = |tabs: &Tabs| tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
 
+        tabs.reorder(1, 3);
+        assert_eq!(
+            order(&tabs),
+            vec![
+                Spot::Library,
+                Spot::Document(2),
+                Spot::Keyboard,
+                Spot::Document(1)
+            ]
+        );
+        tabs.reorder(3, 1);
+        assert_eq!(
+            order(&tabs),
+            vec![
+                Spot::Library,
+                Spot::Document(1),
+                Spot::Document(2),
+                Spot::Keyboard
+            ]
+        );
         tabs.reorder(0, 2);
         assert_eq!(
             order(&tabs),
-            vec![Spot::Document(1), Spot::Document(2), Spot::Library]
+            vec![
+                Spot::Library,
+                Spot::Document(1),
+                Spot::Document(2),
+                Spot::Keyboard
+            ],
+            "the library itself never moves"
         );
-        tabs.reorder(2, 1);
+        tabs.reorder(2, 0);
         assert_eq!(
             order(&tabs),
-            vec![Spot::Document(1), Spot::Library, Spot::Document(2)]
+            vec![
+                Spot::Library,
+                Spot::Document(2),
+                Spot::Document(1),
+                Spot::Keyboard
+            ],
+            "a tab let go over the library lands after it"
         );
         assert_eq!(
             tabs.showing(),
-            Some(Spot::Document(2)),
+            Some(Spot::Keyboard),
             "moving is not showing"
         );
     }
@@ -593,14 +676,19 @@ mod tests {
             .create(crate::workspace::Fresh::Program, &mut log)
             .unwrap();
         let second = ws.create(crate::workspace::Fresh::Live, &mut log).unwrap();
+        // Long enough that the tab reaches well past the library's own, which is the one
+        // tab a drag may not start on.
+        ws.rename(
+            first,
+            "Africa Split, the one with the long tail".to_string(),
+        );
         let mut tabs = Tabs::default();
         tabs.open(first, &ws);
         tabs.open(second, &ws);
 
-        // Inside the first tab, which starts at the strip's left edge, and far past the
-        // right of the last one.
+        // Inside the first document's tab, and far past the right of the last one.
         let (from, to) = (
-            egui::pos2(2.0, HEIGHT / 2.0),
+            egui::pos2(200.0, HEIGHT / 2.0),
             egui::pos2(4_000.0, HEIGHT / 2.0),
         );
         let button = |pos, pressed| egui::Event::PointerButton {
@@ -636,7 +724,7 @@ mod tests {
 
         assert_eq!(
             tabs.open.iter().map(Tab::spot).collect::<Vec<_>>(),
-            vec![Spot::Document(second), Spot::Document(first)],
+            vec![Spot::Library, Spot::Document(second), Spot::Document(first)],
             "the dragged tab landed past its neighbour"
         );
         assert_eq!(
@@ -655,7 +743,6 @@ mod tests {
         let id = ws
             .create(crate::workspace::Fresh::Program, &mut log)
             .unwrap();
-        tabs.show(Spot::Library);
         tabs.open(id, &ws);
         ws.remove(id, &mut log);
         tabs.prune(&ws);
