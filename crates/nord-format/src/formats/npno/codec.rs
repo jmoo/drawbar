@@ -192,11 +192,11 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
         out.push(channel);
     }
 
+    let seeds = stroke.seeds();
     let mut history = [[0i64; MAX_ORDER]; 2];
-    for (channel, state) in history.iter_mut().enumerate().take(channels) {
+    for (state, seeds) in history.iter_mut().zip(&seeds) {
         // The record states the seeds oldest first; the recurrence wants the most
         // recent sample at index 0.
-        let seeds = stroke.seeds(channel);
         for (j, slot) in state.iter_mut().enumerate() {
             *slot = i64::from(seeds[MAX_ORDER - 1 - j]);
         }

@@ -72,7 +72,7 @@ pub const KNOWN_VERSIONS: &[u16] = &[0x450, 0x464];
 /// [`KNOWN_VERSIONS`] as the gate spells them.
 const KNOWN_VERSIONS_U32: &[u32] = &[0x450, 0x464];
 
-/// The stream version that also writes the name and variant as separate fields.
+/// The stream version that also carries a long name and a voicing of their own.
 const VERSION_SPLIT_NAME: u16 = 0x464;
 
 const KEY_MAP_AT: usize = 0x8c;
@@ -190,13 +190,13 @@ impl TextField {
         at: 0x1c,
         len: 0x20,
     };
-    /// The bare name, written only on [`VERSION_SPLIT_NAME`] streams.
-    const NAME: TextField = TextField {
+    /// The long name, present only on [`VERSION_SPLIT_NAME`] streams.
+    const LONG_NAME: TextField = TextField {
         at: 0x3c,
         len: 0x20,
     };
-    /// The variant alone, written only on [`VERSION_SPLIT_NAME`] streams.
-    const VARIANT: TextField = TextField {
+    /// The voicing, present only on [`VERSION_SPLIT_NAME`] streams.
+    const VOICING: TextField = TextField {
         at: 0x5c,
         len: 0x20,
     };
@@ -414,13 +414,14 @@ impl<'a> Stroke<'a> {
         be32(&self.record, REC_ID)
     }
 
-    /// The predictor's four seed samples for `channel`, oldest first. A mono
+    /// The predictor's four seed samples per channel, oldest first. A mono
     /// stroke's second group is unused.
-    pub fn seeds(&self, channel: usize) -> [i16; SEEDS] {
-        let mut out = [0i16; SEEDS];
-        let base = REC_SEEDS + channel * SEEDS * 2;
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = be16(&self.record, base + i * 2) as i16;
+    pub fn seeds(&self) -> [[i16; SEEDS]; 2] {
+        let mut out = [[0i16; SEEDS]; 2];
+        for (channel, group) in out.iter_mut().enumerate() {
+            for (i, slot) in group.iter_mut().enumerate() {
+                *slot = be16(&self.record, REC_SEEDS + (channel * SEEDS + i) * 2) as i16;
+            }
         }
         out
     }
@@ -646,26 +647,57 @@ impl<'a> Library<'a> {
         self.prefix[FINE_TUNE_AT + usize::from(key)] = units as u8;
     }
 
+    /// The long name at `0x3c` and the voicing at `0x5c`, which only
+    /// [`VERSION_SPLIT_NAME`] streams carry. Both are `None` on the older stream.
+    ///
+    /// They are their own fields, not a split of the `Name#Variant` one: vendor
+    /// libraries spell the long name differently from the name before the `#`
+    /// (`EP5 BrightTines` against `EP5 Bright Tines`), and the voicing holds
+    /// neither the padding nor the size suffix the variant does.
+    pub fn long_name(&self) -> Option<String> {
+        self.split_field(TextField::LONG_NAME)
+    }
+
+    pub fn voicing(&self) -> Option<String> {
+        self.split_field(TextField::VOICING)
+    }
+
+    fn split_field(&self, field: TextField) -> Option<String> {
+        (self.stream_version() == VERSION_SPLIT_NAME).then(|| field.read(&self.prefix))
+    }
+
     /// Rename the library, leaving the variant alone.
+    ///
+    /// On a stream that carries one, the long name is set to the same text: both
+    /// are the library's name, and a rename that moved only one would leave the
+    /// old name showing wherever the instrument reads the other.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
         let (_, variant) = self.name();
-        self.write_name(name, &variant)
-    }
-
-    /// Replace the variant — the text after the `#`, which is where the vendor
-    /// records the voicing and the library's size — leaving the name alone.
-    pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
-        let (name, _) = self.name();
-        self.write_name(&name, variant)
-    }
-
-    fn write_name(&mut self, name: &str, variant: &str) -> Result<(), Error> {
         TextField::COMBINED.write(&mut self.prefix, &format!("{name}#{variant}"))?;
         if self.stream_version() == VERSION_SPLIT_NAME {
-            TextField::NAME.write(&mut self.prefix, name)?;
-            TextField::VARIANT.write(&mut self.prefix, variant)?;
+            TextField::LONG_NAME.write(&mut self.prefix, name)?;
         }
         Ok(())
+    }
+
+    /// Replace the variant — the text after the `#`, where the vendor records the
+    /// voicing and the library's size — leaving both names alone.
+    pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
+        let (name, _) = self.name();
+        TextField::COMBINED.write(&mut self.prefix, &format!("{name}#{variant}"))
+    }
+
+    /// Replace the voicing at `0x5c`. Refused on a stream with no such field.
+    pub fn set_voicing(&mut self, voicing: &str) -> Result<(), Error> {
+        if self.stream_version() != VERSION_SPLIT_NAME {
+            return Err(ParseError::AssertFail(format!(
+                "stream {:#06x} carries no voicing field; the variant after the `#` is \
+                 where it records one",
+                self.stream_version()
+            ))
+            .into());
+        }
+        TextField::VOICING.write(&mut self.prefix, voicing)
     }
 
     /// Route `key` to `root`, or to nothing when `root` is `None`.
@@ -1175,16 +1207,31 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_leaves_the_variant_and_writes_both_fields_on_the_split_version() {
+    fn a_rename_carries_the_long_name_with_it_and_leaves_the_voicing_alone() {
         let mut build = Build::new();
         build.version = VERSION_SPLIT_NAME;
         let piano = build.piano();
         let mut library = piano.library().unwrap();
+        library.set_voicing("Nordiska").unwrap();
         library.set_name("Renamed").unwrap();
-        library.set_variant("Sml").unwrap();
-        assert_eq!(library.name(), ("Renamed".into(), "Sml".into()));
-        assert_eq!(TextField::NAME.read(&library.prefix), "Renamed");
-        assert_eq!(TextField::VARIANT.read(&library.prefix), "Sml");
+        library.set_variant("Nordiska  Sml").unwrap();
+        assert_eq!(library.name(), ("Renamed".into(), "Nordiska  Sml".into()));
+        assert_eq!(library.long_name().as_deref(), Some("Renamed"));
+        assert_eq!(
+            library.voicing().as_deref(),
+            Some("Nordiska"),
+            "the voicing is its own field, not the variant's head"
+        );
+    }
+
+    #[test]
+    fn the_older_stream_has_no_long_name_or_voicing_to_read_or_write() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        assert_eq!(library.stream_version(), 0x450);
+        assert_eq!(library.long_name(), None);
+        assert_eq!(library.voicing(), None);
+        assert!(library.set_voicing("Nordiska").is_err());
     }
 
     #[test]

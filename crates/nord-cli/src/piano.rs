@@ -116,6 +116,10 @@ pub struct EditArgs {
     #[arg(long)]
     pub variant: Option<String>,
 
+    /// Replace the voicing, a field of its own that only the newer stream carries.
+    #[arg(long)]
+    pub voicing: Option<String>,
+
     /// `KEY=UNITS`, repeatable: retune one key. A bare number is fine-tune units;
     /// a number suffixed with `c` is cents, rounded to the nearest unit.
     #[arg(long = "tune", value_name = "KEY=UNITS")]
@@ -278,6 +282,9 @@ fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
         library.channels(),
         bytes.len(),
     ));
+    if let (Some(long), Some(voicing)) = (library.long_name(), library.voicing()) {
+        ui.out(ui.dim(format!("  long name {long:?}, voicing {voicing:?}")));
+    }
     ui.out(format!(
         "  {} stroke(s) over {} root(s); keys {coverage}",
         library.strokes().len(),
@@ -515,6 +522,10 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
     }
     if let Some(variant) = &args.variant {
         library.set_variant(variant).map_err(|e| e.to_string())?;
+        changed += 1;
+    }
+    if let Some(voicing) = &args.voicing {
+        library.set_voicing(voicing).map_err(|e| e.to_string())?;
         changed += 1;
     }
     for spec in &args.tune {
