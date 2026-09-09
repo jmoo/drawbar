@@ -8,6 +8,8 @@
 #           aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
 #   corpus — `nord.all-corpus`, the committed tier of the private specimen
 #            corpus. Needs a deploy key, so it does not run on forks.
+#   pages — master pushes only: `nord.site`, the browser build with the user
+#           guide under /docs, deployed to GitHub Pages.
 #   release — master pushes only, and only after check, build and corpus pass:
 #             scripts/release.bash publishes un-tagged crate versions and tags
 #             them. Cargo.toml is the only source of truth for versions.
@@ -123,6 +125,42 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -t ed25519 github.com >>~/.ssh/known_hosts
       - run: nix build .#nord.all-corpus --print-build-logs
+
+  # `nord.site` is built from what check and build already prove; the corpus
+  # tier decides nothing a published page shows, so it is not a gate here.
+  pages:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchange with the Pages deployment
+      pages: write
+    concurrency:
+      cancel-in-progress: false # cancelling mid-upload leaves the site partial
+      group: pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action/restore@v7
+        with:
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
+      - run: nix build .#nord.site --print-build-logs
+      # The action tars its path with `--dereference`, so the `result` symlink
+      # and the store tree behind it both resolve to real files.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: result
+      - uses: actions/deploy-pages@v4
+        id: deployment
 
   release:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'

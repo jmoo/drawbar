@@ -1,0 +1,8 @@
+/* Replaces mdBook's default theme/fonts/fonts.css. mdBook copies
+   theme/fonts/* to <book>/fonts/ and does not rewrite url() in a
+   supplied theme file, so book.toml sets hash-files = false and
+   these names stay literal. */
+@font-face{font-family:"Ubuntu";font-style:normal;font-weight:400;font-display:swap;src:url("ubuntu-400.woff2") format("woff2");}
+@font-face{font-family:"Ubuntu";font-style:normal;font-weight:700;font-display:swap;src:url("ubuntu-700.woff2") format("woff2");}
+@font-face{font-family:"Hack";font-style:normal;font-weight:400;font-display:swap;src:url("hack-400.woff2") format("woff2");}
+@font-face{font-family:"Hack";font-style:normal;font-weight:700;font-display:swap;src:url("hack-700.woff2") format("woff2");}

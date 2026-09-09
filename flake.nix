@@ -70,18 +70,19 @@
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/*.bash (see their `nix-deps` lines)
+              # scripts/*.bash (see their `nix-deps` lines), plus `mdbook serve docs`.
               packages = with pkgs; [
                 curl
                 gh
                 jq
+                mdbook
                 rust-analyzer
               ];
             };
 
             legacyPackages = pkgs;
 
-            packages = pkgs.nord.crates // pkgs.nord.crossPackages;
+            packages = pkgs.nord.crates // pkgs.nord.crossPackages // { inherit (pkgs.nord) docs site; };
 
             treefmt = {
               programs = {
