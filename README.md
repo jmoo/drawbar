@@ -39,13 +39,10 @@ This is still alpha software and should be used with caution. Drawbar is a black
 it does not lean on decompilation of Clavia software. Instead, protocols and formats are decoded by interaction
 with real Nord devices.
 
-Drawbar began with the Nord Electro 5. Its program, live, song, and settings layouts are decoded and fully supported.
-Stage 2, 3, and 4 programs and selected presets are supported thanks to community documentation and specimen evidence
-but have not been validated on hardware.
-
-Sample support includes encoding and decoding of v2/v3/v4 instruments (only v2 confirmed with hardware playback).
-
-Pianos can be renamed, retuned, remapped, trimmed and split, confirmed on hardware.
+Drawbar began with the Nord **Electro 5**. Its **program**, **live**, **song**, and **settings** layouts are decoded and fully supported.
+**Stage 2**, **3**, and **4** programs and selected presets are supported thanks to community documentation and specimen evidence
+but have not been validated on hardware. **Sample** support includes encoding and decoding of v2/v3/v4 instruments (only v2 confirmed with hardware playback).
+**Pianos** can be renamed, retuned, remapped, trimmed and split, confirmed on hardware.
 
 Management of Nord devices over USB is supported. The [USB status](crates/nord-usb/README.md#status) lists implemented 
 operations and their hardware validation.
