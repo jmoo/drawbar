@@ -177,12 +177,15 @@ pub struct EncodeArgs {
     )]
     pub loop_crossfade: usize,
 
-    /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
+    /// State every content field outright instead of the editor's own record
+    /// coding: order-zero records in a larger file, and not the editor's bytes.
+    /// Decoded back exactly either way.
     #[arg(long)]
-    pub predict: bool,
+    pub plain: bool,
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
     /// audio is the same in all three; the container and the stream's units differ.
+    /// Only v2 has been played on hardware, so 3 and 4 need `--unverified`.
     #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
     pub generation: u8,
 
@@ -190,9 +193,10 @@ pub struct EncodeArgs {
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
 
-    /// Acknowledge that this is not a vendor-identical encode. Required.
+    /// Acknowledge that no v3 or v4 encode has been played on an instrument.
+    /// Required with `--generation 3` and `--generation 4`.
     #[arg(long)]
-    pub experimental: bool,
+    pub unverified: bool,
 }
 
 #[derive(Args)]
@@ -212,12 +216,15 @@ pub struct BuildArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Use the narrowest predictor order per cell. Smaller, and decoded exactly.
+    /// State every content field outright instead of the editor's own record
+    /// coding: order-zero records in a larger file, and not the editor's bytes.
+    /// Decoded back exactly either way.
     #[arg(long)]
-    pub predict: bool,
+    pub plain: bool,
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
     /// audio is the same in all three; the container and the stream's units differ.
+    /// Only v2 has been played on hardware, so 3 and 4 need `--unverified`.
     #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
     pub generation: u8,
 
@@ -225,9 +232,10 @@ pub struct BuildArgs {
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
 
-    /// Acknowledge that this is not a vendor-identical encode. Required.
+    /// Acknowledge that no v3 or v4 encode has been played on an instrument.
+    /// Required with `--generation 3` and `--generation 4`.
     #[arg(long)]
-    pub experimental: bool,
+    pub unverified: bool,
 }
 
 #[derive(Args)]
@@ -443,18 +451,17 @@ fn decode_target(
     Ok(())
 }
 
-/// The gate every writing verb in this module sits behind.
-fn experimental(acknowledged: bool) -> Result<(), String> {
-    if acknowledged {
+/// The gate the wide generations sit behind. v2 has no gate: mono, stereo and looped
+/// v2 encodes play on an Electro 5.
+fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), String> {
+    if generation == 2 || acknowledged {
         return Ok(());
     }
-    Err(
-        "encoding is experimental: the file it writes is structurally sound and \
-         decodes back exactly, and mono, stereo and looped v2 output plays on an \
-         Electro 5, but it is not byte-identical to the editor's output and v3/v4 \
-         playback is inferred. Pass --experimental to write it anyway."
-            .into(),
-    )
+    Err(format!(
+        "no v{generation} encode has been played: no instrument that plays that \
+         generation has been available, so all that is known about the file is that it \
+         matches what Nord Sample Editor renders. Pass --unverified to write it anyway."
+    ))
 }
 
 /// One WAV as the encoder needs it: 16-bit at [`codec::SOURCE_RATE`], mono or stereo.
@@ -493,20 +500,11 @@ fn layout(generation: u8) -> Result<codec::Layout, String> {
     }
 }
 
-/// The extension a generation's files carry.
-fn extension(layout: codec::Layout) -> &'static str {
-    match layout {
-        codec::Layout::V2 => "nsmp",
-        codec::Layout::V3 => "nsmp3",
-        codec::Layout::V4 => "nsmp4",
-    }
-}
-
-fn predictor(minimising: bool) -> encode::Predictor {
-    if minimising {
-        encode::Predictor::Minimising
-    } else {
+fn predictor(plain: bool) -> encode::Predictor {
+    if plain {
         encode::Predictor::Plain
+    } else {
+        encode::Predictor::Minimising
     }
 }
 
@@ -548,7 +546,7 @@ fn loop_points(text: &str, crossfade: f64) -> Result<encode::Loop, String> {
 
 /// `nord sample encode`: a WAV into a one-zone instrument of the selected generation.
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
-    experimental(args.experimental)?;
+    unverified_generation(args.generation, args.unverified)?;
     let layout = layout(args.generation)?;
     let source = pcm_source(&args.wav)?;
 
@@ -561,7 +559,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
         .channels(source.channels)
-        .predictor(predictor(args.predict))
+        .predictor(predictor(args.plain))
         .layout(layout);
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
@@ -585,7 +583,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
 
     let path = args.out.unwrap_or_else(|| {
         args.wav
-            .with_file_name(format!("{stem}.{}", extension(layout)))
+            .with_file_name(format!("{stem}.{}", layout.extension()))
     });
     write_file(ui, &path, &out)
 }
@@ -623,7 +621,7 @@ const WRAPPING_ZONE_GAIN: f64 = 16.0;
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
-    experimental(args.experimental)?;
+    unverified_generation(args.generation, args.unverified)?;
     let layout = layout(args.generation)?;
 
     let project = match nord_format::from_path(&args.project)
@@ -675,7 +673,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         encode::Instrument {
             name: &name,
             map_gain,
-            predictor: predictor(args.predict),
+            predictor: predictor(args.plain),
             layout,
             preset,
         },
@@ -742,7 +740,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
 
     let path = args
         .out
-        .unwrap_or_else(|| args.project.with_extension(extension(layout)));
+        .unwrap_or_else(|| args.project.with_extension(layout.extension()));
     write_file(ui, &path, &out)
 }
 
@@ -1297,6 +1295,57 @@ mod tests {
             Entity::Sample(sample) => sample,
             other => panic!("encoded a {}", other.identity().format),
         }
+    }
+
+    fn scratch() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nord-sample-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn encode_args(wav: &Path, out: PathBuf, generation: u8, unverified: bool) -> EncodeArgs {
+        EncodeArgs {
+            wav: wav.to_path_buf(),
+            out: Some(out),
+            name: Some("Gate".into()),
+            root_key: "C4".into(),
+            top_note: None,
+            loop_points: None,
+            loop_crossfade: 0,
+            plain: false,
+            generation,
+            shift: None,
+            unverified,
+        }
+    }
+
+    #[test]
+    fn a_v2_encode_writes_unasked_and_the_unplayed_generations_do_not() {
+        let dir = scratch();
+        let source = dir.join("tone.wav");
+        std::fs::write(&source, wav(codec::SOURCE_RATE, 4096)).unwrap();
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+
+        let played = dir.join("gate.nsmp");
+        encode(&ui, encode_args(&source, played.clone(), 2, false))
+            .expect("v2 is hardware-verified and needs no acknowledgement");
+        assert!(played.is_file());
+
+        for generation in [3u8, 4] {
+            let out = dir.join(format!("gate.nsmp{generation}"));
+            let refused =
+                encode(&ui, encode_args(&source, out.clone(), generation, false)).unwrap_err();
+            assert!(refused.contains("--unverified"), "v{generation}: {refused}");
+            assert!(!out.exists(), "v{generation} was written anyway");
+
+            encode(&ui, encode_args(&source, out.clone(), generation, true)).expect("acknowledged");
+            assert!(out.is_file(), "v{generation}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

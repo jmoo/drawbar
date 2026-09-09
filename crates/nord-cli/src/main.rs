@@ -282,21 +282,23 @@ enum SampleAction {
     /// this never needs `--yes`; its WAVs are named after the instrument.
     Decode(sample::DecodeArgs),
 
-    /// EXPERIMENTAL: build a one-zone sample instrument from a 44.1 kHz mono or stereo
-    /// 16-bit WAV.
+    /// Build a one-zone sample instrument from a 44.1 kHz mono or stereo 16-bit WAV.
     ///
-    /// The result decodes back through `nord sample decode` exactly, but is not
-    /// byte-identical to Nord Sample Editor output. Mono, stereo and looped v2 encodes
-    /// play on an Electro 5; v3/v4 playback is inferred. Pass `--experimental` to write.
+    /// The v2 result is what Nord Sample Editor writes for the same input, byte for
+    /// byte, apart from a float residue in the resampling kernel that leaves the odd
+    /// audio field one count out and changes nothing the instrument plays; mono,
+    /// stereo and looped v2 encodes play on an Electro 5. The wide generations
+    /// reproduce the editor's renders but have never been played, so they need
+    /// `--unverified`.
     Encode(sample::EncodeArgs),
 
-    /// EXPERIMENTAL: build a sample instrument from a Nord Sample Editor project.
+    /// Build a sample instrument from a Nord Sample Editor project.
     ///
     /// The project supplies the zones, their root keys, top notes and trim points,
     /// and the WAVs they play — paths inside it resolve from the project's own
     /// directory. Unsupported layer, detune, velocity and enabled EQ settings are
     /// refused by name. Settings with no instrument representation are reported when
-    /// ignored. The same `--experimental` caveat as `encode` applies.
+    /// ignored. The same fidelity and `--unverified` notes as `encode` apply.
     Build(sample::BuildArgs),
 
     /// Round-trip a sample instrument, in a file or a slot, and with `--deep` also

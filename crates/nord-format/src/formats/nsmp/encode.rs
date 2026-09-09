@@ -1,23 +1,23 @@
-//! Building a sample instrument from PCM — tier "instrument-valid".
+//! Building a sample instrument from PCM.
 //!
-//! The inverse of [`codec`](super::codec), and honest about how far the inverse goes.
-//! What this emits is a file whose container, section chain, stroke header, count
-//! laws and record grammar are the format's, and whose audio is the source on the
-//! field lattice quantised the way the instrument's encoder quantises. What it is
-//! **not** is byte-identical to what Nord Sample Editor would produce for the same
-//! input: the resampling [`kernel`](super::kernel) is the instrument's to within a few
-//! `1e-8` per tap, which leaves a field in a few thousand one count off, the mono
-//! quantiser shift is inferred from chosen plaintext and has one known gap
-//! ([`spends_extra_bit`]), and the editor's own choice of predictor order per record
-//! is reproduced only under [`Predictor::Minimising`].
+//! The inverse of [`codec`](super::codec). What this emits is what Nord Sample Editor
+//! writes for the same input, byte for byte, apart from one residue: the resampling
+//! [`kernel`](super::kernel) is the instrument's to within a few `1e-8` per tap, and a
+//! handful of taps the editor evaluates a ulp off the closed form leave the occasional
+//! field one count from the editor's. No structural field moves with it, and neither
+//! does the pitch, the length, or anything else about what the instrument plays.
 //!
-//! So three claims: a file from here **round-trips through this crate's own decoder
-//! exactly** under either predictor, it obeys every structural law the format is known
-//! to have, and **the Electro 5 loads and plays one** under either predictor, at the pitch
-//! the decoder renders.
+//! The record coding the editor picks, [`Predictor::Minimising`], is the default here.
+//! [`Predictor::Plain`] opts out and states every content field outright: the same
+//! audio in a file several times larger on smooth material, and not the editor's bytes.
 //!
-//! Confirmed on hardware for [`Layout::V2`], which is what the Electro 5 plays. The
-//! wide generations are inferred from specimens; not confirmed on hardware.
+//! Under either predictor a file from here **round-trips through this crate's own
+//! decoder exactly** and obeys every structural law the format is known to have.
+//!
+//! Confirmed on hardware for [`Layout::V2`]: the Electro 5 loads and plays one under
+//! either predictor, at the pitch the decoder renders. The wide generations reproduce
+//! the editor's own renders, but the Electro 5 plays only v2, so their playback is
+//! inferred from specimens; not confirmed on hardware.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -324,11 +324,11 @@ const DIFFERENCE: [&[i32]; 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Predictor {
     /// Store every content field outright at order zero.
-    #[default]
     Plain,
     /// Choose the narrowest predictor per cell, the lowest order among equals — the
     /// editor's own choice. Smaller than plain records and exact through this crate's
     /// decoder.
+    #[default]
     Minimising,
 }
 
@@ -385,14 +385,14 @@ pub struct Options {
 }
 
 impl Options {
-    /// Defaults: the name given, root key C4, the editor's own top note, plain records,
-    /// no loop, the v2 generation.
+    /// Defaults: the name given, root key C4, the editor's own top note, the editor's
+    /// record coding, no loop, the v2 generation.
     pub fn new(name: impl Into<String>) -> Options {
         Options {
             name: name.into(),
             root_key: 60,
             top_note: None,
-            predictor: Predictor::Plain,
+            predictor: Predictor::default(),
             loops: None,
             channels: 1,
             secondary_start: None,
@@ -3235,7 +3235,7 @@ mod tests {
                 zone(&sine(110.0, 9000.0, 8000), 48, 53, 1),
             ],
             "Three",
-            Predictor::Plain,
+            Predictor::default(),
         )
         .unwrap();
 

@@ -2,16 +2,15 @@
 //!
 //! Nothing decodes a WAV, so one opened here has no document of its own — it is bytes
 //! with an error beside them. What it does have is a use: `nord_format`'s sample encoder
-//! builds a one-zone v2 instrument out of 44.1 kHz mono or stereo 16-bit PCM, and that is
-//! the panel this module draws.
+//! builds a one-zone instrument out of 44.1 kHz mono or stereo 16-bit PCM, in any of the
+//! three generations, and that is the panel this module draws.
 //!
-//! ⚠️ The encoder is a reconstruction. What it writes is structurally sound and decodes
-//! back through that crate's own codec exactly, but it is **not** byte-identical to what
-//! Nord Sample Editor writes for the same input. The panel says so where the operator
-//! can read it.
+//! ⚠️ Only a v2 instrument has been played on hardware. The wide generations reproduce
+//! what Nord Sample Editor renders, but no instrument that plays them has been
+//! available, so the panel marks them unverified where the operator can read it.
 
 use eframe::egui;
-use nord_format::formats::nsmp::codec::SOURCE_RATE;
+use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
 use nord_format::wav::Pcm16;
 
@@ -31,20 +30,22 @@ pub struct Draft {
     pub name: String,
     pub root_key: u8,
     pub top_note: u8,
-    /// Narrowest predictor order per cell rather than every field stated outright.
-    pub predict: bool,
+    /// Every content field stated outright rather than the editor's own record coding.
+    pub plain: bool,
+    pub layout: Layout,
 }
 
 impl Draft {
-    /// A panel over `label`, opened at the encoder's own defaults: middle C, and two
-    /// octaves above it.
+    /// A panel over `label`, opened at the encoder's own defaults: middle C, two
+    /// octaves above it, and the one generation that has been played here.
     pub fn new(label: &str) -> Draft {
         let stem = label.rsplit_once('.').map_or(label, |(stem, _)| stem);
         Draft {
             name: fits(stem),
             root_key: 60,
             top_note: 84,
-            predict: false,
+            plain: false,
+            layout: Layout::V2,
         }
     }
 }
@@ -125,12 +126,32 @@ pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
         .root_key(draft.root_key)
         .top_note(draft.top_note)
         .channels(pcm.channels)
-        .predictor(match draft.predict {
-            true => encode::Predictor::Minimising,
-            false => encode::Predictor::Plain,
+        .layout(draft.layout)
+        .predictor(match draft.plain {
+            true => encode::Predictor::Plain,
+            false => encode::Predictor::Minimising,
         });
     let instrument = encode::instrument(&pcm.samples, &options).map_err(|e| e.to_string())?;
     instrument.to_bytes().map_err(|e| e.to_string())
+}
+
+fn generation_label(layout: Layout) -> &'static str {
+    match layout {
+        Layout::V2 => "v2",
+        Layout::V3 => "v3",
+        Layout::V4 => "v4",
+    }
+}
+
+/// How far each generation has been taken, in the operator's words.
+fn generation_note(layout: Layout) -> &'static str {
+    match layout {
+        Layout::V2 => "played on hardware: mono, stereo and looped",
+        Layout::V3 | Layout::V4 => {
+            "unverified: this reproduces the editor's own render, but no instrument \
+             that plays this generation has played one"
+        }
+    }
 }
 
 /// Draw the panel. `true` once the operator has asked for the instrument to be made.
@@ -138,10 +159,10 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
     ui.label(egui::RichText::new("This is a WAV, not a Nord file.").strong());
     ui.label(
         egui::RichText::new(
-            "It can be encoded into a one-zone sample instrument. Encoding is \
-             experimental: the file it writes is structurally sound and decodes back \
-             exactly, but it is not byte-identical to the editor's own output. \
-             Instruments encoded this way have been played on hardware.",
+            "It can be encoded into a one-zone sample instrument. The file is Nord \
+             Sample Editor's own output apart from a float residue in the resampling \
+             kernel that changes nothing the instrument plays. Instruments encoded \
+             this way have been played on hardware.",
         )
         .small()
         .weak(),
@@ -194,11 +215,33 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
             }
         });
         ui.horizontal(|ui| {
-            ui.add_space(120.0);
-            ui.checkbox(&mut draft.predict, "Predict").on_hover_text(
-                "the narrowest predictor order per cell: a smaller file, decoded \
-                     back exactly either way",
+            ui.add_sized(
+                [120.0, ui.spacing().interact_size.y],
+                egui::Label::new("Generation").halign(egui::Align::LEFT),
             );
+            for layout in [Layout::V2, Layout::V3, Layout::V4] {
+                ui.selectable_value(&mut draft.layout, layout, generation_label(layout))
+                    .on_hover_text(generation_note(layout));
+            }
+        });
+        if draft.layout != Layout::V2 {
+            ui.horizontal(|ui| {
+                ui.add_space(120.0);
+                ui.label(
+                    egui::RichText::new(generation_note(draft.layout))
+                        .small()
+                        .color(crate::app::warn(ui.visuals())),
+                );
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(120.0);
+            ui.checkbox(&mut draft.plain, "Plain records")
+                .on_hover_text(
+                    "state every content field outright instead of the editor's own \
+                     record coding: the same audio in a larger file, and not the \
+                     editor's bytes",
+                );
         });
     });
 
@@ -216,9 +259,10 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
             .clicked();
         ui.label(
             egui::RichText::new(format!(
-                "one zone, root {}, up to {}",
+                "one zone, root {}, up to {}, .{}",
                 note::name(draft.root_key),
-                note::name(draft.top_note)
+                note::name(draft.top_note),
+                draft.layout.extension()
             ))
             .small()
             .weak(),
@@ -304,6 +348,23 @@ mod tests {
         assert_eq!(snapshot.zones[0].root_key, 48);
         assert_eq!(snapshot.zones[0].top_note, 60);
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), bytes);
+    }
+
+    #[test]
+    fn the_panel_opens_on_the_played_generation_and_encodes_the_chosen_one() {
+        let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
+        assert_eq!(Draft::new("Marimba.wav").layout, Layout::V2);
+
+        for (layout, generation) in [(Layout::V2, "v2"), (Layout::V3, "v3"), (Layout::V4, "v4")] {
+            let mut draft = Draft::new("Marimba.wav");
+            draft.layout = layout;
+            let bytes = instrument(&draft, &source).expect("it encodes");
+            let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+            let snapshot = super::super::sample::snapshot(&entity)
+                .expect("a sample instrument")
+                .expect("it reads");
+            assert_eq!(snapshot.generation, generation);
+        }
     }
 
     #[test]

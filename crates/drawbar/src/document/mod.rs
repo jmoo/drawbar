@@ -451,7 +451,7 @@ impl Document {
         };
         match encode::instrument(draft, source) {
             Ok(bytes) => {
-                let name = format!("{}.{}", draft.name, nord_format::formats::nsmp::FORMAT);
+                let name = format!("{}.{}", draft.name, draft.layout.extension());
                 self.error = None;
                 workspace.ingest(name, crate::workspace::Origin::Fresh, bytes, log);
             }
