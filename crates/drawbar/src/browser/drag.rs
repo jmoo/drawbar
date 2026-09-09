@@ -12,6 +12,10 @@ use crate::icon::Glyph;
 use crate::strings::folder;
 
 /// What an asset is, which is what decides the folder it belongs in.
+///
+/// One per family of [`Entity`], so a file that decoded is never called a file. The
+/// declaration order is [`Kind::ALL`]'s, which is the order any set of kinds is listed
+/// in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Program,
@@ -20,15 +24,65 @@ pub enum Kind {
     Piano,
     Live,
     Settings,
+    /// A synth patch, on the models that bank them separately from programs.
+    Synth,
+    OrganPreset,
+    PianoPreset,
+    /// A Lead performance — the multi-slot layer above that family's programs.
+    Performance,
+    /// A Lead SysEx bank: the dump itself, or the MIDI file carrying one. The two are
+    /// one thing under two containers.
+    LeadBank,
+    /// An Electro 2 sample library — a whole library rather than one instrument, which
+    /// is why it is not a [`Kind::Sample`].
+    SampleLibrary,
+    /// A C2 pipe-organ library.
+    PipeLibrary,
+    /// An archive of objects: a bundle, a backup, or a Drum-family bank.
+    Bundle,
     /// A Nord Sample Editor project (`.nsmpproj`) — a text file that generates a sample,
     /// and the one kind with no folder on the instrument to send it to.
     Project,
-    /// Something the instrument has no folder for — a bundle, a preset of a kind no
-    /// class holds, a file that did not decode at all.
+    /// Bytes that did not decode.
     Other,
 }
 
+/// The kinds the instrument has a folder for, each under the class that folder is.
+///
+/// One table, read forwards by [`Kind::home`] and backwards by [`Kind::from_class`], so
+/// a class and its kind cannot drift apart.
+const HOMES: [(Kind, ObjectClass); 6] = [
+    (Kind::Program, ObjectClass::Program),
+    (Kind::SetList, ObjectClass::SetList),
+    (Kind::Sample, ObjectClass::Sample),
+    (Kind::Piano, ObjectClass::Piano),
+    (Kind::Live, ObjectClass::Live),
+    (Kind::Settings, ObjectClass::Settings),
+];
+
 impl Kind {
+    /// Every kind, in the order anything showing a set of them shows them.
+    pub const ALL: [Kind; 16] = [
+        Kind::Program,
+        Kind::SetList,
+        Kind::Sample,
+        Kind::Piano,
+        Kind::Live,
+        Kind::Settings,
+        Kind::Synth,
+        Kind::OrganPreset,
+        Kind::PianoPreset,
+        Kind::Performance,
+        Kind::LeadBank,
+        Kind::SampleLibrary,
+        Kind::PipeLibrary,
+        Kind::Bundle,
+        Kind::Project,
+        Kind::Other,
+    ];
+
+    /// What a decoded file is. ⚠️ Exhaustive over [`Entity`], so a family the library
+    /// adds is a compile error here rather than another nameless row.
     pub fn of(entity: Option<&Entity>) -> Kind {
         match entity {
             Some(Entity::Program(_)) => Kind::Program,
@@ -37,34 +91,32 @@ impl Kind {
             Some(Entity::Piano(_) | Entity::PianoLibrary(_)) => Kind::Piano,
             Some(Entity::Live(_)) => Kind::Live,
             Some(Entity::Settings(_)) => Kind::Settings,
+            Some(Entity::Synth(_)) => Kind::Synth,
+            Some(Entity::OrganPreset(_)) => Kind::OrganPreset,
+            Some(Entity::PianoPreset(_)) => Kind::PianoPreset,
+            Some(Entity::Performance(_)) => Kind::Performance,
+            Some(Entity::Midi(_) | Entity::Sysex(_)) => Kind::LeadBank,
+            Some(Entity::Cne3(_)) => Kind::SampleLibrary,
+            Some(Entity::PipeLibrary(_)) => Kind::PipeLibrary,
+            Some(Entity::Bundle(_)) => Kind::Bundle,
             Some(Entity::SampleProject(_)) => Kind::Project,
-            _ => Kind::Other,
+            None => Kind::Other,
         }
     }
 
     pub fn from_class(class: ObjectClass) -> Kind {
-        match class {
-            ObjectClass::Program => Kind::Program,
-            ObjectClass::SetList => Kind::SetList,
-            ObjectClass::Sample => Kind::Sample,
-            ObjectClass::Piano => Kind::Piano,
-            ObjectClass::Live => Kind::Live,
-            ObjectClass::Settings => Kind::Settings,
-            ObjectClass::Unknown(_) => Kind::Other,
-        }
+        HOMES
+            .iter()
+            .find(|(_, held)| *held == class)
+            .map_or(Kind::Other, |(kind, _)| *kind)
     }
 
     /// The folder on the instrument this kind belongs in.
     pub fn home(self) -> Option<ObjectClass> {
-        match self {
-            Kind::Program => Some(ObjectClass::Program),
-            Kind::SetList => Some(ObjectClass::SetList),
-            Kind::Sample => Some(ObjectClass::Sample),
-            Kind::Piano => Some(ObjectClass::Piano),
-            Kind::Live => Some(ObjectClass::Live),
-            Kind::Settings => Some(ObjectClass::Settings),
-            Kind::Project | Kind::Other => None,
-        }
+        HOMES
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .map(|(_, class)| *class)
     }
 
     /// The small word next to a row's name.
@@ -76,6 +128,14 @@ impl Kind {
             Kind::Piano => "piano",
             Kind::Live => "live",
             Kind::Settings => "settings",
+            Kind::Synth => "synth preset",
+            Kind::OrganPreset => "organ preset",
+            Kind::PianoPreset => "piano preset",
+            Kind::Performance => "performance",
+            Kind::LeadBank => "lead bank",
+            Kind::SampleLibrary => "sample library",
+            Kind::PipeLibrary => "pipe library",
+            Kind::Bundle => "bundle",
             Kind::Project => "project",
             Kind::Other => "file",
         }
@@ -86,6 +146,14 @@ impl Kind {
         match self.home() {
             Some(class) => folder(class),
             None => match self {
+                Kind::Synth => "Synth presets",
+                Kind::OrganPreset => "Organ presets",
+                Kind::PianoPreset => "Piano presets",
+                Kind::Performance => "Performances",
+                Kind::LeadBank => "Lead banks",
+                Kind::SampleLibrary => "Sample libraries",
+                Kind::PipeLibrary => "Pipe organ libraries",
+                Kind::Bundle => "Bundles",
                 Kind::Project => "Sample Editor projects",
                 _ => "Other",
             },
@@ -102,6 +170,14 @@ impl Kind {
             Kind::Piano => Glyph::Piano,
             Kind::Live => Glyph::AudioLines,
             Kind::Settings => Glyph::SlidersHorizontal,
+            Kind::Synth => Glyph::Waves,
+            Kind::OrganPreset => Glyph::Columns2,
+            Kind::PianoPreset => Glyph::CircleDot,
+            Kind::Performance => Glyph::Keyboard,
+            Kind::LeadBank => Glyph::Save,
+            Kind::SampleLibrary => Glyph::LibraryBig,
+            Kind::PipeLibrary => Glyph::SlidersVertical,
+            Kind::Bundle => Glyph::Folder,
             Kind::Project => Glyph::FolderGit2,
             Kind::Other => Glyph::HardDrive,
         }
@@ -241,11 +317,13 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
         (Item::Slot { .. }, Onto::Group(_)) => {
             Landing::No("copy it to this computer first, then drag it into the folder")
         }
+        // The kind first: a folder this app cannot name is the home of no kind, so the
+        // refusal it earns says which folder it is rather than talking about pianos.
         (Item::Local(_), Onto::Slot { class, .. }) => {
-            if read_only(class) {
-                Landing::No("pianos are installed on the instrument, not moved into it")
-            } else if carried.kind.home() != Some(class) {
+            if carried.kind.home() != Some(class) {
                 Landing::No("that folder holds a different kind of thing")
+            } else if read_only(class) {
+                Landing::No("pianos are installed on the instrument, not moved into it")
             } else {
                 Landing::Send
             }
@@ -261,7 +339,7 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
             if from != class {
                 Landing::No("things only move within their own folder")
             } else if read_only(class) {
-                Landing::No("pianos stay where the instrument put them")
+                Landing::No("the instrument arranges this folder itself")
             } else if was == at {
                 Landing::No("it is already there")
             } else {
@@ -301,7 +379,6 @@ pub(super) fn ghost(ctx: &egui::Context) {
 mod tests {
     use super::*;
     use crate::browser::bench::{local, onto, slot};
-    use crate::device::BROWSED;
     use crate::strings::folder;
 
     /// The two crossings the browser exists for.
@@ -448,15 +525,19 @@ mod tests {
         }
     }
 
-    /// A folder holds exactly the kind named after it.
+    /// A folder holds exactly the kind named after it, and a kind the instrument has no
+    /// folder for belongs nowhere on it.
     #[test]
     fn every_kind_knows_the_folder_it_belongs_in() {
-        for class in BROWSED {
-            assert_eq!(Kind::from_class(class).home(), Some(class), "{class:?}");
+        let homed: Vec<Kind> = HOMES.iter().map(|(kind, _)| *kind).collect();
+        for (kind, class) in HOMES {
+            assert_eq!(Kind::from_class(class), kind, "{}", folder(class));
+            assert_eq!(kind.home(), Some(class), "{kind:?}");
         }
-        for homeless in [Kind::Project, Kind::Other] {
+        for homeless in Kind::ALL.iter().filter(|kind| !homed.contains(kind)) {
             assert_eq!(homeless.home(), None, "{homeless:?}");
         }
+        assert_eq!(Kind::from_class(ObjectClass::Unknown(9)), Kind::Other);
     }
 
     /// One glyph per kind. Two kinds wearing the same one would read as one kind in the
@@ -464,19 +545,21 @@ mod tests {
     #[test]
     fn no_two_kinds_wear_the_same_glyph() {
         let mut seen: Vec<Glyph> = Vec::new();
-        for kind in [
-            Kind::Program,
-            Kind::SetList,
-            Kind::Sample,
-            Kind::Piano,
-            Kind::Live,
-            Kind::Settings,
-            Kind::Project,
-            Kind::Other,
-        ] {
+        for kind in Kind::ALL {
             let glyph = kind.glyph();
             assert!(!seen.contains(&glyph), "{kind:?} repeats {glyph:?}");
             seen.push(glyph);
+        }
+    }
+
+    /// Every family the library decodes is a kind of its own. Only bytes that did not
+    /// decode are a file.
+    #[test]
+    fn only_what_did_not_decode_is_called_a_file() {
+        assert_eq!(Kind::of(None), Kind::Other);
+        for kind in Kind::ALL.iter().filter(|kind| **kind != Kind::Other) {
+            assert_ne!(kind.chip(), Kind::Other.chip(), "{kind:?}");
+            assert_ne!(kind.plural(), Kind::Other.plural(), "{kind:?}");
         }
     }
 }
