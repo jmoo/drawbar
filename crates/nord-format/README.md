@@ -29,8 +29,9 @@ In brief:
   rename, retune, remap, the per-key map and the sound preset, and the encoded
   audio decoded back to samples in every generation; instruments are also
   *built* from PCM or a Sample Editor project, loops and stereo included), piano
-  libraries (`npno`:
-  the CNSP prefix) and
+  libraries (`npno`: the CNSP prefix, the stroke directory and every stroke's audio
+  span — decoded back to samples, and dropped, narrowed or split by transforms whose
+  writer re-lays the container) and
   Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
   strokes and audio files read and edited, new projects written).
 - **Container-verified stubs** — every other corpus format: 60+ CBIN tags

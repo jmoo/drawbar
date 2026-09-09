@@ -1,7 +1,7 @@
 #![cfg(feature = "corpus")]
 //! Behavioral checks against files produced by the instrument and sample editor.
 
-use nord_format::formats::{nsmp, nsmpproj};
+use nord_format::formats::{npno, nsmp, nsmpproj};
 use nord_format::{Entity, Live, Program, Sample};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
@@ -1787,4 +1787,168 @@ fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
         longest.len() > EDITOR_BOX,
         "no name past the editor's own box to test a short writer against: {longest:?}"
     );
+}
+
+fn pianos() -> impl Iterator<Item = (&'static Specimen, &'static npno::Piano)> {
+    corpus().iter().filter_map(|s| match &s.entity {
+        Entity::Piano(piano) => Some((s, piano)),
+        _ => None,
+    })
+}
+
+/// The model is complete only if the writer can put the file back together from it:
+/// the per-root counts, every audio offset, the alignment gap and the container's
+/// checksum are all recomputed rather than carried, so a byte-exact rebuild says the
+/// derived fields are derived correctly and nothing outside them was lost.
+#[test]
+fn a_piano_rebuilds_from_its_model_byte_for_byte() {
+    let mut seen = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let library = piano
+            .library()
+            .unwrap_or_else(|e| panic!("{where_}: parse: {e}"));
+        let rebuilt = library
+            .to_piano()
+            .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))
+            .unwrap_or_else(|e| panic!("{where_}: rebuild: {e}"));
+        let at = rebuilt
+            .iter()
+            .zip(&specimen.bytes)
+            .position(|(a, b)| a != b)
+            .map(|i| format!("{i:#x}"))
+            .unwrap_or_else(|| "the length".to_string());
+        assert!(
+            rebuilt == specimen.bytes,
+            "{where_}: the rebuild differs at {at} (in {} bytes, out {})",
+            specimen.bytes.len(),
+            rebuilt.len()
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no piano library");
+}
+
+/// Every stroke decodes: each block repeats the previous block's last frames
+/// bit-exactly, and the frames the blocks own come to the count the record states.
+/// Both are properties of the codec against the file, not of the file against
+/// itself, so a decoder that drifts fails here rather than producing noise.
+#[test]
+fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
+    let mut strokes = 0;
+    let mut overlap = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let library = piano.library().unwrap();
+        for stroke in library.strokes() {
+            let audio = npno::codec::decode(stroke, library.channels())
+                .unwrap_or_else(|e| panic!("{where_}: {stroke:?}: {e}"));
+            assert_eq!(
+                audio.frames(),
+                stroke.frames() as usize,
+                "{where_}: {stroke:?}"
+            );
+            assert_eq!(audio.clipped, 0, "{where_}: {stroke:?} left int16");
+            overlap += audio.overlap_checked;
+            strokes += 1;
+        }
+    }
+    assert!(strokes > 0, "no piano stroke");
+    assert!(overlap > 0, "no stroke long enough to repeat a block");
+}
+
+/// Every transform leaves a library the reader takes back: spans tiling the body to
+/// its end, counts summing to the directory, and every covered key naming a root
+/// that still has strokes. The strokes that survive keep their audio byte for byte —
+/// a transform re-lays spans and never re-encodes one.
+#[test]
+fn piano_surgery_leaves_a_library_the_reader_accepts() {
+    let mut seen = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let source = piano.library().unwrap();
+        let covered: Vec<u8> = (0..128)
+            .filter(|&k| source.key_map()[k as usize] != npno::UNCOVERED)
+            .collect();
+        let middle = covered[covered.len() / 2];
+
+        let mut cases: Vec<(String, npno::Library<'_>)> = Vec::new();
+        for bank in npno::Bank::ALL {
+            let mut cut = source.clone();
+            cut.drop_bank(bank);
+            cases.push((format!("without the {bank} bank"), cut));
+        }
+        let mut loudest = source.clone();
+        loudest.keep_layers(&npno::Layers::Loudest(2));
+        cases.push(("two loudest layers".into(), loudest));
+        let mut narrowed = source.clone();
+        narrowed
+            .cut_range(middle..=*covered.last().unwrap())
+            .unwrap();
+        cases.push(("upper half of the keyboard".into(), narrowed));
+        let (low, high) = source.split_at(middle).unwrap();
+        cases.push(("split low".into(), low));
+        cases.push(("split high".into(), high));
+
+        for (label, cut) in cases {
+            let rebuilt = cut
+                .to_piano()
+                .unwrap_or_else(|e| panic!("{where_}: {label}: {e}"));
+            let back = rebuilt
+                .library()
+                .unwrap_or_else(|e| panic!("{where_}: {label}: reading it back: {e}"));
+            assert_eq!(
+                back.strokes().len(),
+                cut.strokes().len(),
+                "{where_}: {label}"
+            );
+            assert_eq!(back.channels(), source.channels(), "{where_}: {label}");
+            for (before, after) in cut.strokes().iter().zip(back.strokes()) {
+                assert_eq!(before.root, after.root, "{where_}: {label}");
+                assert_eq!(before.id(), after.id(), "{where_}: {label}");
+                assert!(
+                    before.audio() == after.audio(),
+                    "{where_}: {label}: {before:?} was re-encoded rather than moved"
+                );
+            }
+            for (key, &root) in back.key_map().iter().enumerate() {
+                assert!(
+                    root == npno::UNCOVERED || back.roots().contains(&root),
+                    "{where_}: {label}: key {key} plays root {root}, which has no stroke"
+                );
+            }
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no piano library");
+}
+
+/// Dropping the resonance bank is how a large library becomes a small one, so the
+/// strokes that stay must be exactly the ones that were not resonance — and nothing
+/// about them may move except where their audio sits.
+#[test]
+fn dropping_a_pianos_resonance_bank_keeps_every_other_stroke_verbatim() {
+    let mut seen = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let source = piano.library().unwrap();
+        let expected: Vec<_> = source
+            .strokes()
+            .iter()
+            .filter(|s| s.bank() != Some(npno::Bank::Resonance))
+            .collect();
+        let mut cut = source.clone();
+        let change = cut.drop_bank(npno::Bank::Resonance);
+        assert_eq!(
+            change.strokes_removed,
+            source.strokes().len() - expected.len(),
+            "{where_}"
+        );
+        for (before, after) in expected.iter().zip(cut.strokes()) {
+            // `+0x00` is the audio offset, which is a placement rather than content.
+            assert_eq!(&before.record()[4..], &after.record()[4..], "{where_}");
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no piano library");
 }

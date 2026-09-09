@@ -18,8 +18,9 @@
 //!   Stage 4 synth, piano and organ presets.
 //! - **Structurally decoded** — the body's framing decodes and is editable; sample
 //!   instruments ([`nsmp`] — section chain, zones, stroke metadata, and encoded
-//!   audio) expose decoded audio on request, while piano libraries ([`npno`] —
-//!   the CNSP prefix) keep their body verbatim.
+//!   audio) and piano libraries ([`npno`] — the CNSP prefix, the stroke directory,
+//!   and audio spans the transforms drop and the writer re-lays) expose decoded
+//!   audio on request.
 //! - **Container-verified stubs** — everything else: body kept verbatim, waiting
 //!   to be reverse-engineered. Each stub module's doc records what is known of it.
 //!

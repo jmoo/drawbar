@@ -17,18 +17,19 @@ A command-line tool (`nord`) over [`nord-format`](../nord-format) and
 | `live` | The three Live slots (object class 6) |
 | `settings` | The global settings singleton (object class 7) |
 | `sample` | Sample instruments — the library (object class 3), or `.nsmp` files |
+| `piano` | Piano libraries — the library (object class 1), or `.npno` files |
 | `raw` | Hidden: the same verbs, addressed by class number |
 
 `inspect`, `verify` and `edit` work on files. The other nouns are the protocol's
 object classes, and normally talk to an attached instrument — but the read-only
 verbs (`get`, `info`, `deps`) and each noun's `edit` also take a file in place of
-a slot. `program`, `setlist` and `sample` share one verb vocabulary:
+a slot. `program`, `setlist`, `sample` and `piano` share one verb vocabulary:
 
 ```
 get put            transfer
 move rename duplicate delete select   organization
 info deps list focus   interrogation
-edit               content (program, setlist, live, settings, sample)
+edit               content (program, setlist, live, settings, sample, piano)
 ```
 
 `live` keeps only the read-only subset plus `edit` — the live buffer is the panel
@@ -37,7 +38,7 @@ singleton with nothing to organize, so it keeps `get`, `info` and `edit`. Other
 class-generic operations remain available through `raw --class 7`.
 
 `nord raw --class N` is those same verbs with the class given as a number. It is
-how to reach a class that has no noun of its own — pianos are class 1.
+how to reach a class that has no noun of its own, or to address one by number.
 
 Slots are written **`BANK:SLOT`**, the way the instrument and Nord Sound Manager
 show them — `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
@@ -141,9 +142,11 @@ ok     settings.ne5s (78 bytes)
 ok     grand.npno (209564996 bytes)
 ```
 
-Every format round-trips, pianos and samples included — a piano's body is not
-decoded, but it is carried verbatim and its checksum verified, so `verify` holds
-it to the same byte-identical bar.
+Every format round-trips, pianos and samples included. A piano library is
+rebuilt from its parsed model — the per-root counts, every audio offset, the
+alignment gap and the container checksum recomputed rather than carried — so the
+byte-identical bar covers the whole container; `nord piano verify --deep` also
+decodes every stroke it holds.
 
 ## Working with an instrument
 
@@ -174,7 +177,7 @@ The same verbs work on `nord setlist`, and on `nord raw` with an explicit class:
 
 ```sh
 nord setlist get 1:1
-nord raw --class 1 info 1:1             # a piano
+nord raw --class 1 info 1:1             # `nord piano info 1:1`, by class number
 nord raw --class 5 get 1:1 --body -o setlist.body
 ```
 
@@ -340,6 +343,36 @@ nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimb
 nord sample build marimba.nsmpproj -o marimba.nsmp
 nord sample build marimba.nsmpproj --generation 4 -o marimba.nsmp4 --unverified
 ```
+
+### `nord piano`
+
+A piano library is a directory of strokes — one recording per root note, bank and
+velocity layer — and the encoded audio those strokes own. `inspect` reports that
+directory, `decode` writes one stroke to a WAV at the rate the instrument plays it,
+and `edit`, `trim` and `split` rewrite the container: renaming, retuning a key,
+rerouting a key to another root, dropping a bank or the quieter velocity layers,
+narrowing the key range, and cutting a library in two. Nothing re-encodes audio — a
+surviving stroke moves byte for byte — and `trim` and `split` refuse to write over
+the file they read.
+
+```sh
+nord piano inspect grand.npno              # roots, layers per bank, keys, tuning
+nord piano inspect grand.npno --strokes    # a line per stroke
+nord piano decode grand.npno --key C4 --layer 0 -o c4.wav
+nord piano edit grand.npno --name "My Grand" --tune C4=-2 --map C8=C7 -o out.npno
+nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
+nord piano split grand.npno --at C4 -o halves/
+nord piano verify --deep grand.npno
+```
+
+A trimmed library loads on the instrument and plays at the original's level:
+hardware-verified for a dropped bank and for dropped velocity layers. The other
+edits — renames, retunes, remaps and a narrowed key range — are inferred from
+specimens and have not been played.
+
+A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
+piano put`, and the rest of the slot verbs address class 1 the way they address
+programs.
 
 ### `nord edit` — files with no noun
 
