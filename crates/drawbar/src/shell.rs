@@ -929,7 +929,7 @@ impl DrawbarApp {
                 return;
             }
             match self.page() {
-                Page::Queue => self.queue_page(ui),
+                Page::Queue => self.queue_page(ui, acts),
                 Page::Log => self.log.ui(ui),
             }
         });
@@ -1002,8 +1002,14 @@ impl DrawbarApp {
     }
 
     /// Everything owed to the instrument, and what each of it runs into.
-    fn queue_page(&mut self, ui: &mut egui::Ui) {
-        crate::queue::page(ui, &mut self.queue, &self.workspace);
+    fn queue_page(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        crate::queue::page(
+            ui,
+            &mut self.queue,
+            &self.workspace,
+            &self.device.state,
+            acts,
+        );
     }
 
     /// The browser dock: this computer and the instrument, under one header.

@@ -6,12 +6,12 @@
 
 use nord_usb::{Location, ObjectClass};
 
-use super::drag::Item;
+use super::drag::{Item, Kind};
 use super::Browser;
-use crate::device::{write_warning, Device, DeviceCmd, Outgoing, Purpose};
+use crate::device::{sendable, write_warning, Device, DeviceCmd, DeviceState, Outgoing, Purpose};
 use crate::filter::Narrow;
 use crate::log::Log;
-use crate::queue::{enqueue, Queue};
+use crate::queue::{enqueue, retarget, Queue};
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
@@ -74,6 +74,12 @@ pub enum Act {
     /// Queue a local asset for a slot, asking first where the write itself has a
     /// warning to carry.
     Send {
+        id: u64,
+        class: ObjectClass,
+        at: Location,
+    },
+    /// Send something already waiting to another slot instead.
+    Retarget {
         id: u64,
         class: ObjectClass,
         at: Location,
@@ -308,30 +314,9 @@ pub fn apply(
                     .iter()
                     .map(|entity| entity.id)
                     .collect();
-                for id in members {
-                    if let Some((class, at)) = workspace.get(id).and_then(owed) {
-                        enqueue(workspace, device, queue, log, id, class, at);
-                    }
-                }
+                queue_all(workspace, device, queue, log, &members);
             }
-            Act::SendChecked(ids) => {
-                let mut nowhere = 0;
-                for id in ids {
-                    match workspace.get(id).and_then(owed) {
-                        Some((class, at)) => enqueue(workspace, device, queue, log, id, class, at),
-                        None => nowhere += 1,
-                    }
-                }
-                if nowhere > 0 {
-                    log.say(match nowhere {
-                        1 => "1 of them never came off a slot, so it is waiting for nowhere."
-                            .to_string(),
-                        n => format!(
-                            "{n} of them never came off a slot, so they are waiting for nowhere."
-                        ),
-                    });
-                }
-            }
+            Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
             Act::Open(Item::Local(id)) => tabs.open(id, workspace),
             // ⚠️ One view per slot prevents divergent copies queued back to one address.
@@ -364,6 +349,9 @@ pub fn apply(
             }
             Act::Replace { id, class, at } => {
                 send(browser, workspace, device, queue, log, id, class, at, false)
+            }
+            Act::Retarget { id, class, at } => {
+                retarget(workspace, device, queue, log, id, class, at)
             }
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::AskSendAll => {
@@ -547,6 +535,75 @@ pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     crate::device::sendable(class).then_some((class, at))
 }
 
+/// Where queueing an asset for sending would put it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Bound {
+    At(ObjectClass, Location),
+    /// Its folder is on the instrument, and no slot of it has been read and found free.
+    Full(ObjectClass),
+    /// Nothing the instrument declares takes this kind, or this app will not write into
+    /// the folder that would.
+    Nowhere,
+}
+
+/// The slot an asset is owed to, and otherwise the first free slot of its own folder.
+///
+/// ⚠️ Free means read and found empty. A folder no walk has reached offers nothing, for
+/// the reason [`crate::queue::Occupancy`] gives.
+pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState) -> Bound {
+    if let Some((class, at)) = owed(entity) {
+        return Bound::At(class, at);
+    }
+    let home = Kind::of(entity.entity.as_ref()).home();
+    let Some(class) = home.filter(|class| sendable(*class) && state.classes().contains(class))
+    else {
+        return Bound::Nowhere;
+    };
+    match state.first_free(class) {
+        Some(at) => Bound::At(class, at),
+        None => Bound::Full(class),
+    }
+}
+
+/// Queue a set of assets, each for wherever it is bound, and say what would not go.
+///
+/// A folder with no room refuses by name: what a set of them comes to is a fact about
+/// the instrument, and dropping the entry without a word would read as a bug.
+fn queue_all(
+    workspace: &Workspace,
+    device: &mut Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    ids: &[u64],
+) {
+    let mut nowhere = 0;
+    for id in ids.iter().copied() {
+        let Some(entity) = workspace.get(id) else {
+            continue;
+        };
+        let name = entity.name.clone();
+        match bound_for(entity, &device.state) {
+            Bound::At(class, at) => enqueue(workspace, device, queue, log, id, class, at),
+            Bound::Full(class) => log.say(format!(
+                "“{name}” is waiting for nowhere: no slot of {} has been read and found free.",
+                device.state.folder_name(class)
+            )),
+            Bound::Nowhere => nowhere += 1,
+        }
+    }
+    if nowhere > 0 {
+        log.say(match nowhere {
+            1 => "1 of them belongs in no folder the instrument has, so it is waiting for \
+                  nowhere."
+                .to_string(),
+            n => format!(
+                "{n} of them belong in no folder the instrument has, so they are waiting for \
+                 nowhere."
+            ),
+        });
+    }
+}
+
 /// Queue a local asset for a slot.
 ///
 /// `ask` is false once the question has been answered, which is what keeps the answer
@@ -688,13 +745,16 @@ mod tests {
         assert!(bulk(Bulk::Delete, &[]).is_empty());
     }
 
-    /// Queueing a checked set takes the same path one Send does, and an asset that never
-    /// came off a slot has nowhere to go, so it is skipped and counted rather than
-    /// queued for an address nobody chose.
+    /// Queueing a checked set puts each of them where it is bound: the slot it is owed
+    /// to, the first free slot of its own folder for one that came off none, and nowhere
+    /// at all for bytes that belong in no folder the instrument has.
     #[test]
-    fn queueing_a_checked_set_skips_what_has_nowhere_to_go_and_says_how_many() {
+    fn queueing_a_checked_set_puts_each_of_them_where_it_is_bound() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let bytes = program(&mut workspace, &mut log);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        // 7:1 is taken by the asset that came off it; 7:2 is the first free slot.
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
         let owed = workspace.ingest(
             "Africa Split.ne5p".to_string(),
             Origin::Device {
@@ -704,12 +764,26 @@ mod tests {
             bytes.clone(),
             &mut log,
         );
-        let nowhere = workspace.ingest("Untitled.ne5p".to_string(), Origin::Fresh, bytes, &mut log);
+        let opened = workspace.ingest(
+            "Squabble B.ne5p".to_string(),
+            Origin::File("Squabble B.ne5p".into()),
+            bytes,
+            &mut log,
+        );
+        let nowhere = workspace.ingest(
+            "notes.txt".to_string(),
+            Origin::Fresh,
+            b"not a Nord file at all".to_vec(),
+            &mut log,
+        );
 
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &[Item::Local(owed), Item::Local(nowhere)]),
+            bulk(
+                Bulk::Queue,
+                &[Item::Local(owed), Item::Local(opened), Item::Local(nowhere)],
+            ),
             &mut workspace,
             &mut device,
             &mut tabs,
@@ -717,9 +791,106 @@ mod tests {
             &mut log,
         );
 
-        assert_eq!(queue.ids(), vec![owed], "only the one with a slot to go to");
+        assert_eq!(queue.ids(), vec![owed, opened]);
+        assert_eq!(queue.entry(owed).map(|held| held.at), Some(at(0)));
+        assert_eq!(
+            queue.entry(opened).map(|held| held.at),
+            Some(at(1)),
+            "the first slot read and found free"
+        );
         assert!(
-            log.transcript().contains("1 of them never came off a slot"),
+            log.transcript()
+                .contains("1 of them belongs in no folder the instrument has"),
+            "{}",
+            log.transcript()
+        );
+    }
+
+    /// A row already waiting, dropped on another slot, is re-targeted rather than
+    /// duplicated: the drop means the same Send it means from any other row, and one
+    /// asset has one entry wherever it was dragged from.
+    #[test]
+    fn dropping_something_already_waiting_onto_a_slot_moves_its_entry() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
+        let class = ObjectClass::Program;
+        let id = workspace.ingest(
+            "Africa Split.ne5p".to_string(),
+            Origin::Device { class, at: at(0) },
+            bytes,
+            &mut log,
+        );
+        let mut send = |acts, device: &mut Device, queue: &mut Queue| {
+            apply(
+                &mut browser,
+                &mut Shell::default(),
+                acts,
+                &mut workspace,
+                device,
+                &mut tabs,
+                queue,
+                &mut log,
+            );
+        };
+        send(vec![Act::SendChecked(vec![id])], &mut device, &mut queue);
+        assert_eq!(queue.entry(id).map(|held| held.at), Some(at(0)));
+
+        // What the queue row carries, landing where the keyboard's cells are.
+        let carried = crate::browser::Held {
+            what: Item::Local(id),
+            kind: crate::browser::Kind::Program,
+            filed: None,
+        };
+        let onto = crate::browser::Onto::Slot { class, at: at(3) };
+        assert_eq!(
+            crate::browser::landing(&carried, onto),
+            crate::browser::Landing::Send
+        );
+
+        send(
+            vec![Act::Send {
+                id,
+                class,
+                at: at(3),
+            }],
+            &mut device,
+            &mut queue,
+        );
+        assert_eq!(queue.ids(), vec![id], "one entry, moved");
+        assert_eq!(queue.entry(id).map(|held| held.at), Some(at(3)));
+    }
+
+    /// A folder every read slot of which is taken refuses the entry by name. Dropping it
+    /// without a word would read as a bug, and putting it somewhere occupied would be
+    /// this app choosing what to overwrite.
+    #[test]
+    fn queueing_into_a_folder_with_no_free_slot_refuses_and_names_it() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "Squabble B"]);
+        let id = workspace.ingest(
+            "Jazzy Click B.ne5p".to_string(),
+            Origin::File("Jazzy Click B.ne5p".into()),
+            bytes,
+            &mut log,
+        );
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            bulk(Bulk::Queue, &[Item::Local(id)]),
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(queue.is_empty());
+        assert!(
+            log.transcript()
+                .contains("no slot of Programs has been read and found free"),
             "{}",
             log.transcript()
         );
@@ -960,7 +1131,7 @@ mod tests {
             );
             browser.folders.file(id, Some(folder));
         }
-        // Never off an instrument, so there is nowhere to send it back to.
+        // Never off an instrument, and nothing is attached to offer it a free slot.
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(fresh, Some(folder));
 
@@ -983,7 +1154,7 @@ mod tests {
                 ObjectClass::Live
             ]
         );
-        assert!(!queue.holds(fresh), "it never came off a slot");
+        assert!(!queue.holds(fresh), "it is bound for nowhere");
     }
 
     /// A double-click on a slot opens a view: a tab and a document, and no new row in

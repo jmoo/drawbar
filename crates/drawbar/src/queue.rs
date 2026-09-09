@@ -13,8 +13,8 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{bad, good, ui as ui_text, warn};
-use crate::browser::{cell_ink, Kind};
-use crate::device::{Device, DeviceCmd, Purpose};
+use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
+use crate::device::{Device, DeviceCmd, DeviceState, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, Glyph};
 use crate::log::Log;
@@ -176,6 +176,25 @@ pub fn enqueue(
     log.say(format!("“{name}” is waiting to be sent to {where_}."));
 }
 
+/// Send a waiting asset somewhere else instead.
+///
+/// The same bookkeeping as [`enqueue`] — the new slot is read again, and whatever was
+/// waiting for it stops — over an asset the queue is already holding. An asset it is not
+/// holding is not queued by asking where it goes.
+pub fn retarget(
+    workspace: &Workspace,
+    device: &mut Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    id: u64,
+    class: ObjectClass,
+    at: Location,
+) {
+    if queue.holds(id) {
+        enqueue(workspace, device, queue, log, id, class, at);
+    }
+}
+
 impl Queue {
     /// Put one asset in the queue for one slot, and say what that moved out of the way:
     /// where this asset was waiting before, and what was waiting for this slot.
@@ -258,6 +277,13 @@ impl Queue {
     fn waiting_for(&mut self, class: ObjectClass, at: Location) -> Option<&mut Queued> {
         self.list
             .iter_mut()
+            .find(|held| (held.class, held.at) == (class, at))
+    }
+
+    /// The entry waiting for a slot, if anything is.
+    pub fn waiting(&self, class: ObjectClass, at: Location) -> Option<&Queued> {
+        self.list
+            .iter()
             .find(|held| (held.class, held.at) == (class, at))
     }
 
@@ -387,6 +413,10 @@ const GAP: f32 = 6.0;
 const GLYPH: f32 = 13.0;
 const SMALL: f32 = 11.0;
 
+/// The destination chip's own height, and the room it keeps at each end.
+const CHIP: f32 = 17.0;
+const CHIP_PAD: f32 = 5.0;
+
 /// The faces a row paints in.
 const NAME: f32 = 12.0;
 const MONO: f32 = 10.5;
@@ -398,7 +428,13 @@ const DIFF_ROW: f32 = 22.0;
 const DIFF_MONO: f32 = 11.0;
 
 /// Everything waiting, and what each of it runs into.
-pub fn page(ui: &mut egui::Ui, queue: &mut Queue, workspace: &Workspace) {
+pub fn page(
+    ui: &mut egui::Ui,
+    queue: &mut Queue,
+    workspace: &Workspace,
+    device: &DeviceState,
+    acts: &mut Vec<Act>,
+) {
     if queue.is_empty() {
         ui.add_space(GAP);
         ui.horizontal(|ui| {
@@ -428,7 +464,16 @@ pub fn page(ui: &mut egui::Ui, queue: &mut Queue, workspace: &Workspace) {
                         let Some(entity) = workspace.get(held.id) else {
                             continue;
                         };
-                        if item(ui, held, entity, picked == Some(held.id)).clicked() {
+                        let drawn = item(
+                            ui,
+                            held,
+                            entity,
+                            picked == Some(held.id),
+                            device,
+                            queue,
+                            acts,
+                        );
+                        if drawn.clicked() {
                             clicked = Some(held.id);
                         }
                     }
@@ -508,9 +553,20 @@ fn summarise(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, S
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a
 /// label allocates a hover rect that wins the hit test over the row, and the click lands
 /// on whichever word happens to be under it.
-fn item(ui: &mut egui::Ui, held: &Queued, entity: &LocalEntity, selected: bool) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::click());
+#[allow(clippy::too_many_arguments)]
+fn item(
+    ui: &mut egui::Ui,
+    held: &Queued,
+    entity: &LocalEntity,
+    selected: bool,
+    device: &DeviceState,
+    queue: &Queue,
+    acts: &mut Vec<Act>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW),
+        egui::Sense::click_and_drag(),
+    );
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let fill = match (selected, response.hovered()) {
@@ -526,20 +582,8 @@ fn item(ui: &mut egui::Ui, held: &Queued, entity: &LocalEntity, selected: bool) 
         false => visuals.text_color(),
     };
     let quiet = cell_ink(selected, visuals.weak_text_color(), &visuals);
-    // The right end is claimed first, so the name is cut to whatever is left of the row.
-    let write = |right: f32, text: String, font: egui::FontId, tint: egui::Color32| -> f32 {
-        let mut job = egui::text::LayoutJob::simple_singleline(text, font, tint);
-        job.wrap = egui::text::TextWrapping::truncate_at_width((right - rect.left()).max(0.0));
-        let galley = painter.layout_job(job);
-        let width = galley.size().x;
-        painter.galley(
-            egui::pos2(right - width, rect.center().y - galley.size().y / 2.0),
-            galley,
-            egui::Color32::PLACEHOLDER,
-        );
-        right - width - GAP
-    };
 
+    // The right end is claimed first, so the name is cut to whatever is left of the row.
     let (glyph, tint, why) = state(held, &visuals);
     painted(
         ui,
@@ -550,11 +594,15 @@ fn item(ui: &mut egui::Ui, held: &Queued, entity: &LocalEntity, selected: bool) 
         ),
         cell_ink(selected, tint, &visuals),
     );
-    let right = write(
+    let right = destination(
+        ui,
+        held,
+        rect,
         rect.right() - PAD - SMALL - GAP,
-        place(held.class, held.at),
-        egui::FontId::monospace(MONO),
         quiet,
+        device,
+        queue,
+        acts,
     );
 
     let left = rect.left() + PAD;
@@ -580,7 +628,157 @@ fn item(ui: &mut egui::Ui, held: &Queued, entity: &LocalEntity, selected: bool) 
         galley,
         egui::Color32::PLACEHOLDER,
     );
+
+    // Dragged like the row this asset has in the library, so a drop on a slot means
+    // there what it means anywhere else: this asset goes to that slot.
+    if response.dragged() {
+        egui::DragAndDrop::set_payload(
+            ui.ctx(),
+            Carried {
+                head: Held {
+                    what: Item::Local(entity.id),
+                    kind: Kind::of(entity.entity.as_ref()),
+                    filed: None,
+                },
+                name: entity.name.clone(),
+                rest: Vec::new(),
+            },
+        );
+    }
     response.on_hover_text(why)
+}
+
+/// Where an entry is going, as a chip to click: the address, and the picker behind it.
+///
+/// Answers with the left edge it claimed, which is where the name before it must stop.
+#[allow(clippy::too_many_arguments)]
+fn destination(
+    ui: &mut egui::Ui,
+    held: &Queued,
+    row: egui::Rect,
+    right: f32,
+    ink: egui::Color32,
+    device: &DeviceState,
+    queue: &Queue,
+    acts: &mut Vec<Act>,
+) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        place(held.class, held.at),
+        egui::FontId::monospace(MONO),
+        ink,
+    );
+    let box_ = egui::Rect::from_min_size(
+        egui::pos2(
+            right - galley.size().x - 2.0 * CHIP_PAD,
+            row.center().y - CHIP / 2.0,
+        ),
+        egui::vec2(galley.size().x + 2.0 * CHIP_PAD, CHIP),
+    );
+    // Flat: nothing under the address until the pointer is on it.
+    let chip = ui.interact(
+        box_,
+        ui.id().with(("destination", held.id)),
+        egui::Sense::click(),
+    );
+    if chip.hovered() {
+        ui.painter()
+            .rect_filled(box_, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    ui.painter().galley(
+        egui::pos2(
+            box_.left() + CHIP_PAD,
+            box_.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    let chip = chip.on_hover_text("change where this goes");
+    egui::Popup::menu(&chip)
+        .width(crate::keyboard::grid_width())
+        .show(|ui| {
+            if let Some(at) = picker(ui, held, device, queue) {
+                acts.push(Act::Retarget {
+                    id: held.id,
+                    class: held.class,
+                    at,
+                });
+                ui.close();
+            }
+        });
+    box_.left() - GAP
+}
+
+/// The picker behind the chip: one row of bank chips, then that bank's slots as the
+/// cells the keyboard's map paints. The slot a click asked for, if it asked for one.
+///
+/// The bank on show is this popup's own state, so opening the picker again lands where
+/// it was left and every entry keeps its own.
+fn picker(
+    ui: &mut egui::Ui,
+    held: &Queued,
+    device: &DeviceState,
+    queue: &Queue,
+) -> Option<Location> {
+    let banks = device.banks_of(held.class);
+    if banks.is_empty() {
+        ui.label(
+            egui::RichText::new("Nothing in this folder has been read.")
+                .text_style(ui_text())
+                .weak()
+                .italics(),
+        );
+        return None;
+    }
+    let kept = ui.id().with("bank");
+    let mut bank = ui
+        .data(|data| data.get_temp::<u32>(kept))
+        .filter(|bank| banks.contains(bank))
+        .unwrap_or(held.at.bank + 1);
+    ui.horizontal(|ui| {
+        crate::panel::flat(ui);
+        for offered in &banks {
+            if ui
+                .selectable_label(
+                    *offered == bank,
+                    egui::RichText::new(offered.to_string())
+                        .monospace()
+                        .size(MONO),
+                )
+                .clicked()
+            {
+                bank = *offered;
+                ui.data_mut(|data| data.insert_temp(kept, bank));
+            }
+        }
+    });
+    let slots = device.bank(held.class, bank).unwrap_or_default();
+    let mut picked = None;
+    crate::keyboard::grid(ui, slots.len(), |ui, index, rect| {
+        let at = Location::from_user(bank, index as u32 + 1);
+        let state = crate::keyboard::State::of(
+            false,
+            queue.waiting(held.class, at).is_some(),
+            slots[index].is_some(),
+        );
+        let response = ui.interact(
+            rect,
+            ui.id().with(("slot", at.bank, at.slot)),
+            egui::Sense::click(),
+        );
+        crate::keyboard::paint_cell(
+            ui,
+            rect,
+            at,
+            slots[index].as_ref(),
+            state,
+            at == held.at,
+            response.hovered(),
+        );
+        if response.clicked() {
+            picked = Some(at);
+        }
+    });
+    picked
 }
 
 /// The diff's four columns: the field, what is here, the sign between them, and what
@@ -1215,6 +1413,136 @@ mod tests {
         assert!(device.queued().is_empty(), "nothing to ask about");
     }
 
+    /// Sending a waiting asset somewhere else moves its one entry rather than adding a
+    /// second: the new slot is read again, what that slot holds is what the entry now
+    /// replaces, and whatever was waiting for it stops.
+    #[test]
+    fn retargeting_moves_the_entry_and_displaces_what_was_waiting_there() {
+        let (mut workspace, mut log, bytes) = bench();
+        let ctx = workspace.ctx().clone();
+        let mut device = Device::new(ctx);
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["", "Africa Split", ""]);
+        let mut queue = Queue::default();
+        let mut asset =
+            |name: &str| workspace.ingest(name.into(), Origin::Fresh, bytes.clone(), &mut log);
+        let first = asset("first.ne5p");
+        let second = asset("second.ne5p");
+        for (id, slot) in [(first, 0), (second, 1)] {
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                class,
+                at(slot),
+            );
+        }
+        assert!(matches!(queue.entry(first).unwrap().diff, Diff::Empty));
+
+        retarget(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            first,
+            class,
+            at(1),
+        );
+
+        assert_eq!(queue.ids(), vec![first], "one entry per slot and per asset");
+        let held = queue.entry(first).unwrap();
+        assert_eq!(held.at, at(1));
+        assert_eq!(
+            held.replaces.occupant().map(|held| held.name.as_str()),
+            Some("Africa Split"),
+            "what the new slot holds is what it now replaces"
+        );
+
+        // Asking where something goes does not put it in the queue.
+        retarget(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            second,
+            class,
+            at(2),
+        );
+        assert_eq!(queue.ids(), vec![first]);
+    }
+
+    /// A click on one of the picker's cells is what re-targets an entry. The cell's own
+    /// rect comes from the frame before the click, so nothing here depends on where the
+    /// bank chips over it happened to land.
+    #[test]
+    fn a_click_on_the_pickers_cell_answers_with_that_slot() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(crate::app::metrics);
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut log = Log::default();
+        let mut device = Device::new(ctx.clone());
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
+        let bytes = {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            let held = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            held
+        };
+        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
+        let mut queue = Queue::default();
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(1),
+        );
+        let held = queue.entry(id).expect("it is waiting");
+
+        let wanted = at(2);
+        let draw = |events: Vec<egui::Event>| -> (Option<Location>, Option<egui::Pos2>) {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(crate::keyboard::grid_width(), 300.0),
+                )),
+                ..Default::default()
+            };
+            let mut drawn = (None, None);
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        drawn = (
+                            picker(ui, held, &device.state, &queue),
+                            ctx.read_response(ui.id().with(("slot", wanted.bank, wanted.slot)))
+                                .map(|cell| cell.rect.center()),
+                        );
+                    });
+            });
+            drawn
+        };
+
+        let on_cell = draw(Vec::new())
+            .1
+            .expect("the picker drew a cell for every slot of the bank");
+        draw(vec![egui::Event::PointerMoved(on_cell)]);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: on_cell,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        assert_eq!(draw(vec![press(true), press(false)]).0, Some(wanted));
+    }
+
     /// Paint the page headlessly, with each shape a diff can be in it. What this catches
     /// is a layout that panics or an id that collides, neither of which a test on the
     /// rules would see.
@@ -1270,7 +1598,7 @@ mod tests {
                         .frame(egui::Frame::new())
                         .show(ctx, |ui| {
                             ui.set_width(width);
-                            page(ui, &mut queue, &workspace);
+                            page(ui, &mut queue, &workspace, &device.state, &mut Vec::new());
                         });
                 });
             }

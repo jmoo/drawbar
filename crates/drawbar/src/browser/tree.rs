@@ -594,6 +594,14 @@ impl Browser {
             acts.push(Act::Open(item));
             ui.close();
         }
+        if ui
+            .button(Bulk::Queue.label())
+            .on_hover_text("to the slot it is linked to, or the first free one in its folder")
+            .clicked()
+        {
+            acts.push(Act::SendChecked(vec![id]));
+            ui.close();
+        }
         if ui.button("Export…").clicked() {
             acts.push(Act::Save(id));
             ui.close();

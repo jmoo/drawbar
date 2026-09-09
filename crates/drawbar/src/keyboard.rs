@@ -156,7 +156,9 @@ impl Keyboard {
         let held = slots.iter().filter(|slot| slot.is_some()).count();
         let incoming = (0..slots.len())
             .filter(|index| {
-                waiting(queue, class, Location::from_user(bank, *index as u32 + 1)).is_some()
+                queue
+                    .waiting(class, Location::from_user(bank, *index as u32 + 1))
+                    .is_some()
             })
             .count();
         let said = sentence(held, slots.len(), incoming);
@@ -181,31 +183,49 @@ impl Keyboard {
             .id_salt("keyboard_map")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                ui.add_space(CELL_GAP);
-                for row in 0..slots.len().div_ceil(COLUMNS) {
-                    let (strip, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), CELL + CELL_GAP),
-                        egui::Sense::hover(),
-                    );
-                    let room = strip.width() - 2.0 * PAD - CELL_GAP * (COLUMNS - 1) as f32;
-                    let width = (room / COLUMNS as f32).max(0.0);
-                    for column in 0..COLUMNS {
-                        let Some(info) = slots.get(row * COLUMNS + column) else {
-                            break;
-                        };
-                        let at = Location::from_user(bank, (row * COLUMNS + column) as u32 + 1);
-                        let rect = egui::Rect::from_min_size(
-                            egui::pos2(
-                                strip.left() + PAD + (width + CELL_GAP) * column as f32,
-                                strip.top(),
-                            ),
-                            egui::vec2(width, CELL),
-                        );
-                        cell(ui, browser, &view, rect, at, info.as_ref(), acts);
-                    }
-                }
+                grid(ui, slots.len(), |ui, index, rect| {
+                    let at = Location::from_user(bank, index as u32 + 1);
+                    cell(ui, browser, &view, rect, at, slots[index].as_ref(), acts);
+                });
             });
     }
+}
+
+/// The five-column grid of 42 px cells a bank of slots is laid out in, whoever is
+/// drawing them. `each` is handed one slot's index and the rect it sits in.
+pub fn grid(
+    ui: &mut egui::Ui,
+    slots: usize,
+    mut each: impl FnMut(&mut egui::Ui, usize, egui::Rect),
+) {
+    ui.add_space(CELL_GAP);
+    for row in 0..slots.div_ceil(COLUMNS) {
+        let (strip, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), CELL + CELL_GAP),
+            egui::Sense::hover(),
+        );
+        let room = strip.width() - 2.0 * PAD - CELL_GAP * (COLUMNS - 1) as f32;
+        let width = (room / COLUMNS as f32).max(0.0);
+        for column in 0..COLUMNS {
+            let index = row * COLUMNS + column;
+            if index >= slots {
+                break;
+            }
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    strip.left() + PAD + (width + CELL_GAP) * column as f32,
+                    strip.top(),
+                ),
+                egui::vec2(width, CELL),
+            );
+            each(ui, index, rect);
+        }
+    }
+}
+
+/// The width a five-column grid wants, for a caller laying out room for one.
+pub fn grid_width() -> f32 {
+    2.0 * PAD + CELL * COLUMNS as f32 + CELL_GAP * (COLUMNS - 1) as f32
 }
 
 // ---- the bands over every folder ---------------------------------------------------
@@ -333,7 +353,7 @@ pub fn sentence(held: usize, slots: usize, incoming: usize) -> String {
 
 /// What a slot in the map is: what it holds, and what is about to happen to it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum State {
+pub enum State {
     Empty,
     Held,
     Incoming,
@@ -343,7 +363,7 @@ enum State {
 impl State {
     /// ⚠️ The panel wins. A slot the instrument is playing is the one thing on the map a
     /// player has to be able to find, whatever else is true of it.
-    fn of(loaded: bool, incoming: bool, held: bool) -> State {
+    pub fn of(loaded: bool, incoming: bool, held: bool) -> State {
         if loaded {
             return State::Loaded;
         }
@@ -400,13 +420,28 @@ fn cell(
     );
     let state = State::of(
         view.device.state.focused(class) == Some(at),
-        waiting(view.queue, class, at).is_some(),
+        view.queue.waiting(class, at).is_some(),
         info.is_some(),
     );
+    paint_cell(ui, rect, at, info, state, selected, response.hovered());
+    let response = response.on_hover_text(hint(view, at, info, state));
+    gestures(ui, browser, view, at, info, &response, acts);
+}
 
+/// A slot painted as a cell: the ground its state and its selection earn, the border,
+/// the address, and what it holds. Whatever senses it is the caller's.
+pub fn paint_cell(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    at: Location,
+    info: Option<&ProgramInfo>,
+    state: State,
+    selected: bool,
+    hovered: bool,
+) {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    let ground = match (state, selected, response.hovered()) {
+    let ground = match (state, selected, hovered) {
         (_, true, _) | (State::Loaded, _, _) => Some(visuals.selection.bg_fill),
         (_, false, true) => Some(visuals.faint_bg_color),
         (State::Empty, _, _) => None,
@@ -469,9 +504,6 @@ fn cell(
         name,
         format,
     );
-
-    let response = response.on_hover_text(hint(view, at, info, state));
-    gestures(ui, browser, view, at, info, &response, acts);
 }
 
 /// The four sides of a dashed border. egui draws dashes along a line, so a rectangle is
@@ -620,7 +652,7 @@ fn row(
         ui.allocate_exact_size(egui::vec2(width, ROW), egui::Sense::click_and_drag());
     let state = State::of(
         view.device.state.focused(class) == Some(at),
-        waiting(view.queue, class, at).is_some(),
+        view.queue.waiting(class, at).is_some(),
         info.is_some(),
     );
 
@@ -791,14 +823,6 @@ fn footer(
 }
 
 // ---- what every slot answers to -----------------------------------------------------
-
-/// The queue entry waiting for this slot, if anything is.
-fn waiting(queue: &Queue, class: ObjectClass, at: Location) -> Option<&Queued> {
-    queue
-        .entries()
-        .iter()
-        .find(|held| (held.class, held.at) == (class, at))
-}
 
 /// The first entry waiting for anywhere in a folder.
 fn waiting_in(queue: &Queue, class: ObjectClass) -> Option<&Queued> {
