@@ -4,6 +4,7 @@
 //! the instrument, so the whole vocabulary is testable without a frame.
 
 use eframe::egui;
+use nord_format::accept::Family;
 use nord_format::Entity;
 use nord_usb::{Location, ObjectClass};
 
@@ -203,6 +204,33 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect()
 }
 
+/// Whether a kind's word needs the family in front of it to say what it is.
+///
+/// True where the word alone would not settle it: the kept assets are from more than one
+/// family, or the asset is not the attached instrument's own. With one family on this
+/// computer and that instrument attached, `program` can only mean one thing.
+pub fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>) -> bool {
+    if kept.len() > 1 {
+        return true;
+    }
+    matches!((asset, instrument), (Some(asset), Some(held)) if asset != held)
+}
+
+/// The families the assets on this computer are from, in [`Family::ALL`] order.
+///
+/// Files that name no family — the shared library formats, the carriers, bytes that did
+/// not decode — are not one, so a list of samples spans no families at all.
+pub fn families_present(workspace: &Workspace) -> Vec<Family> {
+    let here: Vec<Family> = workspace
+        .listed()
+        .filter_map(|entity| Family::of_tag(&entity.tag()))
+        .collect();
+    Family::ALL
+        .into_iter()
+        .filter(|family| here.contains(family))
+        .collect()
+}
+
 /// One row of the tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
@@ -260,6 +288,9 @@ pub struct Held {
     /// The folder it is in, for a local asset. What makes dragging one out of a folder
     /// mean something.
     pub filed: Option<u64>,
+    /// Whether the attached instrument takes this asset's format, from
+    /// [`crate::device::fit`]. Anything already on the instrument fits it.
+    pub fits: bool,
 }
 
 /// What is under the pointer while a drag is in progress.
@@ -341,6 +372,8 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
         (Item::Local(_), Onto::Slot { class, .. }) => {
             if carried.kind.home() != Some(class) {
                 Landing::No("that folder holds a different kind of thing")
+            } else if !carried.fits {
+                Landing::No("the instrument does not take files of that format")
             } else if read_only(class) {
                 Landing::No("pianos are installed on the instrument, not moved into it")
             } else {
@@ -419,6 +452,48 @@ mod tests {
         assert_eq!(
             landing(&local(Kind::SetList), onto(ObjectClass::SetList, 0, 12)),
             Landing::Send
+        );
+    }
+
+    /// A drop of something the attached instrument does not take produces no landing —
+    /// the target does not light and the drop says why.
+    #[test]
+    fn a_drop_of_what_the_instrument_refuses_lands_nowhere() {
+        let refused = Held {
+            fits: false,
+            ..local(Kind::Program)
+        };
+        match landing(&refused, onto(ObjectClass::Program, 6, 3)) {
+            Landing::No(why) => assert!(why.contains("format"), "{why}"),
+            other => panic!("{other:?} should have been refused"),
+        }
+        // It is still a row of this computer's list, so filing it is untouched.
+        assert_eq!(landing(&refused, Onto::Group(1)), Landing::File);
+    }
+
+    /// A kind's word carries the family only where the word alone would not settle whose
+    /// files these are.
+    #[test]
+    fn the_family_is_named_only_where_it_says_something_the_kind_does_not() {
+        let e5 = Some(Family::Electro5);
+        let s4 = Some(Family::Stage4);
+
+        assert!(
+            !qualified(&[Family::Electro5], e5, e5),
+            "one family, its own"
+        );
+        assert!(
+            !qualified(&[Family::Electro5], e5, None),
+            "nothing attached"
+        );
+        assert!(
+            !qualified(&[], None, e5),
+            "nothing on this computer names one"
+        );
+        assert!(qualified(&[Family::Electro5, Family::Stage4], e5, None));
+        assert!(
+            qualified(&[Family::Stage4], s4, e5),
+            "not this instrument's"
         );
     }
 
@@ -534,6 +609,7 @@ mod tests {
             what: Item::Folder(1),
             kind: Kind::Program,
             filed: None,
+            fits: true,
         };
         for onto in [
             Onto::Computer,

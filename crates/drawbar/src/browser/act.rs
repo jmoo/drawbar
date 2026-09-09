@@ -8,7 +8,9 @@ use nord_usb::{Location, ObjectClass};
 
 use super::drag::{Item, Kind};
 use super::Browser;
-use crate::device::{sendable, write_warning, Device, DeviceCmd, DeviceState, Outgoing, Purpose};
+use crate::device::{
+    fit, sendable, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
+};
 use crate::filter::Narrow;
 use crate::log::Log;
 use crate::queue::{enqueue, retarget, Queue};
@@ -507,15 +509,16 @@ pub fn foreign_format(outgoing: &str, resident: &[String]) -> Option<String> {
     ))
 }
 
-/// Everything worth reading before a write into `class` lands: what the format
-/// comparison found, and what the class itself disturbs beyond the slot.
+/// Everything worth reading before a write into `class` lands: what the attached
+/// instrument makes of the asset's format, and what the class itself disturbs beyond
+/// the slot.
 pub(super) fn write_warnings(
+    state: &DeviceState,
     class: ObjectClass,
-    tag: &str,
-    resident: &[String],
+    entity: &LocalEntity,
 ) -> impl Iterator<Item = String> {
     [
-        foreign_format(tag, resident),
+        fit(state, entity).why().map(str::to_string),
         write_warning(class).map(str::to_string),
     ]
     .into_iter()
@@ -523,8 +526,8 @@ pub(super) fn write_warnings(
 }
 
 /// The same set as one note, for the dialog that asks about a single slot.
-fn write_note(class: ObjectClass, tag: &str, resident: &[String]) -> Option<String> {
-    let note: Vec<String> = write_warnings(class, tag, resident).collect();
+fn write_note(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> Option<String> {
+    let note: Vec<String> = write_warnings(state, class, entity).collect();
     (!note.is_empty()).then(|| note.join("\n\n"))
 }
 
@@ -536,11 +539,13 @@ pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
 }
 
 /// Where queueing an asset for sending would put it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum Bound {
     At(ObjectClass, Location),
     /// Its folder is on the instrument, and no slot of it has been read and found free.
     Full(ObjectClass),
+    /// The attached instrument does not take this format, and this is why.
+    Refused(String),
     /// Nothing the instrument declares takes this kind, or this app will not write into
     /// the folder that would.
     Nowhere,
@@ -551,6 +556,9 @@ pub(super) enum Bound {
 /// ⚠️ Free means read and found empty. A folder no walk has reached offers nothing, for
 /// the reason [`crate::queue::Occupancy`] gives.
 pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState) -> Bound {
+    if let Fit::Refuses(why) = fit(state, entity) {
+        return Bound::Refused(why);
+    }
     if let Some((class, at)) = owed(entity) {
         return Bound::At(class, at);
     }
@@ -577,19 +585,39 @@ fn queue_all(
     ids: &[u64],
 ) {
     let mut nowhere = 0;
+    let mut asked = 0;
+    let mut fits = 0;
     for id in ids.iter().copied() {
         let Some(entity) = workspace.get(id) else {
             continue;
         };
         let name = entity.name.clone();
+        asked += 1;
         match bound_for(entity, &device.state) {
-            Bound::At(class, at) => enqueue(workspace, device, queue, log, id, class, at),
-            Bound::Full(class) => log.say(format!(
-                "“{name}” is waiting for nowhere: no slot of {} has been read and found free.",
-                device.state.folder_name(class)
-            )),
-            Bound::Nowhere => nowhere += 1,
+            Bound::At(class, at) => {
+                fits += 1;
+                enqueue(workspace, device, queue, log, id, class, at);
+            }
+            Bound::Full(class) => {
+                fits += 1;
+                log.say(format!(
+                    "“{name}” is waiting for nowhere: no slot of {} has been read and found free.",
+                    device.state.folder_name(class)
+                ));
+            }
+            Bound::Refused(why) => log.say(format!("“{name}” was not queued. {why}")),
+            Bound::Nowhere => {
+                fits += 1;
+                nowhere += 1;
+            }
         }
+    }
+    if let Some(said) = device
+        .state
+        .product()
+        .and_then(|product| crate::strings::fitting(fits, asked, product))
+    {
+        log.say(format!("{said}."));
     }
     if nowhere > 0 {
         log.say(match nowhere {
@@ -638,7 +666,7 @@ fn send(
         ));
         return;
     }
-    let note = write_note(class, &entity.tag(), &device.state.formats_in(class));
+    let note = write_note(&device.state, class, entity);
     let occupant = device
         .state
         .slot(class, at)
@@ -806,6 +834,74 @@ mod tests {
         );
     }
 
+    /// A mixed set queues what the instrument takes, leaves out what it does not, and
+    /// says how much of the set that was.
+    #[test]
+    fn queueing_a_mixed_set_queues_only_what_the_instrument_takes() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_scanned(class, 7, &["", "", ""]);
+
+        let bytes = program(&mut workspace, &mut log);
+        let mine = workspace.ingest(
+            "Africa Split.ne5p".to_string(),
+            Origin::File("Africa Split.ne5p".into()),
+            bytes,
+            &mut log,
+        );
+        let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            bulk(Bulk::Queue, &[Item::Local(mine), Item::Local(stage)]),
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert_eq!(
+            queue.ids(),
+            vec![mine],
+            "only the Electro 5's own is waiting"
+        );
+        let said = log.transcript();
+        assert!(said.contains("1 of 2 fit the Nord Electro 5"), "{said}");
+        assert!(said.contains("Stage 4"), "{said}");
+    }
+
+    /// ⚠️ A refused asset never gets an entry, however it was aimed: the queue is what a
+    /// send walks, so a foreign body in it would reach a delete-then-write.
+    #[test]
+    fn a_slot_named_outright_still_refuses_what_the_instrument_does_not_take() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &[""]);
+        let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::Send {
+                id: stage,
+                class,
+                at: at(0),
+            }],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(queue.is_empty(), "nothing is waiting");
+        let said = log.transcript();
+        assert!(said.contains("cannot go to"), "{said}");
+    }
+
     /// A row already waiting, dropped on another slot, is re-targeted rather than
     /// duplicated: the drop means the same Send it means from any other row, and one
     /// asset has one entry wherever it was dragged from.
@@ -840,6 +936,7 @@ mod tests {
             what: Item::Local(id),
             kind: crate::browser::Kind::Program,
             filed: None,
+            fits: true,
         };
         let onto = crate::browser::Onto::Slot { class, at: at(3) };
         assert_eq!(

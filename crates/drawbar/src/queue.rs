@@ -14,7 +14,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{bad, good, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
-use crate::device::{Device, DeviceCmd, DeviceState, Purpose};
+use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, Glyph};
 use crate::log::Log;
@@ -143,6 +143,11 @@ pub fn enqueue(
     };
     let name = entity.name.clone();
     let where_ = place(class, at);
+    // Refused before the entry exists: the queue is what a send walks, so an asset the
+    // instrument would not take must never get into it.
+    if let Fit::Refuses(why) = fit(&device.state, entity) {
+        return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
+    }
     let holds = match device.state.slot(class, at) {
         Some(Some(info)) => Occupancy::Held(Occupant::of(info)),
         Some(None) => Occupancy::Vacant,
@@ -639,6 +644,8 @@ fn item(
                     what: Item::Local(entity.id),
                     kind: Kind::of(entity.entity.as_ref()),
                     filed: None,
+                    // Nothing the instrument refuses ever reaches the queue.
+                    fits: true,
                 },
                 name: entity.name.clone(),
                 rest: Vec::new(),

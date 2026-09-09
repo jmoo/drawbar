@@ -873,8 +873,9 @@ fn gestures(
                 what: item,
                 kind: Kind::from_class(class),
                 filed: None,
+                fits: true,
             };
-            let carried = browser.carrying(head, name, view.workspace);
+            let carried = browser.carrying(head, name, view.workspace, &view.device.state);
             egui::DragAndDrop::set_payload(ui.ctx(), carried);
         }
     }

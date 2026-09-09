@@ -17,7 +17,7 @@ use std::sync::Arc;
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::{read_only, Device};
+use crate::device::{read_only, Device, DeviceState};
 use crate::filter::Filter;
 use crate::folders::{self, Folders};
 use crate::queue::Queue;
@@ -35,7 +35,9 @@ mod selection;
 mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk};
-pub use drag::{kinds_present, landing, Carried, Held, Item, Kind, Landing, Onto};
+pub use drag::{
+    families_present, kinds_present, landing, qualified, Carried, Held, Item, Kind, Landing, Onto,
+};
 pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
 pub use selection::Selection;
@@ -270,14 +272,20 @@ impl Browser {
 
     /// What one drag carries: the pressed row, and the rest of the selection when the
     /// pressed row is in it.
-    pub(crate) fn carrying(&self, head: Held, name: &str, workspace: &Workspace) -> Carried {
+    pub(crate) fn carrying(
+        &self,
+        head: Held,
+        name: &str,
+        workspace: &Workspace,
+        device: &DeviceState,
+    ) -> Carried {
         let rest: Vec<Held> = match self.selection.holds(head.what) {
             false => Vec::new(),
             true => self
                 .selection
                 .items()
                 .filter(|item| *item != head.what)
-                .filter_map(|item| self.held(item, workspace))
+                .filter_map(|item| self.held(item, workspace, device))
                 .collect(),
         };
         Carried {
@@ -295,7 +303,12 @@ impl Browser {
     ///
     /// ⚠️ Pianos are libraries the instrument installs and indexes for itself, so a slot
     /// in one is not something a drag can pick up and copy back.
-    pub(crate) fn held(&self, item: Item, workspace: &Workspace) -> Option<Held> {
+    pub(crate) fn held(
+        &self,
+        item: Item,
+        workspace: &Workspace,
+        device: &DeviceState,
+    ) -> Option<Held> {
         match item {
             Item::Local(id) => {
                 let entity = workspace.get(id)?;
@@ -303,13 +316,16 @@ impl Browser {
                     what: item,
                     kind: Kind::of(entity.entity.as_ref()),
                     filed: self.folders.holding(id),
+                    fits: crate::device::fit(device, entity).allowed(),
                 })
             }
             Item::Folder(_) | Item::Tag(_) => None,
+            // What is already on the instrument fits it by having got there.
             Item::Slot { class, .. } => (!read_only(class)).then_some(Held {
                 what: item,
                 kind: Kind::from_class(class),
                 filed: None,
+                fits: true,
             }),
         }
     }
@@ -487,7 +503,7 @@ impl Browser {
             };
             let (class, at) = (held.class, held.at);
             let where_ = place(class, at);
-            for warning in write_warnings(class, &entity.tag(), &device.state.formats_in(class)) {
+            for warning in write_warnings(&device.state, class, entity) {
                 if !warnings.contains(&warning) {
                     warnings.push(warning);
                 }
@@ -720,7 +736,7 @@ mod tests {
     /// outside brings only itself — the pressed row is what a drag is about.
     #[test]
     fn a_drag_from_a_picked_row_carries_the_whole_selection() {
-        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
+        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -730,17 +746,17 @@ mod tests {
         }
 
         let head = browser
-            .held(Item::Local(ids[0]), &workspace)
+            .held(Item::Local(ids[0]), &workspace, &device.state)
             .expect("a local is dragged");
-        let carried = browser.carrying(head, "Africa Split", &workspace);
+        let carried = browser.carrying(head, "Africa Split", &workspace, &device.state);
         assert_eq!(carried.rest.len(), 2);
         assert_eq!(carried.all().count(), 3);
         assert!(carried.name.contains("+2"), "{}", carried.name);
 
         let outside = browser
-            .held(Item::Local(apart), &workspace)
+            .held(Item::Local(apart), &workspace, &device.state)
             .expect("a local is dragged");
-        let alone = browser.carrying(outside, "Squabble B", &workspace);
+        let alone = browser.carrying(outside, "Squabble B", &workspace, &device.state);
         assert!(alone.rest.is_empty(), "a row nobody picked carries itself");
         assert_eq!(alone.name, "Squabble B", "and says only its own name");
     }
@@ -750,7 +766,7 @@ mod tests {
     /// them over each other, so a single destination takes the pressed row alone.
     #[test]
     fn a_drop_of_many_repeats_only_where_one_destination_does_not() {
-        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
+        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -758,8 +774,10 @@ mod tests {
             browser.selection.toggle(Item::Local(*id));
         }
         let folder = browser.folders.make();
-        let head = browser.held(Item::Local(ids[0]), &workspace).unwrap();
-        let carried = Arc::new(browser.carrying(head, "Africa Split", &workspace));
+        let head = browser
+            .held(Item::Local(ids[0]), &workspace, &device.state)
+            .unwrap();
+        let carried = Arc::new(browser.carrying(head, "Africa Split", &workspace, &device.state));
 
         let mut filed = Vec::new();
         browser.land(&carried, Onto::Group(folder), &mut filed);
@@ -1005,6 +1023,10 @@ mod tests {
     /// The warning reaches the modal a batch raises, once per format however many items
     /// carry it — and it goes above the list of destinations, which is what the eye
     /// slides past.
+    ///
+    /// The instrument names a model the acceptance table does not know, which is what
+    /// leaves the comparison against the folder's own formats as the only thing to go
+    /// on — a family it does know would refuse these outright.
     #[test]
     fn the_modal_says_when_a_batch_is_of_another_model() {
         use crate::workspace::Origin;
@@ -1012,6 +1034,7 @@ mod tests {
         let (mut browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        device.pretend_attached_as("unnamed device");
 
         let mut ids = Vec::new();
         for slot in 0..2 {

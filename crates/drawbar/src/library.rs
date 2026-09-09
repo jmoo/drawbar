@@ -10,12 +10,13 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use eframe::egui;
+use nord_format::accept::Family;
 use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, Act, Browser, Bulk, Item, Kind};
-use crate::device::{sendable, Device, DeviceState};
+use crate::browser::{cell_ink, families_present, qualified, Act, Browser, Bulk, Item, Kind};
+use crate::device::{fit, sendable, Device, DeviceState};
 use crate::filter::{Filter, Place};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::Track;
@@ -34,6 +35,9 @@ use crate::workspace::{LocalEntity, Workspace};
 pub enum Where {
     Both(bool),
     Computer,
+    /// On this computer, and the attached instrument is not the one whose files these
+    /// are. It is in one place and can only stay there.
+    Foreign,
     Keyboard,
     /// It came off a slot nothing has read, so the other copy cannot be spoken about.
     Unread,
@@ -45,7 +49,7 @@ impl Where {
         match self {
             Where::Both(true) => "both =",
             Where::Both(false) => "both ≠",
-            Where::Computer => "computer",
+            Where::Computer | Where::Foreign => "computer",
             Where::Keyboard => "keyboard",
             Where::Unread => "—",
         }
@@ -60,6 +64,7 @@ impl Where {
                  no longer agree."
             }
             Where::Computer => "On this computer only.",
+            Where::Foreign => "On this computer only — not for this keyboard.",
             Where::Keyboard => "On the instrument only.",
             Where::Unread => "It came off a slot this session has not read.",
         }
@@ -69,7 +74,7 @@ impl Where {
     fn places(self) -> &'static [Place] {
         match self {
             Where::Both(_) => &[Place::Computer, Place::Keyboard],
-            Where::Computer | Where::Unread => &[Place::Computer],
+            Where::Computer | Where::Foreign | Where::Unread => &[Place::Computer],
             Where::Keyboard => &[Place::Keyboard],
         }
     }
@@ -80,8 +85,9 @@ impl Where {
             Where::Both(false) => 0,
             Where::Both(true) => 1,
             Where::Computer => 2,
-            Where::Keyboard => 3,
-            Where::Unread => 4,
+            Where::Foreign => 3,
+            Where::Keyboard => 4,
+            Where::Unread => 5,
         }
     }
 }
@@ -139,6 +145,9 @@ impl Needs {
 pub struct Row {
     pub item: Item,
     pub kind: Kind,
+    /// The family to put in front of the kind's word, where the word alone would not say
+    /// whose files these are. [`crate::browser::qualified`] is the rule.
+    pub family: Option<Family>,
     pub name: String,
     pub tags: usize,
     pub where_: Where,
@@ -167,13 +176,15 @@ impl Row {
 pub fn rows(workspace: &Workspace, device: &DeviceState, tags: &Tags, filter: &Filter) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
+    let kept = families_present(workspace);
+    let instrument = device.product().and_then(Family::from_product);
     for entity in workspace.listed() {
         // The slot the row stands for, so the instrument's own list does not repeat it.
         if let Some(slot) = entity.spot() {
             claimed.push(slot);
         }
         let worn = tags.worn(entity.id);
-        let row = local(entity, device, worn.len());
+        let row = local(entity, device, worn.len(), &kept, instrument);
         if admits(filter, &row, worn) {
             rows.push(row);
         }
@@ -211,10 +222,20 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>) -> bool {
         .any(|place| filter.admits(row.kind, *place, tags))
 }
 
-fn local(entity: &LocalEntity, device: &DeviceState, tags: usize) -> Row {
+fn local(
+    entity: &LocalEntity,
+    device: &DeviceState,
+    tags: usize,
+    kept: &[Family],
+    instrument: Option<Family>,
+) -> Row {
+    let family = Family::of_tag(&entity.tag());
     Row {
         item: Item::Local(entity.id),
         kind: Kind::of(entity.entity.as_ref()),
+        family: qualified(kept, family, instrument)
+            .then_some(family)
+            .flatten(),
         name: entity.name.clone(),
         tags,
         where_: whereabouts(entity, device),
@@ -228,6 +249,8 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
     Row {
         item: Item::Slot { class, at },
         kind: Kind::from_class(class),
+        // What is on the instrument is the instrument's own; the word never needs it.
+        family: None,
         name: info.name.trim().to_string(),
         tags: 0,
         where_: Where::Keyboard,
@@ -242,6 +265,9 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
 /// reports this asset's own checksum.
 fn whereabouts(entity: &LocalEntity, device: &DeviceState) -> Where {
     let Some((class, at)) = entity.link else {
+        if !fit(device, entity).allowed() {
+            return Where::Foreign;
+        }
         return match entity.origin.slot() {
             Some((class, at)) if device.slot(class, at).is_none() => Where::Unread,
             _ => Where::Computer,
@@ -464,6 +490,16 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String
             1 => "1 slot occupied".to_string(),
             n => format!("{n} slots occupied"),
         });
+    }
+    let mine = rows.iter().filter(|row| matches!(row.item, Item::Local(_)));
+    let (fits, of) = mine.fold((0, 0), |(fits, of), row| {
+        (fits + usize::from(row.where_ != Where::Foreign), of + 1)
+    });
+    if let Some(unfit) = device
+        .product()
+        .and_then(|product| crate::strings::fitting(fits, of, product))
+    {
+        said.push(unfit);
     }
     let waiting = rows
         .iter()
@@ -924,8 +960,8 @@ fn paint(
     // A row of the table is dragged like a row of the tree: the same payload, so it
     // lands on the same targets and means the same thing there.
     if response.dragged() {
-        if let Some(head) = browser.held(row.item, workspace) {
-            let carried = browser.carrying(head, &row.name, workspace);
+        if let Some(head) = browser.held(row.item, workspace, &device.state) {
+            let carried = browser.carrying(head, &row.name, workspace, &device.state);
             egui::DragAndDrop::set_payload(ui.ctx(), carried);
         }
     }
@@ -1011,7 +1047,7 @@ fn tooltip(
         Column::Mark => {
             "check it to act on several at once; a click on the row picks it alone".to_string()
         }
-        Column::Glyph => row.kind.chip().to_string(),
+        Column::Glyph => crate::strings::kind_word(row.kind, row.family),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
@@ -1133,6 +1169,7 @@ mod tests {
         Row {
             item: Item::Local(size),
             kind,
+            family: None,
             name: name.to_string(),
             tags: 0,
             where_,

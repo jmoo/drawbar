@@ -6,6 +6,7 @@
 //! of the branch beside it.
 
 use eframe::egui;
+use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::{owed, Act, Bulk};
@@ -499,6 +500,7 @@ impl Browser {
 
         let owed = queue.entry(entity.id).map(destination);
         let wears = self.tags.worn(entity.id).len();
+        let word = crate::strings::kind_word(kind, qualifier(entity, workspace, device));
         let drawn = row(
             ui,
             selected,
@@ -506,7 +508,7 @@ impl Browser {
                 indent: indent(depth, false),
                 glyph: Some(kind.glyph()),
                 name: &entity.name,
-                note: owed.as_deref().or(Some(kind.chip())),
+                note: owed.as_deref().or(Some(word.as_str())),
                 dirty: entity.dirty,
                 // What is waiting wins: a linked asset is settled, an owed one is not.
                 dot: match (owed.is_some(), entity.link.is_some()) {
@@ -522,8 +524,8 @@ impl Browser {
         let response = drawn.response;
 
         if response.dragged() {
-            if let Some(head) = self.held(item, workspace) {
-                let carried = self.carrying(head, &entity.name, workspace);
+            if let Some(head) = self.held(item, workspace, &device.state) {
+                let carried = self.carrying(head, &entity.name, workspace, &device.state);
                 egui::DragAndDrop::set_payload(ui.ctx(), carried);
             }
         }
@@ -1010,8 +1012,8 @@ impl Browser {
 
         if let Some(name) = &held {
             if response.dragged() {
-                if let Some(head) = self.held(item, workspace) {
-                    let carried = self.carrying(head, name, workspace);
+                if let Some(head) = self.held(item, workspace, &device.state) {
+                    let carried = self.carrying(head, name, workspace, &device.state);
                     egui::DragAndDrop::set_payload(ui.ctx(), carried);
                 }
             }
@@ -1202,6 +1204,16 @@ impl Browser {
     fn tag_ids(&self) -> Vec<u64> {
         self.tags.all().iter().map(|tag| tag.id).collect()
     }
+}
+
+/// The family to put in front of an asset's kind word, where the word alone would not
+/// say whose files these are.
+fn qualifier(entity: &LocalEntity, workspace: &Workspace, device: &Device) -> Option<Family> {
+    let family = Family::of_tag(&entity.tag());
+    let instrument = device.state.product().and_then(Family::from_product);
+    super::qualified(&super::families_present(workspace), family, instrument)
+        .then_some(family)
+        .flatten()
 }
 
 /// Where a queued asset is going, for the note that says so.

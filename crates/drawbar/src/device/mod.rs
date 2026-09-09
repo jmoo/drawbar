@@ -14,6 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
+use nord_format::accept::{Acceptance, Family, Slot};
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
@@ -680,6 +681,91 @@ pub const ELECTRO5: [(ObjectClass, &str, u32); 6] = [
     (ObjectClass::Settings, "Settings", 1),
 ];
 
+/// The storage class a folder on the instrument is, in `nord-format`'s vocabulary.
+///
+/// One table between the wire's classes and the acceptance table's. `None` for a class
+/// the partition table named and this app does not know: nothing can be said about what
+/// such a folder takes.
+fn slot_of(class: ObjectClass) -> Option<Slot> {
+    match class {
+        ObjectClass::Piano => Some(Slot::Piano),
+        ObjectClass::Sample => Some(Slot::Sample),
+        ObjectClass::Program => Some(Slot::Program),
+        ObjectClass::SetList => Some(Slot::SetList),
+        ObjectClass::Live => Some(Slot::Live),
+        ObjectClass::Settings => Some(Slot::Settings),
+        ObjectClass::Unknown(_) => None,
+    }
+}
+
+/// Whether the attached instrument takes an asset, and what is worth saying about it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Fit {
+    /// Nothing is attached, so nothing can be said.
+    Unattached,
+    Takes,
+    /// It should land, and this is what has not been checked.
+    Warn(String),
+    /// It is another instrument's, and this is why.
+    Refuses(String),
+}
+
+impl Fit {
+    /// Whether a write may be attempted. Only an outright refusal stops one.
+    pub fn allowed(&self) -> bool {
+        !matches!(self, Fit::Refuses(_))
+    }
+
+    /// The sentence, where there is one to show.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Fit::Warn(why) | Fit::Refuses(why) => Some(why),
+            Fit::Unattached | Fit::Takes => None,
+        }
+    }
+}
+
+/// Whether the attached instrument takes this asset, from the acceptance table in
+/// `nord-format` and, where that table says nothing, from what the folder is holding.
+///
+/// The asset's own folder decides the class: an asset is only ever written to the folder
+/// its kind belongs in, so that is the one question worth asking.
+pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
+    let Some(product) = state.product() else {
+        return Fit::Unattached;
+    };
+    let Some(class) = crate::browser::Kind::of(entity.entity.as_ref()).home() else {
+        return Fit::Takes;
+    };
+    let tag = entity.tag();
+    let resident = || crate::browser::foreign_format(&tag, &state.formats_in(class));
+    let unknown = || match resident() {
+        Some(why) => Fit::Warn(why),
+        None => Fit::Takes,
+    };
+    let (Some(slot), Some(family)) = (slot_of(class), Family::from_product(product)) else {
+        return unknown();
+    };
+    match family.accepts(slot, &tag) {
+        Acceptance::Confirmed => Fit::Takes,
+        Acceptance::Inferred => Fit::Warn(format!(
+            "This is a {} file and the instrument is a {product}, but no file of this \
+             kind has ever been written to one. Sending it is untried.",
+            family.label()
+        )),
+        Acceptance::Refused => Fit::Refuses(match Family::of_tag(&tag) {
+            Some(owner) => format!(
+                "This is a {} file and the instrument is a {product}.",
+                owner.label()
+            ),
+            // ⚠️ Unreachable while `accepts` refuses only a tag another family carries;
+            // stated rather than unwrapped so a widened table cannot panic here.
+            None => format!("A {tag} file is not one a {product} takes."),
+        }),
+        Acceptance::Unknown => unknown(),
+    }
+}
+
 /// The slot on the attached instrument that holds an asset's own body.
 ///
 /// The container's CRC-32 **is** the checksum a walk reports for a slot — see the round
@@ -693,6 +779,11 @@ pub const ELECTRO5: [(ObjectClass, &str, u32); 6] = [
 /// over an unchanged cache answers the same thing. That is what lets an edit here keep
 /// the asset pointing where it was matched.
 pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
+    // ⚠️ Before the checksums: a foreign body whose CRC-32 happens to match a slot's
+    // would otherwise be linked into a folder the instrument would refuse it from.
+    if !fit(state, entity).allowed() {
+        return None;
+    }
     let (class, here) = matchable(entity)?;
     let origin = entity.origin.slot();
     let mut lowest = None;
@@ -968,9 +1059,17 @@ impl Device {
         &self.pending
     }
 
-    /// Attach an instrument, as its descriptors would have.
+    /// Attach an instrument, as its descriptors would have. The product string is the
+    /// one the recorded exchanges in `nord-usb` carry.
     #[cfg(test)]
     pub fn pretend_attached(&mut self) {
+        self.pretend_attached_as("Nord Electro 5");
+    }
+
+    /// Attach an instrument reporting a product string of its own, for the rules that
+    /// turn on which model it is.
+    #[cfg(test)]
+    pub fn pretend_attached_as(&mut self, product: &str) {
         self.state.connection = Connection::Connected(DeviceCard {
             build: Some(7),
             firmware: Some(204),
@@ -978,7 +1077,7 @@ impl Device {
             kind: Some(1),
             manufacturer: Some("Clavia DMI AB".into()),
             max_transfer: Some(4096),
-            product: "Electro 5".into(),
+            product: product.to_string(),
             product_id: 0,
             serial: None,
             vendor_id: 0x0ffc,
@@ -1525,6 +1624,87 @@ mod tests {
             .and_then(|entity| entity.container.as_ref()?.body_crc32)
             .expect("a type-1 container carries one");
         (id, crc)
+    }
+
+    /// An asset of another family's, on this computer.
+    fn stage(workspace: &mut Workspace, log: &mut Log, origin: Origin) -> (u64, u32) {
+        let made = workspace
+            .create(crate::workspace::Fresh::Stage4Program, log)
+            .unwrap();
+        let bytes = workspace.get(made).unwrap().bytes.clone();
+        workspace.remove(made, log);
+        let id = workspace.ingest("Africa-Split.ns4p".into(), origin, bytes, log);
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .expect("a type-1 container carries one");
+        (id, crc)
+    }
+
+    /// The four answers the acceptance table gives, and the fifth for nothing attached.
+    #[test]
+    fn what_the_instrument_takes_is_decided_by_the_table_then_by_the_folder() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (own, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        let (other, _) = stage(&mut workspace, &mut log, Origin::Fresh);
+        fn held(device: &Device, workspace: &Workspace, id: u64) -> Fit {
+            fit(&device.state, workspace.get(id).expect("it is on the list"))
+        }
+        let held = |device: &Device, id| held(device, &workspace, id);
+
+        assert_eq!(held(&device, own), Fit::Unattached);
+
+        device.pretend_attached();
+        assert_eq!(held(&device, own), Fit::Takes, "confirmed on hardware");
+        match held(&device, other) {
+            Fit::Refuses(why) => {
+                assert!(why.contains("Stage 4"), "{why}");
+                assert!(why.contains("Nord Electro 5"), "{why}");
+            }
+            answer => panic!("a Stage 4 program on an Electro 5: {answer:?}"),
+        }
+
+        device.pretend_attached_as("Nord Stage 4 88");
+        match held(&device, other) {
+            Fit::Warn(why) => assert!(why.contains("untried"), "{why}"),
+            answer => panic!("a Stage 4 program on a Stage 4: {answer:?}"),
+        }
+
+        // A model with no row in the table falls back to what the folder is holding.
+        device.pretend_attached_as("unnamed device");
+        assert_eq!(held(&device, own), Fit::Takes);
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        device.pretend_attached_as("unnamed device");
+        match held(&device, other) {
+            Fit::Warn(why) => assert!(why.contains("ns4p"), "{why}"),
+            answer => panic!("an unnameable instrument holding ne5p: {answer:?}"),
+        }
+    }
+
+    /// ⚠️ A refused asset is not linked however well its checksum matches: a link is
+    /// what the queue and the library treat as the slot holding these bytes.
+    #[test]
+    fn an_asset_the_instrument_refuses_is_linked_to_nothing() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (own, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let (other, _) = stage(&mut workspace, &mut log, Origin::Fresh);
+
+        // Both slots report the Electro 5 program's checksum, so only the family
+        // separates the two assets.
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[Some(("Africa Split", crc)), Some(("Squabble B", crc))],
+        );
+        device.relink(&mut workspace);
+        assert!(workspace.get(own).unwrap().link.is_some());
+        assert_eq!(workspace.get(other).unwrap().link, None);
     }
 
     /// A link is a slot of the asset's **own** folder reporting the asset's own body.

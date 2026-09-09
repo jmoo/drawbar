@@ -15,6 +15,7 @@ pub(in crate::browser) fn local(kind: Kind) -> Held {
         what: Item::Local(1),
         kind,
         filed: None,
+        fits: true,
     }
 }
 
@@ -26,6 +27,7 @@ pub(in crate::browser) fn slot(class: ObjectClass, bank: u32, slot: u32) -> Held
         },
         kind: Kind::from_class(class),
         filed: None,
+        fits: true,
     }
 }
 

@@ -9,7 +9,10 @@
 //! English is embedded. Another language is another pair of tables and one lookup;
 //! nothing above this module spells a field name for itself.
 
+use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
+
+use crate::browser::Kind;
 
 /// A part of a document, named the way the panel divides itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -636,6 +639,28 @@ pub fn shown(at: Location) -> String {
 /// Where something is, the way a person would say it: `Programs 7:4`.
 pub fn place(class: ObjectClass, at: Location) -> String {
     format!("{} {}", folder(class), shown(at))
+}
+
+// ── what the attached instrument takes ───────────────────────────────────────────
+
+/// How much of a set the attached instrument takes: `6 of 9 fit the Nord Electro 5D 73`.
+///
+/// A clause rather than a sentence, because the library's footer sets it among others.
+/// `None` when all of it fits, which is nothing to report.
+pub fn fitting(fits: usize, of: usize, product: &str) -> Option<String> {
+    (fits < of).then(|| format!("{fits} of {of} fit the {product}"))
+}
+
+/// What a row's kind is called, with the family in front of it where the word alone
+/// would not say whose files these are: `Stage 4 program` rather than `program`.
+///
+/// [`crate::browser::qualified`] is the rule for when that is; this is the only place
+/// the family's own name is put in front of anything.
+pub fn kind_word(kind: Kind, family: Option<Family>) -> String {
+    match family {
+        Some(family) => format!("{} {}", family.label(), kind.chip()),
+        None => kind.chip().to_string(),
+    }
 }
 
 #[cfg(test)]
