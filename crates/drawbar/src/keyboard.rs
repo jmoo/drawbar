@@ -523,7 +523,7 @@ fn list(
             egui::TopBottomPanel::bottom("keyboard_settings")
                 .resizable(false)
                 .frame(egui::Frame::new())
-                .show_inside(ui, |ui| crate::queue::table(ui, &held.diff));
+                .show_inside(ui, |ui| crate::queue::table(ui, held));
         }
     }
 

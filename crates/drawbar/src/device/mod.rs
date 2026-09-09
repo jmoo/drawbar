@@ -320,6 +320,13 @@ pub enum DeviceEvent {
         bytes: Vec<u8>,
         why: Purpose,
     },
+    /// A read found the slot empty, which is the instrument's answer rather than a
+    /// fault. Only a read can settle a slot no walk has reached.
+    Vacant {
+        class: ObjectClass,
+        at: Location,
+        why: Purpose,
+    },
     /// One object landed on the instrument, so it is no longer owed. Every write path
     /// raises one — a lone put as much as a batch.
     Sent {
@@ -873,11 +880,9 @@ impl Device {
         &self.pending
     }
 
-    /// Fill in a bank as though the instrument had answered, for a headless render.
+    /// Attach an instrument, as its descriptors would have.
     #[cfg(test)]
-    pub fn pretend_scanned(&mut self, class: ObjectClass, bank: u32, names: &[&str]) {
-        use nord_usb::wire::ProgramInfo;
-
+    pub fn pretend_attached(&mut self) {
         self.state.connection = Connection::Connected(DeviceCard {
             build: Some(7),
             firmware: Some(204),
@@ -890,6 +895,15 @@ impl Device {
             serial: None,
             vendor_id: 0x0ffc,
         });
+    }
+
+    /// Fill in a bank as though a walk had answered, under the panel's own bank number —
+    /// which is the number [`DeviceEvent::BankScanned`] carries.
+    #[cfg(test)]
+    pub fn pretend_scanned(&mut self, class: ObjectClass, bank: u32, names: &[&str]) {
+        use nord_usb::wire::ProgramInfo;
+
+        self.pretend_attached();
         let slots = names
             .iter()
             .enumerate()
@@ -1066,8 +1080,17 @@ impl Device {
                     }
                     Purpose::Compare => {
                         if let Some((class, at)) = origin.slot() {
-                            queue.arrived(class, at, &bytes, workspace);
+                            queue.arrived(class, at, &name, &bytes, workspace);
                         }
+                    }
+                },
+                // A slot that is not there to copy or open is a failure to the user, and
+                // an answer to the queue: nothing is being replaced.
+                DeviceEvent::Vacant { class, at, why } => match why {
+                    Purpose::Compare => queue.vacant(class, at),
+                    Purpose::Copy | Purpose::View => {
+                        log.error(format!("{} holds nothing to read", shown(at)));
+                        log.trouble(format!("{} is empty.", place(class, at)));
                     }
                 },
                 DeviceEvent::Rescued { at, name, bytes } => {

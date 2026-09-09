@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn a_send_queues_and_the_drain_names_the_asset_it_writes() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
         let at = Location { bank: 6, slot: 1 };
         let bytes = program(&mut workspace, &mut log);
         let id = workspace.ingest(

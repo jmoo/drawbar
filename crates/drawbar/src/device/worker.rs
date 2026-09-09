@@ -190,9 +190,15 @@ async fn execute<T: Transport>(
             body,
             why,
         } => {
-            let (info, bytes) = read_object(device, class, at, body)
-                .await
-                .map_err(spoil(gone, Some(at)))?;
+            let (info, bytes) = match read_object(device, class, at, body).await {
+                Ok(read) => read,
+                // Status 1 is a vacant slot, not a failure.
+                Err(Error::DeviceStatus(1)) => {
+                    emit.send(DeviceEvent::Vacant { class, at, why });
+                    return Ok(None);
+                }
+                Err(e) => return Err(spoil(gone, Some(at))(e)),
+            };
             let note = format!(
                 "read {:?} from {} ({} bytes)",
                 info.name,
@@ -1038,6 +1044,7 @@ mod wire_tests {
     use std::sync::mpsc::Receiver;
 
     use super::*;
+    use crate::device::Purpose;
     use nord_usb::wire::{cmd, ui, Message, Service};
     use nord_usb::Transport;
 
@@ -1352,6 +1359,42 @@ mod wire_tests {
         let mut names = written_names(device);
         assert_eq!(names.len(), 1, "one write");
         names.remove(0)
+    }
+
+    /// A read of a slot the instrument reports empty is an answer, not a fault: the
+    /// queue needs to hear *empty* to stop waiting on it.
+    #[test]
+    fn a_read_of_an_empty_slot_is_forwarded_as_vacant() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]);
+        let (_, events) = drive(
+            &mut device,
+            DeviceCmd::Get {
+                class: ObjectClass::Program,
+                at,
+                body: false,
+                why: Purpose::Compare,
+            },
+        );
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert!(
+            said.iter().any(|event| matches!(
+                event,
+                DeviceEvent::Vacant {
+                    at: empty,
+                    why: Purpose::Compare,
+                    ..
+                } if *empty == at
+            )),
+            "the empty slot was reported"
+        );
+        assert!(
+            !said
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::OpFailed(_) | DeviceEvent::Got { .. })),
+            "and neither failed nor handed anything back"
+        );
     }
 
     #[test]

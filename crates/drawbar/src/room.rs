@@ -91,7 +91,7 @@ fn incoming(
     queue
         .entries()
         .iter()
-        .filter(|held| held.class == class && held.replaces.is_none())
+        .filter(|held| held.class == class && held.replaces.occupant().is_none())
         .filter_map(|held| match by_slot {
             true => Some(1),
             false => {
