@@ -35,7 +35,7 @@ mod selection;
 mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk};
-pub use drag::{landing, Carried, Held, Item, Kind, Landing, Onto};
+pub use drag::{kinds_present, landing, Carried, Held, Item, Kind, Landing, Onto};
 pub use instrument::about;
 pub use row::{cell_ink, Cells, Drawn};
 pub use selection::Selection;

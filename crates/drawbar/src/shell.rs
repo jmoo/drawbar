@@ -1008,6 +1008,10 @@ impl DrawbarApp {
 
     /// The browser dock: this computer and the instrument, under one header.
     pub(crate) fn browser_dock(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        self.shell.filter.keep_kinds(&crate::browser::kinds_present(
+            &self.workspace,
+            &self.device.state,
+        ));
         let open = self.shell.browser_open;
         let fill = ctx.style().visuals.panel_fill;
         let shut = egui::SidePanel::left("browser_shut")

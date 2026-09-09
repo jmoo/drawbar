@@ -69,6 +69,14 @@ impl Filter {
     pub fn forget_tag(&mut self, tag: u64) {
         self.tags.remove(&tag);
     }
+
+    /// ⚠️ A kind that is nowhere any more takes its narrowing with it. The row that
+    /// would turn it off has gone with it — an instrument let go while its folders are
+    /// what the library is narrowed to would otherwise leave an empty table and no way
+    /// back to a full one.
+    pub fn keep_kinds(&mut self, present: &[Kind]) {
+        self.kind = self.kind.filter(|kind| present.contains(kind));
+    }
 }
 
 #[cfg(test)]

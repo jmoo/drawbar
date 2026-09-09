@@ -7,9 +7,10 @@ use eframe::egui;
 use nord_format::Entity;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::read_only;
+use crate::device::{read_only, DeviceState};
 use crate::icon::Glyph;
 use crate::strings::folder;
+use crate::workspace::Workspace;
 
 /// What an asset is, which is what decides the folder it belongs in.
 ///
@@ -182,6 +183,24 @@ impl Kind {
             Kind::Other => Glyph::HardDrive,
         }
     }
+}
+
+/// The kinds that exist here: what the list on this computer holds, and what the
+/// attached instrument has a folder for, in [`Kind::ALL`] order.
+///
+/// The union of the two places, because a kind is a way of narrowing what the library
+/// shows and the library shows both. A row for a kind neither place holds narrows to
+/// nothing.
+pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
+    let here: Vec<Kind> = workspace
+        .listed()
+        .map(|entity| Kind::of(entity.entity.as_ref()))
+        .chain(device.classes().into_iter().map(Kind::from_class))
+        .collect();
+    Kind::ALL
+        .into_iter()
+        .filter(|kind| here.contains(kind))
+        .collect()
 }
 
 /// One row of the tree.

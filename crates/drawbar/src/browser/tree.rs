@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::{owed, Act, Bulk};
-use super::drag::{Item, Kind, Onto};
+use super::drag::{kinds_present, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device};
@@ -86,17 +86,6 @@ impl Default for Sections {
     }
 }
 
-/// The kinds the tree offers to narrow the library to, in the order §5.1 lists them.
-const KINDS: [Kind; 7] = [
-    Kind::Program,
-    Kind::Live,
-    Kind::SetList,
-    Kind::Sample,
-    Kind::Piano,
-    Kind::Settings,
-    Kind::Project,
-];
-
 /// Where a row's contents start.
 ///
 /// A branch at the top is 8 px in, a leaf beside it 26, and a leaf one level down 40:
@@ -149,6 +138,14 @@ fn nothing(ui: &mut egui::Ui, depth: usize, said: &str) {
     );
 }
 
+/// Whether the kinds section is worth a section at all.
+///
+/// One kind is what everything in both places is, so there is nothing to choose between
+/// and the rows would only narrow the library to what it already shows.
+fn worth_choosing(kinds: &[Kind]) -> bool {
+    kinds.len() > 1
+}
+
 /// Whether a bank's own name says anything the number beside every row does not.
 ///
 /// Programs come back called "Bank 1", "Bank 2" — a caption repeating the number the
@@ -179,8 +176,9 @@ impl Browser {
                 if section(ui, "places", &mut sections.places) {
                     self.places(ui, workspace, device, queue, filter, acts);
                 }
-                if section(ui, "kinds", &mut sections.kinds) {
-                    self.kinds(ui, filter, acts);
+                let kinds = kinds_present(workspace, &device.state);
+                if worth_choosing(&kinds) && section(ui, "kinds", &mut sections.kinds) {
+                    self.kinds(ui, &kinds, filter, acts);
                 }
                 if section(ui, "tags", &mut sections.tags) {
                     self.tag_rows(ui, filter, acts);
@@ -1111,8 +1109,8 @@ impl Browser {
 
     // ---- kinds and tags ---------------------------------------------------------
 
-    fn kinds(&mut self, ui: &mut egui::Ui, filter: &Filter, acts: &mut Vec<Act>) {
-        for kind in KINDS {
+    fn kinds(&mut self, ui: &mut egui::Ui, kinds: &[Kind], filter: &Filter, acts: &mut Vec<Act>) {
+        for kind in kinds.iter().copied() {
             let asked = Narrow::Kind(kind);
             let drawn = row(
                 ui,
@@ -1272,6 +1270,56 @@ mod tests {
         let mut filter = Filter::default();
         filter.narrow(Narrow::Place(Place::Computer));
         assert_eq!(on(&filter), 1, "This computer is the one row lit");
+    }
+
+    /// The kinds row list is what the two places actually hold, in one order. A row for
+    /// a kind neither place holds narrows the library to nothing.
+    #[test]
+    fn the_kinds_section_lists_the_union_of_the_two_places() {
+        let (_browser, mut workspace, mut device, _tabs, _queue, mut log) = bench();
+        workspace.create(Fresh::Program, &mut log).unwrap();
+        let alone = kinds_present(&workspace, &device.state);
+        assert_eq!(alone, [Kind::Program]);
+        assert!(!worth_choosing(&alone), "nothing to choose between");
+
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        workspace.create(Fresh::Stage4Synth, &mut log).unwrap();
+        assert_eq!(
+            kinds_present(&workspace, &device.state),
+            [
+                Kind::Program,
+                Kind::SetList,
+                Kind::Sample,
+                Kind::Piano,
+                Kind::Live,
+                Kind::Settings,
+                Kind::Synth,
+            ],
+            "the instrument's six folders and what is on this computer, in one order"
+        );
+        assert!(worth_choosing(&kinds_present(&workspace, &device.state)));
+    }
+
+    /// ⚠️ The row that turns a narrowing off goes with the kind. A filter left pointing
+    /// at a kind that is nowhere shows an empty table with nothing to click to refill it.
+    #[test]
+    fn a_kind_that_leaves_the_union_stops_narrowing() {
+        let (_browser, workspace, mut device, _tabs, _queue, _log) = bench();
+        let mut filter = Filter::default();
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        filter.narrow(Narrow::Kind(Kind::Piano));
+        filter.keep_kinds(&kinds_present(&workspace, &device.state));
+        assert_eq!(filter.kind, Some(Kind::Piano));
+
+        device.pretend(crate::device::DeviceEvent::Disconnected { lost: false });
+        device.poll(
+            &mut crate::log::Log::default(),
+            &mut Workspace::new(context()),
+            &mut crate::tabs::Tabs::default(),
+            &mut Queue::default(),
+        );
+        filter.keep_kinds(&kinds_present(&workspace, &device.state));
+        assert_eq!(filter.kind, None, "the instrument took its folders with it");
     }
 
     /// A caption earns its line by saying something the location column does not. The
