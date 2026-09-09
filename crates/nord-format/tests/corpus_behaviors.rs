@@ -1882,9 +1882,11 @@ fn piano_surgery_leaves_a_library_the_reader_accepts() {
         loudest.keep_layers(&npno::Layers::Loudest(2));
         cases.push(("two loudest layers".into(), loudest));
         let mut narrowed = source.clone();
-        narrowed.cut_range(middle..=*covered.last().unwrap());
+        narrowed
+            .cut_range(middle..=*covered.last().unwrap())
+            .unwrap();
         cases.push(("upper half of the keyboard".into(), narrowed));
-        let (low, high) = source.split_at(middle);
+        let (low, high) = source.split_at(middle).unwrap();
         cases.push(("split low".into(), low));
         cases.push(("split high".into(), high));
 

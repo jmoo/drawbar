@@ -281,9 +281,7 @@ fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
     let library = piano.library().map_err(|e| e.to_string())?;
     let (name, variant) = library.name();
 
-    let covered: Vec<u8> = (0..128u8)
-        .filter(|&k| library.key_map()[usize::from(k)] != UNCOVERED)
-        .collect();
+    let covered = covered_keys(&library);
     let coverage = match (covered.first(), covered.last()) {
         (Some(&lo), Some(&hi)) => format!(
             "{}..{} ({} keys)",
@@ -386,6 +384,9 @@ fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
     let tuned: Vec<i8> = covered
         .iter()
         .map(|&k| library.fine_tune(k))
+        .collect::<Result<Vec<i8>, _>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
         .filter(|&units| units != 0)
         .collect();
     match (tuned.iter().min(), tuned.iter().max()) {
@@ -405,17 +406,32 @@ fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
             "key", "root", "tune", "cents"
         )));
         for key in covered {
-            let units = library.fine_tune(key);
+            let units = library.fine_tune(key).map_err(|e| e.to_string())?;
+            let root = library
+                .key_root(key)
+                .map_err(|e| e.to_string())?
+                .expect("a covered key names a root");
             ui.out(format!(
                 "  {:>6} {:>6} {:>7} {:>+7.1}",
                 note::name(key),
-                note::name(library.key_map()[usize::from(key)]),
+                note::name(root),
                 format!("{units:+}"),
                 f32::from(units) * npno::FINE_TUNE_CENTS_PER_UNIT,
             ));
         }
     }
     Ok(())
+}
+
+/// The keys the map routes somewhere, ascending.
+fn covered_keys(library: &Library<'_>) -> Vec<u8> {
+    library
+        .key_map()
+        .iter()
+        .enumerate()
+        .filter(|&(_, &root)| root != UNCOVERED)
+        .map(|(key, _)| key as u8)
+        .collect()
 }
 
 fn bank_label(code: u8) -> String {
@@ -447,15 +463,12 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
             })?;
             (index, stroke)
         }
-        (None, Some(key)) => {
-            let key = note::parse(key)?;
-            let root = library.key_map()[usize::from(key)];
-            if root == UNCOVERED {
-                return Err(format!(
-                    "{} is not a key this library covers",
-                    note::name(key)
-                ));
-            }
+        (None, Some(spec)) => {
+            let key = note::parse(spec)?;
+            let root = library
+                .key_root(key)
+                .map_err(|e| format!("--key {spec}: {e}"))?
+                .ok_or_else(|| format!("{} is not a key this library covers", note::name(key)))?;
             let matching: Vec<(usize, _)> = library
                 .strokes()
                 .iter()
@@ -553,7 +566,9 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
     for spec in &args.tune {
         let (key, value) = split_pair(spec, "tune")?;
         let units = parse_tune(value)?;
-        library.set_fine_tune(key, units);
+        library
+            .set_fine_tune(key, units)
+            .map_err(|e| format!("--tune {spec}: {e}"))?;
         ui.out(format!(
             "  {} fine tune {units:+} ({:+.1} c)",
             note::name(key),
@@ -652,7 +667,9 @@ pub fn trim(ui: &Ui, args: TrimArgs) -> Result<(), String> {
     }
     if let Some(spec) = &args.range {
         let (lo, hi) = parse_range(spec)?;
-        let change = library.cut_range(lo..=hi);
+        let change = library
+            .cut_range(lo..=hi)
+            .map_err(|e| format!("--range {spec}: {e}"))?;
         ui.out(format!(
             "  cut to {}..{}: {} key(s) uncovered, {} stroke(s) dropped",
             note::name(lo),
@@ -861,7 +878,9 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
     let (original, piano) = read(&args.file)?;
     let library = piano.library().map_err(|e| e.to_string())?;
     let at = note::parse(&args.at)?;
-    let (low, high) = library.split_at(at);
+    let (low, high) = library
+        .split_at(at)
+        .map_err(|e| format!("--at {}: {e}", args.at))?;
     for (label, half) in [("low", &low), ("high", &high)] {
         if half.strokes().is_empty() {
             return Err(format!(
@@ -882,9 +901,7 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
         refuse_in_place(&args.file, &path)?;
         let bytes = to_bytes(half, &args.file)?;
         write_file(ui, &path, &bytes)?;
-        let covered: Vec<u8> = (0..128u8)
-            .filter(|&k| half.key_map()[usize::from(k)] != UNCOVERED)
-            .collect();
+        let covered = covered_keys(half);
         ui.out(format!(
             "  {label}: {} stroke(s) over {} root(s), keys {}",
             half.strokes().len(),
@@ -939,5 +956,17 @@ mod tests {
         assert_eq!(split_pair("C4=60", "map").unwrap(), (60, "60"));
         assert_eq!(split_pair("60=-", "map").unwrap(), (60, "-"));
         assert!(split_pair("C4", "map").is_err());
+    }
+
+    /// Every verb that takes a key reads it here, so a key the tables cannot hold is
+    /// refused before it reaches a transform.
+    #[test]
+    fn a_key_past_the_midi_range_is_refused_at_every_flag_that_takes_one() {
+        assert!(split_pair("127=3", "tune").is_ok());
+        assert!(split_pair("128=3", "tune").is_err());
+        assert!(split_pair("128=C4", "map").is_err());
+        assert!(note::parse("128").is_err(), "--at and --map's root");
+        assert_eq!(parse_range("0..127").unwrap(), (0, 127));
+        assert!(parse_range("0..128").is_err());
     }
 }

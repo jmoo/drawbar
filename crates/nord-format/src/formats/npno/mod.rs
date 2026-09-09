@@ -340,6 +340,23 @@ fn split_name(field: &str) -> (String, String) {
     (name.trim().to_owned(), variant.trim().to_owned())
 }
 
+/// `key` as an index into a [`NOTES`]-entry table, or an error naming it.
+///
+/// Every accessor that reaches the key map or a per-note table goes through this: a
+/// `u8` runs to 255, and past the table's last entry the byte belongs to the next
+/// table.
+fn midi_key(what: &str, key: u8) -> Result<usize, Error> {
+    let index = usize::from(key);
+    if index < NOTES {
+        return Ok(index);
+    }
+    Err(ParseError::OutOfBounds {
+        value: format!("{what} {key}"),
+        bound: "a MIDI note from 0 through 127".into(),
+    }
+    .into())
+}
+
 fn short(what: &str) -> Error {
     ParseError::AssertFail(format!("the body ends inside {what}")).into()
 }
@@ -635,7 +652,15 @@ impl<'a> Library<'a> {
         self.strokes.iter().map(|s| s.root).collect()
     }
 
-    /// The keys the map routes to `root`, ascending.
+    /// The root note whose strokes play `key`, or `None` where the map leaves the
+    /// key uncovered.
+    pub fn key_root(&self, key: u8) -> Result<Option<u8>, Error> {
+        let root = self.key_map()[midi_key("key", key)?];
+        Ok((root != UNCOVERED).then_some(root))
+    }
+
+    /// The keys the map routes to `root`, ascending. A root the map never names —
+    /// including one outside the MIDI range — has no keys.
     pub fn keys_for(&self, root: u8) -> Vec<u8> {
         self.key_map()
             .iter()
@@ -647,8 +672,8 @@ impl<'a> Library<'a> {
 
     /// The per-key fine tune at `0x18c + key`, in units worth
     /// [`FINE_TUNE_CENTS_PER_UNIT`] each. Confirmed on hardware.
-    pub fn fine_tune(&self, key: u8) -> i8 {
-        self.prefix[FINE_TUNE_AT + usize::from(key)] as i8
+    pub fn fine_tune(&self, key: u8) -> Result<i8, Error> {
+        Ok(self.prefix[FINE_TUNE_AT + midi_key("key", key)?] as i8)
     }
 
     /// Retune one key, in the units [`Library::fine_tune`] reads.
@@ -656,8 +681,10 @@ impl<'a> Library<'a> {
     /// The unit's size and direction are confirmed on hardware from libraries as the
     /// vendor tuned them; that rewriting the byte retunes the key is inferred from
     /// specimens, not confirmed on hardware.
-    pub fn set_fine_tune(&mut self, key: u8, units: i8) {
-        self.prefix[FINE_TUNE_AT + usize::from(key)] = units as u8;
+    pub fn set_fine_tune(&mut self, key: u8, units: i8) -> Result<(), Error> {
+        let at = FINE_TUNE_AT + midi_key("key", key)?;
+        self.prefix[at] = units as u8;
+        Ok(())
     }
 
     /// The long name at `0x3c` and the voicing at `0x5c`, which only
@@ -723,7 +750,9 @@ impl<'a> Library<'a> {
     /// That the instrument follows a rewritten map — a key routed to another root, or
     /// to nothing — is inferred from specimens; not confirmed on hardware.
     pub fn set_key_root(&mut self, key: u8, root: Option<u8>) -> Result<(), Error> {
+        let key = midi_key("key", key)?;
         if let Some(root) = root {
+            midi_key("root", root)?;
             if !self.roots().contains(&root) {
                 return Err(ParseError::OutOfBounds {
                     value: format!("root {root}"),
@@ -732,7 +761,7 @@ impl<'a> Library<'a> {
                 .into());
             }
         }
-        self.key_map_mut()[usize::from(key)] = root.unwrap_or(UNCOVERED);
+        self.key_map_mut()[key] = root.unwrap_or(UNCOVERED);
         Ok(())
     }
 
@@ -780,8 +809,10 @@ impl<'a> Library<'a> {
     ///
     /// That an uncovered key falls silent rather than reaching for a neighbouring
     /// root is inferred from specimens; not confirmed on hardware.
-    pub fn cut_range(&mut self, range: RangeInclusive<u8>) -> Change {
-        self.restrict(|key| range.contains(&key))
+    pub fn cut_range(&mut self, range: RangeInclusive<u8>) -> Result<Change, Error> {
+        midi_key("the range's lowest key", *range.start())?;
+        midi_key("the range's highest key", *range.end())?;
+        Ok(self.restrict(|key| range.contains(&key)))
     }
 
     /// Two libraries, one covering the keys below `key` and one covering `key` and
@@ -790,12 +821,13 @@ impl<'a> Library<'a> {
     /// A root whose keys straddle `key` lands in both halves — each half has to be
     /// playable on its own — so the two together hold more strokes than the one they
     /// came from. Each half carries [`Library::cut_range`]'s provenance.
-    pub fn split_at(&self, key: u8) -> (Library<'a>, Library<'a>) {
+    pub fn split_at(&self, key: u8) -> Result<(Library<'a>, Library<'a>), Error> {
+        midi_key("the split key", key)?;
         let mut low = self.clone();
         let mut high = self.clone();
         low.restrict(|k| k < key);
         high.restrict(|k| k >= key);
-        (low, high)
+        Ok((low, high))
     }
 
     /// Uncover every key `keep` rejects, then drop the roots nothing plays.
@@ -1205,7 +1237,7 @@ mod tests {
     fn cutting_the_range_drops_the_roots_nothing_plays_any_more() {
         let piano = Build::new().piano();
         let mut library = piano.library().unwrap();
-        let change = library.cut_range(0..=70);
+        let change = library.cut_range(0..=70).unwrap();
         assert_eq!(change.keys_uncovered, 1);
         assert_eq!(change.roots_removed, 1);
         assert_eq!(library.roots(), [60].into_iter().collect());
@@ -1216,7 +1248,7 @@ mod tests {
     #[test]
     fn a_split_gives_each_half_the_roots_its_keys_play() {
         let piano = Build::new().piano();
-        let (low, high) = piano.library().unwrap().split_at(70);
+        let (low, high) = piano.library().unwrap().split_at(70).unwrap();
         assert_eq!(low.roots(), [60].into_iter().collect());
         assert_eq!(high.roots(), [72].into_iter().collect());
         assert_eq!(low.keys_for(60), [60, 61]);
@@ -1283,18 +1315,53 @@ mod tests {
         assert!(library.set_key_root(64, Some(61)).is_err());
         library.set_key_root(64, Some(72)).unwrap();
         assert_eq!(library.keys_for(72), [64, 72]);
+        assert_eq!(library.key_root(64).unwrap(), Some(72));
         library.set_key_root(64, None).unwrap();
         assert_eq!(library.keys_for(72), [72]);
+        assert_eq!(library.key_root(64).unwrap(), None);
     }
 
     #[test]
     fn fine_tune_reads_and_writes_the_per_key_byte() {
         let piano = Build::new().piano();
         let mut library = piano.library().unwrap();
-        assert_eq!(library.fine_tune(60), 0);
-        library.set_fine_tune(60, -4);
-        assert_eq!(library.fine_tune(60), -4);
+        assert_eq!(library.fine_tune(60).unwrap(), 0);
+        library.set_fine_tune(60, -4).unwrap();
+        assert_eq!(library.fine_tune(60).unwrap(), -4);
         assert_eq!(library.to_body().unwrap()[FINE_TUNE_AT + 60], 0xfc);
+    }
+
+    #[test]
+    fn a_key_above_the_last_midi_note_is_refused_by_every_entry_point() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        let last = (NOTES - 1) as u8;
+        let past = NOTES as u8;
+
+        assert!(library.fine_tune(last).is_ok());
+        assert!(library.key_root(last).is_ok());
+        assert!(library.set_fine_tune(last, 1).is_ok());
+        assert!(library.set_key_root(last, None).is_ok());
+        assert!(library.cut_range(0..=last).is_ok());
+        assert!(library.split_at(last).is_ok());
+
+        assert!(library.fine_tune(past).is_err());
+        assert!(library.key_root(past).is_err());
+        assert!(library.set_fine_tune(past, 1).is_err());
+        assert!(library.set_key_root(past, None).is_err());
+        assert!(library.set_key_root(0, Some(past)).is_err());
+        assert!(library.cut_range(0..=past).is_err());
+        assert!(library.cut_range(past..=past).is_err());
+        assert!(library.split_at(past).is_err());
+    }
+
+    #[test]
+    fn a_key_past_the_tune_table_is_refused_rather_than_written_to_the_next_table() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+        assert!(library.set_fine_tune(NOTES as u8, 32).is_err());
+        assert_eq!(library.to_body().unwrap(), before);
     }
 
     #[test]
