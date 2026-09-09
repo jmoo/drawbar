@@ -171,7 +171,11 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
                         .monospace()
                         .size(MONO)
                         .color(quiet),
-                );
+                )
+                .on_hover_text(format!(
+                    "this names a {} the instrument has not listed by id",
+                    Kind::from_class(class).chip()
+                ));
             }
         }
     });

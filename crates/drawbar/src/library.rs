@@ -119,8 +119,9 @@ impl Needs {
                 Kind::from_class(*class).chip()
             ),
             Needs::Wanted { class, id } => format!(
-                "It names {} {id:#010x}, which nothing has resolved to a name. Only the \
-                 instrument can, and only for a slot it has been asked about.",
+                "This names a {} the instrument has not listed by id ({id:#010x}). Only the \
+                 instrument can put a name to one, and only for a slot it has been asked \
+                 about.",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -911,14 +912,13 @@ fn paint(
         egui::FontId::monospace(MONO),
         quiet,
     );
+    // ⚠️ Quiet, id and all. An id nothing has resolved is a question nobody has asked
+    // the instrument, not a library reported missing.
     write(
         cell(Column::Needs),
         &row.needs.text(),
         egui::FontId::proportional(NAME - 1.0),
-        match row.needs.short().is_some() {
-            true => cell_ink(selected, warn(&visuals), &visuals),
-            false => quiet,
-        },
+        quiet,
     );
 
     // A row of the table is dragged like a row of the tree: the same payload, so it
