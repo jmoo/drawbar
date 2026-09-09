@@ -27,12 +27,12 @@ use crate::workspace::{LocalEntity, Workspace};
 
 /// Which of the two places a row's contents are in.
 ///
-/// ⚠️ The sign on `Both` compares the file's own body checksum with the one the
-/// instrument reports for the slot. A class the device does not checksum reports none,
-/// and then the two are known to be in both places and not known to agree.
+/// ⚠️ `Both` is a **link**: a slot whose reported checksum was this asset's own — see
+/// [`crate::device::link`]. Its sign says whether the two still agree, which an edit on
+/// this computer turns to `false` while the link stays where it was.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Where {
-    Both(Option<bool>),
+    Both(bool),
     Computer,
     Keyboard,
     /// It came off a slot nothing has read, so the other copy cannot be spoken about.
@@ -43,9 +43,8 @@ impl Where {
     /// The short word the column carries.
     pub fn short(self) -> &'static str {
         match self {
-            Where::Both(Some(true)) => "both =",
-            Where::Both(Some(false)) => "both ≠",
-            Where::Both(None) => "both",
+            Where::Both(true) => "both =",
+            Where::Both(false) => "both ≠",
             Where::Computer => "computer",
             Where::Keyboard => "keyboard",
             Where::Unread => "—",
@@ -55,15 +54,10 @@ impl Where {
     /// The whole of it, which is what the tooltip says.
     pub fn sentence(self) -> &'static str {
         match self {
-            Where::Both(Some(true)) => {
-                "On this computer and on the instrument, and the two bodies match."
-            }
-            Where::Both(Some(false)) => {
-                "On this computer and on the instrument, and the two bodies differ."
-            }
-            Where::Both(None) => {
-                "On this computer and on the instrument. The instrument reports no \
-                 checksum for this folder, so nothing here says whether they agree."
+            Where::Both(true) => "On this computer and in a slot holding these very bytes.",
+            Where::Both(false) => {
+                "On this computer and in a slot it was matched to, and the two bodies \
+                 no longer agree."
             }
             Where::Computer => "On this computer only.",
             Where::Keyboard => "On the instrument only.",
@@ -83,12 +77,11 @@ impl Where {
     /// Both first, then this computer, the instrument, and the unsayable.
     fn rank(self) -> u8 {
         match self {
-            Where::Both(Some(false)) => 0,
-            Where::Both(Some(true)) => 1,
-            Where::Both(None) => 2,
-            Where::Computer => 3,
-            Where::Keyboard => 4,
-            Where::Unread => 5,
+            Where::Both(false) => 0,
+            Where::Both(true) => 1,
+            Where::Computer => 2,
+            Where::Keyboard => 3,
+            Where::Unread => 4,
         }
     }
 }
@@ -174,7 +167,8 @@ pub fn rows(workspace: &Workspace, device: &DeviceState, tags: &Tags, filter: &F
     let mut rows = Vec::new();
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
     for entity in workspace.listed() {
-        if let Some(slot) = entity.origin.slot() {
+        // The slot the row stands for, so the instrument's own list does not repeat it.
+        if let Some(slot) = entity.spot() {
             claimed.push(slot);
         }
         let worn = tags.worn(entity.id);
@@ -223,7 +217,7 @@ fn local(entity: &LocalEntity, device: &DeviceState, tags: usize) -> Row {
         name: entity.name.clone(),
         tags,
         where_: whereabouts(entity, device),
-        at: entity.origin.slot(),
+        at: entity.spot(),
         size: entity.bytes.len() as u64,
         needs: wanted(entity, device),
     }
@@ -242,25 +236,19 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
     }
 }
 
+/// Where a row's contents are, which for anything on this computer is decided by its
+/// link: a linked asset is in both places, and the sign is whether the linked slot still
+/// reports this asset's own checksum.
 fn whereabouts(entity: &LocalEntity, device: &DeviceState) -> Where {
-    let Some((class, at)) = entity.origin.slot() else {
-        return Where::Computer;
+    let Some((class, at)) = entity.link else {
+        return match entity.origin.slot() {
+            Some((class, at)) if device.slot(class, at).is_none() => Where::Unread,
+            _ => Where::Computer,
+        };
     };
-    match device.slot(class, at) {
-        None => Where::Unread,
-        Some(None) => Where::Computer,
-        Some(Some(info)) => Where::Both(agrees(entity, info)),
-    }
-}
-
-/// Whether a file and the slot it came off carry the same body.
-///
-/// The container's own CRC-32 **is** the checksum the device reports — see the
-/// round-trip in [`crate::workspace`] — so the two compare without either body being
-/// hashed again, which a sample library on this computer would not survive per frame.
-fn agrees(entity: &LocalEntity, info: &ProgramInfo) -> Option<bool> {
-    let here = entity.container.as_ref()?.body_crc32?;
-    Some(here == info.crc32?)
+    let here = entity.container.as_ref().and_then(|held| held.body_crc32);
+    let there = device.slot(class, at).flatten().and_then(|info| info.crc32);
+    Where::Both(here.is_some() && here == there)
 }
 
 /// The library a file names, and the name the instrument gave it if it has been asked.
@@ -722,7 +710,7 @@ impl Library {
 fn bar(ui: &mut egui::Ui, rows: &[Row], queue: &Queue, tags: &Tags, filter: &Filter) {
     let differ = rows
         .iter()
-        .filter(|row| row.where_ == Where::Both(Some(false)))
+        .filter(|row| row.where_ == Where::Both(false))
         .count();
     let waiting = queue.len();
     let (rect, _) =
@@ -899,7 +887,7 @@ fn paint(
             quiet,
         );
     }
-    let differs = row.where_ == Where::Both(Some(false));
+    let differs = row.where_ == Where::Both(false);
     write(
         cell(Column::Where),
         row.where_.short(),
@@ -943,10 +931,20 @@ fn paint(
     }
 
     let checked = checkbox
-        .map(|box_| box_.on_hover_text(tooltip(row, Column::Mark, browser.tags())))
+        .map(|box_| {
+            box_.on_hover_text(tooltip(
+                row,
+                Column::Mark,
+                browser.tags(),
+                workspace,
+                device,
+            ))
+        })
         .is_some_and(|box_| box_.clicked());
     let response = match under(&response, rect, tracks) {
-        Some(column) => response.on_hover_text(tooltip(row, column, browser.tags())),
+        Some(column) => {
+            response.on_hover_text(tooltip(row, column, browser.tags(), workspace, device))
+        }
         None => response,
     };
     if checked {
@@ -999,9 +997,16 @@ fn mark(
 
 /// The whole of a cell, which is what a hover asks for.
 ///
-/// The tags column is the one that grows a fact the row does not carry: it holds a count,
-/// and the hover is where the names are.
-fn tooltip(row: &Row, column: Column, tags: &Tags) -> String {
+/// Two columns grow a fact the row does not carry: the tags column holds a count and the
+/// hover is where the names are, and the address is one of possibly several slots holding
+/// these very bytes. Both are worked out for the hovered row alone.
+fn tooltip(
+    row: &Row,
+    column: Column,
+    tags: &Tags,
+    workspace: &Workspace,
+    device: &Device,
+) -> String {
     match column {
         Column::Mark => {
             "check it to act on several at once; a click on the row picks it alone".to_string()
@@ -1014,12 +1019,26 @@ fn tooltip(row: &Row, column: Column, tags: &Tags) -> String {
         },
         Column::Where => row.where_.sentence().to_string(),
         Column::At => match row.at {
-            Some((class, at)) => place(class, at),
+            Some((class, at)) => match also_holding(row, workspace, device) {
+                0 => place(class, at),
+                more => format!("{}, and {more} more hold the same bytes", place(class, at)),
+            },
             None => "it never came off a slot".to_string(),
         },
         Column::Size => format!("{} bytes", row.size),
         Column::Needs => row.needs.sentence(),
     }
+}
+
+/// How many slots beyond the linked one hold this row's own bytes. A row that is a slot
+/// is not linked to anything and answers zero.
+fn also_holding(row: &Row, workspace: &Workspace, device: &Device) -> usize {
+    row.item
+        .local()
+        .and_then(|id| workspace.get(id))
+        .map_or(0, |entity| {
+            crate::device::also_holding(&device.state, entity)
+        })
 }
 
 /// What a row is labelled with. Only a kept asset wears anything: a tag hangs on a
@@ -1192,7 +1211,7 @@ mod tests {
                 row(
                     "africa bass",
                     Kind::Program,
-                    Where::Both(Some(false)),
+                    Where::Both(false),
                     Some(at(6, 0)),
                     100,
                 ),
@@ -1256,9 +1275,9 @@ mod tests {
             bytes
         };
         device.pretend_partitions(&crate::device::ELECTRO5);
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "Squabble B"]);
         device.pretend_scanned(ObjectClass::SetList, 1, &["Sunday"]);
-        // One off a scanned slot, so it is in both places, and one that never was.
+        // One linked to the slot holding its bytes, so it is in both places, and one
+        // that is on this computer alone.
         let both = workspace.ingest(
             "Africa-Split.ne5p".into(),
             Origin::Device {
@@ -1268,6 +1287,16 @@ mod tests {
             bytes,
             &mut log,
         );
+        let crc = workspace
+            .get(both)
+            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .expect("a type-1 container carries one");
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[Some(("Africa Split", crc)), Some(("Squabble B", crc ^ 1))],
+        );
+        device.relink(&mut workspace);
         workspace.create(Fresh::Live, &mut log).unwrap();
         let sunday = tags.make("Sunday");
         tags.set(both, sunday, true);
@@ -1300,10 +1329,11 @@ mod tests {
         assert_eq!(names(&filter), ["Africa-Split.ne5p"]);
     }
 
-    /// An asset off a slot the instrument still holds is in both places, and the sign is
-    /// the two bodies' own checksum.
+    /// A linked asset is in both places, and the sign says whether the slot still
+    /// reports the asset's own checksum — which an edit here turns over while the link
+    /// stays where it was.
     #[test]
-    fn a_kept_asset_reads_as_being_in_both_places_when_its_slot_is_still_held() {
+    fn a_linked_asset_is_in_both_places_and_says_when_the_two_stop_agreeing() {
         let ctx = egui::Context::default();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx);
@@ -1316,33 +1346,50 @@ mod tests {
             workspace.remove(id, &mut log);
             bytes
         };
-        workspace.ingest(
+        let id = workspace.ingest(
             "Africa-Split.ne5p".into(),
             Origin::Device {
                 class: ObjectClass::Program,
                 at: at(6, 0),
             },
-            bytes,
+            bytes.clone(),
             &mut log,
         );
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .expect("a type-1 container carries one");
         let filter = Filter::default();
-        let where_ = |device: &Device| {
-            rows(&workspace, &device.state, &tags, &filter)
+        let where_ = |workspace: &Workspace, device: &Device| {
+            rows(workspace, &device.state, &tags, &filter)
                 .into_iter()
                 .find(|row| matches!(row.item, Item::Local(_)))
                 .map(|row| row.where_)
         };
         // Nothing read: the other copy cannot be spoken about at all.
-        assert_eq!(where_(&device), Some(Where::Unread));
+        device.relink(&mut workspace);
+        assert_eq!(where_(&workspace, &device), Some(Where::Unread));
 
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
-        // ⚠️ `pretend_scanned` reports no checksum, so the two are known to be in both
-        // places and not known to agree.
-        assert_eq!(where_(&device), Some(Where::Both(None)));
+        device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
+        device.relink(&mut workspace);
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(true)));
 
-        // A slot the scan found vacant leaves the asset on this computer alone.
-        device.pretend_scanned(ObjectClass::Program, 7, &[""]);
-        assert_eq!(where_(&device), Some(Where::Computer));
+        // Edited here: the link stays put and the sign turns over.
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
+                .expect("the registry takes the set");
+        workspace.replace_bytes(id, edited, &mut log);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((ObjectClass::Program, at(6, 0)))
+        );
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(false)));
+
+        // A slot the scan found vacant holds nothing to link to.
+        device.pretend_bodies(ObjectClass::Program, 7, &[None]);
+        device.relink(&mut workspace);
+        assert_eq!(where_(&workspace, &device), Some(Where::Computer));
     }
 
     /// The sentence the footer says: where the picked rows go, how many of those slots

@@ -508,7 +508,12 @@ impl Browser {
                 name: &entity.name,
                 note: owed.as_deref().or(Some(kind.chip())),
                 dirty: entity.dirty,
-                dot: owed.is_some().then(|| crate::app::warn(ui.visuals())),
+                // What is waiting wins: a linked asset is settled, an owed one is not.
+                dot: match (owed.is_some(), entity.link.is_some()) {
+                    (true, _) => Some(crate::app::warn(ui.visuals())),
+                    (false, true) => Some(crate::app::good(ui.visuals())),
+                    (false, false) => None,
+                },
                 count: (wears > 0).then(|| wears.to_string()),
                 child: true,
                 ..Cells::default()

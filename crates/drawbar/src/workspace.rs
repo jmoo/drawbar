@@ -171,6 +171,13 @@ pub struct LocalEntity {
     /// It is the list revision at the moment the bytes landed, so a rename or a send
     /// does not spend one.
     pub stamp: u64,
+    /// The slot on the attached instrument that holds these bytes, from
+    /// [`crate::device::link`].
+    ///
+    /// Derived from the scan cache and never stored: it is re-made whenever that cache
+    /// changes and goes when the instrument does. An edit leaves it alone, so an asset
+    /// that has been changed still points at the slot it was matched to.
+    pub link: Option<(ObjectClass, Location)>,
 }
 
 impl LocalEntity {
@@ -197,7 +204,14 @@ impl LocalEntity {
             dirty: false,
             kept: true,
             stamp,
+            link: None,
         }
+    }
+
+    /// The slot this asset stands for: the one holding its bytes, and otherwise the one
+    /// it came off.
+    pub fn spot(&self) -> Option<(ObjectClass, Location)> {
+        self.link.or_else(|| self.origin.slot())
     }
 
     /// The format tag, from the decode where there is one and the container otherwise.
@@ -717,6 +731,14 @@ impl Workspace {
         self.revision += 1;
     }
 
+    /// Re-derive every asset's link. Call whenever the instrument's scan cache changes;
+    /// [`crate::device::link`] is what answers.
+    pub fn relink(&mut self, held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>) {
+        for entity in &mut self.entities {
+            entity.link = held_by(entity);
+        }
+    }
+
     /// Rename an asset held here. Nothing leaves this computer.
     pub fn rename(&mut self, id: u64, name: String) {
         if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
@@ -883,6 +905,7 @@ impl Workspace {
         };
         *entity = LocalEntity {
             kept: entity.kept,
+            link: entity.link,
             ..LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp)
         };
         log.say(format!("“{}” is back as it was opened.", entity.name));
@@ -906,6 +929,7 @@ impl Workspace {
         *entity = LocalEntity {
             dirty: true,
             kept: entity.kept,
+            link: entity.link,
             ..replaced
         };
         if let VerifyState::Ok = verify {

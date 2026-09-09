@@ -21,7 +21,7 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::strings::{folder, place, shown};
 use crate::tabs::Tabs;
-use crate::workspace::{Origin, Workspace};
+use crate::workspace::{LocalEntity, Origin, Workspace};
 
 mod scan;
 mod worker;
@@ -580,14 +580,22 @@ impl DeviceState {
         seen
     }
 
+    /// Every slot of `class` a walk found vacant, in address order.
+    pub fn free_slots(&self, class: ObjectClass) -> impl Iterator<Item = Location> + '_ {
+        self.banks_of(class).into_iter().flat_map(move |bank| {
+            self.bank(class, bank)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| held.is_none())
+                .map(move |(slot, _)| Location::from_user(bank, slot as u32 + 1))
+        })
+    }
+
     /// The first slot of `class` known to be vacant — where a duplicate lands when the
     /// user did not drag it anywhere.
     pub fn first_free(&self, class: ObjectClass) -> Option<Location> {
-        self.banks_of(class).into_iter().find_map(|bank| {
-            let slots = self.bank(class, bank)?;
-            let slot = slots.iter().position(Option::is_none)?;
-            Some(Location::from_user(bank, slot as u32 + 1))
-        })
+        self.free_slots(class).next()
     }
 
     /// Drop one bank's cached names, because something just changed them.
@@ -671,6 +679,86 @@ pub const ELECTRO5: [(ObjectClass, &str, u32); 6] = [
     (ObjectClass::Live, "Live", 1),
     (ObjectClass::Settings, "Settings", 1),
 ];
+
+/// The slot on the attached instrument that holds an asset's own body.
+///
+/// The container's CRC-32 **is** the checksum a walk reports for a slot — see the round
+/// trip in [`crate::workspace`] — so an asset and a slot are matched without either body
+/// being hashed again.
+///
+/// The asset's origin slot where that is one of the matches, and otherwise the lowest
+/// address: a copy of it elsewhere must not point it away from where it came from.
+///
+/// ⚠️ Takes the link the asset already carries as its own input, so running it again
+/// over an unchanged cache answers the same thing. That is what lets an edit here keep
+/// the asset pointing where it was matched.
+pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
+    let (class, here) = matchable(entity)?;
+    let origin = entity.origin.slot();
+    let mut lowest = None;
+    for at in holding(state, class, here) {
+        if origin == Some((class, at)) {
+            return origin;
+        }
+        lowest.get_or_insert(at);
+    }
+    match lowest {
+        Some(at) => Some((class, at)),
+        None => edited(state, entity),
+    }
+}
+
+/// How many further slots hold these same bytes, beyond the one the asset is linked to.
+pub fn also_holding(state: &DeviceState, entity: &LocalEntity) -> usize {
+    let Some((class, here)) = matchable(entity) else {
+        return 0;
+    };
+    holding(state, class, here).count().saturating_sub(1)
+}
+
+/// The folder an asset belongs in and the checksum a slot holding its body would report.
+///
+/// A view is not on this computer until it is kept, and bytes that decode into nothing
+/// belong in no folder.
+fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
+    let class = entity
+        .kept
+        .then(|| crate::browser::Kind::of(entity.entity.as_ref()).home())
+        .flatten()?;
+    Some((class, entity.container.as_ref()?.body_crc32?))
+}
+
+/// Every slot of `class` whose scanned checksum is `crc`, lowest address first.
+///
+/// ⚠️ A class whose slots report no checksum matches nothing. A name and a length are
+/// not a body, and a library is where two different objects most readily share both.
+fn holding(
+    state: &DeviceState,
+    class: ObjectClass,
+    crc: u32,
+) -> impl Iterator<Item = Location> + '_ {
+    state.banks_of(class).into_iter().flat_map(move |bank| {
+        state
+            .bank(class, bank)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(move |(_, info)| info.as_ref().and_then(|info| info.crc32) == Some(crc))
+            .map(move |(slot, _)| Location::from_user(bank, slot as u32 + 1))
+    })
+}
+
+/// The link an asset keeps when no slot holds its bytes any more: an edit here moved
+/// them, and where it was matched to is still where it was matched to.
+///
+/// ⚠️ Only while that slot still reports a checksum of its own. A slot found vacant
+/// holds nothing to point at, and a folder that stopped reporting checksums says nothing
+/// about what its slots hold.
+fn edited(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
+    let (class, at) = entity.link?;
+    let info = state.slot(class, at).flatten()?;
+    info.crc32.is_some().then_some((class, at))
+}
 
 /// Whether the browser offers to change a class at all.
 ///
@@ -937,6 +1025,30 @@ impl Device {
             .collect();
     }
 
+    /// Fill in a bank as a walk of a class that checksums what it holds would have: a
+    /// name and the body CRC-32 the device reports for each occupied slot.
+    ///
+    /// The counterpart of [`Device::pretend_scanned`], whose slots report no checksum.
+    #[cfg(test)]
+    pub fn pretend_bodies(&mut self, class: ObjectClass, bank: u32, slots: &[Option<(&str, u32)>]) {
+        self.pretend_attached();
+        let slots = slots
+            .iter()
+            .enumerate()
+            .map(|(slot, held)| {
+                held.map(|(name, crc)| ProgramInfo {
+                    location: Location::from_user(bank, slot as u32 + 1),
+                    body_len: 121,
+                    format: "ne5p".into(),
+                    version: 4,
+                    crc32: Some(crc),
+                    name: name.to_string(),
+                })
+            })
+            .collect();
+        self.state.banks.insert((class.to_raw(), bank), slots);
+    }
+
     /// Give a class the banks the device would have reported, for a headless render.
     #[cfg(test)]
     pub fn pretend_geometry(&mut self, class: ObjectClass, banks: &[(&str, u32)]) {
@@ -956,6 +1068,16 @@ impl Device {
     #[cfg(test)]
     pub fn pretend_focused(&mut self, class: ObjectClass, at: Location) {
         self.state.focus.insert(class.to_raw(), Some(at));
+    }
+
+    /// Point every asset at the slot holding its bytes.
+    ///
+    /// A link is derived rather than stored, so it is re-made from the scan cache each
+    /// time round: it compares a checksum the walk already reported with one the
+    /// container already carries, and never touches a body.
+    pub fn relink(&self, workspace: &mut Workspace) {
+        let state = &self.state;
+        workspace.relink(|entity| link(state, entity));
     }
 
     /// Drain the worker's events into the cache, the local list and the tabs. Call once
@@ -1135,6 +1257,7 @@ impl Device {
                 }
             }
         }
+        self.relink(workspace);
     }
 }
 
@@ -1386,6 +1509,161 @@ mod tests {
         assert!(!queue.holds(landed), "it was written");
         assert!(queue.holds(still_owed), "still waiting");
         assert_eq!(queue.ids(), vec![still_owed]);
+    }
+
+    /// One program on this computer, and the body checksum a walk would report for the
+    /// slot holding it.
+    fn program(workspace: &mut Workspace, log: &mut Log, origin: Origin) -> (u64, u32) {
+        let made = workspace
+            .create(crate::workspace::Fresh::Program, log)
+            .unwrap();
+        let bytes = workspace.get(made).unwrap().bytes.clone();
+        workspace.remove(made, log);
+        let id = workspace.ingest("Africa-Split.ne5p".into(), origin, bytes, log);
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .expect("a type-1 container carries one");
+        (id, crc)
+    }
+
+    /// A link is a slot of the asset's **own** folder reporting the asset's own body.
+    /// A folder that reports no checksum matches nothing: the name it holds is not
+    /// evidence that the bytes under it are the same.
+    #[test]
+    fn a_link_is_a_slot_of_its_own_folder_reporting_its_own_body() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (id, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+
+        // The same checksum in another folder is another folder's business.
+        device.pretend_bodies(ObjectClass::SetList, 1, &[Some(("Sunday", crc))]);
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[None, Some(("Africa Split", crc))],
+        );
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((ObjectClass::Program, Location { bank: 6, slot: 1 }))
+        );
+
+        device.pretend_scanned(ObjectClass::Program, 7, &["", "Africa Split"]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            None,
+            "a folder reporting no checksum links nothing"
+        );
+    }
+
+    /// Bytes with no container carry no checksum, so nothing about them can be matched
+    /// to a slot however much of the instrument has been read.
+    #[test]
+    fn an_asset_with_no_checksum_of_its_own_links_to_nothing() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (_, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let loose = workspace.ingest(
+            "notes.txt".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 0 },
+            },
+            b"not a Nord file at all".to_vec(),
+            &mut log,
+        );
+        assert!(workspace.get(loose).unwrap().container.is_none());
+
+        device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(loose).unwrap().link, None);
+    }
+
+    /// Three slots hold one body: the asset that came off one of them keeps pointing at
+    /// that one, and the asset that came off none takes the lowest address.
+    #[test]
+    fn a_link_prefers_the_slot_it_came_off_and_otherwise_the_lowest_address() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let at = |slot| Location { bank: 6, slot };
+        let (fresh, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let (copied, _) = program(
+            &mut workspace,
+            &mut log,
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(2),
+            },
+        );
+
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[
+                Some(("Africa Split", crc)),
+                Some(("Africa 2", crc)),
+                Some(("Africa 3", crc)),
+            ],
+        );
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(fresh).unwrap().link,
+            Some((ObjectClass::Program, at(0)))
+        );
+        assert_eq!(
+            workspace.get(copied).unwrap().link,
+            Some((ObjectClass::Program, at(2)))
+        );
+        assert_eq!(
+            also_holding(&device.state, workspace.get(fresh).unwrap()),
+            2,
+            "the hover has the rest to count"
+        );
+    }
+
+    /// A link is derived from the scan cache, so a walk makes one and the instrument
+    /// going takes it away. What is on this computer is untouched either way.
+    #[test]
+    fn a_link_arrives_with_a_walk_and_goes_when_the_instrument_does() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut queue = Queue::default();
+        let (id, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let class = ObjectClass::Program;
+
+        device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 7,
+            slots: vec![Some(ProgramInfo {
+                location: Location { bank: 6, slot: 0 },
+                body_len: 121,
+                format: "ne5p".into(),
+                version: 4,
+                crc32: Some(crc),
+                name: "Africa Split".into(),
+            })],
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, Location { bank: 6, slot: 0 }))
+        );
+
+        device.pretend(DeviceEvent::Disconnected { lost: true });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(workspace.get(id).unwrap().link, None);
+        assert!(workspace.get(id).is_some(), "the asset itself stays");
     }
 
     /// A library id resolves to a name only where the instrument has actually said so:

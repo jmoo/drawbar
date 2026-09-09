@@ -540,10 +540,10 @@ fn write_note(class: ObjectClass, tag: &str, resident: &[String]) -> Option<Stri
     (!note.is_empty()).then(|| note.join("\n\n"))
 }
 
-/// Where an asset would be written back to, if anywhere: the slot it came off, and only
-/// where this app will write into that class at all.
+/// Where an asset would be written back to, if anywhere: the slot holding its bytes,
+/// then the slot it came off, and only where this app will write into that class at all.
 pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
-    let (class, at) = entity.origin.slot()?;
+    let (class, at) = entity.spot()?;
     crate::device::sendable(class).then_some((class, at))
 }
 
