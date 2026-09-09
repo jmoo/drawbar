@@ -234,6 +234,7 @@ macro_rules! synth_layer {
                 concat!("synth_", $layer, "_performance.octave_shift"),
                 concat!("synth_", $layer, "_performance.pitch_stick_enabled"),
                 concat!("synth_", $layer, "_performance.sustain_pedal_enabled"),
+                concat!("synth_", $layer, "_performance.arpeggiator_run_enabled"),
             ],
             groups: &[
                 controls!(
@@ -248,6 +249,47 @@ macro_rules! synth_layer {
                     concat!("synth_", $layer, "_performance."),
                     ["extern_program", "extern_cc_val1", "extern_cc_val2"]
                 ),
+                controls!(
+                    "Keyboard hold",
+                    switched_on!("synth_kb_hold_enabled"),
+                    concat!("synth_", $layer, "_performance."),
+                    ["kb_hold"]
+                ),
+                Group {
+                    // Manual p. 47: the arpeggiator, Pattern included, drives an Extern layer too.
+                    title: "Arpeggiator / gate",
+                    selected_by: None,
+                    when: switched_on!(concat!(
+                        "synth_",
+                        $layer,
+                        "_performance.arpeggiator_run_enabled"
+                    )),
+                    members: &[
+                        concat!("synth_", $layer, "_performance.arpeggiator_mode"),
+                        concat!("synth_", $layer, "_performance.arp_pattern_enabled"),
+                        concat!("synth_", $layer, "_performance.arp_range_env"),
+                        concat!("synth_", $layer, "_performance.arp_direction"),
+                        concat!("synth_", $layer, "_performance.arp_zigzag_enabled"),
+                        concat!("synth_", $layer, "_performance.arp_master_clock_enabled"),
+                        concat!("synth_", $layer, "_performance.arp_rate_time"),
+                        concat!("synth_", $layer, "_performance.kb_sync_enabled"),
+                    ],
+                    groups: &[controls!(
+                        "Pattern",
+                        switched_on!(concat!(
+                            "synth_",
+                            $layer,
+                            "_performance.arp_pattern_enabled"
+                        )),
+                        concat!("synth_", $layer, "_performance."),
+                        [
+                            "arp_pattern_length",
+                            "arpeggiator_accent",
+                            "arpeggiator_gate",
+                            "arpeggiator_pan"
+                        ]
+                    )],
+                },
                 Group {
                     title: "Internal sound",
                     selected_by: None,
@@ -267,8 +309,6 @@ macro_rules! synth_layer {
                         concat!("synth_", $layer, "_performance.unison_level"),
                         concat!("synth_", $layer, "_performance.vibrato_mode"),
                         concat!("synth_", $layer, "_performance.vibrato_delay"),
-                        concat!("synth_", $layer, "_performance.kb_sync_enabled"),
-                        concat!("synth_", $layer, "_performance.arpeggiator_run_enabled"),
                         concat!("synth_", $layer, "_voice.filter_enabled"),
                     ],
                     groups: &[
@@ -307,45 +347,6 @@ macro_rules! synth_layer {
                             concat!("synth_", $layer, "_performance."),
                             ["voice_priority", "glide"]
                         ),
-                        controls!(
-                            "Keyboard hold",
-                            switched_on!("synth_kb_hold_enabled"),
-                            concat!("synth_", $layer, "_performance."),
-                            ["kb_hold"]
-                        ),
-                        Group {
-                            title: "Arpeggiator / gate",
-                            selected_by: None,
-                            when: switched_on!(concat!(
-                                "synth_",
-                                $layer,
-                                "_performance.arpeggiator_run_enabled"
-                            )),
-                            members: &[
-                                concat!("synth_", $layer, "_performance.arpeggiator_mode"),
-                                concat!("synth_", $layer, "_performance.arp_pattern_enabled"),
-                                concat!("synth_", $layer, "_performance.arp_range_env"),
-                                concat!("synth_", $layer, "_performance.arp_direction"),
-                                concat!("synth_", $layer, "_performance.arp_zigzag_enabled"),
-                                concat!("synth_", $layer, "_performance.arp_master_clock_enabled"),
-                                concat!("synth_", $layer, "_performance.arp_rate_time"),
-                            ],
-                            groups: &[controls!(
-                                "Pattern",
-                                switched_on!(concat!(
-                                    "synth_",
-                                    $layer,
-                                    "_performance.arp_pattern_enabled"
-                                )),
-                                concat!("synth_", $layer, "_performance."),
-                                [
-                                    "arp_pattern_length",
-                                    "arpeggiator_accent",
-                                    "arpeggiator_gate",
-                                    "arpeggiator_pan"
-                                ]
-                            )],
-                        },
                         controls!(
                             "Oscillators",
                             None,
@@ -494,10 +495,7 @@ pub const PANEL: Panel = Panel {
             selected_by: None,
             when: enabled_in_either_scene!("piano_section_enabled"),
             members: &["piano_a_layer_enabled", "piano_b_layer_enabled"],
-            groups: &[
-                piano_layer!("Layer A", "a"),
-                piano_layer!("Layer B", "b"),
-            ],
+            groups: &[piano_layer!("Layer A", "a"), piano_layer!("Layer B", "b")],
         },
         Group {
             title: "Synth",
@@ -692,6 +690,8 @@ mod tests {
             let enable = format!("synth_{layer}_layer_enabled");
             let prefix = format!("synth_{layer}_performance");
             let extern_enable = format!("{prefix}.extern_enabled");
+            let arp_enable = format!("{prefix}.arpeggiator_run_enabled");
+            let pattern_enable = format!("{prefix}.arp_pattern_enabled");
             let filter_enable = format!("synth_{layer}_voice.filter_enabled");
             let delay_enable = format!("synth_{layer}_fx.delay_enabled");
             for external in ["false", "true"] {
@@ -699,7 +699,10 @@ mod tests {
                     ("synth_section_enabled", "true"),
                     (&enable, "true"),
                     ("split_enabled", "true"),
+                    ("synth_kb_hold_enabled", "true"),
                     (&extern_enable, external),
+                    (&arp_enable, "true"),
+                    (&pattern_enable, "true"),
                     (&filter_enable, "true"),
                     ("fx_enabled", "true"),
                     (&delay_enable, "true"),
@@ -710,6 +713,10 @@ mod tests {
                     "pitch_stick_enabled",
                     "sustain_pedal_enabled",
                     "extern_enabled",
+                    "kb_hold",
+                    "arpeggiator_run_enabled",
+                    "arp_rate_time",
+                    "arp_pattern_length",
                 ] {
                     assert!(
                         relevant(&fields, &format!("{prefix}.{parameter}")),
@@ -750,10 +757,13 @@ mod tests {
                         ]);
                         assert!(relevant(&fields, &filter_enable));
                         assert!(relevant(&fields, &arp_enable));
-                        assert!(relevant(
-                            &fields,
-                            &format!("synth_{layer}_performance.kb_sync_enabled")
-                        ));
+                        assert_eq!(
+                            relevant(
+                                &fields,
+                                &format!("synth_{layer}_performance.kb_sync_enabled")
+                            ),
+                            arp == "true"
+                        );
                         assert_eq!(
                             relevant(&fields, &format!("synth_{layer}_voice.filter_env_amount")),
                             filter == "true"
