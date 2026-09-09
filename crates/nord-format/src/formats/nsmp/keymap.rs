@@ -13,8 +13,13 @@
 use super::zone;
 use crate::error::ParseError;
 
-/// Schema version of a v2 `map` section carrying this table.
+/// Schema version of a `map` section on the Sample Library 2.0 narrow chain.
 pub(super) const VERSION: u8 = 10;
+
+/// Schema version of a `map` section on the chain before it. The zone table behind
+/// this keyboard map is narrower there; the keyboard map itself is byte for byte the
+/// same layout, filler included.
+pub(super) const VERSION_EARLY: u8 = 9;
 
 /// `1.0` in every gain field of the map, a u24 linear ratio.
 pub const GAIN_UNITY: u32 = 0x10_0000;
@@ -226,15 +231,6 @@ fn fits(map: &[u8]) -> Result<(), ParseError> {
         )));
     }
     Ok(())
-}
-
-pub(super) fn require_version(version: u8) -> Result<(), ParseError> {
-    if version == VERSION {
-        return Ok(());
-    }
-    Err(ParseError::AssertFail(format!(
-        "map section version {version} has no keyboard table layout derived from specimens"
-    )))
 }
 
 #[cfg(test)]

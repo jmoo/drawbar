@@ -1,5 +1,6 @@
 //! The zone table at the tail of the `map` section.
 
+use super::Chain;
 use crate::error::ParseError;
 
 /// Offset of the zone count within the `map` payload. Everything before it is identical
@@ -9,8 +10,8 @@ pub const COUNT_AT: usize = 785;
 /// First zone record.
 pub const RECORDS_AT: usize = COUNT_AT + 1;
 
-/// Bytes per zone record.
-pub const RECORD_LEN: usize = 15;
+/// Bytes per zone record on the chain the encoder writes.
+pub const RECORD_LEN: usize = Chain::Library2.zone_record_len();
 
 /// Stroke global ID, not a positional index.
 const STROKE_ID: usize = 2;
@@ -64,9 +65,12 @@ pub fn count(map: &[u8]) -> Result<usize, ParseError> {
     })
 }
 
-pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
+/// Every field this reads sits at the same offset in both narrow chains; `chain`
+/// supplies the record stride and nothing else.
+pub fn read(chain: Chain, map: &[u8]) -> Result<Vec<Zone>, ParseError> {
+    let width = chain.zone_record_len();
     let n = count(map)?;
-    let need = RECORDS_AT + n * RECORD_LEN;
+    let need = RECORDS_AT + n * width;
     if map.len() < need {
         return Err(ParseError::AssertFail(format!(
             "map declares {n} zones, needing {need} bytes, but the section is {}",
@@ -75,7 +79,7 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
     }
     Ok((0..n)
         .map(|i| {
-            let r = &map[RECORDS_AT + i * RECORD_LEN..][..RECORD_LEN];
+            let r = &map[RECORDS_AT + i * width..][..width];
             Zone {
                 top_note: r[TOP_NOTE],
                 stroke_id: r[STROKE_ID],
@@ -87,14 +91,19 @@ pub fn read(map: &[u8]) -> Result<Vec<Zone>, ParseError> {
 }
 
 /// Set one zone's isolated top-note byte without re-encoding audio.
-pub fn set_top_note(map: &mut [u8], index: usize, note: u8) -> Result<(), ParseError> {
+pub fn set_top_note(
+    chain: Chain,
+    map: &mut [u8],
+    index: usize,
+    note: u8,
+) -> Result<(), ParseError> {
     let n = count(map)?;
     if index >= n {
         return Err(ParseError::AssertFail(format!(
             "zone {index} out of range, the instrument has {n}"
         )));
     }
-    map[RECORDS_AT + index * RECORD_LEN + TOP_NOTE] = note;
+    map[RECORDS_AT + index * chain.zone_record_len() + TOP_NOTE] = note;
     Ok(())
 }
 
@@ -695,10 +704,15 @@ mod tests {
     }
 
     fn table_with_ids(tops: &[u8], ids: &[u8]) -> Vec<u8> {
-        let mut m = vec![0u8; RECORDS_AT + tops.len() * RECORD_LEN];
+        table_on(Chain::Library2, tops, ids)
+    }
+
+    fn table_on(chain: Chain, tops: &[u8], ids: &[u8]) -> Vec<u8> {
+        let width = chain.zone_record_len();
+        let mut m = vec![0u8; RECORDS_AT + tops.len() * width];
         m[COUNT_AT] = tops.len() as u8;
         for (i, (&t, &id)) in tops.iter().zip(ids).enumerate() {
-            let r = RECORDS_AT + i * RECORD_LEN;
+            let r = RECORDS_AT + i * width;
             m[r + STROKE_ID] = id;
             m[r + TOP_NOTE] = t;
         }
@@ -707,7 +721,7 @@ mod tests {
 
     #[test]
     fn reads_the_table() {
-        let zones = read(&table(&[96, 65, 53])).unwrap();
+        let zones = read(Chain::Library2, &table(&[96, 65, 53])).unwrap();
         assert_eq!(zones.len(), 3);
         assert_eq!(zones[0].top_note, 96);
         assert_eq!(zones[2].top_note, 53);
@@ -717,10 +731,10 @@ mod tests {
 
     #[test]
     fn stroke_ids_need_not_be_a_countdown() {
-        let zones = read(&table_with_ids(
-            &[108, 90, 77, 66, 60, 53],
-            &[13, 12, 6, 9, 5, 25],
-        ))
+        let zones = read(
+            Chain::Library2,
+            &table_with_ids(&[108, 90, 77, 66, 60, 53], &[13, 12, 6, 9, 5, 25]),
+        )
         .unwrap();
         assert_eq!(
             zones.iter().map(|z| z.stroke_id).collect::<Vec<_>>(),
@@ -732,26 +746,40 @@ mod tests {
     fn set_top_note_moves_exactly_one_byte() {
         let before = table(&[96, 65, 53]);
         let mut after = before.clone();
-        set_top_note(&mut after, 1, 60).unwrap();
+        set_top_note(Chain::Library2, &mut after, 1, 60).unwrap();
         let differing: Vec<_> = (0..before.len())
             .filter(|&i| before[i] != after[i])
             .collect();
         assert_eq!(differing, vec![RECORDS_AT + RECORD_LEN + TOP_NOTE]);
-        assert_eq!(read(&after).unwrap()[1].top_note, 60);
+        assert_eq!(read(Chain::Library2, &after).unwrap()[1].top_note, 60);
     }
 
     #[test]
     fn out_of_range_zone_is_rejected() {
         let mut m = table(&[96, 65]);
-        assert!(set_top_note(&mut m, 2, 60).is_err());
+        assert!(set_top_note(Chain::Library2, &mut m, 2, 60).is_err());
     }
 
     #[test]
     fn short_map_is_rejected() {
-        assert!(read(&[0u8; 16]).is_err());
+        assert!(read(Chain::Library2, &[0u8; 16]).is_err());
         let mut m = table(&[96, 65]);
         m[COUNT_AT] = 9; // more zones than there are records
-        assert!(read(&m).is_err());
+        assert!(read(Chain::Library2, &m).is_err());
+    }
+
+    /// The pre-2.0 record is the same fields in twelve bytes, so the same table
+    /// read at the wrong stride walks off the records it is counting.
+    #[test]
+    fn the_pre_library_2_record_reads_the_same_fields_three_bytes_narrower() {
+        let tops = [108, 90, 77, 66];
+        let ids = [13, 12, 6, 9];
+        let early = table_on(Chain::Early, &tops, &ids);
+        assert_eq!(early.len(), RECORDS_AT + 12 * tops.len());
+        let zones = read(Chain::Early, &early).unwrap();
+        assert_eq!(zones.iter().map(|z| z.top_note).collect::<Vec<_>>(), tops);
+        assert_eq!(zones.iter().map(|z| z.stroke_id).collect::<Vec<_>>(), ids);
+        assert!(read(Chain::Library2, &early).is_err());
     }
 
     #[test]
@@ -1035,7 +1063,7 @@ mod tests {
         map[RECORDS_AT + TOP_NOTE] = 60;
         map[RECORDS_AT + REL_STRENGTH] = 0x7f;
         map[RECORDS_AT + REL_STRENGTH + 1] = 0xff;
-        let zones = read(&map).unwrap();
+        let zones = read(Chain::Library2, &map).unwrap();
         assert_eq!(zones[0].rel_strength, 32767);
     }
 

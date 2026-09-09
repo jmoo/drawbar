@@ -7,7 +7,7 @@ use nord_format::cbin::Cbin;
 use nord_format::formats::ne5;
 use nord_format::formats::ne5::{Instrument, OrganModel};
 use nord_format::formats::nsmp::zone::VelocityWindow;
-use nord_format::formats::nsmp::{codec, stroke, Sample};
+use nord_format::formats::nsmp::{codec, stroke, Chain, Sample};
 use nord_format::formats::nsmpproj;
 use nord_format::{Entity, Live, Program, Settings, Song};
 
@@ -527,7 +527,9 @@ fn sample_project(ui: &Ui, p: &nsmpproj::Project) {
 /// The sample-instrument printout: identity, then the zone map.
 fn sample(ui: &Ui, s: &Cbin<Sample>) {
     ui.out(field(ui, 2, "type", "sample instrument (nsmp)"));
+    let named = s.chain().is_ok_and(Chain::names_instrument);
     match s.name() {
+        Ok(_) if !named => ui.out(field(ui, 2, "name", "(this library carries none)")),
         Ok(name) => ui.out(field(ui, 2, "name", name)),
         Err(e) => ui.warn(format!("name unreadable: {e}")),
     }

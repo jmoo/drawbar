@@ -1,6 +1,7 @@
 //! The `stk` sections — one per zone, each holding one zone's encoded audio.
 
 use super::codec::Layout;
+use super::Chain;
 use crate::error::ParseError;
 
 /// Within a stroke payload: the MIDI note the sample was recorded at.
@@ -38,20 +39,27 @@ const fn later_header_len(layout: Layout) -> usize {
 /// vendor files and our output at equal zone counts: their `cat` payload is 9 bytes
 /// and ours is 24.
 ///
+/// The two narrow budgets are the same absolute grid seen from different places:
+/// [`Chain::Early`] has no `cat` and a 93-byte-shorter `hdr`, so its chain spends 102
+/// bytes fewer ahead of the `map` payload and its budget is 102 larger. Every stroke
+/// payload in either chain ends 3 bytes past a packet boundary measured from the body.
+///
 /// Inferred from specimens; not confirmed on hardware.
-const fn preamble(layout: Layout) -> usize {
-    match layout {
-        Layout::V2 => 990,
-        Layout::V3 | Layout::V4 => 852,
+const fn preamble(chain: Chain) -> usize {
+    match chain {
+        Chain::Early => 1092,
+        Chain::Library2 => 990,
+        Chain::Wide => 852,
     }
 }
 
-/// The first stroke's header, from the two sections that share the preamble with it.
+/// The first stroke's header, from the sections that share the preamble with it.
 ///
-/// Both lengths are payload sizes, excluding their section headers.
-pub fn first_header_len(layout: Layout, cat_len: usize, map_len: usize) -> usize {
+/// Both lengths are payload sizes, excluding their section headers. `cat_len` is zero
+/// on a chain that has no `cat` section.
+pub fn first_header_len(layout: Layout, chain: Chain, cat_len: usize, map_len: usize) -> usize {
     let used = cat_len + map_len;
-    let mut room = preamble(layout);
+    let mut room = preamble(chain);
     // Exact-boundary metadata advances because a zero-length header does not occur.
     while room <= used {
         room += packet_len(layout);
@@ -60,11 +68,17 @@ pub fn first_header_len(layout: Layout, cat_len: usize, map_len: usize) -> usize
 }
 
 /// Bytes of stroke header. Only the first stroke's depends on anything.
-pub fn header_len(layout: Layout, index: usize, cat_len: usize, map_len: usize) -> usize {
+pub fn header_len(
+    layout: Layout,
+    chain: Chain,
+    index: usize,
+    cat_len: usize,
+    map_len: usize,
+) -> usize {
     if index > 0 {
         later_header_len(layout)
     } else {
-        first_header_len(layout, cat_len, map_len)
+        first_header_len(layout, chain, cat_len, map_len)
     }
 }
 
@@ -84,6 +98,7 @@ pub struct Stroke {
 /// `cat_len` and `map_len` are payload sizes; only the first stroke uses them.
 pub fn read(
     payload: &[u8],
+    chain: Chain,
     index: usize,
     cat_len: usize,
     map_len: usize,
@@ -91,7 +106,7 @@ pub fn read(
     let root_key = *payload.get(ROOT_KEY).ok_or_else(|| {
         ParseError::AssertFail(format!("stroke {index} is {} bytes", payload.len()))
     })?;
-    let header = header_len(Layout::V2, index, cat_len, map_len);
+    let header = header_len(Layout::V2, chain, index, cat_len, map_len);
     let packets = payload
         .len()
         .checked_sub(header)
@@ -123,7 +138,7 @@ mod tests {
     fn stroke(index: usize, zones: usize, packets: usize, root: u8) -> Vec<u8> {
         let mut v = vec![
             0u8;
-            header_len(Layout::V2, index, OUR_CAT, map_len(zones))
+            header_len(Layout::V2, Chain::Library2, index, OUR_CAT, map_len(zones))
                 + packets * packet_len(Layout::V2)
         ];
         v[ROOT_KEY] = root;
@@ -132,12 +147,27 @@ mod tests {
 
     #[test]
     fn header_shrinks_only_for_the_first_stroke() {
-        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(1)), 165);
-        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(2)), 150);
-        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(3)), 135);
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(1)),
+            165
+        );
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(2)),
+            150
+        );
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(3)),
+            135
+        );
         // Position, not the zone table, decides the rest.
-        assert_eq!(header_len(Layout::V2, 1, OUR_CAT, map_len(2)), 372);
-        assert_eq!(header_len(Layout::V2, 2, OUR_CAT, map_len(3)), 372);
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 1, OUR_CAT, map_len(2)),
+            372
+        );
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 2, OUR_CAT, map_len(3)),
+            372
+        );
     }
 
     /// The zone-count ladder, generated for exactly this question: identical audio in
@@ -149,13 +179,16 @@ mod tests {
     fn the_preamble_grows_by_a_packet_rather_than_going_negative() {
         for (zones, header) in [(4, 120), (6, 90), (8, 60), (12, 381), (16, 321)] {
             assert_eq!(
-                header_len(Layout::V2, 0, OUR_CAT, map_len(zones)),
+                header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(zones)),
                 header,
                 "{zones} zones"
             );
         }
         // Eleven zones is the tightest fit before the step: 24 + 951 + 15 = 990.
-        assert_eq!(header_len(Layout::V2, 0, OUR_CAT, map_len(11)), 15);
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(11)),
+            15
+        );
     }
 
     /// The vendor library's `cat` section is 9 bytes where ours is 24, and that alone
@@ -164,11 +197,52 @@ mod tests {
     #[test]
     fn a_smaller_cat_section_lends_its_bytes_to_the_header() {
         const VENDOR_CAT: usize = 9;
-        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(6)), 105);
-        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(11)), 30);
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, VENDOR_CAT, map_len(6)),
+            105
+        );
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, VENDOR_CAT, map_len(11)),
+            30
+        );
         // Their smaller cat also defers the step by a zone: ours steps at twelve.
-        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(12)), 15);
-        assert_eq!(header_len(Layout::V2, 0, VENDOR_CAT, map_len(16)), 336);
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, VENDOR_CAT, map_len(12)),
+            15
+        );
+        assert_eq!(
+            header_len(Layout::V2, Chain::Library2, 0, VENDOR_CAT, map_len(16)),
+            336
+        );
+    }
+
+    /// The pre-2.0 chain has no `cat` section and a 93-byte-shorter `hdr`, so its
+    /// budget is 102 larger and lands the first packet at the same absolute offset.
+    /// Lengths taken off library instruments: `map` is 786 + 12 per zone there.
+    #[test]
+    fn the_pre_library_2_chain_spends_its_missing_cat_on_the_header() {
+        const NO_CAT: usize = 0;
+        let early_map = |z: usize| 786 + 12 * z;
+        // Twenty-five zones is the tightest fit before the step; twenty-seven is past
+        // it, with a fresh packet's worth of room.
+        for (zones, header) in [
+            (1, 294),
+            (16, 114),
+            (25, 6),
+            (27, 363),
+            (35, 267),
+            (68, 252),
+        ] {
+            assert_eq!(
+                header_len(Layout::V2, Chain::Early, 0, NO_CAT, early_map(zones)),
+                header,
+                "{zones} zones"
+            );
+        }
+        assert_eq!(
+            header_len(Layout::V2, Chain::Early, 1, NO_CAT, early_map(10)),
+            372
+        );
     }
 
     /// Lengths off wide instruments the editor rendered: `cat` is 8 bytes there and
@@ -184,18 +258,25 @@ mod tests {
             (Layout::V4, 1340 + 16, 128),
         ] {
             assert_eq!(
-                header_len(layout, 0, WIDE_CAT, map),
+                header_len(layout, Chain::Wide, 0, WIDE_CAT, map),
                 header,
                 "{layout:?}, a {map}-byte map"
             );
         }
-        assert_eq!(header_len(Layout::V3, 1, WIDE_CAT, 792), 116);
-        assert_eq!(header_len(Layout::V4, 3, WIDE_CAT, 1340), 116);
+        assert_eq!(header_len(Layout::V3, Chain::Wide, 1, WIDE_CAT, 792), 116);
+        assert_eq!(header_len(Layout::V4, Chain::Wide, 3, WIDE_CAT, 1340), 116);
     }
 
     #[test]
     fn reads_root_key_and_packet_count() {
-        let s = read(&stroke(0, 1, 4, 60), 0, OUR_CAT, map_len(1)).unwrap();
+        let s = read(
+            &stroke(0, 1, 4, 60),
+            Chain::Library2,
+            0,
+            OUR_CAT,
+            map_len(1),
+        )
+        .unwrap();
         assert_eq!(s.root_key, 60);
         assert_eq!(s.packets, Some(4));
     }
@@ -220,7 +301,7 @@ mod tests {
         ] {
             let mut v = vec![0u8; len];
             v[ROOT_KEY] = 60;
-            let s = read(&v, index, cat, map_len(zones))
+            let s = read(&v, Chain::Library2, index, cat, map_len(zones))
                 .unwrap_or_else(|e| panic!("stroke {index} of {zones}, {len} bytes: {e}"));
             assert_eq!(
                 s.packets,
@@ -236,7 +317,12 @@ mod tests {
     fn a_length_that_is_not_header_plus_packets_has_no_count() {
         let mut v = stroke(0, 1, 2, 60);
         v.push(0);
-        assert_eq!(read(&v, 0, OUR_CAT, map_len(1)).unwrap().packets, None);
+        assert_eq!(
+            read(&v, Chain::Library2, 0, OUR_CAT, map_len(1))
+                .unwrap()
+                .packets,
+            None
+        );
     }
 
     /// Shorter than its own header: no count, and still no refusal — the root key is
@@ -244,7 +330,9 @@ mod tests {
     #[test]
     fn a_stroke_shorter_than_its_header_has_no_count() {
         assert_eq!(
-            read(&[0u8; 8], 1, OUR_CAT, map_len(2)).unwrap().packets,
+            read(&[0u8; 8], Chain::Library2, 1, OUR_CAT, map_len(2))
+                .unwrap()
+                .packets,
             None
         );
     }
