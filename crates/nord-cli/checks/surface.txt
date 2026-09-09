@@ -3,8 +3,8 @@
 # up as a failing check instead of a surprise, which is the mechanism that
 # makes a later compatibility promise enforceable.
 #
-# program, raw, sample and setlist share the slot verbs on purpose: they are
-# the same class of storage, addressed the same way.
+# piano, program, raw, sample and setlist share the slot verbs on purpose: they
+# are the same class of storage, addressed the same way.
 : inspect verify edit device program setlist live settings sample piano help
 device: controls status info recover geometry help
 live: get info deps edit help

@@ -139,7 +139,7 @@ enum Command {
     /// The class-generic primitives, addressed by object-class number.
     ///
     /// Every typed noun above is this with the class fixed. Use it for a class with no
-    /// noun — pianos are `--class 1`.
+    /// noun of its own, or to address a class by number.
     #[command(hide = true)]
     Raw {
         /// Object class: 1 pianos, 3 samples, 4 programs, 5 set lists, 6 live.
@@ -355,7 +355,9 @@ enum PianoAction {
     ///
     /// The strokes that survive move byte for byte, so a trim is a re-lay rather
     /// than a re-encode. Keys whose root loses every stroke are left playing
-    /// nothing, and the count is reported.
+    /// nothing, and the count is reported. Dropping a bank or a layer is
+    /// hardware-verified — the trimmed library loads and plays; narrowing the key
+    /// range is not.
     Trim(piano::TrimArgs),
 
     /// Cut a library in two at a key, writing both halves.

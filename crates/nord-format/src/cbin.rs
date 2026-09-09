@@ -403,7 +403,8 @@ impl<B: Body> Cbin<B> {
 
 /// A body kept verbatim: bytes in, bytes out, checksum verified, nothing decoded.
 ///
-/// For formats whose body is not yet mapped (`npno`) and for wire code that moves
+/// For formats whose body is not yet mapped, for one parsed as a borrowed view over
+/// these bytes rather than a bit-mapped struct (`npno`), and for wire code that moves
 /// bodies whole. ⚠️ Allocates the body — a library-sized file wants [`inspect`],
 /// which holds O(1), not a `RawBody`.
 #[derive(Debug, Clone, PartialEq, Eq)]

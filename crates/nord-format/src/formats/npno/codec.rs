@@ -35,8 +35,11 @@
 //! repeat is bit-exact — [`decode`] checks both and refuses a stroke that fails
 //! either.
 //!
-//! Inferred from specimens; not confirmed on hardware. That the frames play at
-//! [`RATE`] is confirmed on hardware.
+//! The packing and the predictor are inferred from specimens; not confirmed on
+//! hardware — nothing here is played, only reconstructed. Confirmed on hardware:
+//! the frames play at [`RATE`], and a stroke owns the whole
+//! `blocks × BLOCK_WORDS × 2 × channels` bytes the container gives it — a library
+//! whose spans were moved at that size still plays.
 
 use super::Stroke;
 use crate::error::{Error, ParseError};

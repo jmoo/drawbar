@@ -25,10 +25,12 @@
 //! | `0x622` | 128 × u16 strokes per root note, summing to `N` |
 //! | `0x732` | `N` × 118-byte stroke records, grouped in ascending root order |
 //!
-//! The layout is inferred from specimens; not confirmed on hardware. That the key
-//! map's value is the recording's root note, that a stroke's [`Bank`] is what it is
-//! played for, and that [`Stroke::layer`] indexes softness are confirmed on
-//! hardware.
+//! The prefix's individual field placements are inferred from specimens; not
+//! confirmed on hardware. Confirmed on hardware: the container layout as
+//! [`Library::to_body`] writes it — a library whose directory and audio this crate
+//! re-laid loads on the instrument and plays at the original's level — and, within
+//! it, that the key map's value is the recording's root note, that a stroke's
+//! [`Bank`] is what it is played for, and that [`Stroke::layer`] indexes softness.
 //!
 //! Audio follows the directory, one span per record in the directory's own order.
 //! The first span starts at the next `1022 × channels` boundary offset by
@@ -100,7 +102,11 @@ const REC_ID: usize = 0x6e;
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;
 
-/// The audio grid's offset from a whole number of blocks. Unexplained.
+/// The audio grid's offset from a whole number of blocks.
+///
+/// Unexplained: every library holds it and nothing in the file derives it. That the
+/// grid it defines is the one the instrument reads is confirmed on hardware — a
+/// library laid out on it plays.
 pub const AUDIO_ALIGN_BIAS: usize = 192;
 
 /// Cents one unit of [`Library::fine_tune`] is worth. Measured between 0.6 and
@@ -160,7 +166,8 @@ impl fmt::Display for Bank {
 ///
 /// A root's layers are counted within one [`Bank`], since each bank indexes its
 /// own set. Nothing is renumbered: the layer values that survive keep the values
-/// they had.
+/// they had, which is safe because the instrument picks by rank among the layers a
+/// root still holds rather than by matching a layer value. Confirmed on hardware.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layers {
     /// The loudest `n` of each root and bank — the `n` lowest layer values.
@@ -409,7 +416,8 @@ impl<'a> Stroke<'a> {
     }
 
     /// The identifier at `+0x6e`. Distinguishes a recording across libraries;
-    /// what else it means is open.
+    /// what else it means is open. Inferred from specimens; not confirmed on
+    /// hardware.
     pub fn id(&self) -> u32 {
         be32(&self.record, REC_ID)
     }
@@ -643,6 +651,11 @@ impl<'a> Library<'a> {
         self.prefix[FINE_TUNE_AT + usize::from(key)] as i8
     }
 
+    /// Retune one key, in the units [`Library::fine_tune`] reads.
+    ///
+    /// The unit's size and direction are confirmed on hardware from libraries as the
+    /// vendor tuned them; that rewriting the byte retunes the key is inferred from
+    /// specimens, not confirmed on hardware.
     pub fn set_fine_tune(&mut self, key: u8, units: i8) {
         self.prefix[FINE_TUNE_AT + usize::from(key)] = units as u8;
     }
@@ -670,7 +683,9 @@ impl<'a> Library<'a> {
     ///
     /// On a stream that carries one, the long name is set to the same text: both
     /// are the library's name, and a rename that moved only one would leave the
-    /// old name showing wherever the instrument reads the other.
+    /// old name showing wherever the instrument reads the other. Which of the two it
+    /// reads is inferred from specimens; not confirmed on hardware — which is why
+    /// both move.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
         let (_, variant) = self.name();
         TextField::COMBINED.write(&mut self.prefix, &format!("{name}#{variant}"))?;
@@ -704,6 +719,9 @@ impl<'a> Library<'a> {
     ///
     /// A root the directory does not record is refused: the instrument would have
     /// no stroke to play.
+    ///
+    /// That the instrument follows a rewritten map — a key routed to another root, or
+    /// to nothing — is inferred from specimens; not confirmed on hardware.
     pub fn set_key_root(&mut self, key: u8, root: Option<u8>) -> Result<(), Error> {
         if let Some(root) = root {
             if !self.roots().contains(&root) {
@@ -720,12 +738,18 @@ impl<'a> Library<'a> {
 
     /// Drop every stroke of one bank — the resonance set turns a large library into
     /// a small one, the release set silences the note-off sample.
+    ///
+    /// Confirmed on hardware for [`Bank::Release`]: the instrument damps the note at
+    /// note-off where the library it came from plays a release tail.
     pub fn drop_bank(&mut self, bank: Bank) -> Change {
         let code = bank.code();
         self.retain(|s| s.bank_code() != code)
     }
 
     /// Keep only the layers `keep` selects, per root and bank.
+    ///
+    /// Confirmed on hardware: a library with its softest layers dropped plays the
+    /// softest one left at the velocities they had, and is unchanged at loud ones.
     pub fn keep_layers(&mut self, keep: &Layers) -> Change {
         match keep {
             Layers::Only(layers) => {
@@ -753,6 +777,9 @@ impl<'a> Library<'a> {
 
     /// Uncover every key outside `range`, then drop the roots nothing plays any
     /// more. Keys inside the range keep the roots they had.
+    ///
+    /// That an uncovered key falls silent rather than reaching for a neighbouring
+    /// root is inferred from specimens; not confirmed on hardware.
     pub fn cut_range(&mut self, range: RangeInclusive<u8>) -> Change {
         self.restrict(|key| range.contains(&key))
     }
@@ -762,7 +789,7 @@ impl<'a> Library<'a> {
     ///
     /// A root whose keys straddle `key` lands in both halves — each half has to be
     /// playable on its own — so the two together hold more strokes than the one they
-    /// came from.
+    /// came from. Each half carries [`Library::cut_range`]'s provenance.
     pub fn split_at(&self, key: u8) -> (Library<'a>, Library<'a>) {
         let mut low = self.clone();
         let mut high = self.clone();
@@ -831,6 +858,10 @@ impl<'a> Library<'a> {
     /// Lay the body out: the prefix with its counts rewritten, the directory with
     /// every audio offset recomputed, the zero gap, then the audio spans in
     /// directory order.
+    ///
+    /// Confirmed on hardware: a body laid out here, with a directory the transforms
+    /// shortened and every span moved, is accepted by the instrument and plays at the
+    /// level the library it came from plays at.
     pub fn to_body(&self) -> Result<Vec<u8>, Error> {
         let count = u16::try_from(self.strokes.len()).map_err(|_| ParseError::OutOfBounds {
             value: format!("{} strokes", self.strokes.len()),
@@ -881,7 +912,9 @@ impl<'a> Library<'a> {
     ///
     /// The u32 at body `0x06` is unique per file and is not a checksum, a size or a
     /// hash of anything in it; with nothing to recompute it from, an edit carries
-    /// it over rather than inventing a value.
+    /// it over rather than inventing a value. Confirmed on hardware only in that a
+    /// library carrying its source's word loads and plays; what the word means is
+    /// open.
     pub fn to_piano(&self) -> Result<Piano, Error> {
         Ok(Piano {
             file: Cbin {

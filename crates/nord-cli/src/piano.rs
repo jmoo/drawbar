@@ -8,6 +8,12 @@
 //! and cutting a library in two. Nothing here re-encodes audio: a stroke that
 //! survives a transform moves byte for byte.
 //!
+//! A library written here loads on the instrument and plays: confirmed on hardware
+//! for `trim`, both for a dropped bank and for dropped velocity layers. What `edit`
+//! changes — a name, a key's tuning, the root a key plays — and the narrowed key
+//! range `trim --range` and `split` leave behind are inferred from specimens; not
+//! confirmed on hardware.
+//!
 //! These verbs take a file. A library is tens of megabytes, so moving one to or
 //! from the instrument is `nord piano get` and `nord piano put`.
 

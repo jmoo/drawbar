@@ -45,7 +45,10 @@ Many other formats are recognized and preserved verbatim without decoding their 
 see the [format support tiers](crates/nord-format/README.md#what-it-handles).
 Sample support includes
 encoding v2/v3/v4 instruments that round-trip through this crate's decoder; v2 plays on an
-Electro 5, while v3/v4 are inferred from specimens. The
+Electro 5, while v3/v4 are inferred from specimens. Piano libraries are parsed whole — the stroke
+directory, the key map and every stroke's encoded audio — and can be renamed, retuned, remapped,
+trimmed and split; a library rewritten that way loads on an Electro 5 and plays, and dropping a
+bank or a velocity layer behaves as the directory says it should. The
 [USB status](crates/nord-usb/README.md#status) lists implemented operations and their hardware validation.
 
 Hardware validation has focused on the Electro 5. Public tests use self-generated fixtures and
