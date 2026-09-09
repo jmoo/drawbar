@@ -184,6 +184,9 @@ pub struct Change {
     pub keys_uncovered: usize,
 }
 
+/// The character the `Name#Variant` field splits on. Neither half may hold it.
+pub const NAME_SEPARATOR: char = '#';
+
 /// A fixed-width, NUL-padded text field in the prefix.
 #[derive(Clone, Copy)]
 struct TextField {
@@ -219,7 +222,23 @@ impl TextField {
         String::from_utf8_lossy(&field[..end]).into_owned()
     }
 
-    fn write(self, prefix: &mut [u8], text: &str) -> Result<(), Error> {
+    /// Text any of these fields carries back as it was written. The field is a fixed
+    /// width of bytes ended by a NUL and read lossily, so a NUL, a control character
+    /// and anything outside ASCII are all refused rather than stored.
+    fn check_text(text: &str) -> Result<(), Error> {
+        match text.chars().find(|&c| !c.is_ascii_graphic() && c != ' ') {
+            None => Ok(()),
+            Some(bad) => Err(ParseError::AssertFail(format!(
+                "{text:?} holds {bad:?}, which the field would not read back as written; it \
+                 carries printable ASCII"
+            ))
+            .into()),
+        }
+    }
+
+    /// [`TextField::check_text`], and short enough to fit with its terminator.
+    fn check(self, text: &str) -> Result<(), Error> {
+        TextField::check_text(text)?;
         if text.len() > self.capacity() {
             return Err(ParseError::OutOfBounds {
                 value: format!("{text:?} ({} bytes)", text.len()),
@@ -227,11 +246,29 @@ impl TextField {
             }
             .into());
         }
+        Ok(())
+    }
+
+    fn write(self, prefix: &mut [u8], text: &str) -> Result<(), Error> {
+        self.check(text)?;
         let field = &mut prefix[self.at..self.at + self.len];
         field.fill(0);
         field[..text.len()].copy_from_slice(text.as_bytes());
         Ok(())
     }
+}
+
+/// One half of `Name#Variant` as a caller supplies it. A separator inside a half
+/// would move the split, so the halves that read back would not be the ones written.
+fn check_half(what: &str, text: &str) -> Result<(), Error> {
+    if text.contains(NAME_SEPARATOR) {
+        return Err(ParseError::AssertFail(format!(
+            "the {what} {text:?} holds {NAME_SEPARATOR:?}, which is what splits the name from \
+             the variant in the field they share"
+        ))
+        .into());
+    }
+    TextField::check_text(text)
 }
 
 /// A piano library (`npno`): the CBIN container with the `CNSP` body verbatim.
@@ -708,33 +745,49 @@ impl<'a> Library<'a> {
 
     /// Rename the library, leaving the variant alone.
     ///
+    /// A name holding [`NAME_SEPARATOR`], or text the field would not read back, is
+    /// refused; so is one too long for the field it shares with the variant. Nothing
+    /// is written unless every field the rename touches accepts its text.
+    ///
     /// On a stream that carries one, the long name is set to the same text: both
     /// are the library's name, and a rename that moved only one would leave the
     /// old name showing wherever the instrument reads the other. Which of the two it
     /// reads is inferred from specimens; not confirmed on hardware — which is why
     /// both move.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        check_half("name", name)?;
         let (_, variant) = self.name();
-        TextField::COMBINED.write(&mut self.prefix, &format!("{name}#{variant}"))?;
-        if self.stream_version() == VERSION_SPLIT_NAME {
-            TextField::LONG_NAME.write(&mut self.prefix, name)?;
+        let combined = format!("{name}{NAME_SEPARATOR}{variant}");
+        let long = (self.stream_version() == VERSION_SPLIT_NAME).then_some(name);
+        TextField::COMBINED.check(&combined)?;
+        if let Some(long) = long {
+            TextField::LONG_NAME.check(long)?;
+        }
+        TextField::COMBINED.write(&mut self.prefix, &combined)?;
+        if let Some(long) = long {
+            TextField::LONG_NAME.write(&mut self.prefix, long)?;
         }
         Ok(())
     }
 
-    /// Replace the variant — the text after the `#`, where the vendor records the
-    /// voicing and the library's size — leaving both names alone.
+    /// Replace the variant — the text after [`NAME_SEPARATOR`], where the vendor
+    /// records the voicing and the library's size — leaving both names alone. A
+    /// variant holding the separator itself is refused.
     pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
+        check_half("variant", variant)?;
         let (name, _) = self.name();
-        TextField::COMBINED.write(&mut self.prefix, &format!("{name}#{variant}"))
+        TextField::COMBINED.write(
+            &mut self.prefix,
+            &format!("{name}{NAME_SEPARATOR}{variant}"),
+        )
     }
 
     /// Replace the voicing at `0x5c`. Refused on a stream with no such field.
     pub fn set_voicing(&mut self, voicing: &str) -> Result<(), Error> {
         if self.stream_version() != VERSION_SPLIT_NAME {
             return Err(ParseError::AssertFail(format!(
-                "stream {:#06x} carries no voicing field; the variant after the `#` is \
-                 where it records one",
+                "stream {:#06x} carries no voicing field; the variant after the \
+                 {NAME_SEPARATOR:?} is where it records one",
                 self.stream_version()
             ))
             .into());
@@ -1362,6 +1415,30 @@ mod tests {
         let before = library.to_body().unwrap();
         assert!(library.set_fine_tune(NOTES as u8, 32).is_err());
         assert_eq!(library.to_body().unwrap(), before);
+    }
+
+    #[test]
+    fn a_separator_in_a_name_or_a_variant_is_refused() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        assert!(library.set_name("Upright#2").is_err());
+        assert!(library.set_variant("Sml#XL").is_err());
+        assert_eq!(library.name(), ("Test Piano".into(), "Variant".into()));
+    }
+
+    #[test]
+    fn text_the_field_would_not_read_back_is_refused() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        assert!(
+            library.set_name("Flügel").is_err(),
+            "the field is read as ASCII"
+        );
+        assert!(
+            library.set_variant("Sml\0XL").is_err(),
+            "a NUL ends the field, hiding everything after it"
+        );
+        assert_eq!(library.name(), ("Test Piano".into(), "Variant".into()));
     }
 
     #[test]

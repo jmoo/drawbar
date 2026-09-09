@@ -113,12 +113,13 @@ pub struct EditArgs {
     #[arg(value_name = "FILE")]
     pub file: PathBuf,
 
-    /// Rename the library. The name shares a fixed-width field with the variant.
+    /// Rename the library. The name shares a fixed-width field with the variant and
+    /// is split from it on a `#`, so a name holding one is refused.
     #[arg(long)]
     pub name: Option<String>,
 
     /// Replace the variant — the text after the `#`, where the vendor records the
-    /// voicing and the library's size.
+    /// voicing and the library's size. It cannot itself hold a `#`.
     #[arg(long)]
     pub variant: Option<String>,
 
@@ -552,15 +553,19 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
     let mut changed = 0usize;
 
     if let Some(name) = &args.name {
-        library.set_name(name).map_err(|e| e.to_string())?;
+        library.set_name(name).map_err(|e| format!("--name: {e}"))?;
         changed += 1;
     }
     if let Some(variant) = &args.variant {
-        library.set_variant(variant).map_err(|e| e.to_string())?;
+        library
+            .set_variant(variant)
+            .map_err(|e| format!("--variant: {e}"))?;
         changed += 1;
     }
     if let Some(voicing) = &args.voicing {
-        library.set_voicing(voicing).map_err(|e| e.to_string())?;
+        library
+            .set_voicing(voicing)
+            .map_err(|e| format!("--voicing: {e}"))?;
         changed += 1;
     }
     for spec in &args.tune {
