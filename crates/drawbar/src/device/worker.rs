@@ -17,7 +17,7 @@ use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
-use super::{DeviceCmd, DeviceEvent, Outgoing};
+use super::{DeviceCmd, DeviceEvent, Outgoing, Partition};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -53,6 +53,35 @@ pub enum Flow {
 /// A device status is a reply; only transport failure means detachment.
 fn hung_up(e: &Error) -> bool {
     matches!(e, Error::Transport(_))
+}
+
+/// Report the classes the instrument declares, from its own partition table.
+///
+/// The first thing a connection does, because nothing above this can ask for a class
+/// before it knows the instrument has one. The table is read once and kept, so every
+/// later operation is answered out of what this read.
+pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow {
+    let rows = match device.geometry().await {
+        Ok(geometry) => geometry
+            .entries()
+            .map(|(partition, _)| Partition {
+                class: ObjectClass::from_raw(partition.index),
+                name: partition.name.clone(),
+                native: partition.native,
+                unit: partition.allocation_unit().ok(),
+            })
+            .collect(),
+        Err(e) => {
+            let lost = hung_up(&e);
+            emit.send(DeviceEvent::OpFailed(format!("partitions: {e}")));
+            return match lost {
+                true => Flow::Lost,
+                false => Flow::Continue,
+            };
+        }
+    };
+    emit.send(DeviceEvent::Partitions(rows));
+    Flow::Continue
 }
 
 /// Turn an error into the sentence for it, noting on the way whether the instrument is
@@ -552,11 +581,7 @@ async fn scan_class<T: Transport>(
     class: ObjectClass,
     emit: &Emit,
 ) -> Result<Walked, Error> {
-    let geometry = device.geometry().await?;
-    let declared = geometry.banks(class)?.to_vec();
-    // A class whose partition reports no unit still has banks to walk; what it costs a
-    // count is simply not known.
-    let unit = geometry.allocation_unit(class).ok();
+    let declared = device.geometry().await?.banks(class)?.to_vec();
     let plan = planned(&declared)?;
 
     device
@@ -569,7 +594,6 @@ async fn scan_class<T: Transport>(
             emit.send(DeviceEvent::Geometry {
                 class,
                 banks: declared.clone(),
-                unit,
             });
             emit.send(DeviceEvent::ClassStatus {
                 class,
@@ -1647,6 +1671,46 @@ mod wire_tests {
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "it was tried");
         assert_eq!(counted(&device, cmd::INFO), 80);
+    }
+
+    /// The instrument's own partition table is what says which classes exist, and every
+    /// row of it is one — the ones this app has no name for included, so a folder the
+    /// crate cannot name is still listed rather than dropped.
+    #[test]
+    fn a_connection_announces_the_classes_the_instrument_declares() {
+        let mut puppet = Puppet::stocked(&[("Bank 1", 50)], &[]);
+        let (tx, events) = std::sync::mpsc::channel();
+        let emit = Emit::new(tx, egui::Context::default());
+        let lent = std::mem::replace(&mut puppet, Puppet::new(1));
+        let mut device = Device::new(lent);
+
+        let flow = nord_usb::block_on(announce(&mut device, &emit));
+        assert!(flow == Flow::Continue);
+
+        let announced: Vec<Vec<Partition>> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Partitions(rows) => Some(rows),
+                _ => None,
+            })
+            .collect();
+        let [rows] = announced.as_slice() else {
+            panic!("one announcement per connection, not {}", announced.len());
+        };
+        assert_eq!(
+            rows.iter().map(|row| row.class).collect::<Vec<_>>(),
+            (0..8).map(ObjectClass::from_raw).collect::<Vec<_>>(),
+            "the table's index is the class code"
+        );
+        assert_eq!(rows[4].name, "Partition 4", "the device's own word");
+        // The libraries count blocks of net bytes; every other partition counts bytes.
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.unit.map(|unit| unit.get()))
+                .collect::<Vec<_>>(),
+            [1, 131_064, 1, 131_064, 1, 1, 1, 1].map(Some),
+            "each partition's own unit"
+        );
     }
 
     #[test]

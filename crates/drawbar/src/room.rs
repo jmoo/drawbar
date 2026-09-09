@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(constraint(&queue, &workspace, &device.state), None);
 
         // 64 blocks of 131 064 bytes is 8.0 MB, and 5 347 738 bytes is 5.1 MB.
-        device.pretend_unit(class, 131_064);
+        device.pretend_partitions(&crate::device::ELECTRO5);
         assert_eq!(
             constraint(&queue, &workspace, &device.state).as_deref(),
             Some("Grand is 5.1 MB and 8.0 MB is free — it fits.")

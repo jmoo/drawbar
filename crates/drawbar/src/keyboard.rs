@@ -14,13 +14,13 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Browser, Held, Item, Kind, Onto};
-use crate::device::{occupancy, read_only, Device, BROWSED};
+use crate::device::{occupancy, read_only, Device};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::Needs;
 use crate::panel::{caps, Track};
 use crate::queue::{Queue, Queued};
 use crate::room;
-use crate::strings::{folder, place, shown};
+use crate::strings::{place, shown};
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
@@ -230,7 +230,7 @@ fn header(ui: &mut egui::Ui, device: &Device, class: ObjectClass, acts: &mut Vec
                 None,
                 false,
             )
-            .on_hover_text(format!("read {} again", folder(class)))
+            .on_hover_text(format!("read {} again", device.state.folder_name(class)))
             .clicked()
             {
                 acts.push(Act::ReadAgain(class));
@@ -262,7 +262,8 @@ fn ago(seconds: f64) -> String {
 /// Switching is a switch and nothing more — every folder here has already been read, and
 /// asking the instrument again is what the header's own chip is for.
 fn switcher(ui: &mut egui::Ui, device: &Device, on: ObjectClass, acts: &mut Vec<Act>) {
-    let rooms: Vec<Option<String>> = BROWSED
+    let classes = device.state.classes();
+    let rooms: Vec<Option<String>> = classes
         .iter()
         .map(|class| {
             occupancy(
@@ -274,11 +275,14 @@ fn switcher(ui: &mut egui::Ui, device: &Device, on: ObjectClass, acts: &mut Vec<
         .collect();
     let faint = ui.visuals().faint_bg_color;
     band(ui, SWITCHER, Some(faint), |ui| {
-        for (class, room) in BROWSED.iter().zip(&rooms) {
+        for (class, room) in classes.iter().zip(&rooms) {
             let picked = chip(
                 ui,
                 Some(Kind::from_class(*class).glyph()),
-                (folder(*class), egui::FontId::proportional(11.0)),
+                (
+                    device.state.folder_name(*class),
+                    egui::FontId::proportional(11.0),
+                ),
                 room.as_deref(),
                 *class == on,
             )
@@ -503,7 +507,7 @@ fn list(
     if banks.is_empty() {
         return nothing(ui, "Nothing read yet.");
     }
-    if read_only(class) {
+    if class == ObjectClass::Piano {
         prose(ui, PIANOS);
     }
     if class == ObjectClass::Sample {
@@ -1016,6 +1020,7 @@ mod tests {
     use crate::log::Log;
     use crate::queue::enqueue;
     use crate::shell::Shell;
+    use crate::strings::folder;
     use crate::tabs::{Spot, Tabs};
     use crate::workspace::{Fresh, Origin};
     use nord_usb::wire::Status;
@@ -1048,7 +1053,7 @@ mod tests {
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
         device.pretend_geometry(ObjectClass::Piano, &[("Grand", 1)]);
         device.pretend_scanned(ObjectClass::Settings, 1, &["Settings"]);
-        device.pretend_unit(ObjectClass::Sample, 131_064);
+        device.pretend_partitions(&crate::device::ELECTRO5);
         device.state.inventory.push(Status {
             class: ObjectClass::Sample,
             count: 84,
@@ -1145,7 +1150,7 @@ mod tests {
             bench();
         tabs.show(Spot::Keyboard);
 
-        for class in BROWSED {
+        for class in device.state.classes() {
             tabs.keyboard_on(class);
             for width in [430.0_f32, 900.0] {
                 // Twice: the second pass runs with the widget state the first left.
@@ -1187,7 +1192,7 @@ mod tests {
         // is what the click added.
         let asked = device.queued().len();
 
-        // The first chip of the switcher is the first folder in BROWSED.
+        // The first chip of the switcher is the first folder the instrument declares.
         let on_programs = egui::pos2(20.0, HEADER + SWITCHER / 2.0);
         let press = |pressed| egui::Event::PointerButton {
             pos: on_programs,
@@ -1216,7 +1221,10 @@ mod tests {
             );
         }
 
-        assert_eq!(tabs.keyboard_class(), Some(BROWSED[0]));
+        assert_eq!(
+            tabs.keyboard_class(),
+            device.state.classes().first().copied()
+        );
         assert_eq!(tabs.showing(), Some(Spot::Keyboard));
         assert_eq!(
             device.queued().len(),

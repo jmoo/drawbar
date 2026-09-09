@@ -15,7 +15,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Browser, Bulk, Item, Kind};
-use crate::device::{sendable, Device, DeviceState, BROWSED};
+use crate::device::{sendable, Device, DeviceState};
 use crate::filter::{Filter, Place};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::Track;
@@ -184,7 +184,7 @@ pub fn rows(workspace: &Workspace, device: &DeviceState, tags: &Tags, filter: &F
         }
     }
     let untagged = BTreeSet::new();
-    for class in BROWSED {
+    for class in device.classes() {
         for bank in device.banks_of(class) {
             let Some(slots) = device.bank(class, bank) else {
                 continue;
@@ -501,10 +501,13 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String
     }
 }
 
-/// The destinations as one run per folder: `Programs 7:1–7:4`.
+/// The destinations as one run per folder: `Programs 7:1–7:4`, in the order `going` is
+/// sorted into.
 fn spans(going: &[(ObjectClass, Location)]) -> String {
+    let mut folders: Vec<ObjectClass> = going.iter().map(|(class, _)| *class).collect();
+    folders.dedup();
     let mut runs: Vec<String> = Vec::new();
-    for class in BROWSED {
+    for class in folders {
         let mut ats = going
             .iter()
             .filter(|(held, _)| *held == class)
@@ -1252,6 +1255,7 @@ mod tests {
             workspace.remove(id, &mut log);
             bytes
         };
+        device.pretend_partitions(&crate::device::ELECTRO5);
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "Squabble B"]);
         device.pretend_scanned(ObjectClass::SetList, 1, &["Sunday"]);
         // One off a scanned slot, so it is in both places, and one that never was.

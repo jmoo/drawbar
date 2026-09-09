@@ -102,11 +102,20 @@ impl Link {
             };
             match WebUsbTransport::open(chosen.clone()).await {
                 Ok(transport) => {
-                    let mut state = inner.borrow_mut();
-                    state.device = Some(Device::new(transport));
-                    state.chosen = Some(chosen);
-                    drop(state);
+                    let mut device = Device::new(transport);
                     emit.send(DeviceEvent::Connected(card));
+                    // Which classes the instrument has is the first thing read: nothing
+                    // above asks for one before the answer arrives. ⚠️ Awaited before
+                    // the device goes into the cell — a borrow held across an await
+                    // panics the moment the UI touches the same cell.
+                    match worker::announce(&mut device, &emit).await {
+                        Flow::Continue => {
+                            let mut state = inner.borrow_mut();
+                            state.device = Some(device);
+                            state.chosen = Some(chosen);
+                        }
+                        _ => emit.send(DeviceEvent::Disconnected { lost: true }),
+                    }
                 }
                 Err(e) => emit.send(DeviceEvent::ConnectFailed(e.to_string())),
             }

@@ -11,13 +11,13 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, good, ui as ui_text};
 use crate::browser::{Act, Browser, Item, Kind};
-use crate::device::{occupancy, Device, BROWSED};
+use crate::device::{occupancy, Device};
 use crate::icon::{painted, Glyph};
 use crate::panel::panel_header;
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
-use crate::strings::{folder, place};
+use crate::strings::place;
 use crate::tags::Tags;
 use crate::workspace::Workspace;
 
@@ -78,7 +78,7 @@ fn slots(browser: &Browser) -> Vec<(ObjectClass, Location)> {
 fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: &Queue) {
     body(ui, |ui| {
         let mut drawn = 0;
-        for class in BROWSED {
+        for class in device.state.classes() {
             let unit = device.state.allocation_unit(class);
             let Some(held) = room::meter(class, &device.state.inventory, unit, queue, workspace)
             else {
@@ -86,7 +86,9 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
             };
             drawn += 1;
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(folder(class)).text_style(ui_text()));
+                ui.label(
+                    egui::RichText::new(device.state.folder_name(class)).text_style(ui_text()),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // ⚠️ The bar takes the tone and the readout keeps its own ink: the
                     // signal colours do not carry as 10 px figures on the panel.
@@ -291,7 +293,7 @@ mod tests {
         let at = Location { bank: 6, slot: 0 };
         let mut device = Device::new(ctx.clone());
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
-        device.pretend_unit(ObjectClass::Sample, 131_064);
+        device.pretend_partitions(&crate::device::ELECTRO5);
         device.state.inventory.push(Status {
             class: ObjectClass::Sample,
             count: 84,

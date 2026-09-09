@@ -603,7 +603,6 @@ fn send(
 mod tests {
     use super::*;
     use crate::browser::bench::bench;
-    use crate::device::BROWSED;
     use crate::strings::folder;
     use crate::workspace::Origin;
 
@@ -1204,7 +1203,7 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        for class in BROWSED {
+        for class in device.state.classes() {
             let progress = device.state.scan.progress(class);
             assert!(
                 progress.is_some_and(|progress| progress.running),

@@ -39,15 +39,21 @@ use web::Link;
 pub use scan::{Progress, Scan};
 pub use worker::{Emit, Flow};
 
-/// The folders the browser shows, in the order it shows them.
-pub const BROWSED: [ObjectClass; 6] = [
-    ObjectClass::Program,
-    ObjectClass::SetList,
-    ObjectClass::Sample,
-    ObjectClass::Piano,
-    ObjectClass::Live,
-    ObjectClass::Settings,
-];
+/// One row of the instrument's own partition table: a class it has, under the device's
+/// own name for it.
+///
+/// What the instrument declares, never what this app expects. A class this app has no
+/// name for arrives as [`ObjectClass::Unknown`] and is shown under `name`.
+pub struct Partition {
+    pub class: ObjectClass,
+    /// The device's own word: `Piano`, `Samp Lib`, `Program`, `Set List`, …
+    pub name: String,
+    /// Whether this is the `(Native)` view of a library — a second view of a pool the
+    /// table already carries under its user partition, and not a folder of its own.
+    pub native: bool,
+    /// `None` where the partition reports no usable unit.
+    pub unit: Option<AllocationUnit>,
+}
 
 /// What the UI asks the instrument to do.
 #[derive(Clone)]
@@ -270,6 +276,9 @@ pub enum DeviceEvent {
     },
     Started(String),
     Finished,
+    /// The instrument's own partition table, in table order — the classes it has, which
+    /// nothing above this can know before it arrives. Read once per connection.
+    Partitions(Vec<Partition>),
     /// A class's own counters, read at the head of its walk.
     ClassStatus {
         class: ObjectClass,
@@ -277,14 +286,10 @@ pub enum DeviceEvent {
         /// Banks to expect, as the instrument's own bank list divides the class.
         banks: Option<u32>,
     },
-    /// The device's own division of a class into banks, read at the head of its walk,
-    /// with what one unit of whatever `STATUS` counts for its partition is worth.
+    /// The device's own division of a class into banks, read at the head of its walk.
     Geometry {
         class: ObjectClass,
         banks: Vec<Bank>,
-        /// `None` where the partition reports no unit, which is *not known* rather than
-        /// *nothing*.
-        unit: Option<AllocationUnit>,
     },
     /// The slot the panel has loaded in a class; `None` when focus is supported but
     /// nothing is loaded. Never sent for a class that answers `0x15` (focus n/a).
@@ -399,8 +404,9 @@ pub struct DeviceState {
     focus: HashMap<u32, Option<Location>>,
     /// The device's own banks, per class: their names and their capacities.
     geometry: HashMap<u32, Vec<Bank>>,
-    /// Net bytes per unit of what `STATUS` counts, per class.
-    units: HashMap<u32, AllocationUnit>,
+    /// The instrument's own partition table, in table order. Empty until it is read,
+    /// which is *not known* rather than *an instrument with no folders*.
+    partitions: Vec<Partition>,
     banks: HashMap<(u32, u32), Vec<Option<ProgramInfo>>>,
     pub detail: Detail,
 }
@@ -489,12 +495,46 @@ impl DeviceState {
         self.banks.get(&(class.to_raw(), bank)).map(Vec::as_slice)
     }
 
+    /// The classes the instrument declares, in its own table order.
+    ///
+    /// The whole of what the browser, the switcher and a resync walk. Empty until the
+    /// partition table has been read.
+    ///
+    /// The `(Native)` rows are left out: each is a second view of a library the table
+    /// already carries under its user partition, so listing one would show the same
+    /// pool as a folder of its own.
+    pub fn classes(&self) -> Vec<ObjectClass> {
+        self.partitions
+            .iter()
+            .filter(|row| !row.native)
+            .map(|row| row.class)
+            .collect()
+    }
+
+    /// What the browser calls a class's folder: the panel's own word for a class this
+    /// app names, and otherwise the name the instrument's partition table gave it.
+    pub fn folder_name(&self, class: ObjectClass) -> &str {
+        let ObjectClass::Unknown(_) = class else {
+            return folder(class);
+        };
+        self.partition(class)
+            .map(|row| row.name.as_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| folder(class))
+    }
+
     /// What one unit of whatever `STATUS` counts is worth for this class's partition.
     ///
     /// ⚠️ `None` is *not read yet*, never *byte-granular*: a slot-addressed partition
     /// reports a unit of 1, which is a unit like any other.
     pub fn allocation_unit(&self, class: ObjectClass) -> Option<AllocationUnit> {
-        self.units.get(&class.to_raw()).copied()
+        self.partition(class)?.unit
+    }
+
+    fn partition(&self, class: ObjectClass) -> Option<&Partition> {
+        self.partitions
+            .iter()
+            .find(|row| !row.native && row.class == class)
     }
 
     /// The banks of a class that have been read, in order.
@@ -552,7 +592,7 @@ impl DeviceState {
         self.banks.clear();
         self.focus.clear();
         self.geometry.clear();
-        self.units.clear();
+        self.partitions.clear();
         self.inventory.clear();
         self.detail = Detail::default();
         self.scan.clear();
@@ -611,12 +651,28 @@ pub fn pretend_allocation_unit(class: ObjectClass, bytes: u32) -> AllocationUnit
     .expect("a partition reporting a unit of at least one")
 }
 
+/// The partition table an Electro 5 declares, in its own order, with the net bytes each
+/// partition counts in units of. The `(Native)` rows are left out.
+///
+/// Confirmed on hardware.
+#[cfg(test)]
+pub const ELECTRO5: [(ObjectClass, &str, u32); 6] = [
+    (ObjectClass::Piano, "Piano", 261_632),
+    (ObjectClass::Sample, "Samp Lib", 131_064),
+    (ObjectClass::Program, "Program", 1),
+    (ObjectClass::SetList, "Set List", 1),
+    (ObjectClass::Live, "Live", 1),
+    (ObjectClass::Settings, "Settings", 1),
+];
+
 /// Whether the browser offers to change a class at all.
 ///
 /// ⚠️ A piano is a multi-megabyte library that the instrument builds its own index
-/// over; the browser lists what is installed and offers nothing that would move it.
+/// over; the browser lists what is installed and offers nothing that would move it. A
+/// partition this app cannot name is listed and left alone for a plainer reason:
+/// nothing here knows what its slots hold or what a write into one would mean.
 pub fn read_only(class: ObjectClass) -> bool {
-    matches!(class, ObjectClass::Piano)
+    matches!(class, ObjectClass::Piano | ObjectClass::Unknown(_))
 }
 
 /// Whether this app will write into a class at all.
@@ -724,14 +780,14 @@ impl Device {
         self.state.scan.start(class);
     }
 
-    /// Read the whole instrument again: every class, and with each one its counters, its
-    /// geometry and the slot the panel has loaded.
+    /// Read the whole instrument again: every class it declares, and with each one its
+    /// counters, its geometry and the slot the panel has loaded.
     ///
     /// One walk per class, which is the same thing attaching does — a class's counters,
     /// banks and focus are all read at the head of its own session, so there is nothing
     /// else to ask for.
     pub fn resync(&mut self) {
-        for class in BROWSED {
+        for class in self.state.classes() {
             self.read_class(class);
         }
     }
@@ -852,12 +908,19 @@ impl Device {
         self.state.banks.insert((class.to_raw(), bank), slots);
     }
 
-    /// Give a class the allocation unit its partition would have reported.
+    /// Give the instrument the partition table it would have declared: the class of each
+    /// row, the device's own name for it, and the net bytes its counters are in units of.
     #[cfg(test)]
-    pub fn pretend_unit(&mut self, class: ObjectClass, bytes: u32) {
-        self.state
-            .units
-            .insert(class.to_raw(), pretend_allocation_unit(class, bytes));
+    pub fn pretend_partitions(&mut self, table: &[(ObjectClass, &str, u32)]) {
+        self.state.partitions = table
+            .iter()
+            .map(|(class, name, bytes)| Partition {
+                class: *class,
+                name: (*name).to_string(),
+                native: false,
+                unit: Some(pretend_allocation_unit(*class, *bytes)),
+            })
+            .collect();
     }
 
     /// Give a class the banks the device would have reported, for a headless render.
@@ -902,8 +965,6 @@ impl Device {
                     self.state.connection = Connection::Connected(card);
                     self.state.forget_everything();
                     self.pending.clear();
-                    // Each class reads its counters and walks in one session.
-                    self.resync();
                 }
                 DeviceEvent::ConnectFailed(why) => {
                     log.error(why);
@@ -951,12 +1012,15 @@ impl Device {
                     self.state.inventory.push(status);
                     self.state.scan.expect(class, banks);
                 }
-                DeviceEvent::Geometry { class, banks, unit } => {
+                // Which classes exist is the instrument's answer, so the walk of them
+                // can only start here. Each class reads its counters, its banks and its
+                // focus in one session.
+                DeviceEvent::Partitions(partitions) => {
+                    self.state.partitions = partitions;
+                    self.resync();
+                }
+                DeviceEvent::Geometry { class, banks } => {
                     self.state.geometry.insert(class.to_raw(), banks);
-                    match unit {
-                        Some(unit) => self.state.units.insert(class.to_raw(), unit),
-                        None => self.state.units.remove(&class.to_raw()),
-                    };
                 }
                 DeviceEvent::Focus { class, at } => {
                     self.state.focus.insert(class.to_raw(), at);
@@ -1055,10 +1119,86 @@ impl Device {
 mod tests {
     use super::*;
 
-    /// The unit a count is measured in arrives with the geometry, at the head of the
-    /// class's walk, and is forgotten when the instrument goes.
+    /// Every class this app has a name for, which is what the rules below are about.
+    /// The instrument declares its own.
+    fn named() -> impl Iterator<Item = ObjectClass> {
+        crate::browser::Kind::ALL
+            .into_iter()
+            .filter_map(|kind| kind.home())
+    }
+
+    fn table() -> Vec<Partition> {
+        vec![
+            Partition {
+                class: ObjectClass::Unknown(0),
+                name: "Piano (Native)".into(),
+                native: true,
+                unit: None,
+            },
+            Partition {
+                class: ObjectClass::Piano,
+                name: "Piano".into(),
+                native: false,
+                unit: Some(pretend_allocation_unit(ObjectClass::Piano, 261_632)),
+            },
+            Partition {
+                class: ObjectClass::Sample,
+                name: "Samp Lib".into(),
+                native: false,
+                unit: Some(pretend_allocation_unit(ObjectClass::Sample, 131_064)),
+            },
+            Partition {
+                class: ObjectClass::Unknown(9),
+                name: "Rhythms".into(),
+                native: false,
+                unit: None,
+            },
+        ]
+    }
+
+    /// The classes the app walks are the instrument's own table, and a partition this
+    /// app cannot name is one of them — under the device's word for it, and read only.
+    ///
+    /// ⚠️ A `(Native)` row is a second view of a library already in the table, so it is
+    /// not a folder of its own.
     #[test]
-    fn the_geometry_a_walk_reports_carries_the_unit_a_count_is_measured_in() {
+    fn the_instrument_says_which_classes_it_has() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        assert!(device.state.classes().is_empty(), "nothing read yet");
+
+        device.pretend(DeviceEvent::Partitions(table()));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        assert_eq!(
+            device.state.classes(),
+            vec![
+                ObjectClass::Piano,
+                ObjectClass::Sample,
+                ObjectClass::Unknown(9)
+            ]
+        );
+        assert_eq!(device.state.folder_name(ObjectClass::Piano), "Pianos");
+        assert_eq!(device.state.folder_name(ObjectClass::Unknown(9)), "Rhythms");
+        assert!(read_only(ObjectClass::Unknown(9)));
+
+        // Every class the table declared is walked, and nothing else is.
+        for class in device.state.classes() {
+            assert!(device.state.scan.progress(class).is_some(), "{class:?}");
+        }
+        assert!(device.state.scan.progress(ObjectClass::Program).is_none());
+
+        device.pretend(DeviceEvent::Disconnected { lost: false });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        assert!(device.state.classes().is_empty());
+    }
+
+    /// The unit a count is measured in is the partition's own, so it arrives with the
+    /// table and is forgotten when the instrument goes.
+    #[test]
+    fn a_count_is_measured_in_the_unit_its_partition_reports() {
         let ctx = egui::Context::default();
         let mut device = Device::new(ctx.clone());
         let mut workspace = Workspace::new(ctx);
@@ -1071,15 +1211,16 @@ mod tests {
             "nothing read yet"
         );
 
-        device.pretend(DeviceEvent::Geometry {
-            class,
-            banks: Vec::new(),
-            unit: Some(pretend_allocation_unit(class, 131_064)),
-        });
+        device.pretend(DeviceEvent::Partitions(table()));
         device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
         assert_eq!(
             device.state.allocation_unit(class).map(|unit| unit.get()),
             Some(131_064)
+        );
+        assert_eq!(
+            device.state.allocation_unit(ObjectClass::Unknown(9)),
+            None,
+            "a partition that reported none"
         );
 
         device.pretend(DeviceEvent::Disconnected { lost: false });
@@ -1136,9 +1277,9 @@ mod tests {
     /// The buffer classes take a write like any other slot; only a library the
     /// instrument installs for itself is off limits.
     #[test]
-    fn every_browsed_class_but_pianos_can_be_written() {
-        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Piano) {
-            assert!(sendable(*class), "{}", folder(*class));
+    fn every_named_class_but_pianos_can_be_written() {
+        for class in named().filter(|class| *class != ObjectClass::Piano) {
+            assert!(sendable(class), "{}", folder(class));
         }
         assert!(!sendable(ObjectClass::Piano));
     }
@@ -1147,17 +1288,18 @@ mod tests {
     fn a_settings_write_warns_that_the_panel_reloads() {
         let why = write_warning(ObjectClass::Settings).expect("must warn");
         assert!(why.contains("reloads the selected program"), "{why}");
-        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Settings) {
-            assert!(write_warning(*class).is_none(), "{}", folder(*class));
+        for class in named().filter(|class| *class != ObjectClass::Settings) {
+            assert!(write_warning(class).is_none(), "{}", folder(class));
         }
     }
 
-    /// Pianos are listed and never altered.
+    /// Pianos are listed and never altered, and so is a partition this app cannot name.
     #[test]
-    fn only_pianos_are_read_only() {
+    fn a_piano_and_a_class_with_no_name_are_read_only() {
         assert!(read_only(ObjectClass::Piano));
-        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Piano) {
-            assert!(!read_only(*class), "{}", folder(*class));
+        assert!(read_only(ObjectClass::Unknown(9)));
+        for class in named().filter(|class| *class != ObjectClass::Piano) {
+            assert!(!read_only(class), "{}", folder(class));
         }
     }
 

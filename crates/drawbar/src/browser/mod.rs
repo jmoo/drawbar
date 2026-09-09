@@ -659,9 +659,9 @@ mod tests {
             // Named banks, which is what a piano's categories arrive as.
             device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
             device.pretend_geometry(ObjectClass::Piano, &[("Grand", 1), ("Upright", 1)]);
-            device.pretend_unit(ObjectClass::Piano, 261_632);
+            device.pretend_partitions(&crate::device::ELECTRO5);
             // Every branch of the instrument open, so every row shape is painted.
-            for class in crate::device::BROWSED {
+            for class in device.state.classes() {
                 browser.open.insert(Branch::Class(class.to_raw()));
                 for bank in 0..=8 {
                     browser.open.insert(Branch::Bank(class.to_raw(), bank));

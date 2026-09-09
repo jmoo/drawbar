@@ -12,13 +12,13 @@ use super::act::{owed, Act, Bulk};
 use super::drag::{Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
-use crate::device::{occupancy, read_only, Connection, Device, BROWSED};
+use crate::device::{occupancy, read_only, Connection, Device};
 use crate::filter::{Filter, Narrow, Place};
 use crate::icon::Glyph;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::shell::Page;
-use crate::strings::{folder, place, shown};
+use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
 
@@ -722,9 +722,11 @@ impl Browser {
                 }
             }
         }
-        let reading = BROWSED
-            .iter()
-            .filter_map(|class| device.state.scan.progress(*class))
+        let reading = device
+            .state
+            .classes()
+            .into_iter()
+            .filter_map(|class| device.state.scan.progress(class))
             .any(|progress| progress.running);
         let waiting = queue.len();
         drawn.response.context_menu(|ui| {
@@ -758,7 +760,7 @@ impl Browser {
             .filter(|entity| !entity.kept)
             .filter_map(|entity| entity.origin.slot())
             .collect();
-        for class in BROWSED {
+        for class in device.state.classes() {
             self.class_row(ui, device, class, &viewed, workspace, acts);
         }
     }
@@ -798,7 +800,7 @@ impl Browser {
                 indent: indent(1, true),
                 open: Some(open),
                 glyph: Some(Kind::from_class(class).glyph()),
-                name: folder(class),
+                name: device.state.folder_name(class),
                 note: read_only(class).then_some("read only"),
                 count,
                 child: true,
