@@ -188,6 +188,10 @@ Cargo from `crates/` inside the development shell; the parent
 - `nix build .#nord.all-corpus-full` uses the R2 corpus tier and requires a
   seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
   the corpus assemblies.
+- `nix build .#docs` renders the user guide, the mdBook under `docs/`.
+  `mdbook serve docs` previews it from the development shell.
+- `nix build .#site` assembles the GitHub Pages tree: the browser build at the
+  root, the guide at `/docs`.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
 would change, and treats Clippy warnings as failures. The public suite must
@@ -198,6 +202,9 @@ committed fixtures, plus the private corpus when enabled, and applies sidecar
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
 `NORD_CORPUS_DEPLOY_KEY`; forks cannot receive that secret, so the job skips them.
+
+A push to `master` deploys `.#site` to GitHub Pages once the check and build
+jobs pass.
 
 Nix style is two spaces and alphabetized attribute-set keys. Use a dotted path
 for one child (`a.b.c = v`) and braces for two or more children, decided per

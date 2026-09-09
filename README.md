@@ -33,6 +33,10 @@ nix run .#drawbar
 nix run .#drawbar-web
 ```
 
+The browser build is also published at [jmoo.github.io/drawbar](https://jmoo.github.io/drawbar/),
+with the user guide at [jmoo.github.io/drawbar/docs](https://jmoo.github.io/drawbar/docs/).
+`nix build .#docs` builds that guide locally.
+
 ## Status
 
 This is still alpha software and should be used with caution. Drawbar is a blackbox reverse engineering effort --

@@ -2,6 +2,7 @@ final: prev:
 let
   inherit (final.lib)
     attrNames
+    cleanSource
     cleanSourceWith
     concatMap
     concatMapAttrs
@@ -393,6 +394,54 @@ let
       }
     );
 
+  # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
+  # of the source means a local `mdbook build` cannot change this derivation.
+  docs = final.stdenvNoCC.mkDerivation {
+    pname = "drawbar-docs";
+    inherit (manifests.drawbar) version;
+
+    src = cleanSourceWith {
+      name = "docs";
+      src = cleanSource ./docs;
+      filter = path: type: !(type == "directory" && hasSuffix "/book" path);
+    };
+
+    nativeBuildInputs = [ final.mdbook ];
+
+    dontConfigure = true;
+    dontInstall = true;
+
+    buildPhase = ''
+      runHook preBuild
+      mdbook build --dest-dir "$out"
+
+      # A book whose summary renders nothing still exits 0.
+      if [ ! -f "$out/index.html" ]; then
+        echo "mdbook rendered no index.html" >&2
+        exit 1
+      fi
+      runHook postBuild
+    '';
+
+    meta.description = "the drawbar user guide";
+  };
+
+  # The GitHub Pages tree: the browser build at the root, the guide under /docs.
+  # Copies, not links: the tree leaves the store as a tarball.
+  site =
+    final.runCommand "drawbar-site-${manifests.drawbar.version}"
+      {
+        meta.description = "drawbar and its guide, laid out for GitHub Pages";
+      }
+      ''
+        mkdir -p "$out/docs"
+        cp -rL ${drawbar-web}/. "$out/"
+        cp -rL ${docs}/. "$out/docs/"
+
+        # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
+        touch "$out/.nojekyll"
+      '';
+
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
   # the host-independent web bundle.
   crossed =
@@ -486,7 +535,7 @@ in
     // {
       # `all` excludes corpus roll-ups; the R2 tier needs credentials this build
       # cannot assume.
-      all = final.linkFarm "all" (crates // crossed);
+      all = final.linkFarm "all" (crates // crossed // { inherit docs; });
 
       # Clippy over every crate and target, with each crate's test features on so the
       # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
@@ -524,6 +573,10 @@ in
       # The cross builds as a set, because their names are host-dependent and a
       # consumer enumerating them cannot write the list down.
       crossPackages = crossed;
+
+      # `site` stays out of `all`: it only rearranges outputs `all` already
+      # builds, and CI reaches it directly to deploy Pages.
+      inherit docs site;
 
       # `nix run .#drawbar-web`: serve the browser bundle on loopback and open it.
       drawbar-web-launch = final.writeShellApplication {
