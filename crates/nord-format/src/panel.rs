@@ -69,8 +69,6 @@ use crate::{Entity, Live, Program};
 /// across those bodies freely.
 #[derive(Debug)]
 pub struct Panel {
-    /// Limitations a renderer should show alongside this layout, if any.
-    pub notice: Option<&'static str>,
     /// The sections, in the order a reader meets them.
     pub groups: &'static [Group],
     /// Whether the groups account for every field the body registers.

@@ -426,7 +426,6 @@ macro_rules! synth_layer {
 }
 
 pub const PANEL: Panel = Panel {
-    notice: Some("Scene selection and some mode mappings are unverified. Controls include settings from both scenes; Global effect edits do not synchronize layers."),
     exhaustive: false,
     groups: &[
         Group {
