@@ -30,12 +30,7 @@ pub enum Spot {
 }
 
 enum Tab {
-    Document {
-        id: u64,
-        /// The bytes as the tab opened them: what Revert goes back to, and what the byte
-        /// diff is measured against. Held per tab, so switching tabs does not lose it.
-        opened: Vec<u8>,
-    },
+    Document { id: u64 },
     Library,
     Keyboard,
 }
@@ -43,7 +38,7 @@ enum Tab {
 impl Tab {
     fn spot(&self) -> Spot {
         match self {
-            Tab::Document { id, .. } => Spot::Document(*id),
+            Tab::Document { id } => Spot::Document(*id),
             Tab::Library => Spot::Library,
             Tab::Keyboard => Spot::Keyboard,
         }
@@ -73,13 +68,9 @@ impl Default for Tabs {
 
 impl Tabs {
     /// Open a document, or bring the tab already on it forward.
-    pub fn open(&mut self, id: u64, workspace: &Workspace) {
+    pub fn open(&mut self, id: u64) {
         if !self.holds(id) {
-            let opened = workspace
-                .get(id)
-                .map(|e| e.bytes.clone())
-                .unwrap_or_default();
-            self.open.push(Tab::Document { id, opened });
+            self.open.push(Tab::Document { id });
         }
         self.active = Some(Spot::Document(id));
     }
@@ -87,8 +78,7 @@ impl Tabs {
     /// Bring a tab forward, opening the keyboard if that is what is asked for.
     ///
     /// ⚠️ There is one keyboard, so showing it is opening it. The library is always
-    /// open, and a document is not made here: only [`Tabs::open`] has the bytes a
-    /// document tab holds.
+    /// open, and a document tab is made by [`Tabs::open`] alone.
     pub fn show(&mut self, spot: Spot) {
         let held = self.open.iter().any(|tab| tab.spot() == spot);
         match (held, spot) {
@@ -165,21 +155,10 @@ impl Tabs {
         self.open.iter().any(|tab| tab.spot() == Spot::Document(id))
     }
 
-    /// What the tab looked like when it opened.
-    pub fn opened(&self, id: u64) -> &[u8] {
-        self.open
-            .iter()
-            .find_map(|tab| match tab {
-                Tab::Document { id: held, opened } if *held == id => Some(opened.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[])
-    }
-
     /// Drop tabs whose asset is no longer on this computer.
     pub fn prune(&mut self, workspace: &Workspace) {
         self.open.retain(|tab| match tab {
-            Tab::Document { id, .. } => workspace.entities().iter().any(|e| e.id == *id),
+            Tab::Document { id } => workspace.entities().iter().any(|e| e.id == *id),
             Tab::Library | Tab::Keyboard => true,
         });
         if self
@@ -317,11 +296,11 @@ fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals
             hint: None,
             shut: true,
         }),
-        Tab::Document { id, .. } => {
+        Tab::Document { id } => {
             let entity = workspace.get(*id)?;
-            let mark = match (queue.holds(*id), entity.dirty) {
+            let mark = match (queue.holds(*id), entity.is_unsaved()) {
                 (true, _) => Some((crate::app::warn(visuals), "waiting to be sent")),
-                (false, true) => Some((crate::app::good(visuals), "changed since it was opened")),
+                (false, true) => Some((crate::app::good(visuals), "not saved")),
                 (false, false) => None,
             };
             Some(Face {
@@ -457,10 +436,10 @@ mod tests {
     /// Opening the same asset twice is the same tab, brought forward.
     #[test]
     fn opening_an_asset_that_is_already_open_just_activates_it() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
-        tabs.open(2, &ws);
-        tabs.open(1, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
+        tabs.open(2);
+        tabs.open(1);
         assert_eq!(tabs.open.len(), 3, "the library, and the two documents");
         assert_eq!(tabs.active(), Some(1));
     }
@@ -469,9 +448,9 @@ mod tests {
     /// falls back to the library.
     #[test]
     fn closing_the_active_tab_falls_back_to_another() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
-        tabs.open(2, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
+        tabs.open(2);
         tabs.close(Spot::Document(2));
         assert_eq!(tabs.active(), Some(1));
         tabs.close(Spot::Document(1));
@@ -483,8 +462,8 @@ mod tests {
     /// strip is never empty, whatever is asked of it.
     #[test]
     fn closing_the_library_does_nothing_and_leaves_the_strip_standing() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
         tabs.show(Spot::Keyboard);
         for spot in [
             Spot::Library,
@@ -502,23 +481,22 @@ mod tests {
     /// Closing a tab that is not in front leaves the front one showing.
     #[test]
     fn closing_a_background_tab_leaves_the_front_one_showing() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
-        tabs.open(2, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
+        tabs.open(2);
         tabs.close(Spot::Document(1));
         assert_eq!(tabs.active(), Some(2));
     }
 
-    /// Whether a tab is open is its own question, not one inferred from the bytes it
-    /// opened with — a document that opened empty is still open.
+    /// Whether a tab is open is its own question, not one inferred from what it is over
+    /// — a document over nothing at all is still open.
     #[test]
     fn a_tab_says_whether_it_is_open_whatever_it_holds() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
+        let mut tabs = Tabs::default();
         assert!(!tabs.holds(1));
-        // Nothing in the workspace under this id, so the tab opens with no bytes at all.
-        tabs.open(1, &ws);
-        tabs.open(2, &ws);
-        assert!(tabs.opened(1).is_empty());
+        // Nothing in the workspace under this id, so the tab stands for nothing.
+        tabs.open(1);
+        tabs.open(2);
         assert!(tabs.holds(1) && tabs.holds(2), "both are open");
         assert!(!tabs.holds(3));
 
@@ -529,33 +507,12 @@ mod tests {
         assert!(!tabs.holds(1));
     }
 
-    /// Each tab keeps the bytes it opened with, so Revert in one is not Revert in
-    /// another.
-    #[test]
-    fn each_tab_keeps_the_bytes_it_opened_with() {
-        let (mut tabs, mut ws) = (Tabs::default(), workspace());
-        let mut log = crate::log::Log::default();
-        let first = ws
-            .create(crate::workspace::Fresh::Program, &mut log)
-            .unwrap();
-        let second = ws
-            .create(crate::workspace::Fresh::Settings, &mut log)
-            .unwrap();
-        tabs.open(first, &ws);
-        tabs.open(second, &ws);
-
-        assert_eq!(tabs.opened(first), ws.get(first).unwrap().bytes.as_slice());
-        assert_ne!(tabs.opened(first), tabs.opened(second));
-        // A tab that was never opened has nothing to go back to.
-        assert!(tabs.opened(999).is_empty());
-    }
-
     /// There is one library and one keyboard, so asking for either twice is one tab
     /// brought forward — and a document opened between them does not make a second.
     #[test]
     fn the_library_and_the_keyboard_are_each_one_tab() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
         tabs.show(Spot::Keyboard);
         tabs.show(Spot::Library);
         assert_eq!(tabs.open.len(), 3);
@@ -580,9 +537,9 @@ mod tests {
     /// lands. ⚠️ The library stays first: neither end of a move may be it.
     #[test]
     fn reordering_moves_one_tab_and_closes_the_strip_up_behind_it() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
-        tabs.open(2, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
+        tabs.open(2);
         tabs.show(Spot::Keyboard);
         let order = |tabs: &Tabs| tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
 
@@ -639,9 +596,9 @@ mod tests {
     /// panics on the way.
     #[test]
     fn reordering_past_the_end_of_the_strip_moves_nothing() {
-        let (mut tabs, ws) = (Tabs::default(), workspace());
-        tabs.open(1, &ws);
-        tabs.open(2, &ws);
+        let mut tabs = Tabs::default();
+        tabs.open(1);
+        tabs.open(2);
         let before = tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
         for (from, to) in [(0, 0), (0, 2), (5, 1), (9, 9)] {
             tabs.reorder(from, to);
@@ -683,8 +640,8 @@ mod tests {
             "Africa Split, the one with the long tail".to_string(),
         );
         let mut tabs = Tabs::default();
-        tabs.open(first, &ws);
-        tabs.open(second, &ws);
+        tabs.open(first);
+        tabs.open(second);
 
         // Inside the first document's tab, and far past the right of the last one.
         let (from, to) = (
@@ -743,7 +700,7 @@ mod tests {
         let id = ws
             .create(crate::workspace::Fresh::Program, &mut log)
             .unwrap();
-        tabs.open(id, &ws);
+        tabs.open(id);
         ws.remove(id, &mut log);
         tabs.prune(&ws);
         assert!(!tabs.holds(id));

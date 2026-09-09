@@ -147,6 +147,27 @@ impl Container {
     }
 }
 
+/// What an asset was last saved as: the bytes, and the checksum a slot holding them
+/// would report.
+///
+/// ⚠️ The checksum is read when the baseline moves and never per frame. Reading one
+/// streams the whole body, and every listed row asks for it while the library is up.
+#[derive(Clone)]
+pub struct Baseline {
+    pub bytes: Vec<u8>,
+    /// `None` for anything but a type-1 container — see [`Container::body_crc32`].
+    pub crc32: Option<u32>,
+}
+
+impl Baseline {
+    /// The baseline of bytes nothing has inspected yet, which is what a store hands
+    /// back.
+    pub fn read(bytes: Vec<u8>) -> Baseline {
+        let crc32 = Container::read(&bytes).and_then(|held| held.body_crc32);
+        Baseline { bytes, crc32 }
+    }
+}
+
 /// One object held in memory: its bytes, what they decode to, and how they got here.
 pub struct LocalEntity {
     /// Stable across reordering, so a selection survives a removal.
@@ -158,7 +179,9 @@ pub struct LocalEntity {
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     pub verify: VerifyState,
-    pub dirty: bool,
+    /// What this asset was last saved as. Unsaved is not a flag: it is bytes that are
+    /// not these — see [`LocalEntity::is_unsaved`].
+    pub saved: Baseline,
     /// Whether this is on this computer, as opposed to a view of a slot.
     ///
     /// A view is a working copy like any other — it is edited and sent back the same
@@ -192,7 +215,7 @@ impl LocalEntity {
             Some(entity) => verify(entity, &bytes),
             None => VerifyState::NotApplicable("the file did not decode"),
         };
-        LocalEntity {
+        let mut held = LocalEntity {
             id,
             name,
             origin,
@@ -201,10 +224,28 @@ impl LocalEntity {
             parse_error,
             container,
             verify,
-            dirty: false,
+            saved: Baseline {
+                bytes: Vec::new(),
+                crc32: None,
+            },
             kept: true,
             stamp,
             link: None,
+        };
+        held.saved = held.baseline();
+        held
+    }
+
+    /// Whether it holds something other than what it was last saved as.
+    pub fn is_unsaved(&self) -> bool {
+        self.bytes != self.saved.bytes
+    }
+
+    /// The bytes it holds now, as a baseline: what saving it settles on.
+    fn baseline(&self) -> Baseline {
+        Baseline {
+            bytes: self.bytes.clone(),
+            crc32: self.container.as_ref().and_then(|held| held.body_crc32),
         }
     }
 
@@ -241,7 +282,7 @@ impl LocalEntity {
 /// untouched view is the slot's own bytes, which the instrument still has; an edited one
 /// is the only copy there is.
 pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
-    entity.dirty || queue.holds(entity.id)
+    entity.is_unsaved() || queue.holds(entity.id)
 }
 
 /// The filename an export suggests for a verbatim name: made path-safe, and given the
@@ -560,7 +601,10 @@ pub struct Saved {
     pub id: u64,
     pub name: String,
     pub origin: Origin,
-    pub bytes: Vec<u8>,
+    /// What it was last saved as.
+    pub saved: Vec<u8>,
+    /// What it holds now, where that is not what it was saved as.
+    pub unsaved: Option<Vec<u8>>,
 }
 
 /// What a background task hands back to the UI thread.
@@ -900,44 +944,43 @@ impl Workspace {
         });
     }
 
-    /// Put back the bytes a tab opened with. The asset is unchanged again, so the dirty
-    /// mark goes with them.
-    pub fn restore_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
+    /// Put back the bytes this asset was last saved as. What was saved is what it holds
+    /// again, so it is not unsaved any more.
+    pub fn revert(&mut self, id: u64, log: &mut Log) {
+        let Some(saved) = self.get(id).map(|entity| entity.saved.bytes.clone()) else {
+            return;
+        };
+        if self.respell(id, saved).is_none() {
             return;
         }
-        let stamp = self.stamp();
+        if let Some(entity) = self.get(id) {
+            log.say(format!("“{}” is back as it was last saved.", entity.name));
+        }
+    }
+
+    /// The bytes it holds are what it is saved as, from now on.
+    ///
+    /// ⚠️ Not a new set of bytes, so the stamp does not move: nothing cached over them
+    /// is looking at anything else. The list revision does, so the store is written
+    /// again without the unsaved tail.
+    pub fn mark_saved(&mut self, id: u64) {
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return;
         };
-        *entity = LocalEntity {
-            kept: entity.kept,
-            link: entity.link,
-            ..LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp)
-        };
-        log.say(format!("“{}” is back as it was opened.", entity.name));
+        if !entity.is_unsaved() {
+            return;
+        }
+        entity.saved = entity.baseline();
+        self.revision += 1;
     }
 
-    /// Swap in re-encoded bytes, keeping the entity's identity and marking it edited.
+    /// Swap in re-encoded bytes, keeping the entity's identity.
     ///
     /// The decode and the verify are re-run: an editor's output is bytes like any other,
     /// and it earns its badge the same way a file off disk does.
     pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        if self.get(id).is_none() {
+        let Some(verify) = self.respell(id, bytes) else {
             return;
-        }
-        let stamp = self.stamp();
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
-            return;
-        };
-        let replaced =
-            LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
-        let verify = replaced.verify.clone();
-        *entity = LocalEntity {
-            dirty: true,
-            kept: entity.kept,
-            link: entity.link,
-            ..replaced
         };
         if let VerifyState::Ok = verify {
             return;
@@ -947,6 +990,37 @@ impl Workspace {
             verify.badge(),
             verify.detail()
         ));
+    }
+
+    /// Put a different set of bytes under one id, rebuilding everything derived from
+    /// them, and answer with what the re-encode check made of them.
+    ///
+    /// ⚠️ The saved baseline is not one of those things: it moves only when the asset is
+    /// saved, so an edit and the revert of it are measured against the same bytes.
+    fn respell(&mut self, id: u64, bytes: Vec<u8>) -> Option<VerifyState> {
+        if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
+            return None;
+        }
+        let stamp = self.stamp();
+        let entity = self.entities.iter_mut().find(|e| e.id == id)?;
+        let (kept, link) = (entity.kept, entity.link);
+        let saved = std::mem::replace(
+            &mut entity.saved,
+            Baseline {
+                bytes: Vec::new(),
+                crc32: None,
+            },
+        );
+        let replaced =
+            LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
+        let verify = replaced.verify.clone();
+        *entity = LocalEntity {
+            kept,
+            link,
+            saved,
+            ..replaced
+        };
+        Some(verify)
     }
 
     pub fn duplicate(&mut self, id: u64, log: &mut Log) -> Option<u64> {
@@ -986,11 +1060,17 @@ impl Workspace {
             id,
             name,
             origin,
-            bytes,
+            saved,
+            unsaved,
         } in saved
         {
             let stamp = self.stamp();
-            let entity = LocalEntity::new(id, name, origin, bytes, stamp);
+            let baseline = Baseline::read(saved);
+            let bytes = unsaved.unwrap_or_else(|| baseline.bytes.clone());
+            let entity = LocalEntity {
+                saved: baseline,
+                ..LocalEntity::new(id, name, origin, bytes, stamp)
+            };
             if let Some(e) = &entity.parse_error {
                 log.warn(format!("{}: {e}", entity.name));
             }
@@ -1404,14 +1484,61 @@ mod tests {
         let second = stamp(&workspace);
         assert_ne!(second, first);
 
-        workspace.restore_bytes(id, opened.clone(), &mut log);
+        workspace.revert(id, &mut log);
         let third = stamp(&workspace);
         assert_ne!(third, second);
         assert_ne!(third, first, "back to the same bytes is still a new decode");
 
         // Putting back what is already there is not a change and spends nothing.
-        workspace.restore_bytes(id, opened, &mut log);
+        workspace.revert(id, &mut log);
         assert_eq!(stamp(&workspace), third);
+    }
+
+    /// Unsaved is not a flag anything sets: it is holding bytes other than the ones this
+    /// asset was last saved as. An edit makes it so, saving and reverting each end it.
+    #[test]
+    fn an_asset_is_unsaved_while_it_holds_something_its_baseline_does_not() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let opened = workspace.get(id).unwrap().bytes.clone();
+        let unsaved = |workspace: &Workspace| workspace.get(id).unwrap().is_unsaved();
+        assert!(!unsaved(&workspace), "a fresh asset starts saved");
+
+        let (_, edited) =
+            crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        assert!(unsaved(&workspace));
+        assert_eq!(workspace.get(id).unwrap().saved.bytes, opened);
+
+        // Saving moves the baseline onto what it holds; the bytes do not move.
+        workspace.mark_saved(id);
+        assert!(!unsaved(&workspace));
+        assert_eq!(workspace.get(id).unwrap().saved.bytes, edited);
+        assert_eq!(workspace.get(id).unwrap().bytes, edited);
+
+        // Reverting moves the bytes back onto the baseline, which stays where it is.
+        let (_, again) =
+            crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
+        workspace.replace_bytes(id, again, &mut log);
+        assert!(unsaved(&workspace));
+        workspace.revert(id, &mut log);
+        assert!(!unsaved(&workspace));
+        assert_eq!(workspace.get(id).unwrap().bytes, edited);
+    }
+
+    /// The baseline's checksum is the one a slot holding those bytes reports, so a saved
+    /// asset and its slot are compared without either body being hashed again.
+    #[test]
+    fn the_baseline_carries_the_checksum_a_slot_holding_it_reports() {
+        let entity = ingest("untitled.ne5p", Fresh::Program.bytes().unwrap());
+        let body = nord_usb::envelope::unwrap(&entity.bytes).expect("a file the wire takes");
+        assert_eq!(
+            entity.saved.crc32,
+            Some(nord_usb::envelope::crc32(&body.body.0))
+        );
     }
 
     /// A project is text, so nothing at the CBIN tag offset means anything —
@@ -1481,10 +1608,11 @@ mod tests {
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
-        assert!(workspace.get(id).unwrap().dirty);
+        assert!(workspace.get(id).unwrap().is_unsaved());
 
         // Reverting is not renaming either.
-        workspace.restore_bytes(id, bytes, &mut log);
+        workspace.revert(id, &mut log);
+        assert_eq!(workspace.get(id).unwrap().bytes, bytes);
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
 
         // And the filename an export offers is that same name, not one worked back out
@@ -1507,7 +1635,8 @@ mod tests {
                 id: 9,
                 name: "Africa-Split.ne5p".into(),
                 origin: Origin::Fresh,
-                bytes: Fresh::Program.bytes().unwrap(),
+                saved: Fresh::Program.bytes().unwrap(),
+                unsaved: None,
             }],
             Some(10),
             &mut log,
@@ -1515,7 +1644,7 @@ mod tests {
         let entity = workspace.get(9).expect("restored under its own id");
         assert_eq!(entity.name, "Africa-Split.ne5p");
         assert!(matches!(entity.verify, VerifyState::Ok));
-        assert!(!entity.dirty);
+        assert!(!entity.is_unsaved());
         // A new asset cannot land on an id something restored is already using.
         let fresh = workspace.create(Fresh::Live, &mut log).unwrap();
         assert!(fresh >= 10);

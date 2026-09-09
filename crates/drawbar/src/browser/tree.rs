@@ -509,7 +509,7 @@ impl Browser {
                 glyph: Some(kind.glyph()),
                 name: &entity.name,
                 note: owed.as_deref().or(Some(word.as_str())),
-                dirty: entity.dirty,
+                unsaved: entity.is_unsaved(),
                 // What is waiting wins: a linked asset is settled, an owed one is not.
                 dot: match (owed.is_some(), entity.link.is_some()) {
                     (true, _) => Some(crate::app::warn(ui.visuals())),
@@ -605,7 +605,7 @@ impl Browser {
             ui.close();
         }
         if ui.button("Export…").clicked() {
-            acts.push(Act::Save(id));
+            acts.push(Act::Export(id));
             ui.close();
         }
         if ui.button("Rename").clicked() {
@@ -1240,7 +1240,7 @@ mod tests {
             let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
             let mut shell = Shell::default();
             let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            tabs.open(id, &workspace);
+            tabs.open(id);
 
             let mut acts = Vec::new();
             narrow(&mut acts, asked);

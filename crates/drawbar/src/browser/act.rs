@@ -88,9 +88,8 @@ pub enum Act {
     },
     /// Write everything in the queue, grouped by folder. Already agreed to.
     SendAll,
-    /// Queue every edited document that is not already waiting, each for the slot it
-    /// stands for.
-    QueueEdited,
+    /// Queue every asset the instrument no longer agrees with, each for its own slot.
+    QueueChanged,
     /// Put the "send everything waiting" question, which `SendAll` is the answer to.
     AskSendAll,
     /// The same as a Send, already agreed to. Nothing asks twice.
@@ -128,8 +127,14 @@ pub enum Act {
         at: Location,
     },
     Remove(u64),
-    Save(u64),
-    /// Back to the bytes the tab opened with.
+    /// Hand the open document's bytes to the user as a file.
+    Export(u64),
+    /// ⌘S over the open document: what saving means for whichever kind of document it
+    /// is — see [`save_doc`].
+    SaveDoc(u64),
+    /// The write back to a slot a [`Act::SaveDoc`] over a view asks about, agreed to.
+    WriteBack(u64),
+    /// Back to the bytes it was last saved as.
     Revert(u64),
     /// Bring a view of the centre forward.
     ShowTab(Spot),
@@ -219,7 +224,7 @@ pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
             .iter()
             .copied()
             .filter_map(Item::local)
-            .map(Act::Save)
+            .map(Act::Export)
             .collect(),
         Bulk::Tag => Vec::new(),
         Bulk::Delete => checked
@@ -255,7 +260,7 @@ pub fn apply(
             Act::OpenFiles => workspace.open_dialog(),
             Act::New(kind) => {
                 if let Some(id) = workspace.create(kind, log) {
-                    tabs.open(id, workspace);
+                    tabs.open(id);
                 }
             }
             Act::NewProject => workspace.pick_wavs(),
@@ -323,10 +328,10 @@ pub fn apply(
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
-            Act::Open(Item::Local(id)) => tabs.open(id, workspace),
+            Act::Open(Item::Local(id)) => tabs.open(id),
             // ⚠️ One view per slot prevents divergent copies queued back to one address.
             Act::Open(Item::Slot { class, at }) => match workspace.view_of(class, at) {
-                Some(id) => tabs.open(id, workspace),
+                Some(id) => tabs.open(id),
                 None => device.send(
                     DeviceCmd::Get {
                         class,
@@ -359,7 +364,7 @@ pub fn apply(
                 retarget(workspace, device, queue, log, id, class, at)
             }
             Act::SendAll => send_batch(queue, workspace, device, log),
-            Act::QueueEdited => crate::queue::queue_edited(workspace, device, queue, log),
+            Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
             Act::AskSendAll => {
                 let title = match queue.len() {
                     1 => "Send 1 sound to the instrument?".to_string(),
@@ -392,8 +397,10 @@ pub fn apply(
                 browser.tags.forget(id);
                 workspace.remove(id, log);
             }
-            Act::Save(id) => workspace.export(id),
-            Act::Revert(id) => workspace.restore_bytes(id, tabs.opened(id).to_vec(), log),
+            Act::Export(id) => workspace.export(id),
+            Act::SaveDoc(id) => save_doc(browser, workspace, device, queue, log, id, true),
+            Act::WriteBack(id) => save_doc(browser, workspace, device, queue, log, id, false),
+            Act::Revert(id) => workspace.revert(id, log),
             Act::ShowTab(spot) => tabs.show(spot),
             Act::ShowClass(class) => {
                 tabs.show(Spot::Keyboard);
@@ -636,6 +643,68 @@ fn queue_all(
     }
 }
 
+/// What ⌘S means for whichever kind of document this is.
+///
+/// A **view** is the instrument's own copy looked at in place, so saving it is the write
+/// itself: the put runs at once, and the baseline moves when the instrument says the
+/// bytes landed. Anything **on this computer** is already kept, so saving it settles its
+/// baseline — and, where it stands for a slot, queues it for that slot.
+///
+/// `ask` is false once the question a write carries has been answered.
+#[allow(clippy::too_many_arguments)]
+fn save_doc(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    device: &mut Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    id: u64,
+    ask: bool,
+) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    if entity.kept {
+        let name = entity.name.clone();
+        let spot = owed(entity);
+        workspace.mark_saved(id);
+        match spot {
+            Some((class, at)) => enqueue(workspace, device, queue, log, id, class, at),
+            None => log.say(format!("“{name}” is saved on this computer.")),
+        }
+        return;
+    }
+    let Some((class, at)) = owed(entity) else {
+        return log.say(format!(
+            "“{}” came off nowhere this app writes to, so there is nothing to save it \
+             into.",
+            entity.name
+        ));
+    };
+    // Refused before the write: bytes that are not what they claim to be must never
+    // reach a delete-then-write.
+    if let Err(e) = nord_usb::envelope::unwrap(&entity.bytes) {
+        log.error(format!("{}: {e}", entity.name));
+        return log.trouble(format!(
+            "“{}” is not a file the instrument takes.",
+            entity.name
+        ));
+    }
+    if let Some(note) = write_note(&device.state, class, entity).filter(|_| ask) {
+        return browser.ask_write(&entity.name, place(class, at), note, Act::WriteBack(id));
+    }
+    device.send(
+        DeviceCmd::Put {
+            id,
+            class,
+            at,
+            name: entity.name.clone(),
+            bytes: entity.bytes.clone(),
+        },
+        log,
+    );
+}
+
 /// Queue a local asset for a slot.
 ///
 /// `ask` is false once the question has been answered, which is what keeps the answer
@@ -724,6 +793,112 @@ mod tests {
         ]
     }
 
+    /// ⌘S over a **view** is the write itself: the instrument's own copy, looked at in
+    /// place, goes back to the slot it came off at once. Nothing joins the queue, which
+    /// is for what this computer is owed to send.
+    #[test]
+    fn saving_a_view_writes_it_back_to_its_slot_and_queues_nothing() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
+        device.pretend_attached();
+        let id = workspace.view(
+            "Africa Split.ne5p".to_string(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(3),
+            },
+            bytes,
+            &mut log,
+        );
+        let held = workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SaveDoc(id)],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(queue.is_empty(), "a write back is not a debt");
+        let put = device.queued().front().expect("a put was asked for");
+        assert!(
+            matches!(put, DeviceCmd::Put { id: sent, class, at: to, .. }
+                if *sent == id && *class == ObjectClass::Program && *to == at(3)),
+            "{}",
+            put.label()
+        );
+        // The instrument has not answered yet, so the baseline has not moved.
+        assert!(workspace.get(id).unwrap().is_unsaved());
+        device.pretend(crate::device::DeviceEvent::Sent {
+            id,
+            class: ObjectClass::Program,
+            at: at(3),
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert!(!workspace.get(id).unwrap().is_unsaved());
+    }
+
+    /// ⌘S over something **on this computer** keeps what is here — it is already kept —
+    /// and, where it stands for a slot, asks for that slot.
+    #[test]
+    fn saving_a_kept_asset_settles_its_baseline_and_queues_it_where_it_stands() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = program(&mut workspace, &mut log);
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[None, None, None, Some(("held", 7))],
+        );
+        let linked = workspace.ingest(
+            "Africa Split.ne5p".to_string(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(3),
+            },
+            bytes.clone(),
+            &mut log,
+        );
+        let alone = workspace.ingest(
+            "Squabble B.ne5p".to_string(),
+            Origin::File("Squabble B.ne5p".into()),
+            bytes,
+            &mut log,
+        );
+        for id in [linked, alone] {
+            let held = workspace.get(id).unwrap().bytes.clone();
+            let (_, edited) =
+                crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
+            workspace.replace_bytes(id, edited, &mut log);
+        }
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SaveDoc(linked), Act::SaveDoc(alone)],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(!workspace.get(linked).unwrap().is_unsaved());
+        assert!(!workspace.get(alone).unwrap().is_unsaved());
+        assert_eq!(
+            queue.ids(),
+            vec![linked],
+            "only the one that stands for a slot"
+        );
+        assert_eq!(queue.entry(linked).map(|held| held.at), Some(at(3)));
+    }
+
     /// Each of the things offered over a checked set asks only about the half of it that
     /// half is about: queueing and exporting reach this computer's, copying reaches the
     /// instrument's, and deleting reaches all of it.
@@ -743,7 +918,7 @@ mod tests {
         assert!(
             matches!(
                 bulk(Bulk::Export, &checked).as_slice(),
-                [Act::Save(1), Act::Save(2)]
+                [Act::Export(1), Act::Export(2)]
             ),
             "one export per asset on this computer"
         );

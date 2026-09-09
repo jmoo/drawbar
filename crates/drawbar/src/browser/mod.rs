@@ -523,7 +523,11 @@ impl Browser {
         // The warnings first: they are the reason to say no. Then what this send is
         // about to walk past, which is the other one.
         let mut note = warnings;
-        note.extend(crate::queue::nudge(workspace, queue).map(|said| format!("{said}.")));
+        note.extend(
+            crate::queue::Behind::of(workspace, &device.state, queue)
+                .said()
+                .map(|said| format!("{said}, and not in this send.")),
+        );
         if !note.is_empty() {
             note.push(String::new());
         }
@@ -532,6 +536,16 @@ impl Browser {
             title,
             note: Some(note.join("\n")),
             verb: "Send",
+            acts: vec![act],
+        });
+    }
+
+    /// Raise what a write back to one slot carries, where it carries anything.
+    fn ask_write(&mut self, name: &str, at: String, note: String, act: Act) {
+        self.ask = Some(Ask {
+            title: format!("Save “{name}” to {at}?"),
+            note: Some(note),
+            verb: "Save",
             acts: vec![act],
         });
     }

@@ -1294,7 +1294,7 @@ impl Device {
                 } => match why {
                     Purpose::View => {
                         let id = workspace.view(name, origin, bytes, log);
-                        tabs.open(id, workspace);
+                        tabs.open(id);
                     }
                     Purpose::Copy => {
                         workspace.ingest(name, origin, bytes, log);
@@ -1325,9 +1325,13 @@ impl Device {
                     ));
                     workspace.ingest(name, Origin::Rescued { at }, bytes, log);
                 }
-                // It landed, so it is no longer owed. Only that object: the rest of a
-                // batch is still waiting on its own write.
-                DeviceEvent::Sent { id, .. } => queue.forget(id),
+                // It landed, so it is no longer owed, and what landed is what it is
+                // saved as. Only that object: the rest of a batch is still waiting on
+                // its own write.
+                DeviceEvent::Sent { id, .. } => {
+                    queue.forget(id);
+                    workspace.mark_saved(id);
+                }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
                     log.info(text);

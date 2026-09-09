@@ -23,7 +23,8 @@ pub struct Cells<'a> {
     pub count: Option<String>,
     /// The name is a stand-in rather than a real one.
     pub faint: bool,
-    pub dirty: bool,
+    /// It holds something other than what it was last saved as.
+    pub unsaved: bool,
     /// The instrument's panel has this slot loaded.
     pub loaded: bool,
     /// A row inside a branch: a point shorter, and in the smaller face.
@@ -137,9 +138,9 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         x += GLYPH + GAP;
     }
 
-    // One gutter, two marks that never meet: only a local asset is dirty, and only a
+    // One gutter, two marks that never meet: only a local asset is unsaved, and only a
     // slot is loaded on the panel.
-    if cells.dirty {
+    if cells.unsaved {
         let mark = cell_ink(selected, crate::app::warn(&visuals), &visuals);
         painter.circle_filled(egui::pos2(x + 3.5, rect.center().y), 3.5, mark);
         x += 10.0;

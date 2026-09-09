@@ -297,7 +297,7 @@ impl eframe::App for DrawbarApp {
         // Raised by a New → Sample Editor project pick, and answered before anything
         // else this frame draws: it is a modal over the whole window.
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
-            self.tabs.open(made, &self.workspace);
+            self.tabs.open(made);
         }
 
         // Outside in. A panel claims its space from what the ones before it left.
@@ -381,14 +381,9 @@ impl DrawbarApp {
                         acts.push(act);
                     }
                 }
-                let sent = self.document.ui(
-                    ui,
-                    id,
-                    self.tabs.opened(id),
-                    &mut self.workspace,
-                    &mut self.device,
-                    &mut self.log,
-                );
+                let sent =
+                    self.document
+                        .ui(ui, id, &mut self.workspace, &mut self.device, &mut self.log);
                 if let Some(send) = sent {
                     acts.push(browser::Act::Send {
                         id: send.id,

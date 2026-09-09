@@ -318,7 +318,7 @@ mod key {
     use eframe::egui::{Key, KeyboardShortcut as Shortcut, Modifiers as With};
 
     pub const OPEN: Shortcut = Shortcut::new(With::COMMAND, Key::O);
-    pub const KEEP: Shortcut = Shortcut::new(With::COMMAND, Key::S);
+    pub const SAVE: Shortcut = Shortcut::new(With::COMMAND, Key::S);
     pub const EXPORT: Shortcut = Shortcut::new(With::COMMAND.plus(With::SHIFT), Key::E);
     pub const CLOSE: Shortcut = Shortcut::new(With::COMMAND, Key::W);
     pub const QUIT: Shortcut = Shortcut::new(With::COMMAND, Key::Q);
@@ -562,7 +562,7 @@ impl DrawbarApp {
         }
         if hit(&key::EXPORT) {
             if let Some(id) = self.tabs.active() {
-                acts.push(Act::Save(id));
+                acts.push(Act::Export(id));
             }
         }
         if hit(&key::BROWSER) {
@@ -594,25 +594,14 @@ impl DrawbarApp {
                 acts.push(Act::ShowTab(Spot::Document(id)));
             }
         }
-        // ⚠️ Never a file export. ⌘S means "keep what I did", which for something read
-        // off the instrument is a promise to send it back.
-        if hit(&key::KEEP) {
-            self.stage_open();
+        // ⚠️ Never a file export. ⌘S means "save what I did", which for a view of a slot
+        // is the write back to that slot. The library and the keyboard are views of
+        // what is already there, so neither has anything to save.
+        if hit(&key::SAVE) {
+            if let Some(id) = self.tabs.active() {
+                acts.push(Act::SaveDoc(id));
+            }
         }
-    }
-
-    /// Queue the open document for the slot it came off, or say why there is none.
-    fn stage_open(&mut self) {
-        let Some(id) = self.tabs.active() else {
-            return;
-        };
-        self.document.stage(
-            id,
-            &self.workspace,
-            &mut self.device,
-            &mut self.queue,
-            &mut self.log,
-        );
     }
 
     fn menus(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
@@ -639,19 +628,18 @@ impl DrawbarApp {
         });
         ui.separator();
         if let Some(id) = self.tabs.active() {
-            if item(ui, "Keep", Some(key::KEEP)) {
-                self.stage_open();
+            if item(ui, "Save", Some(key::SAVE)) {
+                acts.push(Act::SaveDoc(id));
             }
-            let opened = self.tabs.opened(id).to_vec();
-            let changed = self
+            let unsaved = self
                 .workspace
                 .get(id)
-                .is_some_and(|entity| entity.bytes != opened);
-            if changed && item(ui, "Revert to opened", None) {
+                .is_some_and(crate::workspace::LocalEntity::is_unsaved);
+            if unsaved && item(ui, "Revert to saved", None) {
                 acts.push(Act::Revert(id));
             }
             if item(ui, "Export…", Some(key::EXPORT)) {
-                acts.push(Act::Save(id));
+                acts.push(Act::Export(id));
             }
             ui.separator();
         }
@@ -776,10 +764,9 @@ impl DrawbarApp {
                         .on_hover_text("something new on this computer");
                     });
                     let open = self.tabs.active();
-                    if glyph_button(ui, Glyph::Save, false, "export the open document…").clicked()
-                    {
+                    if glyph_button(ui, Glyph::Save, false, "save the open document").clicked() {
                         if let Some(id) = open {
-                            acts.push(Act::Save(id));
+                            acts.push(Act::SaveDoc(id));
                         }
                     }
                     rule(ui, 16.0);
@@ -972,14 +959,14 @@ impl DrawbarApp {
             // An edit does not queue itself, so what a send would walk past is said
             // here, next to the button that would walk past it. Only with an instrument
             // attached: with none, there is nothing for a queue to be owed to.
-            if let Some(said) = self
-                .attached()
-                .then(|| crate::queue::nudge(&self.workspace, &self.queue))
-                .flatten()
-            {
+            let behind = match self.attached() {
+                true => crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue),
+                false => crate::queue::Behind::default(),
+            };
+            if let Some(said) = behind.said() {
                 ui.label(crate::queue::aside(&said, ui.visuals()));
-                if ui.small_button("Queue them").clicked() {
-                    acts.push(Act::QueueEdited);
+                if behind.changed > 0 && ui.small_button("Queue changed").clicked() {
+                    acts.push(Act::QueueChanged);
                 }
             }
             ui.with_layout(
@@ -1366,7 +1353,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        app.tabs.open(id, &app.workspace);
+        app.tabs.open(id);
         let _ = drawn(&ctx, &mut app);
         assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
 

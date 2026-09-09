@@ -20,7 +20,7 @@ use crate::device::{fit, sendable, Device, DeviceState};
 use crate::filter::{Filter, Place};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::Track;
-use crate::queue::Queue;
+use crate::queue::{Diff, Queue};
 use crate::shell::{Page, Shell};
 use crate::strings::{folder, place, shown};
 use crate::tags::Tags;
@@ -28,12 +28,14 @@ use crate::workspace::{LocalEntity, Workspace};
 
 /// Which of the two places a row's contents are in.
 ///
-/// ⚠️ `Both` is a **link**: a slot whose reported checksum was this asset's own — see
-/// [`crate::device::link`]. Its sign says whether the two still agree, which an edit on
-/// this computer turns to `false` while the link stays where it was.
+/// ⚠️ `Both` is a **link**: a slot this asset was matched to — see
+/// [`crate::device::link`]. Its sign says whether the two still agree, which saving an
+/// edit here turns to `false` while the link stays where it was.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Where {
-    Both(bool),
+    /// A link, and whether the two still agree — see [`agrees`]. `None` is a link the
+    /// two places cannot be compared across.
+    Both(Option<bool>),
     Computer,
     /// On this computer, and the attached instrument is not the one whose files these
     /// are. It is in one place and can only stay there.
@@ -47,8 +49,9 @@ impl Where {
     /// The short word the column carries.
     pub fn short(self) -> &'static str {
         match self {
-            Where::Both(true) => "both =",
-            Where::Both(false) => "both ≠",
+            Where::Both(Some(true)) => "both =",
+            Where::Both(Some(false)) => "both ≠",
+            Where::Both(None) => "both",
             Where::Computer | Where::Foreign => "computer",
             Where::Keyboard => "keyboard",
             Where::Unread => "—",
@@ -58,10 +61,14 @@ impl Where {
     /// The whole of it, which is what the tooltip says.
     pub fn sentence(self) -> &'static str {
         match self {
-            Where::Both(true) => "On this computer and in a slot holding these very bytes.",
-            Where::Both(false) => {
+            Where::Both(Some(true)) => "On this computer and in a slot holding these very bytes.",
+            Where::Both(Some(false)) => {
                 "On this computer and in a slot it was matched to, and the two bodies \
                  no longer agree."
+            }
+            Where::Both(None) => {
+                "On this computer and in a slot matched by name. Nothing here can say \
+                 whether the two bodies agree."
             }
             Where::Computer => "On this computer only.",
             Where::Foreign => "On this computer only — not for this keyboard.",
@@ -82,12 +89,13 @@ impl Where {
     /// Both first, then this computer, the instrument, and the unsayable.
     fn rank(self) -> u8 {
         match self {
-            Where::Both(false) => 0,
-            Where::Both(true) => 1,
-            Where::Computer => 2,
-            Where::Foreign => 3,
-            Where::Keyboard => 4,
-            Where::Unread => 5,
+            Where::Both(Some(false)) => 0,
+            Where::Both(None) => 1,
+            Where::Both(Some(true)) => 2,
+            Where::Computer => 3,
+            Where::Foreign => 4,
+            Where::Keyboard => 5,
+            Where::Unread => 6,
         }
     }
 }
@@ -173,7 +181,13 @@ impl Row {
 /// The list on this computer comes first, and a slot one of its assets came off is that
 /// asset's row rather than a second one: a program read off 7:4 and kept is one thing in
 /// two places, which is what [`Where::Both`] says.
-pub fn rows(workspace: &Workspace, device: &DeviceState, tags: &Tags, filter: &Filter) -> Vec<Row> {
+pub fn rows(
+    workspace: &Workspace,
+    device: &DeviceState,
+    queue: &Queue,
+    tags: &Tags,
+    filter: &Filter,
+) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
     let kept = families_present(workspace);
@@ -184,7 +198,7 @@ pub fn rows(workspace: &Workspace, device: &DeviceState, tags: &Tags, filter: &F
             claimed.push(slot);
         }
         let worn = tags.worn(entity.id);
-        let row = local(entity, device, worn.len(), &kept, instrument);
+        let row = local(entity, device, queue, worn.len(), &kept, instrument);
         if admits(filter, &row, worn) {
             rows.push(row);
         }
@@ -225,6 +239,7 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>) -> bool {
 fn local(
     entity: &LocalEntity,
     device: &DeviceState,
+    queue: &Queue,
     tags: usize,
     kept: &[Family],
     instrument: Option<Family>,
@@ -238,7 +253,7 @@ fn local(
             .flatten(),
         name: entity.name.clone(),
         tags,
-        where_: whereabouts(entity, device),
+        where_: whereabouts(entity, device, queue),
         at: entity.spot(),
         size: entity.bytes.len() as u64,
         needs: wanted(entity, device),
@@ -261,10 +276,12 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
 }
 
 /// Where a row's contents are, which for anything on this computer is decided by its
-/// link: a linked asset is in both places, and the sign is whether the linked slot still
-/// reports this asset's own checksum.
-fn whereabouts(entity: &LocalEntity, device: &DeviceState) -> Where {
-    let Some((class, at)) = entity.link else {
+/// link: a linked asset is in both places, and the sign is [`agrees`].
+fn whereabouts(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Where {
+    let held = entity
+        .link
+        .and_then(|(class, at)| device.slot(class, at).flatten());
+    let Some(info) = held else {
         if !fit(device, entity).allowed() {
             return Where::Foreign;
         }
@@ -273,9 +290,27 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState) -> Where {
             _ => Where::Computer,
         };
     };
-    let here = entity.container.as_ref().and_then(|held| held.body_crc32);
-    let there = device.slot(class, at).flatten().and_then(|info| info.crc32);
-    Where::Both(here.is_some() && here == there)
+    Where::Both(agrees(entity, info, queue))
+}
+
+/// Whether the slot an asset stands for still holds what that asset was last saved as.
+///
+/// The one comparison behind the library's sign, the tree's dot and what a "queue
+/// changed" walks: the checksum a walk reported for the slot against the checksum of
+/// the saved bytes, which a type-1 container carries and nothing has to hash.
+///
+/// ⚠️ `None` where neither answers — a class that reports no checksum was linked by
+/// name, and a name is not a body. Only a compare read settles one of those, and it
+/// settles it in the queue's own diff.
+pub fn agrees(entity: &LocalEntity, info: &ProgramInfo, queue: &Queue) -> Option<bool> {
+    if let (Some(here), Some(there)) = (entity.saved.crc32, info.crc32) {
+        return Some(here == there);
+    }
+    match queue.entry(entity.id).map(|held| &held.diff) {
+        Some(Diff::Identical) => Some(true),
+        Some(Diff::Fields(_) | Diff::Bytes { .. }) => Some(false),
+        _ => None,
+    }
 }
 
 /// The library a file names, and the name the instrument gave it if it has been asked.
@@ -603,7 +638,13 @@ impl Library {
         // horizontal rules in it.
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut acts = Vec::new();
-        let held = rows(workspace, &device.state, browser.tags(), &shell.filter);
+        let held = rows(
+            workspace,
+            &device.state,
+            queue,
+            browser.tags(),
+            &shell.filter,
+        );
         let held = arrange(held, &shell.omnibox, self.by, self.order);
 
         bar(ui, &held, queue, browser.tags(), &shell.filter);
@@ -747,7 +788,7 @@ impl Library {
 fn bar(ui: &mut egui::Ui, rows: &[Row], queue: &Queue, tags: &Tags, filter: &Filter) {
     let differ = rows
         .iter()
-        .filter(|row| row.where_ == Where::Both(false))
+        .filter(|row| row.where_ == Where::Both(Some(false)))
         .count();
     let waiting = queue.len();
     let (rect, _) =
@@ -924,7 +965,7 @@ fn paint(
             quiet,
         );
     }
-    let differs = row.where_ == Where::Both(false);
+    let differs = row.where_ == Where::Both(Some(false));
     write(
         cell(Column::Where),
         row.where_.short(),
@@ -1248,7 +1289,7 @@ mod tests {
                 row(
                     "africa bass",
                     Kind::Program,
-                    Where::Both(false),
+                    Where::Both(Some(false)),
                     Some(at(6, 0)),
                     100,
                 ),
@@ -1339,7 +1380,7 @@ mod tests {
         tags.set(both, sunday, true);
 
         let names = |filter: &Filter| -> Vec<String> {
-            rows(&workspace, &device.state, &tags, filter)
+            rows(&workspace, &device.state, &Queue::default(), &tags, filter)
                 .into_iter()
                 .map(|row| row.name)
                 .collect()
@@ -1398,7 +1439,7 @@ mod tests {
             .expect("a type-1 container carries one");
         let filter = Filter::default();
         let where_ = |workspace: &Workspace, device: &Device| {
-            rows(workspace, &device.state, &tags, &filter)
+            rows(workspace, &device.state, &Queue::default(), &tags, &filter)
                 .into_iter()
                 .find(|row| matches!(row.item, Item::Local(_)))
                 .map(|row| row.where_)
@@ -1409,19 +1450,25 @@ mod tests {
 
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
         device.relink(&mut workspace);
-        assert_eq!(where_(&workspace, &device), Some(Where::Both(true)));
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
 
-        // Edited here: the link stays put and the sign turns over.
+        // Edited here and not saved: the slot still holds what this was saved as, so the
+        // two places have not parted.
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
         workspace.replace_bytes(id, edited, &mut log);
         device.relink(&mut workspace);
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
+
+        // Saved: the link stays put and the sign turns over.
+        workspace.mark_saved(id);
+        device.relink(&mut workspace);
         assert_eq!(
             workspace.get(id).unwrap().link,
             Some((ObjectClass::Program, at(6, 0)))
         );
-        assert_eq!(where_(&workspace, &device), Some(Where::Both(false)));
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(false))));
 
         // A slot the scan found vacant holds nothing to link to.
         device.pretend_bodies(ObjectClass::Program, 7, &[None]);

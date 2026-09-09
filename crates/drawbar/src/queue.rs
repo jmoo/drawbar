@@ -181,38 +181,69 @@ pub fn enqueue(
     log.say(format!("“{name}” is waiting to be sent to {where_}."));
 }
 
-/// The edited documents that are not waiting to go anywhere, each with the slot it
-/// stands for.
+/// The assets whose slot on the attached instrument no longer holds what they were
+/// saved as, each with that slot.
 ///
-/// An edit only marks a document dirty; it enters the queue through Keep, Send, or
-/// Queue for sending. This is the gap between the two — a document changed here and
-/// never asked for, which a send would walk straight past.
-///
-/// A document that stands for no slot is not in it: there is nowhere to queue it to.
-pub fn unqueued(workspace: &Workspace, queue: &Queue) -> Vec<(u64, ObjectClass, Location)> {
+/// An edit queues nothing; saving one that stands for a slot does. This is the gap
+/// between the two — what a send would walk straight past — and it is the same
+/// comparison [`crate::library::Where::Both`] shows in the table.
+pub fn changed(
+    workspace: &Workspace,
+    device: &DeviceState,
+    queue: &Queue,
+) -> Vec<(u64, ObjectClass, Location)> {
     workspace
-        .documents()
-        .filter(|entity| entity.dirty && !queue.holds(entity.id))
+        .listed()
+        .filter(|entity| !queue.holds(entity.id))
         .filter_map(|entity| {
             let (class, at) = entity.spot()?;
-            Some((entity.id, class, at))
+            let info = device.slot(class, at).flatten()?;
+            (crate::library::agrees(entity, info, queue) == Some(false))
+                .then_some((entity.id, class, at))
         })
         .collect()
 }
 
-/// The line that says so, where there is one to say.
-pub fn nudge(workspace: &Workspace, queue: &Queue) -> Option<String> {
-    match unqueued(workspace, queue).len() {
-        0 => None,
-        1 => Some("1 edited document is not queued".to_string()),
-        n => Some(format!("{n} edited documents are not queued")),
+/// What a send would walk past: assets the instrument no longer agrees with, and
+/// documents holding edits nothing has saved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Behind {
+    pub changed: usize,
+    pub unsaved: usize,
+}
+
+impl Behind {
+    pub fn of(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> Behind {
+        Behind {
+            changed: changed(workspace, device, queue).len(),
+            unsaved: workspace
+                .documents()
+                .filter(|entity| entity.is_unsaved())
+                .count(),
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.changed > 0 || self.unsaved > 0
+    }
+
+    /// The line that says so, where there is one to say. A part that counts nothing is
+    /// left out.
+    pub fn said(self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.changed > 0 {
+            parts.push(format!("{} changed", self.changed));
+        }
+        if self.unsaved > 0 {
+            parts.push(format!("{} unsaved", self.unsaved));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 }
 
-/// Queue every edited document that is not already waiting, each for the slot it stands
-/// for.
-pub fn queue_edited(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
-    for (id, class, at) in unqueued(workspace, queue) {
+/// Queue every asset the instrument no longer agrees with, each for its own slot.
+pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+    for (id, class, at) in changed(workspace, &device.state, queue) {
         enqueue(workspace, device, queue, log, id, class, at);
     }
 }
@@ -1045,11 +1076,20 @@ mod tests {
         workspace.replace_bytes(id, edited, log);
     }
 
-    /// An edit does not queue itself. What the header counts is every edited document
-    /// with somewhere to go that nothing has asked for — and a document with nowhere to
-    /// go is not one of them, because there is no slot to queue it to.
+    /// The body checksum of one asset's saved bytes, which is what a slot holding them
+    /// reports.
+    fn crc(workspace: &Workspace, id: u64) -> u32 {
+        workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("a type-1 container carries one")
+    }
+
+    /// An edit queues nothing and neither does saving one the instrument already agrees
+    /// with. The two counts a send walks past are separate facts: a slot holding
+    /// something other than what was saved, and an edit nothing has saved at all.
     #[test]
-    fn the_count_is_every_edited_document_with_a_slot_and_no_entry() {
+    fn the_counts_separate_what_the_instrument_lacks_from_what_nothing_saved() {
         let (mut workspace, mut log, bytes) = bench();
         let class = ObjectClass::Program;
         let (mut device, _) = attached(&workspace);
@@ -1066,50 +1106,67 @@ mod tests {
                 log,
             )
         };
-        let first = off(0, &mut workspace, &mut log);
-        let second = off(1, &mut workspace, &mut log);
-        let untouched = off(2, &mut workspace, &mut log);
-        let homeless = workspace.ingest(
-            "typed-here.ne5p".into(),
-            Origin::Fresh,
-            bytes.clone(),
-            &mut log,
+        let saved = off(0, &mut workspace, &mut log);
+        let queued = off(1, &mut workspace, &mut log);
+        let unsaved = off(2, &mut workspace, &mut log);
+        let held = crc(&workspace, saved);
+        device.pretend_bodies(
+            class,
+            7,
+            &[
+                Some(("off-0", held)),
+                Some(("off-1", held)),
+                Some(("off-2", held)),
+            ],
         );
 
-        assert_eq!(nudge(&workspace, &queue), None, "nothing has been edited");
+        let counts =
+            |workspace: &Workspace, queue: &Queue| Behind::of(workspace, &device.state, queue);
+        assert_eq!(counts(&workspace, &queue), Behind::default());
 
-        for id in [first, second, untouched, homeless] {
+        // Edited and saved: the slot no longer holds what this is.
+        for id in [saved, queued] {
             edit(&mut workspace, id, &mut log);
+            workspace.mark_saved(id);
         }
-        // `untouched` is edited too; what takes it out of the count is its entry.
+        // Edited and not saved: the slot still holds what this was saved as.
+        edit(&mut workspace, unsaved, &mut log);
+
+        assert_eq!(
+            counts(&workspace, &queue),
+            Behind {
+                changed: 2,
+                unsaved: 1
+            }
+        );
+        assert_eq!(
+            counts(&workspace, &queue).said().as_deref(),
+            Some("2 changed · 1 unsaved")
+        );
+
+        // What is already waiting is not what a send would walk past.
         enqueue(
             &workspace,
             &mut device,
             &mut queue,
             &mut log,
-            untouched,
+            queued,
             class,
-            at(2),
+            at(1),
         );
-
         assert_eq!(
-            unqueued(&workspace, &queue)
+            changed(&workspace, &device.state, &queue)
                 .iter()
                 .map(|(id, ..)| *id)
                 .collect::<Vec<_>>(),
-            vec![first, second],
-            "the homeless document has no slot to be queued to"
-        );
-        assert_eq!(
-            nudge(&workspace, &queue).as_deref(),
-            Some("2 edited documents are not queued")
+            vec![saved],
         );
     }
 
-    /// The action closes the gap the line describes: one entry per edited document, each
-    /// for the slot it stands for, and nothing said twice.
+    /// The action closes the gap the line describes: one entry per changed asset, each
+    /// for the slot it stands for.
     #[test]
-    fn queueing_the_edited_documents_makes_one_entry_each() {
+    fn queueing_what_changed_makes_one_entry_each() {
         let (mut workspace, mut log, bytes) = bench();
         let class = ObjectClass::Program;
         let (mut device, _) = attached(&workspace);
@@ -1129,17 +1186,24 @@ mod tests {
             })
             .collect();
         let homeless = workspace.ingest("typed-here.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let held = crc(&workspace, ids[0]);
+        device.pretend_bodies(class, 7, &[Some(("off-0", held)), Some(("off-1", held))]);
         for id in ids.iter().copied().chain([homeless]) {
             edit(&mut workspace, id, &mut log);
+            workspace.mark_saved(id);
         }
 
-        queue_edited(&workspace, &mut device, &mut queue, &mut log);
+        queue_changed(&workspace, &mut device, &mut queue, &mut log);
 
         assert_eq!(queue.ids(), ids);
         assert_eq!(queue.entry(ids[0]).map(|held| held.at), Some(at(0)));
         assert_eq!(queue.entry(ids[1]).map(|held| held.at), Some(at(1)));
         assert!(!queue.holds(homeless), "it stands for no slot");
-        assert_eq!(nudge(&workspace, &queue), None, "the gap is closed");
+        assert_eq!(
+            Behind::of(&workspace, &device.state, &queue),
+            Behind::default(),
+            "the gap is closed"
+        );
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue
