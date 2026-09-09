@@ -338,7 +338,7 @@ impl DrawbarApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(fill))
             .show(ctx, |ui| {
-                self.tabs.ui(ui, &self.workspace, &self.queue, acts);
+                self.tabs.ui(ui, &self.workspace, acts);
                 match self.tabs.showing() {
                     // The library is what the centre shows when no tab claims it.
                     None | Some(Spot::Library) => {

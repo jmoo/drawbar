@@ -10,7 +10,6 @@ use nord_usb::ObjectClass;
 
 use crate::browser::{new_menu, Act, Kind};
 use crate::icon::{painted, Glyph};
-use crate::queue::Queue;
 use crate::workspace::Workspace;
 
 /// ⚠️ The strip's own scroll id. The strip and the document body are drawn into the same
@@ -174,13 +173,7 @@ impl Tabs {
     /// ⚠️ The scroll area is a direct child of the caller's `Ui`, and its salt is
     /// [`SCROLL`]: the document body below carries its own, and two unsalted areas in one
     /// `Ui` would share a state.
-    pub fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        workspace: &Workspace,
-        queue: &Queue,
-        acts: &mut Vec<Act>,
-    ) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, acts: &mut Vec<Act>) {
         let rect = egui::Rect::from_min_size(
             egui::pos2(ui.max_rect().left(), ui.cursor().top()),
             egui::vec2(ui.available_width(), HEIGHT),
@@ -201,9 +194,8 @@ impl Tabs {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 ui.horizontal(|ui| {
-                    let visuals = ui.visuals().clone();
                     for (index, tab) in self.open.iter().enumerate() {
-                        let Some(face) = face(tab, workspace, queue, &visuals) else {
+                        let Some(face) = face(tab, workspace) else {
                             continue;
                         };
                         let spot = tab.spot();
@@ -264,50 +256,40 @@ fn landing(painted: &[(usize, egui::Rect)], x: f32) -> Option<usize> {
         .map(|(index, _)| *index)
 }
 
-/// A tab as it is drawn: what it wears, what it says, and what it is owed.
+/// A tab as it is drawn: what it wears, what it says, and whether it is saved.
 struct Face {
     glyph: Glyph,
     name: String,
-    /// A view of the instrument's copy reads differently from a tab holding this
-    /// computer's own.
-    borrowed: bool,
-    /// The dot, and what it means.
-    mark: Option<(egui::Color32, &'static str)>,
+    /// It holds something other than what it was last saved as, which the name says by
+    /// going italic and wearing a star — the mark it wears everywhere else.
+    unsaved: bool,
     hint: Option<&'static str>,
     /// The × at the end. The library has none: it is what a close falls back to.
     shut: bool,
 }
 
-fn face(tab: &Tab, workspace: &Workspace, queue: &Queue, visuals: &egui::Visuals) -> Option<Face> {
+fn face(tab: &Tab, workspace: &Workspace) -> Option<Face> {
     match tab {
         Tab::Library => Some(Face {
             glyph: Glyph::LibraryBig,
             name: "Library".into(),
-            borrowed: false,
-            mark: None,
+            unsaved: false,
             hint: None,
             shut: false,
         }),
         Tab::Keyboard => Some(Face {
             glyph: Glyph::Keyboard,
             name: "Keyboard".into(),
-            borrowed: false,
-            mark: None,
+            unsaved: false,
             hint: None,
             shut: true,
         }),
         Tab::Document { id } => {
             let entity = workspace.get(*id)?;
-            let mark = match (queue.holds(*id), entity.is_unsaved()) {
-                (true, _) => Some((crate::app::warn(visuals), "waiting to be sent")),
-                (false, true) => Some((crate::app::good(visuals), "not saved")),
-                (false, false) => None,
-            };
             Some(Face {
                 glyph: Kind::of(entity.entity.as_ref()).glyph(),
                 name: entity.name.clone(),
-                borrowed: workspace.is_view(*id),
-                mark,
+                unsaved: entity.is_unsaved(),
                 hint: workspace
                     .is_view(*id)
                     .then_some("the instrument's copy, viewed in place"),
@@ -334,17 +316,15 @@ const SHUT: f32 = 11.0;
 const PAD: f32 = 8.0;
 const GAP: f32 = 6.0;
 
-/// The dot's diameter when a tab owes something.
-const DOT: f32 = 6.0;
-
 fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     let visuals = ui.visuals().clone();
     let ink = match active {
         true => visuals.widgets.active.fg_stroke.color,
         false => crate::app::caption(&visuals),
     };
-    let mut text = egui::RichText::new(&face.name).text_style(crate::app::ui());
-    if face.borrowed {
+    let mut text = egui::RichText::new(crate::browser::starred(&face.name, face.unsaved))
+        .text_style(crate::app::ui());
+    if face.unsaved {
         text = text.italics();
     }
     let galley = egui::WidgetText::from(text.color(ink)).into_galley(
@@ -354,15 +334,11 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
         crate::app::ui(),
     );
 
-    let marked = match face.mark.is_some() {
-        true => GAP + DOT,
-        false => 0.0,
-    };
     let closes = match face.shut {
         true => GAP + SHUT,
         false => 0.0,
     };
-    let width = PAD + GLYPH + GAP + galley.size().x + marked + closes + PAD;
+    let width = PAD + GLYPH + GAP + galley.size().x + closes + PAD;
     let (rect, tab) =
         ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let painter = ui.painter().clone();
@@ -396,14 +372,6 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
         egui::Color32::PLACEHOLDER,
     );
     x += galley.size().x;
-    if let Some((color, why)) = face.mark {
-        x += GAP;
-        let at = box_(x, DOT);
-        painter.circle_filled(at.center(), DOT / 2.0, color);
-        ui.interact(at, tab.id.with("mark"), egui::Sense::hover())
-            .on_hover_text(why);
-        x += DOT;
-    }
     let close = face.shut.then(|| {
         let shut = box_(x + GAP, SHUT);
         painted(ui, Glyph::X, shut, ink.gamma_multiply(0.5));
@@ -505,6 +473,63 @@ mod tests {
         assert!(tabs.holds(1) && !tabs.holds(2));
         tabs.close(Spot::Document(1));
         assert!(!tabs.holds(1));
+    }
+
+    /// The one mark a tab wears: an unsaved document's name goes italic and takes a
+    /// star, which is what it wears in the tree and the table as well.
+    #[test]
+    fn a_tab_over_an_unsaved_document_wears_a_star() {
+        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(crate::app::metrics);
+        let mut ws = Workspace::new(ctx.clone());
+        let mut log = crate::log::Log::default();
+        let id = ws
+            .create(crate::workspace::Fresh::Program, &mut log)
+            .unwrap();
+        ws.rename(id, "Africa Split".into());
+        let mut tabs = Tabs::default();
+        tabs.open(id);
+
+        let strip = |tabs: &mut Tabs, ws: &Workspace| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        tabs.ui(ui, ws, &mut Vec::new());
+                    });
+            });
+            let mut said = Vec::new();
+            for clipped in &output.shapes {
+                words(&clipped.shape, &mut said);
+            }
+            said
+        };
+
+        let said = strip(&mut tabs, &ws);
+        assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
+
+        let bytes = ws.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        ws.replace_bytes(id, edited, &mut log);
+
+        let said = strip(&mut tabs, &ws);
+        assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
     /// There is one library and one keyboard, so asking for either twice is one tab
@@ -674,7 +699,7 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
-                        tabs.ui(ui, &ws, &Queue::default(), &mut Vec::new());
+                        tabs.ui(ui, &ws, &mut Vec::new());
                     });
             });
         }

@@ -17,13 +17,17 @@ pub struct Cells<'a> {
     pub name: &'a str,
     /// A faint word after the name — what kind of thing it is, or where it is owed.
     pub note: Option<&'a str>,
-    /// The dot at the right end: attached, waiting, differs.
+    /// The dot at the right end: what the instrument holds where this row stands.
     pub dot: Option<egui::Color32>,
     /// The monospace readout at the right end — how full, or how many.
     pub count: Option<String>,
+    /// How many tags it wears, painted at the right end as the tag glyph and a number.
+    /// None of them is drawn for a row wearing none.
+    pub tags: usize,
     /// The name is a stand-in rather than a real one.
     pub faint: bool,
-    /// It holds something other than what it was last saved as.
+    /// It holds something other than what it was last saved as, which the name says by
+    /// wearing a star.
     pub unsaved: bool,
     /// The instrument's panel has this slot loaded.
     pub loaded: bool,
@@ -56,8 +60,11 @@ pub const STEP: f32 = CHEVRON + GAP;
 const GLYPH: f32 = 12.0;
 const GAP: f32 = 6.0;
 
-/// The dot that says attached, waiting or differs.
+/// The dot that says what the instrument holds where a row stands.
 const DOT: f32 = 6.0;
+
+/// The tag glyph beside the number of them.
+const SMALL: f32 = 11.0;
 
 /// The width the location column takes, so names line up under each other.
 const AT_W: f32 = 34.0;
@@ -77,6 +84,39 @@ pub fn cell_ink(selected: bool, own: egui::Color32, visuals: &egui::Visuals) -> 
     match selected {
         true => visuals.selection.stroke.color,
         false => own,
+    }
+}
+
+/// The name as it is laid out: italic and starred while the row holds something other
+/// than what it was last saved as.
+///
+/// ⚠️ The star is part of the text, so a name too long for its row loses the star before
+/// it loses the name — and the hover, which is the unmarked name, is what a reader falls
+/// back to.
+pub(super) fn name_job(
+    cells: &Cells,
+    font: egui::FontId,
+    tint: egui::Color32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &starred(cells.name, cells.unsaved),
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color: tint,
+            italics: cells.unsaved,
+            ..egui::TextFormat::default()
+        },
+    );
+    job
+}
+
+/// The name an unsaved row shows: its own, and a star.
+pub fn starred(name: &str, unsaved: bool) -> String {
+    match unsaved {
+        true => format!("{name}*"),
+        false => name.to_string(),
     }
 }
 
@@ -138,13 +178,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         x += GLYPH + GAP;
     }
 
-    // One gutter, two marks that never meet: only a local asset is unsaved, and only a
-    // slot is loaded on the panel.
-    if cells.unsaved {
-        let mark = cell_ink(selected, crate::app::warn(&visuals), &visuals);
-        painter.circle_filled(egui::pos2(x + 3.5, rect.center().y), 3.5, mark);
-        x += 10.0;
-    } else if cells.loaded {
+    if cells.loaded {
         let mark = cell_ink(selected, crate::app::good(&visuals), &visuals);
         painter.circle_stroke(
             egui::pos2(x + 3.5, rect.center().y),
@@ -166,6 +200,24 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
 
     // The right end is claimed first: the name takes whatever is left, and is cut to it.
     let mut right = rect.right() - GAP;
+    if cells.tags > 0 {
+        let galley =
+            painter.layout_no_wrap(cells.tags.to_string(), egui::FontId::monospace(MONO), quiet);
+        right -= galley.size().x;
+        painter.galley(
+            egui::pos2(right, middle(galley.size().y)),
+            galley,
+            egui::Color32::PLACEHOLDER,
+        );
+        right -= SMALL + 3.0;
+        painted(
+            ui,
+            Glyph::Tag,
+            egui::Rect::from_min_size(egui::pos2(right, middle(SMALL)), egui::Vec2::splat(SMALL)),
+            quiet,
+        );
+        right -= GAP;
+    }
     if let Some(count) = &cells.count {
         let galley = painter.layout_no_wrap(count.clone(), egui::FontId::monospace(MONO), quiet);
         right -= galley.size().x;
@@ -190,11 +242,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         true => CHILD_NAME,
         false => NAME,
     };
-    let mut job = egui::text::LayoutJob::simple_singleline(
-        cells.name.to_string(),
-        egui::FontId::proportional(size),
-        strong,
-    );
+    let mut job = name_job(cells, egui::FontId::proportional(size), strong);
     job.wrap = egui::text::TextWrapping::truncate_at_width((right - x).max(0.0));
     let galley = painter.layout_job(job);
     let elided = galley.elided;
@@ -251,6 +299,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The name of a row holding an edit nothing has saved wears a star, and the row
+    /// stays inside its panel with it.
+    #[test]
+    fn an_unsaved_row_writes_its_name_with_a_star() {
+        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::SidePanel::left("places")
+                .exact_width(232.0)
+                .show(ctx, |ui| {
+                    for unsaved in [false, true] {
+                        row(
+                            ui,
+                            false,
+                            &Cells {
+                                name: "Africa Split",
+                                unsaved,
+                                ..Cells::default()
+                            },
+                        );
+                    }
+                });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            words(&clipped.shape, &mut said);
+        }
+        assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
+        assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
     /// ⚠️ A name too long for the panel is cut with an ellipsis rather than painted over

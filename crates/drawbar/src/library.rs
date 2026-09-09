@@ -158,6 +158,9 @@ pub struct Row {
     pub family: Option<Family>,
     pub name: String,
     pub tags: usize,
+    /// It holds something other than what it was last saved as. Only a row on this
+    /// computer can: a slot holds what it holds.
+    pub unsaved: bool,
     pub where_: Where,
     /// The slot it came off, or the slot it is. Nothing on this computer that never came
     /// off one has an address at all.
@@ -253,6 +256,7 @@ fn local(
             .flatten(),
         name: entity.name.clone(),
         tags,
+        unsaved: entity.is_unsaved(),
         where_: whereabouts(entity, device, queue),
         at: entity.spot(),
         size: entity.bytes.len() as u64,
@@ -268,6 +272,7 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
         family: None,
         name: info.name.trim().to_string(),
         tags: 0,
+        unsaved: false,
         where_: Where::Keyboard,
         at: Some((class, at)),
         size: u64::from(info.body_len),
@@ -310,6 +315,29 @@ pub fn agrees(entity: &LocalEntity, info: &ProgramInfo, queue: &Queue) -> Option
         Some(Diff::Identical) => Some(true),
         Some(Diff::Fields(_) | Diff::Bytes { .. }) => Some(false),
         _ => None,
+    }
+}
+
+/// The mark a local row wears at its right end: what the attached instrument holds where
+/// this asset stands.
+///
+/// ⚠️ The one rule, and the only dot a local row wears. `good` is a slot holding what
+/// this asset was last saved as; `warn` is one holding something else, or a write
+/// already waiting to change it; nothing at all is an asset with no slot to stand on.
+pub fn keyboard_mark(
+    entity: &LocalEntity,
+    device: &DeviceState,
+    queue: &Queue,
+    visuals: &egui::Visuals,
+) -> Option<egui::Color32> {
+    let (class, at) = entity.spot()?;
+    let info = device.slot(class, at).flatten()?;
+    if queue.holds(entity.id) {
+        return Some(warn(visuals));
+    }
+    match agrees(entity, info, queue) {
+        Some(false) => Some(warn(visuals)),
+        Some(true) | None => Some(crate::app::good(visuals)),
     }
 }
 
@@ -662,10 +690,11 @@ impl Library {
                     footer(ui, &picked, browser, &device.state, queue, &mut acts)
                 });
         }
-        self.table(ui, &held, browser, workspace, device, &mut acts);
+        self.table(ui, &held, browser, workspace, device, queue, &mut acts);
         acts
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn table(
         &mut self,
         ui: &mut egui::Ui,
@@ -673,6 +702,7 @@ impl Library {
         browser: &mut Browser,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         // The head and every row start where a row of the tree starts, so the whole grid
@@ -707,7 +737,7 @@ impl Library {
             .show_rows(ui, ROW, rows.len(), |ui, shown| {
                 for row in shown.filter_map(|index| rows.get(index)) {
                     paint(
-                        ui, row, width, &tracks, browser, &list, workspace, device, acts,
+                        ui, row, width, &tracks, browser, &list, workspace, device, queue, acts,
                     );
                 }
             });
@@ -888,6 +918,7 @@ fn paint(
     list: &[Item],
     workspace: &Workspace,
     device: &Device,
+    queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
     let selected = browser.picked().holds(row.item);
@@ -916,16 +947,27 @@ fn paint(
             egui::pos2(rect.left() + track.end, rect.bottom()),
         )
     };
-    let write = |box_: egui::Rect, text: &str, font: egui::FontId, tint: egui::Color32| {
-        let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, tint);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(box_.width());
-        let galley = painter.layout_job(job);
-        painter.galley(
-            egui::pos2(box_.left(), box_.center().y - galley.size().y / 2.0),
-            galley,
-            egui::Color32::PLACEHOLDER,
-        );
-    };
+    let write =
+        |box_: egui::Rect, text: &str, font: egui::FontId, tint: egui::Color32, italics: bool| {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                text,
+                0.0,
+                egui::TextFormat {
+                    font_id: font,
+                    color: tint,
+                    italics,
+                    ..egui::TextFormat::default()
+                },
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(box_.width());
+            let galley = painter.layout_job(job);
+            painter.galley(
+                egui::pos2(box_.left(), box_.center().y - galley.size().y / 2.0),
+                galley,
+                egui::Color32::PLACEHOLDER,
+            );
+        };
 
     let checkbox = mark(ui, cell(Column::Mark), selected, &response);
     let glyph = cell(Column::Glyph);
@@ -942,9 +984,10 @@ fn paint(
     }
     write(
         cell(Column::Name),
-        &row.name,
+        &crate::browser::starred(&row.name, row.unsaved),
         egui::FontId::proportional(NAME),
         ink,
+        row.unsaved,
     );
     if row.tags > 0 {
         let tags = cell(Column::Tags);
@@ -963,17 +1006,24 @@ fn paint(
             &row.tags.to_string(),
             egui::FontId::monospace(MONO),
             quiet,
+            false,
         );
     }
-    let differs = row.where_ == Where::Both(Some(false));
+    // The same mark the tree's dot paints, in the words this column carries.
+    let mark = row
+        .item
+        .local()
+        .and_then(|id| workspace.get(id))
+        .and_then(|entity| keyboard_mark(entity, &device.state, queue, &visuals));
     write(
         cell(Column::Where),
         row.where_.short(),
         egui::FontId::proportional(NAME - 1.0),
-        match differs {
-            true => cell_ink(selected, warn(&visuals), &visuals),
-            false => quiet,
+        match mark {
+            Some(tint) => cell_ink(selected, tint, &visuals),
+            None => quiet,
         },
+        false,
     );
     if let Some((_, at)) = row.at {
         write(
@@ -981,6 +1031,7 @@ fn paint(
             &shown(at),
             egui::FontId::monospace(MONO),
             quiet,
+            false,
         );
     }
     write(
@@ -988,6 +1039,7 @@ fn paint(
         &crate::room::measure(row.size),
         egui::FontId::monospace(MONO),
         quiet,
+        false,
     );
     // ⚠️ Quiet, id and all. An id nothing has resolved is a question nobody has asked
     // the instrument, not a library reported missing.
@@ -996,6 +1048,7 @@ fn paint(
         &row.needs.text(),
         egui::FontId::proportional(NAME - 1.0),
         quiet,
+        false,
     );
 
     // A row of the table is dragged like a row of the tree: the same payload, so it
@@ -1213,6 +1266,7 @@ mod tests {
             family: None,
             name: name.to_string(),
             tags: 0,
+            unsaved: false,
             where_,
             at: at.map(|at| (ObjectClass::Program, at)),
             size,
@@ -1609,6 +1663,138 @@ mod tests {
             2,
             "both boxes were ticked, and neither click dropped the other row"
         );
+    }
+
+    /// Every word one frame painted, wherever in the tree of shapes it ended up.
+    fn painted(output: &egui::FullOutput) -> Vec<String> {
+        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            words(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// One mark, four states: no slot to stand on, a slot holding what this was saved
+    /// as, a slot holding something else, and a write already waiting to change it.
+    #[test]
+    fn the_keyboard_mark_says_what_the_instrument_holds_where_this_stands() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut queue = Queue::default();
+        let visuals = egui::Visuals::dark();
+        let (good, warn) = (crate::app::good(&visuals), warn(&visuals));
+
+        let bytes = {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            let bytes = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            bytes
+        };
+        let off = |workspace: &mut Workspace, slot: u32, log: &mut Log| {
+            workspace.ingest(
+                format!("off-{slot}.ne5p"),
+                Origin::Device {
+                    class: ObjectClass::Program,
+                    at: at(6, slot),
+                },
+                bytes.clone(),
+                log,
+            )
+        };
+        let same = off(&mut workspace, 0, &mut log);
+        let other = off(&mut workspace, 1, &mut log);
+        let waiting = off(&mut workspace, 2, &mut log);
+        let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let held = workspace.get(same).unwrap().saved.crc32.unwrap();
+
+        let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, queue, &visuals)
+        };
+        // Nothing scanned: no slot holds anything, so no row says anything about one.
+        assert_eq!(mark(&workspace, &device, &queue, same), None);
+
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[
+                Some(("off-0", held)),
+                Some(("off-1", held ^ 1)),
+                Some(("off-2", held)),
+            ],
+        );
+        assert_eq!(mark(&workspace, &device, &queue, same), Some(good));
+        assert_eq!(mark(&workspace, &device, &queue, other), Some(warn));
+        assert_eq!(
+            mark(&workspace, &device, &queue, nowhere),
+            None,
+            "it came off nowhere"
+        );
+
+        // Waiting to be written wins: the slot agrees now, and is about to stop.
+        assert_eq!(mark(&workspace, &device, &queue, waiting), Some(good));
+        crate::queue::enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            waiting,
+            ObjectClass::Program,
+            at(6, 2),
+        );
+        assert_eq!(mark(&workspace, &device, &queue, waiting), Some(warn));
+    }
+
+    /// An asset holding an edit nothing has saved says so where its name is written.
+    #[test]
+    fn an_unsaved_name_wears_a_star_in_the_table() {
+        const WIDTH: f32 = 900.0;
+
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut browser = Browser::default();
+        let mut library = Library::default();
+        let (queue, shell) = (Queue::default(), Shell::default());
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        workspace.rename(id, "Africa Split".into());
+        let draw = |library: &mut Library, browser: &mut Browser, workspace: &Workspace| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(WIDTH, 540.0),
+                )),
+                ..Default::default()
+            };
+            painted(&ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        library.ui(ui, browser, workspace, &device, &queue, &shell);
+                    });
+            }))
+        };
+
+        let said = draw(&mut library, &mut browser, &workspace);
+        assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
+
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+
+        let said = draw(&mut library, &mut browser, &workspace);
+        assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
     /// ⚠️ A row of the table is a row of the tree: it starts the same drag, and a drop

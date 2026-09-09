@@ -853,12 +853,7 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(crate::tabs::SCROLL)),
                         ui.make_persistent_id(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(
-                        ui,
-                        &workspace,
-                        &crate::queue::Queue::default(),
-                        &mut Vec::new(),
-                    );
+                    tabs.ui(ui, &workspace, &mut Vec::new());
                     ui.separator();
                     document.ui(ui, id, &mut workspace, &mut device, &mut log);
                 });

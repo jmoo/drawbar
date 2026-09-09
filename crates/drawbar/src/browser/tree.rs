@@ -510,13 +510,8 @@ impl Browser {
                 name: &entity.name,
                 note: owed.as_deref().or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                // What is waiting wins: a linked asset is settled, an owed one is not.
-                dot: match (owed.is_some(), entity.link.is_some()) {
-                    (true, _) => Some(crate::app::warn(ui.visuals())),
-                    (false, true) => Some(crate::app::good(ui.visuals())),
-                    (false, false) => None,
-                },
-                count: (wears > 0).then(|| wears.to_string()),
+                dot: crate::library::keyboard_mark(entity, &device.state, queue, ui.visuals()),
+                tags: wears,
                 child: true,
                 ..Cells::default()
             },
