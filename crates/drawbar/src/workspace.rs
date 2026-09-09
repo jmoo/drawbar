@@ -639,6 +639,13 @@ impl Workspace {
         self.entities.iter().filter(|e| e.kept)
     }
 
+    /// Every document in memory, the views of slots included — everything a tab can be
+    /// showing and an edit can have touched. [`Workspace::listed`] is the narrower set
+    /// this computer's own list holds.
+    pub fn documents(&self) -> impl Iterator<Item = &LocalEntity> {
+        self.entities.iter()
+    }
+
     pub fn get(&self, id: u64) -> Option<&LocalEntity> {
         self.entities.iter().find(|e| e.id == id)
     }

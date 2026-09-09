@@ -181,6 +181,42 @@ pub fn enqueue(
     log.say(format!("“{name}” is waiting to be sent to {where_}."));
 }
 
+/// The edited documents that are not waiting to go anywhere, each with the slot it
+/// stands for.
+///
+/// An edit only marks a document dirty; it enters the queue through Keep, Send, or
+/// Queue for sending. This is the gap between the two — a document changed here and
+/// never asked for, which a send would walk straight past.
+///
+/// A document that stands for no slot is not in it: there is nowhere to queue it to.
+pub fn unqueued(workspace: &Workspace, queue: &Queue) -> Vec<(u64, ObjectClass, Location)> {
+    workspace
+        .documents()
+        .filter(|entity| entity.dirty && !queue.holds(entity.id))
+        .filter_map(|entity| {
+            let (class, at) = entity.spot()?;
+            Some((entity.id, class, at))
+        })
+        .collect()
+}
+
+/// The line that says so, where there is one to say.
+pub fn nudge(workspace: &Workspace, queue: &Queue) -> Option<String> {
+    match unqueued(workspace, queue).len() {
+        0 => None,
+        1 => Some("1 edited document is not queued".to_string()),
+        n => Some(format!("{n} edited documents are not queued")),
+    }
+}
+
+/// Queue every edited document that is not already waiting, each for the slot it stands
+/// for.
+pub fn queue_edited(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+    for (id, class, at) in unqueued(workspace, queue) {
+        enqueue(workspace, device, queue, log, id, class, at);
+    }
+}
+
 /// Send a waiting asset somewhere else instead.
 ///
 /// The same bookkeeping as [`enqueue`] — the new slot is read again, and whatever was
@@ -941,7 +977,12 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
 
 /// The header's own line: what the queue amounts to, where the dock has room for it.
 pub fn heading(queue: &Queue, visuals: &egui::Visuals) -> egui::RichText {
-    egui::RichText::new(queue.summary())
+    aside(&queue.summary(), visuals)
+}
+
+/// Anything else the header sets beside the title, in the heading's own face.
+pub fn aside(said: &str, visuals: &egui::Visuals) -> egui::RichText {
+    egui::RichText::new(said)
         .monospace()
         .size(9.5)
         .color(warn(visuals))
@@ -994,6 +1035,111 @@ mod tests {
             DeviceCmd::Get { class, at, why, .. } => (*class, *at, *why),
             other => panic!("{}", other.label()),
         }
+    }
+
+    /// Change a document's bytes the way an edit does.
+    fn edit(workspace: &mut Workspace, id: u64, log: &mut Log) {
+        let bytes = workspace.get(id).expect("it is in memory").bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, log);
+    }
+
+    /// An edit does not queue itself. What the header counts is every edited document
+    /// with somewhere to go that nothing has asked for — and a document with nowhere to
+    /// go is not one of them, because there is no slot to queue it to.
+    #[test]
+    fn the_count_is_every_edited_document_with_a_slot_and_no_entry() {
+        let (mut workspace, mut log, bytes) = bench();
+        let class = ObjectClass::Program;
+        let (mut device, _) = attached(&workspace);
+        let mut queue = Queue::default();
+
+        let off = |slot: u32, workspace: &mut Workspace, log: &mut Log| {
+            workspace.ingest(
+                format!("off-{slot}.ne5p"),
+                Origin::Device {
+                    class,
+                    at: at(slot),
+                },
+                bytes.clone(),
+                log,
+            )
+        };
+        let first = off(0, &mut workspace, &mut log);
+        let second = off(1, &mut workspace, &mut log);
+        let untouched = off(2, &mut workspace, &mut log);
+        let homeless = workspace.ingest(
+            "typed-here.ne5p".into(),
+            Origin::Fresh,
+            bytes.clone(),
+            &mut log,
+        );
+
+        assert_eq!(nudge(&workspace, &queue), None, "nothing has been edited");
+
+        for id in [first, second, untouched, homeless] {
+            edit(&mut workspace, id, &mut log);
+        }
+        // `untouched` is edited too; what takes it out of the count is its entry.
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            untouched,
+            class,
+            at(2),
+        );
+
+        assert_eq!(
+            unqueued(&workspace, &queue)
+                .iter()
+                .map(|(id, ..)| *id)
+                .collect::<Vec<_>>(),
+            vec![first, second],
+            "the homeless document has no slot to be queued to"
+        );
+        assert_eq!(
+            nudge(&workspace, &queue).as_deref(),
+            Some("2 edited documents are not queued")
+        );
+    }
+
+    /// The action closes the gap the line describes: one entry per edited document, each
+    /// for the slot it stands for, and nothing said twice.
+    #[test]
+    fn queueing_the_edited_documents_makes_one_entry_each() {
+        let (mut workspace, mut log, bytes) = bench();
+        let class = ObjectClass::Program;
+        let (mut device, _) = attached(&workspace);
+        let mut queue = Queue::default();
+
+        let ids: Vec<u64> = (0..2)
+            .map(|slot| {
+                workspace.ingest(
+                    format!("off-{slot}.ne5p"),
+                    Origin::Device {
+                        class,
+                        at: at(slot),
+                    },
+                    bytes.clone(),
+                    &mut log,
+                )
+            })
+            .collect();
+        let homeless = workspace.ingest("typed-here.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        for id in ids.iter().copied().chain([homeless]) {
+            edit(&mut workspace, id, &mut log);
+        }
+
+        queue_edited(&workspace, &mut device, &mut queue, &mut log);
+
+        assert_eq!(queue.ids(), ids);
+        assert_eq!(queue.entry(ids[0]).map(|held| held.at), Some(at(0)));
+        assert_eq!(queue.entry(ids[1]).map(|held| held.at), Some(at(1)));
+        assert!(!queue.holds(homeless), "it stands for no slot");
+        assert_eq!(nudge(&workspace, &queue), None, "the gap is closed");
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue

@@ -88,6 +88,9 @@ pub enum Act {
     },
     /// Write everything in the queue, grouped by folder. Already agreed to.
     SendAll,
+    /// Queue every edited document that is not already waiting, each for the slot it
+    /// stands for.
+    QueueEdited,
     /// Put the "send everything waiting" question, which `SendAll` is the answer to.
     AskSendAll,
     /// The same as a Send, already agreed to. Nothing asks twice.
@@ -356,6 +359,7 @@ pub fn apply(
                 retarget(workspace, device, queue, log, id, class, at)
             }
             Act::SendAll => send_batch(queue, workspace, device, log),
+            Act::QueueEdited => crate::queue::queue_edited(workspace, device, queue, log),
             Act::AskSendAll => {
                 let title = match queue.len() {
                     1 => "Send 1 sound to the instrument?".to_string(),

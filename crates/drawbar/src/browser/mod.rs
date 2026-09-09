@@ -520,8 +520,10 @@ impl Browser {
         if lines.is_empty() {
             return;
         }
-        // The warnings first: they are the reason to say no.
+        // The warnings first: they are the reason to say no. Then what this send is
+        // about to walk past, which is the other one.
         let mut note = warnings;
+        note.extend(crate::queue::nudge(workspace, queue).map(|said| format!("{said}.")));
         if !note.is_empty() {
             note.push(String::new());
         }

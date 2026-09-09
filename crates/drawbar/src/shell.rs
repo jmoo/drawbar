@@ -969,6 +969,19 @@ impl DrawbarApp {
             if waiting > 0 {
                 ui.label(crate::queue::heading(&self.queue, ui.visuals()));
             }
+            // An edit does not queue itself, so what a send would walk past is said
+            // here, next to the button that would walk past it. Only with an instrument
+            // attached: with none, there is nothing for a queue to be owed to.
+            if let Some(said) = self
+                .attached()
+                .then(|| crate::queue::nudge(&self.workspace, &self.queue))
+                .flatten()
+            {
+                ui.label(crate::queue::aside(&said, ui.visuals()));
+                if ui.small_button("Queue them").clicked() {
+                    acts.push(Act::QueueEdited);
+                }
+            }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match self.page() {
