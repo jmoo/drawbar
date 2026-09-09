@@ -1,9 +1,14 @@
-//! Stage 4 program controls and their documented enable dependencies.
+//! Stage 4 program controls and the enables that make each one relevant.
 //!
-//! See [the panel audit](https://github.com/jmoo/drawbar/blob/master/docs/ns4-panel.md)
-//! for manual references and the limits imposed by undecoded selectors.
-//! Scene relevance conservatively includes both scenes until the active-scene bit's
-//! polarity is established. Morph targets remain attached to their parameters.
+//! Relevance follows the Nord Stage 4 User Manual, OS v1.6x, Edition N
+//! (<https://www.nordkeyboards.com/wt/documents/951/Nord%20Stage%204%20User%20Manual%20v1.6X-Edition-N.pdf>),
+//! by printed page: sections and layers 43; transpose and split 38–39; Extern 46–47;
+//! mono and legato 34–35; filter 31–33; arpeggiator and pattern 35–37; keyboard hold 36;
+//! effects 48; rotary 48 and 52–53. The manual describes operation, not storage: where a
+//! selector's encoding is not established, the layout keeps its dependents relevant
+//! rather than guess, and the group concerned says so.
+//!
+//! Morph slots are named by nothing: each belongs to the parameter its name binds it to.
 
 use crate::panel::{Group, Match, Panel, Relevance};
 
@@ -432,6 +437,7 @@ pub const PANEL: Panel = Panel {
                 "piano_section_enabled",
                 "synth_section_enabled",
                 "fx_enabled",
+                // Hold is released from here with the Synth section off.
                 "synth_kb_hold_enabled",
             ],
             groups: &[],
@@ -538,6 +544,8 @@ pub const PANEL: Panel = Panel {
             }],
         },
         Group {
+            // Which layer's stored chain a global effect plays is not established, so the
+            // flags sit here and every layer keeps its own chain.
             title: "Effects, globally",
             selected_by: None,
             when: switched_on!("fx_enabled"),
@@ -549,6 +557,9 @@ pub const PANEL: Panel = Panel {
             groups: &[],
         },
         Group {
+            // ⚠️ Which value of `active_layer_scene` means scene 2 is not established, so a
+            // section or layer counts as enabled by either scene — asserting the wrong way
+            // round would hide the half that is playing.
             title: "Scene 2",
             selected_by: None,
             when: None,
