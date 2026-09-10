@@ -1,410 +1,50 @@
 # nord-cli
 
 A command-line tool (`nord`) over [`nord-format`](../nord-format) and
-[`nord-usb`](../nord-usb). 
+[`nord-usb`](../nord-usb): Nord files and the instrument itself from a terminal.
 
+Reading, editing and moving Nord objects, scriptable — data on stdout, everything
+else on stderr, so a summary pipes into `grep` unchanged. `inspect`, `verify` and
+`edit` work on files; `device`, `program`, `setlist`, `live`, `settings`, `sample`
+and `piano` are the protocol's object classes, and `raw --class N` reaches one
+that has no noun of its own.
 
-## Commands
-
-| | |
-|---|---|
-| `inspect` | Decode file(s) and print a readable summary |
-| `verify` | Re-encode file(s) and check the bytes come back identical |
-| `edit` | Change fields inside any editable file, whatever format it holds |
-| `device` | The instrument itself — what is on the bus, and what it holds |
-| `program` | Programs on the instrument (object class 4) |
-| `setlist` | Set lists on the instrument (object class 5) |
-| `live` | The three Live slots (object class 6) |
-| `settings` | The global settings singleton (object class 7) |
-| `sample` | Sample instruments — the library (object class 3), or `.nsmp` files |
-| `piano` | Piano libraries — the library (object class 1), or `.npno` files |
-| `raw` | Hidden: the same verbs, addressed by class number |
-
-`inspect`, `verify` and `edit` work on files. The other nouns are the protocol's
-object classes, and normally talk to an attached instrument — but the read-only
-verbs (`get`, `info`, `deps`) and each noun's `edit` also take a file in place of
-a slot. `program`, `setlist`, `sample` and `piano` share one verb vocabulary:
-
-```
-get put            transfer
-move rename duplicate delete select   organization
-info deps list focus   interrogation
-edit               content (program, setlist, live, settings, sample, piano)
-```
-
-`live` keeps only the read-only subset plus `edit` — the live buffer is the panel
-as it stands, so there is nothing to name, delete, or select. `settings` is a
-singleton with nothing to organize, so it keeps `get`, `info` and `edit`. Other
-class-generic operations remain available through `raw --class 7`.
-
-`nord raw --class N` is those same verbs with the class given as a number. It is
-how to reach a class that has no noun of its own, or to address one by number.
-
-Slots are written **`BANK:SLOT`**, the way the instrument and Nord Sound Manager
-show them — `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
-
-### Output and interaction
-
-- **Data on stdout, everything else on stderr.** `nord program get 7:4 | grep
-  transpose` sees the summary and nothing else.
-- **Color and unicode only on a terminal.** `--color=auto|always|never`;
-  `NO_COLOR` in the environment forces color off. Piped output is plain ASCII.
-- **A pipe is non-interactive.** On a terminal a destructive command asks for
-  confirmation; off one, a missing `--yes` is an error rather than a prompt.
-
-## Working with files
+## Usage
 
 ```sh
-nord inspect patch.ne5p              # readable summary
-nord inspect *.ne5p                  # several at once
-nord inspect --raw song.ne5t         # full Debug dump
-nord verify *.ne5p                   # round-trip check
+nord inspect patch.ne5p                 # readable summary of a file
+nord verify *.ne5p                      # re-encode and check the bytes come back identical
+nord program get 7:4 -o patch.ne5p      # read bank 7 slot 4 off the instrument
+nord program put patch.ne5p 7:4 --yes   # and write one back
 ```
 
-`inspect` exits non-zero if any file fails to parse. For an Electro 5 program:
+Slots are written `BANK:SLOT`, the way the instrument and Nord Sound Manager show
+them, both counted from 1. Every mutating command reads the slot first, says what
+it will touch, then refuses without `--yes`; off a terminal that is a real dry
+run. Close Nord Sound Manager before attaching — it claims the vendor interface
+exclusively.
 
-```
-LA Grand.ne5p
-  type:      Electro 5 program (ne5p)
-  location:  bank 1 slot 5
-  lower:     Piano  octave +0  sustain yes  control no
-  upper:     Sample  octave +0  sustain yes  control no
-  split:     no
-  transpose: +1  (no)
-  part mix:  49.6/50.0 (lower/upper %)
-  gain:      119
-  piano:     category 0  model 2  clav 0  acoustics 1  touch 2  mono no
-  sample:    number 92  attack 14  decay/rel 87  dynamics 1  filter yes
-  depends:   piano 0x3d4b3e14  sample 0x65d8c5a1
-  fx:        stored value, with the panel's 0-10 reading where it applies
-    fx1   off
-    fx2   upper  chorus 1   rate 45  deep no
-    fx3   off
-    delay upper  feedback 2  tempo 24  wet 11 (0.9)  ping-pong no
-    reverb stage      wet 23 (1.8)
-    eq    lower        bass 74  freq 94  gain 70  treble 64
-    rotary speed slow  stop off
-```
+The guide covers every verb, the file formats, editing fields, and the sample and
+piano libraries:
 
-`depends:` is the piano and sample the program references. Those ids are the same
-values the instrument reports for that program over USB, so `nord program deps` on
-the same slot will name them — which is the only way to resolve an id, since the
-file itself stores no names.
-
-For an organ program, both presets of all four models are shown, with the
-selected model marked `*` and its active preset `<`:
-
-```
-  organ:     b3+bass selected (*), drawbar positions 0-8
-   *b3    p1< 04.......  vib off  perc off
-   *b3    p2  000000000  vib off  perc off
-    vox   p1< 888800000  vib V3
-    vox   p2  888800000  vib V3
-   (* = selected model, < = its active preset)
-```
-
-Both presets are shown because in **b3+bass** the two are different instruments:
-preset 1 is the bass manual, whose two drawbars live outside the nine-nibble
-block. It renders as `04.......` rather than nine positions, since the nine
-nibbles hold stale values in that mode.
-
-Songs list their four program slots; settings print the decoded System, MIDI and
-Sound menus plus the startup state the instrument restores at power-up; bundles
-need the `bundle` feature (enabled here) to open.
-
-### The slot verbs on a file
-
-`get`, `info` and `deps` take a file wherever they take a `BANK:SLOT`, so a file
-already on disk can be read with no instrument attached:
-
-```sh
-nord program get patch.ne5p             # the same summary the slot form prints
-nord program get patch.ne5p --body -o patch.body   # strip the CBIN header
-nord program info patch.ne5p            # the header: format tag, version, checksum
-nord program deps patch.ne5p            # stored library ids
-```
-
-A path that exists wins over a slot reading, so a file named `7:4` is still a
-file. What a file does not carry is reported as living on the instrument rather
-than guessed at: files store no slot name, and `deps` on a file prints ids only —
-the slot form asks the instrument, which attaches the names.
-
-### `verify`
-
-Parses each file, writes it back, and checks the bytes are identical — reporting
-the offset of the first difference if not. It is the only thing that exercises
-the write path end to end:
-
-```
-$ nord verify song.ne5t settings.ne5s grand.npno
-ok     song.ne5t (62 bytes)
-ok     settings.ne5s (78 bytes)
-ok     grand.npno (209564996 bytes)
-```
-
-Every format round-trips, pianos and samples included. A piano library is
-rebuilt from its parsed model — the per-root counts, every audio offset, the
-alignment gap and the container checksum recomputed rather than carried — so the
-byte-identical bar covers the whole container; `nord piano verify --deep` also
-decodes every stroke it holds.
-
-## Working with an instrument
-
-Close Nord Sound Manager first — it claims the vendor interface exclusively, and
-`nord` cannot attach alongside it.
-
-```sh
-nord device status                      # inventory per class; --json for machines
-nord device info                        # what is attached, from the USB descriptors
-nord device geometry                    # partitions, banks and slot capacity, from the device
-nord device recover                     # release a session an interrupted run left open
-
-nord program list                       # every occupied slot, walked with the device's own cursor
-nord program focus                      # what the panel has loaded
-nord program get 7:4                    # summary to stdout
-nord program get 7:4 -o patch.ne5p      # write the .ne5p instead
-nord program put patch.ne5p 7:4 --yes
-nord program move 8:13 7:16 --yes
-nord program delete 7:50 7:49 --yes
-nord program info 7:4                   # size, format, version, name, crc32
-nord program deps 7:4                   # piano/sample dependencies, with names
-nord program select 2:12                # load live on the instrument
-nord program rename 6:13 "foo" --yes
-nord program duplicate 7:2 7:3 --yes
-```
-
-The same verbs work on `nord setlist`, and on `nord raw` with an explicit class:
-
-```sh
-nord setlist get 1:1
-nord raw --class 1 info 1:1             # `nord piano info 1:1`, by class number
-nord raw --class 5 get 1:1 --body -o setlist.body
-```
-
-`--body` saves the wire body verbatim instead of wrapping it in a CBIN header.
-Use it for classes whose header layout is not known, where the wrapped file would
-look plausible and be wrong.
-
-### Safety
-
-Every mutating command **reads the slot first, says what it will touch, then
-refuses without `--yes`**. Off a terminal, running it without the flag is a real
-dry run:
-
-```
-$ nord program duplicate 7:2 7:3
-duplicating "Africa Split" from bank 7 slot 2 to bank 7 slot 3 — OVERWRITING "Squabble B"
-error: refusing to proceed without --yes
-```
-
-`duplicate` names the *destination's* current occupant because that is what is
-about to be lost. `move` names it too, but as **SWAPPING WITH**: the instrument
-exchanges the two slots, so nothing is lost — and calling that an overwrite would
-invite deleting the one copy the swap preserves. A `move` also lists the set
-lists that reference the program, because the instrument rewrites them to follow
-it, and a factory set list is migrated to the current version by that rewrite,
-irreversibly.
-
-`put` names the slot after the file's stem, the way Nord Sound Manager does, and
-says so in pre-flight. Rename is refused on the library classes, so a sample's
-name is fixed at write time.
-
-Two other guards worth knowing about:
-
-- An empty slot reports `bank 5 slot 42 is empty` rather than a raw status code.
-- Every command closes its transaction **even when it fails**. An abandoned
-  session leaves the instrument stuck on a progress screen with no way out but a
-  power cycle.
-
-`--yes` means *don't ask me*. There is no `--force`.
-
-Writing into an occupied slot is a **delete followed by a write** — the
-instrument refuses to overwrite in place. `nord` reads the occupant first and
-puts it back if the write fails; if the restore fails too, the bytes are written
-to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
-
-`live` and `settings` are the exception: the instrument accepts a write at one of
-their occupied slots, so nothing is deleted to make room. The occupant is still
-read back first and put back if the write fails.
-
-## Editing an object
-
-`edit` is the only verb that changes what is *inside* an object, and it exists on
-five nouns: `nord program edit`, `nord live edit` (the live buffer is the
-program body under another tag, so the fields are identical), `nord settings
-edit` (the menu settings, plus the `startup_*` state the instrument restores at
-power-up), `nord setlist edit` (below), and `nord sample edit` (below). For the
-first three the field paths are `nord-format`'s own names, generated from the
-panel declarations, so `--fields` lists whatever the library currently knows:
-
-```sh
-nord program edit --fields                       # what is settable, and what it takes
-nord program edit patch.ne5p --set center_panel.gain=96 -o out.ne5p
-nord program edit patch.ne5p --set effects_panel.fx1_rate=96 --yes     # in place
-nord program edit 7:4 --set center_panel.split=true --dry-run
-nord program edit --set center_panel.gain=64 -o blank.ne5p             # a fresh program
-```
-
-A file and a slot are the same command; the slot form is a read-modify-write over
-USB, so it asks before writing. Editing a file in place asks too — pass `-o` to
-write somewhere else instead.
-
-`live` and `settings` edit their slots as well. Live slots are `1:1` to `1:3`
-and the settings singleton is `1:1`; neither class stores a name, so an edit
-changes the body and nothing else:
-
-```sh
-nord live edit 1:2 --set center_panel.gain=96 --yes
-nord settings edit 1:1 --set fine_tune=0 --dry-run
-```
-
-> [!WARNING]
-> A settings write reloads the selected program on the instrument. Panel state
-> that has not been stored is lost, so re-`select` and re-apply afterwards.
-
-**A value is spelled the way `nord inspect` and `--fields` print it**, and one
-the field cannot hold is rejected before anything is written:
-
-```
-$ nord program edit patch.ne5p --set center_panel.gain=200 --dry-run
-error: "200" is not a value of gain (accepts 0 .. 127)
-```
-
-A stored value the library does not recognize prints as `Unknown(9)`, so that is
-also how it is written: `--set …=Unknown(9)`. A bare `9` matches nothing.
-
-`--dry-run` reports the fields and the bytes that would change, and writes
-nothing:
-
-```
-$ nord program edit patch.ne5p --set center_panel.transpose=-5 \
-    --set center_panel.transpose_enabled=true --dry-run
-center_panel.transpose_enabled           false -> true
-center_panel.transpose                   0 -> -5
-  byte 0x0018  0x01 -> 0xad  (body crc32)
-  byte 0x0019  0xe8 -> 0x13  (body crc32)
-  byte 0x001a  0x1d -> 0x5e  (body crc32)
-  byte 0x001b  0xe7 -> 0x05  (body crc32)
-  byte 0x0030  0x00 -> 0x01
-  byte 0x0031  0x60 -> 0x10
-```
-
-> [!WARNING]
-> **Some fields only mean something in pairs.** `center_panel.transpose` is
-> ignored while `center_panel.transpose_enabled` is clear, the instrument never
-> clears that bit once it is set, and an untouched program holds `+1` rather than
-> `0`. Setting one half without the other warns; it is not refused.
-
-### `nord setlist edit`
-
-A set list is the four program slots it points at, so those are its fields:
-`slot1` to `slot4`, each taking a program address as the instrument shows it.
-
-```sh
-nord setlist edit song.ne5t --fields
-nord setlist edit song.ne5t --set slot1=2:5 --set slot4=8:50 -o out.ne5t
-nord setlist edit --set slot1=1:1 -o blank.ne5t     # a fresh set list
-```
-
-### `nord sample edit`
-
-A sample instrument is mostly encoded audio, so its settable fields are the ones
-the format can patch in place without touching a sample: the name, and each
-zone's root key and top note. Notes are spelled as names (`C4`, `F#3` — middle C
-is C4) or numbers 0–127, and zones are numbered from 1, top of the keyboard
-first, the way `inspect` lists them:
-
-```sh
-nord sample edit inst.nsmp --fields
-nord sample edit inst.nsmp --set name="My Piano" --set zone2.top_note=C4 -o out.nsmp
-nord sample edit inst.nsmp --set zone1.root_key=48 --dry-run
-```
-
-### Sample audio
-
-`nord sample` also reaches the encoded audio. `decode` writes each zone as a
-WAV at the format's own field rate, `verify --deep` walks every stroke's stream
-against the codec's grammar, `encode` turns a WAV into a sample instrument,
-`build` renders a whole Sample Editor project (zones, loops, stereo), and
-`project new` writes a project from WAVs for the editor to open.
-
-A build is the editor's own output byte for byte apart from a float residue in
-the resampling kernel: the odd audio field lands one count out, and nothing the
-instrument plays changes. `--plain` opts out of the record coding the editor
-picks and states every content field outright, which decodes back the same audio
-from a larger file. `--generation` selects v2, v3 or v4. Only v2
-has been played on hardware — mono, stereo and looped — so v3 and v4 must
-acknowledge `--unverified`.
-
-```sh
-nord sample decode inst.nsmp -o out/
-nord sample verify --deep inst.nsmp
-nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimba.nsmpproj
-nord sample build marimba.nsmpproj -o marimba.nsmp
-nord sample build marimba.nsmpproj --generation 4 -o marimba.nsmp4 --unverified
-```
-
-### `nord piano`
-
-A piano library is a directory of strokes — one recording per root note, bank and
-velocity layer — and the encoded audio those strokes own. `inspect` reports that
-directory, `decode` writes one stroke to a WAV at the rate the instrument plays it,
-and `edit`, `trim` and `split` rewrite the container: renaming, retuning a key,
-rerouting a key to another root, dropping a bank or the quieter velocity layers,
-narrowing the key range, and cutting a library in two. Nothing re-encodes audio — a
-surviving stroke moves byte for byte — and `trim` and `split` refuse to write over
-the file they read.
-
-```sh
-nord piano inspect grand.npno              # roots, layers per bank, keys, tuning
-nord piano inspect grand.npno --strokes    # a line per stroke
-nord piano decode grand.npno --key C4 --layer 0 -o c4.wav
-nord piano edit grand.npno --name "My Grand" --tune C4=-2 --map C8=C7 -o out.npno
-nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
-nord piano split grand.npno --at C4 -o halves/
-nord piano verify --deep grand.npno
-```
-
-A trimmed library loads on the instrument and plays at the original's level:
-hardware-verified for a dropped bank and for dropped velocity layers. The other
-edits — renames, retunes, remaps and a narrowed key range — are inferred from
-specimens and have not been played.
-
-A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
-piano put`, and the rest of the slot verbs address class 1 the way they address
-programs.
-
-### `nord edit` — files with no noun
-
-The top-level `edit` dispatches on the file itself rather than on an object
-class, so it reaches every format `nord-format` can set: the Electro 5 bodies
-above, the Stage 2/3/4 programs, the Stage 3/4 synth presets, the Stage 4
-organ and piano presets — any body with a generated field registry — plus set
-lists, sample instruments, and Nord Sample Editor projects (`.nsmpproj`: the
-instrument name and velocity defaults, each zone's root key and key range,
-each stroke's trim, loop, gain and velocity window, and each audio file's
-path — zones and files under the ids `inspect` prints, a stroke under its
-global id).
-
-```sh
-nord edit stage.ns3f --fields
-nord edit stage.ns3f --set split_enabled=true -o out.ns3f
-nord edit project.nsmpproj --set name=Marimba --set zone129.root_key=C3 --yes
-nord edit project.nsmpproj --set stroke1.loop_enabled=on \
-  --set stroke1.loop_start=1500 --set stroke1.gain=0.5 --yes
-```
+- [nord-cli guide](https://jmoo.github.io/drawbar/docs/nord-cli/overview.html)
 
 ## Build & run
 
 From the repo root:
 
 ```sh
-nix develop
-cd crates
-cargo run -p nord-cli -- inspect patch.ne5p
+nix run .#nord-cli -- --help
 ```
 
-Or as a Nix package — `nix build .#nord-cli` installs the `nord` binary.
+Or in the development shell, from `crates/`:
+
+```sh
+cargo run -p nord-cli -- inspect patch.ne5p
+cargo test -p nord-cli
+```
+
+`nix build .#nord-cli` installs the `nord` binary and runs its install check.
 
 ## Disclaimer
 

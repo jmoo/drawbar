@@ -17,6 +17,10 @@ specimen corpus. That establishes preservation of file bytes. It does not
 establish that every decoded parameter or newly encoded sound behaves correctly
 on hardware.
 
+Public tests use self-generated fixtures and USB replay scripts; optional private
+corpus tests check byte-exact file round trips, field isolation, and captured
+protocol exchanges. [Testing](../reference/testing.md) describes both.
+
 The support map itself lives in the `nord-format` rustdoc, beside the code it
 describes, and defines the three tiers — decoded, structurally decoded,
 container-verified stub — with each decoded body's byte map:

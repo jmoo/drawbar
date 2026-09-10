@@ -16,26 +16,42 @@
 | `piano` | Piano libraries — the library (object class 1), or `.npno` files |
 | `raw` | Hidden: the same verbs, addressed by class number |
 
+## Nouns and verbs
+
 `inspect`, `verify` and `edit` work on files. The other nouns are the protocol's
-object classes and normally talk to an attached instrument — but the read-only
+object classes, and normally talk to an attached instrument — but the read-only
 verbs (`get`, `info`, `deps`) and each noun's `edit` also take a file in place of
 a slot. `program`, `setlist`, `sample` and `piano` share one verb vocabulary:
 
 ```
-get put                                transfer
-move rename duplicate delete select    organization
-info deps list focus                   interrogation
-edit                                   content
+get put            transfer
+move rename duplicate delete select   organization
+info deps list focus   interrogation
+edit               content (program, setlist, live, settings, sample, piano)
 ```
 
-Slots are written **`BANK:SLOT`**, the way the instrument and Nord Sound Manager
-show them. `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
+`live` keeps only the read-only subset plus `edit` — the live buffer is the panel
+as it stands, so there is nothing to name, delete, or select. `settings` is a
+singleton with nothing to organize, so it keeps `get`, `info` and `edit`. Other
+class-generic operations remain available through `raw --class 7`.
 
-- **Data on stdout, everything else on stderr.**
+`nord raw --class N` is those same verbs with the class given as a number. It is
+how to reach a class that has no noun of its own, or to address one by number.
+
+## Slots
+
+Slots are written **`BANK:SLOT`**, the way the instrument and Nord Sound Manager
+show them — `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
+
+## Output and interaction
+
+- **Data on stdout, everything else on stderr.** `nord program get 7:4 | grep
+  transpose` sees the summary and nothing else.
 - **Color and unicode only on a terminal.** `--color=auto|always|never`;
-  `NO_COLOR` forces color off.
+  `NO_COLOR` in the environment forces color off. Piped output is plain ASCII.
 - **A pipe is non-interactive.** On a terminal a destructive command asks for
   confirmation; off one, a missing `--yes` is an error rather than a prompt.
 
-Every command and its options are in
-[`crates/nord-cli/README.md`](https://github.com/jmoo/drawbar/blob/master/crates/nord-cli/README.md).
+From here: [working with files](files.md), [talking to an
+instrument](instrument.md), [editing an object](editing.md), and [samples and
+pianos](libraries.md).
