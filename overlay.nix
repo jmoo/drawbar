@@ -428,19 +428,23 @@ let
 
   # The GitHub Pages tree: the browser build at the root, the guide under /docs.
   # Copies, not links: the tree leaves the store as a tarball.
-  site =
-    final.runCommand "drawbar-site-${manifests.drawbar.version}"
+  # `web` is a parameter so the deployed tree can pair a released bundle with
+  # this checkout's guide; scripts/site.bash overrides it.
+  site = makeOverridable (
+    { web }:
+    final.runCommand "drawbar-site-${web.version}"
       {
         meta.description = "drawbar and its guide, laid out for GitHub Pages";
       }
       ''
         mkdir -p "$out/docs"
-        cp -rL ${drawbar-web}/. "$out/"
+        cp -rL ${web}/. "$out/"
         cp -rL ${docs}/. "$out/docs/"
 
         # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
         touch "$out/.nojekyll"
-      '';
+      ''
+  ) { web = drawbar-web; };
 
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
   # the host-independent web bundle.
@@ -575,10 +579,11 @@ in
       crossPackages = crossed;
 
       # `site` stays out of `all`: it only rearranges outputs `all` already
-      # builds, and CI reaches it directly to deploy Pages.
+      # builds, and the Pages deploy reaches it through scripts/site.bash.
       inherit docs site;
 
-      # `nix run .#drawbar-web`: serve the browser bundle on loopback and open it.
+      # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
+      # guide the app links to is there under /docs.
       drawbar-web-launch = final.writeShellApplication {
         name = "drawbar-web";
         runtimeInputs = [ final.miniserve ];
@@ -591,7 +596,7 @@ in
           # the wasm. `no-cache` forces revalidation; the ETag still answers 304.
           miniserve --index index.html --interfaces 127.0.0.1 --port "$port" \
             --header "Cache-Control: no-cache" \
-            ${final.nord.drawbar-web} &
+            ${final.nord.site} &
           server=$!
           trap 'kill "$server" 2>/dev/null || true' EXIT
 
