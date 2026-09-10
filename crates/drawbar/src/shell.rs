@@ -750,6 +750,19 @@ impl DrawbarApp {
         if waiting > 0 && item(ui, &format!("Send all ({waiting})"), None) {
             acts.push(Act::AskSendAll);
         }
+        if waiting > 0 && item(ui, "Clear send queue", None) {
+            acts.push(Act::ClearQueue);
+        }
+        let queued: Vec<u64> = self
+            .browser
+            .picked()
+            .locals()
+            .into_iter()
+            .filter(|id| self.queue.holds(*id))
+            .collect();
+        if !queued.is_empty() && item(ui, "Remove from queue", None) {
+            acts.extend(queued.into_iter().map(Act::Unqueue));
+        }
     }
 
     /// The class the open document belongs to, for the menu that offers to read it
@@ -996,9 +1009,15 @@ impl DrawbarApp {
                     Page::Log => clear = ui.small_button("Clear").clicked(),
                     Page::Queue => {
                         if waiting > 0 {
-                            let sent = action(ui, Glyph::Upload, "Send all", true).clicked();
-                            if sent {
+                            if action(ui, Glyph::Upload, "Send all", true).clicked() {
                                 acts.push(Act::AskSendAll);
+                            }
+                            if ui
+                                .small_button("Clear")
+                                .on_hover_text("stop waiting to send any of it")
+                                .clicked()
+                            {
+                                acts.push(Act::ClearQueue);
                             }
                         }
                     }

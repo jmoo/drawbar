@@ -431,6 +431,13 @@ impl Queue {
         }
     }
 
+    /// Nothing is waiting any more. A queue is a plan rather than data, so this deletes
+    /// nothing and asks nothing.
+    pub fn clear(&mut self) {
+        self.list.clear();
+        self.picked = None;
+    }
+
     /// A write into `class` stopped, so the entry it stopped on says why.
     ///
     /// ⚠️ A batch writes its entries in queue order and each one that lands leaves the
@@ -721,21 +728,43 @@ fn item(
     let quiet = cell_ink(selected, visuals.weak_text_color(), &visuals);
 
     // The right end is claimed first, so the name is cut to whatever is left of the row.
+    let box_ = |right: f32| {
+        egui::Rect::from_center_size(
+            egui::pos2(right - SMALL / 2.0, rect.center().y),
+            egui::Vec2::splat(SMALL),
+        )
+    };
+    let unqueue = ui.interact(
+        box_(rect.right() - PAD),
+        ui.id().with(("unqueue", held.id)),
+        egui::Sense::click(),
+    );
+    // Flat: nothing under the × until the pointer is on it.
+    let leaving = match unqueue.hovered() {
+        true => visuals.text_color(),
+        false => visuals.weak_text_color(),
+    };
+    painted(
+        ui,
+        Glyph::X,
+        box_(rect.right() - PAD),
+        cell_ink(selected, leaving, &visuals),
+    );
+    if unqueue.on_hover_text("remove from the queue").clicked() {
+        acts.push(Act::Unqueue(held.id));
+    }
     let (glyph, tint, why) = state(held, &visuals);
     painted(
         ui,
         glyph,
-        egui::Rect::from_center_size(
-            egui::pos2(rect.right() - PAD - SMALL / 2.0, rect.center().y),
-            egui::Vec2::splat(SMALL),
-        ),
+        box_(rect.right() - PAD - SMALL - GAP),
         cell_ink(selected, tint, &visuals),
     );
     let right = destination(
         ui,
         held,
         rect,
-        rect.right() - PAD - SMALL - GAP,
+        rect.right() - PAD - 2.0 * (SMALL + GAP),
         quiet,
         device,
         queue,

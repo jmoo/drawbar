@@ -85,6 +85,10 @@ pub enum Act {
         class: ObjectClass,
         at: Location,
     },
+    /// Stop waiting to send this one. Nothing is deleted.
+    Unqueue(u64),
+    /// Stop waiting to send any of it. A queue is a plan, so emptying it asks nothing.
+    ClearQueue,
     /// Write everything in the queue, grouped by folder. Already agreed to.
     SendAll,
     /// Queue every asset the instrument no longer agrees with, each for its own slot.
@@ -287,6 +291,18 @@ pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
     }
 }
 
+/// Whether running this act puts something in the send queue or moves what is in it.
+fn enqueues(act: &Act) -> bool {
+    matches!(
+        act,
+        Act::Send { .. }
+            | Act::Replace { .. }
+            | Act::Retarget { .. }
+            | Act::SendChecked(_)
+            | Act::QueueChanged
+    )
+}
+
 /// Run what the browser asked for.
 #[allow(clippy::too_many_arguments)]
 pub fn apply(
@@ -300,6 +316,12 @@ pub fn apply(
     log: &mut Log,
 ) {
     for act in acts {
+        // Taken here rather than by each caller: a drop, a menu and a footer all reach
+        // the queue through an act, and a plan made out of sight is a plan nobody
+        // reviews.
+        if enqueues(&act) {
+            shell.show_page(Page::Queue);
+        }
         match act {
             Act::Connect => device.connect(log),
             Act::Disconnect => device.disconnect(log),
@@ -400,6 +422,8 @@ pub fn apply(
             Act::Retarget { id, class, at } => {
                 retarget(workspace, device, queue, log, id, class, at)
             }
+            Act::Unqueue(id) => queue.forget(id),
+            Act::ClearQueue => queue.clear(),
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
             Act::AskSendAll => {
@@ -1266,6 +1290,101 @@ mod tests {
         );
         assert_eq!(queue.ids(), vec![id], "one entry, moved");
         assert_eq!(queue.entry(id).map(|held| held.at), Some(at(3)));
+    }
+
+    /// One entry leaves the queue on its own, and the whole queue empties — and neither
+    /// takes anything off this computer with it.
+    #[test]
+    fn an_entry_leaves_the_queue_alone_and_the_queue_empties_without_deleting_anything() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_scanned(class, 7, &["", "", ""]);
+        let bytes = program(&mut workspace, &mut log);
+        let ids: Vec<u64> = (0..3)
+            .map(|n| {
+                workspace.ingest(
+                    format!("sound {n}.ne5p"),
+                    Origin::File(format!("sound {n}.ne5p")),
+                    bytes.clone(),
+                    &mut log,
+                )
+            })
+            .collect();
+
+        let mut run = |acts, queue: &mut Queue, workspace: &mut Workspace| {
+            apply(
+                &mut browser,
+                &mut Shell::default(),
+                acts,
+                workspace,
+                &mut device,
+                &mut tabs,
+                queue,
+                &mut log,
+            )
+        };
+        run(
+            bulk(
+                Bulk::Queue,
+                &ids.iter().copied().map(Item::Local).collect::<Vec<_>>(),
+            ),
+            &mut queue,
+            &mut workspace,
+        );
+        assert_eq!(queue.ids(), ids);
+
+        run(vec![Act::Unqueue(ids[1])], &mut queue, &mut workspace);
+        assert_eq!(queue.ids(), vec![ids[0], ids[2]]);
+
+        run(vec![Act::ClearQueue], &mut queue, &mut workspace);
+        assert!(queue.is_empty());
+        assert_eq!(
+            workspace.listed().count(),
+            3,
+            "a queue is a plan, so emptying it deletes nothing"
+        );
+    }
+
+    /// Queueing brings the plan into view: whatever put something in the queue leaves
+    /// the bottom dock open on the queue page, however shut it was.
+    #[test]
+    fn queueing_opens_the_dock_on_the_queue_page() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_scanned(class, 7, &[""]);
+        let bytes = program(&mut workspace, &mut log);
+        let id = workspace.ingest(
+            "Africa Split.ne5p".to_string(),
+            Origin::File("Africa Split.ne5p".into()),
+            bytes,
+            &mut log,
+        );
+
+        let mut shell = Shell {
+            dock_open: false,
+            page: Page::Log,
+            ..Shell::default()
+        };
+        apply(
+            &mut browser,
+            &mut shell,
+            vec![Act::Send {
+                id,
+                class,
+                at: at(0),
+            }],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(queue.holds(id));
+        assert!(shell.dock_open);
+        assert_eq!(shell.page, Page::Queue);
     }
 
     /// A folder every read slot of which is taken refuses the entry by name. Dropping it
