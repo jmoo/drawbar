@@ -56,6 +56,10 @@ impl Meter {
 
 /// What a class's partition holds and what is on its way to it, or nothing for a class
 /// whose counters have not been read.
+///
+/// ⚠️ A partition reporting a total of nothing has no meter either: nothing can be
+/// written there and nothing is counted, so a full-width empty trough would be a
+/// measurement of a thing that does not divide.
 pub fn meter(
     class: ObjectClass,
     inventory: &[Status],
@@ -64,6 +68,9 @@ pub fn meter(
     workspace: &Workspace,
 ) -> Option<Meter> {
     let status = inventory.iter().find(|status| status.class == class)?;
+    if status.total() == 0 {
+        return None;
+    }
     let (used, total) = match status.slots() {
         Some(slots) => (u64::from(status.count), u64::from(slots)),
         None => (u64::from(status.used), status.total()),
@@ -308,6 +315,24 @@ mod tests {
         // 300 000 / 131 064 = 2.29, and a partial block still costs a whole one.
         assert_eq!(known.queued, 3);
         assert!(known.crowded(), "1472 of 1536 is past nine tenths");
+    }
+
+    /// ⚠️ A folder whose partition reports a total of nothing is not an empty folder:
+    /// nothing can be written there and nothing is counted, so it gets no meter rather
+    /// than an empty one.
+    #[test]
+    fn a_partition_that_counts_nothing_at_all_has_no_meter() {
+        let ctx = egui::Context::default();
+        let workspace = Workspace::new(ctx);
+        let queue = Queue::default();
+        let class = ObjectClass::Piano;
+        let inventory = [
+            status(class, 0, 0, 0),
+            status(ObjectClass::Program, 1, 9, 1),
+        ];
+
+        assert_eq!(meter(class, &inventory, None, &queue, &workspace), None);
+        assert!(meter(ObjectClass::Program, &inventory, None, &queue, &workspace).is_some());
     }
 
     /// The queued segment never runs past the end of the trough, whatever is waiting.
