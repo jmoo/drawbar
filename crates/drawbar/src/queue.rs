@@ -285,6 +285,9 @@ pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Que
 /// What a waiting entry says about a slot before either body has been read: vacant is
 /// nothing to replace, and two bodies whose checksums agree are known to agree, because
 /// the container's own CRC-32 is the number the instrument reports for a slot.
+///
+/// ⚠️ The bytes held now, which are the ones a send writes — not the saved baseline
+/// [`crate::device::link`] matches a slot on.
 fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
     let here = entity.container.as_ref().and_then(|held| held.body_crc32);
     match replaces {

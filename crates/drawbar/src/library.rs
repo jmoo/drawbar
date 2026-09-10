@@ -1560,7 +1560,7 @@ mod tests {
         );
         let crc = workspace
             .get(both)
-            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .and_then(|entity| entity.saved.crc32)
             .expect("a type-1 container carries one");
         device.pretend_bodies(
             ObjectClass::Program,
@@ -1628,7 +1628,7 @@ mod tests {
         );
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .and_then(|entity| entity.saved.crc32)
             .expect("a type-1 container carries one");
         let filter = Filter::default();
         let where_ = |workspace: &Workspace, device: &Device| {
@@ -1669,6 +1669,78 @@ mod tests {
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
     }
 
+    /// A link is matched on the saved bytes, which is what the sign and the dot are
+    /// already read against. An asset holding an edit nothing has saved still finds the
+    /// slot holding what it was saved as, however far its bytes have moved since; saving
+    /// that edit takes the baseline off the slot and turns both signs over, leaving the
+    /// link where it was matched.
+    #[test]
+    fn an_unsaved_edit_still_links_to_the_slot_holding_the_saved_bytes() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (queue, tags) = (Queue::default(), Tags::default());
+        let visuals = egui::Visuals::dark();
+        let held_at = at(6, 0);
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let saved_as = workspace.get(id).unwrap().saved.crc32.unwrap();
+
+        // Edited before anything is read, so there is no earlier link to fall back on.
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
+                .expect("the registry takes the set");
+        workspace.replace_bytes(id, edited, &mut log);
+        assert!(workspace.get(id).unwrap().is_unsaved());
+        assert_ne!(
+            workspace
+                .get(id)
+                .unwrap()
+                .container
+                .as_ref()
+                .and_then(|held| held.body_crc32),
+            Some(saved_as),
+            "the edit moved the bytes it holds now"
+        );
+
+        let where_ = |workspace: &Workspace, device: &Device| {
+            rows(workspace, &device.state, &queue, &tags, &Filter::default())
+                .into_iter()
+                .find(|row| matches!(row.item, Item::Local(_)))
+                .map(|row| row.where_)
+        };
+        let mark = |workspace: &Workspace, device: &Device| {
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue, &visuals)
+        };
+
+        device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", saved_as))]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((ObjectClass::Program, held_at)),
+            "the slot holds what this was saved as"
+        );
+        assert_eq!(
+            crate::device::also_holding(&device.state, workspace.get(id).unwrap()),
+            0,
+            "the one slot holding it is the one it is linked to"
+        );
+        assert_eq!(mark(&workspace, &device), Some(crate::app::good(&visuals)));
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
+
+        workspace.mark_saved(id);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((ObjectClass::Program, held_at)),
+            "no slot holds the new baseline, and where it stands is where it stands"
+        );
+        assert_eq!(mark(&workspace, &device), Some(warn(&visuals)));
+        assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(false))));
+    }
+
     /// The state axis narrows the library to what wants doing about it — and a write
     /// already waiting takes its row out of "differs" and into "waiting", so one thing
     /// to do is asked for once.
@@ -1686,7 +1758,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.clone();
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .and_then(|entity| entity.saved.crc32)
             .expect("a type-1 container carries one");
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
         device.relink(&mut workspace);

@@ -155,6 +155,10 @@ impl Container {
 #[derive(Clone)]
 pub struct Baseline {
     pub bytes: Vec<u8>,
+    /// The checksum a slot holding these bytes would report, which is what a link and
+    /// the sign beside it are both decided on — [`crate::device::link`] and
+    /// [`crate::library::agrees`].
+    ///
     /// `None` for anything but a type-1 container — see [`Container::body_crc32`].
     pub crc32: Option<u32>,
 }

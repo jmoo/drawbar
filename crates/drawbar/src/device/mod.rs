@@ -761,11 +761,14 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
 /// have made of each other since is [`crate::library::agrees`]'s question rather than
 /// this one.
 ///
-/// With no origin, or an origin the walk found vacant, the body is what matches: the
-/// container's CRC-32 **is** the checksum a walk reports for a slot — see the round trip
-/// in [`crate::workspace`] — so an asset and a slot are matched without either body
-/// being hashed again, and [`among`] decides which of them where several hold it. A
-/// class whose slots report no checksum is matched by [`named`] instead.
+/// With no origin, or an origin the walk found vacant, the saved body is what matches:
+/// the CRC-32 a type-1 container carries **is** the checksum a walk reports for a slot —
+/// see the round trip in [`crate::workspace`] — so an asset and a slot are matched
+/// without either body being hashed again, and [`among`] decides which of them where
+/// several hold it. A class whose slots report no checksum is matched by [`named`]
+/// instead. Saved rather than held now, which is the body
+/// [`crate::library::keyboard_mark`] and the row's own sign are read against, so an
+/// edit nothing has saved cannot make the three disagree about where this stands.
 ///
 /// ⚠️ Takes the link the asset already carries as its own input, so running it again
 /// over an unchanged cache answers the same thing. That is what lets an edit here keep
@@ -784,18 +787,15 @@ pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, L
     {
         return Some(origin);
     }
-    let by_body = entity
-        .container
-        .as_ref()
-        .and_then(|held| held.body_crc32)
-        .and_then(|crc| among(state, class, crc, entity));
+    let by_body = matchable(entity).and_then(|(folder, crc)| among(state, folder, crc, entity));
     match by_body {
         Some(at) => Some((class, at)),
         None => stands(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
     }
 }
 
-/// How many further slots hold these same bytes, beyond the one the asset is linked to.
+/// How many further slots hold what this asset was saved as, beyond the one it is
+/// linked to.
 pub fn also_holding(state: &DeviceState, entity: &LocalEntity) -> usize {
     let Some((class, here)) = matchable(entity) else {
         return 0;
@@ -814,9 +814,10 @@ fn home(entity: &LocalEntity) -> Option<ObjectClass> {
         .flatten()
 }
 
-/// That folder and the checksum a slot holding this asset's body would report.
+/// That folder and the checksum a slot holding what this asset was saved as would
+/// report — see [`crate::workspace::Baseline::crc32`].
 fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
-    Some((home(entity)?, entity.container.as_ref()?.body_crc32?))
+    Some((home(entity)?, entity.saved.crc32?))
 }
 
 /// The slot a class whose slots report no checksum is matched to.
@@ -1749,7 +1750,7 @@ mod tests {
         let id = workspace.ingest("Africa-Split.ne5p".into(), origin, bytes, log);
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .and_then(|entity| entity.saved.crc32)
             .expect("a type-1 container carries one");
         (id, crc)
     }
@@ -1764,7 +1765,7 @@ mod tests {
         let id = workspace.ingest("Africa-Split.ns4p".into(), origin, bytes, log);
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .and_then(|entity| entity.saved.crc32)
             .expect("a type-1 container carries one");
         (id, crc)
     }
