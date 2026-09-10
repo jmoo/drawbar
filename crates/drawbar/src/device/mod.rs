@@ -764,8 +764,8 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
 /// With no origin, or an origin the walk found vacant, the body is what matches: the
 /// container's CRC-32 **is** the checksum a walk reports for a slot — see the round trip
 /// in [`crate::workspace`] — so an asset and a slot are matched without either body
-/// being hashed again, lowest address first. A class whose slots report no checksum is
-/// matched by [`named`] instead.
+/// being hashed again, and [`among`] decides which of them where several hold it. A
+/// class whose slots report no checksum is matched by [`named`] instead.
 ///
 /// ⚠️ Takes the link the asset already carries as its own input, so running it again
 /// over an unchanged cache answers the same thing. That is what lets an edit here keep
@@ -788,7 +788,7 @@ pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, L
         .container
         .as_ref()
         .and_then(|held| held.body_crc32)
-        .and_then(|crc| holding(state, class, crc).next());
+        .and_then(|crc| among(state, class, crc, entity));
     match by_body {
         Some(at) => Some((class, at)),
         None => stands(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
@@ -872,6 +872,30 @@ fn holding(
     occupied(state, class)
         .filter(move |(_, info)| info.crc32 == Some(crc))
         .map(|(at, _)| at)
+}
+
+/// Which of the slots holding this asset's bytes it is matched to.
+///
+/// One body can sit in any number of slots, and the address the row shows is the one
+/// the user has reason to expect: the slot it came off, or the slot it stands on — which
+/// [`Workspace::landed`] set to the slot this app wrote it to. An asset standing nowhere
+/// takes the lowest address holding it.
+fn among(
+    state: &DeviceState,
+    class: ObjectClass,
+    crc: u32,
+    entity: &LocalEntity,
+) -> Option<Location> {
+    let held = |known: Option<(ObjectClass, Location)>| {
+        known
+            .filter(|(held, at)| {
+                *held == class && holding(state, class, crc).any(|other| other == *at)
+            })
+            .map(|(_, at)| at)
+    };
+    held(entity.origin.slot())
+        .or_else(|| held(entity.link))
+        .or_else(|| holding(state, class, crc).next())
 }
 
 /// The link an asset keeps when no slot holds its bytes any more: an edit here moved
@@ -1831,6 +1855,45 @@ mod tests {
             workspace.get(fresh).unwrap().link,
             None,
             "a folder reporting no checksum links nothing"
+        );
+    }
+
+    /// A factory sound that also sits in a slot the user filled is in two places at
+    /// once, and the address the row shows is the one the asset already stood on — a
+    /// write of this app's put it there. Only an asset standing nowhere is matched to
+    /// the lowest of them.
+    #[test]
+    fn a_link_keeps_the_slot_it_has_when_several_hold_the_bytes() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (id, crc) = program(&mut workspace, &mut log, Origin::File("Bells.ne5p".into()));
+        let class = ObjectClass::Program;
+        let (low, high) = (Location { bank: 6, slot: 0 }, Location { bank: 6, slot: 2 });
+        device.pretend_bodies(
+            class,
+            7,
+            &[
+                Some(("Circling Bells", crc)),
+                None,
+                Some(("Circling Bells", crc)),
+            ],
+        );
+
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, low)),
+            "standing nowhere, it takes the lowest address holding it"
+        );
+
+        workspace.landed(id, class, high);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, high)),
+            "it stands where it was written, not where else the bytes are"
         );
     }
 
