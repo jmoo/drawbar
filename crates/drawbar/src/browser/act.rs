@@ -734,7 +734,13 @@ fn save_doc(
         let name = entity.name.clone();
         let spot = owed(entity);
         workspace.mark_saved(id);
+        let waiting = queue.entry(id).map(|held| (held.class, held.at));
         match spot {
+            // Already waiting for that slot: the plan is what it was, so what this
+            // gesture did is settle the bytes.
+            Some(spot) if waiting == Some(spot) => {
+                log.say(format!("“{name}” is saved on this computer."))
+            }
             Some((class, at)) => enqueue(workspace, device, queue, log, id, class, at),
             None => log.say(format!("“{name}” is saved on this computer.")),
         }
@@ -963,6 +969,29 @@ mod tests {
             "only the one that stands for a slot"
         );
         assert_eq!(queue.entry(linked).map(|held| held.at), Some(at(3)));
+
+        // Saving it again asks the instrument nothing further: it is already waiting for
+        // that slot, and a save still says what it did.
+        let reads = device.queued().len();
+        log.clear();
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SaveDoc(linked)],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+        assert_eq!(queue.ids(), vec![linked]);
+        assert_eq!(device.queued().len(), reads, "the slot was not read again");
+        assert!(
+            log.transcript()
+                .contains("“Africa Split.ne5p” is saved on this computer"),
+            "{}",
+            log.transcript()
+        );
     }
 
     /// Each of the things offered over a checked set asks only about the half of it that

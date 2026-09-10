@@ -40,6 +40,12 @@ pub struct Queued {
     /// The stamp of the asset's bytes [`Queued::diff`] was made from, so an edit under a
     /// waiting entry is noticed without comparing anything.
     stamp: u64,
+    /// Whether the read of [`Queued::at`] has been asked for.
+    ///
+    /// One read per entry per destination. A second queueing of the same asset for the
+    /// same slot, and an edit made under it while the answer is still on its way, both
+    /// want the answer already coming.
+    asked: bool,
     /// Why the last attempt to write it stopped. Cleared when it is queued again.
     pub failure: Option<String>,
 }
@@ -131,12 +137,40 @@ pub struct Queue {
     picked: Option<u64>,
 }
 
+/// What queueing an asset came to, which is what there is to say about it.
+enum Put {
+    /// A new entry, for a slot nothing else was waiting for.
+    Made,
+    /// This asset was already waiting for this same slot. Nothing moved.
+    Standing,
+    /// It was waiting for another slot, and is not any more.
+    Moved(ObjectClass, Location),
+    /// Something else was waiting for this slot, and is not any more.
+    Instead(u64),
+}
+
+/// Ask the instrument what is in the slot an entry is waiting for.
+fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Location) {
+    device.send(
+        DeviceCmd::Get {
+            class,
+            at,
+            body: false,
+            why: Purpose::Compare,
+        },
+        log,
+    );
+}
+
 /// Wait for an asset to be written to a slot, and say in the log what that displaced.
 ///
 /// One entry per asset and one per destination, so this both moves what was waiting
 /// somewhere else and drops what was waiting for this slot. What the slot holds is read
 /// again unless the scan cache already answers for it and the two bodies are known to
 /// agree; a bank the scan has never reached is read rather than assumed vacant.
+///
+/// Asking for what is already waiting for the same slot is asking for nothing: the plan
+/// says what it said, and neither the log nor the instrument hears about it again.
 pub fn enqueue(
     workspace: &Workspace,
     device: &mut Device,
@@ -161,32 +195,24 @@ pub fn enqueue(
         Some(None) => Occupancy::Vacant,
         None => Occupancy::Unknown,
     };
-    let (moved, instead_of) = queue.put(entity, class, at, holds);
-
-    if matches!(queue.entry(id).map(|held| &held.diff), Some(Diff::Pending)) {
-        device.send(
-            DeviceCmd::Get {
-                class,
-                at,
-                body: false,
-                why: Purpose::Compare,
-            },
-            log,
-        );
-    }
-    if let Some((was, before)) = moved {
-        return log.say(format!(
+    let displaced = match queue.put(entity, class, at, holds) {
+        Put::Standing => return,
+        Put::Made => None,
+        Put::Moved(was, before) => Some(format!(
             "“{name}” is waiting for {where_} rather than {}.",
             place(was, before)
-        ));
+        )),
+        Put::Instead(other) => workspace.get(other).map(|other| {
+            format!(
+                "“{name}” is waiting for {where_}; “{}” is not any more.",
+                other.name
+            )
+        }),
+    };
+    if let Some((class, at)) = queue.unread(id) {
+        read_occupant(device, log, class, at);
     }
-    if let Some(other) = instead_of.and_then(|id| workspace.get(id)) {
-        return log.say(format!(
-            "“{name}” is waiting for {where_}; “{}” is not any more.",
-            other.name
-        ));
-    }
-    log.say(format!("“{name}” is waiting to be sent to {where_}."));
+    log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
 }
 
 /// The assets whose slot on the attached instrument no longer holds what they were
@@ -276,7 +302,7 @@ fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
 /// checksums settled without a read is settled the same way again, and asks for the read
 /// only where they no longer settle it.
 pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
-    let mut owed = Vec::new();
+    let mut moved = Vec::new();
     for held in &mut queue.list {
         let Some(entity) = workspace.get(held.id) else {
             continue;
@@ -289,20 +315,12 @@ pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log
             Some(there) => compare(&entity.bytes, there),
             None => verdict(entity, &held.replaces),
         };
-        if matches!(held.diff, Diff::Pending) && held.there.is_none() {
-            owed.push((held.class, held.at));
-        }
+        moved.push(held.id);
     }
-    for (class, at) in owed {
-        device.send(
-            DeviceCmd::Get {
-                class,
-                at,
-                body: false,
-                why: Purpose::Compare,
-            },
-            log,
-        );
+    for id in moved {
+        if let Some((class, at)) = queue.unread(id) {
+            read_occupant(device, log, class, at);
+        }
     }
 }
 
@@ -330,13 +348,26 @@ impl Queue {
     /// where this asset was waiting before, and what was waiting for this slot.
     ///
     /// [`enqueue`] is what callers use; this is the bookkeeping under it.
+    ///
+    /// ⚠️ An asset already waiting for this same slot keeps the entry it has, and with
+    /// it the read that entry is waiting on. Rebuilding it would throw away an occupant
+    /// already read and ask the instrument for it again.
     fn put(
         &mut self,
         entity: &LocalEntity,
         class: ObjectClass,
         at: Location,
         replaces: Occupancy,
-    ) -> (Option<(ObjectClass, Location)>, Option<u64>) {
+    ) -> Put {
+        if let Some(held) = self
+            .list
+            .iter_mut()
+            .find(|held| (held.id, held.class, held.at) == (entity.id, class, at))
+        {
+            held.failure = None;
+            self.picked = Some(entity.id);
+            return Put::Standing;
+        }
         let moved = self
             .list
             .iter()
@@ -359,10 +390,29 @@ impl Queue {
             replaces,
             there: None,
             stamp: entity.stamp,
+            asked: false,
             failure: None,
         });
         self.picked = Some(entity.id);
-        (moved, instead_of)
+        match (moved, instead_of) {
+            (Some((was, before)), _) => Put::Moved(was, before),
+            (None, Some(other)) => Put::Instead(other),
+            (None, None) => Put::Made,
+        }
+    }
+
+    /// The slot an entry is still owed a compare read of, marked as asked for.
+    ///
+    /// The read answers once for one destination. Everything that can want it — a
+    /// queueing, a re-queueing, an edit made while it is out — asks here, and the
+    /// instrument hears the question once.
+    fn unread(&mut self, id: u64) -> Option<(ObjectClass, Location)> {
+        let held = self.list.iter_mut().find(|held| held.id == id)?;
+        let owed = matches!(held.diff, Diff::Pending) && held.there.is_none() && !held.asked;
+        owed.then(|| {
+            held.asked = true;
+            (held.class, held.at)
+        })
     }
 
     /// The occupant of a slot something is waiting for, read at last.
@@ -1387,7 +1437,7 @@ mod tests {
             at(0),
             Occupancy::Vacant,
         );
-        assert_eq!(landed, (None, None));
+        assert!(matches!(landed, Put::Made));
 
         let landed = queue.put(
             workspace.get(second).unwrap(),
@@ -1395,7 +1445,10 @@ mod tests {
             at(0),
             Occupancy::Vacant,
         );
-        assert_eq!(landed.1, Some(first), "one asset per slot");
+        assert!(
+            matches!(landed, Put::Instead(displaced) if displaced == first),
+            "one asset per slot"
+        );
         assert_eq!(queue.ids(), vec![second]);
 
         queue.put(
@@ -1410,7 +1463,20 @@ mod tests {
             at(2),
             Occupancy::Vacant,
         );
-        assert_eq!(landed.0, Some((class, at(1))), "one slot per asset");
+        assert!(
+            matches!(landed, Put::Moved(was, before) if (was, before) == (class, at(1))),
+            "one slot per asset"
+        );
+        assert_eq!(queue.ids(), vec![second, first]);
+
+        // And putting it where it already is leaves the one entry it has alone.
+        let landed = queue.put(
+            workspace.get(first).unwrap(),
+            class,
+            at(2),
+            Occupancy::Vacant,
+        );
+        assert!(matches!(landed, Put::Standing));
         assert_eq!(queue.ids(), vec![second, first]);
     }
 
@@ -1714,6 +1780,78 @@ mod tests {
 
         follow(&workspace, &mut device, &mut queue, &mut log);
         assert_eq!(device.queued().len(), 1, "asked for once, not once a frame");
+    }
+
+    /// A plan says what it says. Asking for an asset to go where it is already going
+    /// changes nothing about the queue, so the instrument is not asked about that slot
+    /// again and the log does not say it twice — which is what a checked set holding an
+    /// asset already waiting comes to.
+    #[test]
+    fn queueing_an_asset_where_it_is_already_going_asks_and_says_nothing_further() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, _tabs) = attached(&workspace);
+        let class = ObjectClass::Program;
+        let mut queue = Queue::default();
+        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
+        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
+
+        for _ in 0..3 {
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                class,
+                at(0),
+            );
+        }
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
+        assert_eq!(device.queued().len(), 1, "one read for one destination");
+        assert_eq!(
+            log.transcript()
+                .matches("is waiting to be sent to Programs 7:1")
+                .count(),
+            1,
+            "{}",
+            log.transcript()
+        );
+    }
+
+    /// An entry waiting on a read is waiting on the answer already coming. Every edit
+    /// made under it before that answer lands wants the same bytes back, and asking for
+    /// them again is one more read of one slot for nothing.
+    #[test]
+    fn edits_made_while_a_compare_read_is_out_do_not_ask_for_it_again() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, _tabs) = attached(&workspace);
+        let class = ObjectClass::Program;
+        let mut queue = Queue::default();
+        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
+        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
+
+        for gain in ["96", "97", "98"] {
+            let held = workspace.get(id).unwrap().bytes.clone();
+            let (_, edited) =
+                crate::fields::apply(&held, &[("center_panel.gain".into(), gain.into())]).unwrap();
+            workspace.replace_bytes(id, edited, &mut log);
+            follow(&workspace, &mut device, &mut queue, &mut log);
+        }
+
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
+        assert_eq!(device.queued().len(), 1, "the answer was already coming");
     }
 
     /// A bank no walk has reached says nothing about its slots, so an entry onto one is
