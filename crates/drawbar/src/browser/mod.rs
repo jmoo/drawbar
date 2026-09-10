@@ -56,11 +56,9 @@ struct Rename {
     fresh: bool,
 }
 
-/// A click on a row: which row, what it is called, and the run a ⇧-click may fill.
+/// A click on a row: which row, and the run a ⇧-click may fill.
 struct Click<'a> {
     item: Item,
-    /// The name the rename editor would open on.
-    from: &'a str,
     /// The rows of the list this one sits in, in the order they are drawn.
     list: &'a [Item],
 }
@@ -72,17 +70,6 @@ struct Ask {
     note: Option<String>,
     verb: &'static str,
     acts: Vec<Act>,
-}
-
-/// Whether a plain click starts a rename rather than moving the selection.
-///
-/// Both halves are needed. Selecting is the whole row's job, so a row that answers a
-/// click anywhere would otherwise arm the editor on every second click.
-///
-/// ⚠️ `sole` is the **only** row picked, not merely one of several. A click on a name
-/// inside a multi-selection collapses the selection onto that row instead.
-pub fn arms_rename(sole: bool, on_name: bool) -> bool {
-    sole && on_name
 }
 
 /// What Enter does to an in-place rename: nothing, or a new name.
@@ -181,23 +168,26 @@ impl Browser {
 
     /// A click on a row drawn somewhere other than the tree: the same three gestures
     /// over the same set.
+    pub fn pick(&mut self, ui: &egui::Ui, item: Item, list: &[Item]) {
+        self.clicked(ui, Click { item, list });
+    }
+
+    /// Escape lets go of everything picked, wherever its rows were drawn.
     ///
-    /// ⚠️ No rename is armed. The table has no in-place editor to arm one into, and an
-    /// editor nothing draws would sit there taking the next keystroke.
-    pub fn pick(
-        &mut self,
-        ui: &egui::Ui,
-        item: Item,
-        name: &str,
-        response: &egui::Response,
-        list: &[Item],
-    ) {
-        let click = Click {
-            item,
-            from: name,
-            list,
-        };
-        self.clicked(ui, click, response, egui::Rect::NOTHING);
+    /// ⚠️ Called whether or not the browser dock is open: the library's table shows the
+    /// same selection, and a set nothing draws is one nothing can put down.
+    ///
+    /// An open rename keeps Escape for itself. That is how a name being typed is taken
+    /// back, and the row it is being typed on stays picked.
+    pub fn let_go(&mut self, ctx: &egui::Context) {
+        if self.rename.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.selection.clear();
+        }
+    }
+
+    /// Let go of everything picked, because a click landed past the last row.
+    pub fn unpick(&mut self) {
+        self.selection.clear();
     }
 
     /// A click on a row's own box: that row in or out of what is checked.
@@ -210,11 +200,13 @@ impl Browser {
     }
 
     fn select(&mut self, item: Item) {
-        let same = self.rename.as_ref().is_some_and(|r| r.what == item);
-        if !same {
-            self.rename = None;
-        }
+        self.rename = None;
         self.selection.only(item);
+    }
+
+    /// Whether this row is the only one picked, which is what F2 renames.
+    fn sole_is(&self, item: Item) -> bool {
+        self.selection.sole() == Some(item)
     }
 
     /// Take back an armed rename, because the row it belongs to is about to stop
@@ -236,37 +228,16 @@ impl Browser {
     }
 
     /// What a click on a row does, and the list it can be extended across.
-    fn clicked(
-        &mut self,
-        ui: &egui::Ui,
-        click: Click,
-        response: &egui::Response,
-        name: egui::Rect,
-    ) {
+    ///
+    /// ⚠️ No click arms the rename editor. One armed by a second click on a picked row
+    /// sits there with the whole name selected, so the next keystroke — one meant for
+    /// the document, or a stray one — replaces it. Renaming is F2 and the row's menu.
+    fn clicked(&mut self, ui: &egui::Ui, click: Click) {
+        self.rename = None;
         match gesture(&ui.input(|input| input.modifiers)) {
-            Gesture::Plain => self.plain_click(click, response, name),
-            Gesture::Toggle => {
-                self.rename = None;
-                self.selection.toggle(click.item);
-            }
-            Gesture::Extend => {
-                self.rename = None;
-                self.selection.extend(click.item, click.list);
-            }
-        }
-    }
-
-    /// ⚠️ Arming the rename editor needs the click to land on the **name** of the
-    /// **only** picked row. An editor armed by any second click sits there with the
-    /// whole name selected, so the next keystroke — one meant for the document, or a
-    /// stray one — replaces it, and the blur commits the replacement.
-    fn plain_click(&mut self, click: Click, response: &egui::Response, name: egui::Rect) {
-        let on_name = response
-            .interact_pointer_pos()
-            .is_some_and(|at| name.contains(at));
-        match arms_rename(self.selection.sole() == Some(click.item), on_name) {
-            true => self.start_rename(click.item, click.from),
-            false => self.select(click.item),
+            Gesture::Plain => self.selection.plain(click.item),
+            Gesture::Toggle => self.selection.toggle(click.item),
+            Gesture::Extend => self.selection.extend(click.item, click.list),
         }
     }
 
@@ -819,42 +790,55 @@ mod tests {
         assert!(matches!(sent[0], Act::Send { id, .. } if id == ids[0]));
     }
 
-    /// ⚠️ The gesture that lost a program its name. An editor armed by any second click
-    /// on a selected row sits there with everything selected, so the next keystroke
-    /// replaces the name and the blur commits it.
+    /// ⚠️ F2 renames the row that is the only one picked. A rename typed while several
+    /// are picked reads as a rename of all of them, and only one would take it.
     #[test]
-    fn a_click_away_from_the_name_selects_rather_than_arming_a_rename() {
-        // The row is the click target, so most of it must be safe to click.
-        assert!(!arms_rename(true, false), "past the name on a selected row");
-        assert!(
-            !arms_rename(false, true),
-            "on the name of an unselected row"
-        );
-        assert!(!arms_rename(false, false));
-        assert!(arms_rename(true, true), "the one gesture that renames");
-    }
-
-    /// ⚠️ A name inside a multi-selection does not arm the editor. A rename typed while
-    /// several rows are picked reads as a rename of all of them, and only one would take
-    /// it; the click collapses the selection onto that row instead.
-    #[test]
-    fn a_name_arms_the_editor_only_while_its_row_is_the_only_one_picked() {
-        let mut selection = Selection::default();
+    fn f2_renames_only_while_its_row_is_the_only_one_picked() {
+        let (mut browser, _workspace, _device, _tabs, _queue, _log) = bench();
         let row = Item::Local(1);
-        selection.only(row);
-        assert!(arms_rename(selection.sole() == Some(row), true));
+        browser.selection.only(row);
+        assert!(browser.sole_is(row));
 
-        selection.toggle(Item::Local(2));
-        assert!(
-            !arms_rename(selection.sole() == Some(row), true),
-            "two rows picked"
-        );
-        // The click that landed on it collapses onto it, and the next one does arm.
-        selection.only(row);
-        assert!(arms_rename(selection.sole() == Some(row), true));
+        browser.selection.toggle(Item::Local(2));
+        assert!(!browser.sole_is(row), "two rows picked");
+        // And a plain click on one of the two lets go of it, leaving the other sole.
+        browser.selection.plain(Item::Local(2));
+        assert!(browser.sole_is(row));
     }
 
-    /// The gesture end to end: arm the editor, type, press Enter, and the new name comes
+    /// Escape lets go of everything, whether or not the browser dock is open to show it.
+    ///
+    /// ⚠️ Not while a name is being typed: Escape is how a rename is taken back, and a
+    /// half-typed name is not a reason to drop the selection with it.
+    #[test]
+    fn escape_lets_go_of_the_selection_unless_a_name_is_being_typed() {
+        let ctx = context();
+        let mut browser = Browser::default();
+        let escape = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+
+        browser.start_rename(Item::Local(1), "Africa Split");
+        let _ = ctx.run(escape.clone(), |ctx| browser.let_go(ctx));
+        assert_eq!(
+            browser.picked().items().count(),
+            1,
+            "the editor's Escape is not the selection's"
+        );
+
+        browser.rename = None;
+        let _ = ctx.run(escape, |ctx| browser.let_go(ctx));
+        assert_eq!(browser.picked().items().count(), 0);
+    }
+
+    /// The gesture end to end: open the editor, type, press Enter, and the new name comes
     /// back as an act.
     ///
     /// What this catches is a rename that has stopped committing at all — the unit tests

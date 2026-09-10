@@ -185,7 +185,23 @@ impl Browser {
                     self.tag_rows(ui, filter, acts);
                 }
                 self.sections = sections;
+                self.empty_below(ui);
             });
+    }
+
+    /// The room under the last row: a click there is a click on no row, which lets go of
+    /// everything picked.
+    fn empty_below(&mut self, ui: &mut egui::Ui) {
+        let rest = ui.available_rect_before_wrap();
+        if rest.height() <= 0.0 {
+            return;
+        }
+        if ui
+            .interact(rest, ui.id().with("tree_empty"), egui::Sense::click())
+            .clicked()
+        {
+            self.selection.clear();
+        }
     }
 
     fn twist(&mut self, branch: Branch) {
@@ -409,12 +425,7 @@ impl Browser {
                     false => {
                         let list: Vec<Item> =
                             self.folder_ids().into_iter().map(Item::Folder).collect();
-                        let click = Click {
-                            item,
-                            from: &name,
-                            list: &list,
-                        };
-                        self.clicked(ui, click, &drawn.response, drawn.name);
+                        self.clicked(ui, Click { item, list: &list });
                     }
                 }
             }
@@ -531,14 +542,9 @@ impl Browser {
         if response.double_clicked() {
             acts.push(Act::Open(item));
         } else if response.clicked() {
-            let click = Click {
-                item,
-                from: &entity.name,
-                list,
-            };
-            self.clicked(ui, click, &response, drawn.name);
+            self.clicked(ui, Click { item, list });
         }
-        if selected && ui.input(|i| i.key_pressed(egui::Key::F2)) {
+        if self.sole_is(item) && ui.input(|i| i.key_pressed(egui::Key::F2)) {
             self.start_rename(item, &entity.name);
         }
 
@@ -1020,20 +1026,10 @@ impl Browser {
                 acts.push(Act::Open(item));
             }
         } else if response.clicked() {
-            match (&held, fetchable) {
-                (Some(name), true) => {
-                    let click = Click {
-                        item,
-                        from: name,
-                        list,
-                    };
-                    self.clicked(ui, click, &response, drawn.name);
-                }
-                _ => self.select(item),
-            }
+            self.clicked(ui, Click { item, list });
         }
         if let Some(name) = &held {
-            if selected && fetchable && ui.input(|i| i.key_pressed(egui::Key::F2)) {
+            if fetchable && self.sole_is(item) && ui.input(|i| i.key_pressed(egui::Key::F2)) {
                 self.start_rename(item, name);
             }
         }

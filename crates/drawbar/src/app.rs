@@ -308,6 +308,10 @@ impl eframe::App for DrawbarApp {
             self.tabs.open(made);
         }
 
+        // Before the panels, so an editor open in this frame still has the focus Escape
+        // belongs to.
+        self.browser.let_go(ctx);
+
         // Outside in. A panel claims its space from what the ones before it left.
         let mut acts = Vec::new();
         self.titlebar(ctx, frame, &mut acts);

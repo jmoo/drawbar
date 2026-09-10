@@ -9,7 +9,7 @@ use super::drag::Item;
 /// Which of the three things a click on a row means.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Gesture {
-    /// This row and nothing else — and its name, on the only picked row, renames.
+    /// This row and nothing else, or nothing at all when it is the row already picked.
     Plain,
     /// ⌘: this row in or out of what is picked.
     Toggle,
@@ -43,7 +43,7 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// The one row picked, or `None` when none or several are. What arms a rename.
+    /// The one row picked, or `None` when none or several are. What F2 renames.
     pub fn sole(&self) -> Option<Item> {
         match self.set.len() {
             1 => self.set.iter().copied().next(),
@@ -64,11 +64,29 @@ impl Selection {
         self.items().filter_map(Item::local).collect()
     }
 
-    /// A plain click: this row and nothing else.
+    /// A plain click: this row and nothing else, or this row let go of when it is
+    /// already picked.
+    ///
+    /// ⚠️ The only gesture that takes a row out without a modifier, which is what leaves
+    /// a set of one reachable from the keyboard alone.
+    pub fn plain(&mut self, item: Item) {
+        match self.holds(item) {
+            true => self.toggle(item),
+            false => self.only(item),
+        }
+    }
+
+    /// This row and nothing else, whatever was picked before it.
     pub fn only(&mut self, item: Item) {
         self.anchor = Some(item);
         self.set.clear();
         self.set.insert(item);
+    }
+
+    /// Let go of everything.
+    pub fn clear(&mut self) {
+        self.set.clear();
+        self.anchor = None;
     }
 
     /// ⌘-click: in or out, and the anchor follows the row that was pressed.
@@ -120,12 +138,46 @@ mod tests {
     #[test]
     fn a_plain_click_picks_one_row_and_drops_the_rest() {
         let mut selection = Selection::default();
-        selection.only(Item::Local(1));
+        selection.plain(Item::Local(1));
         selection.toggle(Item::Local(2));
         assert_eq!(selection.items().count(), 2);
 
-        selection.only(Item::Local(3));
+        selection.plain(Item::Local(3));
         assert_eq!(selection.sole(), Some(Item::Local(3)));
+    }
+
+    /// ⚠️ A plain click on a row that is already picked lets go of it — the one gesture
+    /// that empties a selection without a modifier. A click that only ever re-picked the
+    /// row it landed on leaves no way of putting a set of one down.
+    #[test]
+    fn a_plain_click_on_a_picked_row_lets_go_of_it() {
+        let mut selection = Selection::default();
+        selection.plain(Item::Local(1));
+        selection.plain(Item::Local(1));
+        assert_eq!(selection.items().count(), 0, "the sole row let go of");
+
+        selection.plain(Item::Local(1));
+        selection.toggle(Item::Local(2));
+        selection.plain(Item::Local(2));
+        assert_eq!(
+            selection.items().collect::<Vec<_>>(),
+            vec![Item::Local(1)],
+            "and one of a set leaves the rest picked"
+        );
+    }
+
+    /// Escape lets go of everything, and the next ⇧-click measures from the row it
+    /// lands on rather than from the anchor the cleared set left behind.
+    #[test]
+    fn clearing_lets_go_of_the_anchor_too() {
+        let rows = list(4);
+        let mut selection = Selection::default();
+        selection.plain(rows[0]);
+        selection.clear();
+        assert_eq!(selection.items().count(), 0);
+
+        selection.extend(rows[2], &rows);
+        assert_eq!(selection.sole(), Some(rows[2]));
     }
 
     /// ⌘-click adds and removes, so the same click twice leaves what it found.

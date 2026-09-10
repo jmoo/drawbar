@@ -39,8 +39,7 @@ pub struct Cells<'a> {
 /// ended up.
 pub struct Drawn {
     pub response: egui::Response,
-    /// The name's own rectangle — clicking the name of the only picked row starts a
-    /// rename.
+    /// Where the name was painted, which is what a row too narrow for it cut it to.
     pub name: egui::Rect,
     /// The triangle's box, where the row has one. A click there opens the branch rather
     /// than picking the row.

@@ -731,7 +731,7 @@ impl Library {
         }
 
         let list: Vec<Item> = rows.iter().map(|row| row.item).collect();
-        egui::ScrollArea::vertical()
+        let shown = egui::ScrollArea::vertical()
             .id_salt("library_table")
             .auto_shrink([false; 2])
             .show_rows(ui, ROW, rows.len(), |ui, shown| {
@@ -741,6 +741,18 @@ impl Library {
                     );
                 }
             });
+        // The room under the last row: a click there is a click on no row, which lets go
+        // of everything picked.
+        let rest = shown
+            .inner_rect
+            .with_min_y(shown.inner_rect.top() + shown.content_size.y);
+        if rest.height() > 0.0
+            && ui
+                .interact(rest, ui.id().with("library_empty"), egui::Sense::click())
+                .clicked()
+        {
+            browser.unpick();
+        }
     }
 
     /// 20 px of column heads, each one a click that sorts by it.
@@ -1082,7 +1094,7 @@ fn paint(
     } else if response.double_clicked() {
         acts.push(Act::Open(row.item));
     } else if response.clicked() {
-        browser.pick(ui, row.item, &row.name, &response, list);
+        browser.pick(ui, row.item, list);
     }
     response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, acts));
 }
@@ -1213,6 +1225,18 @@ fn footer(
                         .text_style(ui_text())
                         .strong(),
                 );
+                ui.scope(|ui| {
+                    crate::panel::flat(ui);
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("clear").text_style(ui_text()),
+                        ))
+                        .on_hover_text("let go of everything picked — or press Escape")
+                        .clicked()
+                    {
+                        browser.unpick();
+                    }
+                });
                 ui.label(
                     egui::RichText::new(consequence(picked, device, queue))
                         .text_style(ui_text())

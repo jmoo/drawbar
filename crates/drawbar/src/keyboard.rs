@@ -886,7 +886,7 @@ fn gestures(
             acts.push(Act::Open(item));
         }
     } else if response.clicked() {
-        browser.pick(ui, item, name.unwrap_or_default(), response, view.list);
+        browser.pick(ui, item, view.list);
     }
     if name.is_some() {
         response
