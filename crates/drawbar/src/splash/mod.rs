@@ -5,11 +5,37 @@
 //! `scripts/release.bash` writes in a fixed shape. [`classify`] reads that shape back so
 //! the modal can paint it without a markdown parser, and anything it does not recognise
 //! stays the plain line it was.
+//!
+//! The shape a modal wears — its width, its spacing, its title line, its links — is here
+//! rather than in the browser-only half, because [`crate::about`] wears the same one on
+//! every target.
+
+use eframe::egui;
 
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::Splash;
+
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How wide a modal is, and the room between two of its lines.
+pub(crate) const WIDTH: f32 = 560.0;
+pub(crate) const GAP: f32 = 4.0;
+
+/// The line a modal opens with: the app, and the version of it running.
+pub(crate) fn title(ui: &mut egui::Ui) {
+    ui.label(
+        egui::RichText::new(format!("drawbar {VERSION}"))
+            .font(egui::FontId::new(18.0, crate::app::bold())),
+    );
+}
+
+/// ⚠️ Always a new tab: in a browser the app *is* the page, and following a link in
+/// place ends the session and everything unsaved in it.
+pub(crate) fn link(ui: &mut egui::Ui, label: &str, url: &str) {
+    ui.add(egui::Hyperlink::from_label_and_url(label, url).open_in_new_tab(true));
+}
 
 /// One line of the notes, in the terms the modal paints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

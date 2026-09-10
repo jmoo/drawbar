@@ -4,6 +4,7 @@
 //! same shell runs as a native window and as a wasm module in a browser tab.
 //!
 
+pub mod about;
 pub mod app;
 pub mod audio;
 pub mod base64;

@@ -45,6 +45,8 @@ let
         && (
           crane.filterCargoSources path type
           || hasSuffix ".script" path
+          # The About box's test compares its copy against this.
+          || path == toString (workspace + "/LICENSE")
           # The committed specimens and replay scripts, whatever their extensions.
           || hasInfix "/tests/fixtures/" path
           || hasInfix "/tests/scripts/" path
