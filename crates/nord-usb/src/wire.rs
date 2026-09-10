@@ -30,6 +30,7 @@
 use std::num::NonZeroU32;
 
 use crate::error::{Error, Result};
+use nord_format::accept::Slot;
 use nord_format::fields::Library;
 
 /// Bytes ahead of the argument region: length, service, subsystem, command.
@@ -891,6 +892,21 @@ impl ObjectClass {
         }
     }
 
+    /// The storage class `nord_format`'s acceptance table names this one by — the four
+    /// libraries and the two singletons, without the wire. `None` for a code this crate
+    /// does not name, which no table row can be about.
+    pub fn storage(self) -> Option<Slot> {
+        match self {
+            ObjectClass::Piano => Some(Slot::Piano),
+            ObjectClass::Sample => Some(Slot::Sample),
+            ObjectClass::Program => Some(Slot::Program),
+            ObjectClass::SetList => Some(Slot::SetList),
+            ObjectClass::Live => Some(Slot::Live),
+            ObjectClass::Settings => Some(Slot::Settings),
+            ObjectClass::Unknown(_) => None,
+        }
+    }
+
     /// Whether this class is one of the content libraries, whose objects vary in size
     /// and whose [`Status`] counters are storage blocks rather than bytes.
     pub fn is_library(self) -> bool {
@@ -1089,10 +1105,12 @@ impl Location {
 #[cfg(test)]
 mod tests {
     /// A library reference in a decoded body and a session on the wire name the same
-    /// catalogue by the same code, in both directions.
+    /// catalogue by the same code, in both directions — and the acceptance table names
+    /// it by the same storage class.
     #[test]
     fn a_library_class_code_is_the_librarys_own() {
         use super::ObjectClass;
+        use nord_format::accept::Slot;
         use nord_format::fields::Library;
         for library in [
             Library::Piano,
@@ -1103,9 +1121,17 @@ mod tests {
             let class = ObjectClass::from(library);
             assert_eq!(class.to_raw(), u32::from(library.code()), "{library:?}");
             assert_eq!(ObjectClass::from_raw(library.code().into()), class);
+            assert_eq!(class.storage(), Some(Slot::from(library)), "{library:?}");
         }
         assert_eq!(ObjectClass::from_raw(6), ObjectClass::Live);
         assert_eq!(ObjectClass::from_raw(0), ObjectClass::Unknown(0));
+        assert_eq!(ObjectClass::Live.storage(), Some(Slot::Live));
+        assert_eq!(ObjectClass::Settings.storage(), Some(Slot::Settings));
+        assert_eq!(
+            ObjectClass::Unknown(9).storage(),
+            None,
+            "no table row can be about a class this crate does not name"
+        );
     }
 
     use super::*;

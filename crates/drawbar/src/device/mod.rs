@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use nord_format::accept::{Acceptance, Family, Slot};
+use nord_format::accept::{Acceptance, Family};
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
@@ -681,23 +681,6 @@ pub const ELECTRO5: [(ObjectClass, &str, u32); 6] = [
     (ObjectClass::Settings, "Settings", 1),
 ];
 
-/// The storage class a folder on the instrument is, in `nord-format`'s vocabulary.
-///
-/// One table between the wire's classes and the acceptance table's. `None` for a class
-/// the partition table named and this app does not know: nothing can be said about what
-/// such a folder takes.
-fn slot_of(class: ObjectClass) -> Option<Slot> {
-    match class {
-        ObjectClass::Piano => Some(Slot::Piano),
-        ObjectClass::Sample => Some(Slot::Sample),
-        ObjectClass::Program => Some(Slot::Program),
-        ObjectClass::SetList => Some(Slot::SetList),
-        ObjectClass::Live => Some(Slot::Live),
-        ObjectClass::Settings => Some(Slot::Settings),
-        ObjectClass::Unknown(_) => None,
-    }
-}
-
 /// Whether the attached instrument takes an asset, and what is worth saying about it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Fit {
@@ -743,7 +726,7 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
         Some(why) => Fit::Warn(why),
         None => Fit::Takes,
     };
-    let (Some(slot), Some(family)) = (slot_of(class), Family::from_product(product)) else {
+    let (Some(slot), Some(family)) = (class.storage(), Family::from_product(product)) else {
         return unknown();
     };
     match family.accepts(slot, &tag) {

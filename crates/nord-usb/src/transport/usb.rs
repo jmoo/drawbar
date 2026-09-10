@@ -59,7 +59,7 @@ pub struct UsbTransport {
     /// assumed: it decides which frames need a terminating zero-length packet, and it
     /// is 64 only because this link is full speed.
     out_packet: usize,
-    /// What the device descriptor calls itself, kept for the recorder's header.
+    /// What the device descriptor calls itself, where it reports one.
     product: Option<String>,
     /// Set to mirror every frame into a replay script. `None` is the normal case.
     record: Option<Recorder>,
@@ -135,6 +135,14 @@ impl UsbTransport {
         let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
         completion.status.map_err(map_err("bulk write"))?;
         self.terminate(buf.len()).await
+    }
+
+    /// What the device descriptor calls itself: the name an instrument is identified
+    /// by off the bus — `nord_format::accept::Family::from_product` reads it — and the
+    /// one this transport carries into a recording's header. `None` where the
+    /// descriptor reports none.
+    pub fn product(&self) -> Option<&str> {
+        self.product.as_deref()
     }
 
     /// Mirror every frame this transport carries into a replay script at `path`.
