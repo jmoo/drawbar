@@ -320,6 +320,8 @@ html.js .sidebar .sidebar-resize-handle {
 }
 .chapter li a.active {
   background: var(--db-faint-bg);
+  border-left: 2px solid var(--db-accent);
+  padding-left: calc(0.6rem - 2px);
   color: var(--db-ink-strong);
   font-weight: 700;
 }
