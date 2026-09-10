@@ -970,6 +970,9 @@ pub struct Device {
     /// The class the running command writes into, so a refusal can be put against the
     /// entry of the queue it stopped on.
     writing: Option<ObjectClass>,
+    /// The list revision every link was last derived from. A link answers about both
+    /// sides, so it is re-made when either has moved and not once a frame besides.
+    linked: u64,
 }
 
 impl Device {
@@ -986,6 +989,7 @@ impl Device {
             rescan: Vec::new(),
             reselect: Vec::new(),
             writing: None,
+            linked: 0,
         }
     }
 
@@ -1299,7 +1303,9 @@ impl Device {
         queue: &mut Queue,
     ) {
         let now = workspace.ctx().input(|input| input.time);
+        let mut heard = false;
         while let Ok(event) = self.events.try_recv() {
+            heard = true;
             match event {
                 DeviceEvent::Connected(card) => {
                     log.info(format!(
@@ -1471,7 +1477,14 @@ impl Device {
                 }
             }
         }
-        self.relink(workspace);
+        // Both sides of a link move: the instrument said something, or an asset arrived,
+        // changed, was kept or was reverted. An asset that arrives while an instrument
+        // is attached stands wherever the cache already says it does, without waiting
+        // for the next walk to report a bank again.
+        if heard || self.linked != workspace.revision() {
+            self.linked = workspace.revision();
+            self.relink(workspace);
+        }
     }
 }
 
@@ -1894,6 +1907,34 @@ mod tests {
             workspace.get(id).unwrap().link,
             Some((class, high)),
             "it stands where it was written, not where else the bytes are"
+        );
+    }
+
+    /// A file opened against an instrument already walked stands on its slot in the
+    /// frame it arrives in. Nothing is going to read that bank again on its account, so
+    /// waiting for a walk to report is waiting for something that may never happen.
+    #[test]
+    fn an_asset_links_as_soon_as_it_arrives() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut queue = Queue::default();
+        let class = ObjectClass::Program;
+        let (first, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.pretend_bodies(class, 7, &[None, Some(("Circling Bells", crc))]);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        let at = workspace.get(first).unwrap().link;
+        assert_eq!(at, Some((class, Location { bank: 6, slot: 1 })));
+
+        // A second asset of the same bytes, with no event from the instrument between.
+        let (second, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(
+            workspace.get(second).unwrap().link,
+            at,
+            "it links off the cache rather than off the next walk"
         );
     }
 
