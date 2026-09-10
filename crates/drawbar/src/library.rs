@@ -1149,10 +1149,17 @@ fn tooltip(
         },
         Column::Where => row.where_.sentence().to_string(),
         Column::At => match row.at {
-            Some((class, at)) => match also_holding(row, workspace, device) {
-                0 => place(class, at),
-                more => format!("{}, and {more} more hold the same bytes", place(class, at)),
-            },
+            Some((class, at)) => {
+                let where_ = place(class, at);
+                match (row.where_, also_holding(row, workspace, device)) {
+                    // A class reporting no checksum is linked by the name it gave this
+                    // asset, so the address is where the name is rather than where the
+                    // body is.
+                    (Where::Both(None), _) => format!("{where_}, matched by name"),
+                    (_, 0) => where_,
+                    (_, more) => format!("{where_}, and {more} more hold the same bytes"),
+                }
+            }
             None => "it never came off a slot".to_string(),
         },
         Column::Size => format!("{} bytes", row.size),
@@ -1528,6 +1535,34 @@ mod tests {
         device.pretend_bodies(ObjectClass::Program, 7, &[None]);
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
+    }
+
+    /// A class whose slots report no checksum is linked by name, and the table says so:
+    /// the two places are named without a sign between them, and the address says what
+    /// matched them.
+    #[test]
+    fn a_class_linked_by_name_reads_both_without_a_sign() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (tags, filter, queue) = (Tags::default(), Filter::default(), Queue::default());
+
+        workspace.create(Fresh::Settings, &mut log).unwrap();
+        device.pretend_scanned(ObjectClass::Settings, 1, &["Settings"]);
+        device.relink(&mut workspace);
+
+        let row = rows(&workspace, &device.state, &queue, &tags, &filter)
+            .into_iter()
+            .find(|row| matches!(row.item, Item::Local(_)))
+            .expect("the settings row");
+        assert_eq!(row.where_, Where::Both(None));
+        assert_eq!(row.where_.short(), "both");
+        assert!(
+            tooltip(&row, Column::At, &tags, &workspace, &device).ends_with("matched by name"),
+            "{}",
+            tooltip(&row, Column::At, &tags, &workspace, &device)
+        );
     }
 
     /// The sentence the footer says: where the picked rows go, how many of those slots

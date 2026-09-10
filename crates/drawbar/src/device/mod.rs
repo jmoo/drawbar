@@ -766,36 +766,44 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
     }
 }
 
-/// The slot on the attached instrument that holds an asset's own body.
+/// The slot on the attached instrument this asset stands on.
 ///
-/// The container's CRC-32 **is** the checksum a walk reports for a slot — see the round
-/// trip in [`crate::workspace`] — so an asset and a slot are matched without either body
-/// being hashed again.
+/// The slot it came off, while the instrument holds that slot — whatever it holds now.
+/// An asset copied off 1:1 and changed here is still the copy of 1:1, and what the two
+/// have made of each other since is [`crate::library::agrees`]'s question rather than
+/// this one.
 ///
-/// The asset's origin slot where that is one of the matches, and otherwise the lowest
-/// address: a copy of it elsewhere must not point it away from where it came from.
+/// With no origin, or an origin the walk found vacant, the body is what matches: the
+/// container's CRC-32 **is** the checksum a walk reports for a slot — see the round trip
+/// in [`crate::workspace`] — so an asset and a slot are matched without either body
+/// being hashed again, lowest address first. A class whose slots report no checksum is
+/// matched by [`named`] instead.
 ///
 /// ⚠️ Takes the link the asset already carries as its own input, so running it again
 /// over an unchanged cache answers the same thing. That is what lets an edit here keep
 /// the asset pointing where it was matched.
 pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
-    // ⚠️ Before the checksums: a foreign body whose CRC-32 happens to match a slot's
+    // ⚠️ Before anything else: a foreign body whose CRC-32 happens to match a slot's
     // would otherwise be linked into a folder the instrument would refuse it from.
     if !fit(state, entity).allowed() {
         return None;
     }
-    let (class, here) = matchable(entity)?;
-    let origin = entity.origin.slot();
-    let mut lowest = None;
-    for at in holding(state, class, here) {
-        if origin == Some((class, at)) {
-            return origin;
-        }
-        lowest.get_or_insert(at);
+    let class = home(entity)?;
+    if let Some(origin) = entity
+        .origin
+        .slot()
+        .filter(|(class, at)| state.slot(*class, *at).flatten().is_some())
+    {
+        return Some(origin);
     }
-    match lowest {
+    let by_body = entity
+        .container
+        .as_ref()
+        .and_then(|held| held.body_crc32)
+        .and_then(|crc| holding(state, class, crc).next());
+    match by_body {
         Some(at) => Some((class, at)),
-        None => edited(state, entity),
+        None => edited(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
     }
 }
 
@@ -807,36 +815,75 @@ pub fn also_holding(state: &DeviceState, entity: &LocalEntity) -> usize {
     holding(state, class, here).count().saturating_sub(1)
 }
 
-/// The folder an asset belongs in and the checksum a slot holding its body would report.
+/// The folder an asset belongs in.
 ///
 /// A view is not on this computer until it is kept, and bytes that decode into nothing
 /// belong in no folder.
-fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
-    let class = entity
+fn home(entity: &LocalEntity) -> Option<ObjectClass> {
+    entity
         .kept
         .then(|| crate::browser::Kind::of(entity.entity.as_ref()).home())
-        .flatten()?;
-    Some((class, entity.container.as_ref()?.body_crc32?))
+        .flatten()
 }
 
-/// Every slot of `class` whose scanned checksum is `crc`, lowest address first.
+/// That folder and the checksum a slot holding this asset's body would report.
+fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
+    Some((home(entity)?, entity.container.as_ref()?.body_crc32?))
+}
+
+/// The slot a class whose slots report no checksum is matched to.
 ///
-/// ⚠️ A class whose slots report no checksum matches nothing. A name and a length are
-/// not a body, and a library is where two different objects most readily share both.
-fn holding(
+/// ⚠️ Settings, samples and pianos report no body checksum, so no body can be recognised
+/// in one of their slots. Settings holds a single slot and that slot is the link; a
+/// sample or a piano is matched to the slot the instrument gave this asset's own name.
+/// A name is a label rather than a body, which [`crate::library::Where::Both`] says by
+/// leaving the sign off until a compare read settles it.
+fn named(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> Option<Location> {
+    match class {
+        ObjectClass::Settings => {
+            let mut slots = occupied(state, class);
+            let (at, _) = slots.next()?;
+            slots.next().is_none().then_some(at)
+        }
+        ObjectClass::Sample | ObjectClass::Piano => {
+            let name = entity.name.trim();
+            occupied(state, class)
+                .find(|(_, info)| info.name.trim() == name)
+                .map(|(at, _)| at)
+        }
+        _ => None,
+    }
+}
+
+/// Every slot of `class` a walk found holding something, lowest address first.
+fn occupied(
     state: &DeviceState,
     class: ObjectClass,
-    crc: u32,
-) -> impl Iterator<Item = Location> + '_ {
+) -> impl Iterator<Item = (Location, &ProgramInfo)> + '_ {
     state.banks_of(class).into_iter().flat_map(move |bank| {
         state
             .bank(class, bank)
             .unwrap_or_default()
             .iter()
             .enumerate()
-            .filter(move |(_, info)| info.as_ref().and_then(|info| info.crc32) == Some(crc))
-            .map(move |(slot, _)| Location::from_user(bank, slot as u32 + 1))
+            .filter_map(move |(slot, held)| {
+                Some((Location::from_user(bank, slot as u32 + 1), held.as_ref()?))
+            })
     })
+}
+
+/// Every slot of `class` whose scanned checksum is `crc`, lowest address first.
+///
+/// ⚠️ A class whose slots report no checksum matches nothing here. A name and a length
+/// are not a body, and a library is where two different objects most readily share both.
+fn holding(
+    state: &DeviceState,
+    class: ObjectClass,
+    crc: u32,
+) -> impl Iterator<Item = Location> + '_ {
+    occupied(state, class)
+        .filter(move |(_, info)| info.crc32 == Some(crc))
+        .map(|(at, _)| at)
 }
 
 /// The link an asset keeps when no slot holds its bytes any more: an edit here moved
@@ -1811,6 +1858,102 @@ mod tests {
             2,
             "the hover has the rest to count"
         );
+    }
+
+    /// The slot an asset came off is where it stands, whatever that slot holds now. A
+    /// program copied from 1:1, changed here and saved, is still the copy of 1:1 — and
+    /// the two having parted is what the library says about it, not a reason to point it
+    /// somewhere else.
+    #[test]
+    fn the_slot_an_asset_came_off_is_its_link_while_the_instrument_holds_it() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let at = Location { bank: 0, slot: 0 };
+        let class = ObjectClass::Program;
+        let (id, crc) = program(&mut workspace, &mut log, Origin::Device { class, at });
+
+        // Changed here before anything was attached, and saved.
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        workspace.mark_saved(id);
+        let now = workspace.get(id).unwrap().saved.crc32.unwrap();
+        assert_ne!(now, crc, "the edit moved the body");
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(id).unwrap().link, None, "nothing is read yet");
+
+        // Bank 1 is read: 1:1 holds what this asset used to be, and 1:2 holds what it is
+        // now. The slot it came off is still the slot it came off.
+        device.pretend_bodies(
+            class,
+            1,
+            &[Some(("Africa Split", crc)), Some(("Squabble B", now))],
+        );
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(id).unwrap().link, Some((class, at)));
+
+        // A slot the walk found vacant holds nothing to stand on, so the body matches.
+        device.pretend_bodies(class, 1, &[None, Some(("Squabble B", now))]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, Location { bank: 0, slot: 1 })),
+        );
+    }
+
+    /// A class whose slots report no checksum cannot be matched by body. Settings holds
+    /// one slot and that slot is the link; a sample or a piano is matched to the slot
+    /// carrying its own name, and to nothing at all where no slot does.
+    #[test]
+    fn a_class_reporting_no_checksum_links_by_its_singleton_or_by_name() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let settings = workspace
+            .create(crate::workspace::Fresh::Settings, &mut log)
+            .unwrap();
+
+        device.pretend_scanned(ObjectClass::Settings, 1, &["Settings"]);
+        device.pretend_scanned(ObjectClass::Sample, 1, &["Bass Clarinet", "Rhodes"]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(settings).unwrap().link,
+            Some((ObjectClass::Settings, Location { bank: 0, slot: 0 })),
+        );
+
+        // The name is the whole of the match, verbatim and case for case.
+        let bytes = workspace.get(settings).unwrap().bytes.clone();
+        let by_name = |workspace: &mut Workspace, name: &str, log: &mut Log| {
+            let id = workspace.ingest(name.into(), Origin::Fresh, bytes.clone(), log);
+            let at = super::named(
+                &device.state,
+                ObjectClass::Sample,
+                workspace.get(id).unwrap(),
+            );
+            workspace.remove(id, log);
+            at
+        };
+        let slot = |slot| Some(Location { bank: 0, slot });
+        assert_eq!(by_name(&mut workspace, "Rhodes", &mut log), slot(1));
+        assert_eq!(
+            by_name(&mut workspace, " Bass Clarinet ", &mut log),
+            slot(0)
+        );
+        assert_eq!(
+            by_name(&mut workspace, "rhodes", &mut log),
+            None,
+            "case is part of a name"
+        );
+        assert_eq!(by_name(&mut workspace, "Wurlitzer", &mut log), None);
+
+        // Two slots are not a singleton, so nothing about settings is decided by one.
+        device.pretend_scanned(ObjectClass::Settings, 1, &["Settings", "Settings 2"]);
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(settings).unwrap().link, None);
     }
 
     /// A link is derived from the scan cache, so a walk makes one and the instrument
