@@ -795,6 +795,11 @@ fn item(
         egui::Color32::PLACEHOLDER,
     );
 
+    // Opened the way the tree opens it: a waiting entry stands for an asset, and a
+    // reader who wants to see what is going out wants the document.
+    if response.double_clicked() {
+        acts.push(Act::Open(Item::Local(entity.id)));
+    }
     // Dragged like the row this asset has in the library, so a drop on a slot means
     // there what it means anywhere else: this asset goes to that slot.
     if response.dragged() {
@@ -861,8 +866,11 @@ fn destination(
         egui::Color32::PLACEHOLDER,
     );
     let chip = chip.on_hover_text("change where this goes");
+    // ⚠️ A menu shuts on any click, and switching banks is a click. The picker stays up
+    // until a cell is taken or the pointer lands outside it.
     egui::Popup::menu(&chip)
-        .width(crate::keyboard::grid_width())
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(crate::keyboard::grid_width(PICKER_COLUMNS) + ui.spacing().menu_margin.sum().x)
         .show(|ui| {
             if let Some(at) = picker(ui, held, device, queue) {
                 acts.push(Act::Retarget {
@@ -874,6 +882,19 @@ fn destination(
             }
         });
     box_.left() - GAP
+}
+
+/// How many cells across the picker lays a bank out. Wider than the map's own grid,
+/// which has a whole tab to fill and can afford the rows.
+const PICKER_COLUMNS: usize = 6;
+
+/// The ids the picker's own controls sense under.
+///
+/// ⚠️ Salted off the entry rather than off `ui.id()`: the picker is drawn inside a
+/// popup's `Ui`, which is not the one the row was drawn in, and two entries' pickers
+/// must not share a bank or a cell.
+fn salt(held: &Queued) -> egui::Id {
+    egui::Id::new(("picker", held.class.to_raw(), held.id))
 }
 
 /// The picker behind the chip: one row of bank chips, then that bank's slots as the
@@ -897,31 +918,23 @@ fn picker(
         );
         return None;
     }
-    let kept = ui.id().with("bank");
+    let salt = salt(held);
+    let kept = salt.with("bank");
     let mut bank = ui
         .data(|data| data.get_temp::<u32>(kept))
         .filter(|bank| banks.contains(bank))
         .unwrap_or(held.at.bank + 1);
     ui.horizontal(|ui| {
-        crate::panel::flat(ui);
-        for offered in &banks {
-            if ui
-                .selectable_label(
-                    *offered == bank,
-                    egui::RichText::new(offered.to_string())
-                        .monospace()
-                        .size(MONO),
-                )
-                .clicked()
-            {
-                bank = *offered;
+        for offered in banks.iter().copied() {
+            if bank_chip(ui, salt.with(("bank", offered)), offered, offered == bank).clicked() {
+                bank = offered;
                 ui.data_mut(|data| data.insert_temp(kept, bank));
             }
         }
     });
     let slots = device.bank(held.class, bank).unwrap_or_default();
     let mut picked = None;
-    crate::keyboard::grid(ui, slots.len(), |ui, index, rect| {
+    crate::keyboard::grid(ui, PICKER_COLUMNS, slots.len(), |ui, index, rect| {
         let at = Location::from_user(bank, index as u32 + 1);
         let state = crate::keyboard::State::of(
             false,
@@ -930,7 +943,7 @@ fn picker(
         );
         let response = ui.interact(
             rect,
-            ui.id().with(("slot", at.bank, at.slot)),
+            salt.with(("slot", at.bank, at.slot)),
             egui::Sense::click(),
         );
         crate::keyboard::paint_cell(
@@ -942,11 +955,54 @@ fn picker(
             at == held.at,
             response.hovered(),
         );
+        // A cell shows a name cut to 42 px, so the hover is the whole of it.
+        let occupant = slots[index].as_ref().map(|info| info.name.trim());
+        let response = response.on_hover_text(match occupant {
+            Some(name) if !name.is_empty() => format!("{} — {name}", place(held.class, at)),
+            _ => format!("{} — empty", place(held.class, at)),
+        });
         if response.clicked() {
             picked = Some(at);
         }
     });
     picked
+}
+
+/// One bank of the picker: its number, lit while it is the bank on show.
+///
+/// Painted rather than laid out as a button, so it senses under an id of its own and
+/// wears the flat chip the row's destination wears.
+fn bank_chip(ui: &mut egui::Ui, id: egui::Id, bank: u32, on: bool) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let ink = match on {
+        true => visuals.selection.stroke.color,
+        false => visuals.text_color(),
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(bank.to_string(), egui::FontId::monospace(MONO), ink);
+    let (box_, _) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + 2.0 * CHIP_PAD, CHIP),
+        egui::Sense::hover(),
+    );
+    let response = ui.interact(box_, id, egui::Sense::click());
+    let fill = match (on, response.hovered()) {
+        (true, _) => Some(visuals.selection.bg_fill),
+        (false, true) => Some(visuals.widgets.hovered.weak_bg_fill),
+        (false, false) => None,
+    };
+    if let Some(fill) = fill {
+        ui.painter().rect_filled(box_, 2.0, fill);
+    }
+    ui.painter().galley(
+        egui::pos2(
+            box_.left() + CHIP_PAD,
+            box_.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    response
 }
 
 /// A grid inset from the left edge by the room its rows keep at the right, so the head
@@ -1882,6 +1938,105 @@ mod tests {
         assert_eq!(queue.ids(), vec![first]);
     }
 
+    /// ⚠️ A menu shuts on any click, and switching banks is a click. Reaching the second
+    /// bank's slots means the picker survives the chip that got there.
+    #[test]
+    fn a_click_on_a_bank_chip_leaves_the_picker_open_on_that_bank() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(crate::app::metrics);
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut log = Log::default();
+        let mut device = Device::new(ctx.clone());
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
+        device.pretend_scanned(class, 8, &["", "", ""]);
+        let bytes = {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            let held = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            held
+        };
+        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
+        let mut queue = Queue::default();
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(1),
+        );
+        let held = queue.entry(id).expect("it is waiting");
+
+        let chip_id = std::cell::Cell::new(egui::Id::NULL);
+        let draw = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        chip_id.set(ui.id().with(("destination", held.id)));
+                        let row = ui.max_rect();
+                        destination(
+                            ui,
+                            held,
+                            row,
+                            row.right(),
+                            ui.visuals().text_color(),
+                            &device.state,
+                            &queue,
+                            &mut Vec::new(),
+                        );
+                    });
+            });
+        };
+        // The popup lands where the chip is and settles over a frame or two, so
+        // nothing is clicked until its cells stop moving.
+        let settle = || {
+            for _ in 0..3 {
+                draw(Vec::new());
+            }
+        };
+        let click_at = |on: egui::Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos: on,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(vec![egui::Event::PointerMoved(on)]);
+            draw(vec![press(true), press(false)]);
+        };
+        let rect_of = |id: egui::Id| ctx.read_response(id).map(|drawn| drawn.rect);
+
+        settle();
+        let chip = rect_of(chip_id.get()).expect("the row drew its destination chip");
+        click_at(chip.center());
+
+        settle();
+        let bank = rect_of(salt(held).with(("bank", 8_u32)))
+            .expect("the picker offers every bank that has been read");
+        click_at(bank.center());
+
+        settle();
+        assert!(
+            egui::Popup::is_id_open(&ctx, chip_id.get().with("popup")),
+            "the picker stays up across a bank"
+        );
+        assert!(
+            rect_of(salt(held).with(("slot", 7_u32, 0_u32))).is_some(),
+            "and it is showing bank 8"
+        );
+    }
+
     /// A click on one of the picker's cells is what re-targets an entry. The cell's own
     /// rect comes from the frame before the click, so nothing here depends on where the
     /// bank chips over it happened to land.
@@ -1919,7 +2074,7 @@ mod tests {
                 events,
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(crate::keyboard::grid_width(), 300.0),
+                    egui::vec2(crate::keyboard::grid_width(PICKER_COLUMNS), 300.0),
                 )),
                 ..Default::default()
             };
@@ -1930,7 +2085,7 @@ mod tests {
                     .show(ctx, |ui| {
                         drawn = (
                             picker(ui, held, &device.state, &queue),
-                            ctx.read_response(ui.id().with(("slot", wanted.bank, wanted.slot)))
+                            ctx.read_response(salt(held).with(("slot", wanted.bank, wanted.slot)))
                                 .map(|cell| cell.rect.center()),
                         );
                     });

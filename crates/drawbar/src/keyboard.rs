@@ -36,7 +36,10 @@ const ROW: f32 = 24.0;
 /// A slot in the map, and the grid they are laid out in.
 const CELL: f32 = 42.0;
 const CELL_GAP: f32 = 4.0;
-const COLUMNS: usize = 5;
+
+/// How many cells the map itself lays across. A picker drawn somewhere narrower or
+/// wider asks [`grid`] for its own count.
+pub const COLUMNS: usize = 5;
 
 /// The room a band keeps at each end, and the gap between its parts.
 const PAD: f32 = 8.0;
@@ -183,7 +186,7 @@ impl Keyboard {
             .id_salt("keyboard_map")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                grid(ui, slots.len(), |ui, index, rect| {
+                grid(ui, COLUMNS, slots.len(), |ui, index, rect| {
                     let at = Location::from_user(bank, index as u32 + 1);
                     cell(ui, browser, &view, rect, at, slots[index].as_ref(), acts);
                 });
@@ -191,23 +194,24 @@ impl Keyboard {
     }
 }
 
-/// The five-column grid of 42 px cells a bank of slots is laid out in, whoever is
+/// The grid of 42 px cells a bank of slots is laid out in, `columns` across, whoever is
 /// drawing them. `each` is handed one slot's index and the rect it sits in.
 pub fn grid(
     ui: &mut egui::Ui,
+    columns: usize,
     slots: usize,
     mut each: impl FnMut(&mut egui::Ui, usize, egui::Rect),
 ) {
     ui.add_space(CELL_GAP);
-    for row in 0..slots.div_ceil(COLUMNS) {
+    for row in 0..slots.div_ceil(columns) {
         let (strip, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), CELL + CELL_GAP),
             egui::Sense::hover(),
         );
-        let room = strip.width() - 2.0 * PAD - CELL_GAP * (COLUMNS - 1) as f32;
-        let width = (room / COLUMNS as f32).max(0.0);
-        for column in 0..COLUMNS {
-            let index = row * COLUMNS + column;
+        let room = strip.width() - 2.0 * PAD - CELL_GAP * (columns - 1) as f32;
+        let width = (room / columns as f32).max(0.0);
+        for column in 0..columns {
+            let index = row * columns + column;
             if index >= slots {
                 break;
             }
@@ -223,9 +227,9 @@ pub fn grid(
     }
 }
 
-/// The width a five-column grid wants, for a caller laying out room for one.
-pub fn grid_width() -> f32 {
-    2.0 * PAD + CELL * COLUMNS as f32 + CELL_GAP * (COLUMNS - 1) as f32
+/// The width a grid of `columns` cells wants, for a caller laying out room for one.
+pub fn grid_width(columns: usize) -> f32 {
+    2.0 * PAD + CELL * columns as f32 + CELL_GAP * (columns - 1) as f32
 }
 
 // ---- the bands over every folder ---------------------------------------------------
