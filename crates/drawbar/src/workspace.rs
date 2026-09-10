@@ -16,7 +16,7 @@ use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Son
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
-use crate::newproject::Draft;
+use crate::newproject::{Draft, Making};
 use crate::queue::Queue;
 
 /// Where an entity came from.
@@ -613,9 +613,12 @@ enum Incoming {
         name: String,
         bytes: Vec<u8>,
     },
-    /// Everything one *New → Sample Editor project* pick came back with, together:
-    /// the draft is one question about the whole set, not one per file.
-    Wavs(Vec<(String, Vec<u8>)>),
+    /// Everything one *New → WAVs* pick came back with, together: the draft is one
+    /// question about the whole set, not one per file.
+    Wavs {
+        making: Making,
+        files: Vec<(String, Vec<u8>)>,
+    },
     Note(String),
     Failed(String),
 }
@@ -630,8 +633,8 @@ pub struct Workspace {
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
-    /// The WAVs a New → Sample Editor project pick came back with, waiting on their
-    /// root keys. See [`crate::newproject`].
+    /// The WAVs a New pick came back with, waiting on their root keys. See
+    /// [`crate::newproject`].
     draft: Option<Draft>,
 }
 
@@ -853,7 +856,7 @@ impl Workspace {
                 Incoming::Opened { name, bytes } => {
                     self.ingest(name.clone(), Origin::File(name), bytes, log);
                 }
-                Incoming::Wavs(files) => self.draft = Draft::plan(files),
+                Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
             }
@@ -879,13 +882,13 @@ impl Workspace {
         });
     }
 
-    /// Pick the WAVs a new Sample Editor project is built out of.
-    pub fn pick_wavs(&self) {
+    /// Pick the WAVs a new project or instrument is laid out from.
+    pub fn pick_wavs(&self, making: Making) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Pick the WAVs for a Sample Editor project")
+                .set_title(format!("Pick the WAVs for a {}", making.label()))
                 .add_filter("WAV", &["wav"])
                 .pick_files()
                 .await;
@@ -894,7 +897,7 @@ impl Workspace {
                 let bytes = handle.read().await;
                 files.push((handle.file_name(), bytes));
             }
-            let _ = tx.send(Incoming::Wavs(files));
+            let _ = tx.send(Incoming::Wavs { making, files });
             ctx.request_repaint();
         });
     }

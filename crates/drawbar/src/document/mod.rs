@@ -19,10 +19,10 @@ use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
 mod controls;
-mod encode;
+pub(crate) mod encode;
 mod panel;
 mod project;
-mod sample;
+pub(crate) mod sample;
 mod setlist;
 
 use advanced::Advanced;

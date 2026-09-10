@@ -13,6 +13,7 @@ use crate::device::{
 };
 use crate::filter::Narrow;
 use crate::log::Log;
+use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Queue};
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
@@ -25,9 +26,9 @@ pub enum Act {
     Disconnect,
     OpenFiles,
     New(Fresh),
-    /// Pick the WAVs a new Sample Editor project is laid out from. The project itself
-    /// is made once the dialog has each file's root key — see [`crate::newproject`].
-    NewProject,
+    /// Pick the WAVs a new project or instrument is laid out from. What they make is
+    /// made once the dialog has each file's root key — see [`crate::newproject`].
+    NewFromWavs(Making),
     /// Read the whole instrument again — every class, its geometry and its focus.
     Resync,
     ReadAgain(ObjectClass),
@@ -308,7 +309,7 @@ pub fn apply(
                     tabs.open(id);
                 }
             }
-            Act::NewProject => workspace.pick_wavs(),
+            Act::NewFromWavs(making) => workspace.pick_wavs(making),
             Act::Resync => {
                 device.resync();
                 log.say("Reading the instrument again…");

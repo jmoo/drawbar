@@ -16,6 +16,7 @@ use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
+use crate::newproject::Making;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::shell::marked;
@@ -47,18 +48,26 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         });
     }
     ui.separator();
-    // Not a family: a project is laid out from audio files rather than started from a
-    // default, so it asks for them before it exists.
-    if ui
-        .button("Sample Editor project…")
-        .on_hover_text(
-            "pick the WAVs it plays; the project stores their names and the editor looks \
-             for them beside it",
-        )
-        .clicked()
-    {
-        acts.push(Act::NewProject);
-        ui.close();
+    // Not families: both are laid out from audio files rather than started from a
+    // default, so they ask for the files before they exist.
+    for (making, item, hint) in [
+        (
+            Making::Project,
+            "Sample Editor project…",
+            "pick the WAVs it plays; the project stores their names and the editor \
+             looks for them beside it",
+        ),
+        (
+            Making::Instrument,
+            "Sample instrument…",
+            "pick the WAVs it plays; the audio is encoded into the instrument, so the \
+             files are not needed afterwards",
+        ),
+    ] {
+        if ui.button(item).on_hover_text(hint).clicked() {
+            acts.push(Act::NewFromWavs(making));
+            ui.close();
+        }
     }
     if ui
         .button("New folder")
@@ -1273,6 +1282,31 @@ mod tests {
     use crate::browser::act::apply;
     use crate::browser::bench::{bench, context};
     use crate::shell::Shell;
+
+    /// ⚠️ Both things laid out from audio are on the one New menu. A pick of WAVs makes
+    /// either, and a menu offering only the project hides half of what the dialog does.
+    #[test]
+    fn the_new_menu_offers_both_things_a_pick_of_wavs_makes() {
+        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
+                _ => {}
+            }
+        }
+
+        let ctx = context();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            words(&clipped.shape, &mut said);
+        }
+        for item in ["Sample Editor project…", "Sample instrument…", "New folder"] {
+            assert!(said.iter().any(|word| word == item), "{item} is missing");
+        }
+    }
 
     /// ⚠️ A filter turned while a document is in front narrows a table nobody is looking
     /// at. Every row of the tree that narrows brings the library forward with it.
