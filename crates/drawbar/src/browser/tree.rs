@@ -14,11 +14,10 @@ use super::drag::{kinds_present, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device};
-use crate::filter::{Filter, Narrow, Place};
+use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
-use crate::shell::Page;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -255,28 +254,44 @@ impl Browser {
             false => self.connect_row(ui, device, acts),
         }
 
-        let waiting = queue.len();
-        if waiting == 0 {
-            return;
-        }
-        let drawn = row(
-            ui,
-            false,
-            &Cells {
-                indent: indent(0, false),
-                glyph: Some(Glyph::Upload),
-                name: "Waiting to send",
-                dot: Some(crate::app::warn(ui.visuals())),
-                count: Some(waiting.to_string()),
-                ..Cells::default()
-            },
-        );
-        if drawn
-            .response
-            .on_hover_text("everything owed back to the instrument")
-            .clicked()
-        {
-            acts.push(Act::ShowPage(Page::Queue));
+        let counts = [
+            queue.len(),
+            crate::library::differing(workspace, &device.state, queue),
+        ];
+        let states = [
+            (
+                State::Waiting,
+                Glyph::Upload,
+                crate::app::warn(ui.visuals()),
+            ),
+            (
+                State::Differs,
+                Glyph::CircleAlert,
+                crate::app::bad(ui.visuals()),
+            ),
+        ];
+        for ((state, glyph, dot), count) in states.into_iter().zip(counts) {
+            // A row that has gone to nothing stays while it is the one narrowing, so
+            // there is always something left to click to widen the library again.
+            let asked = Narrow::State(state);
+            if count == 0 && !filter.on(asked) {
+                continue;
+            }
+            let drawn = row(
+                ui,
+                filter.on(asked),
+                &Cells {
+                    indent: indent(0, false),
+                    glyph: Some(glyph),
+                    name: state.title(),
+                    dot: Some(dot),
+                    count: Some(count.to_string()),
+                    ..Cells::default()
+                },
+            );
+            if drawn.response.on_hover_text(state.sentence()).clicked() {
+                narrow(acts, asked);
+            }
         }
     }
 
@@ -1227,6 +1242,8 @@ mod tests {
             Narrow::Kind(Kind::Program),
             Narrow::Tag(1),
             Narrow::Place(Place::Computer),
+            Narrow::State(State::Waiting),
+            Narrow::State(State::Differs),
         ] {
             let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
             let mut shell = Shell::default();

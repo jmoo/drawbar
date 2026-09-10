@@ -17,7 +17,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::app::{accent, micro, ui as ui_text, warn};
 use crate::browser::{cell_ink, families_present, qualified, Act, Browser, Bulk, Item, Kind};
 use crate::device::{fit, sendable, Device, DeviceState};
-use crate::filter::{Filter, Place};
+use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::Track;
 use crate::queue::{Diff, Queue};
@@ -202,7 +202,8 @@ pub fn rows(
         }
         let worn = tags.worn(entity.id);
         let row = local(entity, device, queue, worn.len(), &kept, instrument);
-        if admits(filter, &row, worn) {
+        let state = state(row.item, row.where_, queue);
+        if admits(filter, &row, worn, state) {
             rows.push(row);
         }
     }
@@ -221,7 +222,7 @@ pub fn rows(
                     continue;
                 }
                 let row = slot(class, at, info, device);
-                if admits(filter, &row, &untagged) {
+                if admits(filter, &row, &untagged, None) {
                     rows.push(row);
                 }
             }
@@ -232,11 +233,41 @@ pub fn rows(
 
 /// Whether a row survives the narrowing. A row in both places survives a filter naming
 /// either of them.
-fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>) -> bool {
+fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>, state: Option<State>) -> bool {
     row.where_
         .places()
         .iter()
-        .any(|place| filter.admits(row.kind, *place, tags))
+        .any(|place| filter.admits(row.kind, *place, tags, state))
+}
+
+/// What a row wants doing about it: a write already waiting, or a slot that no longer
+/// holds what this row was last saved as. A slot on the instrument wants nothing —
+/// it *is* what the instrument holds.
+///
+/// ⚠️ A queued row is waiting rather than differing, however the two bodies compare. The
+/// write already agreed to is what settles them, so counting it under both would ask
+/// twice for one thing.
+pub fn state(item: Item, where_: Where, queue: &Queue) -> Option<State> {
+    match item {
+        Item::Local(id) if queue.holds(id) => Some(State::Waiting),
+        Item::Local(_) => (where_ == Where::Both(Some(false))).then_some(State::Differs),
+        _ => None,
+    }
+}
+
+/// How many rows the two places hold differently with no write waiting to settle it —
+/// the count the tree's row and the library's chip both carry.
+pub fn differing(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> usize {
+    workspace
+        .listed()
+        .filter(|entity| {
+            state(
+                Item::Local(entity.id),
+                whereabouts(entity, device, queue),
+                queue,
+            ) == Some(State::Differs)
+        })
+        .count()
 }
 
 fn local(
@@ -675,7 +706,8 @@ impl Library {
         );
         let held = arrange(held, &shell.omnibox, self.by, self.order);
 
-        bar(ui, &held, queue, browser.tags(), &shell.filter);
+        let counts = [queue.len(), differing(workspace, &device.state, queue)];
+        bar(ui, counts, browser.tags(), &shell.filter, &mut acts);
         let picked: Vec<&Row> = held
             .iter()
             .filter(|row| browser.picked().holds(row.item))
@@ -827,12 +859,11 @@ impl Library {
 }
 
 /// 28 px: what the library is over, the tags narrowing it, and what wants attention.
-fn bar(ui: &mut egui::Ui, rows: &[Row], queue: &Queue, tags: &Tags, filter: &Filter) {
-    let differ = rows
-        .iter()
-        .filter(|row| row.where_ == Where::Both(Some(false)))
-        .count();
-    let waiting = queue.len();
+///
+/// ⚠️ Both counts are the whole list's, not this view's. They are the numbers the tree's
+/// own rows carry and the toolbar's Send acts on — and a chip counting only what survives
+/// its own narrowing would report a different number the moment it was clicked.
+fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts: &mut Vec<Act>) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), BAR), egui::Sense::hover());
     let mut inner = ui.new_child(
@@ -853,16 +884,28 @@ fn bar(ui: &mut egui::Ui, rows: &[Row], queue: &Queue, tags: &Tags, filter: &Fil
         chip(ui, Glyph::Tag, tag, ink);
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let tint = warn(ui.visuals());
-        // ⚠️ What is owed is the whole list's, not this view's: it is the number the
-        // toolbar's Send carries, and a filtered table would report a different one.
-        if waiting > 0 {
-            chip(ui, Glyph::Clock, &format!("{waiting} waiting"), tint)
-                .on_hover_text("everything owed back to the instrument");
-        }
-        if differ > 0 {
-            chip(ui, Glyph::CircleAlert, &format!("{differ} differ"), tint)
-                .on_hover_text("here and on the instrument, and the two bodies differ");
+        let states = [
+            (State::Waiting, Glyph::Clock),
+            (State::Differs, Glyph::CircleAlert),
+        ];
+        for ((state, glyph), count) in states.into_iter().zip(counts) {
+            // A chip that has gone to nothing stays while it is the one narrowing, so
+            // there is always something left to click to widen the table again.
+            if count == 0 && !filter.on(Narrow::State(state)) {
+                continue;
+            }
+            let text = format!("{count} {}", state.word());
+            let drawn = chip(ui, glyph, &text, warn(ui.visuals()));
+            let picked = ui
+                .interact(
+                    drawn.rect,
+                    drawn.id.with(state.word()),
+                    egui::Sense::click(),
+                )
+                .on_hover_text(state.sentence());
+            if picked.clicked() {
+                acts.push(Act::Narrow(Narrow::State(state)));
+            }
         }
     });
 }
@@ -881,6 +924,9 @@ fn over(filter: &Filter) -> String {
             }
             .to_string(),
         );
+    }
+    if let Some(state) = filter.state {
+        narrowed.push(state.word().to_string());
     }
     match narrowed.is_empty() {
         true => "everything".to_string(),
@@ -1559,6 +1605,84 @@ mod tests {
         device.pretend_bodies(ObjectClass::Program, 7, &[None]);
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
+    }
+
+    /// The state axis narrows the library to what wants doing about it — and a write
+    /// already waiting takes its row out of "differs" and into "waiting", so one thing
+    /// to do is asked for once.
+    #[test]
+    fn a_row_waiting_to_be_sent_is_not_also_one_that_differs() {
+        use crate::filter::{Narrow, State};
+
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (tags, mut queue) = (Tags::default(), Queue::default());
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.container.as_ref()?.body_crc32)
+            .expect("a type-1 container carries one");
+        device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
+        device.relink(&mut workspace);
+        // Edited and saved: the link stays where it was and the two bodies part.
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
+                .expect("the registry takes the set");
+        workspace.replace_bytes(id, edited, &mut log);
+        workspace.mark_saved(id);
+        device.relink(&mut workspace);
+
+        fn narrowed(
+            workspace: &Workspace,
+            device: &Device,
+            queue: &Queue,
+            tags: &Tags,
+            state: crate::filter::State,
+        ) -> usize {
+            let mut filter = Filter::default();
+            filter.narrow(Narrow::State(state));
+            rows(workspace, &device.state, queue, tags, &filter)
+                .into_iter()
+                .filter(|row| matches!(row.item, Item::Local(_)))
+                .count()
+        }
+        assert_eq!(differing(&workspace, &device.state, &queue), 1);
+        assert_eq!(
+            narrowed(&workspace, &device, &queue, &tags, State::Differs),
+            1
+        );
+        assert_eq!(
+            narrowed(&workspace, &device, &queue, &tags, State::Waiting),
+            0
+        );
+
+        crate::queue::enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            ObjectClass::Program,
+            at(6, 0),
+        );
+        assert!(queue.holds(id), "it is owed back to the slot it came off");
+        assert_eq!(
+            differing(&workspace, &device.state, &queue),
+            0,
+            "the write already agreed to is what settles the two"
+        );
+        assert_eq!(
+            narrowed(&workspace, &device, &queue, &tags, State::Waiting),
+            1
+        );
+        assert_eq!(
+            narrowed(&workspace, &device, &queue, &tags, State::Differs),
+            0
+        );
     }
 
     /// A class whose slots report no checksum is linked by name, and the table says so:
