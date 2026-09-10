@@ -41,9 +41,9 @@
             };
 
             # `nix run` prefers apps over packages, so `nix run .#drawbar-web`
-            # launches the bundle that `nix build .#drawbar-web` produces.
+            # launches the site that `nix build .#site` produces.
             apps.drawbar-web = {
-              meta.description = "serve the drawbar browser build and open it";
+              meta.description = "serve the drawbar browser build with its guide and open it";
               program = pkgs.lib.getExe pkgs.nord.drawbar-web-launch;
               type = "app";
             };
