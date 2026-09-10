@@ -165,6 +165,8 @@ pub struct DrawbarApp {
     pub(crate) document: Document,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
+    #[cfg(target_arch = "wasm32")]
+    splash: crate::splash::Splash,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last caught up, on egui's own clock.
@@ -203,6 +205,8 @@ impl DrawbarApp {
             document: Document::default(),
             log: Log::default(),
             theme,
+            #[cfg(target_arch = "wasm32")]
+            splash: crate::splash::Splash::new(&cc.egui_ctx),
             saved: 0,
             saved_at: 0.0,
             left: crate::store::Left::default(),
@@ -362,6 +366,8 @@ impl eframe::App for DrawbarApp {
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
+        #[cfg(target_arch = "wasm32")]
+        self.splash.show(ctx);
 
         // Before the panels, so an editor open in this frame still has the focus Escape
         // belongs to.
