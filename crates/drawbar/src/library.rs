@@ -270,6 +270,38 @@ pub fn differing(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> 
         .count()
 }
 
+/// The row one item makes, for a caller holding an item rather than the whole table.
+///
+/// The same two builders [`rows`] uses, so what the inspector reads about a picked row
+/// is what the table shows on it. A folder or a tag is a grouping rather than a thing,
+/// and makes no row.
+pub fn row_of(
+    item: Item,
+    workspace: &Workspace,
+    device: &DeviceState,
+    queue: &Queue,
+    tags: &Tags,
+) -> Option<Row> {
+    match item {
+        Item::Local(id) => {
+            let entity = workspace.get(id)?;
+            let instrument = device.product().and_then(Family::from_product);
+            Some(local(
+                entity,
+                device,
+                queue,
+                tags.worn(id).len(),
+                &families_present(workspace),
+                instrument,
+            ))
+        }
+        Item::Slot { class, at } => {
+            Some(slot(class, at, device.slot(class, at).flatten()?, device))
+        }
+        Item::Folder(_) | Item::Tag(_) => None,
+    }
+}
+
 fn local(
     entity: &LocalEntity,
     device: &DeviceState,

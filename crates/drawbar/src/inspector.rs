@@ -1,23 +1,28 @@
-//! The inspector: how much room the instrument has, what the selection needs, and what
-//! it is labelled with.
+//! The inspector: what is picked, and — while one is attached — the instrument.
 //!
-//! Four panels, each collapsed on its own and each kept between sessions beside the
-//! docks. Nothing here reads anything the rest of the app has not already been told —
-//! a panel with nothing behind it says so rather than filling itself in.
+//! Two groups. SELECTION answers about the rows the browser has picked and is there
+//! whatever is on the bus; INSTRUMENT is how much room the attached one has and what it
+//! says about itself, so it is absent without one. Every group and every panel is
+//! collapsed on its own and kept between sessions beside the docks.
+//!
+//! Nothing here reads anything the rest of the app has not already been told — a panel
+//! with nothing behind it says so rather than filling itself in.
 
 use eframe::egui;
 
+use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, good, ui as ui_text};
 use crate::browser::{Act, Browser, Item, Kind};
-use crate::device::{occupancy, Device};
+use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{painted, Glyph};
+use crate::library::{row_of, Row, Where};
 use crate::panel::panel_header;
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
-use crate::strings::place;
+use crate::strings::{kind_word, place};
 use crate::tags::Tags;
 use crate::workspace::Workspace;
 
@@ -32,7 +37,10 @@ const PIP: f32 = 9.0;
 /// The mono readout beside a meter, and the words under one.
 const MONO: f32 = 10.5;
 
-/// The four panels, in the order the design stacks them.
+/// The column a fact's own word takes, so the values under each other line up.
+const FACT: f32 = 52.0;
+
+/// The two groups, in the order the design stacks them.
 pub fn ui(
     ui: &mut egui::Ui,
     shell: &mut Shell,
@@ -42,23 +50,177 @@ pub fn ui(
     queue: &Queue,
 ) -> Vec<Act> {
     let mut acts = Vec::new();
-    panel_header(ui, "room", Some(&mut shell.room_open), None);
-    if shell.room_open {
-        room_panel(ui, workspace, device, queue);
+    panel_header(ui, "selection", Some(&mut shell.selection_open), None);
+    if shell.selection_open {
+        acts = selection_group(ui, shell, browser, workspace, device, queue);
     }
-    panel_header(ui, "dependencies", Some(&mut shell.deps_open), None);
-    if shell.deps_open {
-        dependencies(ui, &slots(browser), device);
+    if !device.state.connected() {
+        return acts;
     }
-    panel_header(ui, "tags", Some(&mut shell.tags_open), None);
+    panel_header(ui, "instrument", Some(&mut shell.instrument_open), None);
+    if shell.instrument_open {
+        panel_header(ui, "room", Some(&mut shell.room_open), None);
+        if shell.room_open {
+            room_panel(ui, workspace, device, queue);
+        }
+        panel_header(ui, "info", Some(&mut shell.info_open), None);
+        if shell.info_open {
+            body(ui, |ui| crate::browser::about(ui, device));
+        }
+    }
+    acts
+}
+
+/// What is picked: what it is, what it is labelled with, and what it plays.
+fn selection_group(
+    ui: &mut egui::Ui,
+    shell: &mut Shell,
+    browser: &Browser,
+    workspace: &Workspace,
+    device: &Device,
+    queue: &Queue,
+) -> Vec<Act> {
+    let mut acts = Vec::new();
+    let picked = browser.picked().items().count();
+    if picked == 0 {
+        body(ui, |ui| faint(ui, "Nothing is picked."));
+        return acts;
+    }
+    let rows: Vec<Row> = browser
+        .picked()
+        .items()
+        .filter_map(|item| row_of(item, workspace, &device.state, queue, browser.tags()))
+        .collect();
+
+    panel_header(ui, "facts", Some(&mut shell.facts_open), None);
+    if shell.facts_open {
+        body(ui, |ui| {
+            about_selection(ui, picked, &rows, workspace, device)
+        });
+    }
+    panel_header(
+        ui,
+        "tags on the selection",
+        Some(&mut shell.tags_open),
+        None,
+    );
     if shell.tags_open {
         tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
     }
-    panel_header(ui, "info", Some(&mut shell.info_open), None);
-    if shell.info_open {
-        body(ui, |ui| crate::browser::about(ui, device));
+    // Only a slot the instrument has been asked about has a dependency list, so the
+    // panel is absent rather than empty for everything else.
+    let answered = needs(&slots(browser), device);
+    if answered.is_empty() {
+        return acts;
+    }
+    panel_header(ui, "dependencies", Some(&mut shell.deps_open), None);
+    if shell.deps_open {
+        dependencies(ui, &answered, device);
     }
     acts
+}
+
+/// One line of the FACTS panel: what it is, what it says, and the whole of it where the
+/// short form leaves something out.
+pub struct Fact {
+    pub what: &'static str,
+    pub said: String,
+    pub hint: Option<String>,
+}
+
+/// What the panel says about the one asset that is picked.
+///
+/// The row is the table's own, so a fact here is the fact the table shows. `fit` is
+/// what the attached instrument makes of it, and it is worth a line only where it
+/// refuses: everything else is either silence or the row's own kind.
+pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
+    let mut said = vec![
+        Fact {
+            what: "name",
+            said: row.name.clone(),
+            hint: None,
+        },
+        Fact {
+            what: "kind",
+            said: kind_word(row.kind, row.family),
+            hint: None,
+        },
+        Fact {
+            what: "where",
+            said: row.where_.short().to_string(),
+            hint: Some(row.where_.sentence().to_string()),
+        },
+        Fact {
+            what: "size",
+            said: room::measure(row.size),
+            hint: None,
+        },
+    ];
+    if let Fit::Refuses(why) = fit {
+        said.push(Fact {
+            what: "refused",
+            said: why.clone(),
+            hint: None,
+        });
+    }
+    said
+}
+
+/// What the panel says about a selection of several: how many were picked, and what of
+/// them the two things worth acting on hold.
+///
+/// ⚠️ `picked` counts the rows the browser holds; the other two count the assets among
+/// them, which a folder or a tag row is not.
+pub fn tally(picked: usize, rows: &[Row]) -> String {
+    let unsaved = rows.iter().filter(|row| row.unsaved).count();
+    let keyboard = rows
+        .iter()
+        .filter(|row| matches!(row.where_, Where::Both(_) | Where::Keyboard))
+        .count();
+    format!("{picked} picked, {unsaved} unsaved, {keyboard} on the keyboard")
+}
+
+/// The FACTS panel: one picked row read out, or a count of the several that are.
+fn about_selection(
+    ui: &mut egui::Ui,
+    picked: usize,
+    rows: &[Row],
+    workspace: &Workspace,
+    device: &Device,
+) {
+    let [row] = rows else {
+        return void(ui, tally(picked, rows));
+    };
+    if picked > 1 {
+        // A folder picked beside one asset is still several picked.
+        return void(ui, tally(picked, rows));
+    }
+    let held = row
+        .item
+        .local()
+        .and_then(|id| workspace.get(id))
+        .map(|entity| fit(&device.state, entity))
+        .unwrap_or(Fit::Unattached);
+    for fact in facts(row, &held) {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [FACT, ui.spacing().interact_size.y],
+                egui::Label::new(egui::RichText::new(fact.what).text_style(ui_text()).weak())
+                    .halign(egui::Align::LEFT),
+            );
+            let said = ui.add(
+                egui::Label::new(egui::RichText::new(&fact.said).text_style(ui_text())).truncate(),
+            );
+            if let Some(hint) = fact.hint {
+                said.on_hover_text(hint);
+            }
+        });
+    }
+}
+
+/// A line the panel says about the selection as a whole rather than about a field.
+fn void(ui: &mut egui::Ui, said: String) {
+    ui.label(egui::RichText::new(said).text_style(ui_text()));
 }
 
 /// The slots the selection holds. Only a slot has a dependency list on the instrument.
@@ -109,40 +271,50 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
     });
 }
 
-/// What the instrument said the picked slots need.
+/// The dependency list the instrument gave for `at`, where that is the slot it was last
+/// asked about and it named something.
 ///
 /// ⚠️ `DEPENDENCIES` answers for one slot at a time and the cache holds the last answer,
 /// so this speaks for the slot that was asked about and for no other. A selection nothing
-/// has asked about says so, rather than saying that it needs nothing.
-fn dependencies(ui: &mut egui::Ui, picked: &[(ObjectClass, Location)], device: &Device) {
+/// has asked about has no answer, which is not the same as needing nothing.
+fn answer(device: &Device, at: Location) -> Option<&[Dependency]> {
+    if device.state.detail.at != Some(at) {
+        return None;
+    }
+    let deps = device.state.detail.deps.as_deref()?;
+    (!deps.is_empty()).then_some(deps)
+}
+
+/// The picked slots the instrument has answered about — what the panel would have to
+/// say, and so whether there is a panel at all.
+fn needs(picked: &[(ObjectClass, Location)], device: &Device) -> Vec<(ObjectClass, Location)> {
+    picked
+        .iter()
+        .copied()
+        .filter(|(_, at)| answer(device, *at).is_some())
+        .collect()
+}
+
+/// What the instrument said the picked slots need.
+fn dependencies(ui: &mut egui::Ui, answered: &[(ObjectClass, Location)], device: &Device) {
     body(ui, |ui| {
-        let mut drawn = 0;
-        for (class, at) in picked.iter().copied() {
-            if device.state.detail.at != Some(at) {
-                continue;
-            }
-            let Some(deps) = device.state.detail.deps.as_ref() else {
+        for (class, at) in answered.iter().copied() {
+            let Some(deps) = answer(device, at) else {
                 continue;
             };
             for dep in deps {
-                drawn += 1;
                 let named = device
                     .state
                     .dependency_name(Some((class, at)), dep.class, dep.id)
                     .filter(|name| !name.is_empty());
                 needed(ui, dep.class, named, dep.id);
             }
-            if drawn > 0 {
-                ui.label(
-                    egui::RichText::new(place(class, at))
-                        .monospace()
-                        .size(MONO)
-                        .weak(),
-                );
-            }
-        }
-        if drawn == 0 {
-            faint(ui, "Nothing here says what the selection plays.");
+            ui.label(
+                egui::RichText::new(place(class, at))
+                    .monospace()
+                    .size(MONO)
+                    .weak(),
+            );
         }
     });
 }
@@ -330,13 +502,17 @@ mod tests {
         (device, at)
     }
 
-    /// Draw the whole inspector, and the two panels that take a selection with one.
+    /// Draw the whole inspector over `picked`, and the two panels that take a selection
+    /// of their own.
     ///
     /// Nothing checks pixels. What this catches is a layout that panics or an id that
     /// collides, neither of which a test on the rules would see.
     fn paint(shell: &mut Shell, device: &Device, picked: &[(ObjectClass, Location)]) {
         let ctx = context();
         let mut browser = Browser::default();
+        for (class, at) in picked.iter().copied() {
+            browser.check(Item::Slot { class, at });
+        }
         let workspace = Workspace::new(ctx.clone());
         let queue = Queue::default();
         let mut labels = Tags::default();
@@ -358,7 +534,7 @@ mod tests {
 
     /// Every panel draws, with an instrument answering and with nothing attached at all.
     #[test]
-    fn the_four_panels_paint_with_and_without_an_instrument() {
+    fn every_panel_paints_with_and_without_an_instrument() {
         let ctx = context();
         let mut shell = Shell {
             info_open: true,
@@ -369,15 +545,99 @@ mod tests {
         let (device, at) = attached(&ctx);
         paint(&mut shell, &device, &[(ObjectClass::Program, at)]);
 
-        // Shut, every panel draws its header and nothing under it.
+        // Shut, every group and every panel draws its header and nothing under it.
         let mut shut = Shell {
-            room_open: false,
+            selection_open: false,
+            facts_open: false,
             deps_open: false,
             tags_open: false,
+            instrument_open: false,
+            room_open: false,
             info_open: false,
             ..Shell::default()
         };
         paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
+    }
+
+    /// The facts about one picked asset are the ones its library row already carries,
+    /// so the panel and the table cannot disagree.
+    #[test]
+    fn the_facts_of_one_picked_asset_are_its_rows_own() {
+        use nord_format::accept::Family;
+
+        let row = Row {
+            item: Item::Local(1),
+            kind: Kind::Program,
+            family: Some(Family::Stage4),
+            name: "Africa Split".into(),
+            tags: 1,
+            unsaved: true,
+            where_: Where::Both(Some(false)),
+            at: None,
+            size: 2_048,
+            needs: crate::library::Needs::Nothing,
+        };
+
+        let said = facts(&row, &Fit::Takes);
+        let lines: Vec<(&str, &str)> = said
+            .iter()
+            .map(|fact| (fact.what, fact.said.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("name", "Africa Split"),
+                ("kind", "Stage 4 program"),
+                ("where", "both ≠"),
+                ("size", "2.0 kB"),
+            ]
+        );
+        assert_eq!(
+            said[2].hint.as_deref(),
+            Some(Where::Both(Some(false)).sentence()),
+            "the short word carries the whole of it"
+        );
+
+        // The one thing the panel says that the row does not know: what the attached
+        // instrument makes of it, and only where that is a refusal.
+        let why = "This is a Stage 4 file and the instrument is a Nord Electro 5D.";
+        let refused = facts(&row, &Fit::Refuses(why.into()));
+        assert_eq!(refused.len(), said.len() + 1);
+        assert_eq!(refused[4].what, "refused");
+        assert_eq!(refused[4].said, why);
+        assert_eq!(
+            facts(&row, &Fit::Warn("untried".into())).len(),
+            said.len(),
+            "an untried write is the queue's warning, not a fact about the asset"
+        );
+    }
+
+    /// Several picked is a count rather than a reading-out, and the two counts are the
+    /// two that decide what can be done with the set.
+    #[test]
+    fn a_selection_of_several_says_how_many_and_what_of_them() {
+        let row = |name: &str, unsaved: bool, where_: Where| Row {
+            item: Item::Local(1),
+            kind: Kind::Program,
+            family: None,
+            name: name.into(),
+            tags: 0,
+            unsaved,
+            where_,
+            at: None,
+            size: 0,
+            needs: crate::library::Needs::Nothing,
+        };
+        let rows = [
+            row("kept", false, Where::Computer),
+            row("edited", true, Where::Both(Some(false))),
+            row("read off a slot", false, Where::Keyboard),
+        ];
+        assert_eq!(tally(3, &rows), "3 picked, 1 unsaved, 2 on the keyboard");
+
+        // A folder is picked and is no asset, so it is counted as picked and as nothing
+        // else.
+        assert_eq!(tally(1, &[]), "1 picked, 0 unsaved, 0 on the keyboard");
     }
 
     /// ⚠️ A dependency list answers for the slot it was asked about and for no other, so

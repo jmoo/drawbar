@@ -66,7 +66,7 @@ const SEARCH: &str = "omnibox";
 /// The least width a drop-down takes, whatever is in it.
 ///
 /// ⚠️ A menu sizes itself to its widest item, so without this each one is as wide as
-/// whatever happens to be enabled — and the longest item, "Instrument panel" with ⌥⌘I,
+/// whatever happens to be enabled — and the longest item, "Inspector panel" with ⌥⌘I,
 /// leaves its key text against its label. This is that item with a gap between the two.
 const MENU: f32 = 240.0;
 
@@ -107,10 +107,13 @@ pub struct Shell {
     pub browser_open: bool,
     pub inspector_open: bool,
     pub dock_open: bool,
-    /// The inspector's three panels, each collapsed on its own.
-    pub room_open: bool,
+    /// The inspector's two groups and the panels under them, each collapsed on its own.
+    pub selection_open: bool,
+    pub facts_open: bool,
     pub deps_open: bool,
     pub tags_open: bool,
+    pub instrument_open: bool,
+    pub room_open: bool,
     pub info_open: bool,
     /// How far each dock was last dragged. A side dock's is its width, the bottom
     /// dock's is its body under [`DOCK`].
@@ -132,9 +135,12 @@ impl Default for Shell {
             browser_open: true,
             inspector_open: true,
             dock_open: false,
-            room_open: true,
+            selection_open: true,
+            facts_open: true,
             deps_open: true,
             tags_open: true,
+            instrument_open: true,
+            room_open: true,
             info_open: false,
             browser_width: BROWSER,
             inspector_width: INSPECTOR,
@@ -150,7 +156,7 @@ impl Shell {
     /// Where the layout is kept between sessions, beside the browser's own keys.
     pub const KEY: &'static str = "drawbar.docks";
 
-    const VERSION: &'static str = "drawbar docks 3";
+    const VERSION: &'static str = "drawbar docks 4";
 
     pub fn open(&self, dock: Dock) -> bool {
         match dock {
@@ -194,9 +200,12 @@ impl Shell {
                 (Some("browser"), Some(open)) => held.browser_open = open == "1",
                 (Some("inspector"), Some(open)) => held.inspector_open = open == "1",
                 (Some("dock"), Some(open)) => held.dock_open = open == "1",
-                (Some("room"), Some(open)) => held.room_open = open == "1",
+                (Some("selection"), Some(open)) => held.selection_open = open == "1",
+                (Some("facts"), Some(open)) => held.facts_open = open == "1",
                 (Some("deps"), Some(open)) => held.deps_open = open == "1",
                 (Some("tags"), Some(open)) => held.tags_open = open == "1",
+                (Some("instrument"), Some(open)) => held.instrument_open = open == "1",
+                (Some("room"), Some(open)) => held.room_open = open == "1",
                 (Some("info"), Some(open)) => held.info_open = open == "1",
                 (Some("browser_width"), Some(text)) => {
                     held.browser_width = size(text, SIDE_LEAST, BROWSER)
@@ -219,9 +228,12 @@ impl Shell {
         self.browser_open = held.browser_open;
         self.inspector_open = held.inspector_open;
         self.dock_open = held.dock_open;
-        self.room_open = held.room_open;
+        self.selection_open = held.selection_open;
+        self.facts_open = held.facts_open;
         self.deps_open = held.deps_open;
         self.tags_open = held.tags_open;
+        self.instrument_open = held.instrument_open;
+        self.room_open = held.room_open;
         self.info_open = held.info_open;
         self.browser_width = held.browser_width;
         self.inspector_width = held.inspector_width;
@@ -237,16 +249,19 @@ impl Shell {
         storage.set_string(
             Shell::KEY,
             format!(
-                "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nroom\t{}\ndeps\t{}\n\
-                 tags\t{}\ninfo\t{}\nbrowser_width\t{}\ninspector_width\t{}\n\
-                 dock_body\t{}\npage\t{}\n",
+                "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nselection\t{}\nfacts\t{}\n\
+                 deps\t{}\ntags\t{}\ninstrument\t{}\nroom\t{}\ninfo\t{}\n\
+                 browser_width\t{}\ninspector_width\t{}\ndock_body\t{}\npage\t{}\n",
                 Shell::VERSION,
                 bit(self.browser_open),
                 bit(self.inspector_open),
                 bit(self.dock_open),
-                bit(self.room_open),
+                bit(self.selection_open),
+                bit(self.facts_open),
                 bit(self.deps_open),
                 bit(self.tags_open),
+                bit(self.instrument_open),
+                bit(self.room_open),
                 bit(self.info_open),
                 self.browser_width,
                 self.inspector_width,
@@ -470,7 +485,7 @@ impl DrawbarApp {
     /// Whether an instrument is answering.
     ///
     /// ⚠️ The single gate on everything that only means something with one attached: the
-    /// Read and Send actions, the send queue, the instrument dock and its toggle, and the
+    /// Read and Send actions, the send queue, the inspector's INSTRUMENT group, and the
     /// menu items naming any of them. A control for an instrument that is not there is a
     /// control that can only disappoint.
     pub(crate) fn attached(&self) -> bool {
@@ -581,7 +596,7 @@ impl DrawbarApp {
         if hit(&key::BROWSER) {
             acts.push(Act::ToggleDock(Dock::Browser));
         }
-        if self.attached() && hit(&key::INSPECTOR) {
+        if hit(&key::INSPECTOR) {
             acts.push(Act::ToggleDock(Dock::Inspector));
         }
         if hit(&key::DOCK) {
@@ -689,12 +704,9 @@ impl DrawbarApp {
         ui.separator();
         for (label, dock, shortcut) in [
             ("Browser panel", Dock::Browser, key::BROWSER),
-            ("Instrument panel", Dock::Inspector, key::INSPECTOR),
+            ("Inspector panel", Dock::Inspector, key::INSPECTOR),
             ("Bottom dock", Dock::Bottom, key::DOCK),
         ] {
-            if dock == Dock::Inspector && !self.attached() {
-                continue;
-            }
             if marked(ui, label, self.shell.open(dock), Some(shortcut)) {
                 acts.push(Act::ToggleDock(dock));
             }
@@ -782,13 +794,10 @@ impl DrawbarApp {
                     self.omnibox(ui, acts);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         for (glyph, dock, hint) in [
-                            (Glyph::PanelRight, Dock::Inspector, "the instrument"),
+                            (Glyph::PanelRight, Dock::Inspector, "the inspector"),
                             (Glyph::PanelBottom, Dock::Bottom, "the bottom dock"),
                             (Glyph::PanelLeft, Dock::Browser, "the browser"),
                         ] {
-                            if dock == Dock::Inspector && !self.attached() {
-                                continue;
-                            }
                             if glyph_button(ui, glyph, self.shell.open(dock), hint).clicked() {
                                 acts.push(Act::ToggleDock(dock));
                             }
@@ -1064,22 +1073,17 @@ impl DrawbarApp {
         }
     }
 
-    /// What the instrument dock will claim once the browser has taken its own: the
-    /// browser's most is read before that dock is added, so it has to be asked for.
+    /// What the inspector will claim once the browser has taken its own: the browser's
+    /// most is read before that dock is added, so it has to be asked for.
     fn inspector_room(&self) -> f32 {
-        match (self.attached(), self.shell.inspector_open) {
-            (false, _) => 0.0,
-            (true, true) => self.shell.inspector_width,
-            (true, false) => SHUT,
+        match self.shell.inspector_open {
+            true => self.shell.inspector_width,
+            false => SHUT,
         }
     }
 
-    /// The inspector dock: how much room there is, what the selection needs, and what it
-    /// is labelled with.
+    /// The inspector dock: what is picked, and — while one is attached — the instrument.
     pub(crate) fn inspector_dock(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        if !self.attached() {
-            return;
-        }
         let open = self.shell.inspector_open;
         let fill = ctx.style().visuals.panel_fill;
         let shut = egui::SidePanel::right("inspector_shut")
@@ -1096,12 +1100,12 @@ impl DrawbarApp {
             claim(ui);
             edge(ui, Side::Left);
             if how < 1.0 {
-                if reopen(ui, Glyph::PanelRightOpen, "show the instrument").clicked() {
+                if reopen(ui, Glyph::PanelRightOpen, "show the inspector").clicked() {
                     acts.push(Act::ToggleDock(Dock::Inspector));
                 }
                 return;
             }
-            dock_header(ui, "instrument");
+            dock_header(ui, "inspector");
             acts.extend(crate::inspector::ui(
                 ui,
                 &mut self.shell,
@@ -1301,10 +1305,12 @@ mod tests {
 
     /// ⚠️ With nothing attached there is nothing to read from, nothing to send to and no
     /// room to report. Every control that acts on an instrument is absent rather than
-    /// dead, and the centre takes the width the instrument dock would have claimed.
+    /// dead — the inspector's INSTRUMENT group with them — while SELECTION, which is
+    /// about what is picked here, stays whatever is on the bus.
     #[test]
     fn no_instrument_means_no_instrument_controls() {
-        const ONLY_WITH_ONE: [&str; 4] = ["Read", "Send", "SEND QUEUE", "INSTRUMENT"];
+        const ONLY_WITH_ONE: [&str; 6] =
+            ["Read", "Send", "SEND QUEUE", "INSTRUMENT", "ROOM", "INFO"];
 
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
@@ -1320,7 +1326,8 @@ mod tests {
             );
         }
         assert!(alone.wrote("ACTIVITY LOG"), "the log is the one page left");
-        assert!(alone.region("inspector").is_none(), "{:?}", alone.panels);
+        assert!(alone.wrote("SELECTION"), "the inspector still answers");
+        assert!(alone.region("inspector").is_some(), "{:?}", alone.panels);
 
         attach(&mut app);
         let _ = drawn(&ctx, &mut app);
@@ -1331,12 +1338,11 @@ mod tests {
                 "{control} is missing with one attached"
             );
         }
-        assert!(answering.region("inspector").is_some());
-        assert!(
-            answering.centre.width() < alone.centre.width(),
-            "the centre kept the instrument dock's width: {:?} then {:?}",
-            alone.centre,
-            answering.centre,
+        assert!(answering.wrote("SELECTION"));
+        assert_eq!(
+            answering.region("inspector"),
+            alone.region("inspector"),
+            "the dock is the same width either way"
         );
     }
 
@@ -1435,9 +1441,12 @@ mod tests {
             browser_open: false,
             inspector_open: true,
             dock_open: true,
-            room_open: true,
+            selection_open: true,
+            facts_open: false,
             deps_open: false,
             tags_open: true,
+            instrument_open: true,
+            room_open: true,
             info_open: true,
             browser_width: 301.0,
             inspector_width: 199.0,
@@ -1453,8 +1462,10 @@ mod tests {
         assert!(!after.browser_open);
         assert!(after.inspector_open);
         assert!(after.dock_open);
+        assert!(after.selection_open && after.instrument_open, "both groups");
         assert!(after.room_open && after.tags_open && after.info_open);
         assert!(!after.deps_open, "a shut inspector panel comes back shut");
+        assert!(!after.facts_open, "and so does a shut one under a group");
         assert_eq!(after.browser_width, 301.0);
         assert_eq!(after.inspector_width, 199.0);
         assert_eq!(after.dock_body, 260.0);
