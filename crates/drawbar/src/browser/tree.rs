@@ -1097,7 +1097,7 @@ impl Browser {
             return;
         }
         let item = Item::Slot { class, at };
-        let free = device.state.first_free(class);
+        let free = device.state.first_free(class, &[]);
         if ui
             .button("Open")
             .on_hover_text("a view of this slot; nothing joins the list on this computer")

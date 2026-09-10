@@ -407,6 +407,15 @@ impl Queue {
             .find(|held| (held.class, held.at) == (class, at))
     }
 
+    /// The slots of one class something is already waiting for.
+    pub fn waiting_in(&self, class: ObjectClass) -> Vec<Location> {
+        self.list
+            .iter()
+            .filter(|held| held.class == class)
+            .map(|held| held.at)
+            .collect()
+    }
+
     /// The entry waiting for a slot, if anything is.
     pub fn waiting(&self, class: ObjectClass, at: Location) -> Option<&Queued> {
         self.list

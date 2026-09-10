@@ -593,10 +593,15 @@ impl DeviceState {
         })
     }
 
-    /// The first slot of `class` known to be vacant — where a duplicate lands when the
-    /// user did not drag it anywhere.
-    pub fn first_free(&self, class: ObjectClass) -> Option<Location> {
-        self.free_slots(class).next()
+    /// The first slot of `class` known to be vacant and not among `taken` — where a
+    /// duplicate lands when the user did not drag it anywhere, and where the next of a
+    /// queued set goes.
+    ///
+    /// ⚠️ `taken` is what is already spoken for. Two writes handed one address are one
+    /// write, so a set queued together walks down the free slots rather than piling onto
+    /// the first of them.
+    pub fn first_free(&self, class: ObjectClass, taken: &[Location]) -> Option<Location> {
+        self.free_slots(class).find(|at| !taken.contains(at))
     }
 
     /// Drop one bank's cached names, because something just changed them.

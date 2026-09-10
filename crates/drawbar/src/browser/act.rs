@@ -599,11 +599,12 @@ pub(super) enum Bound {
     Nowhere,
 }
 
-/// The slot an asset is owed to, and otherwise the first free slot of its own folder.
+/// The slot an asset is owed to, and otherwise the first free slot of its own folder
+/// that nothing is already waiting for.
 ///
 /// ⚠️ Free means read and found empty. A folder no walk has reached offers nothing, for
 /// the reason [`crate::queue::Occupancy`] gives.
-pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState) -> Bound {
+pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
     if let Fit::Refuses(why) = fit(state, entity) {
         return Bound::Refused(why);
     }
@@ -615,13 +616,17 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState) -> Bound {
     else {
         return Bound::Nowhere;
     };
-    match state.first_free(class) {
+    match state.first_free(class, &queue.waiting_in(class)) {
         Some(at) => Bound::At(class, at),
         None => Bound::Full(class),
     }
 }
 
 /// Queue a set of assets, each for wherever it is bound, and say what would not go.
+///
+/// Destinations are handed out one at a time and each entry joins the queue before the
+/// next is placed, so a set of unlinked assets walks down the free slots in address
+/// order rather than piling onto the first of them.
 ///
 /// A folder with no room refuses by name: what a set of them comes to is a fact about
 /// the instrument, and dropping the entry without a word would read as a bug.
@@ -641,7 +646,7 @@ fn queue_all(
         };
         let name = entity.name.clone();
         asked += 1;
-        match bound_for(entity, &device.state) {
+        match bound_for(entity, &device.state, queue) {
             Bound::At(class, at) => {
                 fits += 1;
                 enqueue(workspace, device, queue, log, id, class, at);
@@ -649,7 +654,7 @@ fn queue_all(
             Bound::Full(class) => {
                 fits += 1;
                 log.say(format!(
-                    "“{name}” is waiting for nowhere: no slot of {} has been read and found free.",
+                    "“{name}” was not queued: no slot of {} is both read and still free.",
                     device.state.folder_name(class)
                 ));
             }
@@ -1050,6 +1055,74 @@ mod tests {
         );
     }
 
+    /// A set of assets that came off no slot lands on distinct free slots in address
+    /// order — the gaps a walk found, skipping what is already waiting — and the one
+    /// past the last free slot is refused by folder rather than dropped.
+    #[test]
+    fn a_queued_set_walks_down_the_free_slots_and_names_the_folder_that_runs_out() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        // Four gaps among the residents, and one of them is already spoken for.
+        device.pretend_scanned(class, 7, &["", "Africa Split", "", "", "Squabble B", ""]);
+
+        let bytes = program(&mut workspace, &mut log);
+        let ids: Vec<u64> = (0..5)
+            .map(|n| {
+                workspace.ingest(
+                    format!("sound {n}.ne5p"),
+                    Origin::File(format!("sound {n}.ne5p")),
+                    bytes.clone(),
+                    &mut log,
+                )
+            })
+            .collect();
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            ids[0],
+            class,
+            at(2),
+        );
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            bulk(
+                Bulk::Queue,
+                &ids[1..]
+                    .iter()
+                    .copied()
+                    .map(Item::Local)
+                    .collect::<Vec<_>>(),
+            ),
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        let landed: Vec<(u64, u32)> = queue
+            .entries()
+            .iter()
+            .map(|held| (held.id, held.at.slot))
+            .collect();
+        assert_eq!(
+            landed,
+            vec![(ids[0], 2), (ids[1], 0), (ids[2], 3), (ids[3], 5)],
+            "each takes the next free slot, and 7:3 was already waiting"
+        );
+        assert!(!queue.holds(ids[4]), "the free slots ran out before it");
+        let said = log.transcript();
+        assert!(
+            said.contains("“sound 4.ne5p” was not queued: no slot of Programs"),
+            "{said}"
+        );
+    }
+
     /// A mixed set queues what the instrument takes, leaves out what it does not, and
     /// says how much of the set that was.
     #[test]
@@ -1225,7 +1298,7 @@ mod tests {
         assert!(queue.is_empty());
         assert!(
             log.transcript()
-                .contains("no slot of Programs has been read and found free"),
+                .contains("no slot of Programs is both read and still free"),
             "{}",
             log.transcript()
         );
