@@ -15,6 +15,28 @@ use nord_usb::{Location, ObjectClass};
 const KEY: &str = "drawbar.this_computer";
 const VERSION: &str = "drawbar 2";
 
+/// How many fields a line holds, which is the whole of what a version decides.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// `drawbar 1`: id, origin, name, bytes. The bytes are both what the asset holds
+    /// and what it was last saved as, because that version knew of no other.
+    Four,
+    /// `drawbar 2`: those, and — where an edit is unsaved — the bytes it holds instead.
+    Five,
+}
+
+impl Shape {
+    /// The shape a version line asks for. A version this build does not know has none,
+    /// and its store is left alone rather than half-read.
+    fn of(version: &str) -> Option<Shape> {
+        match version {
+            "drawbar 1" => Some(Shape::Four),
+            VERSION => Some(Shape::Five),
+            _ => None,
+        }
+    }
+}
+
 /// The largest asset worth keeping.
 ///
 /// ⚠️ A browser gives an origin about 5 MiB for everything it stores, and base64 costs a
@@ -107,17 +129,17 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
         return;
     };
     let mut lines = text.lines();
-    if lines.next() != Some(VERSION) {
+    let Some(shape) = lines.next().and_then(Shape::of) else {
         // A store this build cannot read is left alone rather than half-read: the next
         // save replaces it.
         log.warn("the saved list is in a format this build does not read");
         return;
-    }
+    };
     let next_id = lines.next().and_then(|line| line.parse().ok());
     let mut restored = Vec::new();
     let mut unreadable = 0;
     for line in lines {
-        match entry(line) {
+        match entry(line, shape) {
             Some(saved) => restored.push(saved),
             None => unreadable += 1,
         }
@@ -135,15 +157,16 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
     }
 }
 
-fn entry(line: &str) -> Option<Saved> {
+fn entry(line: &str, shape: Shape) -> Option<Saved> {
     let mut parts = line.splitn(5, '\t');
     let id = parts.next()?.parse().ok()?;
     let origin = unorigin(parts.next()?)?;
     let name = unescape(parts.next()?);
     let saved = base64::decode(parts.next()?)?;
-    let unsaved = match parts.next() {
-        Some(text) => Some(base64::decode(text)?),
-        None => None,
+    let unsaved = match (shape, parts.next()) {
+        (_, None) => None,
+        (Shape::Five, Some(text)) => Some(base64::decode(text)?),
+        (Shape::Four, Some(_)) => return None,
     };
     Some(Saved {
         id,
@@ -445,19 +468,55 @@ mod tests {
     /// A line that is not a line is dropped, not guessed at.
     #[test]
     fn a_damaged_line_is_refused() {
-        assert!(entry("").is_none());
-        assert!(entry("7\tfresh\tname").is_none(), "no bytes");
+        let read = |line| entry(line, Shape::Five);
+        assert!(read("").is_none());
+        assert!(read("7\tfresh\tname").is_none(), "no bytes");
         assert!(
-            entry("7\tfresh\tname\tZm9v\t!!!").is_none(),
+            read("7\tfresh\tname\tZm9v\t!!!").is_none(),
             "the tail is not base64"
         );
         assert!(
-            entry("7\tfresh\tname\tZm9v\tYmFy").is_some(),
+            read("7\tfresh\tname\tZm9v\tYmFy").is_some(),
             "saved, and a tail"
         );
-        assert!(entry("seven\tfresh\tname\tZm9v").is_none(), "no id");
-        assert!(entry("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
-        assert!(entry("7\tfresh\tname\t!!!").is_none(), "not base64");
-        assert!(entry("7\tfresh\tname\tZm9v").is_some());
+        assert!(read("seven\tfresh\tname\tZm9v").is_none(), "no id");
+        assert!(read("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
+        assert!(read("7\tfresh\tname\t!!!").is_none(), "not base64");
+        assert!(read("7\tfresh\tname\tZm9v").is_some());
+        // A version-1 line is four fields, and a fifth is a line this is not.
+        assert!(entry("7\tfresh\tname\tZm9v", Shape::Four).is_some());
+        assert!(entry("7\tfresh\tname\tZm9v\tYmFy", Shape::Four).is_none());
+    }
+
+    /// A list the version before this one wrote is read rather than thrown away: its
+    /// four fields are an asset holding exactly what it was last saved as.
+    #[test]
+    fn a_version_1_store_comes_back_kept_and_saved() {
+        use crate::workspace::Fresh;
+
+        let (mut before, mut log) = workspace();
+        let id = before.create(Fresh::Program, &mut log).unwrap();
+        let bytes = before.get(id).unwrap().bytes.clone();
+
+        let mut store = Fake::default();
+        eframe::Storage::set_string(
+            &mut store,
+            KEY,
+            format!(
+                "drawbar 1\n8\n7\tfile:Africa Split.ne5p\tAfrica Split.ne5p\t{}\n",
+                base64::encode(&bytes)
+            ),
+        );
+
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        let restored = after.get(7).expect("the line's own id");
+        assert_eq!(restored.name, "Africa Split.ne5p");
+        assert_eq!(restored.bytes, bytes);
+        assert_eq!(restored.saved.bytes, bytes, "there was no other copy");
+        assert!(!restored.is_unsaved());
+        assert!(restored.kept);
+        assert!(matches!(restored.verify, crate::workspace::VerifyState::Ok));
     }
 }
