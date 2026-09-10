@@ -7,11 +7,10 @@ use eframe::egui;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use super::{classify, https, plain, Commit, Line};
-use crate::app::{bold, warn};
+use super::{classify, https, link, plain, title, Commit, Line, GAP, VERSION, WIDTH};
+use crate::about::RELEASES;
+use crate::app::warn;
 use crate::icon::{icon, Glyph};
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Which version's notes have already been read.
 ///
@@ -26,21 +25,20 @@ const TAG: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
-const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
-
 /// The most note text that is shown. A body past this is refused rather than cut: half a
 /// note reads as a whole one.
 const MOST: usize = 64 * 1024;
 
-/// How wide the modal is, and the most of it the notes may claim.
-const WIDTH: f32 = 560.0;
+/// The most of the modal the notes may claim.
 const NOTES: f32 = 320.0;
 
-/// The alert beside the notice, and the room between a bullet and its words.
+/// The alert beside the notice.
 const GLYPH: f32 = 14.0;
-const GAP: f32 = 4.0;
 
 enum Notes {
+    /// Nobody has asked for them: this version's notice was read in an earlier session
+    /// and Help has not reopened it.
+    Unasked,
     Loading,
     Read {
         body: String,
@@ -54,21 +52,37 @@ pub struct Splash {
     showing: bool,
     notes: Notes,
     inbox: Receiver<Notes>,
+    outbox: Sender<Notes>,
 }
 
 impl Splash {
     /// Open on the notice unless this version's notes have already been read.
     pub fn new(ctx: &egui::Context) -> Splash {
         let showing = seen().as_deref() != Some(VERSION);
-        let (sender, inbox) = channel();
-        if showing {
-            fetch(ctx.clone(), sender);
-        }
+        let (outbox, inbox) = channel();
+        let notes = match showing {
+            true => {
+                fetch(ctx.clone(), outbox.clone());
+                Notes::Loading
+            }
+            false => Notes::Unasked,
+        };
         Splash {
             showing,
-            notes: Notes::Loading,
+            notes,
             inbox,
+            outbox,
         }
+    }
+
+    /// Show the notice again, reading the notes unless they are in hand or on the way.
+    pub fn open(&mut self, ctx: &egui::Context) {
+        self.showing = true;
+        if matches!(self.notes, Notes::Loading | Notes::Read { .. }) {
+            return;
+        }
+        self.notes = Notes::Loading;
+        fetch(ctx.clone(), self.outbox.clone());
     }
 
     /// Draw the notice, if it is owed, and record the version once it is dismissed.
@@ -91,9 +105,7 @@ impl Splash {
     /// Returns whether the reader is done with it.
     fn body(&self, ui: &mut egui::Ui) -> bool {
         ui.set_width(WIDTH);
-        ui.label(
-            egui::RichText::new(format!("drawbar {VERSION}")).font(egui::FontId::new(18.0, bold())),
-        );
+        title(ui);
         ui.add_space(GAP);
         ui.horizontal(|ui| {
             let tint = warn(ui.visuals());
@@ -120,7 +132,7 @@ impl Splash {
     fn paint_notes(&self, ui: &mut egui::Ui) {
         ui.add_space(GAP);
         match &self.notes {
-            Notes::Loading => {
+            Notes::Unasked | Notes::Loading => {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(egui::RichText::new("Reading the release notes…").weak());
@@ -185,12 +197,6 @@ fn bullet(ui: &mut egui::Ui, scope: Option<&str>, text: &str, commit: Option<Com
             );
         }
     });
-}
-
-/// ⚠️ Always a new tab: the app is the page, and following a link in place ends the
-/// session and everything unsaved in it.
-fn link(ui: &mut egui::Ui, label: &str, url: &str) {
-    ui.add(egui::Hyperlink::from_label_and_url(label, url).open_in_new_tab(true));
 }
 
 /// Read the notes off GitHub and hand them to whichever frame draws next.

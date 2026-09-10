@@ -167,6 +167,8 @@ pub struct DrawbarApp {
     pub(crate) theme: ThemeChoice,
     #[cfg(target_arch = "wasm32")]
     splash: crate::splash::Splash,
+    /// Whether the About box is showing. Not kept between sessions.
+    pub(crate) about_open: bool,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last caught up, on egui's own clock.
@@ -207,6 +209,7 @@ impl DrawbarApp {
             theme,
             #[cfg(target_arch = "wasm32")]
             splash: crate::splash::Splash::new(&cc.egui_ctx),
+            about_open: false,
             saved: 0,
             saved_at: 0.0,
             left: crate::store::Left::default(),
@@ -268,6 +271,19 @@ impl DrawbarApp {
         if let Some(draft) = self.workspace.draft_mut() {
             draft.add(joining);
         }
+    }
+
+    /// What changed in the version running: the notice again in a tab, where the notes
+    /// can be fetched; the release they were published on in a window, where they cannot.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
+        self.splash.open(ctx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
+        let page = crate::about::release_page(crate::splash::VERSION);
+        ctx.open_url(egui::OpenUrl::new_tab(page));
     }
 
     /// Persist changes from their own frame; an idle egui window may not repaint.
@@ -368,6 +384,7 @@ impl eframe::App for DrawbarApp {
         }
         #[cfg(target_arch = "wasm32")]
         self.splash.show(ctx);
+        crate::about::dialog(ctx, &mut self.about_open);
 
         // Before the panels, so an editor open in this frame still has the focus Escape
         // belongs to.
