@@ -195,6 +195,53 @@ impl Bulk {
     }
 }
 
+/// What the attached instrument makes of a checked set: how many of it it would take,
+/// and the sentence it refuses the rest with.
+///
+/// ⚠️ Only what is on this computer is counted. A slot is on the instrument by having
+/// got there, and nothing here would write it back.
+pub struct Fits {
+    pub takes: usize,
+    pub of: usize,
+    /// Why the ones it will not take are refused — the first refusal's own words, which
+    /// is the one a hover over a dead control shows.
+    pub why: Option<String>,
+}
+
+impl Fits {
+    /// What the Queue control is labelled with: its own words, or the count once the
+    /// instrument has refused some of the set.
+    pub fn label(&self) -> String {
+        match self.takes < self.of {
+            true => format!("Queue {} of {}", self.takes, self.of),
+            false => Bulk::Queue.label().to_string(),
+        }
+    }
+}
+
+/// What the instrument makes of a checked set, from [`fit`] over each of its locals.
+pub fn fits(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Fits {
+    let mut held = Fits {
+        takes: 0,
+        of: 0,
+        why: None,
+    };
+    let locals = checked
+        .iter()
+        .copied()
+        .filter_map(Item::local)
+        .filter_map(|id| workspace.get(id));
+    for entity in locals {
+        held.of += 1;
+        let verdict = fit(state, entity);
+        match verdict.allowed() {
+            true => held.takes += 1,
+            false => held.why = held.why.or_else(|| verdict.why().map(str::to_string)),
+        }
+    }
+    held
+}
+
 /// What one of those asks for over everything checked.
 ///
 /// [`Bulk::Tag`] answers with the ids a tag would hang on rather than with acts: which
@@ -1050,6 +1097,28 @@ mod tests {
         let said = log.transcript();
         assert!(said.contains("1 of 2 fit the Nord Electro 5"), "{said}");
         assert!(said.contains("Stage 4"), "{said}");
+
+        // And the control offering it says as much before it is clicked: the count in
+        // its label, and the instrument's own refusal for the one it would leave out.
+        let checked = [Item::Local(mine), Item::Local(stage)];
+        let held = fits(&checked, &workspace, &device.state);
+        assert_eq!(held.label(), "Queue 1 of 2");
+        assert!(held
+            .why
+            .as_deref()
+            .is_some_and(|why| why.contains("Stage 4")));
+
+        // Nothing it takes: dead, and the hover is the instrument's reason rather than
+        // the checked set's.
+        let refused = fits(&[Item::Local(stage)], &workspace, &device.state);
+        assert_eq!(refused.takes, 0);
+        assert_eq!(refused.label(), "Queue 0 of 1");
+        assert!(refused.why.is_some());
+
+        // Everything it takes: its own words, and no reason to show.
+        let taken = fits(&[Item::Local(mine)], &workspace, &device.state);
+        assert_eq!(taken.label(), Bulk::Queue.label());
+        assert_eq!(taken.why, None);
     }
 
     /// ⚠️ A refused asset never gets an entry, however it was aimed: the queue is what a

@@ -546,13 +546,17 @@ impl Browser {
     /// One of the things that can be asked of everything checked, drawn the same in the
     /// library's footer and in a checked row's own menu.
     ///
-    /// A dead control is one the checked set gives nothing to do. Deleting asks first,
-    /// once, for the whole set.
+    /// A dead control is one the checked set gives nothing to do, and the hover over it
+    /// says which of the two reasons that is: nothing of the right sort is checked, or
+    /// the attached instrument refuses every one that is. Deleting asks first, once, for
+    /// the whole set.
     pub(crate) fn bulk_item(
         &mut self,
         ui: &mut egui::Ui,
         action: Bulk,
         checked: &[Item],
+        workspace: &Workspace,
+        state: &DeviceState,
         acts: &mut Vec<Act>,
     ) {
         if action == Bulk::Tag {
@@ -565,11 +569,25 @@ impl Browser {
             return;
         }
         let wanted = bulk(action, checked);
-        if !ui
-            .add_enabled(!wanted.is_empty(), egui::Button::new(action.label()))
-            .on_disabled_hover_text(action.nothing())
-            .clicked()
-        {
+        // ⚠️ Only a queue asks the instrument's opinion. Everything else here happens on
+        // this computer, where a file that is another instrument's is still a file.
+        let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
+        let label = match &fits {
+            Some(fits) => fits.label(),
+            None => action.label().to_string(),
+        };
+        let live = !wanted.is_empty() && fits.as_ref().is_none_or(|fits| fits.takes > 0);
+        let dead = fits
+            .and_then(|fits| fits.why)
+            .unwrap_or_else(|| action.nothing().to_string());
+        let mut button = ui
+            .add_enabled(live, egui::Button::new(label))
+            .on_disabled_hover_text(dead);
+        if action == Bulk::Queue {
+            button = button
+                .on_hover_text("to the slot it is linked to, or the first free one in its folder");
+        }
+        if !button.clicked() {
             return;
         }
         match action {

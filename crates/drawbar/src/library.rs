@@ -719,7 +719,15 @@ impl Library {
                 .resizable(false)
                 .frame(egui::Frame::new())
                 .show_inside(ui, |ui| {
-                    footer(ui, &picked, browser, &device.state, queue, &mut acts)
+                    footer(
+                        ui,
+                        &picked,
+                        browser,
+                        workspace,
+                        &device.state,
+                        queue,
+                        &mut acts,
+                    )
                 });
         }
         self.table(ui, &held, browser, workspace, device, queue, &mut acts);
@@ -1251,10 +1259,12 @@ fn worn(row: &Row, tags: &Tags) -> Vec<String> {
 
 /// The strip under the table: what is checked, what sending it would do, and everything
 /// that can be asked of the whole set.
+#[allow(clippy::too_many_arguments)]
 fn footer(
     ui: &mut egui::Ui,
     picked: &[&Row],
     browser: &mut Browser,
+    workspace: &Workspace,
     device: &DeviceState,
     queue: &Queue,
     acts: &mut Vec<Act>,
@@ -1296,7 +1306,7 @@ fn footer(
                     // Backwards: the strip runs right to left, so [`Bulk::ALL`]'s first
                     // action has to be drawn last to sit furthest left.
                     for action in Bulk::ALL.iter().rev() {
-                        browser.bulk_item(ui, *action, &checked, acts);
+                        browser.bulk_item(ui, *action, &checked, workspace, device, acts);
                     }
                 });
             });

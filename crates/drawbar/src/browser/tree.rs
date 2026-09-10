@@ -585,12 +585,12 @@ impl Browser {
         let checked: Vec<Item> = self.selection.items().collect();
         if checked.len() > 1 && self.selection.holds(item) {
             for action in Bulk::ALL {
-                self.bulk_item(ui, action, &checked, acts);
+                self.bulk_item(ui, action, &checked, workspace, &device.state, acts);
             }
             return;
         }
         match item {
-            Item::Local(id) => self.local_menu(ui, id, workspace, acts),
+            Item::Local(id) => self.local_menu(ui, id, workspace, device, acts),
             Item::Slot { class, at } => self.slot_menu(ui, class, at, device, acts),
             Item::Folder(_) | Item::Tag(_) => {}
         }
@@ -601,6 +601,7 @@ impl Browser {
         ui: &mut egui::Ui,
         id: u64,
         workspace: &Workspace,
+        device: &Device,
         acts: &mut Vec<Act>,
     ) {
         let Some(entity) = workspace.get(id) else {
@@ -612,14 +613,7 @@ impl Browser {
             acts.push(Act::Open(item));
             ui.close();
         }
-        if ui
-            .button(Bulk::Queue.label())
-            .on_hover_text("to the slot it is linked to, or the first free one in its folder")
-            .clicked()
-        {
-            acts.push(Act::SendChecked(vec![id]));
-            ui.close();
-        }
+        self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
         if ui.button("Export…").clicked() {
             acts.push(Act::Export(id));
             ui.close();
