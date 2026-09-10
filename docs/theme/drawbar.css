@@ -65,7 +65,12 @@ html.light, html.rust, html.coal, html.navy, html.ayu,
   --sidebar-active: var(--db-accent);
   --sidebar-header-border-color: var(--db-rule);
   --sidebar-spacer: var(--db-rule);
-  --sidebar-target-width: 17rem;
+  /* Holds the longest chapter title on one line when it is active and bold,
+     with room to spare for a non-overlay scrollbar. */
+  --sidebar-target-width: 30rem;
+  /* mdBook reserves this strip between the sidebar and the page wrapper; at 0
+     the sidebar's border meets the menu bar's. */
+  --sidebar-resize-indicator-width: 0px;
 
   --scrollbar: var(--db-unlit);
 
@@ -293,12 +298,18 @@ kbd,
 .sidebar .sidebar-scrollbox {
   padding: 1.2rem 1rem 3rem;
 }
+/* chrome.css sizes the drag target from the indicator width zeroed above,
+   which would leave no handle; it now grips the sidebar's inner edge. */
+html.js .sidebar .sidebar-resize-handle {
+  width: 6px;
+}
 .chapter li.chapter-item {
   line-height: 1.45;
   margin: 0;
   padding: 0.15rem 0;
 }
 .chapter li a {
+  flex: 1;
   padding: 0.35rem 0.6rem;
   border-radius: var(--db-radius);
   font-size: 1.45rem;
@@ -309,8 +320,7 @@ kbd,
 }
 .chapter li a.active {
   background: var(--db-faint-bg);
-  border-left: 2px solid var(--db-accent);
-  padding-left: calc(0.6rem - 2px);
+  color: var(--db-ink-strong);
   font-weight: 700;
 }
 .chapter li.part-title {
