@@ -791,7 +791,7 @@ pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, L
         .and_then(|crc| holding(state, class, crc).next());
     match by_body {
         Some(at) => Some((class, at)),
-        None => edited(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
+        None => stands(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
     }
 }
 
@@ -875,15 +875,22 @@ fn holding(
 }
 
 /// The link an asset keeps when no slot holds its bytes any more: an edit here moved
-/// them, and where it was matched to is still where it was matched to.
+/// them, or [`Workspace::landed`] wrote them there, and where it stands is still where
+/// it stands.
 ///
-/// ⚠️ Only while that slot still reports a checksum of its own. A slot found vacant
-/// holds nothing to point at, and a folder that stopped reporting checksums says nothing
-/// about what its slots hold.
-fn edited(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
+/// Whatever the slot holds now, and whether or not it reports a checksum of its own — a
+/// slot this app has just written is holding what it was given.
+///
+/// ⚠️ Until a walk says otherwise. A slot found vacant holds nothing to point at. A bank
+/// no walk has reached is silence rather than an answer, which is what a write must
+/// outlive: [`Device::dispatch`] drops the bank it is about to change, and the read that
+/// fills it in again lands long after the write does.
+fn stands(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     let (class, at) = entity.link?;
-    let info = state.slot(class, at).flatten()?;
-    info.crc32.is_some().then_some((class, at))
+    match state.slot(class, at) {
+        Some(None) => None,
+        Some(Some(_)) | None => Some((class, at)),
+    }
 }
 
 /// Whether the browser offers to change a class at all.
@@ -1214,6 +1221,50 @@ impl Device {
         workspace.relink(|entity| link(state, entity));
     }
 
+    /// Drop everything the last instrument said, the links included.
+    ///
+    /// A link is a fact about an attached instrument. With none attached, or another one
+    /// in its place, there is nothing for an asset to stand on until a walk says so —
+    /// and an empty cache alone does not say that, or a write would unlink what it just
+    /// wrote.
+    fn forget(&mut self, workspace: &mut Workspace) {
+        self.state.forget_everything();
+        workspace.relink(|_| None);
+    }
+
+    /// Say in the log where a slot just read holds a body the asset standing on it was
+    /// not saved as.
+    ///
+    /// Once per asset per read of its bank. Two checksums and an address are protocol
+    /// detail: what the user reads is the row's own sign.
+    fn disagreements(&self, class: ObjectClass, bank: u32, workspace: &Workspace, log: &mut Log) {
+        for entity in workspace.listed() {
+            let Some(at) = entity
+                .link
+                .filter(|(held, at)| *held == class && at.bank + 1 == bank)
+                .map(|(_, at)| at)
+            else {
+                continue;
+            };
+            let (Some(here), Some(there)) = (
+                entity.saved.crc32,
+                self.state
+                    .slot(class, at)
+                    .flatten()
+                    .and_then(|info| info.crc32),
+            ) else {
+                continue;
+            };
+            if here != there {
+                log.info(format!(
+                    "{} reports crc32 {there:#010x}; “{}” is saved as {here:#010x}",
+                    place(class, at),
+                    entity.name
+                ));
+            }
+        }
+    }
+
     /// Drain the worker's events into the cache, the local list and the tabs. Call once
     /// a frame.
     pub fn poll(
@@ -1233,7 +1284,7 @@ impl Device {
                     ));
                     log.say(format!("{} is attached.", card.product));
                     self.state.connection = Connection::Connected(card);
-                    self.state.forget_everything();
+                    self.forget(workspace);
                     self.pending.clear();
                 }
                 DeviceEvent::ConnectFailed(why) => {
@@ -1249,7 +1300,7 @@ impl Device {
                     }
                     self.state.connection = Connection::Disconnected;
                     self.state.in_flight = None;
-                    self.state.forget_everything();
+                    self.forget(workspace);
                     self.pending.clear();
                     self.reading = None;
                     self.rescan.clear();
@@ -1301,6 +1352,7 @@ impl Device {
                     }
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
+                    self.disagreements(class, bank, workspace, log);
                 }
                 DeviceEvent::SlotInfo { at, info, .. } => {
                     self.state.detail = Detail {
@@ -1360,12 +1412,12 @@ impl Device {
                     ));
                     workspace.ingest(name, Origin::Rescued { at }, bytes, log);
                 }
-                // It landed, so it is no longer owed, and what landed is what it is
-                // saved as. Only that object: the rest of a batch is still waiting on
-                // its own write.
-                DeviceEvent::Sent { id, .. } => {
+                // It landed, so it is no longer owed; what landed is what it is saved as,
+                // and the slot it landed in is where it stands. Only that object: the
+                // rest of a batch is still waiting on its own write.
+                DeviceEvent::Sent { id, class, at } => {
                     queue.forget(id);
-                    workspace.mark_saved(id);
+                    workspace.landed(id, class, at);
                 }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
@@ -1770,10 +1822,13 @@ mod tests {
             Some((ObjectClass::Program, Location { bank: 6, slot: 1 }))
         );
 
+        // The same folder, read again and reporting no checksum for what it holds. The
+        // name over those bytes is not evidence that they are these.
         device.pretend_scanned(ObjectClass::Program, 7, &["", "Africa Split"]);
+        let (fresh, _) = program(&mut workspace, &mut log, Origin::Fresh);
         device.relink(&mut workspace);
         assert_eq!(
-            workspace.get(id).unwrap().link,
+            workspace.get(fresh).unwrap().link,
             None,
             "a folder reporting no checksum links nothing"
         );
@@ -1940,8 +1995,9 @@ mod tests {
 
         // Two slots are not a singleton, so nothing about settings is decided by one.
         device.pretend_scanned(ObjectClass::Settings, 1, &["Settings", "Settings 2"]);
+        let second = workspace.ingest("Settings".into(), Origin::Fresh, bytes, &mut log);
         device.relink(&mut workspace);
-        assert_eq!(workspace.get(settings).unwrap().link, None);
+        assert_eq!(workspace.get(second).unwrap().link, None);
     }
 
     /// A link is derived from the scan cache, so a walk makes one and the instrument
@@ -1979,6 +2035,113 @@ mod tests {
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         assert_eq!(workspace.get(id).unwrap().link, None);
         assert!(workspace.get(id).is_some(), "the asset itself stays");
+    }
+
+    /// A write is the strongest evidence there is about where an asset stands: this app
+    /// put the bytes there. What the read after it reports decides the sign the row
+    /// wears, and cannot decide that the asset stands nowhere.
+    #[test]
+    fn a_send_lands_its_asset_on_the_slot_it_wrote() {
+        /// What the read after the write reports for the slot.
+        enum Rescan {
+            /// Nothing read the bank again, which is where a write leaves it.
+            Skipped,
+            Same,
+            Other,
+            /// A slot that reports no checksum for what it holds.
+            Silent,
+        }
+
+        let class = ObjectClass::Program;
+        let at = Location { bank: 4, slot: 2 };
+        let visuals = egui::Visuals::dark();
+        let sent = |rescan: Rescan| {
+            let ctx = egui::Context::default();
+            let mut workspace = Workspace::new(ctx.clone());
+            let mut device = Device::new(ctx);
+            let mut log = Log::default();
+            let mut tabs = Tabs::default();
+            let mut queue = Queue::default();
+            let origin = Origin::File("Africa-Split.ne5p".into());
+            let (id, crc) = program(&mut workspace, &mut log, origin);
+            device.pretend_attached();
+
+            device.pretend(DeviceEvent::Sent { id, class, at });
+            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+            let reported = match rescan {
+                Rescan::Skipped => None,
+                Rescan::Same => Some(Some(crc)),
+                Rescan::Other => Some(Some(crc ^ 1)),
+                Rescan::Silent => Some(None),
+            };
+            if let Some(crc32) = reported {
+                device.pretend(DeviceEvent::BankScanned {
+                    class,
+                    bank: at.bank + 1,
+                    slots: vec![
+                        None,
+                        None,
+                        Some(ProgramInfo {
+                            location: at,
+                            body_len: 121,
+                            format: "ne5p".into(),
+                            version: 4,
+                            crc32,
+                            name: "Africa Split".into(),
+                        }),
+                    ],
+                });
+                device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+            }
+            // A second frame with nothing to report: the log is not a per-frame render.
+            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+            let entity = workspace.get(id).expect("it is on the list");
+            (
+                entity.link,
+                crate::library::keyboard_mark(entity, &device.state, &queue, &visuals),
+                log.transcript(),
+                crc,
+            )
+        };
+        let (good, warn) = (crate::app::good(&visuals), crate::app::warn(&visuals));
+        let there = Some((class, at));
+
+        let (link, mark, said, _) = sent(Rescan::Same);
+        assert_eq!(link, there);
+        assert_eq!(mark, Some(good));
+        assert!(!said.contains("crc32"), "the two agree: {said}");
+
+        let (link, mark, said, crc) = sent(Rescan::Other);
+        assert_eq!(
+            link, there,
+            "it is where it was written, holding what it holds"
+        );
+        assert_eq!(mark, Some(warn));
+        assert!(
+            said.contains(&format!(
+                "Programs 5:3 reports crc32 {:#010x}; “Africa-Split.ne5p” is saved as \
+                 {crc:#010x}",
+                crc ^ 1
+            )),
+            "{said}"
+        );
+        assert_eq!(
+            said.matches("reports crc32").count(),
+            1,
+            "once, on the read"
+        );
+
+        let (link, mark, _, _) = sent(Rescan::Silent);
+        assert_eq!(link, there);
+        assert_eq!(
+            mark,
+            Some(good),
+            "this app wrote those bytes and the slot reports as many"
+        );
+
+        let (link, _, _, _) = sent(Rescan::Skipped);
+        assert_eq!(link, there, "a bank nothing has read says neither way");
     }
 
     /// A library id resolves to a name only where the instrument has actually said so:

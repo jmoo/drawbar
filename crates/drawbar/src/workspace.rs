@@ -966,6 +966,19 @@ impl Workspace {
         self.revision += 1;
     }
 
+    /// It reached a slot: those bytes are what it is saved as, and that slot is where it
+    /// stands.
+    ///
+    /// ⚠️ The one place a link is set rather than derived. A write is the only evidence
+    /// about a slot this app does not have to read back, and [`crate::device::link`]
+    /// keeps it until a walk of that slot says otherwise.
+    pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location) {
+        self.mark_saved(id);
+        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+            entity.link = Some((class, at));
+        }
+    }
+
     /// Swap in re-encoded bytes, keeping the entity's identity.
     ///
     /// The decode and the verify are re-run: an editor's output is bytes like any other,

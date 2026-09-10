@@ -374,11 +374,31 @@ pub fn agrees(entity: &LocalEntity, info: &ProgramInfo, queue: &Queue) -> Option
     if let (Some(here), Some(there)) = (entity.saved.crc32, info.crc32) {
         return Some(here == there);
     }
+    if info.crc32.is_none() && fills(entity, info) {
+        return Some(true);
+    }
     match queue.entry(entity.id).map(|held| &held.diff) {
         Some(Diff::Identical) => Some(true),
         Some(Diff::Fields(_) | Diff::Bytes { .. }) => Some(false),
         _ => None,
     }
+}
+
+/// Whether `info` is the slot this asset is linked to, holding a body of the asset's own
+/// length.
+///
+/// The one thing a slot reporting no checksum can still be compared on, and enough where
+/// the link is a write this app made: those are the bytes it put there, and the slot
+/// reports as many.
+///
+/// ⚠️ `info` is always the slot its caller resolved from this asset's own link, so the
+/// address is the whole of the comparison.
+fn fills(entity: &LocalEntity, info: &ProgramInfo) -> bool {
+    entity.link.is_some_and(|(_, at)| at == info.location)
+        && entity
+            .container
+            .as_ref()
+            .is_some_and(|held| held.body_len == u64::from(info.body_len))
 }
 
 /// The mark a local row wears at its right end: what the attached instrument holds where
