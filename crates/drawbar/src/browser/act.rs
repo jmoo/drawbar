@@ -60,8 +60,6 @@ pub enum Act {
         id: u64,
         folder: Option<u64>,
     },
-    /// Queue every sendable asset in a folder for the slot it came off.
-    SendFolder(u64),
     /// Queue every one of these assets for the slot it came off. One with none is
     /// skipped, and the log says how many were.
     SendChecked(Vec<u64>),
@@ -363,15 +361,6 @@ pub fn apply(
                         browser.start_rename(Item::Tag(tag), &name);
                     }
                 }
-            }
-            Act::SendFolder(id) => {
-                let members: Vec<u64> = browser
-                    .folders
-                    .members(id, workspace)
-                    .iter()
-                    .map(|entity| entity.id)
-                    .collect();
-                queue_all(workspace, device, queue, log, &members);
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
@@ -1480,10 +1469,16 @@ mod tests {
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(fresh, Some(folder));
 
+        let members: Vec<Item> = browser
+            .folders
+            .members(folder, &workspace)
+            .iter()
+            .map(|entity| Item::Local(entity.id))
+            .collect();
         apply(
             &mut browser,
             &mut Shell::default(),
-            vec![Act::SendFolder(folder)],
+            bulk(Bulk::Queue, &members),
             &mut workspace,
             &mut device,
             &mut tabs,

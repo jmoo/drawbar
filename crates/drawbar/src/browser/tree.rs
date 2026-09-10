@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::act::{owed, Act, Bulk};
+use super::act::{Act, Bulk};
 use super::drag::{kinds_present, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
@@ -18,15 +18,19 @@ use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
+use crate::shell::marked;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
 
-/// The New menu: every kind this app can build from nothing, and the project that is
-/// laid out from audio files rather than started from a default.
+/// The New menu: every kind this app can build from nothing, the project that is laid
+/// out from audio files rather than started from a default, and the folder that groups
+/// them once they exist.
 ///
-/// Written once, because the tree's context menu, the File menu, the toolbar and the tab
-/// strip all offer it and they must offer the same thing.
+/// ⚠️ Written once and offered whole. The tree's context menu, the File menu, the toolbar
+/// and the tab strip all say "New", and four menus of that name holding different things
+/// is four things to learn. Connecting an instrument is not one of them — it makes
+/// nothing on this computer — and lives on the tree's own instrument row.
 pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     for family in &Fresh::FAMILIES {
         ui.menu_button(family.label, |ui| {
@@ -54,6 +58,14 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         .clicked()
     {
         acts.push(Act::NewProject);
+        ui.close();
+    }
+    if ui
+        .button("New folder")
+        .on_hover_text("a way of grouping the list on this computer; the instrument never sees one")
+        .clicked()
+    {
+        acts.push(Act::NewFolder);
         ui.close();
     }
 }
@@ -178,10 +190,10 @@ impl Browser {
                 }
                 let kinds = kinds_present(workspace, &device.state);
                 if worth_choosing(&kinds) && section(ui, "kinds", &mut sections.kinds) {
-                    self.kinds(ui, &kinds, filter, acts);
+                    self.kinds(ui, &kinds, workspace, device, filter, acts);
                 }
                 if section(ui, "tags", &mut sections.tags) {
-                    self.tag_rows(ui, filter, acts);
+                    self.tag_rows(ui, workspace, device, filter, acts);
                 }
                 self.sections = sections;
                 self.empty_below(ui);
@@ -325,30 +337,15 @@ impl Browser {
                 false => narrow(acts, here),
             }
         }
-        let attached = device.state.connected();
+        let listed = Browser::standing_for(workspace, |_| true);
         drawn.response.context_menu(|ui| {
-            if ui.button("Open…").clicked() {
-                acts.push(Act::OpenFiles);
-                ui.close();
-            }
-            ui.menu_button("New", |ui| new_menu(ui, acts));
-            if ui
-                .button("New folder")
-                .on_hover_text(
-                    "a way of grouping the list on this computer; the instrument never sees one",
-                )
-                .clicked()
-            {
-                acts.push(Act::NewFolder);
-                ui.close();
-            }
-            if !attached {
-                ui.separator();
-                if ui.button("Connect instrument").clicked() {
-                    acts.push(Act::Connect);
+            self.set_menu(ui, &listed, workspace, device, acts, |_, ui, acts| {
+                if ui.button("Open…").clicked() {
+                    acts.push(Act::OpenFiles);
                     ui.close();
                 }
-            }
+                ui.menu_button("New", |ui| new_menu(ui, acts));
+            });
         });
     }
 
@@ -444,44 +441,22 @@ impl Browser {
                     }
                 }
             }
-            let sendable = members
-                .iter()
-                .filter_map(|id| workspace.get(*id))
-                .filter(|entity| owed(entity).is_some())
-                .count();
             drawn.response.context_menu(|ui| {
                 self.aim(item);
-                // ⚠️ Unlike "Send all", this includes unchanged slot-backed items. The
-                // count says which scope this is before the queue is added to.
-                if ui
-                    .add_enabled(
-                        sendable > 0,
-                        egui::Button::new(format!("Queue folder for the keyboard ({sendable})")),
-                    )
-                    .on_hover_text("everything in here that came off a slot, changed or not")
-                    .on_disabled_hover_text(
-                        "nothing in here came off a slot, so there is nowhere to send it back to",
-                    )
-                    .clicked()
-                {
-                    acts.push(Act::SendFolder(id));
-                    ui.close();
-                }
-                ui.add_enabled(false, egui::Button::new("Export as a bundle…"))
-                    .on_disabled_hover_text("bundles are not written yet");
-                ui.separator();
-                if ui.button("Rename").clicked() {
-                    self.start_rename(item, &name);
-                    ui.close();
-                }
-                if ui
-                    .button("Remove folder")
-                    .on_hover_text("what is in it goes back to the list; nothing is deleted")
-                    .clicked()
-                {
-                    acts.push(Act::RemoveFolder(id));
-                    ui.close();
-                }
+                self.set_menu(ui, &inside, workspace, device, acts, |browser, ui, acts| {
+                    if ui.button("Rename").clicked() {
+                        browser.start_rename(item, &name);
+                        ui.close();
+                    }
+                    if ui
+                        .button("Remove folder")
+                        .on_hover_text("what is in it goes back to the list; nothing is deleted")
+                        .clicked()
+                    {
+                        acts.push(Act::RemoveFolder(id));
+                        ui.close();
+                    }
+                });
             });
         }
 
@@ -564,6 +539,38 @@ impl Browser {
         }
 
         response.context_menu(|ui| self.menu(ui, item, workspace, device, acts));
+    }
+
+    /// The menu a row standing for a set of assets offers: what can be asked of the
+    /// whole set, then whatever can be asked of the row itself.
+    ///
+    /// One builder for the folder, tag, kind, place and class rows. They differ in which
+    /// assets they stand for and in what the row itself can be told to do; between those
+    /// two they offer the same things, dead for the same reasons and labelled the same
+    /// way.
+    fn set_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        members: &[Item],
+        workspace: &Workspace,
+        device: &Device,
+        acts: &mut Vec<Act>,
+        own: impl FnOnce(&mut Browser, &mut egui::Ui, &mut Vec<Act>),
+    ) {
+        for action in [Bulk::Queue, Bulk::Export] {
+            self.bulk_item(ui, action, members, workspace, &device.state, acts);
+        }
+        ui.separator();
+        own(self, ui, acts);
+    }
+
+    /// The assets on this computer a row stands for, in the order the list holds them.
+    fn standing_for(workspace: &Workspace, keep: impl Fn(&LocalEntity) -> bool) -> Vec<Item> {
+        workspace
+            .listed()
+            .filter(|entity| keep(entity))
+            .map(|entity| Item::Local(entity.id))
+            .collect()
     }
 
     /// The menu a row offers, wherever it is drawn — the tree, or the library table.
@@ -650,15 +657,11 @@ impl Browser {
         }
         ui.menu_button("Move to folder", |ui| {
             for folder in self.folders.all() {
-                if ui
-                    .selectable_label(filed == Some(folder.id), &folder.name)
-                    .clicked()
-                {
+                if marked(ui, &folder.name, filed == Some(folder.id), None) {
                     acts.push(Act::File {
                         id,
                         folder: Some(folder.id),
                     });
-                    ui.close();
                 }
             }
             ui.separator();
@@ -679,13 +682,12 @@ impl Browser {
     pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         for tag in self.tags.all() {
             let on = self.tags.on_all(picked, tag.id);
-            if ui.selectable_label(on, &tag.name).clicked() {
+            if marked(ui, &tag.name, on, None) {
                 let ids = picked.to_vec();
                 acts.push(match on {
                     true => Act::Untag { ids, tag: tag.id },
                     false => Act::Tag { ids, tag: tag.id },
                 });
-                ui.close();
             }
         }
         if !self.tags.all().is_empty() {
@@ -752,24 +754,29 @@ impl Browser {
             .filter_map(|class| device.state.scan.progress(class))
             .any(|progress| progress.running);
         let waiting = queue.len();
+        // What this row stands for on this computer: everything that came off a slot of
+        // the instrument it names.
+        let off_it = Browser::standing_for(workspace, |entity| entity.spot().is_some());
         drawn.response.context_menu(|ui| {
-            if ui
-                .add_enabled(!reading, egui::Button::new("Read everything again"))
-                .on_disabled_hover_text("already reading")
-                .clicked()
-            {
-                acts.push(Act::Resync);
-                ui.close();
-            }
-            if waiting > 0 && ui.button(format!("Send all ({waiting})")).clicked() {
-                acts.push(Act::AskSendAll);
-                ui.close();
-            }
-            ui.separator();
-            if ui.button("Disconnect").clicked() {
-                acts.push(Act::Disconnect);
-                ui.close();
-            }
+            self.set_menu(ui, &off_it, workspace, device, acts, |_, ui, acts| {
+                if ui
+                    .add_enabled(!reading, egui::Button::new("Read everything again"))
+                    .on_disabled_hover_text("already reading")
+                    .clicked()
+                {
+                    acts.push(Act::Resync);
+                    ui.close();
+                }
+                if waiting > 0 && ui.button(format!("Send all ({waiting})")).clicked() {
+                    acts.push(Act::AskSendAll);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Disconnect").clicked() {
+                    acts.push(Act::Disconnect);
+                    ui.close();
+                }
+            });
         });
 
         if !self.open.contains(&Branch::Instrument) {
@@ -837,25 +844,32 @@ impl Browser {
             }
         }
         let focus = device.state.focused(class);
+        let off_it = Browser::standing_for(workspace, |entity| {
+            entity.spot().is_some_and(|(held, _)| held == class)
+        });
         drawn.response.context_menu(|ui| {
-            if ui
-                .button("Read this folder again")
-                .on_hover_text("Read everything reads the whole instrument; this reads one folder")
-                .clicked()
-            {
-                acts.push(Act::ReadAgain(class));
-                ui.close();
-            }
-            if let Some(at) = focus {
+            self.set_menu(ui, &off_it, workspace, device, acts, |browser, ui, acts| {
                 if ui
-                    .button("Go to loaded")
-                    .on_hover_text(format!("the panel is on {}", shown(at)))
+                    .button("Read this folder again")
+                    .on_hover_text(
+                        "Read everything reads the whole instrument; this reads one folder",
+                    )
                     .clicked()
                 {
-                    self.jump = Some((class, at));
+                    acts.push(Act::ReadAgain(class));
                     ui.close();
                 }
-            }
+                if let Some(at) = focus {
+                    if ui
+                        .button("Go to loaded")
+                        .on_hover_text(format!("the panel is on {}", shown(at)))
+                        .clicked()
+                    {
+                        browser.jump = Some((class, at));
+                        ui.close();
+                    }
+                }
+            });
         });
 
         // ⚠️ A jump at a slot the walk has never reached would hold the branch open for
@@ -1124,7 +1138,15 @@ impl Browser {
 
     // ---- kinds and tags ---------------------------------------------------------
 
-    fn kinds(&mut self, ui: &mut egui::Ui, kinds: &[Kind], filter: &Filter, acts: &mut Vec<Act>) {
+    fn kinds(
+        &mut self,
+        ui: &mut egui::Ui,
+        kinds: &[Kind],
+        workspace: &Workspace,
+        device: &Device,
+        filter: &Filter,
+        acts: &mut Vec<Act>,
+    ) {
         for kind in kinds.iter().copied() {
             let asked = Narrow::Kind(kind);
             let drawn = row(
@@ -1140,10 +1162,22 @@ impl Browser {
             if drawn.response.clicked() {
                 narrow(acts, asked);
             }
+            let of_it =
+                Browser::standing_for(workspace, |entity| Kind::of(entity.entity.as_ref()) == kind);
+            drawn.response.context_menu(|ui| {
+                self.set_menu(ui, &of_it, workspace, device, acts, |_, _, _| {});
+            });
         }
     }
 
-    fn tag_rows(&mut self, ui: &mut egui::Ui, filter: &Filter, acts: &mut Vec<Act>) {
+    fn tag_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        device: &Device,
+        filter: &Filter,
+        acts: &mut Vec<Act>,
+    ) {
         for id in self.tag_ids() {
             let item = Item::Tag(id);
             let Some(name) = self.tags.name_of(id).map(str::to_string) else {
@@ -1170,19 +1204,31 @@ impl Browser {
             if drawn.response.clicked() {
                 narrow(acts, asked);
             }
+            let wearing =
+                Browser::standing_for(workspace, |entity| self.tags.worn(entity.id).contains(&id));
             drawn.response.context_menu(|ui| {
-                if ui.button("Rename").clicked() {
-                    self.start_rename(item, &name);
-                    ui.close();
-                }
-                if ui
-                    .button("Remove tag")
-                    .on_hover_text("it comes off everything wearing it; nothing is deleted")
-                    .clicked()
-                {
-                    acts.push(Act::RemoveTag(id));
-                    ui.close();
-                }
+                self.aim(item);
+                self.set_menu(
+                    ui,
+                    &wearing,
+                    workspace,
+                    device,
+                    acts,
+                    |browser, ui, acts| {
+                        if ui.button("Rename").clicked() {
+                            browser.start_rename(item, &name);
+                            ui.close();
+                        }
+                        if ui
+                            .button("Remove tag")
+                            .on_hover_text("it comes off everything wearing it; nothing is deleted")
+                            .clicked()
+                        {
+                            acts.push(Act::RemoveTag(id));
+                            ui.close();
+                        }
+                    },
+                );
             });
         }
         let drawn = row(

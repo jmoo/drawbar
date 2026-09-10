@@ -375,12 +375,13 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
-/// A menu item that also says whether what it names is showing.
+/// A menu item that also says whether what it names is on.
 ///
-/// ⚠️ A check at the left rather than a selected button: `Button::selected` fills the
-/// row with `selection.bg_fill`, which is the instrument's red and reads as a warning
-/// across a menu of ordinary items.
-fn marked(
+/// ⚠️ A check at the left rather than a selected button or a `selectable_label`: both
+/// fill the row with `selection.bg_fill`, which is the instrument's red and reads as a
+/// warning across a menu of ordinary items. **Every** checkable item in the app wears
+/// this, wherever its menu is drawn.
+pub fn marked(
     ui: &mut egui::Ui,
     label: &str,
     on: bool,
@@ -619,13 +620,7 @@ impl DrawbarApp {
         if item(ui, "Open…", Some(key::OPEN)) {
             acts.push(Act::OpenFiles);
         }
-        ui.menu_button("New", |ui| {
-            new_menu(ui, acts);
-            ui.separator();
-            if item(ui, "New folder", None) {
-                acts.push(Act::NewFolder);
-            }
-        });
+        ui.menu_button("New", |ui| new_menu(ui, acts));
         ui.separator();
         if let Some(id) = self.tabs.active() {
             if item(ui, "Save", Some(key::SAVE)) {
