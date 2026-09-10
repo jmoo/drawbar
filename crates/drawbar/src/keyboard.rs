@@ -576,6 +576,16 @@ fn list(
         .map(|(at, _)| Item::Slot { class, at: *at })
         .collect();
 
+    // The head and every row start where a row of the tree starts, so the whole grid
+    // moves together and the scroll bar stays at the panel's own edge.
+    let room = ui.available_rect_before_wrap();
+    let mut inset = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(room.with_min_x(room.left() + PAD))
+            .layout(*ui.layout()),
+    );
+    let ui = &mut inset;
+
     let body = ui.available_height() - HEAD;
     let scrolls = slots.len() as f32 * ROW > body;
     let bar = match scrolls {

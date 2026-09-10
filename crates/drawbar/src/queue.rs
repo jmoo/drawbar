@@ -629,6 +629,7 @@ fn diff(ui: &mut egui::Ui, held: &Queued) {
 /// The four column heads, and under them either the fields two bodies do not agree on or
 /// the one line every other shape of difference comes to.
 pub fn table(ui: &mut egui::Ui, held: &Queued) {
+    let ui = &mut inset(ui);
     let width = ui.available_width() - PAD;
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
     diff_head(ui, width, &tracks);
@@ -908,6 +909,18 @@ fn picker(
         }
     });
     picked
+}
+
+/// A grid inset from the left edge by the room its rows keep at the right, so the head
+/// and every row under it start where a row of the tree does. Taken here rather than in
+/// each cell, so the whole grid moves together.
+fn inset(ui: &mut egui::Ui) -> egui::Ui {
+    let room = ui.available_rect_before_wrap();
+    ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(room.with_min_x(room.left() + PAD))
+            .layout(*ui.layout()),
+    )
 }
 
 /// The diff's four columns: the field, what is here, the sign between them, and what

@@ -375,6 +375,18 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
+/// What a click on one of the bottom dock's page titles asks for.
+///
+/// ⚠️ The title of the page already showing shuts the dock. It is the only way out that
+/// is on the dock itself, and a title that answered a click by doing nothing reads as
+/// broken.
+fn page_click(page: Page, showing: bool) -> Act {
+    match showing {
+        true => Act::ToggleDock(Dock::Bottom),
+        false => Act::ShowPage(page),
+    }
+}
+
 /// A menu item that also says whether what it names is on.
 ///
 /// ⚠️ A check at the left rather than a selected button or a `selectable_label`: both
@@ -936,14 +948,19 @@ impl DrawbarApp {
                 acts.push(Act::ToggleDock(Dock::Bottom));
             }
             let ink = crate::app::caption(ui.visuals());
-            icon(ui, Glyph::GitCompareArrows, GLYPH, ink);
+            // ⚠️ The glyph is the queue's, so it goes with the queue. With nothing
+            // attached the log is the only page, and a compare mark over it names a
+            // page that is not there.
+            if self.attached() {
+                icon(ui, Glyph::GitCompareArrows, GLYPH, ink);
+            }
             for page in pages.iter().copied() {
                 let on = self.shell.dock_open && self.shell.page == page;
                 if ui
                     .selectable_label(on, caps(page.title()).color(ink))
                     .clicked()
                 {
-                    picked = Some(page);
+                    picked = Some(page_click(page, on));
                 }
             }
             // What the queue amounts to, wherever the dock is: the summary is the
@@ -979,9 +996,7 @@ impl DrawbarApp {
                 },
             );
         });
-        if let Some(page) = picked {
-            acts.push(Act::ShowPage(page));
-        }
+        acts.extend(picked);
         if clear {
             self.log.clear();
         }
@@ -1395,6 +1410,21 @@ mod tests {
         shell.dock_open = false;
         shell.show_page(Page::Log);
         assert!(shell.dock_open && shell.page == Page::Log);
+    }
+
+    /// ⚠️ The title of the page already showing is the way back out of the dock. A title
+    /// that answered a click by doing nothing reads as broken, and the collapse triangle
+    /// is 8 px of the header.
+    #[test]
+    fn the_title_of_the_page_showing_shuts_the_dock() {
+        assert!(matches!(
+            page_click(Page::Queue, true),
+            Act::ToggleDock(Dock::Bottom)
+        ));
+        assert!(matches!(
+            page_click(Page::Queue, false),
+            Act::ShowPage(Page::Queue)
+        ));
     }
 
     /// What was collapsed is collapsed again next session, on the page it was left on.
