@@ -28,5 +28,5 @@ drawbar reaches an instrument through WebUSB, which two browsers decline.
 > exclusively, and nothing else — drawbar, `nord`, or Chrome — can attach
 > alongside it.
 
-Build details for each target are in
-[`crates/drawbar/README.md`](https://github.com/jmoo/drawbar/blob/master/crates/drawbar/README.md).
+Building either target from a source checkout is covered in
+[Build and run](../drawbar/build.md).
