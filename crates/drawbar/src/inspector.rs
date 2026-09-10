@@ -1,9 +1,11 @@
-//! The inspector: what is picked, and — while one is attached — the instrument.
+//! The right dock: what is picked, and — while one is attached — the instrument.
 //!
-//! Two groups. SELECTION answers about the rows the browser has picked and is there
-//! whatever is on the bus; INSTRUMENT is how much room the attached one has and what it
-//! says about itself, so it is absent without one. Every group and every panel is
-//! collapsed on its own and kept between sessions beside the docks.
+//! Two dock headers rather than a dock header and two groups. SELECTION heads the dock
+//! itself and answers about the rows the browser has picked, whatever is on the bus; it
+//! is flat, because a fact, a tag and a dependency are three lines about one selection
+//! rather than three panels. INSTRUMENT heads what an attached instrument has to say,
+//! so it is absent without one, and ROOM and INFO under it collapse on their own and are
+//! kept between sessions beside the docks.
 //!
 //! Nothing here reads anything the rest of the app has not already been told — a panel
 //! with nothing behind it says so rather than filling itself in.
@@ -18,7 +20,7 @@ use crate::browser::{Act, Browser, Item, Kind};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{painted, Glyph};
 use crate::library::{row_of, Row, Where};
-use crate::panel::panel_header;
+use crate::panel::{dock_header, panel_header};
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
@@ -40,7 +42,7 @@ const MONO: f32 = 10.5;
 /// The column a fact's own word takes, so the values under each other line up.
 const FACT: f32 = 52.0;
 
-/// The two groups, in the order the design stacks them.
+/// The dock's two headers, in the order the design stacks them.
 pub fn ui(
     ui: &mut egui::Ui,
     shell: &mut Shell,
@@ -49,32 +51,27 @@ pub fn ui(
     device: &Device,
     queue: &Queue,
 ) -> Vec<Act> {
-    let mut acts = Vec::new();
-    panel_header(ui, "selection", Some(&mut shell.selection_open), None);
-    if shell.selection_open {
-        acts = selection_group(ui, shell, browser, workspace, device, queue);
-    }
+    dock_header(ui, "selection");
+    let acts = selection(ui, browser, workspace, device, queue);
     if !device.state.connected() {
         return acts;
     }
-    panel_header(ui, "instrument", Some(&mut shell.instrument_open), None);
-    if shell.instrument_open {
-        panel_header(ui, "room", Some(&mut shell.room_open), None);
-        if shell.room_open {
-            room_panel(ui, workspace, device, queue);
-        }
-        panel_header(ui, "info", Some(&mut shell.info_open), None);
-        if shell.info_open {
-            body(ui, |ui| crate::browser::about(ui, device));
-        }
+    dock_header(ui, "instrument");
+    panel_header(ui, "room", Some(&mut shell.room_open), None);
+    if shell.room_open {
+        room_panel(ui, workspace, device, queue);
+    }
+    panel_header(ui, "info", Some(&mut shell.info_open), None);
+    if shell.info_open {
+        body(ui, |ui| crate::browser::about(ui, device));
     }
     acts
 }
 
-/// What is picked: what it is, what it is labelled with, and what it plays.
-fn selection_group(
+/// What is picked: what it is, what it is labelled with, and what it plays — one run of
+/// lines under one header.
+fn selection(
     ui: &mut egui::Ui,
-    shell: &mut Shell,
     browser: &Browser,
     workspace: &Workspace,
     device: &Device,
@@ -92,29 +89,14 @@ fn selection_group(
         .filter_map(|item| row_of(item, workspace, &device.state, queue, browser.tags()))
         .collect();
 
-    panel_header(ui, "facts", Some(&mut shell.facts_open), None);
-    if shell.facts_open {
-        body(ui, |ui| {
-            about_selection(ui, picked, &rows, workspace, device)
-        });
-    }
-    panel_header(
-        ui,
-        "tags on the selection",
-        Some(&mut shell.tags_open),
-        None,
-    );
-    if shell.tags_open {
-        tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
-    }
+    body(ui, |ui| {
+        about_selection(ui, picked, &rows, workspace, device)
+    });
+    tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
     // Only a slot the instrument has been asked about has a dependency list, so the
-    // panel is absent rather than empty for everything else.
+    // lines are absent rather than empty for everything else.
     let answered = needs(&slots(browser), device);
-    if answered.is_empty() {
-        return acts;
-    }
-    panel_header(ui, "dependencies", Some(&mut shell.deps_open), None);
-    if shell.deps_open {
+    if !answered.is_empty() {
         dependencies(ui, &answered, device);
     }
     acts
@@ -357,6 +339,9 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
 ///
 /// ⚠️ Only a **kept** asset can wear one — a tag hangs on a workspace id, and a slot has
 /// none — so this is over what of the selection is on this computer.
+///
+/// ⚠️ Toggling only. A tag is made in the browser's own TAGS section, which is where the
+/// list of them lives and where one is renamed and removed.
 fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
     body(ui, |ui| {
         if picked.is_empty() {
@@ -387,19 +372,6 @@ fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
                     false => Act::Tag { ids, tag: tag.id },
                 });
             }
-        }
-        let new = ui
-            .horizontal(|ui| {
-                mark(ui, Glyph::Plus, PIP, ui.visuals().weak_text_color());
-                ui.add(
-                    egui::Label::new(egui::RichText::new("new tag").text_style(ui_text()).weak())
-                        .sense(egui::Sense::click()),
-                )
-                .clicked()
-            })
-            .inner;
-        if new {
-            acts.push(Act::NewTag("New tag".into()));
         }
     });
 }
@@ -507,7 +479,11 @@ mod tests {
     ///
     /// Nothing checks pixels. What this catches is a layout that panics or an id that
     /// collides, neither of which a test on the rules would see.
-    fn paint(shell: &mut Shell, device: &Device, picked: &[(ObjectClass, Location)]) {
+    fn paint(
+        shell: &mut Shell,
+        device: &Device,
+        picked: &[(ObjectClass, Location)],
+    ) -> Vec<String> {
         let ctx = context();
         let mut browser = Browser::default();
         for (class, at) in picked.iter().copied() {
@@ -518,9 +494,10 @@ mod tests {
         let mut labels = Tags::default();
         let sunday = labels.make("Sunday");
         labels.set(7, sunday, true);
+        let mut said = Vec::new();
         // Twice: the second pass runs with the widget state the first left behind.
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
@@ -529,29 +506,38 @@ mod tests {
                         tags(panel, &[7, 8], &labels, &mut Vec::new());
                     });
             });
+            said = crate::browser::bench::words(&output);
         }
+        said
     }
 
-    /// Every panel draws, with an instrument answering and with nothing attached at all.
+    /// SELECTION heads the dock whatever is on the bus; INSTRUMENT is only there while
+    /// one is attached, because everything under it is something an instrument said.
     #[test]
-    fn every_panel_paints_with_and_without_an_instrument() {
+    fn instrument_is_headed_only_while_one_is_attached() {
         let ctx = context();
         let mut shell = Shell {
             info_open: true,
             ..Shell::default()
         };
-        paint(&mut shell, &Device::new(ctx.clone()), &[]);
+        let detached = paint(&mut shell, &Device::new(ctx.clone()), &[]);
+        assert!(
+            detached.iter().any(|word| word == "SELECTION"),
+            "{detached:?}"
+        );
+        assert!(
+            !detached.iter().any(|word| word == "INSTRUMENT"),
+            "{detached:?}"
+        );
 
         let (device, at) = attached(&ctx);
-        paint(&mut shell, &device, &[(ObjectClass::Program, at)]);
+        let held = paint(&mut shell, &device, &[(ObjectClass::Program, at)]);
+        for header in ["SELECTION", "INSTRUMENT", "ROOM", "INFO"] {
+            assert!(held.iter().any(|word| word == header), "{header}: {held:?}");
+        }
 
-        // Shut, every group and every panel draws its header and nothing under it.
+        // Shut, each panel under INSTRUMENT draws its header and nothing under it.
         let mut shut = Shell {
-            selection_open: false,
-            facts_open: false,
-            deps_open: false,
-            tags_open: false,
-            instrument_open: false,
             room_open: false,
             info_open: false,
             ..Shell::default()
@@ -734,8 +720,6 @@ mod tests {
         let mut store = Fake::default();
         let before = Shell {
             room_open: false,
-            deps_open: true,
-            tags_open: false,
             info_open: true,
             ..Shell::default()
         };
@@ -744,11 +728,6 @@ mod tests {
         let mut after = Shell::default();
         after.restore(&store);
         assert!(!after.room_open);
-        assert!(after.deps_open);
-        assert!(!after.tags_open);
-        assert!(
-            after.info_open,
-            "the info panel is kept like the three above it"
-        );
+        assert!(after.info_open);
     }
 }

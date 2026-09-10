@@ -49,7 +49,7 @@ pub(in crate::browser) fn context() -> egui::Context {
 }
 
 /// Every word a frame painted, in the order it painted them.
-pub(in crate::browser) fn words(output: &egui::FullOutput) -> Vec<String> {
+pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
     fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
         match shape {
             egui::Shape::Text(text) => into.push(text.galley.text().to_string()),

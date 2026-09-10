@@ -27,7 +27,7 @@ use crate::workspace::Workspace;
 
 mod act;
 #[cfg(test)]
-mod bench;
+pub(crate) mod bench;
 mod drag;
 mod instrument;
 mod row;

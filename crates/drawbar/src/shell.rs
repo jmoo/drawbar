@@ -107,12 +107,8 @@ pub struct Shell {
     pub browser_open: bool,
     pub inspector_open: bool,
     pub dock_open: bool,
-    /// The inspector's two groups and the panels under them, each collapsed on its own.
-    pub selection_open: bool,
-    pub facts_open: bool,
-    pub deps_open: bool,
-    pub tags_open: bool,
-    pub instrument_open: bool,
+    /// The two panels under the right dock's INSTRUMENT header, each collapsed on its
+    /// own. SELECTION is flat and has none.
     pub room_open: bool,
     pub info_open: bool,
     /// How far each dock was last dragged. A side dock's is its width, the bottom
@@ -135,11 +131,6 @@ impl Default for Shell {
             browser_open: true,
             inspector_open: true,
             dock_open: false,
-            selection_open: true,
-            facts_open: true,
-            deps_open: true,
-            tags_open: true,
-            instrument_open: true,
             room_open: true,
             info_open: false,
             browser_width: BROWSER,
@@ -156,7 +147,7 @@ impl Shell {
     /// Where the layout is kept between sessions, beside the browser's own keys.
     pub const KEY: &'static str = "drawbar.docks";
 
-    const VERSION: &'static str = "drawbar docks 4";
+    const VERSION: &'static str = "drawbar docks 5";
 
     pub fn open(&self, dock: Dock) -> bool {
         match dock {
@@ -200,11 +191,6 @@ impl Shell {
                 (Some("browser"), Some(open)) => held.browser_open = open == "1",
                 (Some("inspector"), Some(open)) => held.inspector_open = open == "1",
                 (Some("dock"), Some(open)) => held.dock_open = open == "1",
-                (Some("selection"), Some(open)) => held.selection_open = open == "1",
-                (Some("facts"), Some(open)) => held.facts_open = open == "1",
-                (Some("deps"), Some(open)) => held.deps_open = open == "1",
-                (Some("tags"), Some(open)) => held.tags_open = open == "1",
-                (Some("instrument"), Some(open)) => held.instrument_open = open == "1",
                 (Some("room"), Some(open)) => held.room_open = open == "1",
                 (Some("info"), Some(open)) => held.info_open = open == "1",
                 (Some("browser_width"), Some(text)) => {
@@ -228,11 +214,6 @@ impl Shell {
         self.browser_open = held.browser_open;
         self.inspector_open = held.inspector_open;
         self.dock_open = held.dock_open;
-        self.selection_open = held.selection_open;
-        self.facts_open = held.facts_open;
-        self.deps_open = held.deps_open;
-        self.tags_open = held.tags_open;
-        self.instrument_open = held.instrument_open;
         self.room_open = held.room_open;
         self.info_open = held.info_open;
         self.browser_width = held.browser_width;
@@ -249,18 +230,12 @@ impl Shell {
         storage.set_string(
             Shell::KEY,
             format!(
-                "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nselection\t{}\nfacts\t{}\n\
-                 deps\t{}\ntags\t{}\ninstrument\t{}\nroom\t{}\ninfo\t{}\n\
+                "{}\nbrowser\t{}\ninspector\t{}\ndock\t{}\nroom\t{}\ninfo\t{}\n\
                  browser_width\t{}\ninspector_width\t{}\ndock_body\t{}\npage\t{}\n",
                 Shell::VERSION,
                 bit(self.browser_open),
                 bit(self.inspector_open),
                 bit(self.dock_open),
-                bit(self.selection_open),
-                bit(self.facts_open),
-                bit(self.deps_open),
-                bit(self.tags_open),
-                bit(self.instrument_open),
                 bit(self.room_open),
                 bit(self.info_open),
                 self.browser_width,
@@ -970,12 +945,6 @@ impl DrawbarApp {
                 acts.push(Act::ToggleDock(Dock::Bottom));
             }
             let ink = crate::app::caption(ui.visuals());
-            // ⚠️ The glyph is the queue's, so it goes with the queue. With nothing
-            // attached the log is the only page, and a compare mark over it names a
-            // page that is not there.
-            if self.attached() {
-                icon(ui, Glyph::GitCompareArrows, GLYPH, ink);
-            }
             for page in pages.iter().copied() {
                 let on = self.shell.dock_open && self.shell.page == page;
                 if ui
@@ -1124,7 +1093,6 @@ impl DrawbarApp {
                 }
                 return;
             }
-            dock_header(ui, "inspector");
             acts.extend(crate::inspector::ui(
                 ui,
                 &mut self.shell,
@@ -1460,12 +1428,7 @@ mod tests {
             browser_open: false,
             inspector_open: true,
             dock_open: true,
-            selection_open: true,
-            facts_open: false,
-            deps_open: false,
-            tags_open: true,
-            instrument_open: true,
-            room_open: true,
+            room_open: false,
             info_open: true,
             browser_width: 301.0,
             inspector_width: 199.0,
@@ -1481,10 +1444,8 @@ mod tests {
         assert!(!after.browser_open);
         assert!(after.inspector_open);
         assert!(after.dock_open);
-        assert!(after.selection_open && after.instrument_open, "both groups");
-        assert!(after.room_open && after.tags_open && after.info_open);
-        assert!(!after.deps_open, "a shut inspector panel comes back shut");
-        assert!(!after.facts_open, "and so does a shut one under a group");
+        assert!(!after.room_open, "a shut inspector panel comes back shut");
+        assert!(after.info_open, "and an open one comes back open");
         assert_eq!(after.browser_width, 301.0);
         assert_eq!(after.inspector_width, 199.0);
         assert_eq!(after.dock_body, 260.0);
