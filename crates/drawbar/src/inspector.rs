@@ -137,8 +137,8 @@ pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
     let mut said = vec![
         Fact {
             what: "name",
-            said: row.name.clone(),
-            hint: None,
+            said: crate::strings::display_name(&row.name).to_string(),
+            hint: (crate::strings::display_name(&row.name) != row.name).then(|| row.name.clone()),
         },
         Fact {
             what: "kind",

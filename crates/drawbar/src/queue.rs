@@ -783,7 +783,7 @@ fn item(
     );
     let name_at = left + GLYPH + GAP;
     let mut job = egui::text::LayoutJob::simple_singleline(
-        entity.name.clone(),
+        crate::strings::display_name(&entity.name).to_string(),
         egui::FontId::proportional(NAME),
         ink,
     );
@@ -818,7 +818,8 @@ fn item(
             },
         );
     }
-    response.on_hover_text(why)
+    // The name is shown short and cut to the row, so the hover carries the whole of it.
+    response.on_hover_text(format!("{}\n{why}", entity.name))
 }
 
 /// Where an entry is going, as a chip to click: the address, and the picker behind it.

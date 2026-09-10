@@ -212,7 +212,7 @@ impl Tabs {
                         {
                             dropped = Some((index, at.x));
                         }
-                        if let Some(hint) = face.hint {
+                        if let Some(hint) = &face.hint {
                             label = label.on_hover_text(hint);
                         }
                         if label.clicked() {
@@ -263,7 +263,9 @@ struct Face {
     /// It holds something other than what it was last saved as, which the name says by
     /// going italic and wearing a star — the mark it wears everywhere else.
     unsaved: bool,
-    hint: Option<&'static str>,
+    /// What a hover says: the whole of the name a tab shows short, and what else there
+    /// is to know about this tab.
+    hint: Option<String>,
     /// The × at the end. The library has none: it is what a close falls back to.
     shut: bool,
 }
@@ -290,9 +292,10 @@ fn face(tab: &Tab, workspace: &Workspace) -> Option<Face> {
                 glyph: Kind::of(entity.entity.as_ref()).glyph(),
                 name: entity.name.clone(),
                 unsaved: entity.is_unsaved(),
-                hint: workspace
-                    .is_view(*id)
-                    .then_some("the instrument's copy, viewed in place"),
+                hint: Some(match workspace.is_view(*id) {
+                    true => format!("{} — the instrument's copy, viewed in place", entity.name),
+                    false => entity.name.clone(),
+                }),
                 shut: true,
             })
         }

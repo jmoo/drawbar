@@ -615,6 +615,33 @@ fn slot_pair(raw: &str) -> Option<String> {
     Some(format!("{}:{}", bank + 1, slot + 1))
 }
 
+// ── what a thing is called ───────────────────────────────────────────────────────
+
+/// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
+/// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it and a
+/// reader need not be shown it.
+pub fn carries_tag(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, tag)| {
+        !stem.trim().is_empty()
+            && ((2..=5).contains(&tag.len())
+                || tag.eq_ignore_ascii_case(nord_format::formats::nsmpproj::FORMAT))
+            && tag.chars().all(|c| c.is_ascii_alphanumeric())
+            && tag.chars().any(|c| c.is_ascii_alphabetic())
+    })
+}
+
+/// A name as a reader sees it: without the format tag, which the kind glyph beside it
+/// already says.
+///
+/// ⚠️ Showing only. The stored name keeps its tag, because that is what a rename edits,
+/// what an export is named after, and what the log says happened.
+pub fn display_name(name: &str) -> &str {
+    match carries_tag(name) {
+        true => name.rsplit_once('.').map_or(name, |(stem, _)| stem),
+        false => name,
+    }
+}
+
 // ── where things are ─────────────────────────────────────────────────────────────
 
 /// What the browser calls a class's folder.
@@ -754,6 +781,18 @@ mod tests {
     fn a_stored_location_pair_is_labelled_the_way_the_panel_labels_it() {
         assert_eq!(value_label("startup_program", "(0, 0)"), "1:1");
         assert_eq!(value_label("startup_song", "(3, 49)"), "4:50");
+    }
+
+    /// A name is shown without the format tag the glyph beside it already says, and
+    /// anything that is not a tag stays where it is.
+    #[test]
+    fn a_shown_name_drops_a_format_tag_and_nothing_else() {
+        assert_eq!(display_name("x.ne5p"), "x");
+        assert_eq!(display_name("x"), "x");
+        assert_eq!(display_name("proj.nsmpproj"), "proj");
+        assert_eq!(display_name(".hidden"), ".hidden", "there is no stem");
+        assert_eq!(display_name("Africa Split v1.2"), "Africa Split v1.2");
+        assert_eq!(display_name("x."), "x.", "a tag of nothing is not one");
     }
 
     /// The two singleton classes and the folders are named, never numbered.

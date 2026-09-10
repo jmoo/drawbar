@@ -292,7 +292,7 @@ fn export_filename(name: &str, bytes: &[u8]) -> String {
         s if s.is_empty() => "unnamed".to_string(),
         s => s,
     };
-    match carries_tag(&stem) {
+    match crate::strings::carries_tag(&stem) {
         true => stem,
         false => format!("{stem}.{}", format_tag(bytes)),
     }
@@ -337,17 +337,6 @@ fn filename_stem(label: &str) -> String {
     // A leading dot hides the file and dots alone spell `.` and `..`; a leading dash is
     // an option to every tool that later reads it.
     out.trim_matches(['.', '-']).to_string()
-}
-
-/// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
-/// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it.
-fn carries_tag(name: &str) -> bool {
-    name.rsplit_once('.').is_some_and(|(stem, tag)| {
-        !stem.trim().is_empty()
-            && ((2..=5).contains(&tag.len()) || tag.eq_ignore_ascii_case(nsmpproj::FORMAT))
-            && tag.chars().all(|c| c.is_ascii_alphanumeric())
-            && tag.chars().any(|c| c.is_ascii_alphabetic())
-    })
 }
 
 /// The extension a nameless export gets: the CBIN tag the bytes themselves carry,

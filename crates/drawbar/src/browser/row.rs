@@ -111,11 +111,13 @@ pub(super) fn name_job(
     job
 }
 
-/// The name an unsaved row shows: its own, and a star.
+/// The name a row shows: its own without the format tag, and a star while it holds
+/// something other than what it was last saved as.
 pub fn starred(name: &str, unsaved: bool) -> String {
+    let shown = crate::strings::display_name(name);
     match unsaved {
-        true => format!("{name}*"),
-        false => name.to_string(),
+        true => format!("{shown}*"),
+        false => shown.to_string(),
     }
 }
 

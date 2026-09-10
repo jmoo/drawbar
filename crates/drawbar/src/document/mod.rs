@@ -257,7 +257,8 @@ impl Document {
     /// Where it came from, what has changed, and the three things to do about it.
     fn header(&mut self, ui: &mut egui::Ui, entity: &LocalEntity, act: &mut Header) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading(&entity.name);
+            ui.heading(strings::display_name(&entity.name))
+                .on_hover_text(&entity.name);
             if entity.is_unsaved() {
                 let warn = crate::app::warn(ui.visuals());
                 dot(ui, warn);

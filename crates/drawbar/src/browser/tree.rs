@@ -526,7 +526,8 @@ impl Browser {
                 ..Cells::default()
             },
         );
-        let response = drawn.response;
+        // The row shows the name without its format tag, so the hover carries all of it.
+        let response = drawn.response.on_hover_text(&entity.name);
 
         if response.dragged() {
             if let Some(head) = self.held(item, workspace, &device.state) {
@@ -1280,32 +1281,44 @@ fn destination(held: &Queued) -> String {
 mod tests {
     use super::*;
     use crate::browser::act::apply;
-    use crate::browser::bench::{bench, context};
+    use crate::browser::bench::{bench, context, words};
     use crate::shell::Shell;
 
     /// ⚠️ Both things laid out from audio are on the one New menu. A pick of WAVs makes
     /// either, and a menu offering only the project hides half of what the dialog does.
     #[test]
     fn the_new_menu_offers_both_things_a_pick_of_wavs_makes() {
-        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-                _ => {}
-            }
-        }
-
         let ctx = context();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            words(&clipped.shape, &mut said);
-        }
+        let said = words(&output);
         for item in ["Sample Editor project…", "Sample instrument…", "New folder"] {
             assert!(said.iter().any(|word| word == item), "{item} is missing");
         }
+    }
+
+    /// ⚠️ A row says what a sound is called, not what file it is in. The name the
+    /// workspace holds keeps its format tag; only the paint drops it.
+    #[test]
+    fn a_row_paints_its_name_without_the_format_tag() {
+        let (mut browser, mut workspace, device, _tabs, queue, mut log) = bench();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        workspace.rename(id, "Africa Split.ne5p".into());
+
+        let ctx = workspace.ctx().clone();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::SidePanel::left("browser")
+                .exact_width(crate::shell::BROWSER)
+                .show(ctx, |ui| {
+                    browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                });
+        });
+
+        let said = words(&output);
+        assert!(said.iter().any(|word| word == "Africa Split"), "{said:?}");
+        assert!(!said.iter().any(|word| word.contains(".ne5p")), "{said:?}");
+        assert_eq!(workspace.get(id).unwrap().name, "Africa Split.ne5p");
     }
 
     /// ⚠️ A filter turned while a document is in front narrows a table nobody is looking

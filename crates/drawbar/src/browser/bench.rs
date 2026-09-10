@@ -48,6 +48,22 @@ pub(in crate::browser) fn context() -> egui::Context {
     ctx
 }
 
+/// Every word a frame painted, in the order it painted them.
+pub(in crate::browser) fn words(output: &egui::FullOutput) -> Vec<String> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+            _ => {}
+        }
+    }
+    let mut said = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut said);
+    }
+    said
+}
+
 /// Everything an act needs run against it.
 pub(in crate::browser) fn bench() -> (Browser, Workspace, Device, Tabs, Queue, crate::log::Log) {
     let ctx = context();
