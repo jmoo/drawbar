@@ -287,6 +287,14 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.queue,
         );
+        // An edit under a waiting entry changes what that write would do, and the queue
+        // says so from the occupant it already read.
+        crate::queue::follow(
+            &self.workspace,
+            &mut self.device,
+            &mut self.queue,
+            &mut self.log,
+        );
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.

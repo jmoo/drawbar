@@ -278,9 +278,9 @@ impl LocalEntity {
 /// Whether an asset holds something no other copy of it does.
 ///
 /// The one rule that decides what happens to a view when the last thing looking at it
-/// goes: **an edited or owed view is precious, an untouched one is disposable.** An
-/// untouched view is the slot's own bytes, which the instrument still has; an edited one
-/// is the only copy there is.
+/// goes: **an unsaved or owed view is precious, a saved one is disposable.** A saved
+/// view is the slot's own bytes, which the instrument still has; an unsaved one is the
+/// only copy there is.
 pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
     entity.is_unsaved() || queue.holds(entity.id)
 }

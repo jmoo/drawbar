@@ -32,6 +32,14 @@ pub struct Queued {
     pub replaces: Occupancy,
     /// How what is waiting differs from what the slot holds.
     pub diff: Diff,
+    /// The occupant's own bytes, once a compare read has delivered them.
+    ///
+    /// Kept so that an edit made after this entry was queued is diffed against them
+    /// again rather than by reading the slot a second time.
+    there: Option<Vec<u8>>,
+    /// The stamp of the asset's bytes [`Queued::diff`] was made from, so an edit under a
+    /// waiting entry is noticed without comparing anything.
+    stamp: u64,
     /// Why the last attempt to write it stopped. Cleared when it is queued again.
     pub failure: Option<String>,
 }
@@ -248,6 +256,56 @@ pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Que
     }
 }
 
+/// What a waiting entry says about a slot before either body has been read: vacant is
+/// nothing to replace, and two bodies whose checksums agree are known to agree, because
+/// the container's own CRC-32 is the number the instrument reports for a slot.
+fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
+    let here = entity.container.as_ref().and_then(|held| held.body_crc32);
+    match replaces {
+        Occupancy::Vacant => Diff::Empty,
+        Occupancy::Held(held) if held.crc.is_some() && held.crc == here => Diff::Identical,
+        Occupancy::Held(_) | Occupancy::Unknown => Diff::Pending,
+    }
+}
+
+/// Diff every waiting entry whose asset has moved under it since it was queued.
+///
+/// The occupant's bytes are kept from the compare read, so an edit made after the entry
+/// was made is measured against them here rather than by asking the instrument for the
+/// same slot twice. An entry whose read has not come back waits for it; one the
+/// checksums settled without a read is settled the same way again, and asks for the read
+/// only where they no longer settle it.
+pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+    let mut owed = Vec::new();
+    for held in &mut queue.list {
+        let Some(entity) = workspace.get(held.id) else {
+            continue;
+        };
+        if entity.stamp == held.stamp {
+            continue;
+        }
+        held.stamp = entity.stamp;
+        held.diff = match &held.there {
+            Some(there) => compare(&entity.bytes, there),
+            None => verdict(entity, &held.replaces),
+        };
+        if matches!(held.diff, Diff::Pending) && held.there.is_none() {
+            owed.push((held.class, held.at));
+        }
+    }
+    for (class, at) in owed {
+        device.send(
+            DeviceCmd::Get {
+                class,
+                at,
+                body: false,
+                why: Purpose::Compare,
+            },
+            log,
+        );
+    }
+}
+
 /// Send a waiting asset somewhere else instead.
 ///
 /// The same bookkeeping as [`enqueue`] — the new slot is read again, and whatever was
@@ -293,20 +351,14 @@ impl Queue {
         self.list
             .retain(|held| held.id != entity.id && (held.class, held.at) != (class, at));
 
-        // The container's own CRC-32 is the number the instrument reports for a slot, so
-        // two bodies that agree are known to before either is read again.
-        let here = entity.container.as_ref().and_then(|held| held.body_crc32);
-        let diff = match &replaces {
-            Occupancy::Vacant => Diff::Empty,
-            Occupancy::Held(held) if held.crc.is_some() && held.crc == here => Diff::Identical,
-            Occupancy::Held(_) | Occupancy::Unknown => Diff::Pending,
-        };
         self.list.push(Queued {
             id: entity.id,
             class,
             at,
+            diff: verdict(entity, &replaces),
             replaces,
-            diff,
+            there: None,
+            stamp: entity.stamp,
             failure: None,
         });
         self.picked = Some(entity.id);
@@ -334,6 +386,8 @@ impl Queue {
         let Some(entity) = workspace.get(held.id) else {
             return;
         };
+        held.there = Some(there.to_vec());
+        held.stamp = entity.stamp;
         held.diff = compare(&entity.bytes, there);
     }
 
@@ -343,6 +397,7 @@ impl Queue {
             return;
         };
         held.replaces = Occupancy::Vacant;
+        held.there = None;
         held.diff = Diff::Empty;
     }
 
@@ -1465,6 +1520,92 @@ mod tests {
         // Still a replacement, and still counted as one: identical bytes are written
         // over identical bytes.
         assert_eq!(queue.summary(), "4 writes · 2 replace");
+    }
+
+    /// The diff belongs to the asset, not to the moment it was queued. An edit made
+    /// while an entry waits is measured against the occupant already read, so the fields
+    /// change under it and the instrument is not asked about that slot again.
+    #[test]
+    fn an_edit_under_a_waiting_entry_is_diffed_again_without_a_second_read() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, _tabs) = attached(&workspace);
+        let mut queue = Queue::default();
+        let class = ObjectClass::Program;
+        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
+
+        let id = workspace.ingest(
+            "Africa Split".into(),
+            Origin::Device { class, at: at(0) },
+            bytes.clone(),
+            &mut log,
+        );
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        queue.arrived(class, at(0), "Africa Split", &bytes, &workspace);
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
+        let reads = device.queued().len();
+
+        edit(&mut workspace, id, &mut log);
+        follow(&workspace, &mut device, &mut queue, &mut log);
+
+        let Diff::Fields(fields) = &queue.entry(id).unwrap().diff else {
+            panic!("a program against a program is a field list");
+        };
+        assert_eq!(
+            fields.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["center_panel.gain"]
+        );
+        assert_eq!(device.queued().len(), reads, "the slot was not read again");
+
+        // Nothing has moved since, so a second pass changes nothing and asks nothing.
+        follow(&workspace, &mut device, &mut queue, &mut log);
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Fields(_)));
+        assert_eq!(device.queued().len(), reads);
+    }
+
+    /// An entry the checksums settled without a read has no occupant to measure a later
+    /// edit against, so that edit is what makes the read worth asking for.
+    #[test]
+    fn an_edit_under_an_entry_settled_by_checksum_asks_for_the_read_once() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, _tabs) = attached(&workspace);
+        let mut queue = Queue::default();
+        let class = ObjectClass::Program;
+
+        let id = workspace.ingest(
+            "Africa Split".into(),
+            Origin::Device { class, at: at(0) },
+            bytes,
+            &mut log,
+        );
+        let held = workspace.get(id).unwrap().saved.crc32.unwrap();
+        device.pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
+        assert!(device.queued().is_empty(), "the checksums settled it");
+
+        edit(&mut workspace, id, &mut log);
+        follow(&workspace, &mut device, &mut queue, &mut log);
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
+        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
+
+        follow(&workspace, &mut device, &mut queue, &mut log);
+        assert_eq!(device.queued().len(), 1, "asked for once, not once a frame");
     }
 
     /// A bank no walk has reached says nothing about its slots, so an entry onto one is
