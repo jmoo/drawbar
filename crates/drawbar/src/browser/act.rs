@@ -14,7 +14,7 @@ use crate::device::{
 use crate::filter::Narrow;
 use crate::log::Log;
 use crate::newproject::Making;
-use crate::queue::{enqueue, retarget, Queue};
+use crate::queue::{enqueue, retarget, Occupancy, Queue};
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
@@ -817,14 +817,12 @@ fn send(
         return;
     }
     let note = write_note(&device.state, class, entity);
-    let occupant = device
-        .state
-        .slot(class, at)
-        .flatten()
-        .map(|info| info.name.trim().to_string());
-    match (ask, note, occupant) {
+    // The same evidence the entry it is about to become carries: a bank nothing has read
+    // holds nothing to name.
+    let holds = Occupancy::of(&device.state, class, at);
+    match (ask, note, holds.occupant()) {
         (true, Some(note), Some(occupant)) => browser.ask_replace(
-            &occupant,
+            &occupant.name,
             &entity.name,
             place(class, at),
             Some(note),
@@ -1556,6 +1554,58 @@ mod tests {
             other => panic!("{}", other.label()),
         }
         assert_eq!(queue.ids(), vec![id], "still owed until the write lands");
+    }
+
+    /// The question before a write says what is known about each slot it is about to
+    /// land in, and a bank nothing has read is not an empty one.
+    #[test]
+    fn the_send_question_says_what_is_known_about_each_slot() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        // Bank 7 was walked: 7:1 holds something and 7:2 is empty. Nothing has read 8.
+        device.pretend_scanned(class, 7, &["Africa Split", ""]);
+        let bytes = program(&mut workspace, &mut log);
+        for (bank, slot) in [(6, 0), (6, 1), (7, 0)] {
+            let id = workspace.ingest(
+                format!("sound {bank}-{slot}"),
+                Origin::Fresh,
+                bytes.clone(),
+                &mut log,
+            );
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                class,
+                Location { bank, slot },
+            );
+        }
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::AskSendAll],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        let note = browser
+            .ask
+            .as_ref()
+            .and_then(|ask| ask.note.clone())
+            .expect("a question was raised");
+        for said in [
+            "Programs 7:1 holds “Africa Split”",
+            "Programs 7:2 is empty",
+            "Programs 8:1 has not been read yet",
+        ] {
+            assert!(note.contains(said), "{note}");
+        }
     }
 
     /// The queue outlives the instrument it was built against. What the one attached now

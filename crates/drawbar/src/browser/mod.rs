@@ -21,7 +21,6 @@ use crate::device::{read_only, Device, DeviceState};
 use crate::filter::Filter;
 use crate::folders::{self, Folders};
 use crate::queue::Queue;
-use crate::strings::place;
 use crate::tags::{self, Tags};
 use crate::workspace::Workspace;
 
@@ -473,20 +472,18 @@ impl Browser {
                 continue;
             };
             let (class, at) = (held.class, held.at);
-            let where_ = place(class, at);
             for warning in write_warnings(&device.state, class, entity) {
                 if !warnings.contains(&warning) {
                     warnings.push(warning);
                 }
             }
-            lines.push(match device.state.slot(class, at).flatten() {
-                Some(info) => format!(
-                    "“{}” replaces “{}” in {where_}",
-                    entity.name,
-                    info.name.trim()
-                ),
-                None => format!("“{}” goes into {where_}, which is empty", entity.name),
-            });
+            // What is known about the slot, which for a bank nothing has read is that
+            // nothing has read it.
+            lines.push(format!(
+                "“{}” → {}",
+                entity.name,
+                held.replaces.said(class, at)
+            ));
         }
         if lines.is_empty() {
             return;

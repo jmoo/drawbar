@@ -90,10 +90,37 @@ pub enum Occupancy {
 }
 
 impl Occupancy {
+    /// What the scan cache says is in a slot. A bank no walk has reached is *unknown*,
+    /// never empty — the compare read [`enqueue`] asks for is what settles it.
+    pub fn of(state: &DeviceState, class: ObjectClass, at: Location) -> Occupancy {
+        match state.slot(class, at) {
+            Some(Some(info)) => Occupancy::Held(Occupant::of(info)),
+            Some(None) => Occupancy::Vacant,
+            None => Occupancy::Unknown,
+        }
+    }
+
     pub fn occupant(&self) -> Option<&Occupant> {
         match self {
             Occupancy::Held(held) => Some(held),
             Occupancy::Unknown | Occupancy::Vacant => None,
+        }
+    }
+
+    /// What is known about the slot, in the words the question before a write and the
+    /// row waiting for it both use.
+    ///
+    /// ⚠️ The three answers read differently on purpose: a slot nothing has read is not
+    /// an empty one, and a write is about to happen either way.
+    pub fn said(&self, class: ObjectClass, at: Location) -> String {
+        let where_ = place(class, at);
+        match self {
+            Occupancy::Held(held) => format!(
+                "{where_} holds “{}”, {} bytes, which this replaces",
+                held.name, held.body_len
+            ),
+            Occupancy::Vacant => format!("{where_} is empty"),
+            Occupancy::Unknown => format!("{where_} has not been read yet"),
         }
     }
 }
@@ -190,11 +217,7 @@ pub fn enqueue(
     if let Fit::Refuses(why) = fit(&device.state, entity) {
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
-    let holds = match device.state.slot(class, at) {
-        Some(Some(info)) => Occupancy::Held(Occupant::of(info)),
-        Some(None) => Occupancy::Vacant,
-        None => Occupancy::Unknown,
-    };
+    let holds = Occupancy::of(&device.state, class, at);
     let displaced = match queue.put(entity, class, at, holds) {
         Put::Standing => return,
         Put::Made => None,
@@ -1227,13 +1250,14 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
         return (Glyph::CircleAlert, bad(visuals), why.clone());
     }
     let where_ = place(held.class, held.at);
-    match (&held.diff, held.replaces.occupant()) {
+    let said = || held.replaces.said(held.class, held.at);
+    match (&held.diff, &held.replaces) {
         (Diff::Pending, _) => (
             Glyph::Gauge,
             visuals.weak_text_color(),
             format!("reading what is in {where_}"),
         ),
-        (Diff::Identical, Some(occupant)) => (
+        (Diff::Identical, Occupancy::Held(occupant)) => (
             Glyph::CircleCheck,
             good(visuals),
             format!(
@@ -1241,19 +1265,10 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
                 occupant.name
             ),
         ),
-        (_, Some(occupant)) => (
-            Glyph::Replace,
-            warn(visuals),
-            format!(
-                "{where_} holds “{}”, {} bytes, which this replaces",
-                occupant.name, occupant.body_len
-            ),
-        ),
-        (_, None) => (
-            Glyph::CircleCheck,
-            good(visuals),
-            format!("{where_} is free"),
-        ),
+        (_, Occupancy::Held(_)) => (Glyph::Replace, warn(visuals), said()),
+        (_, Occupancy::Vacant) => (Glyph::CircleCheck, good(visuals), said()),
+        // Nothing has read it and no read is out: a write, and no saying into what.
+        (_, Occupancy::Unknown) => (Glyph::CircleDot, visuals.weak_text_color(), said()),
     }
 }
 
