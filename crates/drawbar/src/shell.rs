@@ -954,23 +954,20 @@ impl DrawbarApp {
                     picked = Some(page_click(page, on));
                 }
             }
-            // What the queue amounts to, wherever the dock is: the summary is the
-            // reason to open it.
-            if waiting > 0 {
-                ui.label(crate::queue::heading(&self.queue, ui.visuals()));
-            }
-            // An edit does not queue itself, so what a send would walk past is said
-            // here, next to the button that would walk past it. Only with an instrument
-            // attached: with none, there is nothing for a queue to be owed to.
-            let behind = match self.attached() {
-                true => crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue),
-                false => crate::queue::Behind::default(),
-            };
-            if let Some(said) = behind.said() {
-                ui.label(crate::queue::aside(&said, ui.visuals()));
-                if behind.changed > 0 && ui.small_button("Queue changed").clicked() {
-                    acts.push(Act::QueueChanged);
-                }
+            // An edit does not queue itself, so what a send would carry stands beside
+            // what it would walk past, in one line, next to the button that closes the
+            // gap between them.
+            let behind = crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue);
+            ui.label(crate::queue::aside(&behind.said(), ui.visuals()));
+            if ui
+                .add_enabled(
+                    behind.changed > 0,
+                    egui::Button::new(behind.action()).small(),
+                )
+                .on_disabled_hover_text("nothing here differs from what the instrument holds")
+                .clicked()
+            {
+                acts.push(Act::QueueChanged);
             }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),

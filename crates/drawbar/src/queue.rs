@@ -261,10 +261,11 @@ pub fn changed(
         .collect()
 }
 
-/// What a send would walk past: assets the instrument no longer agrees with, and
-/// documents holding edits nothing has saved.
+/// What a send would carry and what it would walk past: what is waiting, assets the
+/// instrument no longer agrees with, and documents holding edits nothing has saved.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Behind {
+    pub queued: usize,
     pub changed: usize,
     pub unsaved: usize,
 }
@@ -272,6 +273,7 @@ pub struct Behind {
 impl Behind {
     pub fn of(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> Behind {
         Behind {
+            queued: queue.len(),
             changed: changed(workspace, device, queue).len(),
             unsaved: workspace
                 .documents()
@@ -280,21 +282,21 @@ impl Behind {
         }
     }
 
-    pub fn any(self) -> bool {
-        self.changed > 0 || self.unsaved > 0
+    /// The one line every header says it in.
+    ///
+    /// ⚠️ All three counts, whatever they come to. A part left out at zero hides the
+    /// relation the line is for: two changed assets beside an empty queue is exactly
+    /// what a reader has to see.
+    pub fn said(self) -> String {
+        format!(
+            "{} queued · {} changed · {} unsaved",
+            self.queued, self.changed, self.unsaved
+        )
     }
 
-    /// The line that says so, where there is one to say. A part that counts nothing is
-    /// left out.
-    pub fn said(self) -> Option<String> {
-        let mut parts = Vec::new();
-        if self.changed > 0 {
-            parts.push(format!("{} changed", self.changed));
-        }
-        if self.unsaved > 0 {
-            parts.push(format!("{} unsaved", self.unsaved));
-        }
-        (!parts.is_empty()).then(|| parts.join(" · "))
+    /// The action beside the line, which closes the gap the middle count names.
+    pub fn action(self) -> String {
+        format!("Queue {} changed", self.changed)
     }
 }
 
@@ -582,28 +584,6 @@ impl Queue {
 
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
-    }
-
-    /// What the queue amounts to, in the width a dock header has for it.
-    ///
-    /// A part that counts nothing is left out, so an empty queue says nothing at all.
-    pub fn summary(&self) -> String {
-        let replacing = self
-            .list
-            .iter()
-            .filter(|held| held.replaces.occupant().is_some())
-            .count();
-        let mut said = Vec::new();
-        if !self.list.is_empty() {
-            said.push(match self.list.len() {
-                1 => "1 write".to_string(),
-                n => format!("{n} writes"),
-            });
-        }
-        if replacing > 0 {
-            said.push(format!("{replacing} replace"));
-        }
-        said.join(" · ")
     }
 }
 
@@ -1283,12 +1263,7 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
     }
 }
 
-/// The header's own line: what the queue amounts to, where the dock has room for it.
-pub fn heading(queue: &Queue, visuals: &egui::Visuals) -> egui::RichText {
-    aside(&queue.summary(), visuals)
-}
-
-/// Anything else the header sets beside the title, in the heading's own face.
+/// Anything else the header sets beside the title, in the header's own face.
 pub fn aside(said: &str, visuals: &egui::Visuals) -> egui::RichText {
     egui::RichText::new(said)
         .monospace()
@@ -1317,6 +1292,15 @@ mod tests {
 
     fn at(slot: u32) -> Location {
         Location { bank: 6, slot }
+    }
+
+    /// How many of the entries would write over something already in their slot.
+    fn replacing(queue: &Queue) -> usize {
+        queue
+            .entries()
+            .iter()
+            .filter(|held| held.replaces.occupant().is_some())
+            .count()
     }
 
     fn occupant(name: &str, crc: Option<u32>) -> ProgramInfo {
@@ -1455,13 +1439,10 @@ mod tests {
         assert_eq!(
             counts(&workspace, &queue),
             Behind {
+                queued: 0,
                 changed: 2,
                 unsaved: 1
             }
-        );
-        assert_eq!(
-            counts(&workspace, &queue).said().as_deref(),
-            Some("2 changed · 1 unsaved")
         );
 
         // What is already waiting is not what a send would walk past.
@@ -1521,9 +1502,38 @@ mod tests {
         assert!(!queue.holds(homeless), "it stands for no slot");
         assert_eq!(
             Behind::of(&workspace, &device.state, &queue),
-            Behind::default(),
-            "the gap is closed"
+            Behind {
+                queued: 2,
+                changed: 0,
+                unsaved: 0
+            },
+            "the gap is closed, and what closed it is waiting"
         );
+    }
+
+    /// The header says all three counts whatever they come to: a part left out at zero
+    /// would hide the relation between them.
+    #[test]
+    fn the_header_counts_all_three_however_many_each_comes_to() {
+        assert_eq!(
+            Behind {
+                queued: 0,
+                changed: 2,
+                unsaved: 1
+            }
+            .said(),
+            "0 queued · 2 changed · 1 unsaved"
+        );
+        assert_eq!(
+            Behind {
+                queued: 3,
+                changed: 0,
+                unsaved: 0
+            }
+            .said(),
+            "3 queued · 0 changed · 0 unsaved"
+        );
+        assert_eq!(Behind::default().action(), "Queue 0 changed");
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue
@@ -1623,47 +1633,6 @@ mod tests {
         assert!(queue.entry(ids[2]).unwrap().failure.is_none());
     }
 
-    /// The summary counts what is waiting and what is in the way, and says nothing about
-    /// a part it would count zero of.
-    #[test]
-    fn the_summary_leaves_out_what_it_would_count_zero_of() {
-        let (mut workspace, mut log, bytes) = bench();
-        let class = ObjectClass::Program;
-        let mut queue = Queue::default();
-        assert_eq!(queue.summary(), "");
-
-        let held = occupant("Africa Split", Some(7));
-        for slot in 0..3 {
-            let id = workspace.ingest(
-                format!("sound {slot}"),
-                Origin::Fresh,
-                bytes.clone(),
-                &mut log,
-            );
-            let entity = workspace.get(id).unwrap();
-            match slot {
-                0 => queue.put(
-                    entity,
-                    class,
-                    at(slot),
-                    Occupancy::Held(Occupant::of(&held)),
-                ),
-                _ => queue.put(entity, class, at(slot), Occupancy::Vacant),
-            };
-        }
-        assert_eq!(queue.summary(), "3 writes · 1 replace");
-
-        let alone = workspace.ingest("alone".into(), Origin::Fresh, bytes, &mut log);
-        let mut queue = Queue::default();
-        queue.put(
-            workspace.get(alone).unwrap(),
-            class,
-            at(0),
-            Occupancy::Vacant,
-        );
-        assert_eq!(queue.summary(), "1 write");
-    }
-
     /// An asset the queue holds is owed to the instrument; that is the whole of what
     /// `pending` meant, and it stops being owed when the write lands.
     #[test]
@@ -1737,11 +1706,10 @@ mod tests {
         assert_eq!(first_at, 4);
     }
 
-    /// Four things waiting, two of them onto occupied slots: the header counts what it
-    /// holds, and a slot whose occupant turns out to be these very bytes stops being a
-    /// difference at all.
+    /// Four things waiting, two of them onto occupied slots: a slot whose occupant turns
+    /// out to be these very bytes is still a slot being written over.
     #[test]
-    fn what_is_waiting_adds_up_to_the_summary_the_header_shows() {
+    fn what_is_waiting_counts_its_replacements_whatever_the_bytes_turn_out_to_be() {
         let (mut workspace, mut log, bytes) = bench();
         let ctx = workspace.ctx().clone();
         let mut device = Device::new(ctx);
@@ -1781,7 +1749,7 @@ mod tests {
             ids.push(id);
         }
 
-        assert_eq!(queue.summary(), "4 writes · 2 replace");
+        assert_eq!((queue.len(), replacing(&queue)), (4, 2));
         // A vacant slot needs no read; an occupied one is waiting on the bytes it holds.
         assert!(matches!(queue.entry(ids[0]).unwrap().diff, Diff::Pending));
         assert!(matches!(queue.entry(ids[1]).unwrap().diff, Diff::Pending));
@@ -1800,7 +1768,7 @@ mod tests {
         assert!(matches!(queue.entry(ids[1]).unwrap().diff, Diff::Identical));
         // Still a replacement, and still counted as one: identical bytes are written
         // over identical bytes.
-        assert_eq!(queue.summary(), "4 writes · 2 replace");
+        assert_eq!((queue.len(), replacing(&queue)), (4, 2));
     }
 
     /// The diff belongs to the asset, not to the moment it was queued. An edit made
@@ -2081,7 +2049,7 @@ mod tests {
             Some("Jazzy Click B"),
             "the read named what it found"
         );
-        assert_eq!(queue.summary(), "2 writes · 1 replace");
+        assert_eq!((queue.len(), replacing(&queue)), (2, 1));
     }
 
     /// The scan cache is keyed by the panel's bank number — one more than the wire's,

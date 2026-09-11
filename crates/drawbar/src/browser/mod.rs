@@ -488,17 +488,11 @@ impl Browser {
         if lines.is_empty() {
             return;
         }
-        // The warnings first: they are the reason to say no. Then what this send is
-        // about to walk past, which is the other one.
+        // The warnings first: they are the reason to say no. Then the header's own
+        // line, which sets what this send carries against what it walks past.
         let mut note = warnings;
-        note.extend(
-            crate::queue::Behind::of(workspace, &device.state, queue)
-                .said()
-                .map(|said| format!("{said}, and not in this send.")),
-        );
-        if !note.is_empty() {
-            note.push(String::new());
-        }
+        note.push(crate::queue::Behind::of(workspace, &device.state, queue).said());
+        note.push(String::new());
         note.extend(lines);
         self.ask = Some(Ask {
             title,
