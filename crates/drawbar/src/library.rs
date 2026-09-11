@@ -348,8 +348,8 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
 fn whereabouts(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Where {
     let held = entity
         .link
-        .and_then(|(class, at)| device.slot(class, at).flatten());
-    let Some(info) = held else {
+        .and_then(|(class, at)| Some((class, device.slot(class, at).flatten()?)));
+    let Some((class, info)) = held else {
         if !fit(device, entity).allowed() {
             return Where::Foreign;
         }
@@ -358,23 +358,34 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Whe
             _ => Where::Computer,
         };
     };
-    Where::Both(agrees(entity, info, queue))
+    Where::Both(agrees(entity, class, info, queue))
 }
 
 /// Whether the slot an asset stands for still holds what that asset was last saved as.
 ///
 /// The one comparison behind the library's sign, the tree's dot and what a "queue
-/// changed" walks: the checksum a walk reported for the slot against the checksum of
-/// the saved bytes, which is read once at ingest and nothing hashes again.
+/// changed" walks. Equality is claimed only where something says so:
 ///
-/// ⚠️ `None` where neither answers — a class that reports no checksum was linked by
-/// name, and a name is not a body. Only a compare read settles one of those, and it
-/// settles it in the queue's own diff.
-pub fn agrees(entity: &LocalEntity, info: &ProgramInfo, queue: &Queue) -> Option<bool> {
+/// - the checksum a walk reported for the slot against the checksum of the saved bytes,
+///   which is read once at ingest and nothing hashes again;
+/// - a write this app made into that slot, whose bytes are the ones it is saved as —
+///   the one thing it knows about a slot without reading it back;
+/// - a compare read that fetched the occupant and found the bodies equal.
+///
+/// ⚠️ `None` where none of them answers, which is *not known* rather than *the same*.
+/// An address and a length are not evidence: a class reporting no checksum is linked by
+/// name or by being the only slot there is, and neither says anything about the body in
+/// it. Only a read settles one of those.
+pub fn agrees(
+    entity: &LocalEntity,
+    class: ObjectClass,
+    info: &ProgramInfo,
+    queue: &Queue,
+) -> Option<bool> {
     if let (Some(here), Some(there)) = (entity.saved.crc32, info.crc32) {
         return Some(here == there);
     }
-    if info.crc32.is_none() && fills(entity, info) {
+    if wrote(entity, class, info.location) {
         return Some(true);
     }
     match queue.entry(entity.id).map(|held| &held.diff) {
@@ -384,21 +395,14 @@ pub fn agrees(entity: &LocalEntity, info: &ProgramInfo, queue: &Queue) -> Option
     }
 }
 
-/// Whether `info` is the slot this asset is linked to, holding a body of the asset's own
-/// length.
+/// Whether this app wrote what the asset is saved as into this very slot.
 ///
-/// The one thing a slot reporting no checksum can still be compared on, and enough where
-/// the link is a write this app made: those are the bytes it put there, and the slot
-/// reports as many.
-///
-/// ⚠️ `info` is always the slot its caller resolved from this asset's own link, so the
-/// address is the whole of the comparison.
-fn fills(entity: &LocalEntity, info: &ProgramInfo) -> bool {
-    entity.link.is_some_and(|(_, at)| at == info.location)
-        && entity
-            .container
-            .as_ref()
-            .is_some_and(|held| held.body_len == u64::from(info.body_len))
+/// ⚠️ The checksums are the two sets of bytes: a save of anything else moves the
+/// baseline off the bytes the write put there, and the write stops answering for it.
+fn wrote(entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
+    entity.wrote.is_some_and(|wrote| {
+        (wrote.class, wrote.at) == (class, at) && Some(wrote.crc32) == entity.saved.crc32
+    })
 }
 
 /// The mark a local row wears at its right end: what the attached instrument holds where
@@ -406,7 +410,9 @@ fn fills(entity: &LocalEntity, info: &ProgramInfo) -> bool {
 ///
 /// ⚠️ The one rule, and the only dot a local row wears. `good` is a slot holding what
 /// this asset was last saved as; `warn` is one holding something else, or a write
-/// already waiting to change it; nothing at all is an asset with no slot to stand on.
+/// already waiting to change it; the caption ink is a slot nothing can say either way
+/// about, which is the unsigned `both` of [`Where::Both`]; nothing at all is an asset
+/// with no slot to stand on.
 pub fn keyboard_mark(
     entity: &LocalEntity,
     device: &DeviceState,
@@ -418,9 +424,11 @@ pub fn keyboard_mark(
     if queue.holds(entity.id) {
         return Some(warn(visuals));
     }
-    match agrees(entity, info, queue) {
+    match agrees(entity, class, info, queue) {
+        Some(true) => Some(crate::app::good(visuals)),
         Some(false) => Some(warn(visuals)),
-        Some(true) | None => Some(crate::app::good(visuals)),
+        // A green dot is a claim, and nothing here has the evidence to make one.
+        None => Some(crate::app::caption(visuals)),
     }
 }
 
@@ -1667,6 +1675,118 @@ mod tests {
         device.pretend_bodies(ObjectClass::Program, 7, &[None]);
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
+    }
+
+    /// Equality is claimed only where something says so. A settings folder holds one
+    /// slot and that slot reports no checksum, so an asset matched to it stands in both
+    /// places with nothing said about the two bodies — until a read fetches the occupant,
+    /// or this app writes the bytes there itself.
+    #[test]
+    fn a_slot_reporting_no_checksum_says_nothing_until_it_is_read_or_written() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut queue = Queue::default();
+        let tags = Tags::default();
+        let visuals = egui::Visuals::dark();
+        let class = ObjectClass::Settings;
+        let held_at = at(6, 0);
+
+        let id = workspace.create(Fresh::Settings, &mut log).unwrap();
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let held = workspace.get(id).unwrap();
+        let crc = held.saved.crc32.expect("a container");
+        let body_len = held.container.as_ref().expect("a container").body_len;
+
+        // The walk reports what such a slot reports: a name and a length, and no
+        // checksum at all — the length being this asset's own.
+        device.pretend_attached();
+        device.pretend(crate::device::DeviceEvent::BankScanned {
+            class,
+            bank: 7,
+            slots: vec![Some(ProgramInfo {
+                location: held_at,
+                body_len: u32::try_from(body_len).unwrap(),
+                format: "ne5s".into(),
+                version: 1,
+                crc32: None,
+                name: "Live Settings".into(),
+            })],
+        });
+        device.poll(&mut log, &mut workspace, &mut Tabs::default(), &mut queue);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, held_at)),
+            "the one slot the folder has"
+        );
+
+        let said = |workspace: &Workspace, device: &Device, queue: &Queue| {
+            let entity = workspace.get(id).expect("it is on the list");
+            let info = device
+                .state
+                .slot(class, held_at)
+                .flatten()
+                .expect("the slot was scanned");
+            (
+                agrees(entity, class, info, queue),
+                rows(workspace, &device.state, queue, &tags, &Filter::default())
+                    .into_iter()
+                    .find(|row| matches!(row.item, Item::Local(_)))
+                    .map(|row| row.where_),
+                keyboard_mark(entity, &device.state, queue, &visuals),
+            )
+        };
+
+        assert_eq!(
+            said(&workspace, &device, &queue),
+            (
+                None,
+                Some(Where::Both(None)),
+                Some(crate::app::caption(&visuals))
+            ),
+            "an address and a length are not a body"
+        );
+
+        // A compare read fetched the occupant, and the two bodies are the same bytes.
+        crate::queue::enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            held_at,
+        );
+        queue.arrived(class, held_at, "Live Settings", &bytes, &workspace);
+        assert_eq!(said(&workspace, &device, &queue).0, Some(true));
+
+        // A write of this app's own, with nothing waiting to change it.
+        queue.clear();
+        workspace.landed(id, class, held_at, bytes.clone());
+        device.relink(&mut workspace);
+        assert_eq!(
+            said(&workspace, &device, &queue),
+            (
+                Some(true),
+                Some(Where::Both(Some(true))),
+                Some(crate::app::good(&visuals))
+            ),
+            "this app put those bytes there"
+        );
+
+        // A walk that reports a checksum, and it is not this body's.
+        device.pretend_bodies(class, 7, &[Some(("Live Settings", crc ^ 1))]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            said(&workspace, &device, &queue),
+            (
+                Some(false),
+                Some(Where::Both(Some(false))),
+                Some(warn(&visuals))
+            ),
+            "what the instrument reports outlives our own write"
+        );
     }
 
     /// ⚠️ An Electro 5 factory program is a type-0 file, and so is every copy Nord Sound

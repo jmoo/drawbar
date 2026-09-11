@@ -1263,6 +1263,7 @@ impl Device {
     fn forget(&mut self, workspace: &mut Workspace) {
         self.state.forget_everything();
         workspace.relink(|_| None);
+        workspace.forget_writes();
     }
 
     /// Say in the log where a slot just read holds a body the asset standing on it was

@@ -255,7 +255,7 @@ pub fn changed(
         .filter_map(|entity| {
             let (class, at) = entity.spot()?;
             let info = device.slot(class, at).flatten()?;
-            (crate::library::agrees(entity, info, queue) == Some(false))
+            (crate::library::agrees(entity, class, info, queue) == Some(false))
                 .then_some((entity.id, class, at))
         })
         .collect()

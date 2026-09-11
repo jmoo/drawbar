@@ -178,6 +178,21 @@ impl Baseline {
     }
 }
 
+/// A write this app made: the slot it put bytes in, and the checksum of the bytes it
+/// put there.
+///
+/// The one thing this app knows about a slot without reading it back. It answers for a
+/// class whose slots report no checksum of their own — those bytes are in that slot
+/// because this app put them there — and only while the asset is still saved as them:
+/// `crc32` is compared with [`Baseline::crc32`], which moves the moment the asset is
+/// saved as anything else.
+#[derive(Clone, Copy)]
+pub struct Wrote {
+    pub class: ObjectClass,
+    pub at: Location,
+    pub crc32: u32,
+}
+
 /// One object held in memory: its bytes, what they decode to, and how they got here.
 pub struct LocalEntity {
     /// Stable across reordering, so a selection survives a removal.
@@ -211,6 +226,12 @@ pub struct LocalEntity {
     /// changes and goes when the instrument does. An edit leaves it alone, so an asset
     /// that has been changed still points at the slot it was matched to.
     pub link: Option<(ObjectClass, Location)>,
+    /// The last write this app made from this asset, which is the one thing it knows
+    /// about a slot without reading it back — see [`Wrote`] and
+    /// [`crate::library::agrees`].
+    ///
+    /// It goes with the instrument that took it: [`Workspace::forget_writes`].
+    pub wrote: Option<Wrote>,
 }
 
 impl LocalEntity {
@@ -241,6 +262,7 @@ impl LocalEntity {
             kept: true,
             stamp,
             link: None,
+            wrote: None,
         };
         held.saved = held.baseline();
         held
@@ -993,7 +1015,18 @@ impl Workspace {
         };
         entity.saved = Baseline::read(sent);
         entity.link = Some((class, at));
+        entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
         self.revision += 1;
+    }
+
+    /// Forget every write this app made.
+    ///
+    /// ⚠️ A write is evidence about the instrument that took it. With none attached, or
+    /// another one in its place, it says nothing about what is in any slot.
+    pub fn forget_writes(&mut self) {
+        for entity in &mut self.entities {
+            entity.wrote = None;
+        }
     }
 
     /// Swap in re-encoded bytes, keeping the entity's identity.
