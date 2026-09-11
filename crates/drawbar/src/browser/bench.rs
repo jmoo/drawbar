@@ -48,20 +48,28 @@ pub(in crate::browser) fn context() -> egui::Context {
     ctx
 }
 
-/// Every word a frame painted, in the order it painted them.
-pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
-    fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+/// Every galley a frame painted, in the order it painted them.
+pub(crate) fn galleys(output: &egui::FullOutput) -> Vec<std::sync::Arc<egui::Galley>> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<std::sync::Arc<egui::Galley>>) {
         match shape {
-            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+            egui::Shape::Text(text) => into.push(text.galley.clone()),
             egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
             _ => {}
         }
     }
-    let mut said = Vec::new();
+    let mut painted = Vec::new();
     for clipped in &output.shapes {
-        walk(&clipped.shape, &mut said);
+        walk(&clipped.shape, &mut painted);
     }
-    said
+    painted
+}
+
+/// Every word a frame painted, in the order it painted them.
+pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
+    galleys(output)
+        .iter()
+        .map(|galley| galley.text().to_string())
+        .collect()
 }
 
 /// Everything an act needs run against it.

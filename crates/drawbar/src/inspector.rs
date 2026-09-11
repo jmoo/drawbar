@@ -184,20 +184,27 @@ fn about_selection(
         .map(|entity| fit(&device.state, entity))
         .unwrap_or(Fit::Unattached);
     for fact in facts(row, &held) {
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [FACT, ui.spacing().interact_size.y],
-                egui::Label::new(egui::RichText::new(fact.what).text_style(ui_text()).weak())
-                    .halign(egui::Align::LEFT),
-            );
-            let said = ui.add(
-                egui::Label::new(egui::RichText::new(&fact.said).text_style(ui_text())).truncate(),
-            );
-            if let Some(hint) = fact.hint {
-                said.on_hover_text(hint);
-            }
-        });
+        fact_line(ui, fact);
     }
+}
+
+/// One fact: its own word in a fixed column, and the whole of what it says beside it.
+///
+/// ⚠️ The value wraps rather than truncating. A refusal, a where sentence and a name are
+/// each as long as they are, and half of one is not a fact.
+fn fact_line(ui: &mut egui::Ui, fact: Fact) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [FACT, ui.spacing().interact_size.y],
+            egui::Label::new(egui::RichText::new(fact.what).text_style(ui_text()).weak())
+                .halign(egui::Align::LEFT),
+        );
+        let said =
+            ui.add(egui::Label::new(egui::RichText::new(&fact.said).text_style(ui_text())).wrap());
+        if let Some(hint) = fact.hint {
+            said.on_hover_text(hint);
+        }
+    });
 }
 
 /// A line the panel says about the selection as a whole rather than about a field.
@@ -595,6 +602,41 @@ mod tests {
             facts(&row, &Fit::Warn("untried".into())).len(),
             said.len(),
             "an untried write is the queue's warning, not a fact about the asset"
+        );
+    }
+
+    /// ⚠️ A refusal is a sentence, and a sentence the dock cannot fit on one line is laid
+    /// out on more of them rather than cut off at the panel's edge.
+    #[test]
+    fn a_fact_too_long_for_the_dock_wraps_rather_than_truncating() {
+        let ctx = context();
+        let lines = |said: &str| {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(crate::shell::INSPECTOR)
+                    .show(ctx, |ui| {
+                        fact_line(
+                            ui,
+                            Fact {
+                                what: "refused",
+                                said: said.to_string(),
+                                hint: None,
+                            },
+                        );
+                    });
+            });
+            crate::browser::bench::galleys(&output)
+                .iter()
+                .find(|galley| galley.text() == said)
+                .map(|galley| galley.rows.len())
+        };
+
+        assert_eq!(lines("2.0 kB"), Some(1), "a short value keeps its one line");
+        let why = "This is a Stage 4 file and the instrument is a Nord Electro 5D.";
+        assert!(
+            lines(why).is_some_and(|rows| rows > 1),
+            "the whole refusal is painted: {:?}",
+            lines(why)
         );
     }
 
