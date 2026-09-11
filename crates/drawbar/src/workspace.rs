@@ -976,17 +976,24 @@ impl Workspace {
         self.revision += 1;
     }
 
-    /// It reached a slot: those bytes are what it is saved as, and that slot is where it
-    /// stands.
+    /// It reached a slot: the bytes the write carried are what it is saved as, and that
+    /// slot is where it stands.
+    ///
+    /// ⚠️ The bytes the send carried, never the bytes it holds now. A write takes as
+    /// long as the instrument takes, and an edit made while one was in flight is on this
+    /// computer alone — calling it saved would let it be discarded with the tab it is
+    /// open in.
     ///
     /// ⚠️ The one place a link is set rather than derived. A write is the only evidence
     /// about a slot this app does not have to read back, and [`crate::device::link`]
     /// keeps it until a walk of that slot says otherwise.
-    pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location) {
-        self.mark_saved(id);
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
-            entity.link = Some((class, at));
-        }
+    pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        entity.saved = Baseline::read(sent);
+        entity.link = Some((class, at));
+        self.revision += 1;
     }
 
     /// Swap in re-encoded bytes, keeping the entity's identity.

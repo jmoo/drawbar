@@ -221,11 +221,16 @@ async fn execute<T: Transport>(
             name,
             bytes,
         } => {
-            let note = put_one(device, class, at, &name, bytes, emit, gone)
+            let note = put_one(device, class, at, &name, bytes.clone(), emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
             // Nothing is owed to the instrument until this session has closed.
-            emit.send(DeviceEvent::Sent { id, class, at });
+            emit.send(DeviceEvent::Sent {
+                id,
+                class,
+                at,
+                bytes,
+            });
             Ok(Some(note))
         }
 
@@ -487,6 +492,7 @@ async fn batch<T: Transport>(
                             id: item.id,
                             class,
                             at: item.at,
+                            bytes: item.bytes.clone(),
                         });
                     }
                     Err(why) => return Ok(Some(why)),

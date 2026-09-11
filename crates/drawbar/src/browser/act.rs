@@ -912,6 +912,7 @@ mod tests {
             id,
             class: ObjectClass::Program,
             at: at(3),
+            bytes: workspace.get(id).unwrap().bytes.clone(),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         assert!(!workspace.get(id).unwrap().is_unsaved());
@@ -1641,6 +1642,7 @@ mod tests {
             id: ids[0],
             class,
             at: at(0),
+            bytes: workspace.get(ids[0]).unwrap().bytes.clone(),
         });
         device.pretend(DeviceEvent::OpFailed(
             "Programs 7:2 is occupied, and the instrument does not overwrite in place".into(),

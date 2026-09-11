@@ -334,6 +334,10 @@ pub enum DeviceEvent {
         id: u64,
         class: ObjectClass,
         at: Location,
+        /// The bytes the write carried, which is what the slot holds and what the asset
+        /// is saved as from here on — see [`Workspace::landed`]. The asset may hold
+        /// something else by now: a write takes as long as the instrument takes.
+        bytes: Vec<u8>,
     },
     /// A slot's former contents, which a failed write and a failed restore left with
     /// nowhere else to go.
@@ -1446,9 +1450,14 @@ impl Device {
                 // It landed, so it is no longer owed; what landed is what it is saved as,
                 // and the slot it landed in is where it stands. Only that object: the
                 // rest of a batch is still waiting on its own write.
-                DeviceEvent::Sent { id, class, at } => {
+                DeviceEvent::Sent {
+                    id,
+                    class,
+                    at,
+                    bytes,
+                } => {
                     queue.forget(id);
-                    workspace.landed(id, class, at);
+                    workspace.landed(id, class, at, bytes);
                 }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
@@ -1731,6 +1740,7 @@ mod tests {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
+            bytes: workspace.get(landed).unwrap().bytes.clone(),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -1902,7 +1912,8 @@ mod tests {
             "standing nowhere, it takes the lowest address holding it"
         );
 
-        workspace.landed(id, class, high);
+        let sent = workspace.get(id).unwrap().bytes.clone();
+        workspace.landed(id, class, high, sent);
         device.relink(&mut workspace);
         assert_eq!(
             workspace.get(id).unwrap().link,
@@ -2171,7 +2182,13 @@ mod tests {
             let (id, crc) = program(&mut workspace, &mut log, origin);
             device.pretend_attached();
 
-            device.pretend(DeviceEvent::Sent { id, class, at });
+            let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+            device.pretend(DeviceEvent::Sent {
+                id,
+                class,
+                at,
+                bytes: sent,
+            });
             device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
             let reported = match rescan {
@@ -2247,6 +2264,46 @@ mod tests {
 
         let (link, _, _, _) = sent(Rescan::Skipped);
         assert_eq!(link, there, "a bank nothing has read says neither way");
+    }
+
+    /// A write takes as long as the instrument takes, and an edit made while one is in
+    /// flight is on this computer alone. What landed is what the asset is saved as; what
+    /// it holds now is still unsaved, and closing the tab over it would be losing it.
+    #[test]
+    fn a_send_settles_the_baseline_on_the_bytes_it_carried_and_not_on_a_later_edit() {
+        let class = ObjectClass::Program;
+        let at = Location { bank: 4, slot: 2 };
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut queue = Queue::default();
+        let (id, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.pretend_attached();
+        crate::queue::enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
+
+        // What the write carries is what the asset held when it went out.
+        let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+
+        let (_, edited) = crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())])
+            .expect("the registry takes the set");
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+
+        device.pretend(DeviceEvent::Sent {
+            id,
+            class,
+            at,
+            bytes: sent.clone(),
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+        let entity = workspace.get(id).expect("it is on the list");
+        assert_eq!(entity.saved.bytes, sent, "the instrument holds these");
+        assert_eq!(entity.bytes, edited);
+        assert!(entity.is_unsaved(), "the edit never went anywhere");
+        assert_eq!(entity.link, Some((class, at)));
+        assert!(!queue.holds(id), "it landed");
     }
 
     /// A library id resolves to a name only where the instrument has actually said so:
