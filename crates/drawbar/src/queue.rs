@@ -54,7 +54,7 @@ pub struct Queued {
 pub enum Diff {
     /// The occupant's bytes are on their way.
     Pending,
-    /// Nothing about the two bodies differs.
+    /// The two wire bodies are the same bytes.
     Identical,
     /// Both bodies carry a registry, so the difference is a list of fields.
     Fields(Vec<FieldDiff>),
@@ -609,51 +609,62 @@ impl Queue {
 
 /// How what is waiting differs from what the slot holds.
 ///
-/// Both bodies decoding into registries is what makes a field list possible; anything
-/// else is bytes, compared as the wire carries them rather than as they sit in a file —
-/// two containers of one body differ in their headers alone.
+/// ⚠️ The bytes decide whether the two agree. A registry covers what it declares, and a
+/// bit no field claims is still a difference between this body and that one — saying
+/// two bodies are the same because every declared field reads the same would call a
+/// write unnecessary that is not.
+///
+/// What the difference is said to be is the other question: both bodies decoding into
+/// registries is what makes a field list possible, and anything else is an offset into
+/// the wire body — compared as the wire carries it rather than as it sits in a file,
+/// since two containers of one body differ in their headers alone.
 fn compare(here: &[u8], there: &[u8]) -> Diff {
-    let decode = |bytes: &[u8]| nord_format::from_stream(&mut Cursor::new(bytes)).ok();
-    if let (Some(mine), Some(held)) = (decode(here), decode(there)) {
-        if let (Some(mine), Some(held)) = (fields_of(&mine), fields_of(&held)) {
-            let differing: Vec<FieldDiff> = mine
-                .into_iter()
-                .filter_map(|field| {
-                    let there = held.iter().find(|other| other.path == field.path)?;
-                    (there.display != field.display).then(|| FieldDiff {
-                        path: field.path,
-                        here: field.display,
-                        there: there.display.clone(),
-                    })
-                })
-                .collect();
-            return match differing.is_empty() {
-                true => Diff::Identical,
-                false => Diff::Fields(differing),
-            };
-        }
-    }
     let body = |bytes: &[u8]| {
         nord_usb::envelope::unwrap(bytes)
             .ok()
             .map(|read| read.body.0)
     };
-    match (body(here), body(there)) {
-        (Some(mine), Some(held)) => bytewise(&mine, &held),
+    let (mine, held) = match (body(here), body(there)) {
+        (Some(mine), Some(held)) => (mine, held),
         // Not a container this app can strip, so the whole of what it holds is compared.
-        _ => bytewise(here, there),
+        _ => (here.to_vec(), there.to_vec()),
+    };
+    let Some(first_at) = parted(&mine, &held) else {
+        return Diff::Identical;
+    };
+    match apart(here, there) {
+        Some(fields) => Diff::Fields(fields),
+        None => Diff::Bytes { first_at },
     }
 }
 
-fn bytewise(here: &[u8], there: &[u8]) -> Diff {
-    match here.iter().zip(there).position(|(mine, held)| mine != held) {
-        Some(first_at) => Diff::Bytes { first_at },
-        None if here.len() == there.len() => Diff::Identical,
-        // One runs out; the first difference is where the shorter one ended.
-        None => Diff::Bytes {
-            first_at: here.len().min(there.len()),
-        },
+/// The offset of the first byte the two do not share, where they part at all.
+fn parted(here: &[u8], there: &[u8]) -> Option<usize> {
+    if let Some(first_at) = here.iter().zip(there).position(|(mine, held)| mine != held) {
+        return Some(first_at);
     }
+    // One runs out; the first difference is where the shorter one ended.
+    (here.len() != there.len()).then(|| here.len().min(there.len()))
+}
+
+/// The registered fields two bodies do not agree on, where both carry a registry and any
+/// of them do.
+fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
+    let decode = |bytes: &[u8]| nord_format::from_stream(&mut Cursor::new(bytes)).ok();
+    let mine = fields_of(&decode(here)?)?;
+    let held = fields_of(&decode(there)?)?;
+    let differing: Vec<FieldDiff> = mine
+        .into_iter()
+        .filter_map(|field| {
+            let there = held.iter().find(|other| other.path == field.path)?;
+            (there.display != field.display).then(|| FieldDiff {
+                path: field.path,
+                here: field.display,
+                there: there.display.clone(),
+            })
+        })
+        .collect();
+    (!differing.is_empty()).then_some(differing)
 }
 
 /// The height of one waiting item, and the room the list keeps at each end.
@@ -1340,6 +1351,49 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, log);
+    }
+
+    /// Identical means the instrument holds these very bytes. A registry covers what it
+    /// declares, so a body whose every declared field still reads the same can carry a
+    /// bit this app knows nothing about — and a write that would put it right must not
+    /// be called unnecessary.
+    #[test]
+    fn a_body_byte_no_field_claims_still_parts_the_two() {
+        let (_, _, bytes) = bench();
+        let read = nord_usb::envelope::unwrap(&bytes).expect("a container");
+        let (tag, at, version) = (
+            nord_usb::envelope::tag(&read.header),
+            nord_usb::envelope::location(&read.header),
+            read.header.version,
+        );
+        let body = read.body.0;
+        // The occupant as a read of the slot delivers it: the wire body in a container
+        // of this app's own making.
+        let flipped = |offset: usize| {
+            let mut other = body.clone();
+            other[offset] ^= 1;
+            nord_usb::envelope::wrap(&tag, at, version, &other).expect("it wraps")
+        };
+
+        for offset in 0..body.len() {
+            assert!(
+                !matches!(compare(&bytes, &flipped(offset)), Diff::Identical),
+                "body byte {offset:#06x} differs"
+            );
+        }
+
+        // The one this exists for: a body that still decodes, whose every registered
+        // field still reads the same, and which is not the body this asset holds.
+        let unclaimed = (0..body.len()).find(|offset| {
+            let other = flipped(*offset);
+            apart(&bytes, &other).is_none()
+                && nord_format::from_stream(&mut Cursor::new(&other)).is_ok()
+        });
+        let offset = unclaimed.expect("a program body carries bits no field declares");
+        assert!(matches!(
+            compare(&bytes, &flipped(offset)),
+            Diff::Bytes { first_at } if first_at == offset
+        ));
     }
 
     /// The body checksum of one asset's saved bytes, which is what a slot holding them
