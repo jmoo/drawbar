@@ -1751,7 +1751,7 @@ mod tests {
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
-            .expect("a type-1 container carries one");
+            .expect("every CBIN container has one");
         (id, crc)
     }
 
@@ -1766,7 +1766,7 @@ mod tests {
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
-            .expect("a type-1 container carries one");
+            .expect("every CBIN container has one");
         (id, crc)
     }
 

@@ -284,12 +284,12 @@ pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Que
 
 /// What a waiting entry says about a slot before either body has been read: vacant is
 /// nothing to replace, and two bodies whose checksums agree are known to agree, because
-/// the container's own CRC-32 is the number the instrument reports for a slot.
+/// the body's CRC-32 is the number the instrument reports for a slot.
 ///
 /// ⚠️ The bytes held now, which are the ones a send writes — not the saved baseline
 /// [`crate::device::link`] matches a slot on.
 fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
-    let here = entity.container.as_ref().and_then(|held| held.body_crc32);
+    let here = entity.container.as_ref().map(|held| held.body_crc32);
     match replaces {
         Occupancy::Vacant => Diff::Empty,
         Occupancy::Held(held) if held.crc.is_some() && held.crc == here => Diff::Identical,
@@ -1298,7 +1298,7 @@ mod tests {
         workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
-            .expect("a type-1 container carries one")
+            .expect("every CBIN container has one")
     }
 
     /// An edit queues nothing and neither does saving one the instrument already agrees
@@ -1783,6 +1783,39 @@ mod tests {
 
         follow(&workspace, &mut device, &mut queue, &mut log);
         assert_eq!(device.queued().len(), 1, "asked for once, not once a frame");
+    }
+
+    /// ⚠️ A type-0 file — every Electro 5 factory program, and everything Nord Sound
+    /// Manager exports from one — stores no body checksum, so an entry for one settles
+    /// against the slot it already matches only because that checksum is hashed from the
+    /// body rather than read out of the header.
+    #[test]
+    fn a_type_0_entry_settles_against_the_slot_reporting_its_checksum_without_a_read() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, _tabs) = attached(&workspace);
+        let mut queue = Queue::default();
+        let class = ObjectClass::Program;
+
+        let id = workspace.ingest(
+            "Circling Bells.ne5p".into(),
+            Origin::File("Circling Bells.ne5p".into()),
+            crate::workspace::as_type_0(&bytes),
+            &mut log,
+        );
+        let held = crc(&workspace, id);
+        device.pretend_bodies(class, 7, &[Some(("Circling Bells", held))]);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
+        assert!(device.queued().is_empty(), "the checksums settled it");
     }
 
     /// A plan says what it says. Asking for an asset to go where it is already going

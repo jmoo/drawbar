@@ -365,7 +365,7 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Whe
 ///
 /// The one comparison behind the library's sign, the tree's dot and what a "queue
 /// changed" walks: the checksum a walk reported for the slot against the checksum of
-/// the saved bytes, which a type-1 container carries and nothing has to hash.
+/// the saved bytes, which is read once at ingest and nothing hashes again.
 ///
 /// ⚠️ `None` where neither answers — a class that reports no checksum was linked by
 /// name, and a name is not a body. Only a compare read settles one of those, and it
@@ -1561,7 +1561,7 @@ mod tests {
         let crc = workspace
             .get(both)
             .and_then(|entity| entity.saved.crc32)
-            .expect("a type-1 container carries one");
+            .expect("every CBIN container has one");
         device.pretend_bodies(
             ObjectClass::Program,
             7,
@@ -1629,7 +1629,7 @@ mod tests {
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
-            .expect("a type-1 container carries one");
+            .expect("every CBIN container has one");
         let filter = Filter::default();
         let where_ = |workspace: &Workspace, device: &Device| {
             rows(workspace, &device.state, &Queue::default(), &tags, &filter)
@@ -1669,6 +1669,58 @@ mod tests {
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
     }
 
+    /// ⚠️ An Electro 5 factory program is a type-0 file, and so is every copy Nord Sound
+    /// Manager exports from one. Its header carries no body checksum, so nothing links
+    /// it to the slot it came off unless that checksum is hashed from the body.
+    #[test]
+    fn a_type_0_asset_links_to_the_slot_reporting_its_body_checksum() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (queue, tags) = (Queue::default(), Tags::default());
+        let visuals = egui::Visuals::dark();
+        let held_at = at(6, 0);
+
+        let bytes = {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            let bytes = crate::workspace::as_type_0(&workspace.get(id).unwrap().bytes);
+            workspace.remove(id, &mut log);
+            bytes
+        };
+        let id = workspace.ingest(
+            "Circling Bells.ne5p".into(),
+            Origin::File("Circling Bells.ne5p".into()),
+            bytes,
+            &mut log,
+        );
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("hashed from the body the header does not checksum");
+
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[Some(("Circling Bells", crc)), Some(("Squabble B", crc ^ 1))],
+        );
+        device.relink(&mut workspace);
+
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((ObjectClass::Program, held_at))
+        );
+        let where_ = rows(&workspace, &device.state, &queue, &tags, &Filter::default())
+            .into_iter()
+            .find(|row| matches!(row.item, Item::Local(_)))
+            .map(|row| row.where_);
+        assert_eq!(where_, Some(Where::Both(Some(true))));
+        assert_eq!(
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue, &visuals),
+            Some(crate::app::good(&visuals))
+        );
+    }
+
     /// A link is matched on the saved bytes, which is what the sign and the dot are
     /// already read against. An asset holding an edit nothing has saved still finds the
     /// slot holding what it was saved as, however far its bytes have moved since; saving
@@ -1700,7 +1752,7 @@ mod tests {
                 .unwrap()
                 .container
                 .as_ref()
-                .and_then(|held| held.body_crc32),
+                .map(|held| held.body_crc32),
             Some(saved_as),
             "the edit moved the bytes it holds now"
         );
@@ -1759,7 +1811,7 @@ mod tests {
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
-            .expect("a type-1 container carries one");
+            .expect("every CBIN container has one");
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
         device.relink(&mut workspace);
         // Edited and saved: the link stays where it was and the two bodies part.

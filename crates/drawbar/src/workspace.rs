@@ -99,8 +99,9 @@ impl VerifyState {
 
 /// The container facts, read once at ingest.
 ///
-/// ⚠️ Reading them streams the whole file to check the checksum, so it happens on the
-/// way in and never per frame — a piano library is hundreds of megabytes.
+/// ⚠️ Reading them streams the whole file to check the checksum and hash its body, so
+/// it happens on the way in and never per frame — a piano library is hundreds of
+/// megabytes.
 #[derive(Clone)]
 pub struct Container {
     pub header: Header,
@@ -109,27 +110,31 @@ pub struct Container {
     /// `crc32:` or `crc16:` — the two generations keep it in different places.
     pub checksum_label: &'static str,
     pub checksum: String,
-    /// The body's CRC-32, which is what a type-1 container carries and what the device
-    /// reports for a slot — so a file and the slot it came off compare without either
-    /// body being hashed again.
+    /// The CRC-32 of the wire body, which is what the device reports for a slot — so a
+    /// file and the slot it came off compare without either body being hashed again.
     ///
-    /// `None` for a type-0 container, whose checksum is a CRC-16 over the whole file.
-    pub body_crc32: Option<u32>,
+    /// Computed rather than read: a type-1 container carries the same number at `0x18`,
+    /// and a type-0 one carries no such word — only a CRC-16 over the whole file.
+    pub body_crc32: u32,
 }
 
 impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
-        // `Header` omits the generation-specific checksum field.
-        let (checksum_label, checksum, body_crc32) = match info.header.generation {
+        let start = usize::try_from(info.header.generation.body_start()).ok()?;
+        let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
+        let body_crc32 = nord_usb::envelope::crc32(bytes.get(start..end)?);
+        // `Header` omits the generation-specific checksum field. What the file stores is
+        // what is shown; it parts from the body's own hash exactly when the file is bad.
+        let (checksum_label, checksum) = match info.header.generation {
             Generation::V0 => {
                 let tail = bytes.get(bytes.len().checked_sub(2)?..)?;
                 let crc = u16::from_le_bytes(tail.try_into().ok()?);
-                ("crc16:", format!("{crc:#06x}"), None)
+                ("crc16:", format!("{crc:#06x}"))
             }
             Generation::V1 => {
                 let crc = u32::from_le_bytes(bytes.get(0x18..0x1c)?.try_into().ok()?);
-                ("crc32:", format!("{crc:#010x}"), Some(crc))
+                ("crc32:", format!("{crc:#010x}"))
             }
         };
         Some(Container {
@@ -159,7 +164,8 @@ pub struct Baseline {
     /// the sign beside it are both decided on — [`crate::device::link`] and
     /// [`crate::library::agrees`].
     ///
-    /// `None` for anything but a type-1 container — see [`Container::body_crc32`].
+    /// `None` for bytes that are no CBIN container at all — see
+    /// [`Container::body_crc32`].
     pub crc32: Option<u32>,
 }
 
@@ -167,7 +173,7 @@ impl Baseline {
     /// The baseline of bytes nothing has inspected yet, which is what a store hands
     /// back.
     pub fn read(bytes: Vec<u8>) -> Baseline {
-        let crc32 = Container::read(&bytes).and_then(|held| held.body_crc32);
+        let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
         Baseline { bytes, crc32 }
     }
 }
@@ -249,7 +255,7 @@ impl LocalEntity {
     fn baseline(&self) -> Baseline {
         Baseline {
             bytes: self.bytes.clone(),
-            crc32: self.container.as_ref().and_then(|held| held.body_crc32),
+            crc32: self.container.as_ref().map(|held| held.body_crc32),
         }
     }
 
@@ -1165,6 +1171,17 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
     Ok(())
 }
 
+/// The same body under the shorter type-0 header the Electro 5's factory banks carry:
+/// no CRC-32 word, and a CRC-16 over the whole file in the last two bytes.
+#[cfg(test)]
+pub(crate) fn as_type_0(bytes: &[u8]) -> Vec<u8> {
+    let mut file = nord_usb::envelope::unwrap(bytes).expect("a CBIN file with a body");
+    file.header.generation = Generation::V0;
+    let mut out = std::io::Cursor::new(Vec::new());
+    file.write_to(&mut out).expect("a type-0 container writes");
+    out.into_inner()
+}
+
 /// Run a task that outlives the frame that started it.
 ///
 /// ⚠️ wasm has one thread and cannot block: the future has to go to the microtask
@@ -1205,20 +1222,42 @@ mod tests {
         assert_eq!(container.checksum_label, "crc32:");
     }
 
-    /// ⚠️ The checksum a type-1 container carries **is** the device's own body CRC-32,
-    /// which is what lets a file and a slot be compared from the header alone. Hashing
-    /// every listed asset once a frame would stall the library on a sample library, so
-    /// the equality is proved here rather than recomputed there.
+    /// The number a file and a slot are compared on is the CRC-32 of the wire body, and
+    /// the word a type-1 header stores at `0x18` is that same number.
     #[test]
-    fn the_container_carries_the_body_checksum_the_instrument_reports() {
+    fn the_body_checksum_is_the_word_a_type_1_header_stores() {
         let bytes = Fresh::Program.bytes().unwrap();
         let entity = ingest("untitled.ne5p", bytes.clone());
-        let stored = entity
-            .container
-            .and_then(|container| container.body_crc32)
-            .expect("a type-1 container carries one");
+        let container = entity.container.expect("a fresh program is a CBIN file");
+        assert_eq!(container.header.generation, Generation::V1);
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
-        assert_eq!(stored, nord_usb::envelope::crc32(&body.body.0));
+        assert_eq!(
+            container.body_crc32,
+            nord_usb::envelope::crc32(&body.body.0)
+        );
+        assert_eq!(
+            container.body_crc32,
+            u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap()),
+        );
+    }
+
+    /// ⚠️ A type-0 container stores no body checksum — its own is a CRC-16 over the
+    /// whole file — so the number the instrument reports for a slot is hashed from the
+    /// body rather than read out of the header, which is the only way an Electro 5
+    /// factory program is comparable to the slot holding it at all.
+    #[test]
+    fn a_type_0_file_has_the_body_checksum_its_header_does_not_carry() {
+        let bytes = as_type_0(&Fresh::Program.bytes().unwrap());
+        let entity = ingest("Circling Bells.ne5p", bytes.clone());
+        let container = entity.container.as_ref().expect("still a CBIN file");
+        assert_eq!(container.header.generation, Generation::V0);
+        assert!(container.checksum_ok);
+        assert_eq!(container.checksum_label, "crc16:");
+
+        let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
+        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        assert_eq!(container.body_crc32, hashed);
+        assert_eq!(entity.saved.crc32, Some(hashed));
     }
 
     /// Each fresh default carries its own tag, and each one round-trips.
