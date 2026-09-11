@@ -644,20 +644,11 @@ pub fn occupancy(
     let Some(unit) = unit else {
         return Some(format!("{} items", status.count));
     };
-    Some(format!(
-        "{}/{} MB",
-        megabytes(u64::from(status.used), unit),
-        megabytes(status.total(), unit)
+    let bytes = |units: u64| units.saturating_mul(u64::from(unit.get()));
+    Some(crate::room::measure_out_of(
+        bytes(u64::from(status.used)),
+        bytes(status.total()),
     ))
-}
-
-/// What a count of a partition's own units comes to, in whole megabytes.
-fn megabytes(units: u64, unit: AllocationUnit) -> u64 {
-    const MIB: u64 = 1024 * 1024;
-    let bytes = units.saturating_mul(u64::from(unit.get()));
-    // To the nearest, so a library one byte over a boundary does not read a whole
-    // megabyte larger than the panel says.
-    (bytes + MIB / 2) / MIB
 }
 
 /// The allocation unit a partition reporting `bytes` per unit would hand back.
@@ -1643,7 +1634,7 @@ mod tests {
                 Some(pretend_allocation_unit(class, 131_064))
             )
             .as_deref(),
-            Some("184/192 MB")
+            Some("184.0/192.0 MB")
         );
 
         // A slot-addressed class divides into slots, so it never reaches the unit at all.
@@ -1658,6 +1649,49 @@ mod tests {
         assert_eq!(
             occupancy(ObjectClass::Program, &programs, None).as_deref(),
             Some("128/400")
+        );
+    }
+
+    /// ⚠️ A partition reads in the unit its own total deserves, and both figures in that
+    /// one unit. The Live and Settings partitions hold less than a megabyte, and in
+    /// megabytes each of them reads 0/0.
+    #[test]
+    fn a_partition_reads_in_the_unit_its_total_deserves() {
+        let partition = |class, used: u32, free: u32| {
+            [Status {
+                class,
+                count: 0,
+                free,
+                used,
+                dirty: 0,
+                spare: 0,
+            }]
+        };
+        let byte = |class| Some(pretend_allocation_unit(class, 1));
+
+        let live = ObjectClass::Live;
+        assert_eq!(
+            occupancy(live, &partition(live, 121, 379), byte(live)).as_deref(),
+            Some("121/500 B")
+        );
+
+        // The part takes the whole's unit rather than its own: 500 bytes alone would
+        // read in bytes, and would then look larger than the 24 kB it sits inside.
+        let settings = ObjectClass::Settings;
+        assert_eq!(
+            occupancy(settings, &partition(settings, 500, 24_076), byte(settings)).as_deref(),
+            Some("0.5/24.0 kB")
+        );
+
+        let samples = ObjectClass::Sample;
+        assert_eq!(
+            occupancy(
+                samples,
+                &partition(samples, 128, 128),
+                Some(pretend_allocation_unit(samples, 1024 * 1024))
+            )
+            .as_deref(),
+            Some("128.0/256.0 MB")
         );
     }
 

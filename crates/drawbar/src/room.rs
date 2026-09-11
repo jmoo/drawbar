@@ -160,15 +160,32 @@ pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) ->
 
 /// A size in the widest unit that leaves a figure worth reading.
 pub fn measure(bytes: u64) -> String {
+    let (figure, unit) = scaled(bytes, bytes);
+    format!("{figure} {unit}")
+}
+
+/// A part and the whole it is out of: `121/500 B`, `184.0/192.0 MB`.
+///
+/// ⚠️ One unit for the pair, taken from the whole. A part given its own unit would read
+/// smaller than the total it sits under, and the two figures would no longer compare.
+pub fn measure_out_of(part: u64, whole: u64) -> String {
+    let (part, unit) = scaled(part, whole);
+    let (whole, _) = scaled(whole, whole);
+    format!("{part}/{whole} {unit}")
+}
+
+/// `bytes` written in the unit a size of `scale` deserves, and that unit's name.
+fn scaled(bytes: u64, scale: u64) -> (String, &'static str) {
     const K: f64 = 1024.0;
     let held = bytes as f64;
-    if held < K {
-        return format!("{bytes} B");
+    let scale = scale as f64;
+    if scale < K {
+        return (bytes.to_string(), "B");
     }
-    if held < K * K {
-        return format!("{:.1} kB", held / K);
+    if scale < K * K {
+        return (format!("{:.1}", held / K), "kB");
     }
-    format!("{:.1} MB", held / (K * K))
+    (format!("{:.1}", held / (K * K)), "MB")
 }
 
 /// The trough, what the folder holds, and what the queue would add to it.
