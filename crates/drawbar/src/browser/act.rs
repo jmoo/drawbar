@@ -518,29 +518,34 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
 /// The one write path there is: same refusal, same grouping, same per-item flow. What
 /// is written leaves the queue when its [`crate::device::DeviceEvent::Sent`] lands, so a
 /// batch that stops halfway leaves the rest of the queue where it was.
-fn send_batch(queue: &Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
+fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
+    // ⚠️ The instrument attached now need not be the one each entry was queued against:
+    // the queue survives a disconnection, and the next instrument is asked afresh.
+    crate::queue::refit(workspace, &device.state, queue, log);
+    let batch = grouped(queue, workspace);
     // Validate the whole batch before the first delete-then-write.
-    for entity in queue.ids().iter().filter_map(|id| workspace.get(*id)) {
-        if let Err(e) = nord_usb::envelope::unwrap(&entity.bytes) {
-            log.error(format!("{}: {e}", entity.name));
+    for item in batch.iter().flat_map(|(_, items)| items) {
+        if let Err(e) = nord_usb::envelope::unwrap(&item.bytes) {
+            log.error(format!("{}: {e}", item.name));
             log.trouble(format!(
                 "“{}” is not a file the instrument takes, so nothing was sent.",
-                entity.name
+                item.name
             ));
             return;
         }
     }
-    for (class, items) in grouped(queue, workspace) {
+    for (class, items) in batch {
         device.send(DeviceCmd::SendAll { class, items }, log);
     }
 }
 
 /// What is waiting, gathered per folder in the order the queue holds it.
 ///
-/// A session belongs to a folder, so a folder is the unit a batch is cut into.
+/// A session belongs to a folder, so a folder is the unit a batch is cut into. An entry
+/// carrying a refusal is left out of it and stays in the queue.
 fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
     let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
-    for held in queue.entries() {
+    for held in queue.entries().iter().filter(|held| held.failure.is_none()) {
         let Some(entity) = workspace.get(held.id) else {
             continue;
         };
@@ -1551,6 +1556,100 @@ mod tests {
             other => panic!("{}", other.label()),
         }
         assert_eq!(queue.ids(), vec![id], "still owed until the write lands");
+    }
+
+    /// The queue outlives the instrument it was built against. What the one attached now
+    /// refuses is not written, keeps its place with the reason against it, and does not
+    /// stop the rest of the batch.
+    #[test]
+    fn a_send_re_checks_every_entry_against_the_instrument_attached_now() {
+        use crate::device::DeviceEvent;
+
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        let theirs = program(&mut workspace, &mut log);
+        let electro = workspace.ingest("Africa-Split.ne5p".into(), Origin::Fresh, theirs, &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            electro,
+            class,
+            at(0),
+        );
+
+        // Another instrument in its place, and something it does take waiting with it.
+        device.pretend(DeviceEvent::Disconnected { lost: true });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        device.pretend_attached_as("Nord Stage 4");
+        let made = workspace
+            .create(Fresh::Stage4Program, &mut log)
+            .expect("a Stage 4 program");
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            made,
+            class,
+            at(1),
+        );
+        assert_eq!(queue.ids(), vec![electro, made]);
+
+        // The instrument declares itself, and the queue page says so before anyone has
+        // pressed Send.
+        device.pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
+            class,
+            name: "Program".into(),
+            native: false,
+            unit: None,
+        }]));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert!(queue
+            .entry(electro)
+            .is_some_and(|held| held.failure.is_some()));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SendAll],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        let batch = device
+            .queued()
+            .iter()
+            .find(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+            .expect("the rest of the batch still goes");
+        let DeviceCmd::SendAll { items, .. } = batch else {
+            unreachable!()
+        };
+        assert_eq!(
+            items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![made],
+            "only what this instrument takes is written"
+        );
+        assert_eq!(queue.ids(), vec![electro, made], "both are still waiting");
+        let refused = queue.entry(electro).expect("it kept its place");
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .is_some_and(|why| why.contains("Nord Stage 4")),
+            "{:?}",
+            refused.failure
+        );
+        assert!(
+            log.transcript().contains("Africa-Split.ne5p” cannot go to"),
+            "{}",
+            log.transcript()
+        );
     }
 
     /// The queue goes out in the order it was built, one command per folder, and what

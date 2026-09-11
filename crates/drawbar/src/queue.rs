@@ -275,6 +275,36 @@ impl Behind {
     }
 }
 
+/// Re-check everything waiting against the instrument attached now, and say what it
+/// refuses.
+///
+/// ⚠️ The queue outlives a disconnection, so what is in it was checked against whatever
+/// was attached when it was queued. An entry this instrument refuses keeps its place and
+/// carries the reason; [`crate::browser::act`] leaves it out of the batch, and nothing
+/// writes it until it is queued again against an instrument that takes it.
+pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log: &mut Log) {
+    for held in &mut queue.list {
+        let Some(entity) = workspace.get(held.id) else {
+            continue;
+        };
+        let refusal = match fit(state, entity) {
+            Fit::Refuses(why) => Some(why),
+            Fit::Unattached | Fit::Takes | Fit::Warn(_) => None,
+        };
+        // Said once per instrument that refuses it, rather than again on every send.
+        if let Some(why) = &refusal {
+            if held.failure.as_ref() != Some(why) {
+                log.say(format!(
+                    "“{}” cannot go to {}. {why}",
+                    entity.name,
+                    place(held.class, held.at)
+                ));
+            }
+        }
+        held.failure = refusal;
+    }
+}
+
 /// Queue every asset the instrument no longer agrees with, each for its own slot.
 pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for (id, class, at) in changed(workspace, &device.state, queue) {
@@ -494,9 +524,14 @@ impl Queue {
     /// A write into `class` stopped, so the entry it stopped on says why.
     ///
     /// ⚠️ A batch writes its entries in queue order and each one that lands leaves the
-    /// queue, so the first of that class still waiting is the one it stopped on.
+    /// queue, so the first of that class still waiting is the one it stopped on — past
+    /// the ones [`refit`] took out of the batch, which no write reached.
     pub fn stumbled(&mut self, class: ObjectClass, why: &str) {
-        if let Some(held) = self.list.iter_mut().find(|held| held.class == class) {
+        if let Some(held) = self
+            .list
+            .iter_mut()
+            .find(|held| held.class == class && held.failure.is_none())
+        {
             held.failure = Some(why.to_string());
         }
     }

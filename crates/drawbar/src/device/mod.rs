@@ -1371,8 +1371,11 @@ impl Device {
                 // Which classes exist is the instrument's answer, so the walk of them
                 // can only start here. Each class reads its counters, its banks and its
                 // focus in one session.
+                // ⚠️ What is waiting was checked against whatever was attached when it
+                // was queued, and the queue outlives a disconnection.
                 DeviceEvent::Partitions(partitions) => {
                     self.state.partitions = partitions;
+                    crate::queue::refit(workspace, &self.state, queue, log);
                     self.resync();
                 }
                 DeviceEvent::Geometry { class, banks } => {
