@@ -25,6 +25,11 @@
 //! `MEASURED`. Where a tap is known only to within an `f32` rounding, a sum landing
 //! within that of a quantiser step can still store one count off the instrument's.
 //!
+//! The ratio is not baked into the bank: the `*_at` entry points run the same taps at
+//! another one, which is what a source at a rate other than
+//! [`SOURCE_RATE`](super::codec::SOURCE_RATE) needs. The cutoff stays where it was
+//! measured, so a faster source is not band-limited as far as the target's Nyquist.
+//!
 //! Inferred from specimens; not confirmed on hardware.
 
 use super::codec::{PITCH_DEN, PITCH_NUM};
@@ -203,19 +208,26 @@ pub fn taps() -> &'static [[f32; TAPS]; PHASES] {
     })
 }
 
-/// Return field `f` as `(floor(source position), phase)` without index overflow.
-pub fn lattice(field: usize) -> (i128, usize) {
-    let t = u128::from(PITCH_NUM) * field as u128;
-    let remainder = t % u128::from(PITCH_DEN);
+/// Return field `f` as `(floor(source position), phase)` without index overflow, on a
+/// lattice of `num` source samples per `den` fields.
+pub fn lattice_at(field: usize, num: u32, den: u32) -> (i128, usize) {
+    let t = u128::from(num) * field as u128;
+    let remainder = t % u128::from(den);
     (
-        (t / u128::from(PITCH_DEN)) as i128,
-        (remainder * PHASES as u128 / u128::from(PITCH_DEN)) as usize,
+        (t / u128::from(den)) as i128,
+        (remainder * PHASES as u128 / u128::from(den)) as usize,
     )
 }
 
-/// Sum field `f`'s tap products in `f64`; samples outside `source` are zero.
-pub fn accumulate(source: &[i16], field: usize) -> f64 {
-    let (base, phase) = lattice(field);
+/// [`lattice_at`] on the lattice the tap bank was measured for.
+pub fn lattice(field: usize) -> (i128, usize) {
+    lattice_at(field, PITCH_NUM, PITCH_DEN)
+}
+
+/// Sum field `f`'s tap products in `f64` on the `num`/`den` lattice; samples outside
+/// `source` are zero.
+pub fn accumulate_at(source: &[i16], field: usize, num: u32, den: u32) -> f64 {
+    let (base, phase) = lattice_at(field, num, den);
     let row = &taps()[phase];
     let mut acc = 0.0f64;
     for (j, &tap) in row.iter().enumerate() {
@@ -228,9 +240,20 @@ pub fn accumulate(source: &[i16], field: usize) -> f64 {
     acc
 }
 
-/// Return a field in source units, truncating toward zero once after the full sum.
+/// [`accumulate_at`] on the lattice the tap bank was measured for.
+pub fn accumulate(source: &[i16], field: usize) -> f64 {
+    accumulate_at(source, field, PITCH_NUM, PITCH_DEN)
+}
+
+/// Return a field in source units on the `num`/`den` lattice, truncating toward zero
+/// once after the full sum.
+pub fn field_at(source: &[i16], at: usize, num: u32, den: u32) -> i64 {
+    accumulate_at(source, at, num, den).trunc() as i64
+}
+
+/// [`field_at`] on the lattice the tap bank was measured for.
 pub fn field(source: &[i16], at: usize) -> i64 {
-    accumulate(source, at).trunc() as i64
+    field_at(source, at, PITCH_NUM, PITCH_DEN)
 }
 
 #[cfg(test)]
@@ -314,6 +337,18 @@ mod tests {
             expected,
             f64::from(sample) * f64::from(taps()[0][FIRST as usize])
         );
+    }
+
+    #[test]
+    fn another_ratio_walks_the_same_bank() {
+        assert_eq!(lattice_at(7, PITCH_NUM, PITCH_DEN), lattice(7));
+        // Two source samples per field lands on a stored sample every time.
+        for f in 0..8 {
+            assert_eq!(lattice_at(f, 2, 1), (2 * f as i128, 0));
+        }
+        // Three source samples per two fields alternates whole and half.
+        assert_eq!(lattice_at(1, 3, 2), (1, PHASES / 2));
+        assert_eq!(lattice_at(2, 3, 2), (3, 0));
     }
 
     #[test]
