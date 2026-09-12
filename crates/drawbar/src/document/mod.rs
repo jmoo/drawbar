@@ -79,6 +79,7 @@ pub struct Wants {
 /// draw it: audio, or a new asset made out of this one.
 enum Asked {
     Zone(sample::Ask),
+    Root(piano::Ask),
     Encode,
     /// The copy a body with nothing to edit offers, which is the header's Export.
     Export,
@@ -116,6 +117,8 @@ pub struct Document {
     player: crate::audio::Player,
     /// The encode panel over a WAV, and the read of the WAV it works from.
     wav: Option<(encode::Draft, encode::Source)>,
+    /// The piano library's plan, the facts it is a plan over, and its decoded strokes.
+    piano: piano::State,
     /// What the field document keeps between frames: the morph lens, where the reader
     /// is, and the two decodes a pending count is measured across. Never an edit.
     fields: field::State,
@@ -157,6 +160,7 @@ impl Document {
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
             self.player.stop();
+            self.piano.leave();
             // Reading a WAV copies every sample, so it happens on arrival and never per
             // frame — the panel works from what is read here.
             self.wav = match decoded.is_none() && encode::is_wav(&entity.bytes) {
@@ -172,6 +176,10 @@ impl Document {
         // Paint marks are measured against the bytes the asset was last saved as.
         sample::follow(&mut self.sample, id, &entity.saved.bytes);
         self.player.settle();
+        if let Some(left) = self.piano.settle(ui.input(|input| input.time)) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
         if self.player.playing().is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
@@ -205,7 +213,10 @@ impl Document {
                 queue: around.queue,
                 tags: around.tags,
                 view: viewing,
-                extras: extras(entity, device, workspace, pending),
+                extras: match decoded.is_some_and(piano::is_piano) {
+                    true => self.piano.begin(id, entity, &device.state),
+                    false => extras(entity, device, workspace, pending),
+                },
             },
             (&mut self.name, &mut self.variant),
             &mut sets,
@@ -239,9 +250,7 @@ impl Document {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
             if face == Face::Edit {
-                asked = self
-                    .pinned(ui, entity, doc.as_ref(), &mut sets)
-                    .map(Asked::Zone);
+                asked = self.pinned(ui, entity, doc.as_ref(), &mut sets);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -277,10 +286,16 @@ impl Document {
                                 self.advanced.table(ui, &table, &mut sets);
                                 typed = !sets.is_empty();
                             }
+                            None if entity.entity.as_ref().is_some_and(piano::is_piano) => {
+                                self.piano.advanced(ui)
+                            }
                             None => capabilities(ui, entity),
                         },
                         Face::Metadata => {
-                            record(ui, entity);
+                            match entity.entity.as_ref().is_some_and(piano::is_piano) {
+                                true => self.piano.meta(ui),
+                                false => record(ui, entity),
+                            }
                             details = self.advanced.meta(ui, entity, device)
                         }
                     });
@@ -318,6 +333,7 @@ impl Document {
         }
         if act.revert {
             workspace.revert(id, log);
+            self.piano.forget(id);
             self.error = None;
             // Reread on the next frame: the name box is holding an edit that is gone.
             self.target = None;
@@ -330,12 +346,52 @@ impl Document {
                 self.advanced.settled(outcome);
             }
         }
+        self.replan(id, workspace, log);
         if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
             // The strip was drawn from the bytes this frame then edited; one more frame
             // shows what the edit made of them.
             ui.ctx().request_repaint();
         }
         wants
+    }
+
+    /// Rebuild a piano library's bytes from the plan its frame left behind.
+    ///
+    /// ⚠️ The plan is tried before it is kept, so the one in hand always rebuilds: a
+    /// name the format refuses, or a switch that would leave the library with no
+    /// strokes, is turned down here rather than refusing every later edit.
+    fn replan(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
+        let Some(plan) = self.piano.drafted() else {
+            return;
+        };
+        let made = {
+            let Some(entity) = workspace.get(id) else {
+                return;
+            };
+            piano::rebuild(&entity.saved.bytes, &plan)
+                .map(|bytes| (bytes != entity.bytes).then_some(bytes))
+        };
+        match made {
+            Ok(bytes) => {
+                self.piano.commit(plan);
+                self.error = None;
+                if let Some(bytes) = bytes {
+                    workspace.replace_bytes(id, bytes, log);
+                }
+            }
+            Err(why) => {
+                self.piano.discard();
+                log.error(why.clone());
+                self.error = Some(why);
+            }
+        }
+    }
+
+    /// The root the speakers are on, where it is this document's.
+    fn sounding_root(&self) -> Option<u8> {
+        let (id, root) = self.player.playing()?;
+        (Some(id) == self.target).then_some(())?;
+        u8::try_from(root).ok()
     }
 
     /// Whether this frame should read the slot's dependencies without being asked to.
@@ -384,6 +440,10 @@ impl Document {
         }
         if fields::is_set_list(decoded) {
             return setlist::ui(ui, &mut self.list, entity, seen, sets).map(Asked::Open);
+        }
+        if piano::is_piano(decoded) {
+            let sounding = self.sounding_root();
+            return self.piano.ui(ui, sounding).map(Asked::Root);
         }
         if let Some(doc) = doc {
             return field::body(ui, &self.ctx, &mut self.fields, doc, piano, sets)
@@ -442,14 +502,17 @@ impl Document {
         entity: &LocalEntity,
         doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
-    ) -> Option<sample::Ask> {
+    ) -> Option<Asked> {
         if let Some(doc) = doc {
             field::nav(ui, &mut self.fields, doc);
             return None;
         }
         let decoded = entity.entity.as_ref()?;
+        if piano::is_piano(decoded) {
+            return self.piano.map(ui).map(Asked::Root);
+        }
         if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-            return sample::map(ui, &mut self.sample, &snapshot, sets);
+            return sample::map(ui, &mut self.sample, &snapshot, sets).map(Asked::Zone);
         }
         if let Some(Ok(snapshot)) = project::snapshot(decoded) {
             project::map(ui, &mut self.sample, &snapshot, sets);
@@ -473,7 +536,12 @@ impl Document {
                     return;
                 };
                 let rate = crate::audio::rate(semitones);
-                if let Err(why) = self.player.strike((id, zone), &decoded.audio, rate) {
+                if let Err(why) = self.player.strike(
+                    (id, zone),
+                    &decoded.audio.samples,
+                    decoded.audio.channels,
+                    rate,
+                ) {
                     log.error(why);
                     log.trouble("This computer would not play that zone.");
                 }
@@ -482,7 +550,10 @@ impl Document {
                 let Some(Ok(decoded)) = self.audio.get(zone) else {
                     return;
                 };
-                if let Err(why) = self.player.toggle((id, zone), &decoded.audio) {
+                if let Err(why) =
+                    self.player
+                        .toggle((id, zone), &decoded.audio.samples, decoded.audio.channels)
+                {
                     log.error(why);
                     log.trouble("This computer would not play that zone.");
                 }
@@ -506,11 +577,60 @@ impl Document {
                     }
                 }
             }
+            Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
             Asked::Encode => self.encode(id, workspace, log),
             Asked::Export => workspace.export(id),
             // ⚠️ Answered where the frame collects what it wants: the browser owns
             // opening a tab, and the face is the frame's own to switch.
             Asked::Open(_) | Asked::Advanced => {}
+        }
+    }
+
+    /// Hear or write one root of a piano library. The stroke is decoded on the way,
+    /// once, because either answer needs it.
+    fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
+        let root = ask.root();
+        if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
+            self.piano.decode(decoded, root);
+        }
+        let sound = match self.piano.sound(root) {
+            Some(Ok(sound)) => sound,
+            Some(Err(why)) => {
+                log.error(why);
+                log.trouble("That root could not be decoded.");
+                return;
+            }
+            None => return,
+        };
+        match ask {
+            piano::Ask::Play(_) => {
+                if let Err(why) =
+                    self.player
+                        .toggle((id, usize::from(root)), sound.samples, sound.channels)
+                {
+                    log.error(why);
+                    log.trouble("This computer would not play that root.");
+                }
+            }
+            piano::Ask::Strike { semitones, .. } => {
+                let rate = crate::audio::rate(semitones);
+                if let Err(why) =
+                    self.player
+                        .strike((id, usize::from(root)), sound.samples, sound.channels, rate)
+                {
+                    log.error(why);
+                    log.trouble("This computer would not play that root.");
+                }
+            }
+            piano::Ask::Save(_) => {
+                match nord_format::wav::pcm16(sound.samples, sound.rate, sound.channels) {
+                    Ok(bytes) => workspace.save_bytes(sound.name, bytes),
+                    Err(e) => {
+                        log.error(e.to_string());
+                        log.trouble("That root could not be written as a WAV.");
+                    }
+                }
+            }
         }
     }
 
@@ -583,7 +703,9 @@ impl Document {
         } else if decoded.is_some_and(project::is_project) {
             project::apply(&bytes, &sets)
         } else if decoded.is_some_and(piano::is_piano) {
-            piano::apply(&bytes, &sets)
+            // A piano's sets land in its plan, and the plan is what makes its bytes —
+            // see [`Document::replan`].
+            self.piano.take(&sets).map(|()| bytes.clone())
         } else if decoded.is_some_and(fields::is_set_list) {
             setlist::apply(&bytes, &sets)
         } else {
@@ -620,6 +742,7 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
                 || fields::is_set_list(e)
                 || sample::is_sample(e)
                 || project::is_project(e)
+                || piano::is_piano(e)
                 || verbatim::is_verbatim(e)
         }
         // A WAV decodes into nothing, but it is the one thing this app can make an
@@ -638,6 +761,7 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
                 || project::is_project(e)
                 || fields::is_set_list(e)
                 || verbatim::is_verbatim(e)
+                || piano::is_piano(e)
         }
         None => false,
     };
@@ -2197,6 +2321,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.zones[0].top_note, 84, "the edit stands");
+    }
+
+    fn piano_bytes() -> Vec<u8> {
+        nord_format::formats::npno::synthetic::Build::new()
+            .bytes()
+            .expect("the builder lays out a library")
+    }
+
+    /// A piano library is a document like any other: it offers all three faces, and the
+    /// panel that decides what goes on the instrument is one of them.
+    #[test]
+    fn a_piano_document_offers_every_face_and_paints_on_each_of_them() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        assert_eq!(
+            faces(open.entity(), None)
+                .iter()
+                .map(|face| face.label())
+                .collect::<Vec<_>>(),
+            ["Edit", "Metadata", "Advanced"],
+        );
+
+        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+            for dark in [true, false] {
+                let mut open = Open::file("Test Piano.npno", piano_bytes());
+                open.ctx.set_theme(match dark {
+                    true => egui::ThemePreference::Dark,
+                    false => egui::ThemePreference::Light,
+                });
+                open.document.views.insert(open.id, face);
+                let said = open.twice();
+                let has = |word: &str| said.iter().any(|held| held == word);
+                assert!(has("Test Piano"), "{face:?} in {dark}: {said:?}");
+                match face {
+                    Face::Edit => assert!(has("Trim to fit"), "{said:?}"),
+                    Face::Metadata => {
+                        assert!(has("Metadata") && has("Container"), "{said:?}");
+                        assert!(!has("Key map"), "the map is the Edit face's: {said:?}");
+                    }
+                    Face::Advanced => {
+                        assert!(has("What this format holds") && has("Offsets"), "{said:?}")
+                    }
+                }
+            }
+        }
+        // And the map is pinned above the body rather than drawn inside it.
+        open.document.views.insert(open.id, Face::Edit);
+        assert!(open.twice().iter().any(|word| word == "Key map"));
     }
 
     #[test]

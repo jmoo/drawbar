@@ -263,7 +263,8 @@ pub struct Mark {
     pub label: Option<String>,
 }
 
-const KEYBOARD_H: f32 = 58.0;
+/// How tall the keyboard is drawn, which is what a pinned region reserves room for.
+pub const KEYBOARD_H: f32 = 58.0;
 const BLACK_H: f32 = 35.0;
 const OCTAVE_TEXT: f32 = 8.0;
 /// How much of the key's own ink an octave label keeps.
