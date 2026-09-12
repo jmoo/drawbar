@@ -27,6 +27,10 @@ bundle = ["dep:zip"]
 # Test-only: the suites that read the private corpus (NORD_CORPUS_ROOT). Implies
 # `bundle`, because the corpus holds ZIP banks and backups.
 corpus = ["bundle"]
+# Test-only: `npno::synthetic`, a piano library laid out from a description, for
+# another crate's tests — nothing public builds one without a template library. This
+# crate's own tests have it whether the feature is on or not.
+synthetic = []
 
 # ⚠️ Pinned `=`: `#[bitbody]`-generated code names nord-format internals, so a
 # registry build must expand exactly the derive version this source was written
