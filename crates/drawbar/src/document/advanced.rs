@@ -243,13 +243,12 @@ impl Advanced {
     }
 
     /// The record, section by section: where it came from and what it is, what the bytes
-    /// have done since the tab opened, what the instrument says about its slot, and the
-    /// decode in full.
+    /// have done since it was last saved, what the instrument says about its slot, and
+    /// the decode in full.
     pub fn meta(
         &mut self,
         ui: &mut egui::Ui,
         entity: &LocalEntity,
-        opened: &[u8],
         device: &Device,
     ) -> Option<SlotDetails> {
         let mut asked = None;
@@ -257,12 +256,13 @@ impl Advanced {
             verify(ui, entity);
             container(ui, entity);
         });
-        let rows = byte_diff(opened, &entity.bytes);
+        let saved = &entity.saved.bytes;
+        let rows = byte_diff(saved, &entity.bytes);
         let title = match rows.len() {
             0 => "Changes".to_string(),
             n => format!("Changes ({n} bytes)"),
         };
-        controls::section(ui, &title, |ui| diff(ui, entity, opened, rows));
+        controls::section(ui, &title, |ui| diff(ui, entity, saved, rows));
         if entity.origin.slot().is_some() {
             controls::section(ui, "On the instrument", |ui| {
                 asked = slot(ui, entity, device);
@@ -359,10 +359,10 @@ fn stored_slot(header: &nord_format::cbin::Header) -> String {
     }
 }
 
-fn diff(ui: &mut egui::Ui, entity: &LocalEntity, opened: &[u8], rows: Vec<DiffRow>) {
+fn diff(ui: &mut egui::Ui, entity: &LocalEntity, saved: &[u8], rows: Vec<DiffRow>) {
     if rows.is_empty() {
         ui.label(
-            egui::RichText::new(match opened.len() == entity.bytes.len() {
+            egui::RichText::new(match saved.len() == entity.bytes.len() {
                 true => "nothing moved",
                 // Nothing here can pair the bytes up across a length change.
                 false => "the length changed, so there is nothing to line up",

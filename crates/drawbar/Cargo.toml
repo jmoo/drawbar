@@ -26,6 +26,7 @@ eframe = { version = "0.32", default-features = false, features = [
   "wayland",
   "x11",
 ] }
+egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
 nord-format = { path = "../nord-format", version = "0.5.0", features = [
   "bundle",
 ] }

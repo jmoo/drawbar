@@ -14,13 +14,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use nord_usb::wire::{Bank, Dependency, ProgramInfo, Status};
+use nord_format::accept::{Acceptance, Family};
+use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::strings::{folder, place, shown};
 use crate::tabs::Tabs;
-use crate::workspace::{Origin, Workspace};
+use crate::workspace::{LocalEntity, Origin, Workspace};
 
 mod scan;
 mod worker;
@@ -38,15 +40,21 @@ use web::Link;
 pub use scan::{Progress, Scan};
 pub use worker::{Emit, Flow};
 
-/// The folders the browser shows, in the order it shows them.
-pub const BROWSED: [ObjectClass; 6] = [
-    ObjectClass::Program,
-    ObjectClass::SetList,
-    ObjectClass::Sample,
-    ObjectClass::Piano,
-    ObjectClass::Live,
-    ObjectClass::Settings,
-];
+/// One row of the instrument's own partition table: a class it has, under the device's
+/// own name for it.
+///
+/// What the instrument declares, never what this app expects. A class this app has no
+/// name for arrives as [`ObjectClass::Unknown`] and is shown under `name`.
+pub struct Partition {
+    pub class: ObjectClass,
+    /// The device's own word: `Piano`, `Samp Lib`, `Program`, `Set List`, …
+    pub name: String,
+    /// Whether this is the `(Native)` view of a library — a second view of a pool the
+    /// table already carries under its user partition, and not a folder of its own.
+    pub native: bool,
+    /// `None` where the partition reports no usable unit.
+    pub unit: Option<AllocationUnit>,
+}
 
 /// What the UI asks the instrument to do.
 #[derive(Clone)]
@@ -75,10 +83,7 @@ pub enum DeviceCmd {
         at: Location,
         /// The wire body verbatim, rather than a whole CBIN file.
         body: bool,
-        /// The copy opens in a tab as a **view** of the slot rather than joining the
-        /// local list, which is what a double-click asks for. Copying to this computer
-        /// is the same read with this off.
-        open: bool,
+        why: Purpose,
     },
     Put {
         /// The asset on this computer these bytes came from. It is what the
@@ -125,6 +130,20 @@ pub enum DeviceCmd {
     Disconnect,
 }
 
+/// What a read of a slot is for, which is what decides where its bytes go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Purpose {
+    /// A **view** of the slot, opened in a tab rather than joining the local list,
+    /// which is what a double-click asks for.
+    View,
+    /// A copy on this computer: a row in the list like any other.
+    Copy,
+    /// The occupant of a slot something is queued for, to be compared with what is
+    /// waiting. ⚠️ These bytes never reach the workspace — a copy nobody asked for is a
+    /// row nobody can account for.
+    Compare,
+}
+
 /// One object waiting to go back to the instrument.
 #[derive(Clone)]
 pub struct Outgoing {
@@ -165,9 +184,10 @@ impl DeviceCmd {
             DeviceCmd::ScanBank { bank, .. } => format!("scan bank {bank}"),
             DeviceCmd::SlotInfo { at, .. } => format!("info {}", shown(*at)),
             DeviceCmd::Deps { at, .. } => format!("deps {}", shown(*at)),
-            DeviceCmd::Get { at, body, .. } => match body {
-                true => format!("get {} (raw body)", shown(*at)),
-                false => format!("get {}", shown(*at)),
+            DeviceCmd::Get { at, body, why, .. } => match (body, why) {
+                (_, Purpose::Compare) => format!("get {} (to compare)", shown(*at)),
+                (true, _) => format!("get {} (raw body)", shown(*at)),
+                (false, _) => format!("get {}", shown(*at)),
             },
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
@@ -197,6 +217,12 @@ impl DeviceCmd {
             DeviceCmd::Deps { class, at } => {
                 words(READING, format!("what {} needs", place(*class, *at)))
             }
+            DeviceCmd::Get {
+                class,
+                at,
+                why: Purpose::Compare,
+                ..
+            } => words(READING, format!("what is in {}", place(*class, *at))),
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
@@ -251,6 +277,9 @@ pub enum DeviceEvent {
     },
     Started(String),
     Finished,
+    /// The instrument's own partition table, in table order — the classes it has, which
+    /// nothing above this can know before it arrives. Read once per connection.
+    Partitions(Vec<Partition>),
     /// A class's own counters, read at the head of its walk.
     ClassStatus {
         class: ObjectClass,
@@ -290,8 +319,14 @@ pub enum DeviceEvent {
         name: String,
         origin: Origin,
         bytes: Vec<u8>,
-        /// The copy is a view of the slot rather than a new row on this computer.
-        open: bool,
+        why: Purpose,
+    },
+    /// A read found the slot empty, which is the instrument's answer rather than a
+    /// fault. Only a read can settle a slot no walk has reached.
+    Vacant {
+        class: ObjectClass,
+        at: Location,
+        why: Purpose,
     },
     /// One object landed on the instrument, so it is no longer owed. Every write path
     /// raises one — a lone put as much as a batch.
@@ -299,6 +334,10 @@ pub enum DeviceEvent {
         id: u64,
         class: ObjectClass,
         at: Location,
+        /// The bytes the write carried, which is what the slot holds and what the asset
+        /// is saved as from here on — see [`Workspace::landed`]. The asset may hold
+        /// something else by now: a write takes as long as the instrument takes.
+        bytes: Vec<u8>,
     },
     /// A slot's former contents, which a failed write and a failed restore left with
     /// nowhere else to go.
@@ -377,6 +416,9 @@ pub struct DeviceState {
     focus: HashMap<u32, Option<Location>>,
     /// The device's own banks, per class: their names and their capacities.
     geometry: HashMap<u32, Vec<Bank>>,
+    /// The instrument's own partition table, in table order. Empty until it is read,
+    /// which is *not known* rather than *an instrument with no folders*.
+    partitions: Vec<Partition>,
     banks: HashMap<(u32, u32), Vec<Option<ProgramInfo>>>,
     pub detail: Detail,
 }
@@ -465,6 +507,57 @@ impl DeviceState {
         self.banks.get(&(class.to_raw(), bank)).map(Vec::as_slice)
     }
 
+    /// The classes the instrument declares, in its own table order.
+    ///
+    /// The whole of what the browser, the switcher and a resync walk. Empty until the
+    /// partition table has been read.
+    ///
+    /// The `(Native)` rows are left out: each is a second view of a library the table
+    /// already carries under its user partition, so listing one would show the same
+    /// pool as a folder of its own.
+    pub fn classes(&self) -> Vec<ObjectClass> {
+        self.partitions
+            .iter()
+            .filter(|row| !row.native)
+            .map(|row| row.class)
+            .collect()
+    }
+
+    /// What the browser calls a class's folder: the panel's own word for a class this
+    /// app names, and otherwise the name the instrument's partition table gave it.
+    pub fn folder_name(&self, class: ObjectClass) -> &str {
+        let ObjectClass::Unknown(_) = class else {
+            return folder(class);
+        };
+        self.partition(class)
+            .map(|row| row.name.as_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| folder(class))
+    }
+
+    /// What one unit of whatever `STATUS` counts is worth for this class's partition.
+    ///
+    /// ⚠️ `None` is *not read yet*, never *byte-granular*: a slot-addressed partition
+    /// reports a unit of 1, which is a unit like any other.
+    pub fn allocation_unit(&self, class: ObjectClass) -> Option<AllocationUnit> {
+        self.partition(class)?.unit
+    }
+
+    fn partition(&self, class: ObjectClass) -> Option<&Partition> {
+        self.partitions
+            .iter()
+            .find(|row| !row.native && row.class == class)
+    }
+
+    /// How many banks a class declares.
+    ///
+    /// ⚠️ The device's own division of the class, read at the head of its walk — not
+    /// what has been scanned, which [`DeviceState::banks_of`] answers. Zero until that
+    /// geometry has arrived.
+    pub fn banks(&self, class: ObjectClass) -> usize {
+        self.geometry.get(&class.to_raw()).map_or(0, Vec::len)
+    }
+
     /// The banks of a class that have been read, in order.
     pub fn banks_of(&self, class: ObjectClass) -> Vec<u32> {
         let mut banks: Vec<u32> = self
@@ -501,14 +594,27 @@ impl DeviceState {
         seen
     }
 
-    /// The first slot of `class` known to be vacant — where a duplicate lands when the
-    /// user did not drag it anywhere.
-    pub fn first_free(&self, class: ObjectClass) -> Option<Location> {
-        self.banks_of(class).into_iter().find_map(|bank| {
-            let slots = self.bank(class, bank)?;
-            let slot = slots.iter().position(Option::is_none)?;
-            Some(Location::from_user(bank, slot as u32 + 1))
+    /// Every slot of `class` a walk found vacant, in address order.
+    pub fn free_slots(&self, class: ObjectClass) -> impl Iterator<Item = Location> + '_ {
+        self.banks_of(class).into_iter().flat_map(move |bank| {
+            self.bank(class, bank)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| held.is_none())
+                .map(move |(slot, _)| Location::from_user(bank, slot as u32 + 1))
         })
+    }
+
+    /// The first slot of `class` known to be vacant and not among `taken` — where a
+    /// duplicate lands when the user did not drag it anywhere, and where the next of a
+    /// queued set goes.
+    ///
+    /// ⚠️ `taken` is what is already spoken for. Two writes handed one address are one
+    /// write, so a set queued together walks down the free slots rather than piling onto
+    /// the first of them.
+    pub fn first_free(&self, class: ObjectClass, taken: &[Location]) -> Option<Location> {
+        self.free_slots(class).find(|at| !taken.contains(at))
     }
 
     /// Drop one bank's cached names, because something just changed them.
@@ -520,6 +626,7 @@ impl DeviceState {
         self.banks.clear();
         self.focus.clear();
         self.geometry.clear();
+        self.partitions.clear();
         self.inventory.clear();
         self.detail = Detail::default();
         self.scan.clear();
@@ -532,20 +639,297 @@ impl DeviceState {
 ///
 /// Slot counts only: the inventory also reports opaque block totals, and a class whose
 /// items differ in size (pianos, samples) cannot be divided into slots at all.
-pub fn occupancy(class: ObjectClass, inventory: &[Status]) -> Option<String> {
+pub fn occupancy(
+    class: ObjectClass,
+    inventory: &[Status],
+    unit: Option<AllocationUnit>,
+) -> Option<String> {
     let status = inventory.iter().find(|status| status.class == class)?;
-    Some(match status.slots() {
-        Some(slots) => format!("{}/{slots}", status.count),
-        None => format!("{} items", status.count),
+    if let Some(slots) = status.slots() {
+        return Some(format!("{}/{slots}", status.count));
+    }
+    // A library counts blocks, and one block is the partition's allocation unit of net
+    // bytes. Until that unit has arrived the count is all there is to say.
+    let Some(unit) = unit else {
+        return Some(format!("{} items", status.count));
+    };
+    let bytes = |units: u64| units.saturating_mul(u64::from(unit.get()));
+    Some(crate::room::measure_out_of(
+        bytes(u64::from(status.used)),
+        bytes(status.total()),
+    ))
+}
+
+/// The allocation unit a partition reporting `bytes` per unit would hand back.
+///
+/// ⚠️ Built the one way there is to build one — out of a partition record — so a test
+/// cannot invent a unit the wire could not carry.
+#[cfg(test)]
+pub fn pretend_allocation_unit(class: ObjectClass, bytes: u32) -> AllocationUnit {
+    nord_usb::wire::Partition {
+        index: class.to_raw(),
+        name: String::new(),
+        native: false,
+        fields: bytes.to_be_bytes().to_vec(),
+    }
+    .allocation_unit()
+    .expect("a partition reporting a unit of at least one")
+}
+
+/// The partition table an Electro 5 declares, in its own order, with the net bytes each
+/// partition counts in units of. The `(Native)` rows are left out.
+///
+/// Confirmed on hardware.
+#[cfg(test)]
+pub const ELECTRO5: [(ObjectClass, &str, u32); 6] = [
+    (ObjectClass::Piano, "Piano", 261_632),
+    (ObjectClass::Sample, "Samp Lib", 131_064),
+    (ObjectClass::Program, "Program", 1),
+    (ObjectClass::SetList, "Set List", 1),
+    (ObjectClass::Live, "Live", 1),
+    (ObjectClass::Settings, "Settings", 1),
+];
+
+/// Whether the attached instrument takes an asset, and what is worth saying about it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Fit {
+    /// Nothing is attached, so nothing can be said.
+    Unattached,
+    Takes,
+    /// It should land, and this is what has not been checked.
+    Warn(String),
+    /// It is another instrument's, and this is why.
+    Refuses(String),
+}
+
+impl Fit {
+    /// Whether a write may be attempted. Only an outright refusal stops one.
+    pub fn allowed(&self) -> bool {
+        !matches!(self, Fit::Refuses(_))
+    }
+
+    /// The sentence, where there is one to show.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Fit::Warn(why) | Fit::Refuses(why) => Some(why),
+            Fit::Unattached | Fit::Takes => None,
+        }
+    }
+}
+
+/// Whether the attached instrument takes this asset, from the acceptance table in
+/// `nord-format` and, where that table says nothing, from what the folder is holding.
+///
+/// The asset's own folder decides the class: an asset is only ever written to the folder
+/// its kind belongs in, so that is the one question worth asking.
+pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
+    let Some(product) = state.product() else {
+        return Fit::Unattached;
+    };
+    let Some(class) = crate::browser::Kind::of(entity.entity.as_ref()).home() else {
+        return Fit::Takes;
+    };
+    let tag = entity.tag();
+    let resident = || crate::browser::foreign_format(&tag, &state.formats_in(class));
+    let unknown = || match resident() {
+        Some(why) => Fit::Warn(why),
+        None => Fit::Takes,
+    };
+    let (Some(slot), Some(family)) = (class.storage(), Family::from_product(product)) else {
+        return unknown();
+    };
+    match family.accepts(slot, &tag) {
+        Acceptance::Confirmed => Fit::Takes,
+        Acceptance::Inferred => Fit::Warn(format!(
+            "This is a {} file and the instrument is a {product}, but no file of this \
+             kind has ever been written to one. Sending it is untried.",
+            family.label()
+        )),
+        Acceptance::Refused => Fit::Refuses(match Family::of_tag(&tag) {
+            Some(owner) => format!(
+                "This is a {} file and the instrument is a {product}.",
+                owner.label()
+            ),
+            // ⚠️ Unreachable while `accepts` refuses only a tag another family carries;
+            // stated rather than unwrapped so a widened table cannot panic here.
+            None => format!("A {tag} file is not one a {product} takes."),
+        }),
+        Acceptance::Unknown => unknown(),
+    }
+}
+
+/// The slot on the attached instrument this asset stands on.
+///
+/// The slot it came off, while the instrument holds that slot — whatever it holds now.
+/// An asset copied off 1:1 and changed here is still the copy of 1:1, and what the two
+/// have made of each other since is [`crate::library::agrees`]'s question rather than
+/// this one.
+///
+/// With no origin, or an origin the walk found vacant, the saved body is what matches:
+/// the CRC-32 a type-1 container carries **is** the checksum a walk reports for a slot —
+/// see the round trip in [`crate::workspace`] — so an asset and a slot are matched
+/// without either body being hashed again, and [`among`] decides which of them where
+/// several hold it. A class whose slots report no checksum is matched by [`named`]
+/// instead. Saved rather than held now, which is the body
+/// [`crate::library::keyboard_mark`] and the row's own sign are read against, so an
+/// edit nothing has saved cannot make the three disagree about where this stands.
+///
+/// ⚠️ Takes the link the asset already carries as its own input, so running it again
+/// over an unchanged cache answers the same thing. That is what lets an edit here keep
+/// the asset pointing where it was matched.
+pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
+    // ⚠️ Before anything else: a foreign body whose CRC-32 happens to match a slot's
+    // would otherwise be linked into a folder the instrument would refuse it from.
+    if !fit(state, entity).allowed() {
+        return None;
+    }
+    let class = home(entity)?;
+    if let Some(origin) = entity
+        .origin
+        .slot()
+        .filter(|(class, at)| state.slot(*class, *at).flatten().is_some())
+    {
+        return Some(origin);
+    }
+    let by_body = matchable(entity).and_then(|(folder, crc)| among(state, folder, crc, entity));
+    match by_body {
+        Some(at) => Some((class, at)),
+        None => stands(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
+    }
+}
+
+/// How many further slots hold what this asset was saved as, beyond the one it is
+/// linked to.
+pub fn also_holding(state: &DeviceState, entity: &LocalEntity) -> usize {
+    let Some((class, here)) = matchable(entity) else {
+        return 0;
+    };
+    holding(state, class, here).count().saturating_sub(1)
+}
+
+/// The folder an asset belongs in.
+///
+/// A view is not on this computer until it is kept, and bytes that decode into nothing
+/// belong in no folder.
+fn home(entity: &LocalEntity) -> Option<ObjectClass> {
+    entity
+        .kept
+        .then(|| crate::browser::Kind::of(entity.entity.as_ref()).home())
+        .flatten()
+}
+
+/// That folder and the checksum a slot holding what this asset was saved as would
+/// report — see [`crate::workspace::Baseline::crc32`].
+fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
+    Some((home(entity)?, entity.saved.crc32?))
+}
+
+/// The slot a class whose slots report no checksum is matched to.
+///
+/// ⚠️ Settings, samples and pianos report no body checksum, so no body can be recognised
+/// in one of their slots. Settings holds a single slot and that slot is the link; a
+/// sample or a piano is matched to the slot the instrument gave this asset's own name.
+/// A name is a label rather than a body, which [`crate::library::Where::Both`] says by
+/// leaving the sign off until a compare read settles it.
+fn named(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> Option<Location> {
+    match class {
+        ObjectClass::Settings => {
+            let mut slots = occupied(state, class);
+            let (at, _) = slots.next()?;
+            slots.next().is_none().then_some(at)
+        }
+        ObjectClass::Sample | ObjectClass::Piano => {
+            let name = entity.name.trim();
+            occupied(state, class)
+                .find(|(_, info)| info.name.trim() == name)
+                .map(|(at, _)| at)
+        }
+        _ => None,
+    }
+}
+
+/// Every slot of `class` a walk found holding something, lowest address first.
+fn occupied(
+    state: &DeviceState,
+    class: ObjectClass,
+) -> impl Iterator<Item = (Location, &ProgramInfo)> + '_ {
+    state.banks_of(class).into_iter().flat_map(move |bank| {
+        state
+            .bank(class, bank)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter_map(move |(slot, held)| {
+                Some((Location::from_user(bank, slot as u32 + 1), held.as_ref()?))
+            })
     })
+}
+
+/// Every slot of `class` whose scanned checksum is `crc`, lowest address first.
+///
+/// ⚠️ A class whose slots report no checksum matches nothing here. A name and a length
+/// are not a body, and a library is where two different objects most readily share both.
+fn holding(
+    state: &DeviceState,
+    class: ObjectClass,
+    crc: u32,
+) -> impl Iterator<Item = Location> + '_ {
+    occupied(state, class)
+        .filter(move |(_, info)| info.crc32 == Some(crc))
+        .map(|(at, _)| at)
+}
+
+/// Which of the slots holding this asset's bytes it is matched to.
+///
+/// One body can sit in any number of slots, and the address the row shows is the one
+/// the user has reason to expect: the slot it came off, or the slot it stands on — which
+/// [`Workspace::landed`] set to the slot this app wrote it to. An asset standing nowhere
+/// takes the lowest address holding it.
+fn among(
+    state: &DeviceState,
+    class: ObjectClass,
+    crc: u32,
+    entity: &LocalEntity,
+) -> Option<Location> {
+    let held = |known: Option<(ObjectClass, Location)>| {
+        known
+            .filter(|(held, at)| {
+                *held == class && holding(state, class, crc).any(|other| other == *at)
+            })
+            .map(|(_, at)| at)
+    };
+    held(entity.origin.slot())
+        .or_else(|| held(entity.link))
+        .or_else(|| holding(state, class, crc).next())
+}
+
+/// The link an asset keeps when no slot holds its bytes any more: an edit here moved
+/// them, or [`Workspace::landed`] wrote them there, and where it stands is still where
+/// it stands.
+///
+/// Whatever the slot holds now, and whether or not it reports a checksum of its own — a
+/// slot this app has just written is holding what it was given.
+///
+/// ⚠️ Until a walk says otherwise. A slot found vacant holds nothing to point at. A bank
+/// no walk has reached is silence rather than an answer, which is what a write must
+/// outlive: [`Device::dispatch`] drops the bank it is about to change, and the read that
+/// fills it in again lands long after the write does.
+fn stands(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
+    let (class, at) = entity.link?;
+    match state.slot(class, at) {
+        Some(None) => None,
+        Some(Some(_)) | None => Some((class, at)),
+    }
 }
 
 /// Whether the browser offers to change a class at all.
 ///
 /// ⚠️ A piano is a multi-megabyte library that the instrument builds its own index
-/// over; the browser lists what is installed and offers nothing that would move it.
+/// over; the browser lists what is installed and offers nothing that would move it. A
+/// partition this app cannot name is listed and left alone for a plainer reason:
+/// nothing here knows what its slots hold or what a write into one would mean.
 pub fn read_only(class: ObjectClass) -> bool {
-    matches!(class, ObjectClass::Piano)
+    matches!(class, ObjectClass::Piano | ObjectClass::Unknown(_))
 }
 
 /// Whether this app will write into a class at all.
@@ -588,6 +972,12 @@ pub struct Device {
     /// The loaded slots the running command overwrites. A batch can touch one per
     /// class, so this is a list rather than a single slot.
     reselect: Vec<(ObjectClass, Location)>,
+    /// The class the running command writes into, so a refusal can be put against the
+    /// entry of the queue it stopped on.
+    writing: Option<ObjectClass>,
+    /// The list revision every link was last derived from. A link answers about both
+    /// sides, so it is re-made when either has moved and not once a frame besides.
+    linked: u64,
 }
 
 impl Device {
@@ -603,6 +993,8 @@ impl Device {
             reading: None,
             rescan: Vec::new(),
             reselect: Vec::new(),
+            writing: None,
+            linked: 0,
         }
     }
 
@@ -649,14 +1041,14 @@ impl Device {
         self.state.scan.start(class);
     }
 
-    /// Read the whole instrument again: every class, and with each one its counters, its
-    /// geometry and the slot the panel has loaded.
+    /// Read the whole instrument again: every class it declares, and with each one its
+    /// counters, its geometry and the slot the panel has loaded.
     ///
     /// One walk per class, which is the same thing attaching does — a class's counters,
     /// banks and focus are all read at the head of its own session, so there is nothing
     /// else to ask for.
     pub fn resync(&mut self) {
-        for class in BROWSED {
+        for class in self.state.classes() {
             self.read_class(class);
         }
     }
@@ -719,6 +1111,10 @@ impl Device {
                 .collect(),
             _ => Vec::new(),
         };
+        self.writing = match &cmd {
+            DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
+            _ => None,
+        };
         if let DeviceCmd::Select { class, at } = &cmd {
             self.state.selected.insert(class.to_raw(), *at);
         }
@@ -738,11 +1134,17 @@ impl Device {
         &self.pending
     }
 
-    /// Fill in a bank as though the instrument had answered, for a headless render.
+    /// Attach an instrument, as its descriptors would have. The product string is the
+    /// one the recorded exchanges in `nord-usb` carry.
     #[cfg(test)]
-    pub fn pretend_scanned(&mut self, class: ObjectClass, bank: u32, names: &[&str]) {
-        use nord_usb::wire::ProgramInfo;
+    pub fn pretend_attached(&mut self) {
+        self.pretend_attached_as("Nord Electro 5");
+    }
 
+    /// Attach an instrument reporting a product string of its own, for the rules that
+    /// turn on which model it is.
+    #[cfg(test)]
+    pub fn pretend_attached_as(&mut self, product: &str) {
         self.state.connection = Connection::Connected(DeviceCard {
             build: Some(7),
             firmware: Some(204),
@@ -750,11 +1152,20 @@ impl Device {
             kind: Some(1),
             manufacturer: Some("Clavia DMI AB".into()),
             max_transfer: Some(4096),
-            product: "Electro 5".into(),
+            product: product.to_string(),
             product_id: 0,
             serial: None,
             vendor_id: 0x0ffc,
         });
+    }
+
+    /// Fill in a bank as though a walk had answered, under the panel's own bank number —
+    /// which is the number [`DeviceEvent::BankScanned`] carries.
+    #[cfg(test)]
+    pub fn pretend_scanned(&mut self, class: ObjectClass, bank: u32, names: &[&str]) {
+        use nord_usb::wire::ProgramInfo;
+
+        self.pretend_attached();
         let slots = names
             .iter()
             .enumerate()
@@ -767,6 +1178,45 @@ impl Device {
                     version: 4,
                     crc32: None,
                     name: (*name).to_string(),
+                })
+            })
+            .collect();
+        self.state.banks.insert((class.to_raw(), bank), slots);
+    }
+
+    /// Give the instrument the partition table it would have declared: the class of each
+    /// row, the device's own name for it, and the net bytes its counters are in units of.
+    #[cfg(test)]
+    pub fn pretend_partitions(&mut self, table: &[(ObjectClass, &str, u32)]) {
+        self.state.partitions = table
+            .iter()
+            .map(|(class, name, bytes)| Partition {
+                class: *class,
+                name: (*name).to_string(),
+                native: false,
+                unit: Some(pretend_allocation_unit(*class, *bytes)),
+            })
+            .collect();
+    }
+
+    /// Fill in a bank as a walk of a class that checksums what it holds would have: a
+    /// name and the body CRC-32 the device reports for each occupied slot.
+    ///
+    /// The counterpart of [`Device::pretend_scanned`], whose slots report no checksum.
+    #[cfg(test)]
+    pub fn pretend_bodies(&mut self, class: ObjectClass, bank: u32, slots: &[Option<(&str, u32)>]) {
+        self.pretend_attached();
+        let slots = slots
+            .iter()
+            .enumerate()
+            .map(|(slot, held)| {
+                held.map(|(name, crc)| ProgramInfo {
+                    location: Location::from_user(bank, slot as u32 + 1),
+                    body_len: 121,
+                    format: "ne5p".into(),
+                    version: 4,
+                    crc32: Some(crc),
+                    name: name.to_string(),
                 })
             })
             .collect();
@@ -794,10 +1244,74 @@ impl Device {
         self.state.focus.insert(class.to_raw(), Some(at));
     }
 
+    /// Point every asset at the slot holding its bytes.
+    ///
+    /// A link is derived rather than stored, so it is re-made from the scan cache each
+    /// time round: it compares a checksum the walk already reported with one the
+    /// container already carries, and never touches a body.
+    pub fn relink(&self, workspace: &mut Workspace) {
+        let state = &self.state;
+        workspace.relink(|entity| link(state, entity));
+    }
+
+    /// Drop everything the last instrument said, the links included.
+    ///
+    /// A link is a fact about an attached instrument. With none attached, or another one
+    /// in its place, there is nothing for an asset to stand on until a walk says so —
+    /// and an empty cache alone does not say that, or a write would unlink what it just
+    /// wrote.
+    fn forget(&mut self, workspace: &mut Workspace) {
+        self.state.forget_everything();
+        workspace.relink(|_| None);
+        workspace.forget_writes();
+    }
+
+    /// Say in the log where a slot just read holds a body the asset standing on it was
+    /// not saved as.
+    ///
+    /// Once per asset per read of its bank. Two checksums and an address are protocol
+    /// detail: what the user reads is the row's own sign.
+    fn disagreements(&self, class: ObjectClass, bank: u32, workspace: &Workspace, log: &mut Log) {
+        for entity in workspace.listed() {
+            let Some(at) = entity
+                .link
+                .filter(|(held, at)| *held == class && at.bank + 1 == bank)
+                .map(|(_, at)| at)
+            else {
+                continue;
+            };
+            let (Some(here), Some(there)) = (
+                entity.saved.crc32,
+                self.state
+                    .slot(class, at)
+                    .flatten()
+                    .and_then(|info| info.crc32),
+            ) else {
+                continue;
+            };
+            if here != there {
+                log.info(format!(
+                    "{} reports crc32 {there:#010x}; “{}” is saved as {here:#010x}",
+                    place(class, at),
+                    entity.name
+                ));
+            }
+        }
+    }
+
     /// Drain the worker's events into the cache, the local list and the tabs. Call once
     /// a frame.
-    pub fn poll(&mut self, log: &mut Log, workspace: &mut Workspace, tabs: &mut Tabs) {
+    pub fn poll(
+        &mut self,
+        log: &mut Log,
+        workspace: &mut Workspace,
+        tabs: &mut Tabs,
+        queue: &mut Queue,
+    ) {
+        let now = workspace.ctx().input(|input| input.time);
+        let mut heard = false;
         while let Ok(event) = self.events.try_recv() {
+            heard = true;
             match event {
                 DeviceEvent::Connected(card) => {
                     log.info(format!(
@@ -806,10 +1320,8 @@ impl Device {
                     ));
                     log.say(format!("{} is attached.", card.product));
                     self.state.connection = Connection::Connected(card);
-                    self.state.forget_everything();
+                    self.forget(workspace);
                     self.pending.clear();
-                    // Each class reads its counters and walks in one session.
-                    self.resync();
                 }
                 DeviceEvent::ConnectFailed(why) => {
                     log.error(why);
@@ -824,16 +1336,18 @@ impl Device {
                     }
                     self.state.connection = Connection::Disconnected;
                     self.state.in_flight = None;
-                    self.state.forget_everything();
+                    self.forget(workspace);
                     self.pending.clear();
                     self.reading = None;
                     self.rescan.clear();
                     self.reselect.clear();
+                    self.writing = None;
                 }
                 DeviceEvent::Started(what) => log.info(what),
                 DeviceEvent::Finished => {
                     if let Some(class) = self.reading.take() {
                         self.state.scan.finished(class);
+                        self.state.scan.heard(class, now);
                     }
                     // The panel is still playing what it read before the write, so it is
                     // asked to load the slot again. `select` is read-only.
@@ -843,6 +1357,7 @@ impl Device {
                     for (class, bank) in std::mem::take(&mut self.rescan) {
                         self.pending.push_back(DeviceCmd::ScanBank { class, bank });
                     }
+                    self.writing = None;
                     self.state.in_flight = None;
                 }
                 DeviceEvent::ClassStatus {
@@ -853,6 +1368,16 @@ impl Device {
                     self.state.inventory.retain(|held| held.class != class);
                     self.state.inventory.push(status);
                     self.state.scan.expect(class, banks);
+                }
+                // Which classes exist is the instrument's answer, so the walk of them
+                // can only start here. Each class reads its counters, its banks and its
+                // focus in one session.
+                // ⚠️ What is waiting was checked against whatever was attached when it
+                // was queued, and the queue outlives a disconnection.
+                DeviceEvent::Partitions(partitions) => {
+                    self.state.partitions = partitions;
+                    crate::queue::refit(workspace, &self.state, queue, log);
+                    self.resync();
                 }
                 DeviceEvent::Geometry { class, banks } => {
                     self.state.geometry.insert(class.to_raw(), banks);
@@ -865,6 +1390,8 @@ impl Device {
                         self.state.banks.insert((class.to_raw(), bank), slots);
                     }
                     self.state.scan.bank(class, bank);
+                    self.state.scan.heard(class, now);
+                    self.disagreements(class, bank, workspace, log);
                 }
                 DeviceEvent::SlotInfo { at, info, .. } => {
                     self.state.detail = Detail {
@@ -883,21 +1410,36 @@ impl Device {
                     }
                     self.state.detail.deps = Some(deps);
                 }
+                // A view belongs to its tab, a copied read becomes a local entity, and
+                // an occupant read for a diff belongs to the queue and to nothing else.
                 DeviceEvent::Got {
                     name,
                     origin,
                     bytes,
-                    open,
-                } => {
-                    // A view belongs to its tab; a copied read becomes a local entity.
-                    let id = match open {
-                        true => workspace.view(name, origin, bytes, log),
-                        false => workspace.ingest(name, origin, bytes, log),
-                    };
-                    if open {
-                        tabs.open(id, workspace);
+                    why,
+                } => match why {
+                    Purpose::View => {
+                        let id = workspace.view(name, origin, bytes, log);
+                        tabs.open(id);
                     }
-                }
+                    Purpose::Copy => {
+                        workspace.ingest(name, origin, bytes, log);
+                    }
+                    Purpose::Compare => {
+                        if let Some((class, at)) = origin.slot() {
+                            queue.arrived(class, at, &name, &bytes, workspace);
+                        }
+                    }
+                },
+                // A slot that is not there to copy or open is a failure to the user, and
+                // an answer to the queue: nothing is being replaced.
+                DeviceEvent::Vacant { class, at, why } => match why {
+                    Purpose::Compare => queue.vacant(class, at),
+                    Purpose::Copy | Purpose::View => {
+                        log.error(format!("{} holds nothing to read", shown(at)));
+                        log.trouble(format!("{} is empty.", place(class, at)));
+                    }
+                },
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
                         "{} could not be restored; its bytes are in the local list as {name}",
@@ -909,9 +1451,18 @@ impl Device {
                     ));
                     workspace.ingest(name, Origin::Rescued { at }, bytes, log);
                 }
-                // It landed, so it is no longer owed. Only that object: the rest of a
-                // batch is still waiting on its own write.
-                DeviceEvent::Sent { id, .. } => workspace.mark_pending(id, false),
+                // It landed, so it is no longer owed; what landed is what it is saved as,
+                // and the slot it landed in is where it stands. Only that object: the
+                // rest of a batch is still waiting on its own write.
+                DeviceEvent::Sent {
+                    id,
+                    class,
+                    at,
+                    bytes,
+                } => {
+                    queue.forget(id);
+                    workspace.landed(id, class, at, bytes);
+                }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
                     log.info(text);
@@ -920,6 +1471,9 @@ impl Device {
                     }
                 }
                 DeviceEvent::OpFailed(text) => {
+                    if let Some(class) = self.writing {
+                        queue.stumbled(class, &text);
+                    }
                     log.error(text);
                     match &self.state.in_flight {
                         Some(words) => {
@@ -937,6 +1491,14 @@ impl Device {
                 }
             }
         }
+        // Both sides of a link move: the instrument said something, or an asset arrived,
+        // changed, was kept or was reverted. An asset that arrives while an instrument
+        // is attached stands wherever the cache already says it does, without waiting
+        // for the next walk to report a bank again.
+        if heard || self.linked != workspace.revision() {
+            self.linked = workspace.revision();
+            self.relink(workspace);
+        }
     }
 }
 
@@ -944,12 +1506,210 @@ impl Device {
 mod tests {
     use super::*;
 
+    /// Every class this app has a name for, which is what the rules below are about.
+    /// The instrument declares its own.
+    fn named() -> impl Iterator<Item = ObjectClass> {
+        crate::browser::Kind::ALL
+            .into_iter()
+            .filter_map(|kind| kind.home())
+    }
+
+    fn table() -> Vec<Partition> {
+        vec![
+            Partition {
+                class: ObjectClass::Unknown(0),
+                name: "Piano (Native)".into(),
+                native: true,
+                unit: None,
+            },
+            Partition {
+                class: ObjectClass::Piano,
+                name: "Piano".into(),
+                native: false,
+                unit: Some(pretend_allocation_unit(ObjectClass::Piano, 261_632)),
+            },
+            Partition {
+                class: ObjectClass::Sample,
+                name: "Samp Lib".into(),
+                native: false,
+                unit: Some(pretend_allocation_unit(ObjectClass::Sample, 131_064)),
+            },
+            Partition {
+                class: ObjectClass::Unknown(9),
+                name: "Rhythms".into(),
+                native: false,
+                unit: None,
+            },
+        ]
+    }
+
+    /// The classes the app walks are the instrument's own table, and a partition this
+    /// app cannot name is one of them — under the device's word for it, and read only.
+    ///
+    /// ⚠️ A `(Native)` row is a second view of a library already in the table, so it is
+    /// not a folder of its own.
+    #[test]
+    fn the_instrument_says_which_classes_it_has() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        assert!(device.state.classes().is_empty(), "nothing read yet");
+
+        device.pretend(DeviceEvent::Partitions(table()));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        assert_eq!(
+            device.state.classes(),
+            vec![
+                ObjectClass::Piano,
+                ObjectClass::Sample,
+                ObjectClass::Unknown(9)
+            ]
+        );
+        assert_eq!(device.state.folder_name(ObjectClass::Piano), "Pianos");
+        assert_eq!(device.state.folder_name(ObjectClass::Unknown(9)), "Rhythms");
+        assert!(read_only(ObjectClass::Unknown(9)));
+
+        // Every class the table declared is walked, and nothing else is.
+        for class in device.state.classes() {
+            assert!(device.state.scan.progress(class).is_some(), "{class:?}");
+        }
+        assert!(device.state.scan.progress(ObjectClass::Program).is_none());
+
+        device.pretend(DeviceEvent::Disconnected { lost: false });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        assert!(device.state.classes().is_empty());
+    }
+
+    /// The unit a count is measured in is the partition's own, so it arrives with the
+    /// table and is forgotten when the instrument goes.
+    #[test]
+    fn a_count_is_measured_in_the_unit_its_partition_reports() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let class = ObjectClass::Sample;
+        assert_eq!(
+            device.state.allocation_unit(class),
+            None,
+            "nothing read yet"
+        );
+
+        device.pretend(DeviceEvent::Partitions(table()));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        assert_eq!(
+            device.state.allocation_unit(class).map(|unit| unit.get()),
+            Some(131_064)
+        );
+        assert_eq!(
+            device.state.allocation_unit(ObjectClass::Unknown(9)),
+            None,
+            "a partition that reported none"
+        );
+
+        device.pretend(DeviceEvent::Disconnected { lost: false });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        assert_eq!(device.state.allocation_unit(class), None);
+    }
+
+    /// ⚠️ A library counts blocks, not bytes, and one block is its partition's
+    /// allocation unit. Until that unit has arrived the count is all the row can say —
+    /// a block count read as bytes would be off by five orders of magnitude.
+    #[test]
+    fn a_library_reads_in_bytes_only_once_its_allocation_unit_has_arrived() {
+        let class = ObjectClass::Sample;
+        // The shape an Electro 5 answers with: 1 472 of the partition's 1 536 blocks
+        // in use, each 131 064 net bytes.
+        let inventory = [Status {
+            class,
+            count: 84,
+            free: 60,
+            used: 1472,
+            dirty: 0,
+            spare: 4,
+        }];
+        assert_eq!(
+            occupancy(class, &inventory, None).as_deref(),
+            Some("84 items"),
+            "the count alone until the unit lands"
+        );
+        assert_eq!(
+            occupancy(
+                class,
+                &inventory,
+                Some(pretend_allocation_unit(class, 131_064))
+            )
+            .as_deref(),
+            Some("184.0/192.0 MB")
+        );
+
+        // A slot-addressed class divides into slots, so it never reaches the unit at all.
+        let programs = [Status {
+            class: ObjectClass::Program,
+            count: 128,
+            free: 272 * 121,
+            used: 128 * 121,
+            dirty: 0,
+            spare: 0,
+        }];
+        assert_eq!(
+            occupancy(ObjectClass::Program, &programs, None).as_deref(),
+            Some("128/400")
+        );
+    }
+
+    /// ⚠️ A partition reads in the unit its own total deserves, and both figures in that
+    /// one unit. The Live and Settings partitions hold less than a megabyte, and in
+    /// megabytes each of them reads 0/0.
+    #[test]
+    fn a_partition_reads_in_the_unit_its_total_deserves() {
+        let partition = |class, used: u32, free: u32| {
+            [Status {
+                class,
+                count: 0,
+                free,
+                used,
+                dirty: 0,
+                spare: 0,
+            }]
+        };
+        let byte = |class| Some(pretend_allocation_unit(class, 1));
+
+        let live = ObjectClass::Live;
+        assert_eq!(
+            occupancy(live, &partition(live, 121, 379), byte(live)).as_deref(),
+            Some("121/500 B")
+        );
+
+        // The part takes the whole's unit rather than its own: 500 bytes alone would
+        // read in bytes, and would then look larger than the 24 kB it sits inside.
+        let settings = ObjectClass::Settings;
+        assert_eq!(
+            occupancy(settings, &partition(settings, 500, 24_076), byte(settings)).as_deref(),
+            Some("0.5/24.0 kB")
+        );
+
+        let samples = ObjectClass::Sample;
+        assert_eq!(
+            occupancy(
+                samples,
+                &partition(samples, 128, 128),
+                Some(pretend_allocation_unit(samples, 1024 * 1024))
+            )
+            .as_deref(),
+            Some("128.0/256.0 MB")
+        );
+    }
+
     /// The buffer classes take a write like any other slot; only a library the
     /// instrument installs for itself is off limits.
     #[test]
-    fn every_browsed_class_but_pianos_can_be_written() {
-        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Piano) {
-            assert!(sendable(*class), "{}", folder(*class));
+    fn every_named_class_but_pianos_can_be_written() {
+        for class in named().filter(|class| *class != ObjectClass::Piano) {
+            assert!(sendable(class), "{}", folder(class));
         }
         assert!(!sendable(ObjectClass::Piano));
     }
@@ -958,17 +1718,18 @@ mod tests {
     fn a_settings_write_warns_that_the_panel_reloads() {
         let why = write_warning(ObjectClass::Settings).expect("must warn");
         assert!(why.contains("reloads the selected program"), "{why}");
-        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Settings) {
-            assert!(write_warning(*class).is_none(), "{}", folder(*class));
+        for class in named().filter(|class| *class != ObjectClass::Settings) {
+            assert!(write_warning(class).is_none(), "{}", folder(class));
         }
     }
 
-    /// Pianos are listed and never altered.
+    /// Pianos are listed and never altered, and so is a partition this app cannot name.
     #[test]
-    fn only_pianos_are_read_only() {
+    fn a_piano_and_a_class_with_no_name_are_read_only() {
         assert!(read_only(ObjectClass::Piano));
-        for class in BROWSED.iter().filter(|c| **c != ObjectClass::Piano) {
-            assert!(!read_only(*class), "{}", folder(*class));
+        assert!(read_only(ObjectClass::Unknown(9)));
+        for class in named().filter(|class| *class != ObjectClass::Piano) {
+            assert!(!read_only(class), "{}", folder(class));
         }
     }
 
@@ -1009,20 +1770,586 @@ mod tests {
             bytes,
             &mut log,
         );
-        workspace.mark_pending(landed, true);
-        workspace.mark_pending(still_owed, true);
+        let mut queue = Queue::default();
+        for (id, slot) in [(landed, 3), (still_owed, 4)] {
+            crate::queue::enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                ObjectClass::Program,
+                at(slot),
+            );
+        }
 
         device.pretend(DeviceEvent::Sent {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
+            bytes: workspace.get(landed).unwrap().bytes.clone(),
         });
-        device.poll(&mut log, &mut workspace, &mut tabs);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
-        assert!(!workspace.get(landed).unwrap().pending, "it was written");
-        assert!(workspace.get(still_owed).unwrap().pending, "still waiting");
-        let owed: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-        assert_eq!(owed, vec![still_owed]);
+        assert!(!queue.holds(landed), "it was written");
+        assert!(queue.holds(still_owed), "still waiting");
+        assert_eq!(queue.ids(), vec![still_owed]);
+    }
+
+    /// One program on this computer, and the body checksum a walk would report for the
+    /// slot holding it.
+    fn program(workspace: &mut Workspace, log: &mut Log, origin: Origin) -> (u64, u32) {
+        let made = workspace
+            .create(crate::workspace::Fresh::Program, log)
+            .unwrap();
+        let bytes = workspace.get(made).unwrap().bytes.clone();
+        workspace.remove(made, log);
+        let id = workspace.ingest("Africa-Split.ne5p".into(), origin, bytes, log);
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("every CBIN container has one");
+        (id, crc)
+    }
+
+    /// An asset of another family's, on this computer.
+    fn stage(workspace: &mut Workspace, log: &mut Log, origin: Origin) -> (u64, u32) {
+        let made = workspace
+            .create(crate::workspace::Fresh::Stage4Program, log)
+            .unwrap();
+        let bytes = workspace.get(made).unwrap().bytes.clone();
+        workspace.remove(made, log);
+        let id = workspace.ingest("Africa-Split.ns4p".into(), origin, bytes, log);
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("every CBIN container has one");
+        (id, crc)
+    }
+
+    /// The four answers the acceptance table gives, and the fifth for nothing attached.
+    #[test]
+    fn what_the_instrument_takes_is_decided_by_the_table_then_by_the_folder() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (own, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        let (other, _) = stage(&mut workspace, &mut log, Origin::Fresh);
+        fn held(device: &Device, workspace: &Workspace, id: u64) -> Fit {
+            fit(&device.state, workspace.get(id).expect("it is on the list"))
+        }
+        let held = |device: &Device, id| held(device, &workspace, id);
+
+        assert_eq!(held(&device, own), Fit::Unattached);
+
+        device.pretend_attached();
+        assert_eq!(held(&device, own), Fit::Takes, "confirmed on hardware");
+        match held(&device, other) {
+            Fit::Refuses(why) => {
+                assert!(why.contains("Stage 4"), "{why}");
+                assert!(why.contains("Nord Electro 5"), "{why}");
+            }
+            answer => panic!("a Stage 4 program on an Electro 5: {answer:?}"),
+        }
+
+        device.pretend_attached_as("Nord Stage 4 88");
+        match held(&device, other) {
+            Fit::Warn(why) => assert!(why.contains("untried"), "{why}"),
+            answer => panic!("a Stage 4 program on a Stage 4: {answer:?}"),
+        }
+
+        // A model with no row in the table falls back to what the folder is holding.
+        device.pretend_attached_as("unnamed device");
+        assert_eq!(held(&device, own), Fit::Takes);
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        device.pretend_attached_as("unnamed device");
+        match held(&device, other) {
+            Fit::Warn(why) => assert!(why.contains("ns4p"), "{why}"),
+            answer => panic!("an unnameable instrument holding ne5p: {answer:?}"),
+        }
+    }
+
+    /// ⚠️ A refused asset is not linked however well its checksum matches: a link is
+    /// what the queue and the library treat as the slot holding these bytes.
+    #[test]
+    fn an_asset_the_instrument_refuses_is_linked_to_nothing() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (own, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let (other, _) = stage(&mut workspace, &mut log, Origin::Fresh);
+
+        // Both slots report the Electro 5 program's checksum, so only the family
+        // separates the two assets.
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[Some(("Africa Split", crc)), Some(("Squabble B", crc))],
+        );
+        device.relink(&mut workspace);
+        assert!(workspace.get(own).unwrap().link.is_some());
+        assert_eq!(workspace.get(other).unwrap().link, None);
+    }
+
+    /// A link is a slot of the asset's **own** folder reporting the asset's own body.
+    /// A folder that reports no checksum matches nothing: the name it holds is not
+    /// evidence that the bytes under it are the same.
+    #[test]
+    fn a_link_is_a_slot_of_its_own_folder_reporting_its_own_body() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (id, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+
+        // The same checksum in another folder is another folder's business.
+        device.pretend_bodies(ObjectClass::SetList, 1, &[Some(("Sunday", crc))]);
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[None, Some(("Africa Split", crc))],
+        );
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((ObjectClass::Program, Location { bank: 6, slot: 1 }))
+        );
+
+        // The same folder, read again and reporting no checksum for what it holds. The
+        // name over those bytes is not evidence that they are these.
+        device.pretend_scanned(ObjectClass::Program, 7, &["", "Africa Split"]);
+        let (fresh, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(fresh).unwrap().link,
+            None,
+            "a folder reporting no checksum links nothing"
+        );
+    }
+
+    /// A factory sound that also sits in a slot the user filled is in two places at
+    /// once, and the address the row shows is the one the asset already stood on — a
+    /// write of this app's put it there. Only an asset standing nowhere is matched to
+    /// the lowest of them.
+    #[test]
+    fn a_link_keeps_the_slot_it_has_when_several_hold_the_bytes() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (id, crc) = program(&mut workspace, &mut log, Origin::File("Bells.ne5p".into()));
+        let class = ObjectClass::Program;
+        let (low, high) = (Location { bank: 6, slot: 0 }, Location { bank: 6, slot: 2 });
+        device.pretend_bodies(
+            class,
+            7,
+            &[
+                Some(("Circling Bells", crc)),
+                None,
+                Some(("Circling Bells", crc)),
+            ],
+        );
+
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, low)),
+            "standing nowhere, it takes the lowest address holding it"
+        );
+
+        let sent = workspace.get(id).unwrap().bytes.clone();
+        workspace.landed(id, class, high, sent);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, high)),
+            "it stands where it was written, not where else the bytes are"
+        );
+    }
+
+    /// A file opened against an instrument already walked stands on its slot in the
+    /// frame it arrives in. Nothing is going to read that bank again on its account, so
+    /// waiting for a walk to report is waiting for something that may never happen.
+    #[test]
+    fn an_asset_links_as_soon_as_it_arrives() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut queue = Queue::default();
+        let class = ObjectClass::Program;
+        let (first, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.pretend_bodies(class, 7, &[None, Some(("Circling Bells", crc))]);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        let at = workspace.get(first).unwrap().link;
+        assert_eq!(at, Some((class, Location { bank: 6, slot: 1 })));
+
+        // A second asset of the same bytes, with no event from the instrument between.
+        let (second, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(
+            workspace.get(second).unwrap().link,
+            at,
+            "it links off the cache rather than off the next walk"
+        );
+    }
+
+    /// Bytes with no container carry no checksum, so nothing about them can be matched
+    /// to a slot however much of the instrument has been read.
+    #[test]
+    fn an_asset_with_no_checksum_of_its_own_links_to_nothing() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (_, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let loose = workspace.ingest(
+            "notes.txt".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 0 },
+            },
+            b"not a Nord file at all".to_vec(),
+            &mut log,
+        );
+        assert!(workspace.get(loose).unwrap().container.is_none());
+
+        device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(loose).unwrap().link, None);
+    }
+
+    /// Three slots hold one body: the asset that came off one of them keeps pointing at
+    /// that one, and the asset that came off none takes the lowest address.
+    #[test]
+    fn a_link_prefers_the_slot_it_came_off_and_otherwise_the_lowest_address() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let at = |slot| Location { bank: 6, slot };
+        let (fresh, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let (copied, _) = program(
+            &mut workspace,
+            &mut log,
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(2),
+            },
+        );
+
+        device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[
+                Some(("Africa Split", crc)),
+                Some(("Africa 2", crc)),
+                Some(("Africa 3", crc)),
+            ],
+        );
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(fresh).unwrap().link,
+            Some((ObjectClass::Program, at(0)))
+        );
+        assert_eq!(
+            workspace.get(copied).unwrap().link,
+            Some((ObjectClass::Program, at(2)))
+        );
+        assert_eq!(
+            also_holding(&device.state, workspace.get(fresh).unwrap()),
+            2,
+            "the hover has the rest to count"
+        );
+    }
+
+    /// The slot an asset came off is where it stands, whatever that slot holds now. A
+    /// program copied from 1:1, changed here and saved, is still the copy of 1:1 — and
+    /// the two having parted is what the library says about it, not a reason to point it
+    /// somewhere else.
+    #[test]
+    fn the_slot_an_asset_came_off_is_its_link_while_the_instrument_holds_it() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let at = Location { bank: 0, slot: 0 };
+        let class = ObjectClass::Program;
+        let (id, crc) = program(&mut workspace, &mut log, Origin::Device { class, at });
+
+        // Changed here before anything was attached, and saved.
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        workspace.mark_saved(id);
+        let now = workspace.get(id).unwrap().saved.crc32.unwrap();
+        assert_ne!(now, crc, "the edit moved the body");
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(id).unwrap().link, None, "nothing is read yet");
+
+        // Bank 1 is read: 1:1 holds what this asset used to be, and 1:2 holds what it is
+        // now. The slot it came off is still the slot it came off.
+        device.pretend_bodies(
+            class,
+            1,
+            &[Some(("Africa Split", crc)), Some(("Squabble B", now))],
+        );
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(id).unwrap().link, Some((class, at)));
+
+        // A slot the walk found vacant holds nothing to stand on, so the body matches.
+        device.pretend_bodies(class, 1, &[None, Some(("Squabble B", now))]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, Location { bank: 0, slot: 1 })),
+        );
+    }
+
+    /// A class whose slots report no checksum cannot be matched by body. Settings holds
+    /// one slot and that slot is the link; a sample or a piano is matched to the slot
+    /// carrying its own name, and to nothing at all where no slot does.
+    #[test]
+    fn a_class_reporting_no_checksum_links_by_its_singleton_or_by_name() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let settings = workspace
+            .create(crate::workspace::Fresh::Settings, &mut log)
+            .unwrap();
+
+        device.pretend_scanned(ObjectClass::Settings, 1, &["Settings"]);
+        device.pretend_scanned(ObjectClass::Sample, 1, &["Bass Clarinet", "Rhodes"]);
+        device.relink(&mut workspace);
+        assert_eq!(
+            workspace.get(settings).unwrap().link,
+            Some((ObjectClass::Settings, Location { bank: 0, slot: 0 })),
+        );
+
+        // The name is the whole of the match, verbatim and case for case.
+        let bytes = workspace.get(settings).unwrap().bytes.clone();
+        let by_name = |workspace: &mut Workspace, name: &str, log: &mut Log| {
+            let id = workspace.ingest(name.into(), Origin::Fresh, bytes.clone(), log);
+            let at = super::named(
+                &device.state,
+                ObjectClass::Sample,
+                workspace.get(id).unwrap(),
+            );
+            workspace.remove(id, log);
+            at
+        };
+        let slot = |slot| Some(Location { bank: 0, slot });
+        assert_eq!(by_name(&mut workspace, "Rhodes", &mut log), slot(1));
+        assert_eq!(
+            by_name(&mut workspace, " Bass Clarinet ", &mut log),
+            slot(0)
+        );
+        assert_eq!(
+            by_name(&mut workspace, "rhodes", &mut log),
+            None,
+            "case is part of a name"
+        );
+        assert_eq!(by_name(&mut workspace, "Wurlitzer", &mut log), None);
+
+        // Two slots are not a singleton, so nothing about settings is decided by one.
+        device.pretend_scanned(ObjectClass::Settings, 1, &["Settings", "Settings 2"]);
+        let second = workspace.ingest("Settings".into(), Origin::Fresh, bytes, &mut log);
+        device.relink(&mut workspace);
+        assert_eq!(workspace.get(second).unwrap().link, None);
+    }
+
+    /// A link is derived from the scan cache, so a walk makes one and the instrument
+    /// going takes it away. What is on this computer is untouched either way.
+    #[test]
+    fn a_link_arrives_with_a_walk_and_goes_when_the_instrument_does() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut queue = Queue::default();
+        let (id, crc) = program(&mut workspace, &mut log, Origin::Fresh);
+        let class = ObjectClass::Program;
+
+        device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 7,
+            slots: vec![Some(ProgramInfo {
+                location: Location { bank: 6, slot: 0 },
+                body_len: 121,
+                format: "ne5p".into(),
+                version: 4,
+                crc32: Some(crc),
+                name: "Africa Split".into(),
+            })],
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(
+            workspace.get(id).unwrap().link,
+            Some((class, Location { bank: 6, slot: 0 }))
+        );
+
+        device.pretend(DeviceEvent::Disconnected { lost: true });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(workspace.get(id).unwrap().link, None);
+        assert!(workspace.get(id).is_some(), "the asset itself stays");
+    }
+
+    /// A write is the strongest evidence there is about where an asset stands: this app
+    /// put the bytes there. What the read after it reports decides the sign the row
+    /// wears, and cannot decide that the asset stands nowhere.
+    #[test]
+    fn a_send_lands_its_asset_on_the_slot_it_wrote() {
+        /// What the read after the write reports for the slot.
+        enum Rescan {
+            /// Nothing read the bank again, which is where a write leaves it.
+            Skipped,
+            Same,
+            Other,
+            /// A slot that reports no checksum for what it holds.
+            Silent,
+        }
+
+        let class = ObjectClass::Program;
+        let at = Location { bank: 4, slot: 2 };
+        let sent = |rescan: Rescan| {
+            let ctx = egui::Context::default();
+            let mut workspace = Workspace::new(ctx.clone());
+            let mut device = Device::new(ctx);
+            let mut log = Log::default();
+            let mut tabs = Tabs::default();
+            let mut queue = Queue::default();
+            let origin = Origin::File("Africa-Split.ne5p".into());
+            let (id, crc) = program(&mut workspace, &mut log, origin);
+            device.pretend_attached();
+
+            let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+            device.pretend(DeviceEvent::Sent {
+                id,
+                class,
+                at,
+                bytes: sent,
+            });
+            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+            let reported = match rescan {
+                Rescan::Skipped => None,
+                Rescan::Same => Some(Some(crc)),
+                Rescan::Other => Some(Some(crc ^ 1)),
+                Rescan::Silent => Some(None),
+            };
+            if let Some(crc32) = reported {
+                device.pretend(DeviceEvent::BankScanned {
+                    class,
+                    bank: at.bank + 1,
+                    slots: vec![
+                        None,
+                        None,
+                        Some(ProgramInfo {
+                            location: at,
+                            body_len: 121,
+                            format: "ne5p".into(),
+                            version: 4,
+                            crc32,
+                            name: "Africa Split".into(),
+                        }),
+                    ],
+                });
+                device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+            }
+            // A second frame with nothing to report: the log is not a per-frame render.
+            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+            let entity = workspace.get(id).expect("it is on the list");
+            (
+                entity.link,
+                crate::library::keyboard_mark(entity, &device.state, &queue),
+                log.transcript(),
+                crc,
+            )
+        };
+        let (good, warn) = (crate::library::Mark::Agrees, crate::library::Mark::Differs);
+        let there = Some((class, at));
+
+        let (link, mark, said, _) = sent(Rescan::Same);
+        assert_eq!(link, there);
+        assert_eq!(mark, Some(good));
+        assert!(!said.contains("crc32"), "the two agree: {said}");
+
+        let (link, mark, said, crc) = sent(Rescan::Other);
+        assert_eq!(
+            link, there,
+            "it is where it was written, holding what it holds"
+        );
+        assert_eq!(mark, Some(warn));
+        assert!(
+            said.contains(&format!(
+                "Programs 5:3 reports crc32 {:#010x}; “Africa-Split.ne5p” is saved as \
+                 {crc:#010x}",
+                crc ^ 1
+            )),
+            "{said}"
+        );
+        assert_eq!(
+            said.matches("reports crc32").count(),
+            1,
+            "once, on the read"
+        );
+
+        let (link, mark, _, _) = sent(Rescan::Silent);
+        assert_eq!(link, there);
+        assert_eq!(
+            mark,
+            Some(good),
+            "this app wrote those bytes and the slot reports as many"
+        );
+
+        let (link, _, _, _) = sent(Rescan::Skipped);
+        assert_eq!(link, there, "a bank nothing has read says neither way");
+    }
+
+    /// A write takes as long as the instrument takes, and an edit made while one is in
+    /// flight is on this computer alone. What landed is what the asset is saved as; what
+    /// it holds now is still unsaved, and closing the tab over it would be losing it.
+    #[test]
+    fn a_send_settles_the_baseline_on_the_bytes_it_carried_and_not_on_a_later_edit() {
+        let class = ObjectClass::Program;
+        let at = Location { bank: 4, slot: 2 };
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let mut queue = Queue::default();
+        let (id, _) = program(&mut workspace, &mut log, Origin::Fresh);
+        device.pretend_attached();
+        crate::queue::enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
+
+        // What the write carries is what the asset held when it went out.
+        let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+
+        let (_, edited) = crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())])
+            .expect("the registry takes the set");
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+
+        device.pretend(DeviceEvent::Sent {
+            id,
+            class,
+            at,
+            bytes: sent.clone(),
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+        let entity = workspace.get(id).expect("it is on the list");
+        assert_eq!(entity.saved.bytes, sent, "the instrument holds these");
+        assert_eq!(entity.bytes, edited);
+        assert!(entity.is_unsaved(), "the edit never went anywhere");
+        assert_eq!(entity.link, Some((class, at)));
+        assert!(!queue.holds(id), "it landed");
     }
 
     /// A library id resolves to a name only where the instrument has actually said so:

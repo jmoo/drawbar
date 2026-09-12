@@ -45,13 +45,18 @@ impl Link {
                     return;
                 }
             };
+            // Which classes the instrument has is the first thing read: nothing above
+            // asks for one before the answer arrives.
+            let mut flow = nord_usb::block_on(worker::announce(&mut device, &emit));
             // `recv` ends when the UI drops its sender, so a disconnect that races the
             // thread still stops it.
-            let mut flow = Flow::Released;
-            while let Ok(cmd) = rx.recv() {
-                flow = nord_usb::block_on(worker::run(&mut device, cmd, &emit));
-                if flow != Flow::Continue {
-                    break;
+            if flow == Flow::Continue {
+                flow = Flow::Released;
+                while let Ok(cmd) = rx.recv() {
+                    flow = nord_usb::block_on(worker::run(&mut device, cmd, &emit));
+                    if flow != Flow::Continue {
+                        break;
+                    }
                 }
             }
             // Dropping the device drops its transport, releasing the claimed interface,

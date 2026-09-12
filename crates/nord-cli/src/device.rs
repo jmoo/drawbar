@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use nord_format::accept::{Acceptance, Family};
 use nord_usb::op;
 use nord_usb::transport::{Transport, UsbTransport};
 use nord_usb::wire::{Bank, Location, ProgramInfo, Status};
@@ -554,6 +555,59 @@ fn taken(dir: &Path, stem: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+/// What the acceptance table says about writing a file into a class on the attached
+/// instrument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admit {
+    Takes,
+    /// The write goes ahead, and this is what has not been checked.
+    Warn(String),
+    /// Another family's file. Nothing is written.
+    Refuse(String),
+}
+
+/// Whether the instrument `product` names takes a `tag` file in `class`.
+///
+/// ⚠️ Only a tag another family carries is evidence that a file is in the wrong place,
+/// so everything short of that — a product string the table does not name, a class it
+/// says nothing about, or no product string at all — warns and lets the write proceed.
+/// Refusing what is merely unmeasured would put this table in the way of the next
+/// measurement.
+pub fn admit(product: Option<&str>, class: ObjectClass, tag: &str) -> Admit {
+    let Some(product) = product else {
+        return Admit::Warn(format!(
+            "this transport reports no product string, so nothing here says whether \
+             the instrument takes a {tag} file"
+        ));
+    };
+    let (Some(slot), Some(family)) = (class.storage(), Family::from_product(product)) else {
+        return Admit::Warn(format!(
+            "{product} is not in the acceptance table, so nothing here says whether it \
+             takes a {tag} file"
+        ));
+    };
+    match family.accepts(slot, tag) {
+        Acceptance::Confirmed => Admit::Takes,
+        Acceptance::Inferred => Admit::Warn(format!(
+            "this is a {} file and the instrument is a {product}, but no file of this \
+             kind has ever been written to one: this write is untried",
+            family.label()
+        )),
+        Acceptance::Unknown => Admit::Warn(format!(
+            "nothing here says whether a {product} takes a {tag} file"
+        )),
+        Acceptance::Refused => Admit::Refuse(match Family::of_tag(tag) {
+            Some(owner) => format!(
+                "this is a {} file and the instrument is a {product}",
+                owner.label()
+            ),
+            // ⚠️ Unreachable while `accepts` refuses only a tag another family carries;
+            // stated rather than unwrapped so a widened table cannot panic here.
+            None => format!("a {tag} file is not one a {product} takes"),
+        }),
+    }
+}
+
 /// Write a file into a slot, overwriting it.
 pub fn put(
     ui: &Ui,
@@ -712,6 +766,17 @@ pub fn send(
             "a settings write reloads the selected program: panel state that has not \
              been stored is lost, so re-select and re-apply afterwards",
         );
+    }
+    // The file names its model in its tag and the instrument names its own in the
+    // product string, so this is the last thing that can be known before the write.
+    // Bytes carrying no tag are nothing the table can be about, and `put` has already
+    // refused those.
+    if let Some(tag) = tag(file) {
+        match admit(device.transport().product(), class, &tag) {
+            Admit::Takes => {}
+            Admit::Warn(why) => ui.warn(why),
+            Admit::Refuse(why) => return Err(format!("{what}: {why}")),
+        }
     }
     ui.confirm(confirmed)?;
 
@@ -1751,15 +1816,20 @@ fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u
     format!("{} put {file} {} {name:?} {stamp}", noun(class), addr(at))
 }
 
+/// The four-character format tag a body carries, where those bytes are one.
+///
+/// ⚠️ Read off the header rather than parsed: this has to answer for a body whose
+/// checksum is bad, because that body may be a slot's last remaining copy.
+fn tag(body: &[u8]) -> Option<String> {
+    body.get(8..12)
+        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
+        .map(|tag| String::from_utf8_lossy(tag).into_owned())
+}
+
 /// Filename for a rescued slot: the location as the instrument labels it, and the
 /// object's own format tag so the file can be handed straight back to `put`.
 fn rescue_name(at: Location, backup: &[u8]) -> String {
-    // The rescue name must survive a bad checksum in the slot's last remaining copy.
-    let format = backup
-        .get(8..12)
-        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
-        .map(|tag| String::from_utf8_lossy(tag).into_owned())
-        .unwrap_or_else(|| "bin".to_string());
+    let format = tag(backup).unwrap_or_else(|| "bin".to_string());
     format!(
         "nord-rescued-{}-{}.{format}",
         at.user_bank(),
@@ -1929,6 +1999,49 @@ mod tests {
             aftermath(ObjectClass::Settings, at),
             "bank 1 slot 2 may hold a partly written body"
         );
+    }
+
+    /// ⚠️ A refusal is a file another family carries the tag of, and nothing else: the
+    /// instrument would take the write and store something it cannot play. Both models
+    /// are named, because which of the two is wrong is the operator's to decide.
+    #[test]
+    fn a_write_of_another_familys_file_is_refused_and_names_both() {
+        let refused = admit(Some("Nord Electro 5D"), ObjectClass::Program, "ns4p");
+        let Admit::Refuse(why) = refused else {
+            panic!("{refused:?}");
+        };
+        assert!(why.contains("Stage 4"), "{why}");
+        assert!(why.contains("Nord Electro 5D"), "{why}");
+    }
+
+    /// ⚠️ Everything short of another family's tag warns and writes. An unmeasured
+    /// combination is not a wrong one, and a table that refused those would stand in
+    /// the way of the measurement.
+    #[test]
+    fn only_a_measured_write_is_silent_and_the_rest_warns() {
+        let warning = |product, class, tag| match admit(product, class, tag) {
+            Admit::Warn(why) => why,
+            other => panic!("{other:?}"),
+        };
+
+        assert_eq!(
+            admit(Some("Nord Electro 5D"), ObjectClass::Program, "ne5p"),
+            Admit::Takes,
+            "a row written and read back says nothing"
+        );
+
+        let untried = warning(Some("Nord Stage 2 EX"), ObjectClass::Program, "ns2p");
+        assert!(untried.contains("untried"), "{untried}");
+
+        let unnamed = warning(Some("Nord Modular G2"), ObjectClass::Program, "ne5p");
+        assert!(unnamed.contains("not in the acceptance table"), "{unnamed}");
+
+        // A shared library format is nobody's own, so the table says nothing about it.
+        let shared = warning(Some("Nord Electro 5D"), ObjectClass::Program, "npno");
+        assert!(shared.contains("npno"), "{shared}");
+
+        let silent = warning(None, ObjectClass::Program, "ne5p");
+        assert!(silent.contains("no product string"), "{silent}");
     }
 
     /// A set list must not land with a program's extension.

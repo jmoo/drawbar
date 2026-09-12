@@ -17,7 +17,7 @@ use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
-use super::{DeviceCmd, DeviceEvent, Outgoing};
+use super::{DeviceCmd, DeviceEvent, Outgoing, Partition};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -53,6 +53,35 @@ pub enum Flow {
 /// A device status is a reply; only transport failure means detachment.
 fn hung_up(e: &Error) -> bool {
     matches!(e, Error::Transport(_))
+}
+
+/// Report the classes the instrument declares, from its own partition table.
+///
+/// The first thing a connection does, because nothing above this can ask for a class
+/// before it knows the instrument has one. The table is read once and kept, so every
+/// later operation is answered out of what this read.
+pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow {
+    let rows = match device.geometry().await {
+        Ok(geometry) => geometry
+            .entries()
+            .map(|(partition, _)| Partition {
+                class: ObjectClass::from_raw(partition.index),
+                name: partition.name.clone(),
+                native: partition.native,
+                unit: partition.allocation_unit().ok(),
+            })
+            .collect(),
+        Err(e) => {
+            let lost = hung_up(&e);
+            emit.send(DeviceEvent::OpFailed(format!("partitions: {e}")));
+            return match lost {
+                true => Flow::Lost,
+                false => Flow::Continue,
+            };
+        }
+    };
+    emit.send(DeviceEvent::Partitions(rows));
+    Flow::Continue
 }
 
 /// Turn an error into the sentence for it, noting on the way whether the instrument is
@@ -159,11 +188,17 @@ async fn execute<T: Transport>(
             class,
             at,
             body,
-            open,
+            why,
         } => {
-            let (info, bytes) = read_object(device, class, at, body)
-                .await
-                .map_err(spoil(gone, Some(at)))?;
+            let (info, bytes) = match read_object(device, class, at, body).await {
+                Ok(read) => read,
+                // Status 1 is a vacant slot, not a failure.
+                Err(Error::DeviceStatus(1)) => {
+                    emit.send(DeviceEvent::Vacant { class, at, why });
+                    return Ok(None);
+                }
+                Err(e) => return Err(spoil(gone, Some(at))(e)),
+            };
             let note = format!(
                 "read {:?} from {} ({} bytes)",
                 info.name,
@@ -174,7 +209,7 @@ async fn execute<T: Transport>(
                 name: entity_name(&info, body),
                 origin: Origin::Device { class, at },
                 bytes,
-                open,
+                why,
             });
             Ok(Some(note))
         }
@@ -186,11 +221,16 @@ async fn execute<T: Transport>(
             name,
             bytes,
         } => {
-            let note = put_one(device, class, at, &name, bytes, emit, gone)
+            let note = put_one(device, class, at, &name, bytes.clone(), emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
             // Nothing is owed to the instrument until this session has closed.
-            emit.send(DeviceEvent::Sent { id, class, at });
+            emit.send(DeviceEvent::Sent {
+                id,
+                class,
+                at,
+                bytes,
+            });
             Ok(Some(note))
         }
 
@@ -452,6 +492,7 @@ async fn batch<T: Transport>(
                             id: item.id,
                             class,
                             at: item.at,
+                            bytes: item.bytes.clone(),
                         });
                     }
                     Err(why) => return Ok(Some(why)),
@@ -1009,6 +1050,7 @@ mod wire_tests {
     use std::sync::mpsc::Receiver;
 
     use super::*;
+    use crate::device::Purpose;
     use nord_usb::wire::{cmd, ui, Message, Service};
     use nord_usb::Transport;
 
@@ -1323,6 +1365,42 @@ mod wire_tests {
         let mut names = written_names(device);
         assert_eq!(names.len(), 1, "one write");
         names.remove(0)
+    }
+
+    /// A read of a slot the instrument reports empty is an answer, not a fault: the
+    /// queue needs to hear *empty* to stop waiting on it.
+    #[test]
+    fn a_read_of_an_empty_slot_is_forwarded_as_vacant() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]);
+        let (_, events) = drive(
+            &mut device,
+            DeviceCmd::Get {
+                class: ObjectClass::Program,
+                at,
+                body: false,
+                why: Purpose::Compare,
+            },
+        );
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert!(
+            said.iter().any(|event| matches!(
+                event,
+                DeviceEvent::Vacant {
+                    at: empty,
+                    why: Purpose::Compare,
+                    ..
+                } if *empty == at
+            )),
+            "the empty slot was reported"
+        );
+        assert!(
+            !said
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::OpFailed(_) | DeviceEvent::Got { .. })),
+            "and neither failed nor handed anything back"
+        );
     }
 
     #[test]
@@ -1642,6 +1720,46 @@ mod wire_tests {
         );
         assert!(counted(&device, cmd::NEXT_SLOT) > 0, "it was tried");
         assert_eq!(counted(&device, cmd::INFO), 80);
+    }
+
+    /// The instrument's own partition table is what says which classes exist, and every
+    /// row of it is one — the ones this app has no name for included, so a folder the
+    /// crate cannot name is still listed rather than dropped.
+    #[test]
+    fn a_connection_announces_the_classes_the_instrument_declares() {
+        let mut puppet = Puppet::stocked(&[("Bank 1", 50)], &[]);
+        let (tx, events) = std::sync::mpsc::channel();
+        let emit = Emit::new(tx, egui::Context::default());
+        let lent = std::mem::replace(&mut puppet, Puppet::new(1));
+        let mut device = Device::new(lent);
+
+        let flow = nord_usb::block_on(announce(&mut device, &emit));
+        assert!(flow == Flow::Continue);
+
+        let announced: Vec<Vec<Partition>> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Partitions(rows) => Some(rows),
+                _ => None,
+            })
+            .collect();
+        let [rows] = announced.as_slice() else {
+            panic!("one announcement per connection, not {}", announced.len());
+        };
+        assert_eq!(
+            rows.iter().map(|row| row.class).collect::<Vec<_>>(),
+            (0..8).map(ObjectClass::from_raw).collect::<Vec<_>>(),
+            "the table's index is the class code"
+        );
+        assert_eq!(rows[4].name, "Partition 4", "the device's own word");
+        // The libraries count blocks of net bytes; every other partition counts bytes.
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.unit.map(|unit| unit.get()))
+                .collect::<Vec<_>>(),
+            [1, 131_064, 1, 131_064, 1, 1, 1, 1].map(Some),
+            "each partition's own unit"
+        );
     }
 
     #[test]
