@@ -351,9 +351,19 @@ velocity layer — and the encoded audio those strokes own. `inspect` reports th
 directory, `decode` writes one stroke to a WAV at the rate the instrument plays it,
 and `edit`, `trim` and `split` rewrite the container: renaming, retuning a key,
 rerouting a key to another root, dropping a bank or the quieter velocity layers,
-narrowing the key range, and cutting a library in two. Nothing re-encodes audio — a
-surviving stroke moves byte for byte — and `trim` and `split` refuse to write over
-the file they read.
+narrowing the key range, and cutting a library in two. None of those re-encodes
+audio — a surviving stroke moves byte for byte — and they refuse to write over the
+file they read.
+
+`build` and `rebuild` do write audio. `build` lays a whole library out from a
+directory of WAVs named `<root>-b<bank>-l<layer>.wav` — `060-b0-l00.wav` is MIDI
+note 60, the attack bank, the loudest layer — resampling any rate onto the lattice
+the instrument plays at. Everything the audio does not decide comes from a template
+library: the length marks, the decay coefficients, the per-note tables and the
+stream version, taken from the template stroke of the same bank and nearest root.
+`rebuild` codes a library's own strokes again from the frames they decode to and
+prints how each one's blocks came back, which is the coder checked against a file
+it did not write.
 
 ```sh
 nord piano inspect grand.npno              # roots, layers per bank, keys, tuning
@@ -363,12 +373,18 @@ nord piano edit grand.npno --name "My Grand" --tune C4=-2 --map C8=C7 -o out.npn
 nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
 nord piano split grand.npno --at C4 -o halves/
 nord piano verify --deep grand.npno
+nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno --unverified
+nord piano rebuild grand.npno -o again.npno --unverified
 ```
 
 A trimmed library loads on the instrument and plays at the original's level:
 hardware-verified for a dropped bank and for dropped velocity layers. The other
 edits — renames, retunes, remaps and a narrowed key range — are inferred from
-specimens and have not been played.
+specimens and have not been played. Nothing whose audio was coded here has been
+played at all, which is what `--unverified` acknowledges: what is known is that
+every block the coder lays out is the one a vendor library holds for the same
+frames, apart from the attenuation statistic each block header declares, which the
+instrument's own decode never reads.
 
 A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
 piano put`, and the rest of the slot verbs address class 1 the way they address
