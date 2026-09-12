@@ -1141,7 +1141,7 @@ fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
     };
     if !sendable(class) {
         return idle(format!(
-            "{} are installed on the instrument, not sent to it",
+            "nothing here knows what {} holds, so nothing is written there",
             folder(class)
         ));
     }
@@ -1412,11 +1412,12 @@ mod tests {
         }
     }
 
-    /// The loud action's three states: a send that can happen, a class this app does not
-    /// write into, and an instrument that is not there.
+    /// The loud action's three states: a send that can happen, a folder with no room
+    /// for it, and an instrument that is not there.
     #[test]
     fn the_loud_action_says_which_of_its_three_states_it_is_in() {
         use crate::device::Device;
+        use nord_usb::wire::Status;
 
         let (queue, tags) = (Queue::default(), Tags::default());
         let (mut workspace, mut log) = workspace();
@@ -1457,26 +1458,50 @@ mod tests {
         assert_eq!(held.short, "Send");
         assert_eq!(held.hint, "replaces Set lists 7:4");
 
-        // A piano is installed on the instrument rather than sent to it, so there is
-        // nothing for the action to do however much room there is.
-        let installed = workspace.ingest(
+        // A piano is sent like anything else that stands on a slot. Nothing has reported
+        // what the Pianos partition has free, and nothing that has not been said is a
+        // reason to refuse.
+        let in_pianos = Location { bank: 0, slot: 3 };
+        let library = workspace.ingest(
             "Grand.npno".into(),
             Origin::Device {
                 class: ObjectClass::Piano,
-                at,
+                at: in_pianos,
             },
-            bytes,
+            bytes.clone(),
             &mut log,
         );
         let held = action(
-            workspace.get(installed).unwrap(),
+            workspace.get(library).unwrap(),
             &facts(&attached.state, &queue, &tags),
         );
-        assert_eq!(held.tone, Tone::Idle);
-        assert_eq!(
-            held.hint,
-            "Pianos are installed on the instrument, not sent to it"
+        assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
+        assert_eq!(held.send, Some((ObjectClass::Piano, in_pianos)));
+        assert_eq!(held.hint, "replaces Pianos 1:4");
+
+        // The same library against a Pianos partition with nothing left in it.
+        let mut full = Device::new(egui::Context::default());
+        full.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
+        full.pretend_partitions(&crate::device::ELECTRO5);
+        full.state.inventory.push(Status {
+            class: ObjectClass::Piano,
+            count: 1,
+            free: 0,
+            used: 1072,
+            dirty: 0,
+            spare: 0,
+        });
+        let held = action(
+            workspace.get(library).unwrap(),
+            &facts(&full.state, &queue, &tags),
         );
+        assert_eq!(held.tone, Tone::Blocked);
+        assert_eq!(
+            held.label,
+            format!("Won't fit · {} over", room::measure(bytes.len() as u64))
+        );
+        assert_eq!(held.send, None, "a blocked action asks for nothing");
+        assert!(held.hint.contains("free in Pianos"), "{}", held.hint);
     }
 
     /// A project lives on this computer, so its loud action is a build — and the build

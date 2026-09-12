@@ -1041,7 +1041,7 @@ impl Browser {
             response.scroll_to_me(Some(egui::Align::Center));
         }
 
-        // ⚠️ Pianos are large libraries fetched whole, so this browser only lists them.
+        // ⚠️ A partition this app cannot name is listed and nothing more.
         let fetchable = !read_only(class);
 
         if let Some(name) = &held {
@@ -1090,11 +1090,9 @@ impl Browser {
         else {
             return;
         };
-        // ⚠️ Pianos are large libraries fetched whole, so this browser only lists them.
+        // ⚠️ A partition this app cannot name is listed and nothing more.
         if read_only(class) {
-            ui.label(
-                egui::RichText::new("Installed on the instrument; nothing to change here.").weak(),
-            );
+            ui.label(egui::RichText::new("Nothing here knows what this folder holds.").weak());
             return;
         }
         let item = Item::Slot { class, at };
