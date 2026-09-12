@@ -817,7 +817,15 @@ fn footer(
     workspace: &Workspace,
 ) {
     let unit = device.state.allocation_unit(class);
-    let Some(held) = room::meter(class, &device.state.inventory, unit, queue, workspace) else {
+    let banks = device.state.banks(class);
+    let Some(held) = room::meter(
+        class,
+        &device.state.inventory,
+        unit,
+        banks,
+        queue,
+        workspace,
+    ) else {
         return;
     };
     egui::Frame::new()

@@ -549,6 +549,15 @@ impl DeviceState {
             .find(|row| !row.native && row.class == class)
     }
 
+    /// How many banks a class declares.
+    ///
+    /// ⚠️ The device's own division of the class, read at the head of its walk — not
+    /// what has been scanned, which [`DeviceState::banks_of`] answers. Zero until that
+    /// geometry has arrived.
+    pub fn banks(&self, class: ObjectClass) -> usize {
+        self.geometry.get(&class.to_raw()).map_or(0, Vec::len)
+    }
+
     /// The banks of a class that have been read, in order.
     pub fn banks_of(&self, class: ObjectClass) -> Vec<u32> {
         let mut banks: Vec<u32> = self

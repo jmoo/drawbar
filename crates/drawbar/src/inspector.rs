@@ -231,8 +231,15 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
         let mut drawn = 0;
         for class in device.state.classes() {
             let unit = device.state.allocation_unit(class);
-            let Some(held) = room::meter(class, &device.state.inventory, unit, queue, workspace)
-            else {
+            let banks = device.state.banks(class);
+            let Some(held) = room::meter(
+                class,
+                &device.state.inventory,
+                unit,
+                banks,
+                queue,
+                workspace,
+            ) else {
                 continue;
             };
             drawn += 1;

@@ -54,8 +54,18 @@ impl Meter {
     }
 }
 
+/// Whether a class's partition is one that fills: counted in bytes, or divided into
+/// more than one bank.
+///
+/// ⚠️ What is left is a single bank of fixed slots. Its meter would say what its own
+/// heading already says in figures, and a bar is a claim about room running out where
+/// nothing ever runs out but the count.
+fn fills(class: ObjectClass, unit: Option<AllocationUnit>, banks: usize) -> bool {
+    (class.is_library() && unit.is_some()) || banks > 1
+}
+
 /// What a class's partition holds and what is on its way to it, or nothing for a class
-/// whose counters have not been read.
+/// whose counters have not been read or whose partition does not fill.
 ///
 /// ⚠️ A partition reporting a total of nothing has no meter either: nothing can be
 /// written there and nothing is counted, so a full-width empty trough would be a
@@ -64,9 +74,13 @@ pub fn meter(
     class: ObjectClass,
     inventory: &[Status],
     unit: Option<AllocationUnit>,
+    banks: usize,
     queue: &Queue,
     workspace: &Workspace,
 ) -> Option<Meter> {
+    if !fills(class, unit, banks) {
+        return None;
+    }
     let status = inventory.iter().find(|status| status.class == class)?;
     if status.total() == 0 {
         return None;
@@ -289,7 +303,8 @@ mod tests {
             );
         }
 
-        let held = meter(class, &inventory, None, &queue, &workspace).expect("the class was read");
+        let held =
+            meter(class, &inventory, None, 4, &queue, &workspace).expect("the class was read");
         assert_eq!(held.used, 100);
         assert_eq!(held.total, 400);
         assert_eq!(held.queued, 2, "the third replaces what is there");
@@ -298,10 +313,10 @@ mod tests {
         assert!(!held.crowded());
     }
 
-    /// A library counts blocks of its partition's allocation unit, and what a body would
-    /// occupy cannot be worked out until that unit has arrived.
+    /// A library counts blocks of its partition's allocation unit, and until that unit
+    /// has arrived nothing can say how much of a block anything occupies.
     #[test]
-    fn a_library_meters_blocks_and_says_nothing_about_them_without_its_unit() {
+    fn a_library_meters_blocks_and_has_no_meter_at_all_without_its_unit() {
         let ctx = egui::Context::default();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx);
@@ -322,13 +337,12 @@ mod tests {
             at(0),
         );
 
-        let blind = meter(class, &inventory, None, &queue, &workspace).unwrap();
-        assert_eq!(blind.used, 1472);
-        assert_eq!(blind.total, 1536);
-        assert_eq!(blind.queued, 0, "nothing sizes a body without the unit");
+        assert_eq!(meter(class, &inventory, None, 1, &queue, &workspace), None);
 
         let unit = pretend_allocation_unit(class, 131_064);
-        let known = meter(class, &inventory, Some(unit), &queue, &workspace).unwrap();
+        let known = meter(class, &inventory, Some(unit), 1, &queue, &workspace).unwrap();
+        assert_eq!(known.used, 1472);
+        assert_eq!(known.total, 1536);
         // 300 000 / 131 064 = 2.29, and a partial block still costs a whole one.
         assert_eq!(known.queued, 3);
         assert!(known.crowded(), "1472 of 1536 is past nine tenths");
@@ -343,13 +357,56 @@ mod tests {
         let workspace = Workspace::new(ctx);
         let queue = Queue::default();
         let class = ObjectClass::Piano;
+        let unit = Some(pretend_allocation_unit(class, 261_632));
         let inventory = [
             status(class, 0, 0, 0),
             status(ObjectClass::Program, 1, 9, 1),
         ];
 
-        assert_eq!(meter(class, &inventory, None, &queue, &workspace), None);
-        assert!(meter(ObjectClass::Program, &inventory, None, &queue, &workspace).is_some());
+        let drawn = |class, unit, banks| meter(class, &inventory, unit, banks, &queue, &workspace);
+        assert_eq!(drawn(class, unit, 1), None);
+        assert!(drawn(ObjectClass::Program, None, 4).is_some());
+    }
+
+    /// A meter is for a partition that can fill: one counted in bytes, or one divided
+    /// into more than one bank. A single bank of fixed slots has none — its heading
+    /// already says the count, and nothing there runs out but slots.
+    #[test]
+    fn only_a_partition_that_can_fill_gets_a_meter() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let workspace = Workspace::new(ctx);
+        let queue = Queue::default();
+        let (one, many, library) = (ObjectClass::Live, ObjectClass::Program, ObjectClass::Sample);
+        let inventory = [
+            status(one, 1, 4, 1),
+            status(many, 100, 300, 100),
+            status(library, 84, 64, 1472),
+        ];
+        device.pretend_geometry(one, &[("Live", 5)]);
+        device.pretend_geometry(many, &[("1", 50), ("2", 50), ("3", 50), ("4", 50)]);
+        device.pretend_geometry(library, &[("Samp Lib", 1)]);
+        let unit = |class| Some(pretend_allocation_unit(class, 1));
+        let drawn = |class, unit| {
+            meter(
+                class,
+                &inventory,
+                unit,
+                device.state.banks(class),
+                &queue,
+                &workspace,
+            )
+            .is_some()
+        };
+
+        assert!(!drawn(one, unit(one)), "one bank of fixed slots");
+        assert!(drawn(many, unit(many)), "more than one bank");
+        assert!(drawn(many, None), "a bank division needs no unit");
+        assert!(
+            drawn(library, unit(library)),
+            "one bank, and counted in bytes"
+        );
+        assert!(!drawn(library, None), "nothing counts bytes without a unit");
     }
 
     /// The queued segment never runs past the end of the trough, whatever is waiting.
