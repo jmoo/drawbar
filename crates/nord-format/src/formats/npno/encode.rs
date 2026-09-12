@@ -66,9 +66,9 @@
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, Bank, Library, Stroke, DECAYS, FINE_TUNE_AT, KEY_MAP_AT, MARKS,
-    NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER,
-    REC_MARKS, REC_MARK_BLOCK, REC_SEEDS, REC_START, SEEDS, UNCOVERED,
+    be32, block_bytes, midi_key, Bank, Library, Stroke, FINE_TUNE_AT, KEY_MAP_AT, MARKS, NOTES,
+    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
+    REC_MARK_BLOCK, REC_SEEDS, REC_START, SEEDS, UNCOVERED,
 };
 use crate::error::{Error, ParseError};
 use crate::formats::nsmp::kernel;
@@ -449,8 +449,9 @@ fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
 /// The template stroke a recording inherits the fields no audio predicts from: the
 /// same bank and nearest root, then the nearest layer.
 ///
-/// A release stroke declares no marks and no decay, so one can be built against a
-/// template holding none; anything else needs a donor that declares them.
+/// A release stroke zeroes the marks and the decay coefficient at `+0x2e` it would
+/// inherit, so any stroke can donate to one; anything else needs a donor that declares
+/// marks of its own.
 fn donor<'a>(template: &'a Library<'_>, recording: &Recording) -> Result<&'a [u8; RECORD], Error> {
     let release = Bank::Release.code();
     let wanted = recording.bank.code();
@@ -778,10 +779,11 @@ fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
 
 /// A donor record with everything the audio decides written over it.
 ///
-/// The length marks scale with the stroke's length so that they stay inside it, and a
-/// release stroke declares no marks and not one of the fifteen decay coefficients —
-/// that is the class rule every specimen stroke obeys. The block index at `+0x2c` is derived: it is the block holding the
-/// first mark.
+/// The length marks scale with the stroke's length so that they stay inside it. A
+/// release stroke declares no marks and zeroes the decay coefficient at `+0x2e`,
+/// keeping the fourteen-entry ladder at `+0x36` exactly as the donor carries it, as a
+/// stroke of any other bank does. The block index at `+0x2c` is derived: it is the
+/// block holding the first mark.
 fn record(
     donor: &[u8; RECORD],
     coded: &Coded,
@@ -834,7 +836,6 @@ fn record(
     out[REC_MARK_BLOCK..REC_MARK_BLOCK + 2].copy_from_slice(&(holding as u16).to_be_bytes());
     if silent {
         out[REC_DECAY..REC_DECAY + 4].fill(0);
-        out[REC_DECAYS..REC_DECAYS + DECAYS * 4].fill(0);
     }
     out[REC_ID..REC_ID + 4].copy_from_slice(&id.to_be_bytes());
     Ok(out)
@@ -869,7 +870,7 @@ fn compare(before: &[u8], coded: &[u8], block: usize) -> Recoded {
 mod tests {
     use super::*;
     use crate::cbin::{Cbin, Header, RawBody};
-    use crate::formats::npno::{Piano, CNSP_MAGIC, FORMAT};
+    use crate::formats::npno::{Piano, CNSP_MAGIC, DECAYS, FORMAT, REC_DECAYS};
 
     /// A one-stroke library the encoder can donate from: a real prefix and one real
     /// record, holding marks and a full ladder of decay coefficients a new stroke
@@ -1195,11 +1196,11 @@ mod tests {
         assert_eq!(values, [0, 6, 12]);
     }
 
-    /// The no-decay rule is the whole coefficient table, not the first of it: a
-    /// release stroke built from a donor that carries all fifteen declares none of
-    /// them, and a stroke of any other bank inherits every one.
+    /// Only the coefficient at `+0x2e` answers to the bank: a release stroke built
+    /// from a donor that carries all fifteen zeroes that one and keeps the donor's
+    /// fourteen-entry ladder, as a stroke of any other bank does.
     #[test]
-    fn a_release_stroke_declares_no_marks_and_no_decay() {
+    fn a_release_stroke_declares_no_marks_and_zeroes_one_decay_coefficient() {
         let short = tone(6_000, 300.0, 1);
         let piano = round_trip(
             1,
@@ -1209,26 +1210,32 @@ mod tests {
             ],
         );
         let library = piano.library().unwrap();
+        let donated: Vec<u32> = (0..DECAYS).map(|c| 0x0000_1000u32 + c as u32).collect();
         for stroke in library.strokes() {
             let record = stroke.record();
             let marks: Vec<u32> = (0..MARKS)
                 .map(|m| be32(record, REC_MARKS + m * 4))
                 .collect();
-            let decay: Vec<u32> = std::iter::once(be32(record, REC_DECAY))
-                .chain((0..DECAYS).map(|c| be32(record, REC_DECAYS + c * 4)))
+            let ladder: Vec<u32> = (0..DECAYS)
+                .map(|c| be32(record, REC_DECAYS + c * 4))
                 .collect();
+            assert_eq!(
+                ladder, donated,
+                "a stroke of any bank inherits the donor's ladder unchanged"
+            );
             if stroke.bank() == Some(Bank::Release) {
                 assert_eq!(marks, [0; MARKS], "a release stroke declares no marks");
                 assert_eq!(
-                    decay,
-                    vec![0; DECAYS + 1],
-                    "a release stroke declares no decay coefficient at all"
+                    be32(record, REC_DECAY),
+                    0,
+                    "a release stroke zeroes the coefficient at +0x2e"
                 );
             } else {
                 assert!(marks.iter().all(|&m| m > 0 && m < stroke.frames()));
-                assert!(
-                    decay.iter().all(|&c| c != 0),
-                    "a stroke of another bank inherits the donor's whole ladder"
+                assert_ne!(
+                    be32(record, REC_DECAY),
+                    0,
+                    "a stroke of another bank inherits the donor's coefficient at +0x2e"
                 );
             }
         }

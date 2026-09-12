@@ -113,8 +113,9 @@ const SEEDS: usize = 4;
 const MARKS: usize = 4;
 
 /// One-pole decay coefficients a record carries after the one at [`REC_DECAY`], from
-/// [`REC_DECAYS`] up to the identifier. All fifteen are zero on a release stroke and
-/// on no other; nothing here derives them from audio.
+/// [`REC_DECAYS`] up to the identifier. This ladder is non-decreasing across its
+/// entries, and a stroke of any bank carries it — including a release stroke, which
+/// zeroes only the coefficient at [`REC_DECAY`]. Nothing here derives them from audio.
 const DECAYS: usize = 14;
 const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
 
