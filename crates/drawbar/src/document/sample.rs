@@ -820,6 +820,8 @@ const SIZE_W: f32 = 74.0;
 const CHEVRON_W: f32 = 20.0;
 /// How far an open row's body is indented, measured from the page's edge.
 const INDENT: f32 = 68.0;
+/// Which of the five columns holds the size, which is the one set right to left.
+const SIZE_COLUMN: usize = 3;
 const HEAD_TEXT: f32 = 9.0;
 const NAME_TEXT: f32 = 11.5;
 const ROW_MONO: f32 = 11.0;
@@ -867,10 +869,8 @@ pub fn rows(
         let painter = ui.painter();
         painter.hline(head.x_range(), head.top() + 0.5, hairline);
         painter.hline(head.x_range(), head.bottom() - 0.5, hairline);
-        for ((left, width), text) in columns(head)
-            .into_iter()
-            .zip([heads.0, "Answers", heads.1, "Size", ""])
-        {
+        let heads = [heads.0, "Answers", heads.1, "Size", ""];
+        for (column, ((left, width), text)) in columns(head).into_iter().zip(heads).enumerate() {
             if text.is_empty() {
                 continue;
             }
@@ -879,9 +879,10 @@ pub fn rows(
                 egui::FontId::proportional(HEAD_TEXT),
                 app::caption(&visuals),
             );
-            let left = match text {
-                "Size" => left + width - galley.size().x,
-                _ => left,
+            // The size column reads right to left, so its head stands over its figures.
+            let left = match column == SIZE_COLUMN {
+                true => left + width - galley.size().x,
+                false => left,
             };
             painter.galley(
                 egui::pos2(left, head.center().y - galley.size().y / 2.0),
