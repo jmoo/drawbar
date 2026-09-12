@@ -926,6 +926,83 @@ mod tests {
         }
     }
 
+    /// The strip's two groups never run into each other: the controls hold the right
+    /// edge, and the words on the left wrap under themselves rather than under them.
+    #[test]
+    fn the_headers_words_never_run_under_its_controls() {
+        let mut open = Open::fresh(Fresh::Program);
+        let bytes = open.entity().bytes.clone();
+        open.id = open.workspace.ingest(
+            "Africa Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+            bytes,
+            &mut open.log,
+        );
+        open.set(&[("center_panel.organ_type", "Vox")]);
+        open.width = 720.0;
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
+
+        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => into.push((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+                _ => {}
+            }
+        }
+        let mut words = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut words);
+        }
+        let header: Vec<&(String, egui::Rect)> =
+            words.iter().filter(|(_, rect)| rect.top() < 70.0).collect();
+        // The controls, and the glyphs painted where their art would load. The kind
+        // glyph at the far left is the one glyph that is not a control.
+        const CONTROLS: [&str; 7] = [
+            "Send",
+            "Queue send",
+            "Edit",
+            "Metadata",
+            "Advanced",
+            "Revert",
+            "Export…",
+        ];
+        type Placed<'a> = Vec<&'a (String, egui::Rect)>;
+        let (right, left): (Placed, Placed) = header.iter().partition(|(word, rect)| {
+            CONTROLS.contains(&word.as_str()) || (word == "⚠" && rect.left() > 300.0)
+        });
+        let edge = right
+            .iter()
+            .map(|(_, rect)| rect.left())
+            .fold(f32::MAX, f32::min);
+        let row_bottom = right
+            .iter()
+            .map(|(_, rect)| rect.bottom())
+            .fold(f32::MIN, f32::max);
+        assert!(
+            left.iter().any(|(word, _)| word == "edited"),
+            "the state phrase is what the left group runs out of room with: {header:?}"
+        );
+        for (word, rect) in &left {
+            if rect.right() > edge {
+                assert!(
+                    rect.top() >= row_bottom - 1.0,
+                    "{word:?} at {rect:?} runs under the controls, whose edge is {edge}"
+                );
+            }
+        }
+        assert!(
+            left.iter().any(|(_, rect)| rect.top() >= row_bottom - 1.0),
+            "at 720 px something has to wrap: {header:?}"
+        );
+    }
+
     /// The strip gives up its words in one order as it narrows: the quiet actions
     /// first, then the faces, and the loud action keeps a short label rather than
     /// becoming a bare glyph.

@@ -14,7 +14,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::controls::Sets;
 use super::{encode, piano, project, sample, setlist, SendBack};
-use crate::app::{accent, caption, dot, good, warn};
+use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
 use crate::device::{sendable, DeviceState};
 use crate::icon::{icon, painted, Glyph};
@@ -42,7 +42,7 @@ const SMALL: f32 = 11.0;
 const LOUD: f32 = 12.0;
 const TAG: f32 = 10.0;
 
-/// The state dot's box, which holds a 6 px dot — see [`dot`].
+/// The state dot's box, which holds a 6 px dot — see [`claim`].
 const DOT: f32 = 8.0;
 
 /// The room between a glyph and the word after it.
@@ -283,13 +283,12 @@ pub(super) fn ui(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             ui.spacing_mut().interact_size.y = CONTROL;
-            ui.horizontal(|ui| {
-                ui.set_min_height(HEIGHT - 8.0);
-                left(ui, entity, facts, boxes, sets, &mut act);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    right(ui, entity, facts, stage, &mut act)
-                });
-            });
+            strip(
+                ui,
+                &mut act,
+                |rhs, act| right(rhs, entity, facts, stage, act),
+                |lhs, act| left(lhs, entity, facts, boxes, sets, act),
+            );
             if !cells.is_empty() {
                 row(ui, &cells, stage);
             }
@@ -300,6 +299,41 @@ pub(super) fn ui(
     ui.painter()
         .hline(ui.max_rect().x_range(), rect.bottom() - 0.5, hairline);
     act
+}
+
+/// One row of the strip: the right-hand group takes the width it needs at the right
+/// edge, and the left-hand group has the rest, wrapping onto a second line when the
+/// words run out of room rather than running under the controls.
+///
+/// The right group is laid out first because its width is what decides the left
+/// group's room.
+fn strip<T>(
+    ui: &mut egui::Ui,
+    state: &mut T,
+    right: impl FnOnce(&mut egui::Ui, &mut T),
+    left: impl FnOnce(&mut egui::Ui, &mut T),
+) {
+    let row = egui::Rect::from_min_size(
+        ui.cursor().min,
+        egui::vec2(ui.available_width(), HEIGHT - 8.0),
+    );
+    let mut rhs = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(row)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    rhs.spacing_mut().item_spacing.x = GAP;
+    right(&mut rhs, state);
+    let taken = rhs.min_rect();
+    let room = egui::Rect::from_min_max(row.min, egui::pos2(taken.left() - GAP, row.max.y));
+    let mut lhs = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(room)
+            .layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)),
+    );
+    lhs.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
+    left(&mut lhs, state);
+    ui.advance_cursor_after_rect(lhs.min_rect().union(taken).union(row));
 }
 
 /// The kind, the name, the format, the place, the size and the state.
@@ -360,14 +394,33 @@ fn left(
 
     if let Some(state) = state(entity, facts) {
         let ink = state.ink.color(&visuals);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = INSET;
-            dot(ui, ink, DOT);
-            ui.label(egui::RichText::new(&state.words).size(WORD).color(ink));
-        })
-        .response
-        .on_hover_text(&state.hint);
+        claim(ui, &state.words, ink).on_hover_text(&state.hint);
     }
+}
+
+/// The state as one widget, a dot and its phrase, so a wrapping row moves the two
+/// together rather than leaving the dot on one line and the words on the next.
+fn claim(ui: &mut egui::Ui, words: &str, ink: egui::Color32) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(words.to_owned(), egui::FontId::proportional(WORD), ink);
+    let size = egui::vec2(DOT + INSET + galley.size().x, CONTROL);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.circle_filled(
+        egui::pos2(rect.left() + DOT / 2.0, rect.center().y),
+        DOT / 2.0 - 1.0,
+        ink,
+    );
+    painter.galley(
+        egui::pos2(
+            rect.left() + DOT + INSET,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        ink,
+    );
+    response
 }
 
 /// The faces, the quiet actions and the loud one, in that order left to right — which
