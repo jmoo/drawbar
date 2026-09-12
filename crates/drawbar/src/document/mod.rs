@@ -33,7 +33,7 @@ mod setlist;
 use advanced::Advanced;
 use controls::{Ctx, Sets};
 
-pub use header::{Cell, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
+pub use header::{Body, Cell, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
 pub use sample::note_picker;
 
 /// The body's own scroll id — see [`crate::tabs::SCROLL`].
@@ -99,6 +99,9 @@ pub struct Document {
     advanced: Advanced,
     /// Zone audio decoded on request, dropped when the bytes under it change.
     audio: sample::Cache,
+    /// What the instrument editor keeps between frames: the open zone, the struck key,
+    /// the folded key table. Never an edit — an edit is on the working copy at once.
+    sample: sample::State,
     /// Which zone is sounding, and the one backend that makes it sound.
     player: crate::audio::Player,
     /// The encode panel over a WAV, and the read of the WAV it works from.
@@ -131,6 +134,7 @@ impl Document {
             self.ctx = Ctx::default();
             (self.name, self.variant) = header::boxes(entity, viewing);
             self.paths.clear();
+            self.sample = sample::State::default();
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
             self.player.stop();
@@ -146,6 +150,8 @@ impl Document {
         }
         // Decoded audio belongs to one set of bytes; an edit re-encodes all of them.
         self.audio.follow(id, entity.stamp);
+        // Paint marks are measured against the bytes the asset was last saved as.
+        sample::follow(&mut self.sample, id, &entity.saved.bytes);
         self.player.settle();
         if self.player.playing().is_some() {
             ui.ctx()
@@ -201,7 +207,9 @@ impl Document {
             if let Some(why) = &self.error {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
-            pinned(ui, entity);
+            if face == Face::Edit {
+                asked = self.pinned(ui, entity, &mut sets).map(Asked::Zone);
+            }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
                 .auto_shrink([false; 2])
@@ -210,16 +218,23 @@ impl Document {
                     // the same format, so every control also answers to the document id.
                     ui.push_id(id, |ui| match face {
                         Face::Edit => {
-                            asked =
+                            if let Some(from_body) =
                                 self.body(ui, entity, registry.as_deref(), &mut lookup, &mut sets)
+                            {
+                                asked = Some(from_body);
+                            }
                         }
-                        Face::Advanced => {
-                            if let Some(fields) = registry.as_deref() {
+                        Face::Advanced => match registry.as_deref() {
+                            Some(fields) => {
                                 self.advanced.table(ui, fields, &mut sets);
                                 typed = !sets.is_empty();
                             }
+                            None => capabilities(ui, entity),
+                        },
+                        Face::Metadata => {
+                            record(ui, entity);
+                            details = self.advanced.meta(ui, entity, device)
                         }
-                        Face::Metadata => details = self.advanced.meta(ui, entity, device),
                     });
                 });
         }
@@ -358,7 +373,28 @@ impl Document {
                 playing: sounding == target.map(|id| (id, index)),
             })
             .collect();
-        sample::ui(ui, &snapshot, &sounds, sets)
+        sample::ui(ui, &mut self.sample, &snapshot, &sounds, sets)
+    }
+
+    /// What an editor keeps in front of the body: above the scroll region, on the panel
+    /// fill, so it stays where it is while the rows under it move.
+    ///
+    /// The instrument key map is what this region is for. A kind with nothing to pin
+    /// takes up no room.
+    fn pinned(
+        &mut self,
+        ui: &mut egui::Ui,
+        entity: &LocalEntity,
+        sets: &mut Sets,
+    ) -> Option<sample::Ask> {
+        let decoded = entity.entity.as_ref()?;
+        if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+            return sample::map(ui, &mut self.sample, &snapshot, sets);
+        }
+        if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+            project::map(ui, &mut self.sample, &snapshot, sets);
+        }
+        None
     }
 
     /// Do what the Basic view asked for, now that nothing is borrowing the asset.
@@ -367,6 +403,19 @@ impl Document {
             Asked::Zone(sample::Ask::Decode(zone)) => {
                 if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
                     self.audio.decode(decoded, zone);
+                }
+            }
+            Asked::Zone(sample::Ask::Strike { zone, semitones }) => {
+                if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
+                    self.audio.decode(decoded, zone);
+                }
+                let Some(Ok(decoded)) = self.audio.get(zone) else {
+                    return;
+                };
+                let rate = crate::audio::rate(semitones);
+                if let Err(why) = self.player.strike((id, zone), &decoded.audio, rate) {
+                    log.error(why);
+                    log.trouble("This computer would not play that zone.");
                 }
             }
             Asked::Zone(sample::Ask::Play(zone)) => {
@@ -439,7 +488,9 @@ impl Document {
 
     fn project_body(&mut self, ui: &mut egui::Ui, decoded: &nord_format::Entity, sets: &mut Sets) {
         match project::snapshot(decoded) {
-            Some(Ok(snapshot)) => project::ui(ui, &snapshot, &mut self.paths, sets),
+            Some(Ok(snapshot)) => {
+                project::ui(ui, &mut self.sample, &snapshot, &mut self.paths, sets)
+            }
             Some(Err(why)) => {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
@@ -514,7 +565,11 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
         faces.push(Face::Edit);
     }
     faces.push(Face::Metadata);
-    if registry.is_some() {
+    let capabilities = match &entity.entity {
+        Some(e) => sample::is_sample(e) || project::is_project(e),
+        None => false,
+    };
+    if registry.is_some() || capabilities {
         faces.push(Face::Advanced);
     }
     faces
@@ -529,12 +584,32 @@ fn showing(faces: &[Face], remembered: Face) -> Face {
     }
 }
 
-/// What an editor keeps in front of the body: above the scroll region, on the panel
-/// fill, so it stays where it is while the rows under it move.
-///
-/// The sample and piano key maps are what this region is for. No kind claims it yet, so
-/// it takes up no room.
-fn pinned(_ui: &mut egui::Ui, _entity: &LocalEntity) {}
+/// What the file says about itself, ahead of the container record every asset has.
+fn record(ui: &mut egui::Ui, entity: &LocalEntity) {
+    let Some(decoded) = &entity.entity else {
+        return;
+    };
+    if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+        sample::metadata(ui, &snapshot);
+    } else if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+        project::metadata(ui, &snapshot);
+    }
+}
+
+/// The Advanced face of a body with no field registry: what the format holds, and where
+/// each field of it lands.
+fn capabilities(ui: &mut egui::Ui, entity: &LocalEntity) {
+    let Some(decoded) = &entity.entity else {
+        return;
+    };
+    if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+        capability::table(ui, &sample::capabilities(snapshot.generation));
+        capability::offsets(ui, &sample::offsets(&snapshot));
+    } else if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+        capability::table(ui, &project::capabilities());
+        capability::offsets(ui, &project::offsets(&snapshot));
+    }
+}
 
 /// The strip over a document that is a view of a slot rather than an asset on this
 /// computer, and the one way to make it one.
@@ -715,8 +790,10 @@ mod tests {
         fn empty() -> Open {
             let ctx = egui::Context::default();
             // Both faces, the way the app dresses them: a named text style the header
-            // asks for and nothing registered is a panic mid-frame.
+            // asks for and nothing registered is a panic mid-frame, and so is the
+            // semibold family a section heading and a zone row are set in.
             ctx.all_styles_mut(crate::app::metrics);
+            ctx.set_fonts(crate::app::fonts());
             Open {
                 workspace: Workspace::new(ctx.clone()),
                 device: Device::new(ctx.clone()),
@@ -774,6 +851,33 @@ mod tests {
                 words(&clipped.shape, &mut said);
             }
             said
+        }
+
+        /// One frame, and every shape it painted — for what a word says and where.
+        fn output(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(self.width, SCREEN.y),
+                )),
+                ..Default::default()
+            };
+            self.ctx.clone().run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    self.document.ui(
+                        ui,
+                        self.id,
+                        &mut self.workspace,
+                        &mut self.device,
+                        &mut self.log,
+                        &Around {
+                            queue: &self.queue,
+                            tags: &self.tags,
+                        },
+                    );
+                });
+            })
         }
 
         /// Twice: the second pass runs with the caches and the widget state the first
@@ -1464,6 +1568,132 @@ mod tests {
             "decoded from stale bytes"
         );
         assert_eq!(open.document.instrument_name(id, &open.workspace), "Vibes");
+    }
+
+    /// A three-zone project, as the format's own fixtures hold one.
+    ///
+    /// Committed in `nord-format`, written by this project's tools: the editor's own
+    /// output has no fixture that may be redistributed.
+    fn project_bytes() -> Vec<u8> {
+        include_bytes!("../../../nord-format/tests/fixtures/nsmpproj/three-zones.nsmpproj").to_vec()
+    }
+
+    /// An instrument and the project it is built from each have all three faces: the
+    /// panel, the record, and the capability table that says what the format holds.
+    #[test]
+    fn an_instrument_and_a_project_offer_all_three_faces() {
+        for (name, bytes) in [
+            ("Marimba.nsmp", sample_bytes()),
+            ("clarinet.nsmpproj", project_bytes()),
+        ] {
+            let open = Open::file(name, bytes);
+            let entity = open.entity();
+            let registry = entity.entity.as_ref().and_then(fields::fields_of);
+            assert!(registry.is_none(), "{name} declares no field registry");
+            assert_eq!(
+                faces(entity, registry.as_deref())
+                    .iter()
+                    .map(|face| face.label())
+                    .collect::<Vec<_>>(),
+                ["Edit", "Metadata", "Advanced"],
+                "{name}",
+            );
+        }
+    }
+
+    /// Every face of an instrument and of a project paints, twice over.
+    #[test]
+    fn a_project_document_paints_on_every_face() {
+        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+            render_file("clarinet.nsmpproj", project_bytes(), face);
+            render_file("Marimba.nsmp", sample_bytes(), face);
+        }
+    }
+
+    /// ⚠️ The key map is pinned: it is painted above the region the rows scroll in, so
+    /// it stays put while they move. Inside the scroll area it would scroll away, and
+    /// the map is how a zone is picked.
+    #[test]
+    fn the_key_map_is_painted_above_the_scrolling_rows() {
+        let mut open = Open::file("Marimba.nsmp", sample_bytes());
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
+
+        let placed = |word: &str| -> (egui::Rect, egui::Rect) {
+            fn walk(
+                shape: &egui::Shape,
+                clip: egui::Rect,
+                word: &str,
+                into: &mut Vec<(egui::Rect, egui::Rect)>,
+            ) {
+                match shape {
+                    egui::Shape::Text(text) if text.galley.text() == word => into.push((
+                        egui::Rect::from_min_size(text.pos, text.galley.size()),
+                        clip,
+                    )),
+                    egui::Shape::Vec(shapes) => shapes
+                        .iter()
+                        .for_each(|shape| walk(shape, clip, word, into)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, clipped.clip_rect, word, &mut found);
+            }
+            *found
+                .first()
+                .unwrap_or_else(|| panic!("{word} was never painted"))
+        };
+
+        let (map, pinned) = placed("Key map");
+        let (_, scrolling) = placed("Zones");
+        assert_ne!(pinned, scrolling, "two regions, not one");
+        assert!(
+            map.bottom() <= scrolling.top(),
+            "the map at {map:?} is inside the rows' own region {scrolling:?}",
+        );
+    }
+
+    /// ⚠️ A zone index belongs to the instrument it was opened on. Leaving the tab
+    /// drops the selection, the open rows and the struck key — and nothing else: an
+    /// edit is on the working copy already.
+    #[test]
+    fn leaving_a_document_forgets_the_open_zone_and_keeps_the_edit() {
+        let mut open = Open::file("Marimba.nsmp", sample_bytes());
+        open.frame(Vec::new());
+        sample::pick_row(&mut open.document.sample, 0);
+        assert_eq!(sample::selected(&open.document.sample), Some(0));
+
+        let edited = sample::apply(
+            &open.entity().bytes,
+            &[("zone1.top_note".into(), "C6".into())],
+        )
+        .unwrap();
+        open.workspace.replace_bytes(open.id, edited, &mut open.log);
+
+        // Another document, and back: the same frame the tab strip's own switch makes.
+        let elsewhere = open.workspace.ingest(
+            "other.nsmp".into(),
+            Origin::File("other.nsmp".into()),
+            sample_bytes(),
+            &mut open.log,
+        );
+        let id = open.id;
+        open.id = elsewhere;
+        open.frame(Vec::new());
+        open.id = id;
+        open.frame(Vec::new());
+
+        assert_eq!(
+            sample::selected(&open.document.sample),
+            None,
+            "the selection is the instrument's, not the editor's"
+        );
+        let snapshot = sample::snapshot(open.entity().entity.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.zones[0].top_note, 84, "the edit stands");
     }
 
     #[test]

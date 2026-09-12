@@ -53,6 +53,9 @@ const INSET: f32 = 5.0;
 const WORD: f32 = 10.5;
 const MONO: f32 = 10.5;
 
+/// A read-only value on the identity row, which stands where a text box would.
+const READ: f32 = 11.5;
+
 /// The name box, the piano's shorter one, and the variant beside it.
 const NAME: f32 = 190.0;
 const PIANO_NAME: f32 = 150.0;
@@ -208,15 +211,23 @@ pub struct Extras {
 
 /// One cell of the identity row: a MICRO-caps label and what the document wears under
 /// it.
-///
-/// Chips are all any kind puts here yet. A kind with a header-level field of its own —
-/// the sample's category, sub name and gain — widens this into the control it needs.
 pub struct Cell {
     pub label: &'static str,
-    pub chips: Vec<String>,
+    pub body: Body,
     /// The one note that is shown rather than hovered: a constraint the field enforces.
     pub note: Option<String>,
     pub hint: &'static str,
+}
+
+/// What a cell wears beside its label.
+///
+/// There is no third kind yet because no header-level field of any format has a setter:
+/// the sample's category and sub name are stated by the file and read here.
+pub enum Body {
+    /// One chip per label the list puts on this asset.
+    Chips(Vec<String>),
+    /// A value the file states and nothing here writes.
+    Read(String),
 }
 
 /// Everything the strip draws from besides the asset itself.
@@ -559,8 +570,13 @@ fn row(ui: &mut egui::Ui, cells: &[Cell], stage: Stage) {
                     ui.spacing_mut().item_spacing.x = 7.0;
                     ui.label(caps(cell.label).color(caption(ui.visuals())));
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for text in &cell.chips {
-                        chip(ui, text);
+                    match &cell.body {
+                        Body::Chips(chips) => {
+                            for text in chips {
+                                chip(ui, text);
+                            }
+                        }
+                        Body::Read(value) => read(ui, value),
                     }
                     if let Some(note) = &cell.note {
                         ui.label(
@@ -580,6 +596,17 @@ fn row(ui: &mut egui::Ui, cells: &[Cell], stage: Stage) {
         Stage::Narrow => ui.horizontal_wrapped(draw),
         _ => ui.horizontal(draw),
     };
+}
+
+/// A value the file states: the eye that says nothing writes it, and the value in mono.
+fn read(ui: &mut egui::Ui, value: &str) {
+    ui.spacing_mut().item_spacing.x = INSET;
+    icon(ui, Glyph::Eye, SMALL, caption(ui.visuals()));
+    ui.label(
+        egui::RichText::new(value)
+            .font(egui::FontId::monospace(READ))
+            .color(ui.visuals().weak_text_color()),
+    );
 }
 
 /// One tag chip: the accent stroke and ink the inspector's own chips wear, in a box
@@ -1122,11 +1149,14 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
         if !worn.is_empty() {
             cells.push(Cell {
                 label: "Tags",
-                chips: worn,
+                body: Body::Chips(worn),
                 note: None,
                 hint: "what this computer's list labels it with",
             });
         }
+    }
+    if let Some(stated) = entity.entity.as_ref().and_then(sample::stated) {
+        cells.push(stated);
     }
     cells
 }
