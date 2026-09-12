@@ -1857,14 +1857,33 @@ fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
     assert!(overlap > 0, "no stroke long enough to repeat a block");
 }
 
-/// The coder is the decoder's inverse against files this crate did not write: give
-/// each stroke back the frames it decodes to and it lays out the same blocks — the
-/// same segmentation, the same width and order, the same residuals to the bit, and
-/// the same clear bits after the last field.
+/// Whether a stroke's record counts frames past its last non-silent one.
+///
+/// A stroke states the frames its blocks own, so a coder laying whole blocks over a
+/// recording ends the stroke inside the recording. One that counts silence past it
+/// stretched its last block over frames it was never given, and chose the widths
+/// before it against a source length the file does not hold — so no function of the
+/// stroke's own samples reaches those widths, and all a coder owes such a stroke is
+/// to lose nothing.
+fn overhangs_its_audio(audio: &npno::codec::Audio) -> bool {
+    audio
+        .channels
+        .iter()
+        .filter_map(|c| c.iter().rposition(|&s| s != 0))
+        .max()
+        .is_none_or(|last| last + 1 < audio.frames())
+}
+
+/// The coder is the decoder's inverse: give each stroke back the frames it decodes to
+/// and it lays out the same blocks — the same segmentation, the same width and order,
+/// the same residuals to the bit, and the same clear bits after the last field.
 ///
 /// A block's attenuation byte is the one value that can come back different. It is a
 /// statistic the vendor's encoder recorded, not a function of the frames it went on
 /// to store, and nothing in the decode reads it.
+///
+/// A stroke that overhangs its audio is owed the weaker claim instead: it comes back
+/// over whole blocks, no longer than it was, holding every frame that carried signal.
 #[test]
 fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
     let mut strokes = 0;
@@ -1873,7 +1892,32 @@ fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
         let library = piano.library().unwrap();
         let again =
             npno::encode::rebuild(&library).unwrap_or_else(|e| panic!("{where_}: recode: {e}"));
-        for (stroke, recoded) in library.strokes().iter().zip(&again.strokes) {
+        for ((stroke, coded), recoded) in library
+            .strokes()
+            .iter()
+            .zip(again.library.strokes())
+            .zip(&again.strokes)
+        {
+            let was = npno::codec::decode(stroke, library.channels()).unwrap();
+            if overhangs_its_audio(&was) {
+                let back = npno::codec::decode(coded, library.channels()).unwrap();
+                assert!(
+                    back.frames() <= was.frames(),
+                    "{where_}: {stroke:?} came back longer than it was"
+                );
+                for (now, before) in back.channels.iter().zip(&was.channels) {
+                    assert!(
+                        now[..] == before[..back.frames()],
+                        "{where_}: {stroke:?} came back holding different frames"
+                    );
+                    assert!(
+                        before[back.frames()..].iter().all(|&s| s == 0),
+                        "{where_}: {stroke:?} left off {} frame(s) that carried signal",
+                        was.frames() - back.frames()
+                    );
+                }
+                continue;
+            }
             assert_eq!(
                 recoded.blocks,
                 usize::from(stroke.blocks()),
@@ -1890,13 +1934,17 @@ fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
             strokes += 1;
         }
     }
-    assert!(strokes > 0, "no piano stroke");
+    assert!(strokes > 0, "no piano stroke states the blocks it holds");
 }
 
 /// A library coded again from its own audio is the library it came from: the same
 /// size, the same prefix, the same directory records, and the same blocks in the same
 /// places. Only the attenuation the blocks declare can move, so the file this writes
 /// plays what the file it read plays.
+///
+/// A library holding a stroke that overhangs its audio is not one of these: that
+/// stroke comes back over whole blocks, which can be shorter, and the container closes
+/// up around it. Nothing it carries is lost, which is the claim above.
 #[test]
 fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
     let mut seen = 0;
@@ -1905,6 +1953,12 @@ fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
         let library = piano.library().unwrap();
         let before = library.to_body().unwrap();
         let again = npno::encode::rebuild(&library).unwrap();
+        if library.strokes().iter().any(|stroke| {
+            let audio = npno::codec::decode(stroke, library.channels()).unwrap();
+            overhangs_its_audio(&audio)
+        }) {
+            continue;
+        }
         let after = again.library.to_body().unwrap();
         assert_eq!(
             after.len(),
@@ -1930,6 +1984,38 @@ fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
                 "{where_}: {stroke:?} did not come back block for block"
             );
         }
+        seen += 1;
+    }
+    assert!(seen > 0, "no piano library states the blocks it holds");
+}
+
+/// Coding reaches a fixed point in one pass, whatever it is handed: what a recode
+/// writes is what a recode of that writes, byte for byte, blocks and container. A
+/// stroke states the frames its blocks own, so the search is given the same room the
+/// second time and lands on the same widths — which is what makes a library this
+/// crate writes one that survives a rebuild untouched.
+#[test]
+fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
+    let mut seen = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let library = piano.library().unwrap();
+        let once = npno::encode::rebuild(&library).unwrap();
+        let twice = npno::encode::rebuild(&once.library).unwrap();
+        let before = once.library.to_body().unwrap();
+        let after = twice.library.to_body().unwrap();
+        let at = before
+            .iter()
+            .zip(&after)
+            .position(|(a, b)| a != b)
+            .map(|i| format!("{i:#x}"))
+            .unwrap_or_else(|| "the length".to_string());
+        assert!(
+            before == after,
+            "{where_}: coding the recode again moved {at} (in {} bytes, out {})",
+            before.len(),
+            after.len()
+        );
         seen += 1;
     }
     assert!(seen > 0, "no piano library");
