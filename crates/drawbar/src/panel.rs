@@ -80,6 +80,37 @@ pub fn tracks(width: f32, wanted: &[Track], gap: f32) -> Vec<Range<f32>> {
         .collect()
 }
 
+/// A bordered glyph and a word: what the library's bar is narrowed by, and what the
+/// selection wears.
+///
+/// A chip given a `fill` is **solid** — what it says is true of everything it stands
+/// for. One without is hollow, and true of only some of it.
+pub fn chip(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    size: f32,
+    text: &str,
+    tint: egui::Color32,
+    fill: Option<egui::Color32>,
+) -> egui::Response {
+    let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    egui::Frame::new()
+        .fill(fill.unwrap_or(egui::Color32::TRANSPARENT))
+        .stroke(egui::Stroke::new(1.0_f32, border))
+        .corner_radius(2.0)
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            icon(ui, glyph, size, tint);
+            ui.label(
+                egui::RichText::new(text)
+                    .text_style(crate::app::ui())
+                    .color(tint),
+            );
+        })
+        .response
+}
+
 /// A header title: [`crate::app::micro`], uppercased.
 ///
 /// Uppercasing is the whole of the treatment — egui has no letter spacing, and a faked

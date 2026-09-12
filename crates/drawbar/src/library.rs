@@ -19,7 +19,7 @@ use crate::browser::{cell_ink, families_present, qualified, Act, Browser, Bulk, 
 use crate::device::{fit, sendable, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
-use crate::panel::Track;
+use crate::panel::{chip, Track};
 use crate::queue::{Diff, Queue};
 use crate::shell::{Page, Shell};
 use crate::strings::{folder, place, shown};
@@ -994,7 +994,7 @@ fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts
             .color(ink),
     );
     for tag in filter.tags.iter().filter_map(|id| tags.name_of(*id)) {
-        chip(ui, Glyph::Tag, tag, ink);
+        chip(ui, Glyph::Tag, SMALL, tag, ink, None);
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let states = [
@@ -1008,7 +1008,7 @@ fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts
                 continue;
             }
             let text = format!("{count} {}", state.word());
-            let drawn = chip(ui, glyph, &text, warn(ui.visuals()));
+            let drawn = chip(ui, glyph, SMALL, &text, warn(ui.visuals()), None);
             let picked = ui
                 .interact(
                     drawn.rect,
@@ -1045,21 +1045,6 @@ fn over(filter: &Filter) -> String {
         true => "everything".to_string(),
         false => narrowed.join(" · "),
     }
-}
-
-/// A bordered glyph and a word, for the bar's states and its tags.
-fn chip(ui: &mut egui::Ui, glyph: Glyph, text: &str, tint: egui::Color32) -> egui::Response {
-    let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
-    egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0_f32, border))
-        .corner_radius(2.0)
-        .inner_margin(egui::Margin::symmetric(5, 1))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            icon(ui, glyph, SMALL, tint);
-            ui.label(egui::RichText::new(text).text_style(ui_text()).color(tint));
-        })
-        .response
 }
 
 /// Which column the pointer is over, for the tooltip and for the head's sort click.

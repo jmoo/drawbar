@@ -15,12 +15,12 @@ use eframe::egui;
 use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
-use crate::app::{accent, good, ui as ui_text};
+use crate::app::{good, ui as ui_text};
 use crate::browser::{Act, Browser, Item, Kind};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{painted, Glyph};
 use crate::library::{row_of, Row, Where};
-use crate::panel::{dock_header, panel_header};
+use crate::panel::{chip, dock_header, panel_header};
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
@@ -32,9 +32,9 @@ use crate::workspace::Workspace;
 const PAD: i8 = 8;
 const GAP: f32 = 6.0;
 
-/// A glyph in a line, and the mark a tag wears.
+/// A glyph in a line, and the smaller one a tag's chip wears.
 const GLYPH: f32 = 12.0;
-const PIP: f32 = 9.0;
+const TAG: f32 = 11.0;
 
 /// The mono readout beside a meter, and the words under one.
 const MONO: f32 = 10.5;
@@ -349,60 +349,60 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     });
 }
 
-/// Every tag, filled where the whole selection wears it and outlined where it does not.
+/// The tags the selection wears, as chips: solid where the whole of it wears one and
+/// hollow where only some does. A click takes a solid one off all of it and puts a
+/// hollow one on all of it.
 ///
 /// ⚠️ Only a **kept** asset can wear one — a tag hangs on a workspace id, and a slot has
 /// none — so this is over what of the selection is on this computer.
 ///
 /// ⚠️ Toggling only. A tag is made in the browser's own TAGS section, which is where the
-/// list of them lives and where one is renamed and removed.
+/// list of them lives and where one is renamed and removed, and put on something new
+/// from the row's own Tag menu.
 fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
+    let wearing = wearing(picked, worn);
+    if wearing.is_empty() {
+        return;
+    }
     body(ui, |ui| {
-        if picked.is_empty() {
-            faint(ui, "Nothing on this computer is picked.");
-        }
-        for tag in worn.all() {
-            let on_all = worn.on_all(picked, tag.id);
-            let on_some = picked.iter().any(|id| worn.worn(*id).contains(&tag.id));
-            let clicked = ui
-                .horizontal(|ui| {
-                    pip(ui, on_all);
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&tag.name).text_style(ui_text()))
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text(match (on_all, on_some) {
-                        (true, _) => "on everything picked — click to take it off",
-                        (false, true) => "on some of what is picked — click to put it on all",
-                        (false, false) => "click to put it on everything picked",
+        ui.horizontal_wrapped(|ui| {
+            for (id, name, on_all) in wearing {
+                let visuals = ui.visuals().clone();
+                let (tint, fill) = match on_all {
+                    true => (visuals.text_color(), Some(visuals.faint_bg_color)),
+                    false => (crate::app::caption(&visuals), None),
+                };
+                let drawn = chip(ui, Glyph::Tag, TAG, name, tint, fill);
+                let clicked = ui
+                    .interact(drawn.rect, drawn.id.with(id), egui::Sense::click())
+                    .on_hover_text(match on_all {
+                        true => "on everything picked — click to take it off all of it",
+                        false => "on some of what is picked — click to put it on all of it",
                     })
-                    .clicked()
-                })
-                .inner;
-            if clicked && !picked.is_empty() {
-                let ids = picked.to_vec();
-                acts.push(match on_all {
-                    true => Act::Untag { ids, tag: tag.id },
-                    false => Act::Tag { ids, tag: tag.id },
-                });
+                    .clicked();
+                if clicked {
+                    let ids = picked.to_vec();
+                    acts.push(match on_all {
+                        true => Act::Untag { ids, tag: id },
+                        false => Act::Tag { ids, tag: id },
+                    });
+                }
             }
-        }
+        });
     });
 }
 
-/// A tag's own mark: filled where the whole selection wears it, outlined where it does
-/// not.
-fn pip(ui: &mut egui::Ui, solid: bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(PIP), egui::Sense::hover());
-    let tint = accent(ui.visuals());
-    match solid {
-        true => ui.painter().circle_filled(rect.center(), PIP / 2.0, tint),
-        false => ui.painter().circle_stroke(
-            rect.center(),
-            PIP / 2.0 - 0.5,
-            egui::Stroke::new(1.0_f32, tint),
-        ),
-    };
+/// The tags something picked wears, and whether each is on every one of it.
+///
+/// ⚠️ Worn tags only, in the list's own order. A tag nothing picked wears is not a state
+/// of this selection — the whole list of them is the tree's, and putting a new one on is
+/// the row's own Tag menu.
+fn wearing<'a>(picked: &[u64], worn: &'a Tags) -> Vec<(u64, &'a str, bool)> {
+    worn.all()
+        .iter()
+        .filter(|tag| picked.iter().any(|id| worn.worn(*id).contains(&tag.id)))
+        .map(|tag| (tag.id, tag.name.as_str(), worn.on_all(picked, tag.id)))
+        .collect()
 }
 
 /// A glyph in a line, claiming its own box so the words after it line up.
@@ -710,6 +710,44 @@ mod tests {
                 .filter(|name| !name.is_empty()),
             None,
         );
+    }
+
+    /// The selection wears chips rather than the whole list: only the tags something
+    /// picked wears, solid where every picked asset wears one and hollow where some do.
+    /// A selection wearing none is a section that paints nothing where they would be.
+    #[test]
+    fn the_selections_tags_are_chips_and_nothing_at_all_where_there_are_none() {
+        let ctx = context();
+        let mut labels = Tags::default();
+        let (both, some) = (labels.make("Sunday"), labels.make("Loud"));
+        for tag in [both, some] {
+            labels.set(7, tag, true);
+        }
+        labels.set(8, both, true);
+
+        assert_eq!(
+            wearing(&[7, 8], &labels),
+            [(both, "Sunday", true), (some, "Loud", false)]
+        );
+        assert!(wearing(&[], &labels).is_empty(), "nothing picked");
+        assert!(
+            wearing(&[9], &labels).is_empty(),
+            "picked, and wearing none"
+        );
+
+        let painted = |picked: &[u64]| {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(crate::shell::INSPECTOR)
+                    .show(ctx, |panel| tags(panel, picked, &labels, &mut Vec::new()));
+            });
+            crate::browser::bench::words(&output)
+        };
+        let said = painted(&[7, 8]);
+        for name in ["Sunday", "Loud"] {
+            assert!(said.contains(&name.to_string()), "{name}: {said:?}");
+        }
+        assert!(painted(&[9]).is_empty(), "{:?}", painted(&[9]));
     }
 
     /// A tag goes on everything picked and comes off it again, which is the whole of what
