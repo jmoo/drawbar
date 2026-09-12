@@ -9,8 +9,8 @@
 //! survives a transform moves byte for byte.
 //!
 //! `build` and `rebuild` are the two verbs that do write audio: one lays a library out
-//! from a directory of WAVs against a template, the other codes a library's own
-//! strokes again and reports how each one came back.
+//! from a directory of WAVs, the other codes a library's own strokes again and reports
+//! how each one came back.
 //!
 //! A library written here loads on the instrument and plays: confirmed on hardware
 //! for `trim`, both for a dropped bank and for dropped velocity layers, and for what
@@ -20,10 +20,16 @@
 //! and a vendor library coded again playing indistinguishably from the original in
 //! level and in spectrum. What `edit` changes — a name, a key's tuning, the root a
 //! key plays — and the narrowed key range `trim --range` and `split` leave behind are
-//! inferred from specimens; not confirmed on hardware. The fields a build cannot
-//! derive from audio — the length marks, the decay coefficients, the per-note tables,
-//! the word at the body's start — go in as the template donated them: the instrument
-//! accepts them, and what it makes of them beyond accepting is not known.
+//! inferred from specimens; not confirmed on hardware.
+//!
+//! The fields a build cannot derive from audio — the length marks, the decay
+//! coefficients, the per-note tables, the playback parameters, the word at the body's
+//! start — go in as `--template` donated them: the instrument accepts them, and what
+//! it makes of them beyond accepting is not known. Given no template, `build` states
+//! them by rule instead, and they are then neutral playback parameters: no decay
+//! applied over the recordings, the layer trims taken from the layer values, and the
+//! damper limit the kind of instrument implies. Confirmed on hardware: a library
+//! written that way plays, and sounds like the same audio built against a template.
 //!
 //! These verbs take a file. A library is tens of megabytes, so moving one to or
 //! from the instrument is `nord piano get` and `nord piano put`.
@@ -199,12 +205,38 @@ pub struct BuildArgs {
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
-    /// The library to take everything the audio does not decide from: the length
-    /// marks, the decay coefficients, the per-note tables, the stream version and the
-    /// word at the body's start. Each new stroke inherits from the template stroke of
-    /// its own bank and nearest root.
+    /// A library to take everything the audio does not decide from: the length marks,
+    /// the decay coefficients, the per-note tables, the playback parameters, the
+    /// stream version and the word at the body's start. Each new stroke inherits from
+    /// the template stroke of its own bank and nearest root.
+    ///
+    /// Without one, the library states those fields by rule instead: nothing applied
+    /// over what the recordings hold, each stroke trimmed by its own layer value, and
+    /// the damper reaching the keys `--kind` names. A library written that way has
+    /// been played, and sounds like the same audio built against a template.
     #[arg(long, value_name = "FILE")]
-    pub template: PathBuf,
+    pub template: Option<PathBuf>,
+
+    /// What kind of instrument the library holds. Only the damper limit follows from
+    /// it; the rest is how the instrument files the library.
+    #[arg(long, value_enum, default_value_t = KindName::Grand, conflicts_with = "template")]
+    pub kind: KindName,
+
+    /// A gain over the whole library, in decibels. Stored in tenths, so the range is
+    /// -12.8 to 12.7.
+    #[arg(
+        long,
+        value_name = "DB",
+        default_value_t = 5.0,
+        conflicts_with = "template"
+    )]
+    pub gain: f64,
+
+    /// The highest key the instrument damps at note-off; keys above it ring on. A note
+    /// name or 0-127, defaulting to what `--kind` implies. Anything above the top key
+    /// the instrument plays damps every key.
+    #[arg(long, value_name = "KEY", conflicts_with = "template")]
+    pub damper_top: Option<String>,
 
     /// The library's name, the half of its name field before the `#`.
     #[arg(long)]
@@ -217,6 +249,41 @@ pub struct BuildArgs {
     /// Where to write the library.
     #[arg(short, long, value_name = "FILE")]
     pub out: PathBuf,
+}
+
+/// The instruments a library can state it holds, at body `0x18`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum KindName {
+    Grand,
+    Upright,
+    ElectricGrand,
+    /// The tine electric pianos.
+    ElectricPiano,
+    /// The reed electric pianos.
+    Wurlitzer,
+    Clavinet,
+    Harpsichord,
+    Digital,
+    /// The hybrid and ballad electric pianos.
+    Hybrid,
+    Mallet,
+}
+
+impl From<KindName> for encode::Kind {
+    fn from(kind: KindName) -> encode::Kind {
+        match kind {
+            KindName::Grand => encode::Kind::Grand,
+            KindName::Upright => encode::Kind::Upright,
+            KindName::ElectricGrand => encode::Kind::ElectricGrand,
+            KindName::ElectricPiano => encode::Kind::ElectricPiano,
+            KindName::Wurlitzer => encode::Kind::Wurlitzer,
+            KindName::Clavinet => encode::Kind::Clavinet,
+            KindName::Harpsichord => encode::Kind::Harpsichord,
+            KindName::Digital => encode::Kind::DigitalPiano,
+            KindName::Hybrid => encode::Kind::Hybrid,
+            KindName::Mallet => encode::Kind::Mallet,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -1103,10 +1170,47 @@ fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
     Ok(values)
 }
 
+/// The rules a build states where it is given no template, from the flags that name
+/// them.
+fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
+    let kind = encode::Kind::from(args.kind);
+    let tenths = (args.gain * 10.0).round();
+    let gain = (tenths.is_finite() && (f64::from(i8::MIN)..=f64::from(i8::MAX)).contains(&tenths))
+        .then_some(tenths as i8)
+        .ok_or_else(|| {
+            format!(
+                "--gain {} dB is outside the -12.8 to 12.7 the field holds",
+                args.gain
+            )
+        })?;
+    let damper_top = match &args.damper_top {
+        Some(key) => note::parse(key)?,
+        None => kind.damper_top(),
+    };
+    Ok(encode::Rules {
+        kind,
+        gain,
+        damper_top,
+    })
+}
+
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
-    refuse_in_place(&args.template, &args.out)?;
-    let (_, donor) = read(&args.template)?;
-    let template = donor.library().map_err(|e| e.to_string())?;
+    let rules = build_rules(&args)?;
+    let template = match &args.template {
+        Some(path) => {
+            refuse_in_place(path, &args.out)?;
+            Some(read(path)?.1)
+        }
+        None => None,
+    };
+    let template = match &template {
+        Some(piano) => Some(piano.library().map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let donor = match &template {
+        Some(library) => encode::Donor::Template(library),
+        None => encode::Donor::Rules(rules),
+    };
 
     ui.out(ui.dim(format!(
         "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
@@ -1150,7 +1254,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     }
 
     let options = encode::Options::new(&args.name).variant(&args.variant);
-    let library = encode::build(&template, &options, &recordings).map_err(|e| e.to_string())?;
+    let library = encode::build(&donor, &options, &recordings).map_err(|e| e.to_string())?;
     let bytes = to_bytes(&library, &args.out)?;
     write_file(ui, &args.out, &bytes)?;
 
@@ -1175,13 +1279,32 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
              enough that the kernel overshoots it"
         ));
     }
-    ui.note(format!(
-        "{} states the length marks, the decay coefficients, the per-note tables and \
-         the word at the body's start as the template donated them; the instrument \
-         accepts them, and what it makes of them beyond accepting is not known",
-        args.out.display()
-    ));
+    ui.note(match &args.template {
+        Some(_) => format!(
+            "{} states the length marks, the decay coefficients, the per-note tables, the \
+             playback parameters and the word at the body's start as the template donated \
+             them; the instrument accepts them, and what it makes of them beyond accepting \
+             is not known",
+            args.out.display()
+        ),
+        None => format!(
+            "{} states neutral playback where a template would have donated it: no decay \
+             applied over the recordings, each stroke trimmed by its own layer value, {:+.1} dB \
+             of library gain and the damper reaching {}",
+            args.out.display(),
+            f64::from(rules.gain) / 10.0,
+            damper_reach(rules.damper_top),
+        ),
+    });
     Ok(())
+}
+
+/// What a `damper_top` reaches, for the line a build prints.
+fn damper_reach(top: u8) -> String {
+    match top >= encode::ALL_KEYS_DAMPED {
+        true => "every key".to_string(),
+        false => format!("{} and below", note::name(top)),
+    }
 }
 
 pub fn rebuild(ui: &Ui, args: RebuildArgs) -> Result<(), String> {
