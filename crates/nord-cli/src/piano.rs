@@ -1048,6 +1048,9 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
 /// A `v` name is that value; an `l` name is spread across its root and bank's own
 /// layers, loudest first. The two forms would each mean something different about how
 /// many layers a spread is over, so one root's bank names its layers one way.
+///
+/// A `v` name past [`encode::HIGHEST_PLAYED_LAYER`] is a stroke no velocity would
+/// reach, and is refused by the file that names it.
 fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
     let mut groups: BTreeMap<(u8, u8), Vec<usize>> = BTreeMap::new();
     for (index, file) in files.iter().enumerate() {
@@ -1084,6 +1087,14 @@ fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
                 LayerName::Value(value) => value,
                 LayerName::Index(_) => encode::layer_value(rank, members.len()),
             };
+            if values[index] > encode::HIGHEST_PLAYED_LAYER {
+                return Err(format!(
+                    "{}: no velocity selects layer value {}; {} is the largest a key ever                      sounds",
+                    files[index].path.display(),
+                    values[index],
+                    encode::HIGHEST_PLAYED_LAYER
+                ));
+            }
         }
     }
     Ok(values)
@@ -1294,6 +1305,20 @@ mod tests {
             wav(60, Bank::Attack, LayerName::Value(12)),
         ];
         assert_eq!(layer_values(&files).unwrap(), [0, 6, 12]);
+    }
+
+    /// `v255` parses and is a layer no key would ever sound, so the name is refused
+    /// rather than built into a library as a stroke nothing plays.
+    #[test]
+    fn a_named_layer_value_no_velocity_selects_is_refused() {
+        let highest = encode::HIGHEST_PLAYED_LAYER;
+        assert_eq!(
+            layer_values(&[wav(60, Bank::Attack, LayerName::Value(highest))]).unwrap(),
+            [highest]
+        );
+        let refused = layer_values(&[wav(60, Bank::Attack, LayerName::Value(255))]).unwrap_err();
+        assert!(refused.contains("no velocity selects"), "{refused}");
+        assert!(refused.contains(&highest.to_string()), "{refused}");
     }
 
     #[test]

@@ -125,9 +125,17 @@ pub struct Recording {
 }
 
 /// The softest layer value a root is given when [`layer_value`] spreads it: the top
-/// of the range vendor libraries use, and well inside the bound above which a layer
-/// is never selected.
+/// of the range vendor libraries use, and well inside [`HIGHEST_PLAYED_LAYER`].
 pub const SOFTEST_LAYER: u8 = 27;
+
+/// The largest layer value any velocity sounds: `(127 − 1)·31/127`, the selection
+/// bound at velocity 1, the softest note-on a key can send.
+///
+/// A key sounds the largest value its root holds that is at most
+/// `(127 − velocity)·31/127` ([`Stroke::layer`]), and that bound only falls as the
+/// velocity rises, so a stroke stating more than this is one no playing reaches.
+/// [`build`] refuses one rather than write a library with a silent stroke in it.
+pub const HIGHEST_PLAYED_LAYER: u8 = ((127 - 1) * 31 / 127) as u8;
 
 /// The value the `index`-th loudest of a root's `layers` takes when the caller states
 /// none: `round(index·27/(layers − 1))`, and 0 for a root holding one.
@@ -383,6 +391,11 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
         }
         if frames == 0 {
             return Err(refuse(format!("{what} has no frames")));
+        }
+        if recording.layer > HIGHEST_PLAYED_LAYER {
+            return Err(refuse(format!(
+                "{what} states a layer value no velocity selects; {HIGHEST_PLAYED_LAYER} is                  the largest a key ever sounds"
+            )));
         }
         if !seen.insert((recording.root, recording.bank.code(), recording.layer)) {
             return Err(refuse(format!(
@@ -1183,6 +1196,26 @@ mod tests {
         }
     }
 
+    /// The bound is the selection rule at the softest note-on, so the value it names
+    /// is the last one a key can reach and the spread stays inside it.
+    #[test]
+    fn the_highest_played_layer_is_the_rule_at_the_softest_velocity() {
+        let selected = |velocity: u32| ((127 - velocity) * 31 / 127) as u8;
+        assert_eq!(HIGHEST_PLAYED_LAYER, selected(1));
+        assert!((1..=127).all(|v| selected(v) <= HIGHEST_PLAYED_LAYER));
+        const { assert!(SOFTEST_LAYER <= HIGHEST_PLAYED_LAYER) };
+
+        let donor = template(1);
+        let library = donor.library().unwrap();
+        let short = tone(6_000, 300.0, 1);
+        build(
+            &library,
+            &Options::new("Synth"),
+            &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short)],
+        )
+        .expect("the bound itself is a value a key sounds");
+    }
+
     #[test]
     fn every_key_up_to_the_highest_roots_own_plays_the_root_above_it() {
         let roots: BTreeSet<u8> = [25, 30, 60].into_iter().collect();
@@ -1235,6 +1268,14 @@ mod tests {
             one(60, Bank::Attack, 0, short.clone()),
         ])
         .contains("recorded twice"));
+        let unplayable = error(&[one(
+            60,
+            Bank::Attack,
+            HIGHEST_PLAYED_LAYER + 1,
+            short.clone(),
+        )]);
+        assert!(unplayable.contains("no velocity selects"), "{unplayable}");
+        assert!(unplayable.contains("30"), "{unplayable}");
         assert!(error(&[
             one(60, Bank::Attack, 0, short.clone()),
             one(
