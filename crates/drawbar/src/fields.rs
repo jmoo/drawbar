@@ -7,10 +7,8 @@
 use std::io::Cursor;
 use std::ops::Range;
 
-use nord_format::fields::{ControlKind, Field};
+use nord_format::fields::Field;
 use nord_format::{Entity, Settings, Song};
-
-use crate::drawbar_widget;
 
 /// Every registered field's current value, for a body that has a registry.
 ///
@@ -66,96 +64,31 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<(Vec<Field>, Vec
     Ok((fields, out))
 }
 
-/// Longest legal-value list that stays a menu. Past it, a run of consecutive integers is
-/// a slider instead.
-const CHOICE_MAX: usize = 24;
-
-/// Which control a field asks for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Control {
-    Toggle,
-    Choice,
-    Number {
-        min: i64,
-        max: i64,
-    },
-    /// One organ drawbar, where the file gives each bar its own nibble. Carries the bar's
-    /// place in the register, `0`-based, or `None` where the declaration places it in no
-    /// register at all.
-    Bar(Option<usize>),
-    /// A whole nine-bar organ register in one field.
-    Register,
-    /// No control: the stored value is the only reading this app has of it.
-    Stored,
-}
-
-impl Control {
-    /// The field's own [`ControlKind`] decides, and the legal values fill in only what a
-    /// kind leaves open — a knob's travel, or whether a two-state field spells its states
-    /// `true`/`false` or names them.
-    pub fn of(field: &Field, legal: &[String]) -> Control {
-        match field.spec.control {
-            // The kind counts the bars, so a body that packs a whole register into one
-            // field and one that gives each bar its own are told apart by what they say
-            // rather than by how wide they happen to be.
-            ControlKind::Drawbar { bars, .. } if bars as usize == drawbar_widget::BARS => {
-                Control::Register
-            }
-            ControlKind::Drawbar { bars: 1, rank, .. } => Control::Bar(drawbar_rank(rank)),
-            // A register of some other length has no widget here.
-            ControlKind::Drawbar { .. } => Control::Stored,
-            // Pattern and reference controls need UI data this app does not have.
-            ControlKind::Pattern { .. } | ControlKind::Reference(_) => Control::Stored,
-            ControlKind::Toggle if legal == ["false", "true"] => Control::Toggle,
-            // A knob says so, so its values are travel however few of them there are.
-            ControlKind::Bipolar(_)
-            | ControlKind::Knob(_)
-            | ControlKind::Morph { .. }
-            | ControlKind::Shift(_) => turned(legal),
-            // ⚠️ Number means unclassified; only a range too long to present as a list turns.
-            _ => picked(legal),
-        }
-    }
-}
-
-fn drawbar_rank(rank: Option<u8>) -> Option<usize> {
-    rank.and_then(|rank| usize::from(rank).checked_sub(1))
-        .filter(|&rank| rank < drawbar_widget::BARS)
-}
-
-/// A knob's control: the run its values cover, or a menu where they are named rather
-/// than counted. A field too wide to enumerate lists nothing and has neither.
-fn turned(legal: &[String]) -> Control {
-    match contiguous(legal) {
-        // A run of one value has no travel, so there is nothing to turn.
-        Some((min, max)) if min < max => Control::Number { min, max },
-        _ if legal.is_empty() => Control::Stored,
-        _ => Control::Choice,
-    }
-}
-
-/// A picker's control: its values, which are the positions.
+/// Every registered field of a body, decoded straight from bytes.
 ///
-/// ⚠️ Past [`CHOICE_MAX`] the list is longer than a menu can be read at — a `WideSelector`
-/// over a sample library offers a thousand bare indices — so a long one turns instead.
-fn picked(legal: &[String]) -> Control {
-    match (1..=CHOICE_MAX).contains(&legal.len()) {
-        true => Control::Choice,
-        false => turned(legal),
-    }
+/// The document draws the working copy and measures it against the bytes it was last
+/// saved as, so both decodes come through here.
+pub fn decoded(bytes: &[u8]) -> Option<Vec<Field>> {
+    let entity = nord_format::from_stream(&mut Cursor::new(bytes)).ok()?;
+    fields_of(&entity)
 }
 
-/// The range a legal-value list covers, when every value is an integer and none is
-/// missing. A gapped set stays a menu — a slider over it would stop on values the field
-/// refuses.
-fn contiguous(legal: &[String]) -> Option<(i64, i64)> {
-    let mut values = Vec::with_capacity(legal.len());
-    for value in legal {
-        values.push(value.trim_start_matches('+').parse::<i64>().ok()?);
-    }
-    let min = *values.iter().min()?;
-    let max = *values.iter().max()?;
-    (max.checked_sub(min)? + 1 == values.len() as i64).then_some((min, max))
+/// The registry paths the two sets of bytes spell differently, in registry order.
+///
+/// ⚠️ An edit lands on the working copy in the frame it is made, so a pending change is
+/// this document against its own saved bytes — not `raw != bits` inside one decode,
+/// which an applied edit has already settled. Bytes that do not decode name nothing
+/// rather than claiming every field moved.
+pub fn changed(saved: &[u8], current: &[u8]) -> Vec<String> {
+    let (Some(before), Some(after)) = (decoded(saved), decoded(current)) else {
+        return Vec::new();
+    };
+    before
+        .iter()
+        .zip(&after)
+        .filter(|(before, after)| before.path == after.path && before.value != after.value)
+        .map(|(_, after)| after.path.clone())
+        .collect()
 }
 
 /// One byte that moved.
@@ -310,6 +243,7 @@ pub mod blank {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drawbar_widget;
     use nord_format::formats::ne5;
     use nord_format::Program;
 
@@ -386,99 +320,6 @@ mod tests {
         );
     }
 
-    /// A gapped legal set must stay a menu: a slider over it would stop on values the
-    /// field refuses.
-    #[test]
-    fn only_a_gapless_run_of_integers_becomes_a_slider() {
-        let full: Vec<String> = (0..128).map(|n| n.to_string()).collect();
-        assert_eq!(contiguous(&full), Some((0, 127)));
-
-        let gapped: Vec<String> = vec!["0".into(), "1".into(), "9".into()];
-        assert_eq!(contiguous(&gapped), None);
-
-        let named: Vec<String> = vec!["Organ".into(), "Piano".into()];
-        assert_eq!(contiguous(&named), None);
-    }
-
-    /// What a field is drawn as comes off its own declared kind, so a body this app has
-    /// never heard of arrives with its controls already chosen.
-    fn control_of(fields: &[Field], path: &str) -> Control {
-        let field = fields
-            .iter()
-            .find(|f| f.path == path)
-            .unwrap_or_else(|| panic!("{path} is declared"));
-        Control::of(field, &(field.spec.legal)())
-    }
-
-    /// The nine-nibble register is the drawbar widget's, and nothing else is.
-    #[test]
-    fn a_register_field_picks_the_drawbar_control() {
-        let bytes = program();
-        let (fields, _) = apply(&bytes, &[]).unwrap();
-        assert_eq!(
-            control_of(&fields, "organ_panel.b3_preset1_drawbars"),
-            Control::Register
-        );
-        assert_eq!(
-            control_of(&fields, "center_panel.gain"),
-            Control::Number { min: 0, max: 127 }
-        );
-    }
-
-    /// ⚠️ Both spellings of a drawbar carry the one kind: the Electro 5 packs a whole
-    /// registration into one field and the Stage 4 gives each bar its own nibble. The
-    /// kind's bar count is what separates them, and a single bar brings its own place in
-    /// the register — nothing here reads either off the path or the width.
-    #[test]
-    fn a_drawbar_is_a_register_or_a_bar_by_what_its_kind_counts() {
-        let (stage4, _) = apply(&blank::stage4_program(), &[]).unwrap();
-        assert_eq!(
-            control_of(&stage4, "organ_a.drawbar_1"),
-            Control::Bar(Some(0))
-        );
-        assert_eq!(
-            control_of(&stage4, "organ_a.drawbar_9"),
-            Control::Bar(Some(8))
-        );
-
-        let (electro5, _) = apply(&program(), &[]).unwrap();
-        assert_eq!(
-            control_of(&electro5, "organ_panel.vox_preset1_drawbars"),
-            Control::Register
-        );
-    }
-
-    #[test]
-    fn only_a_rank_the_widget_can_label_claims_footage() {
-        assert_eq!(drawbar_rank(None), None);
-        assert_eq!(drawbar_rank(Some(0)), None);
-        assert_eq!(drawbar_rank(Some(1)), Some(0));
-        assert_eq!(drawbar_rank(Some(9)), Some(8));
-        assert_eq!(drawbar_rank(Some(10)), None);
-        assert_eq!(drawbar_rank(Some(u8::MAX)), None);
-    }
-
-    /// A selector is its positions, a two-state field is a lamp, and a knob is travel —
-    /// each because the field says so, not because this app knows the path.
-    #[test]
-    fn the_declared_kind_picks_the_control() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
-        assert_eq!(control_of(&fields, "split_enabled"), Control::Toggle);
-        assert_eq!(control_of(&fields, "piano_a.piano_type"), Control::Choice);
-        assert_eq!(
-            control_of(&fields, "organ_a_volume"),
-            Control::Number { min: 0, max: 127 }
-        );
-        // A library id names something only the instrument holds, so there is no control
-        // for it here.
-        assert_eq!(control_of(&fields, "piano_a.model_id"), Control::Stored);
-        // A picker over four thousand bare indices is past reading as a list.
-        assert_eq!(
-            control_of(&fields, "synth_a_performance.sample_slot"),
-            Control::Number { min: 0, max: 4095 }
-        );
-    }
-
     /// Every body the library decodes into fields is editable here, in both directions.
     #[test]
     fn every_registry_backed_body_reads_and_writes() {
@@ -494,6 +335,25 @@ mod tests {
             assert!(!fields.is_empty());
             assert_eq!(out, bytes, "an empty set changes nothing");
         }
+    }
+
+    /// Pending is the working copy against the saved bytes, and it names the edited
+    /// paths and nothing else — the checksum that moved with them is no field.
+    #[test]
+    fn changed_names_the_edited_paths_and_nothing_else() {
+        let bytes = program();
+        let (_, once) = apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        assert_eq!(changed(&bytes, &once), ["center_panel.gain"]);
+
+        let (_, twice) = apply(&once, &[("center_panel.split".into(), "true".into())]).unwrap();
+        assert_eq!(
+            changed(&bytes, &twice),
+            ["center_panel.split", "center_panel.gain"],
+            "registry order, not the order the edits were made in",
+        );
+        assert!(changed(&bytes, &bytes).is_empty());
+        // Bytes that do not decode name nothing rather than claiming every field moved.
+        assert!(changed(b"not a nord file", &bytes).is_empty());
     }
 
     /// A drawbar pulled in the widget writes back exactly what the field reads out, so
