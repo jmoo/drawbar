@@ -1044,8 +1044,24 @@ pub fn cell(ui: &mut egui::Ui, label: &str, width: f32, body: impl FnOnce(&mut e
 }
 
 /// A cell whose value the file states and nothing here writes.
+///
+/// It asks for the room its own words need: a read cell has no control to size it by.
 pub fn read_cell(ui: &mut egui::Ui, label: &str, value: &str, note: &str) {
-    let width = 92.0_f32.max(value.len() as f32 * 7.0 + 20.0);
+    let laid = |text: &str, font: egui::FontId| {
+        ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_string(), font, egui::Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+    };
+    let width = laid(value, egui::FontId::monospace(VALUE_TEXT)) + 20.0;
+    let width = width
+        .max(laid(
+            &label.to_uppercase(),
+            egui::FontId::proportional(LABEL_TEXT),
+        ))
+        .max(laid(note, egui::FontId::proportional(10.0)));
     cell(ui, label, width, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 5.0;
@@ -1223,9 +1239,7 @@ pub fn ui(
     });
 
     if let Some(table) = &snapshot.key_table {
-        if let Some(asked) = per_key(ui, state, snapshot, table, sets) {
-            ask = Some(asked);
-        }
+        per_key(ui, state, snapshot, table, sets);
     }
     if !snapshot.sound.is_empty() {
         controls::heading(
@@ -1342,7 +1356,7 @@ fn per_key(
     snapshot: &Snapshot,
     table: &KeyTable,
     sets: &mut Sets,
-) -> Option<Ask> {
+) {
     let span = span(&map_zones(snapshot), NSMP_SPAN);
     let quiet = app::caption(ui.visuals());
     controls::heading(
@@ -1425,7 +1439,6 @@ fn per_key(
     }
     key_table(ui, state, table);
     ui.add_space(8.0);
-    None
 }
 
 /// One key's stored value on the lane's own scale, clamped to what it can draw.
