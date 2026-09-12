@@ -68,6 +68,13 @@ pub struct Offset {
     pub note: &'static str,
 }
 
+/// One thing the file says about itself: what it is called, what it reads, and a note.
+pub struct Fact {
+    pub key: &'static str,
+    pub value: String,
+    pub note: &'static str,
+}
+
 const ROW_H: f32 = 22.0;
 const PAD: f32 = 12.0;
 const COLUMN_MIN: f32 = 280.0;
@@ -192,50 +199,68 @@ pub fn offsets(ui: &mut egui::Ui, rows: &[Offset]) {
         "where each edited field lands in the file",
         None,
     );
-    let hairline = egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
     for row in rows {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), ROW_H),
-            egui::Sense::hover(),
+        three(ui, (&row.at, true), &row.holds, row.note);
+    }
+}
+
+/// What the file says about itself: the same three columns, the key in words rather
+/// than as a figure.
+pub fn facts(ui: &mut egui::Ui, rows: &[Fact]) {
+    for row in rows {
+        three(ui, (row.key, false), &row.value, row.note);
+    }
+}
+
+/// One row of the three-column record: a key, a mono value, and a note.
+fn three(ui: &mut egui::Ui, key: (&str, bool), value: &str, note: &str) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_H),
+        egui::Sense::hover(),
+    );
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter();
+    painter.hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+    );
+    let inner = rect.shrink2(egui::vec2(PAD, 0.0));
+    let track = inner.width() / 3.8;
+    let (text, mono) = key;
+    let cells = [
+        (
+            text,
+            match mono {
+                true => egui::FontId::monospace(NAME),
+                false => egui::FontId::proportional(NAME),
+            },
+            visuals.weak_text_color(),
+            inner.left(),
+        ),
+        (
+            value,
+            egui::FontId::monospace(NAME),
+            visuals.text_color(),
+            inner.left() + track,
+        ),
+        (
+            note,
+            egui::FontId::proportional(NOTE),
+            app::caption(&visuals),
+            inner.left() + track * 2.0,
+        ),
+    ];
+    for (text, font, ink, left) in cells {
+        let mut job = egui::text::LayoutJob::default();
+        job.append(text, 0.0, egui::TextFormat::simple(font, ink));
+        job.wrap = egui::text::TextWrapping::truncate_at_width((inner.right() - left).max(0.0));
+        let galley = painter.layout_job(job);
+        painter.galley(
+            egui::pos2(left, rect.center().y - galley.size().y / 2.0),
+            galley,
+            ink,
         );
-        let painter = ui.painter();
-        painter.hline(rect.x_range(), rect.top() + 0.5, hairline);
-        let inner = rect.shrink2(egui::vec2(PAD, 0.0));
-        let track = inner.width() / 3.8;
-        let ink = ui.visuals().text_color();
-        let weak = ui.visuals().weak_text_color();
-        let quiet = app::caption(ui.visuals());
-        let cells = [
-            (
-                row.at.as_str(),
-                egui::FontId::monospace(NAME),
-                weak,
-                inner.left(),
-            ),
-            (
-                row.holds.as_str(),
-                egui::FontId::monospace(NAME),
-                ink,
-                inner.left() + track,
-            ),
-            (
-                row.note,
-                egui::FontId::proportional(NOTE),
-                quiet,
-                inner.left() + track * 2.0,
-            ),
-        ];
-        for (text, font, ink, left) in cells {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(text, 0.0, egui::TextFormat::simple(font, ink));
-            job.wrap = egui::text::TextWrapping::truncate_at_width((inner.right() - left).max(0.0));
-            let galley = painter.layout_job(job);
-            painter.galley(
-                egui::pos2(left, rect.center().y - galley.size().y / 2.0),
-                galley,
-                ink,
-            );
-        }
     }
 }
 
