@@ -20,6 +20,7 @@ use crate::workspace::{LocalEntity, Workspace};
 mod advanced;
 mod controls;
 pub(crate) mod encode;
+pub mod keys;
 mod panel;
 mod project;
 pub(crate) mod sample;
