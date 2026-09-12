@@ -1162,6 +1162,8 @@ pub fn ui(
         });
     }
 
+    velocity(ui, state, snapshot);
+
     let quiet = app::caption(ui.visuals());
     controls::heading(
         ui,
@@ -1260,6 +1262,74 @@ pub fn ui(
         ui.add_space(8.0);
     }
     ask
+}
+
+/// The key × velocity field, on the generations whose records state a window.
+///
+/// Read-only: `nord-format` has no setter for a wide zone's window, and every shipped
+/// instrument answers the whole of it. Clicking a block still opens its row.
+fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
+    let stated: Vec<(usize, &Zone)> = snapshot
+        .zones
+        .iter()
+        .enumerate()
+        .filter(|(_, zone)| zone.velocity.is_some())
+        .collect();
+    if stated.is_empty() {
+        return;
+    }
+    let blocks: Vec<keys::VelBlock> = stated
+        .iter()
+        .map(|(row, zone)| {
+            let window = zone
+                .velocity
+                .unwrap_or((keys::VELOCITY_LOW, keys::VELOCITY_HIGH));
+            keys::VelBlock {
+                low: bottom(&snapshot.zones, *row).unwrap_or(NSMP_SPAN.low),
+                top: zone.top_note,
+                window,
+                name: format!("Zone {}", row + 1),
+                hint: format!(
+                    "Zone {} answers at velocity {}–{} · the record states it and nothing \
+                     here writes it",
+                    row + 1,
+                    window.0,
+                    window.1
+                ),
+            }
+        })
+        .collect();
+    let visuals = ui.visuals().clone();
+    let holes = keys::velocity_holes(&blocks);
+    let (cover, ink) = match holes.len() {
+        0 => ("fully covered".to_string(), app::good(&visuals)),
+        1 => ("1 hole".to_string(), app::warn(&visuals)),
+        n => (format!("{n} holes"), app::warn(&visuals)),
+    };
+    controls::heading(
+        ui,
+        "Velocity",
+        "every stroke answers the full window",
+        Some((&cover, ink)),
+    );
+    let span = span(&map_zones(snapshot), NSMP_SPAN);
+    let acted = ui
+        .horizontal(|ui| {
+            ui.add_space(PAD);
+            let room = (ui.available_width() - PAD).max(64.0);
+            ui.allocate_ui(egui::vec2(room, 0.0), |ui| {
+                let picked = stated
+                    .iter()
+                    .position(|(row, _)| Some(*row) == state.selected);
+                keys::velocity(ui, span, &blocks, picked, keys::Handles::Fixed)
+            })
+            .inner
+        })
+        .inner;
+    ui.add_space(8.0);
+    if let Some(keys::VelocityAct::Pick(block)) = acted {
+        state.pick(stated[block].0, true);
+    }
 }
 
 /// The middle column of a zone's row: what the record states, and what a decode found.
@@ -2459,6 +2529,59 @@ mod tests {
     fn v2_snapshot() -> Snapshot {
         let entity = nord_format::from_stream(&mut Cursor::new(&v2_bytes())).unwrap();
         snapshot(&entity).unwrap().unwrap()
+    }
+
+    /// One frame of the body over `snapshot`, with nothing decoded: what it painted,
+    /// and what it wrote.
+    fn bodied(ctx: &egui::Context, state: &mut State, snapshot: &Snapshot) -> (Vec<String>, Sets) {
+        let mut sets = Sets::new();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |page| {
+                ui(page, state, snapshot, &[], &mut sets);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said.into_iter().map(|(text, _)| text).collect(), sets)
+    }
+
+    /// The wide generations state a velocity window per zone, so the field is drawn —
+    /// read only, because nothing here writes one. A v2 record holds no window at all,
+    /// and gets no section for it.
+    #[test]
+    fn the_velocity_field_is_drawn_only_where_a_window_is_stated() {
+        let ctx = dressed();
+        let entity = Entity::Sample(Sample::V3(v3_sample(300)));
+        let wide = snapshot(&entity).unwrap().unwrap();
+        assert!(wide.zones.iter().all(|zone| zone.velocity.is_some()));
+        let (said, sets) = bodied(&ctx, &mut State::default(), &wide);
+        assert!(said.iter().any(|text| text == "Velocity"), "{said:?}");
+        assert!(
+            said.iter()
+                .any(|text| text == "every stroke answers the full window"),
+            "{said:?}"
+        );
+        assert!(sets.is_empty(), "a stated window is not an edit");
+
+        let narrow = v2_snapshot();
+        assert!(narrow.zones.iter().all(|zone| zone.velocity.is_none()));
+        let (said, sets) = bodied(&ctx, &mut State::default(), &narrow);
+        assert!(!said.iter().any(|text| text == "Velocity"), "{said:?}");
+        assert!(
+            said.iter().any(|text| text == "Per key"),
+            "the v2 keyboard map is drawn instead: {said:?}"
+        );
+        assert!(sets.is_empty());
     }
 
     /// Clicking a key a zone answers sounds it and says so; clicking one past every
