@@ -22,10 +22,19 @@
 //! ordinary full block whose own trailing overlap sits past the stroke's end, which
 //! is why coding a stroke again needs [`codec::Audio::tail`].
 //!
+//! A stroke therefore states whole blocks. The frames its record declares are the
+//! frames its blocks own, and a recording's last part-block — under 13 ms — is not
+//! stated at all. That is what makes the coding reversible: the cap above is what the
+//! stroke has left to own, so the same search run over the frames a stroke decodes to
+//! is given the same room at every block that laid the stroke out, and reaches the
+//! same widths. A coder that instead stretched its last block past the recording and
+//! counted the silence would state frames its own search was never given, and would
+//! lay the stroke out differently the second time.
+//!
 //! Confirmed on hardware: what this codes plays. Libraries built here load and
 //! sound — mono and stereo, attack, resonance and release, from the lowest root to
-//! the highest, through a long stroke's silent overhang — and a vendor library coded
-//! again from its own audio plays at the original's level.
+//! the highest, a long stroke and a short one — and a vendor library coded again from
+//! its own audio plays at the original's level.
 //!
 //! That the width and order it *chooses* are the vendor's own choice is inferred from
 //! specimens: given each block's width, order and attenuation, this reproduces the
@@ -102,6 +111,10 @@ pub struct Recording {
     pub layer: u8,
     /// One vector per channel at [`codec::RATE`], all the same length. Every
     /// recording of one library states the same channel count, 1 or 2.
+    ///
+    /// The stroke holds the whole blocks that cover these frames, so a tail shorter
+    /// than the shortest block — under 13 ms — is not stated. A recording under one
+    /// block long is the exception: it gets a block, silent past its end.
     pub channels: Vec<Vec<i16>>,
 }
 
@@ -448,16 +461,20 @@ struct Coded {
     starts: Vec<usize>,
 }
 
-/// Code `source` — one vector per channel — into blocks owning `target` frames.
+/// Code the whole blocks that cover `target` frames of `source` — one vector per
+/// channel — and report the frames they own between them.
 ///
-/// The blocks own whole frame counts the widths allow, so the last one usually
-/// reaches past `target`; the source is read as silent from its end, which is where
-/// those frames come from.
+/// A block owns whole frame counts the widths allow, so the blocks stop short of
+/// `target` by whatever is left over when no block is short enough to fit — under
+/// [`shortest_block`] frames, 13 ms, which the stroke does not state. A `target`
+/// under one block is the exception: it gets that block, reaching past the source,
+/// which is read as silent from its end.
 fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result<Coded, Error> {
     let channels = source.len();
     let block = block_bytes(channels as u16);
     let counts = frame_counts(block, channels);
     let widest = counts[usize::from(MIN_WIDTH)];
+    let shortest = shortest_block(&counts);
     let total = target
         .checked_add(widest)
         .and_then(|total| total.checked_mul(channels).map(|_| total))
@@ -467,9 +484,9 @@ fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result
     let mut audio = Vec::new();
     let mut starts = Vec::new();
     let mut at = 0usize;
-    while at < target {
-        let (order, width) = choose(&planes, at, channels, &counts, Some(target - at))
-            .or_else(|| choose(&planes, at, channels, &counts, None))
+    while at == 0 || at + shortest <= target {
+        let left = target.saturating_sub(at).max(shortest);
+        let (order, width) = choose(&planes, at, channels, &counts, left)
             .expect("order zero states a sample outright, which always fits sixteen bits");
         let frames = counts[usize::from(width)];
         let span = at * channels..(at + frames) * channels;
@@ -494,6 +511,12 @@ fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result
         owned: at,
         starts,
     })
+}
+
+/// Frames the shortest block a header can declare owns: the widest field, and so the
+/// fewest frames. It is the grain the stroke's own frame count comes in.
+fn shortest_block(counts: &[usize; WIDTHS]) -> usize {
+    counts[usize::from(MAX_WIDTH)] - OVERLAP
 }
 
 /// Frames a block of each candidate width carries, the overlap included.
@@ -552,15 +575,15 @@ fn residuals(len: usize) -> Result<Vec<i32>, Error> {
 /// The `(order, width)` a block starting at frame `at` declares.
 ///
 /// `owned_left` caps a block's owned frames at what the stroke has left to own. The
-/// narrowest width is the longest block, so a cap rules out an opening range of
-/// widths; with none, the search may pick a block that reaches past the frames the
-/// caller asked for, which is what the last block of a stroke does.
+/// narrowest width is the longest block, so the cap rules out an opening range of
+/// widths; at [`shortest_block`] it leaves only the widest, which order zero always
+/// reaches, so a cap that large or larger always names a block.
 fn choose(
     planes: &[Vec<i32>],
     at: usize,
     channels: usize,
     counts: &[usize; WIDTHS],
-    owned_left: Option<usize>,
+    owned_left: usize,
 ) -> Option<(u8, u8)> {
     let mut best: Option<(u8, u8)> = None;
     for (order, plane) in planes.iter().enumerate() {
@@ -581,7 +604,7 @@ fn choose(
             if lo < -bound || hi >= bound {
                 break;
             }
-            if owned_left.is_none_or(|left| frames - OVERLAP <= left) {
+            if frames - OVERLAP <= owned_left {
                 narrowest = Some(width);
             }
         }
@@ -827,6 +850,9 @@ mod tests {
         Piano::read_from(&mut std::io::Cursor::new(bytes)).unwrap()
     }
 
+    /// A stroke holds the whole blocks that cover its recording: every frame it states
+    /// is the recording's own, and what it leaves off is the part-block the recording
+    /// ends on, shorter than the shortest block a header can declare.
     #[test]
     fn a_built_library_decodes_back_to_the_frames_it_was_given() {
         let source = tone(20_000, 220.0, 2);
@@ -838,18 +864,15 @@ mod tests {
         let stroke = &library.strokes()[0];
         let audio = codec::decode(stroke, 2).unwrap();
         assert_eq!(audio.clipped, 0);
+        let shortest = codec::block_frames(MAX_WIDTH, library.block_bytes(), 2) - OVERLAP;
+        let left_off = source[0].len() - audio.frames();
         assert!(
-            audio.frames() >= source[0].len(),
-            "the stroke owns every frame it was given: {} of {}",
-            audio.frames(),
+            left_off < shortest,
+            "the stroke leaves off {left_off} frames of {}, a whole block or more",
             source[0].len()
         );
         for (channel, given) in audio.channels.iter().zip(&source) {
-            assert_eq!(&channel[..given.len()], &given[..]);
-            assert!(
-                channel[given.len()..].iter().all(|&s| s == 0),
-                "the frames past the source are silent"
-            );
+            assert_eq!(channel, &given[..audio.frames()]);
         }
     }
 
@@ -860,7 +883,7 @@ mod tests {
         let library = piano.library().unwrap();
         assert_eq!(library.channels(), 1);
         let audio = codec::decode(&library.strokes()[0], 1).unwrap();
-        assert_eq!(&audio.channels[0][..source[0].len()], &source[0][..]);
+        assert_eq!(audio.channels[0], source[0][..audio.frames()]);
     }
 
     #[test]
@@ -1038,26 +1061,70 @@ mod tests {
         );
     }
 
+    /// A recording followed by digital silence, which is what a take trimmed to a
+    /// fixed length holds and what a release stroke is mostly made of.
+    fn trailing_silence(frames: usize, silence: usize, channels: usize) -> Vec<Vec<i16>> {
+        let mut source = tone(frames, 262.0, channels);
+        for channel in &mut source {
+            channel.resize(frames + silence, 0);
+        }
+        source
+    }
+
+    /// A library this module writes is one [`rebuild`] leaves alone: every block comes
+    /// back byte for byte and so does the container around it. A stroke states the
+    /// frames its blocks own and nothing past them, which is what leaves the width
+    /// search the same room the second time.
+    ///
+    /// The lengths put the recording's end in each place it falls against the block
+    /// grid: inside a single block, part-way down a decay, and after the recording has
+    /// already reached digital silence.
     #[test]
     fn rebuilding_a_library_this_module_wrote_reproduces_every_block() {
-        let piano = round_trip(
-            2,
-            &[
-                one(60, Bank::Attack, 0, tone(12_000, 262.0, 2)),
-                one(72, Bank::Attack, 0, tone(9_000, 523.0, 2)),
-            ],
-        );
-        let library = piano.library().unwrap();
-        let again = rebuild(&library).unwrap();
-        assert_eq!(again.strokes.len(), 2);
-        for (index, recoded) in again.strokes.iter().enumerate() {
+        let cases: [(&str, u16, Vec<Recording>); 4] = [
+            (
+                "a source shorter than one block",
+                2,
+                vec![one(60, Bank::Attack, 0, tone(509, 262.0, 2))],
+            ),
+            (
+                "two stereo strokes cut mid-decay",
+                2,
+                vec![
+                    one(60, Bank::Attack, 0, tone(12_000, 262.0, 2)),
+                    one(72, Bank::Attack, 0, tone(9_000, 523.0, 2)),
+                ],
+            ),
+            (
+                "a mono stroke cut mid-decay",
+                1,
+                vec![one(48, Bank::Attack, 0, tone(9_133, 440.0, 1))],
+            ),
+            (
+                "a stroke that reaches silence before its source ends",
+                2,
+                vec![one(60, Bank::Attack, 0, trailing_silence(6_000, 5_000, 2))],
+            ),
+        ];
+
+        for (what, channels, recordings) in cases {
+            let piano = round_trip(channels, &recordings);
+            let library = piano.library().unwrap();
+            let again = rebuild(&library).unwrap();
+            assert_eq!(again.strokes.len(), recordings.len());
+            for (index, recoded) in again.strokes.iter().enumerate() {
+                assert_eq!(
+                    (recoded.identical, recoded.recoded()),
+                    (recoded.blocks, 0),
+                    "{what}: stroke {index} came back with different blocks"
+                );
+            }
             assert_eq!(
-                (recoded.identical, recoded.recoded()),
-                (recoded.blocks, 0),
-                "stroke {index} came back with different blocks"
+                again.library.to_body().unwrap(),
+                piano.file.body.0,
+                "{what}: the library came back a different file"
             );
         }
-        assert_eq!(again.library.to_body().unwrap(), piano.file.body.0);
     }
 
     #[test]

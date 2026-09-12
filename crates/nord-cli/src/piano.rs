@@ -189,6 +189,9 @@ pub struct BuildArgs {
     /// `v12` in place of `l00` to state a layer's value outright; one root's bank
     /// names all its layers the same way. Files that are not WAVs are skipped, and a
     /// WAV named some other way is refused.
+    ///
+    /// A stroke holds the whole blocks that cover its WAV, so a tail under 13 ms is
+    /// not stated; the `frames` column below is the WAV's, not the stroke's.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
