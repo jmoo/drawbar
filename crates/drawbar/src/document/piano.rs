@@ -9,8 +9,6 @@ use std::io::Cursor;
 use nord_format::formats::npno;
 use nord_format::Entity;
 
-use super::controls::Sets;
-
 pub fn is_piano(entity: &Entity) -> bool {
     matches!(entity, Entity::Piano(_))
 }
@@ -52,7 +50,7 @@ fn set(library: &mut npno::Library<'_>, path: &str, value: &str) -> Result<(), S
 
 /// Apply every set to a fresh decode and re-encode, the same all-or-nothing rule the
 /// registry bodies follow.
-pub fn apply(bytes: &[u8], sets: &Sets) -> Result<Vec<u8>, String> {
+pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<Vec<u8>, String> {
     let entity = nord_format::from_stream(&mut Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let piano = piano(&entity).ok_or("not a piano library")?;
     let mut library = piano.library().map_err(|e| e.to_string())?;
@@ -77,7 +75,7 @@ mod tests {
     fn a_body_that_is_no_piano_library_is_refused_before_anything_is_written() {
         let refused = apply(
             &crate::fields::blank::electro5_song(),
-            &vec![("name".into(), "Wurly 200A".into())],
+            &[("name".into(), "Wurly 200A".into())],
         );
         assert!(refused.is_err(), "a set list is not a piano library");
     }
