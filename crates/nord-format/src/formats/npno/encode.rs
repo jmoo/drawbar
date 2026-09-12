@@ -64,9 +64,9 @@
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, Bank, Library, Stroke, FINE_TUNE_AT, KEY_MAP_AT, MARKS, NOTES,
-    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
-    REC_MARK_BLOCK, REC_SEEDS, REC_START, SEEDS, UNCOVERED,
+    be32, block_bytes, midi_key, Bank, Library, Stroke, DECAYS, FINE_TUNE_AT, KEY_MAP_AT, MARKS,
+    NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER,
+    REC_MARKS, REC_MARK_BLOCK, REC_SEEDS, REC_START, SEEDS, UNCOVERED,
 };
 use crate::error::{Error, ParseError};
 use crate::formats::nsmp::kernel;
@@ -753,8 +753,8 @@ fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
 /// A donor record with everything the audio decides written over it.
 ///
 /// The length marks scale with the stroke's length so that they stay inside it, and a
-/// release stroke declares none and no decay — that is the class rule every specimen
-/// stroke obeys. The block index at `+0x2c` is derived: it is the block holding the
+/// release stroke declares no marks and not one of the fifteen decay coefficients —
+/// that is the class rule every specimen stroke obeys. The block index at `+0x2c` is derived: it is the block holding the
 /// first mark.
 fn record(
     donor: &[u8; RECORD],
@@ -808,6 +808,7 @@ fn record(
     out[REC_MARK_BLOCK..REC_MARK_BLOCK + 2].copy_from_slice(&(holding as u16).to_be_bytes());
     if silent {
         out[REC_DECAY..REC_DECAY + 4].fill(0);
+        out[REC_DECAYS..REC_DECAYS + DECAYS * 4].fill(0);
     }
     out[REC_ID..REC_ID + 4].copy_from_slice(&id.to_be_bytes());
     Ok(out)
@@ -845,7 +846,8 @@ mod tests {
     use crate::formats::npno::{Piano, CNSP_MAGIC, FORMAT};
 
     /// A one-stroke library the encoder can donate from: a real prefix and one real
-    /// record, holding marks and a decay coefficient a new stroke inherits.
+    /// record, holding marks and a full ladder of decay coefficients a new stroke
+    /// inherits.
     fn template(channels: u16) -> Piano {
         let block = block_bytes(channels);
         let directory_end = super::super::DIRECTORY_AT + RECORD;
@@ -870,6 +872,11 @@ mod tests {
             body[at..at + 4].copy_from_slice(&((mark as u32 + 6) * 100).to_be_bytes());
         }
         body[rec + REC_DECAY..rec + REC_DECAY + 4].copy_from_slice(&0x0000_2000u32.to_be_bytes());
+        for coefficient in 0..DECAYS {
+            let at = rec + REC_DECAYS + coefficient * 4;
+            let value = 0x0000_1000u32 + coefficient as u32;
+            body[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        }
         body[rec + REC_ID..rec + REC_ID + 4].copy_from_slice(&77u32.to_be_bytes());
         // One block of order-0 width-16 silence, so the stroke reads back.
         let audio = first;
@@ -1137,6 +1144,9 @@ mod tests {
         assert_eq!(values, [0, 6, 12]);
     }
 
+    /// The no-decay rule is the whole coefficient table, not the first of it: a
+    /// release stroke built from a donor that carries all fifteen declares none of
+    /// them, and a stroke of any other bank inherits every one.
     #[test]
     fn a_release_stroke_declares_no_marks_and_no_decay() {
         let short = tone(6_000, 300.0, 1);
@@ -1153,13 +1163,22 @@ mod tests {
             let marks: Vec<u32> = (0..MARKS)
                 .map(|m| be32(record, REC_MARKS + m * 4))
                 .collect();
-            let decay = be32(record, REC_DECAY);
+            let decay: Vec<u32> = std::iter::once(be32(record, REC_DECAY))
+                .chain((0..DECAYS).map(|c| be32(record, REC_DECAYS + c * 4)))
+                .collect();
             if stroke.bank() == Some(Bank::Release) {
                 assert_eq!(marks, [0; MARKS], "a release stroke declares no marks");
-                assert_eq!(decay, 0, "a release stroke declares no decay");
+                assert_eq!(
+                    decay,
+                    vec![0; DECAYS + 1],
+                    "a release stroke declares no decay coefficient at all"
+                );
             } else {
                 assert!(marks.iter().all(|&m| m > 0 && m < stroke.frames()));
-                assert_ne!(decay, 0);
+                assert!(
+                    decay.iter().all(|&c| c != 0),
+                    "a stroke of another bank inherits the donor's whole ladder"
+                );
             }
         }
     }

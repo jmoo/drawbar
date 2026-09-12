@@ -103,6 +103,7 @@ const REC_SEEDS: usize = 0x0c;
 const REC_MARKS: usize = 0x1c;
 const REC_MARK_BLOCK: usize = 0x2c;
 const REC_DECAY: usize = 0x2e;
+const REC_DECAYS: usize = 0x36;
 const REC_ID: usize = 0x6e;
 
 /// Predictor seeds a record carries per channel.
@@ -110,6 +111,12 @@ const SEEDS: usize = 4;
 
 /// Length marks a record carries at [`REC_MARKS`].
 const MARKS: usize = 4;
+
+/// One-pole decay coefficients a record carries after the one at [`REC_DECAY`], from
+/// [`REC_DECAYS`] up to the identifier. All fifteen are zero on a release stroke and
+/// on no other; nothing here derives them from audio.
+const DECAYS: usize = 14;
+const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
 
 /// The audio grid's offset from a whole number of blocks.
 ///
