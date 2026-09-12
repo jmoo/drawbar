@@ -1368,7 +1368,13 @@ fn turned(
         return plain(ui, field, legal);
     };
     let value: i64 = field.value.trim_start_matches('+').parse().ok()?;
-    let moved = knob::ui(ui, &field.path, value, min, max);
+    let mut moved = None;
+    let dial = ui
+        .scope(|ui| moved = knob::ui(ui, &field.path, value, min, max))
+        .response;
+    if centred {
+        detent(ui, dial.rect);
+    }
     let shown = moved.unwrap_or(value);
     match reading(unit, centred, shown, min, max) {
         Some(text) => {
@@ -1397,6 +1403,19 @@ fn turned(
         }
     }
     moved.filter(|moved| *moved != value).map(|m| m.to_string())
+}
+
+/// The mark at twelve o'clock on a knob whose musical zero is its centre.
+///
+/// ⚠️ The knob's sweep is symmetrical about straight up, so the slot's midpoint is
+/// already where the tick goes — the lit arc still fills from the bottom stop, because
+/// the stored range runs `0..=127` and nothing in it is negative.
+fn detent(ui: &egui::Ui, dial: egui::Rect) {
+    let top = egui::pos2(dial.center().x, dial.top());
+    ui.painter().line_segment(
+        [top, egui::pos2(top.x, top.y + 5.0)],
+        egui::Stroke::new(1.0_f32, app::caption(ui.visuals())),
+    );
 }
 
 /// The panel reading beside a knob, where the unit supports one.
