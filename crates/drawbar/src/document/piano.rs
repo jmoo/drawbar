@@ -2547,8 +2547,8 @@ const CAPABILITIES: &[Row] = &[
     },
     Row {
         name: "write to the instrument",
-        state: Cap::ReadOnly,
-        note: "class 1 — installed on the instrument, not sent to it",
+        state: Cap::Editable,
+        note: "class 1",
     },
     Row {
         name: "byte-exact round trip",
@@ -3162,19 +3162,21 @@ mod tests {
     // ---- the capability table -------------------------------------------------------
 
     /// Every capability the Advanced face calls editable is something this editor
-    /// actually does: a plan change that lands in the rebuilt bytes, or a stroke it
-    /// decodes when asked.
+    /// actually does: a plan change that lands in the rebuilt bytes, a stroke it decodes
+    /// when asked, or the send its header offers.
     #[test]
     fn every_editable_capability_is_something_the_editor_does() {
         let saved = bytes();
         let facts = facts();
         for row in CAPABILITIES.iter().filter(|row| row.state == Cap::Editable) {
             let Some(edit) = plan_for(row.name) else {
-                assert_eq!(
-                    row.name, "decode / audition",
-                    "{} claims editable with no plan behind it",
-                    row.name
-                );
+                match row.name {
+                    "decode / audition" => {}
+                    "write to the instrument" => {
+                        assert!(crate::device::sendable(ObjectClass::Piano))
+                    }
+                    other => panic!("{other} claims editable with no plan behind it"),
+                }
                 continue;
             };
             let mut plan = plan();
