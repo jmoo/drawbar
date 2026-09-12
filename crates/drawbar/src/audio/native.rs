@@ -16,6 +16,16 @@ const RATE: NonZero<u32> = match NonZero::new(FIELD_RATE) {
     None => panic!("the field rate is not zero"),
 };
 
+/// The rate a buffer is declared at to play `rate` times its recorded pitch: handing the
+/// mixer a faster clock is the resampling, and there is no second copy of the samples.
+fn clocked(rate: f32) -> NonZero<u32> {
+    let asked = (RATE.get() as f32 * rate).round();
+    match asked.is_finite() && asked >= 1.0 {
+        true => NonZero::new(asked.min(u32::MAX as f32) as u32).unwrap_or(RATE),
+        false => RATE,
+    }
+}
+
 #[derive(Default)]
 pub struct Sound {
     device: Option<MixerDeviceSink>,
@@ -23,7 +33,7 @@ pub struct Sound {
 }
 
 impl Sound {
-    pub fn play(&mut self, samples: &[i16], channels: u16) -> Result<(), String> {
+    pub fn play(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<(), String> {
         let channels = NonZero::new(channels).ok_or("this zone declares no channels")?;
         // One voice: whatever is sounding gives way rather than mixing with this.
         self.stop();
@@ -36,7 +46,7 @@ impl Sound {
         let player = rodio::Player::connect_new(device.mixer());
         // rodio mixes in f32; the codec's own units are the 16-bit ones it decoded to.
         let source: Vec<f32> = samples.iter().map(|s| f32::from(*s) / 32768.0).collect();
-        player.append(SamplesBuffer::new(channels, RATE, source));
+        player.append(SamplesBuffer::new(channels, clocked(rate), source));
         self.player = Some(player);
         Ok(())
     }
@@ -49,5 +59,22 @@ impl Sound {
 
     pub fn finished(&self) -> bool {
         self.player.as_ref().is_none_or(rodio::Player::empty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An octave up is twice the clock, and a rate that is not a rate leaves the
+    /// recorded pitch alone rather than handing the mixer a zero.
+    #[test]
+    fn the_clock_carries_the_pitch_shift() {
+        assert_eq!(clocked(1.0), RATE);
+        assert_eq!(clocked(2.0).get(), RATE.get() * 2);
+        assert_eq!(clocked(0.5).get(), RATE.get() / 2);
+        for refused in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(clocked(refused), RATE, "{refused}");
+        }
     }
 }
