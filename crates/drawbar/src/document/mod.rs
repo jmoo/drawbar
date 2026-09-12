@@ -122,6 +122,7 @@ impl Document {
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
+        let stamp = entity.stamp;
         let decoded = entity.entity.as_ref();
         let registry = decoded.map(fields::fields_of).unwrap_or_default();
         let viewing = workspace.is_view(id);
@@ -276,6 +277,11 @@ impl Document {
                 // The table keeps a refused cell open with what was typed in it.
                 self.advanced.settled(outcome);
             }
+        }
+        if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
+            // The strip was drawn from the bytes this frame then edited; one more frame
+            // shows what the edit made of them.
+            ui.ctx().request_repaint();
         }
         wants
     }
@@ -949,7 +955,10 @@ mod tests {
         fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
             match shape {
                 egui::Shape::Text(text) => into.push((
-                    text.galley.text().to_string(),
+                    match text.galley.rows.len() {
+                        1 => text.galley.text().to_string(),
+                        rows => format!("{} (in {rows} rows)", text.galley.text()),
+                    },
                     egui::Rect::from_min_size(text.pos, text.galley.size()),
                 )),
                 egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
@@ -962,6 +971,12 @@ mod tests {
         }
         let header: Vec<&(String, egui::Rect)> =
             words.iter().filter(|(_, rect)| rect.top() < 70.0).collect();
+        for (word, _) in &header {
+            assert!(
+                !word.ends_with(" rows)"),
+                "{word} was broken inside itself rather than moved whole"
+            );
+        }
         // The controls, and the glyphs painted where their art would load. The kind
         // glyph at the far left is the one glyph that is not a control.
         const CONTROLS: [&str; 7] = [
