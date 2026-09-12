@@ -149,7 +149,7 @@ pub enum Ink {
 }
 
 impl Ink {
-    fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
+    pub(super) fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
             Ink::Good => good(visuals),
             Ink::Warn => warn(visuals),
@@ -166,6 +166,7 @@ pub struct SizeLine {
 }
 
 /// The dot and the phrase beside it: one claim about this document.
+#[derive(Clone)]
 pub struct StateLine {
     pub words: String,
     pub ink: Ink,
@@ -209,6 +210,9 @@ pub struct Extras {
     /// ⚠️ Its ink is the strip's, not the editor's: an unsaved document is a warning
     /// whatever counted it.
     pub edited: Option<StateLine>,
+    /// What a saved document claims instead of what the strip works out — a set list
+    /// naming programs the instrument does not have where it says.
+    pub state: Option<StateLine>,
     pub loud: Option<Loud>,
 }
 
@@ -1076,6 +1080,9 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
             None => phrase(Mark::Unsaved, waiting),
         });
     }
+    if let Some(claim) = &facts.extras.state {
+        return Some(claim.clone());
+    }
     let mark = keyboard_mark(entity, facts.device, facts.queue)?;
     Some(phrase(mark, waiting))
 }
@@ -1402,6 +1409,18 @@ mod tests {
     }
 
     /// An editor's own word for an unsaved document stands in the strip, and it is warn
+    fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
+        Facts {
+            faces: &[Face::Edit],
+            showing: Face::Edit,
+            device,
+            queue,
+            tags,
+            view: false,
+            extras: Extras::default(),
+        }
+    }
+
     /// ink whatever the editor called it — the header has no red to reach for.
     #[test]
     fn an_editors_own_state_phrase_keeps_the_strips_ink() {
@@ -1430,18 +1449,6 @@ mod tests {
             Ink::Warn,
             "the strip decides the ink, not the editor"
         );
-    }
-
-    fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
-        Facts {
-            faces: &[Face::Edit],
-            showing: Face::Edit,
-            device,
-            queue,
-            tags,
-            view: false,
-            extras: Extras::default(),
-        }
     }
 
     /// The loud action's three states: a send that can happen, a class this app does not

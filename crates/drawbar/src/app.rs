@@ -419,6 +419,9 @@ impl DrawbarApp {
         if wants.keep {
             acts.push(browser::Act::Keep(id));
         }
+        if let Some(item) = wants.open {
+            acts.push(browser::Act::Open(item));
+        }
     }
 }
 
