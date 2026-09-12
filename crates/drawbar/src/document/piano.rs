@@ -23,7 +23,7 @@ use nord_usb::ObjectClass;
 use super::capability::{self, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys::{self, Audition, Scale, SizeCell, Span};
-use super::{Extras, Loud, SizeLine, Tone};
+use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
@@ -789,7 +789,12 @@ fn extras(facts: &Facts, plan: &Plan, free: Option<u64>) -> Extras {
                 None => "the instrument has not reported its free piano memory".to_string(),
             },
         }),
-        edited: trimmed.then_some("trimmed"),
+        edited: trimmed.then(|| StateLine {
+            words: "trimmed".to_string(),
+            ink: Ink::Warn,
+            hint: "the plan drops strokes the saved file holds".to_string(),
+        }),
+        state: None,
         loud: over.map(|over| Loud {
             label: format!("Won't fit · {} over", room::measure(over)),
             short: format!("{} over", room::measure(over)),
@@ -3026,7 +3031,10 @@ mod tests {
             trimmed.size.as_ref().map(|size| size.text.clone()),
             Some(room::measure_out_of(kept, facts.total))
         );
-        assert_eq!(trimmed.edited, Some("trimmed"));
+        assert_eq!(
+            trimmed.edited.as_ref().map(|line| line.words.as_str()),
+            Some("trimmed")
+        );
         assert!(!trimmed.size.unwrap().warn, "it fits");
         assert!(trimmed.loud.is_none());
 

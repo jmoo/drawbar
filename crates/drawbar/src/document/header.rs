@@ -149,7 +149,7 @@ pub enum Ink {
 }
 
 impl Ink {
-    fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
+    pub(super) fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
             Ink::Good => good(visuals),
             Ink::Warn => warn(visuals),
@@ -166,6 +166,7 @@ pub struct SizeLine {
 }
 
 /// The dot and the phrase beside it: one claim about this document.
+#[derive(Clone)]
 pub struct StateLine {
     pub words: String,
     pub ink: Ink,
@@ -203,9 +204,15 @@ pub struct Loud {
 #[derive(Default)]
 pub struct Extras {
     pub size: Option<SizeLine>,
-    /// The word for an unsaved document, where the editor has a better one than
-    /// `edited`.
-    pub edited: Option<&'static str>,
+    /// The claim an unsaved document makes, where the editor has a better one than
+    /// `edited` — the field document's `N pending`.
+    ///
+    /// ⚠️ Its ink is the strip's, not the editor's: an unsaved document is a warning
+    /// whatever counted it.
+    pub edited: Option<StateLine>,
+    /// What a saved document claims instead of what the strip works out — a set list
+    /// naming programs the instrument does not have where it says.
+    pub state: Option<StateLine>,
     pub loud: Option<Loud>,
 }
 
@@ -434,7 +441,7 @@ fn right(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
-    let own = action(entity, facts);
+    let own = action(entity, facts.device);
     let loud = facts.extras.loud.as_ref().unwrap_or(&own);
     let label = match stage {
         Stage::Narrow => &loud.short,
@@ -996,7 +1003,7 @@ fn stream_version(entity: &LocalEntity) -> Option<u16> {
 
 /// Where the document lives: a slot on the instrument, a folder on this computer, or the
 /// computer itself.
-fn lives(entity: &LocalEntity) -> String {
+pub(super) fn lives(entity: &LocalEntity) -> String {
     if let Some((class, at)) = entity.spot() {
         return place(class, at);
     }
@@ -1064,21 +1071,31 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
 fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
-        return Some(phrase(Mark::Unsaved, waiting, facts.extras.edited));
+        return Some(match &facts.extras.edited {
+            Some(line) => StateLine {
+                words: line.words.clone(),
+                ink: Ink::Warn,
+                hint: line.hint.clone(),
+            },
+            None => phrase(Mark::Unsaved, waiting),
+        });
+    }
+    if let Some(claim) = &facts.extras.state {
+        return Some(claim.clone());
     }
     let mark = keyboard_mark(entity, facts.device, facts.queue)?;
-    Some(phrase(mark, waiting, facts.extras.edited))
+    Some(phrase(mark, waiting))
 }
 
 /// What a mark says in the strip, in the strip's own shorter words — and never in red.
 ///
 /// ⚠️ Exhaustive over [`Mark`], and every arm's ink is an [`Ink`]: there is no spelling
 /// of this that reaches `bad`.
-fn phrase(mark: Mark, waiting: bool, edited: Option<&'static str>) -> StateLine {
+fn phrase(mark: Mark, waiting: bool) -> StateLine {
     let hint = mark_words(mark).to_string();
     match mark {
         Mark::Unsaved => StateLine {
-            words: edited.unwrap_or("edited").to_string(),
+            words: "edited".to_string(),
             ink: Ink::Warn,
             hint,
         },
@@ -1108,7 +1125,7 @@ fn phrase(mark: Mark, waiting: bool, edited: Option<&'static str>) -> StateLine 
 /// ⚠️ Ordered, and the order is what makes the label honest: a project has nothing to
 /// send whatever is attached, an unattached instrument cannot be written to whatever the
 /// asset is, and a class this app does not write into is never a question of room.
-fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
+pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let send = |hint: String| Loud {
         label: "Queue send".to_string(),
         short: "Send".to_string(),
@@ -1133,7 +1150,7 @@ fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
             send: None,
         };
     }
-    if !facts.device.connected() {
+    if !device.connected() {
         return idle("no instrument attached — nothing to send to".to_string());
     }
     let Some((class, at)) = entity.spot() else {
@@ -1145,7 +1162,7 @@ fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
             folder(class)
         ));
     }
-    if let Some((over, free)) = over(entity, class, facts.device) {
+    if let Some((over, free)) = over(entity, class, device) {
         return Loud {
             label: format!("Won't fit · {} over", room::measure(over)),
             short: format!("{} over", room::measure(over)),
@@ -1371,35 +1388,27 @@ mod tests {
         let marks = [Mark::Unsaved, Mark::Agrees, Mark::Differs, Mark::Unknown];
         for mark in marks {
             for waiting in [false, true] {
-                for edited in [None, Some("trimmed")] {
-                    let held = phrase(mark, waiting, edited);
-                    assert!(!held.words.is_empty(), "{mark:?} says something");
-                    assert_eq!(held.hint, mark_words(mark), "{mark:?} explains itself");
-                    // Only `dark_mode` decides an ink, so egui's own two faces answer.
-                    for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-                        assert_ne!(
-                            held.ink.color(&visuals),
-                            crate::app::bad(&visuals),
-                            "{mark:?} in the header"
-                        );
-                    }
+                let held = phrase(mark, waiting);
+                assert!(!held.words.is_empty(), "{mark:?} says something");
+                assert_eq!(held.hint, mark_words(mark), "{mark:?} explains itself");
+                // Only `dark_mode` decides an ink, so egui's own two faces answer.
+                for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+                    assert_ne!(
+                        held.ink.color(&visuals),
+                        crate::app::bad(&visuals),
+                        "{mark:?} in the header"
+                    );
                 }
             }
         }
-        assert_eq!(phrase(Mark::Unsaved, false, None).words, "edited");
-        assert_eq!(
-            phrase(Mark::Unsaved, false, Some("trimmed")).words,
-            "trimmed"
-        );
-        assert_eq!(phrase(Mark::Agrees, false, None).words, "matches keyboard");
-        assert_eq!(
-            phrase(Mark::Differs, false, None).words,
-            "differs from keyboard"
-        );
-        assert_eq!(phrase(Mark::Differs, true, None).words, "waiting to send");
-        assert_eq!(phrase(Mark::Unknown, false, None).words, "on the keyboard");
+        assert_eq!(phrase(Mark::Unsaved, false).words, "edited");
+        assert_eq!(phrase(Mark::Agrees, false).words, "matches keyboard");
+        assert_eq!(phrase(Mark::Differs, false).words, "differs from keyboard");
+        assert_eq!(phrase(Mark::Differs, true).words, "waiting to send");
+        assert_eq!(phrase(Mark::Unknown, false).words, "on the keyboard");
     }
 
+    /// An editor's own word for an unsaved document stands in the strip, and it is warn
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
         Facts {
             faces: &[Face::Edit],
@@ -1412,6 +1421,36 @@ mod tests {
         }
     }
 
+    /// ink whatever the editor called it — the header has no red to reach for.
+    #[test]
+    fn an_editors_own_state_phrase_keeps_the_strips_ink() {
+        let (queue, tags) = (Queue::default(), Tags::default());
+        let device = crate::device::Device::new(egui::Context::default());
+        let (mut workspace, mut log) = workspace();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let mut edited = workspace.get(id).unwrap().bytes.clone();
+        *edited.last_mut().expect("a byte to move") ^= 0xff;
+        workspace.replace_bytes(id, edited, &mut log);
+
+        let mut facts = facts(&device.state, &queue, &tags);
+        let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
+        assert_eq!(held.words, "edited");
+
+        facts.extras.edited = Some(StateLine {
+            words: "6 pending".to_string(),
+            ink: Ink::Good,
+            hint: "raw ≠ bits on 6 fields".to_string(),
+        });
+        let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
+        assert_eq!(held.words, "6 pending");
+        assert_eq!(held.hint, "raw ≠ bits on 6 fields");
+        assert_eq!(
+            held.ink,
+            Ink::Warn,
+            "the strip decides the ink, not the editor"
+        );
+    }
+
     /// The loud action's three states: a send that can happen, a folder with no room
     /// for it, and an instrument that is not there.
     #[test]
@@ -1419,7 +1458,6 @@ mod tests {
         use crate::device::Device;
         use nord_usb::wire::Status;
 
-        let (queue, tags) = (Queue::default(), Tags::default());
         let (mut workspace, mut log) = workspace();
         let at = Location { bank: 6, slot: 3 };
         let bytes = crate::fields::blank::electro5_song();
@@ -1434,10 +1472,7 @@ mod tests {
             bytes.clone(),
             &mut log,
         );
-        let held = action(
-            workspace.get(id).unwrap(),
-            &facts(&unattached.state, &queue, &tags),
-        );
+        let held = action(workspace.get(id).unwrap(), &unattached.state);
         assert_eq!(held.tone, Tone::Idle, "{}", held.hint);
         assert_eq!(held.send, None, "a dashed action asks for nothing");
         assert!(
@@ -1448,10 +1483,7 @@ mod tests {
 
         let mut attached = Device::new(egui::Context::default());
         attached.pretend_scanned(ObjectClass::SetList, 7, &["Blue Room"]);
-        let held = action(
-            workspace.get(id).unwrap(),
-            &facts(&attached.state, &queue, &tags),
-        );
+        let held = action(workspace.get(id).unwrap(), &attached.state);
         assert_eq!(held.tone, Tone::Ready);
         assert_eq!(held.send, Some((ObjectClass::SetList, at)));
         assert_eq!(held.label, "Queue send");
@@ -1471,10 +1503,7 @@ mod tests {
             bytes.clone(),
             &mut log,
         );
-        let held = action(
-            workspace.get(library).unwrap(),
-            &facts(&attached.state, &queue, &tags),
-        );
+        let held = action(workspace.get(library).unwrap(), &attached.state);
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
         assert_eq!(held.send, Some((ObjectClass::Piano, in_pianos)));
         assert_eq!(held.hint, "replaces Pianos 1:4");
@@ -1491,10 +1520,7 @@ mod tests {
             dirty: 0,
             spare: 0,
         });
-        let held = action(
-            workspace.get(library).unwrap(),
-            &facts(&full.state, &queue, &tags),
-        );
+        let held = action(workspace.get(library).unwrap(), &full.state);
         assert_eq!(held.tone, Tone::Blocked);
         assert_eq!(
             held.label,
@@ -1508,10 +1534,9 @@ mod tests {
     /// refuses, because nothing here writes an nsmp from one yet.
     #[test]
     fn a_project_offers_a_build_that_refuses_rather_than_a_send() {
-        let (queue, tags) = (Queue::default(), Tags::default());
         let device = crate::device::Device::new(egui::Context::default());
         let (held, id) = opened("clarinet.nsmpproj", project_bytes());
-        let loud = action(held.get(id).unwrap(), &facts(&device.state, &queue, &tags));
+        let loud = action(held.get(id).unwrap(), &device.state);
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.label, "Build → .nsmp");
         assert_eq!(loud.short, "Build");

@@ -22,6 +22,7 @@ mod advanced;
 pub mod capability;
 pub mod controls;
 pub(crate) mod encode;
+mod field;
 mod header;
 pub mod keys;
 mod panel;
@@ -29,6 +30,7 @@ mod piano;
 mod project;
 pub(crate) mod sample;
 mod setlist;
+mod verbatim;
 
 use advanced::Advanced;
 use controls::{Ctx, Sets};
@@ -68,6 +70,9 @@ pub struct Wants {
     pub send: Option<SendBack>,
     /// The banner's offer to put a view of a slot on this computer.
     pub keep: bool,
+    /// The thing a body pointed at: a set list's entry is a program of its own, and
+    /// opening it is the browser's act, not the document's.
+    pub open: Option<crate::browser::Item>,
 }
 
 /// What the Edit face asked for that cannot be done while the asset is borrowed to
@@ -76,6 +81,11 @@ enum Asked {
     Zone(sample::Ask),
     Root(piano::Ask),
     Encode,
+    /// The copy a body with nothing to edit offers, which is the header's Export.
+    Export,
+    Open(crate::browser::Item),
+    /// The Advanced link under a section the instrument is not using.
+    Advanced,
 }
 
 #[derive(Default)]
@@ -109,6 +119,12 @@ pub struct Document {
     wav: Option<(encode::Draft, encode::Source)>,
     /// The piano library's plan, the facts it is a plan over, and its decoded strokes.
     piano: piano::State,
+    /// What the field document keeps between frames: the morph lens, where the reader
+    /// is, and the two decodes a pending count is measured across. Never an edit.
+    fields: field::State,
+    /// What the set list editor keeps: the half-typed address boxes and whether a
+    /// reorder has been made.
+    list: setlist::State,
 }
 
 impl Document {
@@ -139,6 +155,8 @@ impl Document {
             (self.name, self.variant) = header::boxes(entity, viewing);
             self.paths.clear();
             self.sample = sample::State::default();
+            self.fields = field::State::default();
+            self.list = setlist::State::default();
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
             self.player.stop();
@@ -170,6 +188,20 @@ impl Document {
         let faces = faces(entity, registry.as_deref());
         let face = showing(&faces, self.views.get(&id).copied().unwrap_or_default());
 
+        // ⚠️ Only a registry body. Reading the saved bytes means decoding them, and a
+        // piano library is hundreds of megabytes with no field in it.
+        if registry.is_some() {
+            self.fields.follow(entity);
+        }
+        let doc = match (decoded, registry.as_deref()) {
+            (Some(decoded), Some(fields)) => Some(field::of(decoded, fields)),
+            _ => None,
+        };
+        let pending = match doc.is_some() {
+            true => self.fields.pending().len(),
+            false => 0,
+        };
+
         let mut sets: Sets = Vec::new();
         let act = header::ui(
             ui,
@@ -181,7 +213,10 @@ impl Document {
                 queue: around.queue,
                 tags: around.tags,
                 view: viewing,
-                extras: self.piano.begin(id, entity, &device.state),
+                extras: match decoded.is_some_and(piano::is_piano) {
+                    true => self.piano.begin(id, entity, &device.state),
+                    false => extras(entity, device, workspace, pending),
+                },
             },
             (&mut self.name, &mut self.variant),
             &mut sets,
@@ -190,7 +225,7 @@ impl Document {
 
         let mut wants = Wants {
             send: act.send,
-            keep: false,
+            ..Wants::default()
         };
         let mut details = None;
         let mut typed = false;
@@ -215,7 +250,7 @@ impl Document {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
             if face == Face::Edit {
-                asked = self.pinned(ui, entity, &mut sets);
+                asked = self.pinned(ui, entity, doc.as_ref(), &mut sets);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -225,15 +260,30 @@ impl Document {
                     // the same format, so every control also answers to the document id.
                     ui.push_id(id, |ui| match face {
                         Face::Edit => {
-                            if let Some(from_body) =
-                                self.body(ui, entity, registry.as_deref(), &mut lookup, &mut sets)
-                            {
+                            if let Some(from_body) = self.body(
+                                ui,
+                                entity,
+                                doc.as_ref(),
+                                &mut lookup,
+                                &setlist::Catalogue {
+                                    device: &device.state,
+                                    workspace,
+                                },
+                                &mut sets,
+                            ) {
                                 asked = Some(from_body);
                             }
                         }
-                        Face::Advanced => match registry.as_deref() {
-                            Some(fields) => {
-                                self.advanced.table(ui, fields, &mut sets);
+                        Face::Advanced => match doc.as_ref() {
+                            Some(doc) => {
+                                Advanced::about(ui, &field::about(doc, entity));
+                                let table = advanced::Table {
+                                    fields: registry.as_deref().unwrap_or_default(),
+                                    saved: self.fields.settled(),
+                                    changed: self.fields.pending(),
+                                    doc: Some(doc),
+                                };
+                                self.advanced.table(ui, &table, &mut sets);
                                 typed = !sets.is_empty();
                             }
                             None if entity.entity.as_ref().is_some_and(piano::is_piano) => {
@@ -259,8 +309,13 @@ impl Document {
                 device.send(cmd, log);
             }
         }
-        if let Some(asked) = asked {
-            self.answer(id, asked, workspace, log);
+        match asked {
+            Some(Asked::Open(item)) => wants.open = Some(item),
+            Some(Asked::Advanced) => {
+                self.views.insert(id, Face::Advanced);
+            }
+            Some(asked) => self.answer(id, asked, workspace, log),
+            None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
             if lookup.asked || self.owes_deps(&lookup, at, device) {
@@ -368,8 +423,9 @@ impl Document {
         &mut self,
         ui: &mut egui::Ui,
         entity: &LocalEntity,
-        registry: Option<&[Field]>,
+        doc: Option<&field::Doc<'_>>,
         piano: &mut panel::PianoLookup,
+        seen: &setlist::Catalogue<'_>,
         sets: &mut Sets,
     ) -> Option<Asked> {
         let Some(decoded) = &entity.entity else {
@@ -382,22 +438,18 @@ impl Document {
             self.project_body(ui, decoded, sets);
             return None;
         }
+        if fields::is_set_list(decoded) {
+            return setlist::ui(ui, &mut self.list, entity, seen, sets).map(Asked::Open);
+        }
         if piano::is_piano(decoded) {
             let sounding = self.sounding_root();
             return self.piano.ui(ui, sounding).map(Asked::Root);
         }
-        if let Some(fields) = registry {
-            if let Some(layout) = nord_format::panel::of(decoded) {
-                panel::program(ui, &self.ctx, layout, fields, piano, sets);
-            } else if fields::is_electro5_settings(decoded) {
-                panel::settings(ui, &self.ctx, fields, sets);
-            } else {
-                panel::plain(ui, &self.ctx, fields, sets);
-            }
-            return None;
+        if let Some(doc) = doc {
+            return field::body(ui, &self.ctx, &mut self.fields, doc, piano, sets)
+                .then_some(Asked::Advanced);
         }
-        setlist::ui(ui, decoded, sets);
-        None
+        verbatim::ui(ui, entity).then_some(Asked::Export)
     }
 
     /// Bytes that did not decode: the encode panel where they are a WAV, and the plain
@@ -448,8 +500,13 @@ impl Document {
         &mut self,
         ui: &mut egui::Ui,
         entity: &LocalEntity,
+        doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
     ) -> Option<Asked> {
+        if let Some(doc) = doc {
+            field::nav(ui, &mut self.fields, doc);
+            return None;
+        }
         let decoded = entity.entity.as_ref()?;
         if piano::is_piano(decoded) {
             return self.piano.map(ui).map(Asked::Root);
@@ -522,6 +579,10 @@ impl Document {
             }
             Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
             Asked::Encode => self.encode(id, workspace, log),
+            Asked::Export => workspace.export(id),
+            // ⚠️ Answered where the frame collects what it wants: the browser owns
+            // opening a tab, and the face is the frame's own to switch.
+            Asked::Open(_) | Asked::Advanced => {}
         }
     }
 
@@ -682,6 +743,7 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
                 || sample::is_sample(e)
                 || project::is_project(e)
                 || piano::is_piano(e)
+                || verbatim::is_verbatim(e)
         }
         // A WAV decodes into nothing, but it is the one thing this app can make an
         // instrument out of, so it gets a panel rather than only a byte record.
@@ -691,14 +753,69 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
         faces.push(Face::Edit);
     }
     faces.push(Face::Metadata);
-    let capabilities = match &entity.entity {
-        Some(e) => sample::is_sample(e) || project::is_project(e) || piano::is_piano(e),
+    // Whatever the Edit face left out: the capability table, the addresses a set list
+    // stores, or the body a verbatim document keeps.
+    let deeper = match &entity.entity {
+        Some(e) => {
+            sample::is_sample(e)
+                || project::is_project(e)
+                || fields::is_set_list(e)
+                || verbatim::is_verbatim(e)
+                || piano::is_piano(e)
+        }
         None => false,
     };
-    if registry.is_some() || capabilities {
+    if registry.is_some() || deeper {
         faces.push(Face::Advanced);
     }
     faces
+}
+
+/// What the strip shows instead of what it works out for itself.
+fn extras(
+    entity: &LocalEntity,
+    device: &Device,
+    workspace: &Workspace,
+    pending: usize,
+) -> header::Extras {
+    let Some(decoded) = &entity.entity else {
+        return header::Extras::default();
+    };
+    if fields::has_registry(decoded) {
+        return header::Extras {
+            edited: (pending > 0).then(|| StateLine {
+                words: format!("{pending} pending"),
+                ink: Ink::Warn,
+                hint: format!("raw ≠ bits on {pending} fields"),
+            }),
+            loud: queued(entity, device, pending),
+            ..header::Extras::default()
+        };
+    }
+    if fields::is_set_list(decoded) {
+        return header::Extras {
+            state: setlist::claim(
+                decoded,
+                &setlist::Catalogue {
+                    device: &device.state,
+                    workspace,
+                },
+            ),
+            ..header::Extras::default()
+        };
+    }
+    if verbatim::is_verbatim(decoded) {
+        // The same write the strip works out for itself, in the words a body nothing
+        // can edit calls it by.
+        let mut loud = header::action(entity, &device.state);
+        loud.label = "Send as-is".to_string();
+        loud.short = "Send".to_string();
+        return header::Extras {
+            loud: Some(loud),
+            ..header::Extras::default()
+        };
+    }
+    header::Extras::default()
 }
 
 /// The face to show: the one this document was last left on, where that face still
@@ -722,8 +839,9 @@ fn record(ui: &mut egui::Ui, entity: &LocalEntity) {
     }
 }
 
-/// The Advanced face of a body with no field registry: what the format holds, and where
-/// each field of it lands.
+/// The Advanced face of a body with no field registry: what the format holds and where
+/// each field of it lands, the addresses a set list stores, or the bytes a body nothing
+/// describes is keeping.
 fn capabilities(ui: &mut egui::Ui, entity: &LocalEntity) {
     let Some(decoded) = &entity.entity else {
         return;
@@ -734,6 +852,10 @@ fn capabilities(ui: &mut egui::Ui, entity: &LocalEntity) {
     } else if let Some(Ok(snapshot)) = project::snapshot(decoded) {
         capability::table(ui, &project::capabilities());
         capability::offsets(ui, &project::offsets(&snapshot));
+    } else if fields::is_set_list(decoded) {
+        setlist::stored(ui, decoded);
+    } else {
+        verbatim::bytes(ui, entity);
     }
 }
 
@@ -769,6 +891,28 @@ fn viewing_banner(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
         });
     });
     keep
+}
+
+/// The loud action a field document offers: the one the header would make anyway, with
+/// the pending count on it.
+///
+/// ⚠️ The count is added only where the header would already say the write can happen.
+/// A document with nothing to send to says so, and a number in front of that would read
+/// as an offer.
+fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud> {
+    if pending == 0 {
+        return None;
+    }
+    let loud = header::action(entity, &device.state);
+    if loud.tone != Tone::Ready {
+        return None;
+    }
+    Some(Loud {
+        label: format!("Queue send · {pending}"),
+        short: format!("Send {pending}"),
+        hint: format!("{pending} pending sets, applied as one batch — all or none"),
+        ..loud
+    })
 }
 
 /// What is known about the piano a program plays.
@@ -1121,7 +1265,7 @@ mod tests {
             .map(|(_, rect)| rect.bottom())
             .fold(f32::MIN, f32::max);
         assert!(
-            left.iter().any(|(word, _)| word == "edited"),
+            left.iter().any(|(word, _)| word == "1 pending"),
             "the state phrase is what the left group runs out of room with: {header:?}"
         );
         for (word, rect) in &left {
@@ -1300,6 +1444,199 @@ mod tests {
         }
     }
 
+    /// An edit lands on the working copy at once, so the strip counts the fields that
+    /// differ from the saved bytes rather than saying only that something did.
+    #[test]
+    fn the_header_counts_the_fields_that_differ_from_the_saved_bytes() {
+        let mut open = Open::fresh(Fresh::Program);
+        let said = open.twice();
+        assert!(
+            !said.iter().any(|word| word.ends_with("pending")),
+            "nothing has been touched: {said:?}"
+        );
+
+        open.set(&[("center_panel.gain", "96")]);
+        let said = open.twice();
+        assert!(said.iter().any(|word| word == "1 pending"), "{said:?}");
+        assert!(
+            !said.iter().any(|word| word == "edited"),
+            "a field document counts what moved: {said:?}"
+        );
+
+        open.set(&[("center_panel.split", "true")]);
+        let said = open.twice();
+        assert!(said.iter().any(|word| word == "2 pending"), "{said:?}");
+    }
+
+    /// The loud action carries the count, but only where the header would already say
+    /// the write can happen — a number in front of a dashed action would read as an
+    /// offer.
+    #[test]
+    fn the_loud_action_carries_the_count_where_there_is_somewhere_to_send_it() {
+        let mut open = Open::fresh(Fresh::Program);
+        let bytes = open.entity().bytes.clone();
+        open.id = open.workspace.ingest(
+            "Africa Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+            bytes,
+            &mut open.log,
+        );
+        open.set(&[("center_panel.gain", "96")]);
+
+        let unattached = open.twice();
+        assert!(
+            unattached.iter().any(|word| word == "Queue send"),
+            "nothing is attached, so the count is not an offer: {unattached:?}"
+        );
+
+        open.device
+            .pretend_scanned(ObjectClass::Program, 7, &["", "", "", "Africa Split"]);
+        let attached = open.twice();
+        assert!(
+            attached.iter().any(|word| word == "Queue send · 1"),
+            "{attached:?}"
+        );
+    }
+
+    /// Not relevant means the instrument is not using these controls for the state the
+    /// file holds. They are hidden, and the section says so rather than leaving a gap.
+    #[test]
+    fn a_group_the_instrument_is_not_using_is_named_rather_than_silently_absent() {
+        let mut open = Open::fresh(Fresh::Program);
+        let said = open.twice();
+        let idle: Vec<&String> = said
+            .iter()
+            .filter(|word| word.contains("stored but not in use"))
+            .collect();
+        assert!(!idle.is_empty(), "{said:?}");
+        assert!(
+            idle.iter().any(|line| line.contains("Vox")),
+            "a B3 program keeps the other models' registrations: {idle:?}"
+        );
+        assert!(
+            idle.iter().all(|line| line.contains("kept, not cleared")),
+            "{idle:?}"
+        );
+    }
+
+    /// What the Edit face hides is a row in Advanced like any other, counted where the
+    /// reader can see how much of the body is not on the other face.
+    #[test]
+    fn the_fields_the_edit_face_hides_are_rows_under_advanced() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.document.views.insert(open.id, Face::Advanced);
+        let said = open.twice();
+        let reading = said
+            .iter()
+            .find(|word| word.contains("hidden from Edit"))
+            .unwrap_or_else(|| panic!("the table counts what Edit does not draw: {said:?}"));
+        assert!(!reading.contains("· 0 hidden"), "{reading}");
+        assert!(
+            said.iter().any(|word| word == "About this file"),
+            "{said:?}"
+        );
+        assert!(said.iter().any(|word| word == "Every field"), "{said:?}");
+    }
+
+    /// Both stored registrations stay on screen: the one the instrument plays says so,
+    /// and the other is the switch that would bring it back.
+    #[test]
+    fn both_stored_alternatives_paint_and_the_playing_one_says_so() {
+        let mut open = Open::fresh(Fresh::Program);
+        let said = open.twice();
+        for title in ["B3 · Preset 1", "B3 · Preset 2"] {
+            assert!(said.iter().any(|word| word == title), "{title}: {said:?}");
+        }
+        assert!(said.iter().any(|word| word == "playing"), "{said:?}");
+        assert!(said.iter().any(|word| word == "select"), "{said:?}");
+        // ⚠️ The head of each card is the switch. The layout keeps the selector in the
+        // group above the ones it picks between, and drawn there as well it would be
+        // two controls for one preset.
+        assert!(
+            !said.iter().any(|word| word == "B3 preset"),
+            "the selector is drawn once, as the cards' own heads: {said:?}"
+        );
+    }
+
+    /// The lens swaps every morphed control to what it becomes under one performance
+    /// control, and says so above the sections.
+    #[test]
+    fn the_morph_lens_shows_what_a_control_becomes_under_the_wheel() {
+        let mut open = Open::file("blank.ns4y", crate::fields::blank::stage4_synth());
+        open.set(&[("synth_a_volume", "40"), ("synth_a_volume_wheel", "211")]);
+        let panel = open.twice();
+        assert!(
+            !panel.iter().any(|word| word == "211"),
+            "the panel shows the panel value: {panel:?}"
+        );
+
+        open.document.fields.pretend_lens(0);
+        let wheel = open.twice();
+        assert!(wheel.iter().any(|word| word == "211"), "{wheel:?}");
+        assert!(
+            wheel
+                .iter()
+                .any(|word| word.contains("writes the morph slot")),
+            "the banner says where an edit lands: {wheel:?}"
+        );
+    }
+
+    /// A position the library could not name is shown as what it is. Real files hold
+    /// them, and that spelling is the only way to write one back.
+    #[test]
+    fn a_position_the_library_could_not_name_is_shown_rather_than_hidden() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.set(&[("center_panel.organ_type", "unknown (6)")]);
+        let said = open.twice();
+        assert!(
+            said.iter().any(|word| word == "unrecognized value (6)"),
+            "{said:?}"
+        );
+    }
+
+    /// A path this app has no word for reads as a rough name rather than as a nameless
+    /// knob — unpolished has to look unpolished.
+    #[test]
+    fn a_path_with_no_label_yet_reads_as_its_prettified_self() {
+        let said = Open::file("blank.ns4y", crate::fields::blank::stage4_synth()).twice();
+        assert!(!strings::known("synth_a_volume"));
+        assert!(
+            said.iter().any(|word| word == "Synth a volume"),
+            "{:?}",
+            &said[..said.len().min(40)]
+        );
+    }
+
+    /// ⚠️ Every section of a Stage program is open, and the nav names each of them. The
+    /// old view folded a body this size away behind its headings, which made a control
+    /// you cannot see a control you do not know you have.
+    #[test]
+    fn every_section_of_a_stage_program_is_open_and_named_in_the_nav() {
+        let bytes = crate::fields::blank::stage4_program();
+        let (registry, _) = fields::apply(&bytes, &[]).unwrap();
+        let resolved = nord_format::formats::ns4::program::PANEL.resolve(&registry);
+        let titles: Vec<&str> = resolved
+            .sections
+            .iter()
+            .filter(|section| section.relevant)
+            .map(|section| section.group.title)
+            .collect();
+        assert!(titles.len() > 1, "{titles:?}");
+
+        let mut open = Open::file("blank.ns4p", bytes);
+        let said = open.twice();
+        for title in titles {
+            let drawn = said.iter().filter(|word| *word == title).count();
+            assert!(
+                drawn >= 2,
+                "{title} was painted {drawn} times; the nav chip and the heading are two",
+            );
+        }
+    }
+
     /// The record: the container grid, the byte diff — with something in it and with
     /// nothing — and the folded dump.
     #[test]
@@ -1349,7 +1686,11 @@ mod tests {
             crate::fields::blank::electro5_song(),
             &mut log,
         );
-        assert_eq!(offered(&workspace, song), ["Edit", "Metadata"]);
+        assert_eq!(
+            offered(&workspace, song),
+            ["Edit", "Metadata", "Advanced"],
+            "the four entries, the record, and the addresses as stored"
+        );
 
         let stub = workspace.ingest(
             "blank.ns3s".into(),
@@ -1357,7 +1698,11 @@ mod tests {
             crate::fields::blank::stage3_song(),
             &mut log,
         );
-        assert_eq!(offered(&workspace, stub), ["Metadata"]);
+        assert_eq!(
+            offered(&workspace, stub),
+            ["Edit", "Metadata", "Advanced"],
+            "a body no registry describes still says so, and shows its bytes"
+        );
 
         let junk = workspace.ingest(
             "junk.bin".into(),
@@ -1397,6 +1742,7 @@ mod tests {
 
         // What the table does with the library's answer, which is the part worth
         // pinning: the same call the frame makes.
+        let before = workspace.get(id).unwrap().bytes.clone();
         let refused = document.apply(
             id,
             vec![("center_panel.gain".into(), "200".into())],
@@ -1404,6 +1750,15 @@ mod tests {
             &mut log,
         );
         assert!(refused.is_err());
+        assert!(
+            refused.as_ref().unwrap_err().contains("0 .. 127"),
+            "the library's own words reach the operator: {refused:?}"
+        );
+        assert_eq!(
+            workspace.get(id).unwrap().bytes,
+            before,
+            "a refused value leaves the file untouched"
+        );
         document.advanced.settled(refused);
         assert!(document.error.is_some());
 
@@ -1425,6 +1780,7 @@ mod tests {
     fn the_tab_strip_and_the_document_body_scroll_on_their_own() {
         let ctx = egui::Context::default();
         ctx.style_mut(crate::app::metrics);
+        ctx.set_fonts(crate::app::fonts());
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();
@@ -1571,6 +1927,8 @@ mod tests {
     #[test]
     fn a_half_typed_cell_does_not_follow_the_operator_into_the_next_document() {
         let ctx = egui::Context::default();
+        ctx.all_styles_mut(crate::app::metrics);
+        ctx.set_fonts(crate::app::fonts());
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();
@@ -1647,27 +2005,84 @@ mod tests {
         }
     }
 
-    /// An Electro 5 set list has a Basic view of its own — the four slots — and it does
-    /// not come from the registry, which lists nothing for that body.
+    /// An Electro 5 set list has a view of its own — the four entries — and it does not
+    /// come from the registry, which lists nothing for that body. Every face of it
+    /// paints.
     #[test]
     fn a_set_list_has_its_own_view() {
         let bytes = crate::fields::blank::electro5_song();
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        render_file("blank.ne5t", bytes, Face::Edit);
+        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+            render_file("blank.ne5t", bytes.clone(), face);
+        }
     }
 
-    /// ⚠️ A song that decodes no further than its container has no Basic view to offer,
-    /// and must not be given one: an empty page saying nothing is editable stands in
-    /// front of the byte record, which is everything that file has.
+    /// A body no registry describes says which of the two silences it is — nothing to
+    /// draw, rather than nothing read — states what the container does say, and shows
+    /// the bytes it is keeping.
     #[test]
-    fn an_undecoded_song_keeps_the_record_it_has() {
+    fn a_body_with_no_registry_says_why_and_shows_its_bytes() {
         let bytes = crate::fields::blank::stage3_song();
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(!fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        render_file("blank.ns3s", bytes, Face::Metadata);
+
+        let mut open = Open::file("blank.ns3s", bytes);
+        let said = open.twice();
+        let has = |word: &str| said.iter().any(|held| held == word);
+        assert!(has("Nothing to edit here yet"), "{said:?}");
+        assert!(
+            said.iter()
+                .any(|word| word.starts_with("No registry declares this model's fields yet")),
+            "the sentence: {said:?}"
+        );
+        for fact in ["Format", "Model", "Container", "Body", "Version", "Where"] {
+            assert!(has(fact), "{fact} is one of the facts: {said:?}");
+        }
+        assert!(has("Save a copy…"), "the one thing left to do: {said:?}");
+        assert!(
+            has("Send as-is"),
+            "the loud action is the same send in this body's words: {said:?}"
+        );
+        assert!(has("0000") && has("0020"), "the body as hex: {said:?}");
+        assert!(
+            !said.iter().any(|word| word.contains("editable here yet")),
+            "the old apology: {said:?}"
+        );
+
+        open.document.views.insert(open.id, Face::Advanced);
+        let said = open.twice();
+        assert!(
+            said.iter().any(|word| word == "Body bytes"),
+            "the whole body has a face of its own: {said:?}"
+        );
+        assert!(said.iter().any(|word| word == "3 rows"), "{said:?}");
+    }
+
+    /// A set list's header says what the list amounts to, and only when that is
+    /// something to look at: nothing read is not four problems.
+    #[test]
+    fn a_set_lists_header_claims_only_what_the_instrument_showed() {
+        let mut open = Open::file("Blue Room.ne5t", crate::fields::blank::electro5_song());
+        let said = open.twice();
+        assert!(
+            !said.iter().any(|word| word.contains("needs attention")),
+            "nothing is attached, so nothing is claimed: {said:?}"
+        );
+
+        // Bank 1 read, and the slot the second entry names is vacant.
+        open.device.pretend_scanned(
+            ObjectClass::Program,
+            1,
+            &["Africa Split", "", "Gospel Perc"],
+        );
+        let said = open.twice();
+        assert!(
+            said.iter().any(|word| word == "1 entry needs attention"),
+            "{said:?}"
+        );
     }
 
     /// Bytes that do not decode still have a document — it says so and shows the record.
