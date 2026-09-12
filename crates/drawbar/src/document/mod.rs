@@ -18,7 +18,7 @@ use crate::strings;
 use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
-mod controls;
+pub mod controls;
 pub(crate) mod encode;
 pub mod keys;
 mod panel;
