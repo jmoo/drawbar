@@ -522,7 +522,7 @@ pub fn bold() -> egui::FontFamily {
 /// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
 /// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
 /// heavier weight to ask for and no 400 to set the body in.
-fn fonts() -> egui::FontDefinitions {
+pub(crate) fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
     for (family, face, ttf) in [
