@@ -1358,6 +1358,13 @@ mod tests {
         }
         assert!(said.iter().any(|word| word == "playing"), "{said:?}");
         assert!(said.iter().any(|word| word == "select"), "{said:?}");
+        // ⚠️ The head of each card is the switch. The layout keeps the selector in the
+        // group above the ones it picks between, and drawn there as well it would be
+        // two controls for one preset.
+        assert!(
+            !said.iter().any(|word| word == "B3 preset"),
+            "the selector is drawn once, as the cards' own heads: {said:?}"
+        );
     }
 
     /// The lens swaps every morphed control to what it becomes under one performance
