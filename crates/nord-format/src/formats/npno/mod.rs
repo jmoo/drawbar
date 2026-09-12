@@ -28,9 +28,10 @@
 //! The prefix's individual field placements are inferred from specimens; not
 //! confirmed on hardware. Confirmed on hardware: the container layout as
 //! [`Library::to_body`] writes it — a library whose directory and audio this crate
-//! re-laid loads on the instrument and plays at the original's level — and, within
-//! it, that the key map's value is the recording's root note, that a stroke's
-//! [`Bank`] is what it is played for, and that [`Stroke::layer`] indexes softness.
+//! re-laid, and one whose audio [`encode`] coded outright, load on the instrument and
+//! play at the original's level — and, within it, that the key map's value is the
+//! recording's root note, that a stroke's [`Bank`] is what it is played for, and that
+//! [`Stroke::layer`] states the softness the velocity threshold reads.
 //!
 //! Audio follows the directory, one span per record in the directory's own order.
 //! The first span starts at the next `1022 × channels` boundary offset by
@@ -48,9 +49,11 @@
 //! no local specimen says what. Gating on them would refuse real files.
 
 pub mod codec;
+pub mod encode;
 
 use crate::cbin::{self, Cbin, Header, RawBody};
 use crate::error::{try_vec, Error, ParseError};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Read, Seek, Write};
@@ -97,10 +100,35 @@ const REC_LAYER: usize = 0x05;
 const REC_FRAMES: usize = 0x06;
 const REC_BLOCKS: usize = 0x0a;
 const REC_SEEDS: usize = 0x0c;
+const REC_MARKS: usize = 0x1c;
+const REC_MARK_BLOCK: usize = 0x2c;
+const REC_DECAY: usize = 0x2e;
+/// u16 holding the layer value again in vendor records. Sweeping it moved nothing
+/// measurable. Confirmed on hardware.
+const REC_WINDOW: usize = 0x32;
+/// u16 the instrument attenuates the stroke by, one decibel per unit. Confirmed on
+/// hardware.
+const REC_TRIM: usize = 0x34;
+const REC_DECAYS: usize = 0x36;
 const REC_ID: usize = 0x6e;
 
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;
+
+/// Length marks a record carries at [`REC_MARKS`].
+const MARKS: usize = 4;
+
+/// One-pole decay coefficients a record carries after the one at [`REC_DECAY`], from
+/// [`REC_DECAYS`] up to the identifier. This ladder is the decay the instrument applies
+/// over the stroke's own; it is non-decreasing across its entries, and a stroke of any
+/// bank carries it — including a release stroke, which zeroes only the coefficient at
+/// [`REC_DECAY`]. Nothing here derives them from audio. Confirmed on hardware.
+const DECAYS: usize = 14;
+const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
+
+/// One [`REC_DECAYS`] entry applying nothing: 1.0 in the ladder's fixed point, where
+/// the vendor's own entries sit just below it.
+const LADDER_UNITY: u32 = 0x0080_0000;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
@@ -120,8 +148,8 @@ pub const FINE_TUNE_CENTS_PER_UNIT: f32 = 0.7;
 pub enum Bank {
     /// Played at note-on. Every library has these.
     Attack,
-    /// Played from the note-on while the sustain pedal is down, which the panel's
-    /// acoustics bit 0 enables. Only the larger libraries carry them.
+    /// Played in place of the attack when the sustain pedal is down at note-on, which
+    /// the panel's acoustics bit 0 enables. Only the larger libraries carry them.
     Resonance,
     /// Played at note-off.
     Release,
@@ -165,9 +193,10 @@ impl fmt::Display for Bank {
 /// Which velocity layers of a root to keep.
 ///
 /// A root's layers are counted within one [`Bank`], since each bank indexes its
-/// own set. Nothing is renumbered: the layer values that survive keep the values
-/// they had, which is safe because the instrument picks by rank among the layers a
-/// root still holds rather than by matching a layer value. Confirmed on hardware.
+/// own set. Nothing is renumbered, and nothing should be: selection reads the value
+/// a layer states rather than its rank among the layers left ([`Stroke::layer`]), so
+/// the survivors keep their place in the velocity range and the softest one left
+/// takes over the velocities below it. Confirmed on hardware.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layers {
     /// The loudest `n` of each root and bank — the `n` lowest layer values.
@@ -438,7 +467,7 @@ pub struct Stroke<'a> {
     /// hardware.
     pub root: u8,
     record: [u8; RECORD],
-    audio: &'a [u8],
+    audio: Cow<'a, [u8]>,
 }
 
 impl<'a> Stroke<'a> {
@@ -452,9 +481,15 @@ impl<'a> Stroke<'a> {
         Bank::from_code(self.bank_code())
     }
 
-    /// Softness index within the root's bank; 0 is the loudest recording, and a
-    /// bank's values need be neither dense nor start at zero. Confirmed on
-    /// hardware.
+    /// Softness value within the root's bank; 0 is the loudest recording, and a
+    /// bank's values need be neither dense nor start at zero.
+    ///
+    /// A key sounds the largest value the root holds that is at most
+    /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
+    /// value above 30 ([`encode::HIGHEST_PLAYED_LAYER`]) never plays at all. Confirmed
+    /// on hardware; the 31 is measured to about ±2, so a layer sitting on the bound
+    /// switches a few velocities either side of where the formula puts it. Vendor
+    /// libraries spread a root over 0..[`encode::SOFTEST_LAYER`].
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
     }
@@ -489,8 +524,8 @@ impl<'a> Stroke<'a> {
     }
 
     /// The encoded audio, `blocks × 1022 × channels` bytes.
-    pub fn audio(&self) -> &'a [u8] {
-        self.audio
+    pub fn audio(&self) -> &[u8] {
+        &self.audio
     }
 
     /// The record as stored, its audio offset excluded from any meaning: the
@@ -617,7 +652,7 @@ impl<'a> Library<'a> {
             strokes.push(Stroke {
                 root,
                 record,
-                audio,
+                audio: Cow::Borrowed(audio),
             });
             at = end;
         }
@@ -986,7 +1021,7 @@ impl<'a> Library<'a> {
             let record = DIRECTORY_AT + i * RECORD;
             out[record..record + RECORD].copy_from_slice(&stroke.record);
             out[record + REC_START..record + REC_START + 4].copy_from_slice(&start.to_be_bytes());
-            out[at..at + stroke.audio.len()].copy_from_slice(stroke.audio);
+            out[at..at + stroke.audio.len()].copy_from_slice(&stroke.audio);
             at += stroke.audio.len();
         }
         Ok(out)

@@ -1857,6 +1857,236 @@ fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
     assert!(overlap > 0, "no stroke long enough to repeat a block");
 }
 
+/// The coder is the decoder's inverse: give each stroke back the frames it decodes to
+/// and it lays out the same blocks — the same segmentation, the same width and order,
+/// the same residuals to the bit, and the same clear bits after the last field. Every
+/// stroke of every library is held to it, the ones this crate wrote included.
+///
+/// A block's attenuation byte is the one value that can come back different. It is a
+/// statistic the vendor's encoder recorded, not a function of the frames it went on
+/// to store, and nothing in the decode reads it.
+#[test]
+fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
+    let mut strokes = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let library = piano.library().unwrap();
+        let again =
+            npno::encode::rebuild(&library).unwrap_or_else(|e| panic!("{where_}: recode: {e}"));
+        for (stroke, recoded) in library.strokes().iter().zip(&again.strokes) {
+            assert_eq!(
+                recoded.blocks,
+                usize::from(stroke.blocks()),
+                "{where_}: {stroke:?} came back as a different number of blocks"
+            );
+            assert_eq!(
+                recoded.recoded(),
+                0,
+                "{where_}: {stroke:?}: {} of {} block(s) came back with different residuals, \
+                 a different width or a different order",
+                recoded.recoded(),
+                recoded.blocks
+            );
+            strokes += 1;
+        }
+    }
+    assert!(strokes > 0, "no piano stroke");
+}
+
+/// A library coded again from its own audio is the library it came from: the same
+/// size, the same prefix, the same directory records, and the same blocks in the same
+/// places. Only the attenuation the blocks declare can move, so the file this writes
+/// plays what the file it read plays.
+#[test]
+fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
+    let mut seen = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+        let again = npno::encode::rebuild(&library).unwrap();
+        let after = again.library.to_body().unwrap();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "{where_}: the recode is a different size"
+        );
+
+        let audio: usize = again
+            .library
+            .strokes()
+            .iter()
+            .map(|s| s.audio().len())
+            .sum();
+        let head = before.len() - audio;
+        assert!(
+            after[..head] == before[..head],
+            "{where_}: the recode moved a byte outside the audio"
+        );
+        for (stroke, recoded) in again.library.strokes().iter().zip(&again.strokes) {
+            assert_eq!(
+                recoded.identical + recoded.restated,
+                recoded.blocks,
+                "{where_}: {stroke:?} did not come back block for block"
+            );
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no piano library");
+}
+
+/// Coding reaches a fixed point in one pass, whatever it is handed: what a recode
+/// writes is what a recode of that writes, byte for byte, blocks and container. A
+/// stroke states the frames its blocks own, so the search is given the same room the
+/// second time and lands on the same widths — which is what makes a library this
+/// crate writes one that survives a rebuild untouched.
+#[test]
+fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
+    let mut seen = 0;
+    for (specimen, piano) in pianos() {
+        let where_ = specimen.path.display();
+        let library = piano.library().unwrap();
+        let once = npno::encode::rebuild(&library).unwrap();
+        let twice = npno::encode::rebuild(&once.library).unwrap();
+        let before = once.library.to_body().unwrap();
+        let after = twice.library.to_body().unwrap();
+        let at = before
+            .iter()
+            .zip(&after)
+            .position(|(a, b)| a != b)
+            .map(|i| format!("{i:#x}"))
+            .unwrap_or_else(|| "the length".to_string());
+        assert!(
+            before == after,
+            "{where_}: coding the recode again moved {at} (in {} bytes, out {})",
+            before.len(),
+            after.len()
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no piano library");
+}
+
+/// A library written from recordings alone, no template donating a byte of it, is the
+/// library that was played from those rules.
+///
+/// The recordings are `full.npno`'s own strokes decoded — the frames its sources coded
+/// to, which the codec gives back sample for sample — and the expected bytes are
+/// `from-scratch.npno`, which holds that audio and states every other byte by rule.
+/// That file was written by a script outside this crate and played on the instrument,
+/// so it is an oracle for the rules rather than a snapshot of this code.
+#[test]
+fn a_piano_written_from_rules_alone_is_the_library_that_was_played() {
+    let specimen = named("from-scratch.npno");
+    let Entity::Piano(source) = &named("full.npno").entity else {
+        panic!("full.npno is not a piano library");
+    };
+    let library = source.library().unwrap();
+    let recordings: Vec<npno::encode::Recording> = library
+        .strokes()
+        .iter()
+        .map(|stroke| {
+            let audio = npno::codec::decode(stroke, library.channels()).unwrap();
+            assert_eq!(audio.clipped, 0, "{stroke:?} saturates the decode");
+            npno::encode::Recording {
+                root: stroke.root,
+                bank: stroke.bank().expect("a named bank"),
+                layer: stroke.layer(),
+                channels: audio.channels,
+            }
+        })
+        .collect();
+
+    let (name, variant) = library.name();
+    let built = npno::encode::build(
+        &npno::encode::Donor::Rules(npno::encode::Rules::new(npno::encode::Kind::Grand)),
+        &npno::encode::Options::new(&name).variant(&variant),
+        &recordings,
+    )
+    .unwrap();
+    let bytes = built
+        .to_piano()
+        .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))
+        .unwrap();
+    let differing: Vec<String> = bytes
+        .iter()
+        .zip(&specimen.bytes)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(at, (a, b))| format!("{at:#x}: wrote {a:#04x}, played {b:#04x}"))
+        .take(8)
+        .collect();
+    assert!(
+        bytes == specimen.bytes,
+        "the rule-written library is not the one that was played ({} bytes out, {} in); \
+         first differences: {}",
+        bytes.len(),
+        specimen.bytes.len(),
+        differing.join(", ")
+    );
+
+    let again = npno::encode::rebuild(&built).unwrap();
+    assert_eq!(
+        again.library.to_body().unwrap(),
+        built.to_body().unwrap(),
+        "a rule-written library is not a fixed point of a recode"
+    );
+}
+
+/// The libraries in reach this crate's own coder produced, named because nothing in a
+/// file says who wrote it: a stereo build, a mono one, a synthetic one, a vendor
+/// library coded again from its own audio, and one written with no template at all.
+const OUR_LIBRARIES: [&str; 5] = [
+    "full.npno",
+    "mono.npno",
+    "synth.npno",
+    "rebuilt-clavinet.npno",
+    "from-scratch.npno",
+];
+
+/// A library this crate wrote comes back from a recode byte for byte — every block
+/// identical, the attenuation it declares included, and the container closed up the
+/// same way. The one value a recode may move is a statistic another encoder measured,
+/// and these hold none: what the coder writes, the coder writes again.
+#[test]
+fn a_library_this_crate_wrote_recodes_byte_for_byte() {
+    for name in OUR_LIBRARIES {
+        let specimen = named(name);
+        let Entity::Piano(piano) = &specimen.entity else {
+            panic!("{name} is not a piano library");
+        };
+        let library = piano
+            .library()
+            .unwrap_or_else(|e| panic!("{name}: parse: {e}"));
+        let again = npno::encode::rebuild(&library).unwrap_or_else(|e| panic!("{name}: {e}"));
+        for (stroke, recoded) in library.strokes().iter().zip(&again.strokes) {
+            assert_eq!(
+                recoded.identical,
+                recoded.blocks,
+                "{name}: {stroke:?} came back with {} block(s) restated",
+                recoded.blocks - recoded.identical
+            );
+        }
+        let rebuilt = again
+            .library
+            .to_piano()
+            .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let at = rebuilt
+            .iter()
+            .zip(&specimen.bytes)
+            .position(|(a, b)| a != b)
+            .map(|i| format!("{i:#x}"))
+            .unwrap_or_else(|| "the length".to_string());
+        assert!(
+            rebuilt == specimen.bytes,
+            "{name}: the recode differs at {at} (in {} bytes, out {})",
+            specimen.bytes.len(),
+            rebuilt.len()
+        );
+    }
+}
+
 /// Every transform leaves a library the reader takes back: spans tiling the body to
 /// its end, counts summing to the directory, and every covered key naming a root
 /// that still has strokes. The strokes that survive keep their audio byte for byte —

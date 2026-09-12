@@ -363,6 +363,39 @@ enum PianoAction {
     /// Cut a library in two at a key, writing both halves.
     Split(piano::SplitArgs),
 
+    /// Build a piano library from a directory of WAVs.
+    ///
+    /// The WAVs name the root, bank and layer they are. Any rate resamples onto the
+    /// lattice the instrument plays at.
+    ///
+    /// Everything the audio does not decide — the length marks, the decay
+    /// coefficients, the per-note tables, the playback parameters and the stream
+    /// version — comes from `--template`, out of its own stroke of the same bank and
+    /// nearest root. Without a template the library states neutral playback instead:
+    /// no decay applied over the recordings, each stroke trimmed by its own layer
+    /// value, and the damper limit `--kind` implies.
+    ///
+    /// Every key up to one semitone above the highest root sounds, playing the
+    /// nearest root at or above it; keys past that are left uncovered. A key sounds
+    /// the largest layer value its root holds that is at most (127 − velocity)·31/127,
+    /// and a root's `l00`, `l01`, … spread over 0..27 so that each layer answers to
+    /// its own part of the velocity range.
+    ///
+    /// Hardware-verified: a library built this way loads and plays, mono and stereo,
+    /// on every key it covers, and one written without a template sounds like the same
+    /// audio built against one.
+    Build(piano::BuildArgs),
+
+    /// Code a library's audio again from the frames it decodes to, and report how each
+    /// stroke's blocks came back.
+    ///
+    /// A library this coder wrote comes back byte for byte. One it did not comes back
+    /// block for block apart from the attenuation each block declares, which is a
+    /// statistic the file's own encoder measured and the decode never reads — coded
+    /// again, such a library plays indistinguishably from the original. Each stroke
+    /// keeps its own root, bank and layer value.
+    Rebuild(piano::RebuildArgs),
+
     /// Rebuild each library from its parsed model and check the bytes come back
     /// identical; with `--deep` also decode every stroke it holds.
     ///
@@ -789,6 +822,8 @@ fn main() -> ExitCode {
             PianoAction::Edit(args) => piano::edit(&ui, args),
             PianoAction::Trim(args) => piano::trim(&ui, args),
             PianoAction::Split(args) => piano::split(&ui, args),
+            PianoAction::Build(args) => piano::build(&ui, args),
+            PianoAction::Rebuild(args) => piano::rebuild(&ui, args),
             PianoAction::Verify(args) => piano::verify(&ui, args),
         },
         Command::Setlist { action } => match action {
