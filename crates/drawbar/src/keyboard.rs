@@ -457,7 +457,7 @@ pub fn paint_cell(
     let (edge, dashed) = state.edge(&visuals);
     let stroke = egui::Stroke::new(1.0_f32, cell_ink(selected, edge, &visuals));
     match dashed {
-        true => dashed_rect(&painter, rect, stroke),
+        true => crate::document::keys::dashed_rect(&painter, rect, stroke),
         false => {
             painter.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
         }
@@ -508,22 +508,6 @@ pub fn paint_cell(
         name,
         format,
     );
-}
-
-/// The four sides of a dashed border. egui draws dashes along a line, so a rectangle is
-/// four of them.
-fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
-    const DASH: f32 = 3.0;
-    let corners = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-        rect.left_top(),
-    ];
-    for side in corners.windows(2) {
-        painter.extend(egui::Shape::dashed_line(side, stroke, DASH, DASH));
-    }
 }
 
 // ---- the lists ----------------------------------------------------------------------
