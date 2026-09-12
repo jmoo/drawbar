@@ -433,6 +433,7 @@ fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result
     let widest = counts[usize::from(MIN_WIDTH)];
     let total = target
         .checked_add(widest)
+        .and_then(|total| total.checked_mul(channels).map(|_| total))
         .ok_or_else(|| refuse("a stroke longer than this platform can address"))?;
     let planes = planes(source, seeds, total)?;
 
