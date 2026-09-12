@@ -76,10 +76,6 @@ const LIST: [Track; 5] = [
     Track::Px(20.0),
 ];
 
-/// What the Pianos folder is, since nothing in it can be changed from here.
-const PIANOS: &str = "Pianos are installed by Nord Sound Manager. They are listed here so \
-                      a program can name what it plays.";
-
 /// The centre's view of the attached instrument.
 #[derive(Default)]
 pub struct Keyboard {
@@ -527,10 +523,9 @@ fn list(
     if banks.is_empty() {
         return nothing(ui, "Nothing read yet.");
     }
-    if class == ObjectClass::Piano {
-        prose(ui, PIANOS);
-    }
-    if class == ObjectClass::Sample {
+    // A library partition fills in bytes rather than slots, so what it has left is what
+    // decides whether the next send lands.
+    if class.is_library() {
         egui::TopBottomPanel::bottom("keyboard_room")
             .resizable(false)
             .frame(egui::Frame::new())
@@ -867,7 +862,7 @@ fn gestures(
 ) {
     let class = view.class;
     let item = Item::Slot { class, at };
-    // ⚠️ Pianos are large libraries fetched whole, so this view only lists them.
+    // ⚠️ A partition this app cannot name is listed and nothing more.
     let fetchable = !read_only(class);
     let name = info
         .map(|info| info.name.trim())
@@ -1032,16 +1027,6 @@ fn nothing(ui: &mut egui::Ui, said: &str) {
                 .italics(),
         );
     });
-}
-
-/// A sentence about the folder itself, over the list it is about.
-fn prose(ui: &mut egui::Ui, said: &str) {
-    ui.add_space(GAP);
-    ui.horizontal(|ui| {
-        ui.add_space(PAD);
-        ui.label(egui::RichText::new(said).text_style(ui_text()).weak());
-    });
-    ui.add_space(GAP);
 }
 
 #[cfg(test)]
