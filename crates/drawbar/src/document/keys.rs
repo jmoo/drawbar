@@ -1,10 +1,10 @@
 //! The key map: the keyboard, the lanes over it, and the geometry they share.
 //!
-//! ⚠️ Two geometries meet here and they do not line up. A lane gives every key in the
-//! span an equal share of the width ([`Span`]); the keyboard gives every *white* key an
-//! equal share and hangs the blacks between them. A band edge and the key beneath it are
-//! therefore a fraction of a key apart in the middle of the span. The lanes agree with
-//! each other, and the keyboard agrees with the keys.
+//! One geometry serves both. The white keys share the width equally and the black keys
+//! hang between them, and a key's cell in a lane is that same key's cell on the
+//! keyboard — so a band edge, a size bar, a per-key bar and a root marker all sit over
+//! the key they name. Black cells are the narrow ones, and they overlap the whites they
+//! are drawn between, which is what a keyboard looks like.
 //!
 //! Nothing here scrolls, pins or holds state. A lane takes the width it is offered,
 //! paints what it was handed, and answers with what the pointer asked for.
@@ -16,6 +16,17 @@ use crate::note;
 
 /// The velocity a click on the keyboard plays at.
 pub const AUDITION_VELOCITY: u8 = 90;
+
+/// The gap between two white keys.
+const WHITE_GAP: f32 = 1.0;
+/// How wide a black key is, and how far its left edge sits before the white boundary it
+/// hangs on — both in white keys.
+const BLACK_W: f32 = 0.6;
+const BLACK_OFFSET: f32 = 0.3;
+
+pub fn is_black(note: u8) -> bool {
+    matches!(note % 12, 1 | 3 | 6 | 8 | 10)
+}
 
 /// The stretch of keyboard a lane covers, inclusive at both ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,37 +53,87 @@ impl Span {
         note >= low && note <= high
     }
 
-    /// How wide one key's cell is.
+    /// How many white keys the span holds. Never zero.
+    fn whites(self) -> usize {
+        let (low, high) = self.ends();
+        (low..=high).filter(|note| !is_black(*note)).count().max(1)
+    }
+
+    /// How wide one white key's share of the rect is, gap included.
     fn unit(self, rect: egui::Rect) -> f32 {
-        rect.width() / self.keys() as f32
+        rect.width() / self.whites() as f32
+    }
+
+    /// The `index`-th white key of the span.
+    fn white(self, index: usize) -> u8 {
+        let (low, high) = self.ends();
+        (low..=high)
+            .filter(|note| !is_black(*note))
+            .nth(index)
+            .unwrap_or(high)
+    }
+
+    /// How many white keys come before `note`.
+    fn whites_before(self, note: u8) -> usize {
+        let (low, _) = self.ends();
+        (low..note).filter(|note| !is_black(*note)).count()
     }
 
     /// The left edge of `note`'s cell. A note past either end lands on that end.
     pub fn x_of(self, rect: egui::Rect, note: u8) -> f32 {
         let (low, high) = self.ends();
-        let index = note.clamp(low, high) - low;
-        rect.left() + self.unit(rect) * index as f32
+        let note = note.clamp(low, high);
+        let unit = self.unit(rect);
+        let seen = self.whites_before(note) as f32;
+        match is_black(note) {
+            true => rect.left() + unit * (seen - BLACK_OFFSET),
+            false => rect.left() + unit * seen,
+        }
     }
 
-    /// The right edge of `note`'s cell, which is the left edge of the next one.
+    /// The right edge of `note`'s cell. Two white cells are a gap apart; a black cell
+    /// overlaps the whites on either side of it.
     pub fn x_after(self, rect: egui::Rect, note: u8) -> f32 {
-        self.x_of(rect, note) + self.unit(rect)
+        let (low, high) = self.ends();
+        let unit = self.unit(rect);
+        match is_black(note.clamp(low, high)) {
+            true => self.x_of(rect, note) + unit * BLACK_W,
+            false => self.x_of(rect, note) + unit - WHITE_GAP,
+        }
     }
 
     /// The key `x` falls in, clamped to the span.
+    ///
+    /// Black keys are drawn over the whites they hang between, so a black cell owns its
+    /// whole x range — a lane has no vertical dimension to tell them apart by.
     pub fn note_at(self, rect: egui::Rect, x: f32) -> u8 {
-        let (low, _) = self.ends();
+        let (low, high) = self.ends();
+        if x <= self.x_of(rect, low) {
+            return low;
+        }
+        if x >= self.x_after(rect, high) {
+            return high;
+        }
+        let black = (low..=high)
+            .filter(|note| is_black(*note))
+            .find(|note| x >= self.x_of(rect, *note) && x < self.x_after(rect, *note));
+        if let Some(note) = black {
+            return note;
+        }
+        // Between two white cells is the gap that separates them, which belongs to the
+        // key it was taken from.
         let unit = self.unit(rect);
         let index = match unit > 0.0 {
             true => ((x - rect.left()) / unit).floor(),
             false => 0.0,
         };
-        low + index.clamp(0.0, (self.keys() - 1) as f32) as u8
+        self.white(index.clamp(0.0, (self.whites() - 1) as f32) as usize)
     }
-}
 
-pub fn is_black(note: u8) -> bool {
-    matches!(note % 12, 1 | 3 | 6 | 8 | 10)
+    /// The middle of `note`'s cell, which is what a marker points at.
+    fn centre(self, rect: egui::Rect, note: u8) -> f32 {
+        (self.x_of(rect, note) + self.x_after(rect, note)) / 2.0
+    }
 }
 
 /// How far a played key is from the root that answers it.
@@ -219,7 +280,6 @@ pub struct Mark {
 
 const KEYBOARD_H: f32 = 58.0;
 const BLACK_H: f32 = 35.0;
-const WHITE_GAP: f32 = 1.0;
 const OCTAVE_TEXT: f32 = 8.0;
 /// How much of the key's own ink an octave label keeps.
 const OCTAVE_ALPHA: f32 = 0.7;
@@ -227,36 +287,20 @@ const MARK_TOP: f32 = 2.0;
 const MARK_H: f32 = 4.0;
 const MARK_W: f32 = 6.0;
 
-/// How many white keys the span holds.
-fn white_count(span: Span) -> usize {
-    let (low, high) = span.ends();
-    (low..=high).filter(|note| !is_black(*note)).count()
-}
-
-/// How many white keys come before `note`.
-fn whites_before(span: Span, note: u8) -> usize {
-    let (low, _) = span.ends();
-    (low..note).filter(|note| !is_black(*note)).count()
-}
-
-/// The key `note` occupies: a white key's share of the width, or a black key hung over
-/// the two whites it sits between.
+/// The key `note` occupies: its cell, as deep as that kind of key is drawn.
 fn key_rect(rect: egui::Rect, span: Span, note: u8) -> egui::Rect {
-    let unit = rect.width() / white_count(span).max(1) as f32;
-    let seen = whites_before(span, note) as f32;
-    match is_black(note) {
-        true => egui::Rect::from_min_size(
-            egui::pos2(rect.left() + unit * (seen - 0.3), rect.top()),
-            egui::vec2(unit * 0.6, BLACK_H),
-        ),
-        false => egui::Rect::from_min_max(
-            egui::pos2(rect.left() + unit * seen, rect.top()),
-            egui::pos2(rect.left() + unit * (seen + 1.0) - WHITE_GAP, rect.bottom()),
-        ),
-    }
+    let bottom = match is_black(note) {
+        true => rect.top() + BLACK_H,
+        false => rect.bottom(),
+    };
+    egui::Rect::from_min_max(
+        egui::pos2(span.x_of(rect, note), rect.top()),
+        egui::pos2(span.x_after(rect, note), bottom),
+    )
 }
 
-/// The key under `at`. Black keys are drawn over the whites, so they are tested first.
+/// The key under `at`. Black keys are drawn over the whites, so they are tested first —
+/// on the keyboard a white key is still its own below the black keys' depth.
 fn key_at(rect: egui::Rect, span: Span, at: egui::Pos2) -> Option<u8> {
     if !rect.contains(at) {
         return None;
@@ -335,7 +379,7 @@ fn root_mark(
     mark: &Mark,
     visuals: &egui::Visuals,
 ) {
-    let centre = key_rect(rect, span, mark.note).center().x;
+    let centre = span.centre(rect, mark.note);
     let accent = app::accent(visuals);
     let mut top = rect.top() + MARK_TOP;
     if let Some(label) = &mark.label {
@@ -368,7 +412,7 @@ fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
         egui::Order::Foreground,
         ui.id().with("audition"),
     ));
-    let centre = key_rect(rect, span, note).center().x;
+    let centre = span.centre(rect, note);
     chip(
         &painter,
         egui::pos2(centre, rect.top() - CHIP_TEXT - 4.0),
@@ -964,7 +1008,7 @@ pub fn lane(
         let left = span.x_of(inner, note);
         let bar = egui::Rect::from_min_size(
             egui::pos2(left, top),
-            egui::vec2((span.x_after(inner, note) - left - 1.0).max(1.0), tall),
+            egui::vec2((span.x_after(inner, note) - left).max(1.0), tall),
         );
         let ink = match (edited, value.abs() < LANE_QUIET) {
             (true, _) => app::accent(&visuals),
@@ -1141,8 +1185,9 @@ mod tests {
 
     // ---- geometry -------------------------------------------------------------------
 
-    /// A lane splits its width by key count, and the key under a point is the key whose
-    /// cell that point is in — which is what every hit test in the map rests on.
+    /// The white keys share the width and the blacks hang between them, and the key
+    /// under a point is the key whose cell holds it — which is what every hit test in
+    /// the map rests on.
     #[test]
     fn a_lane_gives_each_key_a_cell_and_reads_it_back() {
         assert_eq!(NSMP.keys(), 73);
@@ -1150,17 +1195,71 @@ mod tests {
 
         let rect = egui::Rect::from_min_size(egui::pos2(7.0, 3.0), egui::vec2(601.0, 19.0));
         for span in [NSMP, NPNO] {
-            let unit = rect.width() / span.keys() as f32;
+            let unit = rect.width() / span.whites() as f32;
             for note in span.low..=span.high {
                 let left = span.x_of(rect, note);
-                assert!(
-                    (span.x_after(rect, note) - left - unit).abs() < 0.001,
-                    "{note} is not one key wide",
-                );
-                assert_eq!(span.note_at(rect, left + unit / 2.0), note);
+                let wide = span.x_after(rect, note) - left;
+                let wanted = match is_black(note) {
+                    true => unit * BLACK_W,
+                    false => unit - WHITE_GAP,
+                };
+                assert!((wide - wanted).abs() < 0.001, "{note} is {wide} wide");
+                assert_eq!(span.note_at(rect, span.centre(rect, note)), note);
             }
+            // The span starts at the left edge and the last white key ends at the right,
+            // a gap short of it.
             assert!((span.x_of(rect, span.low) - rect.left()).abs() < 0.001);
-            assert!((span.x_after(rect, span.high) - rect.right()).abs() < 0.001);
+            assert!((span.x_after(rect, span.high) - rect.right() + WHITE_GAP).abs() < 0.001,);
+        }
+    }
+
+    /// The one geometry: the cell a lane gives a key is the rect the keyboard paints it
+    /// at. Two of these that drift leave every band a key away from the key it names.
+    #[test]
+    fn a_keys_cell_is_the_key_the_keyboard_paints() {
+        fn key_shapes(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Rect> {
+            fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Rect(drawn)
+                        if drawn.rect.top() == rect.top()
+                            && (drawn.rect.height() == KEYBOARD_H
+                                || drawn.rect.height() == BLACK_H) =>
+                    {
+                        into.push(drawn.rect)
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        shapes.iter().for_each(|shape| walk(shape, rect, into))
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, rect, &mut found);
+            }
+            found
+        }
+
+        let ctx = dressed();
+        for span in [NSMP, NPNO] {
+            let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
+                keyboard(ui, span, None, &[])
+            });
+            let painted = key_shapes(&output, rect);
+            assert_eq!(painted.len(), span.keys(), "one rect per key");
+            for (note, key) in (span.low..=span.high).zip(painted) {
+                assert_eq!(
+                    (key.left(), key.right()),
+                    (span.x_of(rect, note), span.x_after(rect, note)),
+                    "{} sits somewhere else on the keyboard",
+                    note::name(note),
+                );
+                let deep = match is_black(note) {
+                    true => BLACK_H,
+                    false => KEYBOARD_H,
+                };
+                assert_eq!(key.height(), deep);
+            }
         }
     }
 
@@ -1174,6 +1273,7 @@ mod tests {
             assert_eq!(span.note_at(rect, rect.right() + 500.0), span.high);
             assert_eq!(span.x_of(rect, 0), span.x_of(rect, span.low));
             assert_eq!(span.x_of(rect, 127), span.x_of(rect, span.high));
+            assert_eq!(span.note_at(rect, span.x_of(rect, span.low)), span.low);
             assert!(span.contains(span.low) && span.contains(span.high));
             assert!(!span.contains(span.low - 1) && !span.contains(span.high + 1));
         }
@@ -1211,16 +1311,12 @@ mod tests {
     /// both are laid out by their white keys.
     #[test]
     fn the_keyboard_holds_the_white_and_black_keys_of_its_span() {
-        assert_eq!(
-            (white_count(NSMP), NSMP.keys() - white_count(NSMP)),
-            (43, 30)
-        );
-        assert_eq!(
-            (white_count(NPNO), NPNO.keys() - white_count(NPNO)),
-            (52, 36)
-        );
-        assert_eq!(whites_before(NSMP, NSMP.low), 0);
-        assert_eq!(whites_before(NSMP, 36), 7, "one octave of white keys");
+        assert_eq!((NSMP.whites(), NSMP.keys() - NSMP.whites()), (43, 30));
+        assert_eq!((NPNO.whites(), NPNO.keys() - NPNO.whites()), (52, 36));
+        assert_eq!(NSMP.whites_before(NSMP.low), 0);
+        assert_eq!(NSMP.whites_before(36), 7, "one octave of white keys");
+        assert_eq!(NSMP.white(0), NSMP.low);
+        assert_eq!(NPNO.white(51), NPNO.high, "the last white key is C8");
     }
 
     /// The only words on the keyboard are the octaves, and there is one per C.
@@ -1512,8 +1608,7 @@ mod tests {
         let (_, rect, drawn) = frame(&ctx, Vec::new(), LANE_H, lane_of);
         assert!(drawn.is_empty(), "nothing is painted unasked");
 
-        let unit = rect.width() / 3.0;
-        let at = |note: u8, y: f32| egui::pos2(span.x_of(rect, note) + unit / 2.0, y);
+        let at = |note: u8, y: f32| egui::pos2(span.centre(rect, note), y);
         let start = at(60, rect.center().y);
         let events = vec![
             egui::Event::PointerMoved(start),
