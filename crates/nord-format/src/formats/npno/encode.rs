@@ -57,19 +57,31 @@
 //! # What the audio does not say
 //!
 //! A stroke record carries fields no audio predicts: four length marks, fifteen
-//! one-pole decay coefficients, a per-stroke identifier, and two bytes the later
-//! streams use. Nor does the prefix's bank of per-note tables. [`build`] takes them
-//! from the template — for each recording, the template stroke of the same bank and
-//! nearest root — and rescales the marks to the new stroke's length. They go in as
-//! the template donated them: the instrument accepts them, and what it makes of them
-//! beyond accepting is not known.
+//! one-pole decay coefficients, a velocity window, a per-stroke identifier, and two
+//! bytes the later streams use. Nor does the prefix's bank of per-note tables and
+//! playback parameters. [`Donor`] is where [`build`] gets them.
+//!
+//! [`Donor::Template`] copies them from a library — for each recording, the template
+//! stroke of the same bank and nearest root, with the marks rescaled to the new
+//! stroke's length. They go in as the template donated them: the instrument accepts
+//! them, and what it makes of them beyond accepting is not known. What comes with them
+//! is the vendor's tuning of an instrument these recordings are not.
+//!
+//! [`Donor::Rules`] states them instead, so a library can be written from recordings
+//! alone. Every one is then a neutral playback parameter: no decay applied over the
+//! recordings, each stroke trimmed by its own layer value, and the damper reaching the
+//! keys the kind of instrument dampens. Confirmed on hardware: a library written this
+//! way plays like the same audio built against a template, within about a decibel at
+//! every velocity and key, and sustains longer because nothing is applied over it.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, Bank, Library, Stroke, FINE_TUNE_AT, KEY_MAP_AT, MARKS, NOTES,
-    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
-    REC_MARK_BLOCK, REC_SEEDS, REC_START, SEEDS, UNCOVERED,
+    be32, block_bytes, midi_key, Bank, Library, Stroke, CNSP_MAGIC, DECAYS, DIRECTORY_AT,
+    FINE_TUNE_AT, FORMAT, KEY_MAP_AT, LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS,
+    REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_SEEDS,
+    REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
 };
+use crate::cbin::Header;
 use crate::error::{Error, ParseError};
 use crate::formats::nsmp::kernel;
 use std::borrow::Cow;
@@ -83,7 +95,7 @@ const WIDTHS: usize = MAX_WIDTH as usize + 1;
 
 /// What a library states about itself besides its strokes. Everything else — the
 /// stream version, the per-note tables, the word at body `0x06` — comes from the
-/// template [`build`] is given.
+/// [`Donor`] [`build`] is given.
 #[derive(Debug, Clone)]
 pub struct Options {
     /// The half of the `Name#Variant` field before the separator.
@@ -103,6 +115,109 @@ impl Options {
     pub fn variant(mut self, variant: &str) -> Options {
         self.variant = variant.to_owned();
         self
+    }
+}
+
+/// Where [`build`] takes the fields no audio predicts from.
+#[derive(Debug, Clone)]
+pub enum Donor<'a> {
+    /// A library to copy them from: its prefix whole, and per stroke the length marks
+    /// and decay ladder of its nearest stroke of the same bank.
+    Template(&'a Library<'a>),
+    /// The rules that state them instead, which is what a library built from nothing
+    /// but recordings carries.
+    Rules(Rules),
+}
+
+/// The kind of instrument a library states it holds, at body `0x18`.
+///
+/// The instrument files the library under it. Which code names which kind is inferred
+/// from specimens; not confirmed on hardware. Confirmed on hardware: the byte changes
+/// nothing a library sounds like.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    ElectricGrand,
+    /// The tine electric pianos.
+    ElectricPiano,
+    /// The reed electric pianos.
+    Wurlitzer,
+    Clavinet,
+    #[default]
+    Grand,
+    Upright,
+    Harpsichord,
+    DigitalPiano,
+    /// The hybrid and ballad electric pianos.
+    Hybrid,
+    Mallet,
+}
+
+impl Kind {
+    pub fn code(self) -> u8 {
+        match self {
+            Kind::ElectricGrand => 1,
+            Kind::ElectricPiano => 2,
+            Kind::Wurlitzer => 3,
+            Kind::Clavinet => 4,
+            Kind::Grand => 5,
+            Kind::Upright => 6,
+            Kind::Harpsichord => 7,
+            Kind::DigitalPiano => 14,
+            Kind::Hybrid => 15,
+            Kind::Mallet => 16,
+        }
+    }
+
+    /// The [`Rules::damper_top`] this kind of instrument has: the acoustic pianos damp
+    /// to a key well below the top of the keyboard and let the rest ring, the reed
+    /// pianos to a higher one, and everything else damps every key.
+    pub fn damper_top(self) -> u8 {
+        match self {
+            Kind::Grand | Kind::Upright => 90,
+            Kind::Wurlitzer => 97,
+            _ => ALL_KEYS_DAMPED,
+        }
+    }
+}
+
+/// A [`Rules::damper_top`] above the highest key the instrument plays, so that every
+/// key is damped at note-off.
+pub const ALL_KEYS_DAMPED: u8 = 109;
+
+/// The [`Rules::gain`] a library states unless a caller says otherwise: +5.0 dB.
+pub const DEFAULT_GAIN: i8 = 50;
+
+/// What a library states about its playback where no template donates it.
+///
+/// These are the parameters a recording cannot carry, at their neutral settings: the
+/// library is heard at [`Rules::gain`], each stroke is trimmed by its own layer value,
+/// nothing is applied over the recordings' own decay, and the damper reaches
+/// [`Rules::damper_top`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    pub kind: Kind,
+    /// Body `0x40c`: a gain over the whole library in tenths of a decibel. Confirmed
+    /// on hardware.
+    pub gain: i8,
+    /// Body `0x40d`: the highest key the instrument damps at note-off. Keys above it
+    /// ring on, and [`ALL_KEYS_DAMPED`] leaves none of them. Confirmed on hardware.
+    pub damper_top: u8,
+}
+
+impl Rules {
+    /// The neutral rules for one kind of instrument.
+    pub fn new(kind: Kind) -> Rules {
+        Rules {
+            kind,
+            gain: DEFAULT_GAIN,
+            damper_top: kind.damper_top(),
+        }
+    }
+}
+
+impl Default for Rules {
+    fn default() -> Rules {
+        Rules::new(Kind::default())
     }
 }
 
@@ -183,27 +298,33 @@ impl Recoded {
     }
 }
 
-/// Build a library from recordings, taking from `template` every field the audio does
+/// Build a library from recordings, taking from `donor` every field the audio does
 /// not decide.
 ///
 /// The recordings may arrive in any order; the directory sorts them by root, then
 /// bank, then layer, which is the ascending root order the per-root counts index by.
 /// The key map routes every key up to one semitone above the highest root, and the
-/// per-key fine tune starts at zero rather than carrying the template's.
+/// per-key fine tune starts at zero rather than carrying a template's.
 pub fn build(
-    template: &Library<'_>,
+    donor: &Donor<'_>,
     options: &Options,
     recordings: &[Recording],
 ) -> Result<Library<'static>, Error> {
     let channels = check_recordings(recordings)?;
 
-    let mut prefix = template.prefix.clone();
+    let (header, mut prefix) = match donor {
+        Donor::Template(template) => (template.header.clone(), template.prefix.clone()),
+        Donor::Rules(rules) => (
+            Header::new(FORMAT, (0, 0), CONTENT_VERSION),
+            rules_prefix(rules),
+        ),
+    };
     prefix[FINE_TUNE_AT..FINE_TUNE_AT + NOTES].fill(0);
     let roots: BTreeSet<u8> = recordings.iter().map(|r| r.root).collect();
     prefix[KEY_MAP_AT..KEY_MAP_AT + NOTES].copy_from_slice(&key_map(&roots));
 
     let mut library = Library {
-        header: template.header.clone(),
+        header,
         prefix,
         channels,
         strokes: Vec::new(),
@@ -215,12 +336,15 @@ pub fn build(
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
 
     let mut donors = Vec::with_capacity(order.len());
-    for recording in &order {
-        donors.push(donor(template, recording)?);
+    for (index, recording) in order.iter().enumerate() {
+        donors.push(match donor {
+            Donor::Template(template) => *donor_record(template, recording)?,
+            Donor::Rules(_) => rules_record(recording, index),
+        });
     }
     // A donor serving several recordings would name them all the same, so the
     // identifiers only carry over when they stay distinct.
-    let unique: BTreeSet<u32> = donors.iter().map(|d| be32(*d, REC_ID)).collect();
+    let unique: BTreeSet<u32> = donors.iter().map(|d| be32(d, REC_ID)).collect();
     let keep_ids = unique.len() == donors.len();
 
     for (index, (recording, donor)) in order.iter().zip(&donors).enumerate() {
@@ -228,7 +352,7 @@ pub fn build(
         let target = recording.channels[0].len();
         let coded = code(&recording.channels, &seeds, target)?;
         let id = if keep_ids {
-            be32(*donor, REC_ID)
+            be32(donor, REC_ID)
         } else {
             index as u32 + 1
         };
@@ -246,6 +370,153 @@ pub fn build(
         });
     }
     Ok(library)
+}
+
+/// The content version the container states where no template donates one: a library's
+/// own version times a hundred, as the instrument reports it. Confirmed on hardware
+/// only in that a library stating it loads and plays.
+const CONTENT_VERSION: u32 = 540;
+
+/// The stream version a rule-written prefix states, at [`VERSION_AT`],
+/// [`VERSION_REPEAT_AT`] and [`VERSION_ECHO_AT`].
+const RULES_VERSION: u16 = 0x450;
+
+/// u32 the vendor makes distinct per library. The instrument does not read it, so a
+/// rule-written prefix states one. Confirmed on hardware.
+const FILE_ID_AT: usize = 0x06;
+const FILE_ID: u32 = 1;
+
+/// The stream version again, ahead of the echo at [`VERSION_ECHO_AT`].
+const VERSION_REPEAT_AT: usize = 0x16;
+
+/// [`Kind::code`], then a model id within the kind and the library's version digit —
+/// neither of which a rule-written prefix claims — then a format constant.
+const KIND_AT: usize = 0x18;
+const KIND_TRAILER: [u8; 3] = [0, 0, 2];
+
+/// The per-note tables, [`NOTES`] bytes each, at the value that states nothing about
+/// the note: no retune at [`FINE_TUNE_AT`], and for the rest the value a library that
+/// has been played holds, sweeping any of them having moved nothing measurable.
+/// Confirmed on hardware.
+const PER_NOTE_TABLES: [(usize, u8); 6] = [
+    (0x10c, 0),
+    (FINE_TUNE_AT, 0),
+    (0x20c, 57),
+    (0x28c, 0),
+    (0x30c, 0),
+    (0x38c, 0),
+];
+
+/// The playback parameters, zero but for the fields below.
+const PARAMETERS: std::ops::Range<usize> = 0x40c..0x60f;
+const GAIN_AT: usize = 0x40c;
+const DAMPER_TOP_AT: usize = 0x40d;
+/// The three bytes after the damper limit, whose meaning is open; every library holds
+/// these.
+const PARAMETER_TAIL_AT: usize = 0x40e;
+const PARAMETER_TAIL: [u8; 3] = [10, 108, 1];
+/// Nineteen bytes ahead of the damper cut whose meaning is open; every library holds
+/// these.
+const BEFORE_DAMPER_CUT_AT: usize = 0x489;
+const BEFORE_DAMPER_CUT: [u8; 19] = [128; 19];
+/// The damper cut per note, [`NOTES`] bytes of [`damper_cut`].
+const DAMPER_CUT_AT: usize = 0x49d;
+const _: () = assert!(DAMPER_CUT_AT + NOTES <= PARAMETERS.end);
+
+/// The prefix a library states where no template donates one: the stream's own
+/// constants, the parameters `rules` carries, and zero wherever the vendor writes
+/// something only a recording session knows.
+///
+/// The name, the key map and the counts are laid over this by [`build`] and the
+/// container's writer.
+fn rules_prefix(rules: &Rules) -> Vec<u8> {
+    let mut prefix = vec![0u8; DIRECTORY_AT];
+    prefix[..CNSP_MAGIC.len()].copy_from_slice(CNSP_MAGIC);
+    for at in [VERSION_AT, VERSION_REPEAT_AT, VERSION_ECHO_AT] {
+        prefix[at..at + 2].copy_from_slice(&RULES_VERSION.to_be_bytes());
+    }
+    prefix[FILE_ID_AT..FILE_ID_AT + 4].copy_from_slice(&FILE_ID.to_be_bytes());
+    prefix[KIND_AT] = rules.kind.code();
+    prefix[KIND_AT + 1..KIND_AT + 1 + KIND_TRAILER.len()].copy_from_slice(&KIND_TRAILER);
+    for (at, value) in PER_NOTE_TABLES {
+        prefix[at..at + NOTES].fill(value);
+    }
+    prefix[GAIN_AT] = rules.gain as u8;
+    prefix[DAMPER_TOP_AT] = rules.damper_top;
+    prefix[PARAMETER_TAIL_AT..PARAMETER_TAIL_AT + PARAMETER_TAIL.len()]
+        .copy_from_slice(&PARAMETER_TAIL);
+    prefix[BEFORE_DAMPER_CUT_AT..BEFORE_DAMPER_CUT_AT + BEFORE_DAMPER_CUT.len()]
+        .copy_from_slice(&BEFORE_DAMPER_CUT);
+    for note in 0..NOTES {
+        prefix[DAMPER_CUT_AT + note] = damper_cut(note);
+    }
+    prefix
+}
+
+/// The damper cut's entry for `note`, at [`DAMPER_CUT_AT`] `+ note`.
+///
+/// A plateau over the lowest notes, a straight fall to the highest key an instrument
+/// plays, and a fixed value past it. Confirmed on hardware: a curve of this shape takes
+/// a held key down within tens of milliseconds, where a flat table of any level takes
+/// about half a second. What axis the instrument reads the table on is open.
+fn damper_cut(note: usize) -> u8 {
+    /// The last note of the plateau, and the note the fall ends on.
+    const FLAT_TO: usize = 24;
+    const TOP: usize = 108;
+    const PLATEAU: f64 = 79.0;
+    const FALL: f64 = 59.0;
+    /// What every note past [`TOP`] states, which no key reaches.
+    const PAST_TOP: u8 = 30;
+
+    if note < FLAT_TO {
+        PLATEAU as u8
+    } else if note <= TOP {
+        (PLATEAU - FALL * (note - FLAT_TO) as f64 / (TOP - FLAT_TO) as f64).round_ties_even() as u8
+    } else {
+        PAST_TOP
+    }
+}
+
+/// The record a stroke states where no template donates one: no length marks, a decay
+/// ladder that applies nothing, the trim its layer implies, and its own place in the
+/// directory as the identifier.
+///
+/// [`record`] lays the audio's own fields over this, and reads the absent marks as the
+/// zeros they are.
+fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
+    let mut out = [0u8; RECORD];
+    let (window, trim) = velocity_window(recording.bank, recording.layer);
+    out[REC_WINDOW..REC_WINDOW + 2].copy_from_slice(&window.to_be_bytes());
+    out[REC_TRIM..REC_TRIM + 2].copy_from_slice(&trim.to_be_bytes());
+    for entry in 0..DECAYS {
+        let at = REC_DECAYS + entry * 4;
+        out[at..at + 4].copy_from_slice(&LADDER_UNITY.to_be_bytes());
+    }
+    out[REC_ID..REC_ID + 4].copy_from_slice(&(index as u32 + 1).to_be_bytes());
+    out
+}
+
+/// The trim [`REC_TRIM`] states for a release stroke, in decibels.
+const RELEASE_TRIM: u16 = 12;
+
+/// The largest trim [`velocity_window`] states, the top of the range the layer values
+/// are selected over ([`Stroke::layer`]).
+const WIDEST_TRIM: u16 = 31;
+
+/// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states.
+///
+/// An attack or resonance stroke is trimmed three decibels past its layer value, so
+/// that the softer layers of a root play softer than the loud ones by the amount their
+/// values already say they are; a release stroke takes a fixed trim instead, its layer
+/// value being no part of how it is selected.
+fn velocity_window(bank: Bank, layer: u8) -> (u16, u16) {
+    match bank {
+        Bank::Release => (0, RELEASE_TRIM),
+        Bank::Attack | Bank::Resonance => (
+            u16::from(layer),
+            u16::from(layer).saturating_add(3).min(WIDEST_TRIM),
+        ),
+    }
 }
 
 /// Code every stroke of `library` again from the frames it decodes to, each keeping
@@ -452,7 +723,10 @@ fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
 /// A release stroke zeroes the marks and the decay coefficient at `+0x2e` it would
 /// inherit, so any stroke can donate to one; anything else needs a donor that declares
 /// marks of its own.
-fn donor<'a>(template: &'a Library<'_>, recording: &Recording) -> Result<&'a [u8; RECORD], Error> {
+fn donor_record<'a>(
+    template: &'a Library<'_>,
+    recording: &Recording,
+) -> Result<&'a [u8; RECORD], Error> {
     let release = Bank::Release.code();
     let wanted = recording.bank.code();
     let same: Vec<&Stroke<'_>> = template
@@ -870,7 +1144,7 @@ fn compare(before: &[u8], coded: &[u8], block: usize) -> Recoded {
 mod tests {
     use super::*;
     use crate::cbin::{Cbin, Header, RawBody};
-    use crate::formats::npno::{Piano, CNSP_MAGIC, DECAYS, FORMAT, REC_DECAYS};
+    use crate::formats::npno::{be16, Piano, CNSP_MAGIC, DECAYS, FORMAT, REC_DECAYS};
 
     /// A one-stroke library the encoder can donate from: a real prefix and one real
     /// record, holding marks and a full ladder of decay coefficients a new stroke
@@ -950,7 +1224,7 @@ mod tests {
     fn round_trip(channels: u16, recordings: &[Recording]) -> Piano {
         let donor = template(channels);
         let built = build(
-            &donor.library().unwrap(),
+            &Donor::Template(&donor.library().unwrap()),
             &Options::new("Synth").variant("Test"),
             recordings,
         )
@@ -1241,6 +1515,82 @@ mod tests {
         }
     }
 
+    /// Building without a template needs no library to donate anything, and what comes
+    /// out reads back: the kind, the gain and the damper limit the rules state, a
+    /// stroke trimmed by its own layer value with no decay applied over it, and
+    /// identifiers counting the directory. A library that has been played holds these
+    /// bytes; the corpus suite is where that comparison is made.
+    #[test]
+    fn a_library_built_from_rules_states_them_and_needs_no_template() {
+        let short = tone(6_000, 300.0, 1);
+        let rules = Rules {
+            kind: Kind::Wurlitzer,
+            gain: -20,
+            damper_top: 97,
+        };
+        let built = build(
+            &Donor::Rules(rules),
+            &Options::new("Reeds"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Attack, 17, short.clone()),
+                one(60, Bank::Release, 0, short.clone()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(built.prefix[KIND_AT], Kind::Wurlitzer.code());
+        assert_eq!(built.prefix[GAIN_AT] as i8, -20);
+        assert_eq!(built.prefix[DAMPER_TOP_AT], 97);
+        assert_eq!(built.stream_version(), RULES_VERSION);
+        assert_eq!(
+            Rules::new(Kind::Wurlitzer).damper_top,
+            rules.damper_top,
+            "the kind names its own damper limit"
+        );
+
+        let stated: Vec<(u8, u16, u16, u32)> = built
+            .strokes()
+            .iter()
+            .map(|s| {
+                let record = s.record();
+                (
+                    s.layer(),
+                    be16(record, REC_WINDOW),
+                    be16(record, REC_TRIM),
+                    be32(record, REC_ID),
+                )
+            })
+            .collect();
+        assert_eq!(stated, [(0, 0, 3, 1), (17, 17, 20, 2), (0, 0, 12, 3)]);
+        for stroke in built.strokes() {
+            let record = stroke.record();
+            assert!((0..MARKS).all(|m| be32(record, REC_MARKS + m * 4) == 0));
+            assert!((0..DECAYS).all(|c| be32(record, REC_DECAYS + c * 4) == LADDER_UNITY));
+        }
+
+        let again = rebuild(&built).unwrap();
+        assert_eq!(
+            again.library.to_body().unwrap(),
+            built.to_body().unwrap(),
+            "a rule-written library is not a fixed point of a recode"
+        );
+    }
+
+    /// The damper cut is flat over the lowest notes, falls straight to the highest key
+    /// an instrument plays, and states one value past it.
+    #[test]
+    fn the_damper_cut_is_a_plateau_then_a_straight_fall_to_the_top_key() {
+        let curve: Vec<u8> = (0..NOTES).map(damper_cut).collect();
+        assert_eq!(curve[..25], [79; 25]);
+        assert_eq!((curve[66], curve[108], curve[109]), (50, 20, 30));
+        assert!(
+            curve[24..=108].windows(2).all(|w| w[0] >= w[1]),
+            "the fall never rises"
+        );
+        assert!(curve[109..].iter().all(|&v| v == 30));
+    }
+
     /// The bound is the selection rule at the softest note-on, so the value it names
     /// is the last one a key can reach and the spread stays inside it.
     #[test]
@@ -1254,7 +1604,7 @@ mod tests {
         let library = donor.library().unwrap();
         let short = tone(6_000, 300.0, 1);
         build(
-            &library,
+            &Donor::Template(&library),
             &Options::new("Synth"),
             &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short)],
         )
@@ -1296,7 +1646,7 @@ mod tests {
         let options = Options::new("Synth");
         let short = tone(6_000, 300.0, 1);
         let error = |recordings: &[Recording]| {
-            build(&library, &options, recordings)
+            build(&Donor::Template(&library), &options, recordings)
                 .expect_err("expected a refusal")
                 .to_string()
         };
@@ -1340,7 +1690,7 @@ mod tests {
         library.strokes[0].record[REC_BANK] = Bank::Release.code();
         let short = tone(6_000, 300.0, 1);
         let error = build(
-            &library,
+            &Donor::Template(&library),
             &Options::new("Synth"),
             &[one(60, Bank::Attack, 0, short)],
         )

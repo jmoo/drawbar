@@ -32,7 +32,7 @@ In brief:
   libraries (`npno`: the CNSP prefix, the stroke directory and every stroke's audio
   span — decoded back to samples, dropped, narrowed or split by transforms whose
   writer re-lays the container, and coded again from samples, so a library is also
-  *built* from recordings against a template) and
+  *built* from recordings, against a template or from the rules alone) and
   Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
   strokes and audio files read and edited, new projects written).
 - **Container-verified stubs** — every other corpus format: 60+ CBIN tags
