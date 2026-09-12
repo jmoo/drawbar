@@ -343,6 +343,17 @@ pub fn zone_wav_name(instrument: &str, zone: usize) -> String {
     format!("{stem}-zone{zone}.wav")
 }
 
+/// The filename a decoded piano stroke's WAV suggests: the library's own name, made
+/// path-safe, and the stroke spelled the way `nord piano decode` spells it —
+/// `<root>-b<bank>-l<layer>`, the MIDI note zero-padded to three digits.
+pub fn stroke_wav_name(library: &str, root: u8, bank: u8, layer: u8) -> String {
+    let stem = match filename_stem(library) {
+        s if s.is_empty() => "unnamed".to_string(),
+        s => s,
+    };
+    format!("{stem}-{root:03}-b{bank}-l{layer:02}.wav")
+}
+
 /// A verbatim name reduced to what a path can carry: whitespace runs and path
 /// separators become one `-`, control characters drop, and nothing hidden or
 /// option-like survives at the edges. Filenames only — the name itself stays verbatim.
