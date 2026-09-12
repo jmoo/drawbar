@@ -434,9 +434,11 @@ pub struct Band {
 }
 
 /// Which ends of a band can be dragged. `TopOnly` is the v2 table, where a zone's low is
-/// derived from the zone below rather than stored.
+/// derived from the zone below rather than stored; `Fixed` is a body whose zones cannot
+/// be written at all, where a handle that moved and snapped back would be a lie.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edges {
+    Fixed,
     TopOnly,
     Both,
 }
@@ -473,7 +475,7 @@ const PILL: egui::Vec2 = egui::vec2(3.0, 11.0);
 const HATCH_ALPHA: f32 = 0.55;
 
 /// The stretches of `span` no band covers, low to high.
-fn gaps(bounds: &[(u8, u8)], span: Span) -> Vec<(u8, u8)> {
+pub fn gaps(bounds: &[(u8, u8)], span: Span) -> Vec<(u8, u8)> {
     let (low, high) = span.ends();
     let mut sorted = bounds.to_vec();
     sorted.sort_by_key(|(low, _)| *low);
@@ -621,6 +623,7 @@ pub fn bands(
     let mut grabs = Vec::new();
     for (index, band) in zones.iter().enumerate() {
         let wanted = match edges {
+            Edges::Fixed => [None, None],
             Edges::TopOnly => [Some(Edge::Top), None],
             Edges::Both => [Some(Edge::Top), Some(Edge::Low)],
         };
@@ -915,6 +918,391 @@ pub fn size_cells(
 /// How many keys a cell spans.
 fn cell_keys(cell: &SizeCell) -> usize {
     (cell.top.max(cell.low) - cell.low) as usize + 1
+}
+
+// ---- the velocity field -------------------------------------------------------------
+
+/// One zone as the velocity field draws it: the keys it answers, the velocities it
+/// answers them at, and what it is called.
+pub struct VelBlock {
+    pub low: u8,
+    pub top: u8,
+    /// The window's ends, inclusive and in order.
+    pub window: (u8, u8),
+    pub name: String,
+    pub hint: String,
+}
+
+/// Which velocity edges a block offers. `Fixed` is the wide generations' window: the
+/// format states it and nothing writes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handles {
+    Fixed,
+    Draggable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VelEdge {
+    Min,
+    Max,
+}
+
+/// What the velocity field was asked for this frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VelocityAct {
+    /// A block was clicked.
+    Pick(usize),
+    /// A handle moved. `window` is that zone's window after the clamp.
+    Drag {
+        zone: usize,
+        edge: VelEdge,
+        window: (u8, u8),
+    },
+}
+
+/// The lowest and highest velocity a key can be struck at.
+pub const VELOCITY_LOW: u8 = 1;
+pub const VELOCITY_HIGH: u8 = 127;
+
+const FIELD_H: f32 = 84.0;
+const AXIS_W: f32 = 22.0;
+const AXIS_GAP: f32 = 6.0;
+const AXIS_TEXT: f32 = 9.0;
+/// Where the field rules itself, as a share of its height.
+const GRID: [f32; 2] = [0.5, 0.75];
+const BLOCK_NAME: f32 = 10.0;
+const BLOCK_PAD: f32 = 6.0;
+const BLOCK_TOP: f32 = 8.0;
+/// The smallest block a one-velocity window still reads as.
+const BLOCK_MIN_H: f32 = 2.0;
+const BLOCK_MIN_W: f32 = 3.0;
+/// A block's fill, at full strength and as the ghost of one nothing has picked.
+const BLOCK_ALPHA: f32 = 0.45;
+const QUIET_ALPHA: f32 = 0.08;
+/// The handle: the pill, and the room the pointer has to find it in.
+const PILL_H: f32 = 4.0;
+const GRAB_H: f32 = 10.0;
+const PILL_SHARE: f32 = 0.56;
+const PILL_MAX: f32 = 120.0;
+/// How much of the hatch colour a hole keeps.
+const HOLE_ALPHA: f32 = 0.5;
+
+/// The key × velocity stretches no block covers, by the zone whose keys they leave
+/// silent.
+///
+/// A zone's keys are answered at a velocity by its own window or by any other block
+/// whose keys overlap it, so the holes are what is left of `1..=127` once those are
+/// laid over each other.
+pub fn velocity_holes(blocks: &[VelBlock]) -> Vec<(usize, u8, u8)> {
+    let mut out = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let mut covered: Vec<(u8, u8)> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(other, over)| {
+                *other == index || (over.low <= block.top && over.top >= block.low)
+            })
+            .map(|(_, over)| ordered(over.window))
+            .collect();
+        covered.sort_by_key(|(low, _)| *low);
+        let mut at = VELOCITY_LOW;
+        for (low, high) in covered {
+            if low > at {
+                out.push((index, at, low.saturating_sub(1)));
+            }
+            at = at.max(high.saturating_add(1));
+        }
+        if at <= VELOCITY_HIGH {
+            out.push((index, at, VELOCITY_HIGH));
+        }
+    }
+    out
+}
+
+/// A window's ends in order, so one handed over inverted still reads as a range.
+fn ordered(window: (u8, u8)) -> (u8, u8) {
+    (window.0.min(window.1), window.0.max(window.1))
+}
+
+/// The velocity field: one rectangle per zone over the keys it answers, the key ×
+/// velocity stretches nothing answers hatched.
+///
+/// The axis is drawn here because it names this widget's own vertical scale.
+pub fn velocity(
+    ui: &mut egui::Ui,
+    span: Span,
+    blocks: &[VelBlock],
+    selected: Option<usize>,
+    handles: Handles,
+) -> Option<VelocityAct> {
+    let width = ui.available_width().max(1.0);
+    let (whole, response) =
+        ui.allocate_exact_size(egui::vec2(width, FIELD_H), egui::Sense::click());
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter().clone();
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(whole.left() + AXIS_W + AXIS_GAP, whole.top()),
+        whole.max,
+    );
+
+    for (share, text) in [(0.0, VELOCITY_HIGH), (0.5, 64), (1.0, VELOCITY_LOW)] {
+        let galley = painter.layout_no_wrap(
+            text.to_string(),
+            egui::FontId::monospace(AXIS_TEXT),
+            app::caption(&visuals),
+        );
+        let middle = rect.top() + (rect.height() - galley.size().y) * share + galley.size().y / 2.0;
+        write(
+            &painter,
+            whole.left() + AXIS_W - galley.size().x,
+            middle,
+            galley,
+        );
+    }
+
+    painter.rect_filled(rect, RADIUS, visuals.extreme_bg_color);
+    painter.rect_stroke(
+        rect,
+        RADIUS,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    for share in GRID {
+        painter.hline(
+            rect.x_range(),
+            rect.top() + rect.height() * share,
+            egui::Stroke::new(1.0_f32, app::unlit(&visuals).gamma_multiply(0.5)),
+        );
+    }
+
+    let mut hint = None;
+    for (zone, from, to) in velocity_holes(blocks) {
+        let block = &blocks[zone];
+        let hole = cell(rect, span, block, (from, to));
+        hatch(&painter, hole, app::bad(&visuals), HOLE_ALPHA);
+        if response.hover_pos().is_some_and(|at| hole.contains(at)) {
+            hint = Some(format!(
+                "{}–{} answers nothing at velocity {from}–{to}",
+                note::name(block.low),
+                note::name(block.top)
+            ));
+        }
+    }
+
+    for (index, block) in blocks.iter().enumerate() {
+        let over = cell(rect, span, block, block.window);
+        let picked = selected == Some(index);
+        let worn = look(&visuals, picked, false);
+        let alpha = match picked {
+            true => BLOCK_ALPHA,
+            false => QUIET_ALPHA,
+        };
+        let fill = match picked {
+            true => worn.fill,
+            false => visuals.weak_text_color(),
+        };
+        painter.rect_filled(over, RADIUS, fill.gamma_multiply(alpha));
+        painter.rect_stroke(
+            over,
+            RADIUS,
+            egui::Stroke::new(
+                match picked {
+                    true => 2.0_f32,
+                    false => 1.0,
+                },
+                worn.stroke,
+            ),
+            egui::StrokeKind::Inside,
+        );
+        let (low, high) = ordered(block.window);
+        let room = over.width() - BLOCK_PAD * 2.0;
+        if room > 0.0 {
+            let ink = match picked {
+                true => visuals.text_color(),
+                false => visuals.weak_text_color(),
+            };
+            let window = clipped(
+                &painter,
+                &format!("vel {low}–{high}"),
+                egui::FontId::monospace(CHIP_TEXT),
+                ink,
+                room,
+            );
+            let name = clipped(
+                &painter,
+                &block.name,
+                egui::FontId::new(BLOCK_NAME, app::bold()),
+                ink,
+                room - window.size().x - BAND_GAP,
+            );
+            let left = over.left() + BLOCK_PAD;
+            let middle = over.top() + BLOCK_TOP;
+            let after = left + name.size().x + BAND_GAP;
+            write(&painter, left, middle, name);
+            write(&painter, after, middle, window);
+        }
+        if response.hover_pos().is_some_and(|at| over.contains(at)) {
+            hint = Some(block.hint.clone());
+        }
+    }
+
+    let mut act = None;
+    let mut grabs = Vec::new();
+    if handles == Handles::Draggable {
+        for (index, block) in blocks.iter().enumerate() {
+            for edge in [VelEdge::Max, VelEdge::Min] {
+                let grab = vel_handle_rect(rect, span, block, edge);
+                grabs.push(grab);
+                let at = vel_handle(ui, &painter, grab, (index, edge), block, edge, &visuals);
+                let Some(at) = at else { continue };
+                let window = vel_clamped(block.window, edge, velocity_at(rect, at.y));
+                let shown = match edge {
+                    VelEdge::Max => window.1,
+                    VelEdge::Min => window.0,
+                };
+                chip(
+                    &painter,
+                    egui::pos2(grab.center().x, y_of(rect, f32::from(shown)) - CHIP_TEXT),
+                    &format!("vel {shown}"),
+                    app::accent(&visuals),
+                    app::accent(&visuals),
+                );
+                if window != ordered(block.window) {
+                    act = Some(VelocityAct::Drag {
+                        zone: index,
+                        edge,
+                        window,
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(hint) = hint {
+        response.clone().on_hover_text(hint);
+    }
+    if act.is_some() {
+        return act;
+    }
+    let picked = response
+        .clicked()
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
+    blocks
+        .iter()
+        .position(|block| cell(rect, span, block, block.window).contains(picked))
+        .map(VelocityAct::Pick)
+}
+
+/// Where one velocity sits in the field.
+fn y_of(rect: egui::Rect, velocity: f32) -> f32 {
+    let reach = f32::from(VELOCITY_HIGH - VELOCITY_LOW);
+    let share = ((velocity - f32::from(VELOCITY_LOW)) / reach).clamp(0.0, 1.0);
+    rect.bottom() - rect.height() * share
+}
+
+/// The velocity `y` falls on, clamped to the field.
+fn velocity_at(rect: egui::Rect, y: f32) -> u8 {
+    let share = ((rect.bottom() - y) / rect.height().max(1.0)).clamp(0.0, 1.0);
+    let reach = f32::from(VELOCITY_HIGH - VELOCITY_LOW);
+    (f32::from(VELOCITY_LOW) + share * reach).round() as u8
+}
+
+/// One block's rectangle: its keys across, a velocity range down.
+fn cell(rect: egui::Rect, span: Span, block: &VelBlock, window: (u8, u8)) -> egui::Rect {
+    let (low, high) = ordered(window);
+    let left = span.x_of(rect, block.low);
+    let top = y_of(rect, f32::from(high));
+    egui::Rect::from_min_size(
+        egui::pos2(left, top),
+        egui::vec2(
+            (span.x_after(rect, block.top) - left).max(BLOCK_MIN_W),
+            (y_of(rect, f32::from(low)) - top).max(BLOCK_MIN_H),
+        ),
+    )
+}
+
+/// Where a dragged velocity edge lands: neither end reaches the other, and the field's
+/// own ends stand for what is past them.
+fn vel_clamped(window: (u8, u8), edge: VelEdge, velocity: u8) -> (u8, u8) {
+    let (low, high) = ordered(window);
+    match edge {
+        VelEdge::Max => (
+            low,
+            velocity
+                .max(low.saturating_add(1))
+                .clamp(VELOCITY_LOW, VELOCITY_HIGH),
+        ),
+        VelEdge::Min => (
+            velocity
+                .min(high.saturating_sub(1))
+                .clamp(VELOCITY_LOW, VELOCITY_HIGH),
+            high,
+        ),
+    }
+}
+
+/// The grab zone for one end of a block, straddling the edge it moves.
+fn vel_handle_rect(rect: egui::Rect, span: Span, block: &VelBlock, edge: VelEdge) -> egui::Rect {
+    let (low, high) = ordered(block.window);
+    let at = y_of(
+        rect,
+        f32::from(match edge {
+            VelEdge::Max => high,
+            VelEdge::Min => low,
+        }),
+    );
+    let over = cell(rect, span, block, block.window);
+    egui::Rect::from_center_size(
+        egui::pos2(over.center().x, at),
+        egui::vec2(over.width(), GRAB_H),
+    )
+}
+
+/// One end of a block, as a pill on a halo of the field's own ground.
+fn vel_handle(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    grab: egui::Rect,
+    which: (usize, VelEdge),
+    block: &VelBlock,
+    edge: VelEdge,
+    visuals: &egui::Visuals,
+) -> Option<egui::Pos2> {
+    let response = ui.interact(
+        grab,
+        ui.id().with(("vel_edge", which.0, which.1 == VelEdge::Max)),
+        egui::Sense::click_and_drag(),
+    );
+    let dragging = response.dragged();
+    let ink = match dragging {
+        true => app::accent(visuals),
+        false => visuals.weak_text_color(),
+    };
+    let pill = egui::Rect::from_center_size(
+        grab.center(),
+        egui::vec2((grab.width() * PILL_SHARE).min(PILL_MAX), PILL_H),
+    );
+    painter.rect_filled(pill.expand(1.0), RADIUS, visuals.extreme_bg_color);
+    painter.rect_filled(pill, RADIUS, ink);
+    let (low, high) = ordered(block.window);
+    response.clone().on_hover_text(format!(
+        "Drag to move {}'s velocity {} — now {}",
+        block.name,
+        match edge {
+            VelEdge::Max => "max",
+            VelEdge::Min => "min",
+        },
+        match edge {
+            VelEdge::Max => high,
+            VelEdge::Min => low,
+        }
+    ));
+    match dragging {
+        true => response.interact_pointer_pos(),
+        false => None,
+    }
 }
 
 // ---- the per-key lane ---------------------------------------------------------------
@@ -1483,6 +1871,17 @@ mod tests {
         let (_, _, act) = frame(&ctx, press(middle), BANDS_H, lane);
         assert_eq!(act, Some(BandAct::Pick(1)));
 
+        // With no edges to grab, the whole band answers a click — including the ends a
+        // handle would otherwise have taken.
+        let fixed = |ui: &mut egui::Ui| bands(ui, NSMP, &zones, None, None, Edges::Fixed);
+        let (_, rect, _) = frame(&ctx, Vec::new(), BANDS_H, fixed);
+        let end = egui::pos2(
+            NSMP.x_after(rect, 60) - HANDLE_W / 2.0 - 1.0,
+            rect.center().y,
+        );
+        let (_, _, act) = frame(&ctx, press(end), BANDS_H, fixed);
+        assert_eq!(act, Some(BandAct::Pick(1)));
+
         // The hatch over a gap answers nothing; it is not a zone to open.
         let holed = bands_of(&[(61, 96), (41, 60)]);
         let lane = |ui: &mut egui::Ui| bands(ui, NSMP, &holed, None, None, Edges::Both);
@@ -1562,6 +1961,96 @@ mod tests {
         );
         let (_, _, picked) = frame(&ctx, press(at), CELLS_H, lane);
         assert_eq!(picked, Some(1));
+    }
+
+    // ---- the velocity field ---------------------------------------------------------
+
+    fn vel_blocks(of: &[(u8, u8, (u8, u8))]) -> Vec<VelBlock> {
+        of.iter()
+            .enumerate()
+            .map(|(index, (low, top, window))| VelBlock {
+                low: *low,
+                top: *top,
+                window: *window,
+                name: format!("Zone {}", index + 1),
+                hint: format!("Zone {}", index + 1),
+            })
+            .collect()
+    }
+
+    /// A hole is a velocity no zone answers a key at. Two zones over the same keys
+    /// cover for each other, so the hole is what neither reaches.
+    #[test]
+    fn a_velocity_hole_is_what_no_block_over_those_keys_answers() {
+        let full = vel_blocks(&[(61, 96, (1, 127)), (24, 60, (1, 127))]);
+        assert!(velocity_holes(&full).is_empty());
+
+        let narrow = vel_blocks(&[(61, 96, (1, 64))]);
+        assert_eq!(velocity_holes(&narrow), [(0, 65, 127)]);
+
+        // Both ends left open, and the zone is named by the keys the hole silences.
+        let middle = vel_blocks(&[(61, 96, (40, 80))]);
+        assert_eq!(velocity_holes(&middle), [(0, 1, 39), (0, 81, 127)]);
+
+        // Stacked over the same keys: neither alone covers the field, together they do.
+        let stacked = vel_blocks(&[(61, 96, (1, 64)), (61, 96, (65, 127))]);
+        assert!(velocity_holes(&stacked).is_empty());
+
+        // Over other keys it covers nothing for them, so both keep their own hole.
+        let apart = vel_blocks(&[(61, 96, (1, 64)), (24, 60, (65, 127))]);
+        assert_eq!(
+            velocity_holes(&apart),
+            [(0, 65, 127), (1, 1, 64)],
+            "each zone's own uncovered band"
+        );
+    }
+
+    /// The clamps are what keeps a window from turning inside out.
+    #[test]
+    fn a_velocity_handle_stops_short_of_its_own_other_end() {
+        assert_eq!(vel_clamped((1, 127), VelEdge::Max, 90), (1, 90));
+        assert_eq!(vel_clamped((40, 80), VelEdge::Min, 90), (79, 80));
+        assert_eq!(vel_clamped((40, 80), VelEdge::Max, 10), (40, 41));
+        assert_eq!(vel_clamped((1, 127), VelEdge::Min, 0), (1, 127));
+        assert_eq!(vel_clamped((1, 127), VelEdge::Max, 200), (1, 127));
+        // An inverted window still reads as the range between its ends.
+        assert_eq!(vel_clamped((80, 40), VelEdge::Max, 100), (40, 100));
+    }
+
+    /// Clicking a block opens its row, and the field with no handles has nothing a
+    /// pointer can move.
+    #[test]
+    fn a_click_on_a_velocity_block_picks_it() {
+        let ctx = dressed();
+        let blocks = vel_blocks(&[(61, 96, (1, 127)), (24, 60, (1, 64))]);
+        let field = |ui: &mut egui::Ui| velocity(ui, NSMP, &blocks, None, Handles::Fixed);
+        let (_, rect, act) = frame(&ctx, Vec::new(), FIELD_H, field);
+        assert_eq!(act, None, "nothing is picked unasked");
+
+        let lane = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + AXIS_W + AXIS_GAP, rect.top()),
+            rect.max,
+        );
+        let at = egui::pos2(
+            (NSMP.x_of(lane, 24) + NSMP.x_after(lane, 60)) / 2.0,
+            lane.bottom() - 4.0,
+        );
+        let (_, _, act) = frame(&ctx, press(at), FIELD_H, field);
+        assert_eq!(act, Some(VelocityAct::Pick(1)));
+    }
+
+    /// The field's top is the highest velocity and its bottom the lowest, which is the
+    /// only thing the axis labels mean.
+    #[test]
+    fn the_field_reads_velocity_from_the_bottom_up() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 10.0), egui::vec2(200.0, FIELD_H));
+        assert_eq!(y_of(rect, f32::from(VELOCITY_LOW)), rect.bottom());
+        assert_eq!(y_of(rect, f32::from(VELOCITY_HIGH)), rect.top());
+        assert_eq!(velocity_at(rect, rect.bottom()), VELOCITY_LOW);
+        assert_eq!(velocity_at(rect, rect.top()), VELOCITY_HIGH);
+        assert_eq!(velocity_at(rect, rect.bottom() + 50.0), VELOCITY_LOW);
+        assert_eq!(velocity_at(rect, rect.top() - 50.0), VELOCITY_HIGH);
+        assert_eq!(velocity_at(rect, y_of(rect, 64.0)), 64);
     }
 
     // ---- the per-key lane -----------------------------------------------------------
