@@ -42,7 +42,8 @@ with real Nord devices.
 Drawbar began with the **Electro 5**. Its **program**, **live**, **song**, and **settings** layouts are decoded and fully supported.
 **Stage 2**, **3**, and **4** programs and selected presets are supported thanks to community documentation and specimen evidence
 but have not been validated on hardware. **Sample** support includes encoding and decoding of v2/v3/v4 instruments (only v2 confirmed with hardware playback).
-**Pianos** can be renamed, retuned, remapped, trimmed and split, confirmed on hardware.
+**Pianos** can be renamed, retuned, remapped, trimmed and split, confirmed on hardware; a library's audio can
+also be encoded, which reproduces the blocks of the libraries read, and libraries built that way load and play.
 
 Management of Nord devices over USB is supported. The [USB status](crates/nord-usb/README.md#status) lists implemented 
 operations and their hardware validation.
