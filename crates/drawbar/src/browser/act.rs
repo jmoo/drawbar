@@ -1822,9 +1822,8 @@ mod tests {
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),
-            // The live buffer takes a write like any other slot.
+            // The live buffer and the piano library take a write like any other slot.
             (ObjectClass::Live, 0),
-            // A piano is installed by the instrument, so it must not reach the queue.
             (ObjectClass::Piano, 0),
         ] {
             let id = workspace.ingest(
@@ -1864,7 +1863,8 @@ mod tests {
             vec![
                 ObjectClass::Program,
                 ObjectClass::SetList,
-                ObjectClass::Live
+                ObjectClass::Live,
+                ObjectClass::Piano
             ]
         );
         assert!(!queue.holds(fresh), "it is bound for nowhere");

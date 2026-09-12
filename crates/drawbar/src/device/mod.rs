@@ -924,12 +924,13 @@ fn stands(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Loc
 
 /// Whether the browser offers to change a class at all.
 ///
-/// ⚠️ A piano is a multi-megabyte library that the instrument builds its own index
-/// over; the browser lists what is installed and offers nothing that would move it. A
-/// partition this app cannot name is listed and left alone for a plainer reason:
-/// nothing here knows what its slots hold or what a write into one would mean.
+/// ⚠️ A partition this app cannot name is listed and left alone: nothing here knows what
+/// its slots hold or what a write into one would mean. Every class it can name takes a
+/// write, a piano library included — that one is sent like a sample, and whether the
+/// partition has room for it is [`crate::room::free_bytes`]'s question rather than this
+/// one.
 pub fn read_only(class: ObjectClass) -> bool {
-    matches!(class, ObjectClass::Piano | ObjectClass::Unknown(_))
+    matches!(class, ObjectClass::Unknown(_))
 }
 
 /// Whether this app will write into a class at all.
@@ -1704,14 +1705,16 @@ mod tests {
         );
     }
 
-    /// The buffer classes take a write like any other slot; only a library the
-    /// instrument installs for itself is off limits.
+    /// Every folder this app can name takes a write — the buffer classes and the two
+    /// libraries alike. A partition it cannot name is listed and left alone.
     #[test]
-    fn every_named_class_but_pianos_can_be_written() {
-        for class in named().filter(|class| *class != ObjectClass::Piano) {
+    fn only_a_class_with_no_name_is_read_only() {
+        for class in named() {
             assert!(sendable(class), "{}", folder(class));
+            assert!(!read_only(class), "{}", folder(class));
         }
-        assert!(!sendable(ObjectClass::Piano));
+        assert!(read_only(ObjectClass::Unknown(9)));
+        assert!(!sendable(ObjectClass::Unknown(9)));
     }
 
     #[test]
@@ -1720,16 +1723,6 @@ mod tests {
         assert!(why.contains("reloads the selected program"), "{why}");
         for class in named().filter(|class| *class != ObjectClass::Settings) {
             assert!(write_warning(class).is_none(), "{}", folder(class));
-        }
-    }
-
-    /// Pianos are listed and never altered, and so is a partition this app cannot name.
-    #[test]
-    fn a_piano_and_a_class_with_no_name_are_read_only() {
-        assert!(read_only(ObjectClass::Piano));
-        assert!(read_only(ObjectClass::Unknown(9)));
-        for class in named().filter(|class| *class != ObjectClass::Piano) {
-            assert!(!read_only(class), "{}", folder(class));
         }
     }
 
