@@ -1967,14 +1967,81 @@ fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
     assert!(seen > 0, "no piano library");
 }
 
+/// A library written from recordings alone, no template donating a byte of it, is the
+/// library that was played from those rules.
+///
+/// The recordings are `full.npno`'s own strokes decoded — the frames its sources coded
+/// to, which the codec gives back sample for sample — and the expected bytes are
+/// `from-scratch.npno`, which holds that audio and states every other byte by rule.
+/// That file was written by a script outside this crate and played on the instrument,
+/// so it is an oracle for the rules rather than a snapshot of this code.
+#[test]
+fn a_piano_written_from_rules_alone_is_the_library_that_was_played() {
+    let specimen = named("from-scratch.npno");
+    let Entity::Piano(source) = &named("full.npno").entity else {
+        panic!("full.npno is not a piano library");
+    };
+    let library = source.library().unwrap();
+    let recordings: Vec<npno::encode::Recording> = library
+        .strokes()
+        .iter()
+        .map(|stroke| {
+            let audio = npno::codec::decode(stroke, library.channels()).unwrap();
+            assert_eq!(audio.clipped, 0, "{stroke:?} saturates the decode");
+            npno::encode::Recording {
+                root: stroke.root,
+                bank: stroke.bank().expect("a named bank"),
+                layer: stroke.layer(),
+                channels: audio.channels,
+            }
+        })
+        .collect();
+
+    let (name, variant) = library.name();
+    let built = npno::encode::build(
+        &npno::encode::Donor::Rules(npno::encode::Rules::new(npno::encode::Kind::Grand)),
+        &npno::encode::Options::new(&name).variant(&variant),
+        &recordings,
+    )
+    .unwrap();
+    let bytes = built
+        .to_piano()
+        .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))
+        .unwrap();
+    let differing: Vec<String> = bytes
+        .iter()
+        .zip(&specimen.bytes)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(at, (a, b))| format!("{at:#x}: wrote {a:#04x}, played {b:#04x}"))
+        .take(8)
+        .collect();
+    assert!(
+        bytes == specimen.bytes,
+        "the rule-written library is not the one that was played ({} bytes out, {} in); \
+         first differences: {}",
+        bytes.len(),
+        specimen.bytes.len(),
+        differing.join(", ")
+    );
+
+    let again = npno::encode::rebuild(&built).unwrap();
+    assert_eq!(
+        again.library.to_body().unwrap(),
+        built.to_body().unwrap(),
+        "a rule-written library is not a fixed point of a recode"
+    );
+}
+
 /// The libraries in reach this crate's own coder produced, named because nothing in a
-/// file says who wrote it: a stereo build, a mono one, a synthetic one, and a vendor
-/// library coded again from its own audio.
-const OUR_LIBRARIES: [&str; 4] = [
+/// file says who wrote it: a stereo build, a mono one, a synthetic one, a vendor
+/// library coded again from its own audio, and one written with no template at all.
+const OUR_LIBRARIES: [&str; 5] = [
     "full.npno",
     "mono.npno",
     "synth.npno",
     "rebuilt-clavinet.npno",
+    "from-scratch.npno",
 ];
 
 /// A library this crate wrote comes back from a recode byte for byte — every block
