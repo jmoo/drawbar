@@ -33,7 +33,8 @@
 //! block is the four samples immediately before it rather than the four at the
 //! physical block end. Their sum is the frame count the record states, and the
 //! repeat is bit-exact — [`decode`] checks both and refuses a stroke that fails
-//! either.
+//! either. The last block has no next block to repeat into, so its own final
+//! [`OVERLAP`] frames sit past the stroke's end; [`Audio::tail`] carries them.
 //!
 //! The packing and the predictor are inferred from specimens; not confirmed on
 //! hardware — nothing here is played, only reconstructed. Confirmed on hardware:
@@ -54,17 +55,30 @@ pub const OVERLAP: usize = 64;
 pub const RATE: u32 = 35_002;
 
 /// Highest backward-difference order a block header can ask for.
-const MAX_ORDER: usize = 4;
+pub const MAX_ORDER: usize = 4;
+
+/// Narrowest residual field a block header can express.
+pub const MIN_WIDTH: u8 = 1;
 
 /// Widths a block header can express. A field wider than a reservoir top-up is
 /// refused rather than read across an unbounded number of words.
-const MAX_WIDTH: u8 = 16;
+pub const MAX_WIDTH: u8 = 16;
+
+/// Frames a block of `width` carries, the [`OVERLAP`] it repeats included. A wider
+/// block is a shorter one, so the width and the frame count are one choice.
+pub fn block_frames(width: u8, block_bytes: usize, channels: usize) -> usize {
+    8 * (block_bytes - 2) / (usize::from(width) * channels)
+}
 
 /// Decoded audio for one stroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
     /// One vector per channel, each [`Audio::frames`] long.
     pub channels: Vec<Vec<i16>>,
+    /// The [`OVERLAP`] frames per channel the last block carries past the stroke's
+    /// end. The stroke does not own them and nothing plays them; they are here
+    /// because coding that block again needs them.
+    pub tail: Vec<Vec<i16>>,
     /// Samples the reconstruction put outside `i16` and that were saturated.
     /// Specimens produce none; a non-zero count means the stroke is not what this
     /// codec describes.
@@ -115,7 +129,7 @@ impl BlockHeader {
 
     /// Frames this block carries, the overlap included.
     fn frames(self, block_bytes: usize, channels: usize) -> usize {
-        8 * (block_bytes - 2) / (usize::from(self.width) * channels)
+        block_frames(self.width, block_bytes, channels)
     }
 }
 
@@ -154,7 +168,7 @@ impl<'a> Fields<'a> {
 }
 
 /// `C(n, k)`, for the small orders a block header can express.
-fn binomial(n: usize, k: usize) -> i64 {
+pub(super) fn binomial(n: usize, k: usize) -> i64 {
     let mut c = 1i64;
     for i in 0..k {
         c = c * (n - i) as i64 / (i + 1) as i64;
@@ -308,8 +322,23 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
         .into());
     }
 
+    let mut narrowed = Vec::with_capacity(channels);
+    for channel in &tail {
+        narrowed.push(
+            channel
+                .iter()
+                .map(|&sample| {
+                    let narrow = sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                    clipped += usize::from(i32::from(narrow) != sample);
+                    narrow
+                })
+                .collect(),
+        );
+    }
+
     Ok(Audio {
         channels: out,
+        tail: narrowed,
         clipped,
         overlap_checked,
     })
@@ -358,7 +387,7 @@ mod tests {
         Stroke {
             root: 0,
             record,
-            audio,
+            audio: std::borrow::Cow::Borrowed(audio),
         }
     }
 

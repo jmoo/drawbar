@@ -1,0 +1,1039 @@
+//! Writing a piano library: recordings coded into blocks, and a container laid out
+//! around them.
+//!
+//! [`build`] takes a **template** library and a set of [`Recording`]s — one per root
+//! note, [`Bank`] and velocity layer, frames at [`codec::RATE`] — and returns a
+//! [`Library`] the parent module's writer turns into a file. [`rebuild`] re-codes a
+//! library's own strokes from the frames they decode to, which is how the coder is
+//! checked against files this crate did not write.
+//!
+//! # The coding laws
+//!
+//! A block's width fixes its frame count, `F(w) = ⌊8·(1022·C − 2)/(w·C)⌋`, so a wider
+//! block is a shorter one and the width and the segmentation are one choice. Per
+//! block: for each order up to [`codec::MAX_ORDER`], take the narrowest width whose
+//! order-`w` residuals all fit `w` signed bits and whose frames still fit what the
+//! stroke has left; then take the order that reaches the narrowest width, ties to the
+//! lowest order. Width 1 occurs and there is no floor above it.
+//!
+//! Every block but the first opens by restating the previous block's last
+//! [`codec::OVERLAP`] frames against the running history, so a block owns
+//! `F(w) − OVERLAP` frames and the stroke owns their sum. The last block is an
+//! ordinary full block whose own trailing overlap sits past the stroke's end, which
+//! is why coding a stroke again needs [`codec::Audio::tail`].
+//!
+//! Inferred from specimens; not confirmed on hardware. Given each block's width,
+//! order and attenuation, this reproduces the blocks of every specimen read, byte for
+//! byte. The width and order it derives are the ones those files declare, apart from
+//! a handful of libraries whose headers were decided on a signal that is not the one
+//! they store. The attenuation is the same kind of thing one step smaller: it is a
+//! statistic the vendor's encoder recorded rather than a function of the frames it
+//! went on to store, so a block coded again from its own audio can declare a
+//! neighbouring value. Nothing in [`codec`] reads it.
+//!
+//! # What the audio does not say
+//!
+//! A stroke record carries fields no audio predicts: four length marks, fifteen
+//! one-pole decay coefficients, a per-stroke identifier, and two bytes the later
+//! streams use. Nor does the prefix's bank of per-note tables. [`build`] takes them
+//! from the template — for each recording, the template stroke of the same bank and
+//! nearest root — and rescales the marks to the new stroke's length. That the
+//! instrument reads them as the recording it made them for is unverified.
+//!
+//! ⚠️ No library this module wrote has been played on an instrument. What is known is
+//! that the bytes it lays out are the ones the vendor's own libraries hold.
+
+use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
+use super::{
+    be32, block_bytes, midi_key, Bank, Library, Stroke, FINE_TUNE_AT, KEY_MAP_AT, MARKS, NOTES,
+    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
+    REC_MARK_BLOCK, REC_SEEDS, REC_START, SEEDS, UNCOVERED,
+};
+use crate::error::{Error, ParseError};
+use crate::formats::nsmp::kernel;
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+
+/// Full scale the header's attenuation statistic is measured against.
+const FULL_SCALE: f64 = 8192.0;
+
+/// Widest field a header can declare, as an index bound.
+const WIDTHS: usize = MAX_WIDTH as usize + 1;
+
+/// What a library states about itself besides its strokes. Everything else — the
+/// stream version, the per-note tables, the word at body `0x06` — comes from the
+/// template [`build`] is given.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// The half of the `Name#Variant` field before the separator.
+    pub name: String,
+    /// The half after it, where the vendor records the voicing and the library's size.
+    pub variant: String,
+}
+
+impl Options {
+    pub fn new(name: &str) -> Options {
+        Options {
+            name: name.to_owned(),
+            variant: String::new(),
+        }
+    }
+
+    pub fn variant(mut self, variant: &str) -> Options {
+        self.variant = variant.to_owned();
+        self
+    }
+}
+
+/// One recording to code: what it is played for, and its frames.
+#[derive(Debug, Clone)]
+pub struct Recording {
+    /// The note it was recorded at.
+    pub root: u8,
+    pub bank: Bank,
+    /// Softness index within the root's bank, 0 being the loudest recording. The
+    /// instrument picks by rank among the layers a root holds, so the values need be
+    /// neither dense nor start at zero.
+    pub layer: u8,
+    /// One vector per channel at [`codec::RATE`], all the same length. Every
+    /// recording of one library states the same channel count, 1 or 2.
+    pub channels: Vec<Vec<i16>>,
+}
+
+/// A library rebuilt from its own audio, and how each stroke's blocks compare with
+/// the ones they were coded from.
+pub struct Rebuilt {
+    pub library: Library<'static>,
+    /// One entry per stroke, in directory order.
+    pub strokes: Vec<Recoded>,
+}
+
+/// How one stroke's blocks came back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Recoded {
+    /// Blocks the coder wrote.
+    pub blocks: usize,
+    /// Blocks byte-identical to the ones read.
+    pub identical: usize,
+    /// Blocks identical apart from the attenuation byte, which the decode never reads.
+    pub restated: usize,
+}
+
+impl Recoded {
+    /// Blocks that came back with different residuals, a different width or order, or
+    /// no counterpart at all.
+    pub fn recoded(&self) -> usize {
+        self.blocks - self.identical - self.restated
+    }
+}
+
+/// Build a library from recordings, taking from `template` every field the audio does
+/// not decide.
+///
+/// The recordings may arrive in any order; the directory sorts them by root, then
+/// bank, then layer, which is the ascending root order the per-root counts index by.
+/// The key map routes every key up to the highest root's own, and the per-key fine
+/// tune starts at zero rather than carrying the template's.
+pub fn build(
+    template: &Library<'_>,
+    options: &Options,
+    recordings: &[Recording],
+) -> Result<Library<'static>, Error> {
+    let channels = check_recordings(recordings)?;
+
+    let mut prefix = template.prefix.clone();
+    prefix[FINE_TUNE_AT..FINE_TUNE_AT + NOTES].fill(0);
+    let roots: BTreeSet<u8> = recordings.iter().map(|r| r.root).collect();
+    prefix[KEY_MAP_AT..KEY_MAP_AT + NOTES].copy_from_slice(&key_map(&roots));
+
+    let mut library = Library {
+        header: template.header.clone(),
+        prefix,
+        channels,
+        strokes: Vec::new(),
+    };
+    library.set_name(&options.name)?;
+    library.set_variant(&options.variant)?;
+
+    let mut order: Vec<&Recording> = recordings.iter().collect();
+    order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
+
+    let mut donors = Vec::with_capacity(order.len());
+    for recording in &order {
+        donors.push(donor(template, recording)?);
+    }
+    // A donor serving several recordings would name them all the same, so the
+    // identifiers only carry over when they stay distinct.
+    let unique: BTreeSet<u32> = donors.iter().map(|d| be32(*d, REC_ID)).collect();
+    let keep_ids = unique.len() == donors.len();
+
+    for (index, (recording, donor)) in order.iter().zip(&donors).enumerate() {
+        let seeds = seeds_for(&recording.channels);
+        let target = recording.channels[0].len();
+        let coded = code(&recording.channels, &seeds, target)?;
+        let id = if keep_ids {
+            be32(*donor, REC_ID)
+        } else {
+            index as u32 + 1
+        };
+        library.strokes.push(Stroke {
+            root: recording.root,
+            record: record(
+                donor,
+                &coded,
+                recording.bank.code(),
+                recording.layer,
+                &seeds,
+                id,
+            )?,
+            audio: Cow::Owned(coded.audio),
+        });
+    }
+    Ok(library)
+}
+
+/// Code every stroke of `library` again from the frames it decodes to, each keeping
+/// its own record and its own place in the directory.
+pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
+    let block = library.block_bytes();
+    let mut strokes = Vec::new();
+    let mut report = Vec::new();
+    for stroke in library.strokes() {
+        let audio = codec::decode(stroke, library.channels())?;
+        let target = audio.frames();
+        let mut source = audio.channels;
+        for (channel, tail) in source.iter_mut().zip(&audio.tail) {
+            channel.extend_from_slice(tail);
+        }
+        let seeds = stroke.seeds();
+        let coded = code(&source, &seeds, target)?;
+        report.push(compare(stroke.audio(), &coded.audio, block));
+        strokes.push(Stroke {
+            root: stroke.root,
+            record: record(
+                stroke.record(),
+                &coded,
+                stroke.bank_code(),
+                stroke.layer(),
+                &seeds,
+                stroke.id(),
+            )?,
+            audio: Cow::Owned(coded.audio),
+        });
+    }
+    Ok(Rebuilt {
+        library: Library {
+            header: library.header.clone(),
+            prefix: library.prefix.clone(),
+            channels: library.channels(),
+            strokes,
+        },
+        strokes: report,
+    })
+}
+
+/// 16-bit PCM at `rate`, interleaved by channel, resampled onto the stroke lattice.
+///
+/// The tap bank is [`nsmp`](crate::formats::nsmp::kernel)'s and the lattice is
+/// `t(f) = rate·f / RATE`. Audio already at [`codec::RATE`] passes through untouched:
+/// the bank interpolates rather than reproduces, so running it at a ratio of one
+/// would filter the source for nothing.
+///
+/// ⚠️ The bank's cutoff is measured against a 44,100 Hz source. On a faster one it
+/// does not band-limit as far as [`codec::RATE`]'s own Nyquist, and what sits above
+/// that folds back.
+pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled, Error> {
+    if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
+        return Err(ParseError::OutOfBounds {
+            value: format!(
+                "{} sample(s) of {channels} channel(s) at {rate} Hz",
+                samples.len()
+            ),
+            bound: "whole frames of at least one channel at a positive rate".into(),
+        }
+        .into());
+    }
+    if rate == codec::RATE {
+        let mut lanes = vec![Vec::new(); channels];
+        for (i, &sample) in samples.iter().enumerate() {
+            lanes[i % channels].push(sample);
+        }
+        return Ok(Resampled {
+            channels: lanes,
+            clipped: 0,
+        });
+    }
+
+    let frames = samples.len() / channels;
+    let fields = (frames as u128 * u128::from(codec::RATE) / u128::from(rate)) as usize;
+    let mut clipped = 0;
+    let mut lanes = Vec::with_capacity(channels);
+    for channel in 0..channels {
+        let lane: Vec<i16> = samples
+            .iter()
+            .skip(channel)
+            .step_by(channels)
+            .copied()
+            .collect();
+        lanes.push(
+            (0..fields)
+                .map(|f| {
+                    let value = kernel::field_at(&lane, f, rate, codec::RATE);
+                    let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+                    clipped += usize::from(i64::from(narrow) != value);
+                    narrow
+                })
+                .collect(),
+        );
+    }
+    Ok(Resampled {
+        channels: lanes,
+        clipped,
+    })
+}
+
+/// What [`resample`] produced.
+pub struct Resampled {
+    /// One vector per channel at [`codec::RATE`].
+    pub channels: Vec<Vec<i16>>,
+    /// Samples a sum put outside `i16`, which saturate.
+    pub clipped: usize,
+}
+
+/// The channel count the recordings agree on, or the first thing about them a
+/// library cannot state.
+fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
+    let Some(first) = recordings.first() else {
+        return Err(refuse(
+            "a library with no recordings at all has nothing to play",
+        ));
+    };
+    let channels = first.channels.len();
+    if !(1..=2).contains(&channels) {
+        return Err(ParseError::OutOfBounds {
+            value: format!("{channels} channels"),
+            bound: "1 or 2, which is what a library states".into(),
+        }
+        .into());
+    }
+
+    let mut seen = BTreeSet::new();
+    for recording in recordings {
+        let what = describe(recording);
+        midi_key("root", recording.root)?;
+        if recording.channels.len() != channels {
+            return Err(refuse(format!(
+                "{what} has {} channel(s) where another has {channels}; one library plays \
+                 one channel count",
+                recording.channels.len()
+            )));
+        }
+        let frames = recording.channels[0].len();
+        if recording.channels.iter().any(|c| c.len() != frames) {
+            return Err(refuse(format!(
+                "{what} has channels of unequal length; a frame is one sample of each"
+            )));
+        }
+        if frames == 0 {
+            return Err(refuse(format!("{what} has no frames")));
+        }
+        if !seen.insert((recording.root, recording.bank.code(), recording.layer)) {
+            return Err(refuse(format!(
+                "{what} is recorded twice; a root's layers are numbered within one bank"
+            )));
+        }
+    }
+    Ok(channels as u16)
+}
+
+fn describe(recording: &Recording) -> String {
+    format!(
+        "root {} {} layer {}",
+        recording.root, recording.bank, recording.layer
+    )
+}
+
+fn refuse(what: impl Into<String>) -> Error {
+    ParseError::AssertFail(what.into()).into()
+}
+
+/// The root each key plays: the lowest root the key sits no more than a semitone
+/// above. Keys past the highest root's own key are left uncovered.
+///
+/// Inferred from the key maps of vendor libraries; not confirmed on hardware. Those
+/// also stop short of the lowest keys, which is the acoustic instrument's range
+/// rather than anything the map derives.
+fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
+    let mut map = [UNCOVERED; NOTES];
+    for (key, slot) in map.iter_mut().enumerate() {
+        if let Some(&root) = roots.range((key as u8).saturating_sub(1)..).next() {
+            *slot = root;
+        }
+    }
+    map
+}
+
+/// The template stroke a recording inherits the fields no audio predicts from: the
+/// same bank and nearest root, then the nearest layer.
+///
+/// A release stroke declares no marks and no decay, so one can be built against a
+/// template holding none; anything else needs a donor that declares them.
+fn donor<'a>(template: &'a Library<'_>, recording: &Recording) -> Result<&'a [u8; RECORD], Error> {
+    let release = Bank::Release.code();
+    let wanted = recording.bank.code();
+    let same: Vec<&Stroke<'_>> = template
+        .strokes()
+        .iter()
+        .filter(|s| s.bank_code() == wanted)
+        .collect();
+    let pool: Vec<&Stroke<'_>> = match (same.is_empty(), recording.bank) {
+        (false, _) => same,
+        (true, Bank::Release) => template.strokes().iter().collect(),
+        (true, _) => template
+            .strokes()
+            .iter()
+            .filter(|s| s.bank_code() != release)
+            .collect(),
+    };
+    pool.iter()
+        .min_by_key(|s| {
+            (
+                s.root.abs_diff(recording.root),
+                s.layer().abs_diff(recording.layer),
+            )
+        })
+        .map(|s| s.record())
+        .ok_or_else(|| {
+            refuse(format!(
+                "the template records no stroke to take {}'s length marks and decay \
+                 coefficients from, and nothing in the audio predicts them",
+                describe(recording)
+            ))
+        })
+}
+
+/// One stroke's blocks, and what its record has to say about them.
+struct Coded {
+    audio: Vec<u8>,
+    /// Frames the blocks own between them.
+    owned: usize,
+    /// The frame each block starts at.
+    starts: Vec<usize>,
+}
+
+/// Code `source` — one vector per channel — into blocks owning `target` frames.
+///
+/// The blocks own whole frame counts the widths allow, so the last one usually
+/// reaches past `target`; the source is read as silent from its end, which is where
+/// those frames come from.
+fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result<Coded, Error> {
+    let channels = source.len();
+    let block = block_bytes(channels as u16);
+    let counts = frame_counts(block, channels);
+    let widest = counts[usize::from(MIN_WIDTH)];
+    let total = target
+        .checked_add(widest)
+        .ok_or_else(|| refuse("a stroke longer than this platform can address"))?;
+    let planes = planes(source, seeds, total)?;
+
+    let mut audio = Vec::new();
+    let mut starts = Vec::new();
+    let mut at = 0usize;
+    while at < target {
+        let (order, width) = choose(&planes, at, channels, &counts, Some(target - at))
+            .or_else(|| choose(&planes, at, channels, &counts, None))
+            .expect("order zero states a sample outright, which always fits sixteen bits");
+        let frames = counts[usize::from(width)];
+        let span = at * channels..(at + frames) * channels;
+        let peak = planes[0][span.clone()]
+            .iter()
+            .map(|&v| i64::from(v).abs())
+            .max()
+            .unwrap_or(0);
+        pack(
+            &mut audio,
+            order,
+            width,
+            attenuation(peak),
+            &planes[usize::from(order)][span],
+            block,
+        );
+        starts.push(at);
+        at += frames - OVERLAP;
+    }
+    Ok(Coded {
+        audio,
+        owned: at,
+        starts,
+    })
+}
+
+/// Frames a block of each candidate width carries, the overlap included.
+fn frame_counts(block: usize, channels: usize) -> [usize; WIDTHS] {
+    let mut out = [0; WIDTHS];
+    for width in MIN_WIDTH..=MAX_WIDTH {
+        out[usize::from(width)] = codec::block_frames(width, block, channels);
+    }
+    out
+}
+
+/// `Δ^order` of the covered frames for every order a header can declare, each
+/// interleaved by channel the way a block emits them and read as silent past the
+/// source's end.
+fn planes(
+    source: &[Vec<i16>],
+    seeds: &[[i16; SEEDS]; 2],
+    total: usize,
+) -> Result<Vec<Vec<i32>>, Error> {
+    let channels = source.len();
+    let sample = |channel: usize, n: isize| -> i64 {
+        match usize::try_from(n) {
+            Ok(n) => i64::from(source[channel].get(n).copied().unwrap_or(0)),
+            Err(_) => i64::from(seeds[channel][(SEEDS as isize + n) as usize]),
+        }
+    };
+    let mut out = Vec::with_capacity(MAX_ORDER + 1);
+    for order in 0..=MAX_ORDER {
+        let mut plane = residuals(total * channels)?;
+        for n in 0..total {
+            for channel in 0..channels {
+                let mut acc = 0i64;
+                for j in 0..=order {
+                    let term = codec::binomial(order, j) * sample(channel, n as isize - j as isize);
+                    acc += if j.is_multiple_of(2) { term } else { -term };
+                }
+                plane[n * channels + channel] = acc as i32;
+            }
+        }
+        out.push(plane);
+    }
+    Ok(out)
+}
+
+fn residuals(len: usize) -> Result<Vec<i32>, Error> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| ParseError::OutOfBounds {
+            value: format!("{len} residual(s)"),
+            bound: "an allocation that fits memory".into(),
+        })?;
+    out.resize(len, 0);
+    Ok(out)
+}
+
+/// The `(order, width)` a block starting at frame `at` declares.
+///
+/// `owned_left` caps a block's owned frames at what the stroke has left to own. The
+/// narrowest width is the longest block, so a cap rules out an opening range of
+/// widths; with none, the search may pick a block that reaches past the frames the
+/// caller asked for, which is what the last block of a stroke does.
+fn choose(
+    planes: &[Vec<i32>],
+    at: usize,
+    channels: usize,
+    counts: &[usize; WIDTHS],
+    owned_left: Option<usize>,
+) -> Option<(u8, u8)> {
+    let mut best: Option<(u8, u8)> = None;
+    for (order, plane) in planes.iter().enumerate() {
+        let mut lo = 0i32;
+        let mut hi = 0i32;
+        let mut scanned = at;
+        let mut narrowest = None;
+        // A wider block is a shorter one, so walking widths down grows the window a
+        // step at a time and the span the residuals need never narrows again.
+        for width in (MIN_WIDTH..=MAX_WIDTH).rev() {
+            let frames = counts[usize::from(width)];
+            for &value in &plane[scanned * channels..(at + frames) * channels] {
+                lo = lo.min(value);
+                hi = hi.max(value);
+            }
+            scanned = at + frames;
+            let bound = 1i32 << (width - 1);
+            if lo < -bound || hi >= bound {
+                break;
+            }
+            if owned_left.is_none_or(|left| frames - OVERLAP <= left) {
+                narrowest = Some(width);
+            }
+        }
+        if let Some(width) = narrowest {
+            if best.is_none_or(|(_, reached)| width < reached) {
+                best = Some((order as u8, width));
+            }
+        }
+    }
+    best
+}
+
+/// Append one block: the header word, then the residuals as `width`-bit two's
+/// complement fields low-bit-first, then zero to the block's length.
+fn pack(out: &mut Vec<u8>, order: u8, width: u8, stat: u8, residuals: &[i32], block: usize) {
+    let start = out.len();
+    let header = (u16::from(stat) << 8) | (u16::from(order) << 5) | u16::from(width);
+    out.extend_from_slice(&header.to_be_bytes());
+    let mask = (1u64 << width) - 1;
+    let mut reservoir = 0u64;
+    let mut held = 0u32;
+    for &value in residuals {
+        reservoir |= (i64::from(value) as u64 & mask) << held;
+        held += u32::from(width);
+        while held >= 16 {
+            out.extend_from_slice(&((reservoir & 0xffff) as u16).to_be_bytes());
+            reservoir >>= 16;
+            held -= 16;
+        }
+    }
+    if held > 0 {
+        out.extend_from_slice(&((reservoir & 0xffff) as u16).to_be_bytes());
+    }
+    out.resize(start + block, 0);
+}
+
+/// The header's high byte: how far a block's loudest frame sits below [`FULL_SCALE`],
+/// in dB, rounded to a whole one and clamped to `0..=100`.
+///
+/// A silent block declares 100 where one count declares 78. Inferred from specimens;
+/// not confirmed on hardware.
+fn attenuation(peak: i64) -> u8 {
+    if peak == 0 {
+        return 100;
+    }
+    let db = -20.0 * (peak as f64 / FULL_SCALE).log10();
+    (db + 0.5).floor().clamp(0.0, 100.0) as u8
+}
+
+/// The four seeds a new recording declares, oldest first: a zero, then the recording's
+/// own first three frames.
+///
+/// Vendor strokes carry the four frames before the recording, the oldest of them zero
+/// on every stroke of every specimen read. A recording that starts in silence has no
+/// such frames to carry and this states zeros, which is the same thing.
+fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
+    let mut out = [[0i16; SEEDS]; 2];
+    for (channel, group) in source.iter().zip(out.iter_mut()) {
+        for (i, slot) in group.iter_mut().skip(1).enumerate() {
+            *slot = channel.get(i).copied().unwrap_or(0);
+        }
+    }
+    out
+}
+
+/// A donor record with everything the audio decides written over it.
+///
+/// The length marks scale with the stroke's length so that they stay inside it, and a
+/// release stroke declares none and no decay — that is the class rule every specimen
+/// stroke obeys. The block index at `+0x2c` is derived: it is the block holding the
+/// first mark.
+fn record(
+    donor: &[u8; RECORD],
+    coded: &Coded,
+    bank: u8,
+    layer: u8,
+    seeds: &[[i16; SEEDS]; 2],
+    id: u32,
+) -> Result<[u8; RECORD], Error> {
+    let owned = u32::try_from(coded.owned).map_err(|_| ParseError::OutOfBounds {
+        value: format!("{} frames", coded.owned),
+        bound: "the u32 frame count a stroke record holds".into(),
+    })?;
+    let blocks = u16::try_from(coded.starts.len()).map_err(|_| ParseError::OutOfBounds {
+        value: format!("{} blocks", coded.starts.len()),
+        bound: "the u16 block count a stroke record holds".into(),
+    })?;
+
+    let mut out = *donor;
+    out[REC_START..REC_START + 4].fill(0);
+    out[REC_BANK] = bank;
+    out[REC_LAYER] = layer;
+    out[REC_FRAMES..REC_FRAMES + 4].copy_from_slice(&owned.to_be_bytes());
+    out[REC_BLOCKS..REC_BLOCKS + 2].copy_from_slice(&blocks.to_be_bytes());
+    for (channel, group) in seeds.iter().enumerate() {
+        for (i, seed) in group.iter().enumerate() {
+            let at = REC_SEEDS + (channel * SEEDS + i) * 2;
+            out[at..at + 2].copy_from_slice(&seed.to_be_bytes());
+        }
+    }
+
+    let silent = bank == Bank::Release.code();
+    let donor_frames = be32(donor, REC_FRAMES);
+    let mut first = 0u32;
+    for mark in 0..MARKS {
+        let at = REC_MARKS + mark * 4;
+        let scaled = match (silent, donor_frames) {
+            (true, _) | (_, 0) => 0,
+            _ => rescale(be32(donor, at), owned, donor_frames),
+        };
+        out[at..at + 4].copy_from_slice(&scaled.to_be_bytes());
+        if mark == 0 {
+            first = scaled;
+        }
+    }
+    let holding = coded
+        .starts
+        .iter()
+        .rposition(|&start| start as u64 <= u64::from(first))
+        .unwrap_or(0);
+    out[REC_MARK_BLOCK..REC_MARK_BLOCK + 2].copy_from_slice(&(holding as u16).to_be_bytes());
+    if silent {
+        out[REC_DECAY..REC_DECAY + 4].fill(0);
+    }
+    out[REC_ID..REC_ID + 4].copy_from_slice(&id.to_be_bytes());
+    Ok(out)
+}
+
+/// A mark at the same place in a stroke of `owned` frames, and inside it.
+fn rescale(mark: u32, owned: u32, donor_frames: u32) -> u32 {
+    let moved = u64::from(mark) * u64::from(owned) / u64::from(donor_frames);
+    moved.min(u64::from(owned.saturating_sub(1))) as u32
+}
+
+/// How `coded` compares with the span it was coded from, block by block.
+fn compare(before: &[u8], coded: &[u8], block: usize) -> Recoded {
+    let mut out = Recoded {
+        blocks: coded.len() / block,
+        ..Recoded::default()
+    };
+    for (index, now) in coded.chunks_exact(block).enumerate() {
+        let Some(was) = before.get(index * block..(index + 1) * block) else {
+            continue;
+        };
+        if was == now {
+            out.identical += 1;
+        } else if was[1..] == now[1..] {
+            out.restated += 1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cbin::{Cbin, Header, RawBody};
+    use crate::formats::npno::{Piano, CNSP_MAGIC, FORMAT};
+
+    /// A one-stroke library the encoder can donate from: a real prefix and one real
+    /// record, holding marks and a decay coefficient a new stroke inherits.
+    fn template(channels: u16) -> Piano {
+        let block = block_bytes(channels);
+        let directory_end = super::super::DIRECTORY_AT + RECORD;
+        let first = super::super::first_audio_offset(directory_end, block).unwrap();
+        let mut body = vec![0u8; first + block];
+        body[..4].copy_from_slice(CNSP_MAGIC);
+        body[0x04..0x06].copy_from_slice(&0x450u16.to_be_bytes());
+        body[0x61c..0x61e].copy_from_slice(&0x450u16.to_be_bytes());
+        body[0x61e..0x620].copy_from_slice(&channels.to_be_bytes());
+        body[0x1c..0x1c + 9].copy_from_slice(b"Donor#Med");
+        body[KEY_MAP_AT..KEY_MAP_AT + NOTES].fill(UNCOVERED);
+        body[KEY_MAP_AT + 60] = 60;
+        body[0x620..0x622].copy_from_slice(&1u16.to_be_bytes());
+        body[0x622 + 60 * 2..0x622 + 60 * 2 + 2].copy_from_slice(&1u16.to_be_bytes());
+
+        let rec = super::super::DIRECTORY_AT;
+        body[rec..rec + 4].copy_from_slice(&(first as u32).to_be_bytes());
+        body[rec + REC_FRAMES..rec + REC_FRAMES + 4].copy_from_slice(&1000u32.to_be_bytes());
+        body[rec + REC_BLOCKS..rec + REC_BLOCKS + 2].copy_from_slice(&1u16.to_be_bytes());
+        for mark in 0..MARKS {
+            let at = rec + REC_MARKS + mark * 4;
+            body[at..at + 4].copy_from_slice(&((mark as u32 + 6) * 100).to_be_bytes());
+        }
+        body[rec + REC_DECAY..rec + REC_DECAY + 4].copy_from_slice(&0x0000_2000u32.to_be_bytes());
+        body[rec + REC_ID..rec + REC_ID + 4].copy_from_slice(&77u32.to_be_bytes());
+        // One block of order-0 width-16 silence, so the stroke reads back.
+        let audio = first;
+        body[audio..audio + 2].copy_from_slice(&0x6410u16.to_be_bytes());
+        let frames = codec::block_frames(16, block, usize::from(channels));
+        let owned = (frames - OVERLAP) as u32;
+        body[rec + REC_FRAMES..rec + REC_FRAMES + 4].copy_from_slice(&owned.to_be_bytes());
+
+        Piano {
+            file: Cbin {
+                header: Header::new(FORMAT, (0, 0), 530),
+                body: RawBody(body),
+            },
+        }
+    }
+
+    /// A decaying tone, which is the shape the coder's width search is built for.
+    fn tone(frames: usize, hertz: f64, channels: usize) -> Vec<Vec<i16>> {
+        (0..channels)
+            .map(|c| {
+                (0..frames)
+                    .map(|n| {
+                        let t = n as f64 / f64::from(codec::RATE);
+                        let envelope = (-3.0 * t).exp() * (1.0 - (-400.0 * t).exp());
+                        let phase = std::f64::consts::TAU * hertz * (c as f64 * 0.01 + 1.0) * t;
+                        (9000.0 * envelope * phase.sin()) as i16
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn one(root: u8, bank: Bank, layer: u8, channels: Vec<Vec<i16>>) -> Recording {
+        Recording {
+            root,
+            bank,
+            layer,
+            channels,
+        }
+    }
+
+    /// Build, write, read back, and decode: what the caller put in is what the
+    /// instrument would be handed.
+    fn round_trip(channels: u16, recordings: &[Recording]) -> Piano {
+        let donor = template(channels);
+        let built = build(
+            &donor.library().unwrap(),
+            &Options::new("Synth").variant("Test"),
+            recordings,
+        )
+        .unwrap();
+        let bytes = {
+            let piano = built.to_piano().unwrap();
+            let mut out = std::io::Cursor::new(Vec::new());
+            piano.write_to(&mut out).unwrap();
+            out.into_inner()
+        };
+        Piano::read_from(&mut std::io::Cursor::new(bytes)).unwrap()
+    }
+
+    #[test]
+    fn a_built_library_decodes_back_to_the_frames_it_was_given() {
+        let source = tone(20_000, 220.0, 2);
+        let piano = round_trip(2, &[one(60, Bank::Attack, 0, source.clone())]);
+        let library = piano.library().unwrap();
+        assert_eq!(library.name(), ("Synth".into(), "Test".into()));
+        assert_eq!(library.channels(), 2);
+
+        let stroke = &library.strokes()[0];
+        let audio = codec::decode(stroke, 2).unwrap();
+        assert_eq!(audio.clipped, 0);
+        assert!(
+            audio.frames() >= source[0].len(),
+            "the stroke owns every frame it was given: {} of {}",
+            audio.frames(),
+            source[0].len()
+        );
+        for (channel, given) in audio.channels.iter().zip(&source) {
+            assert_eq!(&channel[..given.len()], &given[..]);
+            assert!(
+                channel[given.len()..].iter().all(|&s| s == 0),
+                "the frames past the source are silent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mono_library_codes_and_decodes_on_its_own_block_size() {
+        let source = tone(9_000, 440.0, 1);
+        let piano = round_trip(1, &[one(48, Bank::Attack, 0, source.clone())]);
+        let library = piano.library().unwrap();
+        assert_eq!(library.channels(), 1);
+        let audio = codec::decode(&library.strokes()[0], 1).unwrap();
+        assert_eq!(&audio.channels[0][..source[0].len()], &source[0][..]);
+    }
+
+    #[test]
+    fn the_directory_orders_strokes_by_root_then_bank_then_layer() {
+        let short = tone(6_000, 300.0, 1);
+        let piano = round_trip(
+            1,
+            &[
+                one(72, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Release, 0, short.clone()),
+                one(60, Bank::Attack, 4, short.clone()),
+                one(60, Bank::Attack, 0, short.clone()),
+            ],
+        );
+        let library = piano.library().unwrap();
+        let seen: Vec<(u8, Option<Bank>, u8)> = library
+            .strokes()
+            .iter()
+            .map(|s| (s.root, s.bank(), s.layer()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (60, Some(Bank::Attack), 0),
+                (60, Some(Bank::Attack), 4),
+                (60, Some(Bank::Release), 0),
+                (72, Some(Bank::Attack), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_release_stroke_declares_no_marks_and_no_decay() {
+        let short = tone(6_000, 300.0, 1);
+        let piano = round_trip(
+            1,
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Release, 0, short.clone()),
+            ],
+        );
+        let library = piano.library().unwrap();
+        for stroke in library.strokes() {
+            let record = stroke.record();
+            let marks: Vec<u32> = (0..MARKS)
+                .map(|m| be32(record, REC_MARKS + m * 4))
+                .collect();
+            let decay = be32(record, REC_DECAY);
+            if stroke.bank() == Some(Bank::Release) {
+                assert_eq!(marks, [0; MARKS], "a release stroke declares no marks");
+                assert_eq!(decay, 0, "a release stroke declares no decay");
+            } else {
+                assert!(marks.iter().all(|&m| m > 0 && m < stroke.frames()));
+                assert_ne!(decay, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn every_key_up_to_the_highest_roots_own_plays_the_root_above_it() {
+        let roots: BTreeSet<u8> = [25, 30, 60].into_iter().collect();
+        let map = key_map(&roots);
+        assert_eq!(map[0], 25, "the lowest root takes everything under it");
+        assert_eq!(map[26], 25, "a key one semitone above its root");
+        assert_eq!(map[27], 30, "and the next one belongs to the root above");
+        assert_eq!(map[31], 30, "a root reaches one semitone above itself");
+        assert_eq!(map[32], 60, "and the key after that is the next root's");
+        assert_eq!(map[61], 60, "the highest root reaches one semitone up");
+        assert_eq!(map[62], UNCOVERED);
+        assert_eq!(map[NOTES - 1], UNCOVERED);
+    }
+
+    #[test]
+    fn the_attenuation_states_decibels_below_full_scale() {
+        assert_eq!(attenuation(8192), 0);
+        assert_eq!(
+            attenuation(9000),
+            0,
+            "louder than full scale clamps at zero"
+        );
+        assert_eq!(attenuation(819), 20);
+        assert_eq!(attenuation(82), 40);
+        assert_eq!(attenuation(1), 78);
+        assert_eq!(attenuation(0), 100, "silence is not 78 dB down");
+    }
+
+    #[test]
+    fn a_recording_a_library_cannot_state_is_refused_by_name() {
+        let donor = template(1);
+        let library = donor.library().unwrap();
+        let options = Options::new("Synth");
+        let short = tone(6_000, 300.0, 1);
+        let error = |recordings: &[Recording]| {
+            build(&library, &options, recordings)
+                .expect_err("expected a refusal")
+                .to_string()
+        };
+
+        assert!(error(&[]).contains("no recordings"));
+        assert!(error(&[one(60, Bank::Attack, 0, vec![])]).contains("1 or 2"));
+        assert!(error(&[one(60, Bank::Attack, 0, vec![vec![]])]).contains("no frames"));
+        assert!(
+            error(&[one(60, Bank::Attack, 0, vec![short[0].clone(), vec![0; 3]])])
+                .contains("unequal length")
+        );
+        assert!(error(&[
+            one(60, Bank::Attack, 0, short.clone()),
+            one(60, Bank::Attack, 0, short.clone()),
+        ])
+        .contains("recorded twice"));
+        assert!(error(&[
+            one(60, Bank::Attack, 0, short.clone()),
+            one(
+                60,
+                Bank::Attack,
+                1,
+                vec![short[0].clone(), short[0].clone()]
+            ),
+        ])
+        .contains("one channel count"));
+    }
+
+    #[test]
+    fn a_template_with_only_release_strokes_cannot_donate_to_an_attack_stroke() {
+        let donor = template(1);
+        let mut library = donor.library().unwrap();
+        library.strokes[0].record[REC_BANK] = Bank::Release.code();
+        let short = tone(6_000, 300.0, 1);
+        let error = build(
+            &library,
+            &Options::new("Synth"),
+            &[one(60, Bank::Attack, 0, short)],
+        )
+        .expect_err("expected a refusal")
+        .to_string();
+        assert!(
+            error.contains("length marks and decay coefficients"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rebuilding_a_library_this_module_wrote_reproduces_every_block() {
+        let piano = round_trip(
+            2,
+            &[
+                one(60, Bank::Attack, 0, tone(12_000, 262.0, 2)),
+                one(72, Bank::Attack, 0, tone(9_000, 523.0, 2)),
+            ],
+        );
+        let library = piano.library().unwrap();
+        let again = rebuild(&library).unwrap();
+        assert_eq!(again.strokes.len(), 2);
+        for (index, recoded) in again.strokes.iter().enumerate() {
+            assert_eq!(
+                (recoded.identical, recoded.recoded()),
+                (recoded.blocks, 0),
+                "stroke {index} came back with different blocks"
+            );
+        }
+        assert_eq!(again.library.to_body().unwrap(), piano.file.body.0);
+    }
+
+    #[test]
+    fn the_resampler_leaves_audio_already_on_the_lattice_alone() {
+        let interleaved: Vec<i16> = (0..64).map(|n| (n * 100 - 3000) as i16).collect();
+        let out = resample(&interleaved, 2, codec::RATE).unwrap();
+        assert_eq!(out.clipped, 0);
+        assert_eq!(out.channels[0][..3], [-3000, -2800, -2600]);
+        assert_eq!(out.channels[1][..3], [-2900, -2700, -2500]);
+
+        assert!(resample(&[1, 2, 3], 2, codec::RATE).is_err());
+        assert!(resample(&[1, 2], 1, 0).is_err());
+    }
+
+    #[test]
+    fn resampling_a_slower_source_stretches_it_onto_the_lattice() {
+        let rate = 22_050;
+        let frames = 4_000;
+        let source: Vec<i16> = (0..frames)
+            .map(|n| {
+                let t = n as f64 / f64::from(rate);
+                (8000.0 * (std::f64::consts::TAU * 100.0 * t).sin()) as i16
+            })
+            .collect();
+        let out = resample(&source, 1, rate).unwrap();
+        assert_eq!(
+            out.channels[0].len(),
+            frames * codec::RATE as usize / rate as usize
+        );
+        // A 100 Hz sine keeps its zero crossings, so the resampled lattice holds the
+        // same count of them over the same span of time.
+        let crossings = |signal: &[i16]| {
+            signal
+                .windows(2)
+                .filter(|w| (w[0] < 0) != (w[1] < 0))
+                .count()
+        };
+        assert_eq!(
+            crossings(&out.channels[0][100..]),
+            crossings(&source[100..])
+        );
+    }
+}

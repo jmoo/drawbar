@@ -48,9 +48,11 @@
 //! no local specimen says what. Gating on them would refuse real files.
 
 pub mod codec;
+pub mod encode;
 
 use crate::cbin::{self, Cbin, Header, RawBody};
 use crate::error::{try_vec, Error, ParseError};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Read, Seek, Write};
@@ -97,10 +99,16 @@ const REC_LAYER: usize = 0x05;
 const REC_FRAMES: usize = 0x06;
 const REC_BLOCKS: usize = 0x0a;
 const REC_SEEDS: usize = 0x0c;
+const REC_MARKS: usize = 0x1c;
+const REC_MARK_BLOCK: usize = 0x2c;
+const REC_DECAY: usize = 0x2e;
 const REC_ID: usize = 0x6e;
 
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;
+
+/// Length marks a record carries at [`REC_MARKS`].
+const MARKS: usize = 4;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
@@ -438,7 +446,7 @@ pub struct Stroke<'a> {
     /// hardware.
     pub root: u8,
     record: [u8; RECORD],
-    audio: &'a [u8],
+    audio: Cow<'a, [u8]>,
 }
 
 impl<'a> Stroke<'a> {
@@ -489,8 +497,8 @@ impl<'a> Stroke<'a> {
     }
 
     /// The encoded audio, `blocks × 1022 × channels` bytes.
-    pub fn audio(&self) -> &'a [u8] {
-        self.audio
+    pub fn audio(&self) -> &[u8] {
+        &self.audio
     }
 
     /// The record as stored, its audio offset excluded from any meaning: the
@@ -617,7 +625,7 @@ impl<'a> Library<'a> {
             strokes.push(Stroke {
                 root,
                 record,
-                audio,
+                audio: Cow::Borrowed(audio),
             });
             at = end;
         }
@@ -986,7 +994,7 @@ impl<'a> Library<'a> {
             let record = DIRECTORY_AT + i * RECORD;
             out[record..record + RECORD].copy_from_slice(&stroke.record);
             out[record + REC_START..record + REC_START + 4].copy_from_slice(&start.to_be_bytes());
-            out[at..at + stroke.audio.len()].copy_from_slice(stroke.audio);
+            out[at..at + stroke.audio.len()].copy_from_slice(&stroke.audio);
             at += stroke.audio.len();
         }
         Ok(out)
