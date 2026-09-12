@@ -10,18 +10,21 @@ use nord_format::fields::Field;
 use nord_format::formats::nsmp::codec;
 use nord_usb::{Location, ObjectClass};
 
-use crate::app::dot;
 use crate::device::Device;
 use crate::fields;
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::strings;
+use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
 pub mod controls;
 pub(crate) mod encode;
+mod header;
 pub mod keys;
 mod panel;
+mod piano;
 mod project;
 pub(crate) mod sample;
 mod setlist;
@@ -29,10 +32,19 @@ mod setlist;
 use advanced::Advanced;
 use controls::{Ctx, Sets};
 
+pub use header::{Cell, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
 pub use sample::note_picker;
 
 /// The body's own scroll id — see [`crate::tabs::SCROLL`].
 pub const SCROLL: &str = "document_body";
+
+/// The id the body's own `Ui` is salted with, so the scroll region inside it answers to
+/// an id that does not move with the number of widgets drawn before it.
+pub const PAGE: &str = "document_page";
+
+/// The room the body keeps inside the centre. The header is full bleed and claims none
+/// of it.
+const BODY_MARGIN: f32 = 8.0;
 
 /// A put the header asked for. The browser owns the question it may need to raise.
 pub struct SendBack {
@@ -41,45 +53,41 @@ pub struct SendBack {
     pub at: Location,
 }
 
-/// What the header row asked for this frame.
-#[derive(Default)]
-struct Header {
-    revert: bool,
-    export: bool,
-    send: Option<SendBack>,
+/// The rest of the window a document reads: what is waiting to be sent, and what this
+/// computer's list labels things with.
+pub struct Around<'a> {
+    pub queue: &'a Queue,
+    pub tags: &'a Tags,
 }
 
-/// What the Basic view asked for that cannot be done while the asset is borrowed to
+/// What a document's frame asked the app for.
+#[derive(Default)]
+pub struct Wants {
+    /// The write the header queued.
+    pub send: Option<SendBack>,
+    /// The banner's offer to put a view of a slot on this computer.
+    pub keep: bool,
+}
+
+/// What the Edit face asked for that cannot be done while the asset is borrowed to
 /// draw it: audio, or a new asset made out of this one.
 enum Asked {
     Zone(sample::Ask),
     Encode,
 }
 
-/// Which face of a document is showing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum View {
-    /// The panel, in the instrument's own words. Happy-path edits.
-    #[default]
-    Basic,
-    /// The whole body as a table. Nothing hidden.
-    Advanced,
-    /// The record: the container, the bytes that moved, and what the instrument says
-    /// about the slot. Nothing here is a control.
-    Meta,
-}
-
 #[derive(Default)]
 pub struct Document {
     target: Option<u64>,
     /// Which face each document was left on.
-    views: std::collections::HashMap<u64, View>,
+    views: std::collections::HashMap<u64, Face>,
     /// Per-field legal values and controls, cached as they are drawn. One per document —
     /// see [`Ctx`].
     ctx: Ctx,
-    /// The name box for a sample instrument or a Sample Editor project, so a
-    /// half-typed name survives a frame.
+    /// The header's name box, so a half-typed name survives a frame, and the piano's
+    /// variant box beside it.
     name: String,
+    variant: String,
     /// The path boxes for a project's audio files, by file id — same reason.
     paths: std::collections::HashMap<u32, String>,
     /// The last refusal, and what caused it.
@@ -97,7 +105,7 @@ pub struct Document {
 }
 
 impl Document {
-    /// Draw the open tab's document.
+    /// Draw the open tab's document: the header full bleed, and the body under it.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -105,10 +113,14 @@ impl Document {
         workspace: &mut Workspace,
         device: &mut Device,
         log: &mut Log,
-    ) -> Option<SendBack> {
-        let entity = workspace.get(id)?;
+        around: &Around<'_>,
+    ) -> Wants {
+        let Some(entity) = workspace.get(id) else {
+            return Wants::default();
+        };
         let decoded = entity.entity.as_ref();
         let registry = decoded.map(fields::fields_of).unwrap_or_default();
+        let viewing = workspace.is_view(id);
 
         if self.target != Some(id) {
             self.target = Some(id);
@@ -116,17 +128,7 @@ impl Document {
             self.fetched_deps = false;
             self.advanced.leave();
             self.ctx = Ctx::default();
-            self.name = decoded
-                .and_then(sample::snapshot)
-                .and_then(Result::ok)
-                .map(|snapshot| snapshot.name)
-                .or_else(|| {
-                    decoded
-                        .and_then(project::snapshot)
-                        .and_then(Result::ok)
-                        .map(|snapshot| snapshot.name)
-                })
-                .unwrap_or_default();
+            (self.name, self.variant) = header::boxes(entity, viewing);
             self.paths.clear();
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
@@ -150,52 +152,78 @@ impl Document {
         }
 
         let faces = faces(entity, registry.as_deref());
-        let view = showing(&faces, self.views.get(&id).copied().unwrap_or_default());
+        let face = showing(&faces, self.views.get(&id).copied().unwrap_or_default());
 
         let mut sets: Sets = Vec::new();
-        let mut act = Header::default();
+        let act = header::ui(
+            ui,
+            entity,
+            &header::Facts {
+                faces: &faces,
+                showing: face,
+                device: &device.state,
+                queue: around.queue,
+                tags: around.tags,
+                view: viewing,
+                // No editor overrides the strip yet; the piano's `188 of 194 MB` and
+                // its refusal to queue a library that does not fit go here.
+                extras: header::Extras::default(),
+            },
+            (&mut self.name, &mut self.variant),
+            &mut sets,
+        );
+        self.views.insert(id, act.face.unwrap_or(face));
 
-        self.header(ui, entity, &mut act);
-        let mut want = view;
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Right to left, so the labels read in their own order left to right.
-                for (face, label) in faces.iter().rev() {
-                    if ui.selectable_label(view == *face, *label).clicked() {
-                        want = *face;
-                    }
-                }
-            });
-        });
-        self.views.insert(id, want);
-        if let Some(why) = &self.error {
-            ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
-        }
-        ui.separator();
-
+        let mut wants = Wants {
+            send: act.send,
+            keep: false,
+        };
         let mut details = None;
         let mut typed = false;
         let mut asked = None;
-        let mut piano = piano_lookup(entity, registry.as_deref(), device);
-        egui::ScrollArea::vertical()
-            .id_salt(SCROLL)
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                // ⚠️ Widget state keyed only by field path leaks between tabs of the same
-                // format, so every control also answers to the document id.
-                ui.push_id(id, |ui| match view {
-                    View::Basic => {
-                        asked = self.body(ui, entity, registry.as_deref(), &mut piano, &mut sets)
-                    }
-                    View::Advanced => {
-                        if let Some(fields) = registry.as_deref() {
-                            self.advanced.table(ui, fields, &mut sets);
-                            typed = !sets.is_empty();
+        let mut lookup = piano_lookup(entity, registry.as_deref(), device);
+        // A `Ui` of its own rather than a `Frame`: the margin is the same, and the
+        // salted id keeps the body's scroll state answering to one name whatever the
+        // header drew above it — see [`PAGE`].
+        let mut page = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(PAGE)
+                .max_rect(ui.available_rect_before_wrap().shrink(BODY_MARGIN)),
+        );
+        {
+            let ui = &mut page;
+            // ⚠️ A view's tab looks like a local document; the banner is the only
+            // visible indication that its bytes still belong to the instrument.
+            if viewing {
+                wants.keep = viewing_banner(ui, entity);
+            }
+            if let Some(why) = &self.error {
+                ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
+            }
+            pinned(ui, entity);
+            egui::ScrollArea::vertical()
+                .id_salt(SCROLL)
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    // ⚠️ Widget state keyed only by field path leaks between tabs of
+                    // the same format, so every control also answers to the document id.
+                    ui.push_id(id, |ui| match face {
+                        Face::Edit => {
+                            asked =
+                                self.body(ui, entity, registry.as_deref(), &mut lookup, &mut sets)
                         }
-                    }
-                    View::Meta => details = self.advanced.meta(ui, entity, device),
+                        Face::Advanced => {
+                            if let Some(fields) = registry.as_deref() {
+                                self.advanced.table(ui, fields, &mut sets);
+                                typed = !sets.is_empty();
+                            }
+                        }
+                        Face::Metadata => details = self.advanced.meta(ui, entity, device),
+                    });
                 });
-            });
+        }
+        let drawn = page.min_rect();
+        ui.advance_cursor_after_rect(drawn.expand(BODY_MARGIN));
 
         if let Some(details) = details {
             for cmd in advanced::commands(details) {
@@ -206,10 +234,15 @@ impl Document {
             self.answer(id, asked, workspace, log);
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            if piano.asked || self.owes_deps(&piano, at, device) {
+            if lookup.asked || self.owes_deps(&lookup, at, device) {
                 self.fetched_deps = true;
                 device.send(crate::device::DeviceCmd::Deps { class, at }, log);
             }
+        }
+        if let Some(name) = act.rename {
+            workspace.rename(id, name);
+            // The box is holding what was typed; the asset now carries it with its tag.
+            self.target = None;
         }
         if act.export {
             workspace.export(id);
@@ -219,7 +252,7 @@ impl Document {
             self.error = None;
             // Reread on the next frame: the name box is holding an edit that is gone.
             self.target = None;
-            return act.send;
+            return wants;
         }
         if !sets.is_empty() {
             let outcome = self.apply(id, sets, workspace, log);
@@ -228,7 +261,7 @@ impl Document {
                 self.advanced.settled(outcome);
             }
         }
-        act.send
+        wants
     }
 
     /// Whether this frame should read the slot's dependencies without being asked to.
@@ -238,8 +271,8 @@ impl Document {
     /// rather than sitting on an id until someone clicks. Once per document, and never
     /// with nothing to learn: no instrument, no piano named, a name already in hand, or a
     /// list the instrument has already given for this slot and simply did not name it in.
-    fn owes_deps(&self, piano: &panel::PianoLookup, at: Location, device: &Device) -> bool {
-        if self.fetched_deps || !piano.can_ask || piano.id.is_none() || piano.name.is_some() {
+    fn owes_deps(&self, lookup: &panel::PianoLookup, at: Location, device: &Device) -> bool {
+        if self.fetched_deps || !lookup.can_ask || lookup.id.is_none() || lookup.name.is_some() {
             return false;
         }
         let detail = &device.state.detail;
@@ -253,46 +286,6 @@ impl Document {
     pub fn leave(&mut self) {
         self.target = None;
         self.player.stop();
-    }
-
-    /// Where it came from, what has changed, and the three things to do about it.
-    fn header(&mut self, ui: &mut egui::Ui, entity: &LocalEntity, act: &mut Header) {
-        ui.horizontal_wrapped(|ui| {
-            ui.heading(strings::display_name(&entity.name))
-                .on_hover_text(&entity.name);
-            if entity.is_unsaved() {
-                let warn = crate::app::warn(ui.visuals());
-                dot(ui, warn);
-                ui.label(egui::RichText::new("unsaved").small().color(warn));
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(entity.origin.label()).small().weak());
-        });
-        ui.horizontal_wrapped(|ui| {
-            act.revert = ui
-                .add_enabled(entity.is_unsaved(), egui::Button::new("Revert"))
-                .on_hover_text("back to the bytes it was last saved as")
-                .on_disabled_hover_text("nothing has changed since it was saved")
-                .clicked();
-            act.export = ui.button("Export…").clicked();
-            if let Some((class, at)) = entity.origin.slot() {
-                let label = format!("Send to {}", strings::place(class, at));
-                let button = ui
-                    .add_enabled(crate::device::sendable(class), egui::Button::new(label))
-                    .on_disabled_hover_text(format!(
-                        "{} are installed on the instrument, not sent to it",
-                        strings::folder(class)
-                    ));
-                if button.clicked() {
-                    act.send = Some(SendBack {
-                        id: entity.id,
-                        class,
-                        at,
-                    });
-                }
-            }
-        });
     }
 
     /// Whichever shape this asset is.
@@ -364,7 +357,7 @@ impl Document {
                 playing: sounding == target.map(|id| (id, index)),
             })
             .collect();
-        sample::ui(ui, &snapshot, &mut self.name, &sounds, sets)
+        sample::ui(ui, &snapshot, &sounds, sets)
     }
 
     /// Do what the Basic view asked for, now that nothing is borrowing the asset.
@@ -445,7 +438,7 @@ impl Document {
 
     fn project_body(&mut self, ui: &mut egui::Ui, decoded: &nord_format::Entity, sets: &mut Sets) {
         match project::snapshot(decoded) {
-            Some(Ok(snapshot)) => project::ui(ui, &snapshot, &mut self.name, &mut self.paths, sets),
+            Some(Ok(snapshot)) => project::ui(ui, &snapshot, &mut self.paths, sets),
             Some(Err(why)) => {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
@@ -473,6 +466,8 @@ impl Document {
             sample::apply(&bytes, &sets)
         } else if decoded.is_some_and(project::is_project) {
             project::apply(&bytes, &sets)
+        } else if decoded.is_some_and(piano::is_piano) {
+            piano::apply(&bytes, &sets)
         } else if decoded.is_some_and(fields::is_set_list) {
             setlist::apply(&bytes, &sets)
         } else {
@@ -497,12 +492,11 @@ impl Document {
     }
 }
 
-/// The faces this document offers, in the order they are shown.
+/// The faces this document offers, in the order the control shows them.
 ///
-/// Meta is always one of them — every asset has a record, even bytes that decoded into
-/// nothing. Where it is the *only* one it is called by its full name: a lone "Meta"
-/// beside nothing reads as an abbreviation of something missing.
-fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<(View, &'static str)> {
+/// Metadata is always one of them — every asset has a record, even bytes that decoded
+/// into nothing.
+fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
     let mut faces = Vec::new();
     let friendly = match &entity.entity {
         Some(e) => {
@@ -516,28 +510,63 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<(View, &'stati
         None => encode::is_wav(&entity.bytes),
     };
     if friendly {
-        faces.push((View::Basic, "Basic"));
+        faces.push(Face::Edit);
     }
+    faces.push(Face::Metadata);
     if registry.is_some() {
-        faces.push((View::Advanced, "Advanced"));
+        faces.push(Face::Advanced);
     }
-    faces.push((
-        View::Meta,
-        match faces.is_empty() {
-            true => "Metadata",
-            false => "Meta",
-        },
-    ));
     faces
 }
 
 /// The face to show: the one this document was last left on, where that face still
 /// exists — the panel otherwise, and the record where there is no panel either.
-fn showing(faces: &[(View, &'static str)], remembered: View) -> View {
-    match faces.iter().any(|(face, _)| *face == remembered) {
+fn showing(faces: &[Face], remembered: Face) -> Face {
+    match faces.contains(&remembered) {
         true => remembered,
-        false => faces.first().map_or(View::Meta, |(face, _)| *face),
+        false => faces.first().copied().unwrap_or(Face::Metadata),
     }
+}
+
+/// What an editor keeps in front of the body: above the scroll region, on the panel
+/// fill, so it stays where it is while the rows under it move.
+///
+/// The sample and piano key maps are what this region is for. No kind claims it yet, so
+/// it takes up no room.
+fn pinned(_ui: &mut egui::Ui, _entity: &LocalEntity) {}
+
+/// The strip over a document that is a view of a slot rather than an asset on this
+/// computer, and the one way to make it one.
+fn viewing_banner(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
+    let Some(where_) = entity
+        .origin
+        .slot()
+        .map(|(class, at)| strings::place(class, at))
+    else {
+        return false;
+    };
+    let mut keep = false;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Viewing {where_} on the instrument."))
+                    .strong()
+                    .small(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Edits and Send back work from here; it is not on this computer.",
+                )
+                .small()
+                .weak(),
+            );
+            keep = ui
+                .small_button("Keep on this computer")
+                .on_hover_text("put it in the list, where it stays after this tab closes")
+                .clicked();
+        });
+    });
+    keep
 }
 
 /// What is known about the piano a program plays.
@@ -642,43 +671,300 @@ mod tests {
     use super::*;
     use crate::workspace::{Fresh, Origin};
 
-    /// Paint one document into a headless context.
+    /// One document open in a headless window: everything a frame of it needs, and the
+    /// words it painted.
     ///
-    /// Nothing checks pixels; what this catches is the failure a document can actually
-    /// have — a section that indexes past its fields, or a control asked for a value the
-    /// field cannot hold.
-    fn render(sets: &[(&str, &str)], kind: Fresh) {
-        render_view(sets, kind, View::Basic);
+    /// Nothing checks pixels; what a paint pass catches is the failure a document can
+    /// actually have — a section that indexes past its fields, or a control asked for a
+    /// value the field cannot hold.
+    struct Open {
+        ctx: egui::Context,
+        workspace: Workspace,
+        device: Device,
+        log: Log,
+        queue: Queue,
+        tags: Tags,
+        document: Document,
+        id: u64,
+        /// How wide the window is, which is what the header's collapse is measured on.
+        width: f32,
     }
 
-    fn render_view(sets: &[(&str, &str)], kind: Fresh, view: View) {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut document = Document::default();
+    /// The window a document is painted into, wide enough for [`Stage::Full`].
+    const SCREEN: egui::Vec2 = egui::vec2(1280.0, 720.0);
 
-        let id = workspace.create(kind, &mut log).expect("a fresh default");
-        document.views.insert(id, view);
-        if !sets.is_empty() {
-            let bytes = workspace.get(id).unwrap().bytes.clone();
+    impl Open {
+        fn fresh(kind: Fresh) -> Open {
+            let mut open = Open::empty();
+            open.id = open
+                .workspace
+                .create(kind, &mut open.log)
+                .expect("a fresh default");
+            open
+        }
+
+        fn file(name: &str, bytes: Vec<u8>) -> Open {
+            let mut open = Open::empty();
+            open.id =
+                open.workspace
+                    .ingest(name.into(), Origin::File(name.into()), bytes, &mut open.log);
+            open
+        }
+
+        fn empty() -> Open {
+            let ctx = egui::Context::default();
+            // Both faces, the way the app dresses them: a named text style the header
+            // asks for and nothing registered is a panic mid-frame.
+            ctx.all_styles_mut(crate::app::metrics);
+            Open {
+                workspace: Workspace::new(ctx.clone()),
+                device: Device::new(ctx.clone()),
+                ctx,
+                log: Log::default(),
+                queue: Queue::default(),
+                tags: Tags::default(),
+                document: Document::default(),
+                id: 0,
+                width: SCREEN.x,
+            }
+        }
+
+        fn entity(&self) -> &LocalEntity {
+            self.workspace.get(self.id).expect("it is still open")
+        }
+
+        fn set(&mut self, sets: &[(&str, &str)]) {
+            let bytes = self.entity().bytes.clone();
             let sets: Vec<(String, String)> = sets
                 .iter()
-                .map(|(p, v)| ((*p).to_string(), (*v).to_string()))
+                .map(|(path, value)| ((*path).to_string(), (*value).to_string()))
                 .collect();
             let (_, edited) = fields::apply(&bytes, &sets).expect("the sets are legal");
-            workspace.replace_bytes(id, edited, &mut log);
+            self.workspace.replace_bytes(self.id, edited, &mut self.log);
         }
 
-        // Twice: the second pass runs with the caches and the widget state the first
-        // one left behind, which is where a stale index would show up.
-        for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        /// One frame, and every word it put on screen.
+        fn frame(&mut self, events: Vec<egui::Event>) -> Vec<String> {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(self.width, SCREEN.y),
+                )),
+                ..Default::default()
+            };
+            let output = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
+                    self.document.ui(
+                        ui,
+                        self.id,
+                        &mut self.workspace,
+                        &mut self.device,
+                        &mut self.log,
+                        &Around {
+                            queue: &self.queue,
+                            tags: &self.tags,
+                        },
+                    );
                 });
             });
+            let mut said = Vec::new();
+            for clipped in &output.shapes {
+                words(&clipped.shape, &mut said);
+            }
+            said
         }
+
+        /// Twice: the second pass runs with the caches and the widget state the first
+        /// one left behind, which is where a stale index would show up.
+        fn twice(&mut self) -> Vec<String> {
+            self.frame(Vec::new());
+            self.frame(Vec::new())
+        }
+    }
+
+    fn words(shape: &egui::Shape, into: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
+            _ => {}
+        }
+    }
+
+    fn render(sets: &[(&str, &str)], kind: Fresh) {
+        render_view(sets, kind, Face::Edit);
+    }
+
+    /// Every kind gets the same strip, in both faces of the theme, and it names the
+    /// faces in their own words. The old abbreviations are gone from it.
+    #[test]
+    fn every_kind_wears_the_header_and_names_its_faces() {
+        for kind in [Fresh::Program, Fresh::Live, Fresh::SetList, Fresh::Settings] {
+            for dark in [true, false] {
+                let mut open = Open::fresh(kind);
+                open.ctx.set_theme(match dark {
+                    true => egui::ThemePreference::Dark,
+                    false => egui::ThemePreference::Light,
+                });
+                let said = open.twice();
+                let has = |word: &str| said.iter().any(|held| held == word);
+                assert!(has("Edit"), "{kind:?} in {dark}: {said:?}");
+                assert!(has("Metadata"), "{kind:?} in {dark}: {said:?}");
+                assert!(has("Queue send"), "the loud action: {said:?}");
+                assert!(has("Revert") && has("Export…"), "the quiet ones: {said:?}");
+                assert!(
+                    !has("Basic") && !has("Meta"),
+                    "the faces are called by their own names: {said:?}"
+                );
+            }
+        }
+    }
+
+    /// The strip gives up its words in one order as it narrows: the quiet actions
+    /// first, then the faces, and the loud action keeps a short label rather than
+    /// becoming a bare glyph.
+    #[test]
+    fn a_narrowing_header_gives_up_its_words_in_one_order() {
+        let at = |width: f32| {
+            let mut open = Open::fresh(Fresh::Program);
+            open.width = width;
+            open.twice()
+        };
+
+        let full = at(1100.0);
+        assert!(full.contains(&"Export…".to_string()), "{full:?}");
+        assert!(full.contains(&"Edit".to_string()));
+        assert!(full.contains(&"Queue send".to_string()));
+
+        let quiet = at(900.0);
+        assert!(!quiet.contains(&"Export…".to_string()), "{quiet:?}");
+        assert!(quiet.contains(&"Edit".to_string()), "the faces keep theirs");
+        assert!(quiet.contains(&"Queue send".to_string()));
+
+        let faces = at(800.0);
+        assert!(!faces.contains(&"Edit".to_string()), "{faces:?}");
+        assert!(faces.contains(&"Queue send".to_string()));
+
+        let narrow = at(700.0);
+        assert!(!narrow.contains(&"Queue send".to_string()), "{narrow:?}");
+        assert!(
+            narrow.contains(&"Send".to_string()),
+            "the loud action is never a bare glyph: {narrow:?}"
+        );
+    }
+
+    /// The name box edits the asset's own name where the file stores none, and the
+    /// stored name keeps the tag the box never shows.
+    #[test]
+    fn typing_in_the_name_box_renames_the_asset_and_keeps_its_tag() {
+        let mut open = Open::fresh(Fresh::Program);
+        assert_eq!(open.entity().name, "untitled.ne5p");
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![enter()]);
+
+        let renamed = open.entity().name.clone();
+        assert_ne!(renamed, "untitled.ne5p", "the box was typed into");
+        assert!(renamed.ends_with(".ne5p"), "the tag survives: {renamed}");
+        assert!(renamed.contains('X'), "what was typed landed: {renamed}");
+    }
+
+    /// Where the file stores the name, the box commits through the format rather than
+    /// renaming the asset.
+    #[test]
+    fn typing_in_a_samples_name_box_writes_the_name_the_file_stores() {
+        let mut open = Open::file("whatever.nsmp", sample_bytes());
+        let stored = |open: &Open| {
+            sample::snapshot(open.entity().entity.as_ref().unwrap())
+                .unwrap()
+                .unwrap()
+                .name
+        };
+        assert_eq!(stored(&open), "Marimba");
+
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![enter()]);
+
+        assert_ne!(stored(&open), "Marimba", "the instrument was renamed");
+        assert!(stored(&open).contains('X'), "{}", stored(&open));
+        assert_eq!(
+            open.entity().name,
+            "whatever.nsmp",
+            "the asset's own name is not what that box edits"
+        );
+    }
+
+    /// A program wears its tags as chips on the identity row, and a program wearing none
+    /// has no row for them.
+    #[test]
+    fn the_identity_row_carries_the_tags_the_asset_wears() {
+        let mut open = Open::fresh(Fresh::Program);
+        let said = open.twice();
+        assert!(
+            !said.iter().any(|word| word == "TAGS"),
+            "nothing is worn, so there is no cell: {said:?}"
+        );
+
+        let friday = open.tags.make("Friday — Blue Room");
+        let organ = open.tags.make("Organ-heavy");
+        for tag in [friday, organ] {
+            open.tags.set(open.id, tag, true);
+        }
+        let said = open.twice();
+        assert!(said.iter().any(|word| word == "TAGS"), "{said:?}");
+        for worn in ["Friday — Blue Room", "Organ-heavy"] {
+            assert!(said.iter().any(|word| word == worn), "{worn}: {said:?}");
+        }
+    }
+
+    /// A click inside the name box, which sits after the kind glyph at the left of the
+    /// strip.
+    const NAME_BOX: egui::Pos2 = egui::pos2(100.0, 19.0);
+
+    fn click(at: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn enter() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn sample_bytes() -> Vec<u8> {
+        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
+        let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
+        nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+    }
+
+    /// The rest of the window, as a document with nothing waiting and nothing labelled
+    /// sees it.
+    fn alone() -> (Queue, Tags) {
+        (Queue::default(), Tags::default())
+    }
+
+    fn render_view(sets: &[(&str, &str)], kind: Fresh, face: Face) {
+        let mut open = Open::fresh(kind);
+        open.document.views.insert(open.id, face);
+        if !sets.is_empty() {
+            open.set(sets);
+        }
+        open.twice();
     }
 
     #[test]
@@ -700,38 +986,44 @@ mod tests {
     /// nothing — and the folded dump.
     #[test]
     fn the_meta_face_paints() {
-        render_view(&[("center_panel.gain", "96")], Fresh::Program, View::Meta);
-        render_view(&[], Fresh::Settings, View::Meta);
+        render_view(
+            &[("center_panel.gain", "96")],
+            Fresh::Program,
+            Face::Metadata,
+        );
+        render_view(&[], Fresh::Settings, Face::Metadata);
     }
 
     /// The engineer's table paints, filters and holds an edit — for a body with ninety
     /// fields and for one with forty.
     #[test]
     fn the_advanced_table_paints() {
-        render_view(&[], Fresh::Program, View::Advanced);
-        render_view(&[], Fresh::Settings, View::Advanced);
+        render_view(&[], Fresh::Program, Face::Advanced);
+        render_view(&[], Fresh::Settings, Face::Advanced);
     }
 
     /// A body with a registry has all three faces; one with a view of its own but no
-    /// registry has no field table to offer; bytes with neither have only the record,
-    /// and then it is called by its full name.
+    /// registry has no field table to offer; bytes with neither have only the record.
     #[test]
     fn the_faces_offered_are_the_ones_the_asset_has() {
         let ctx = egui::Context::default();
         let mut workspace = Workspace::new(ctx.clone());
         let mut log = Log::default();
 
-        let labels = |workspace: &Workspace, id: u64| -> Vec<&'static str> {
+        let offered = |workspace: &Workspace, id: u64| -> Vec<&'static str> {
             let entity = workspace.get(id).unwrap();
             let registry = entity.entity.as_ref().and_then(fields::fields_of);
             faces(entity, registry.as_deref())
                 .iter()
-                .map(|(_, label)| *label)
+                .map(|face| face.label())
                 .collect()
         };
 
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
-        assert_eq!(labels(&workspace, program), ["Basic", "Advanced", "Meta"]);
+        assert_eq!(
+            offered(&workspace, program),
+            ["Edit", "Metadata", "Advanced"]
+        );
 
         let song = workspace.ingest(
             "blank.ne5t".into(),
@@ -739,7 +1031,7 @@ mod tests {
             crate::fields::blank::electro5_song(),
             &mut log,
         );
-        assert_eq!(labels(&workspace, song), ["Basic", "Meta"]);
+        assert_eq!(offered(&workspace, song), ["Edit", "Metadata"]);
 
         let stub = workspace.ingest(
             "blank.ns3s".into(),
@@ -747,7 +1039,7 @@ mod tests {
             crate::fields::blank::stage3_song(),
             &mut log,
         );
-        assert_eq!(labels(&workspace, stub), ["Metadata"]);
+        assert_eq!(offered(&workspace, stub), ["Metadata"]);
 
         let junk = workspace.ingest(
             "junk.bin".into(),
@@ -755,28 +1047,24 @@ mod tests {
             b"not a nord file".to_vec(),
             &mut log,
         );
-        assert_eq!(labels(&workspace, junk), ["Metadata"]);
+        assert_eq!(offered(&workspace, junk), ["Metadata"]);
     }
 
     /// A document opens on the face it was left on, and on something that has no such
     /// face falls back rather than showing an empty page.
     #[test]
     fn a_document_falls_back_to_a_face_it_actually_has() {
-        let all = [
-            (View::Basic, "Basic"),
-            (View::Advanced, "Advanced"),
-            (View::Meta, "Meta"),
-        ];
-        assert_eq!(showing(&all, View::Meta), View::Meta);
-        assert_eq!(showing(&all[..2], View::Meta), View::Basic);
+        let all = [Face::Edit, Face::Metadata, Face::Advanced];
+        assert_eq!(showing(&all, Face::Metadata), Face::Metadata);
+        assert_eq!(showing(&all[..2], Face::Advanced), Face::Edit);
 
-        let record_only = [(View::Meta, "Metadata")];
-        for left_on in [View::Basic, View::Advanced, View::Meta] {
-            assert_eq!(showing(&record_only, left_on), View::Meta);
+        let record_only = [Face::Metadata];
+        for left_on in [Face::Edit, Face::Advanced, Face::Metadata] {
+            assert_eq!(showing(&record_only, left_on), Face::Metadata);
         }
         // A set list has no field table: the table's operator lands on the panel.
-        let no_table = [(View::Basic, "Basic"), (View::Meta, "Meta")];
-        assert_eq!(showing(&no_table, View::Advanced), View::Basic);
+        let no_table = [Face::Edit, Face::Metadata];
+        assert_eq!(showing(&no_table, Face::Advanced), Face::Edit);
     }
 
     /// A cell the library refuses stays open with what was typed in it, because that is
@@ -824,6 +1112,7 @@ mod tests {
         let mut log = Log::default();
         let mut document = Document::default();
         let mut tabs = crate::tabs::Tabs::default();
+        let (queue, tags) = alone();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         tabs.open(id);
@@ -853,11 +1142,22 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ids = Some((
                         ui.make_persistent_id(egui::Id::new(crate::tabs::SCROLL)),
-                        ui.make_persistent_id(egui::Id::new(SCROLL)),
+                        ui.make_persistent_id(egui::Id::new(PAGE))
+                            .with(egui::Id::new(SCROLL)),
                     ));
                     tabs.ui(ui, &workspace, &mut Vec::new());
                     ui.separator();
-                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
+                    document.ui(
+                        ui,
+                        id,
+                        &mut workspace,
+                        &mut device,
+                        &mut log,
+                        &Around {
+                            queue: &queue,
+                            tags: &tags,
+                        },
+                    );
                 });
             });
         }
@@ -958,13 +1258,25 @@ mod tests {
         let mut log = Log::default();
         let mut document = Document::default();
 
+        let (queue, tags) = alone();
+
         let first = workspace.create(Fresh::Program, &mut log).unwrap();
         let second = workspace.create(Fresh::Program, &mut log).unwrap();
 
         let mut show = |document: &mut Document, id: u64| {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
+                    document.ui(
+                        ui,
+                        id,
+                        &mut workspace,
+                        &mut device,
+                        &mut log,
+                        &Around {
+                            queue: &queue,
+                            tags: &tags,
+                        },
+                    );
                 });
             });
         };
@@ -993,22 +1305,10 @@ mod tests {
     }
 
     /// Paint a document over bytes the workspace has no fresh default for.
-    fn render_file(name: &str, bytes: Vec<u8>, view: View) {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut document = Document::default();
-
-        let id = workspace.ingest(name.into(), Origin::File(name.into()), bytes, &mut log);
-        document.views.insert(id, view);
-        for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
-                });
-            });
-        }
+    fn render_file(name: &str, bytes: Vec<u8>, face: Face) {
+        let mut open = Open::file(name, bytes);
+        open.document.views.insert(open.id, face);
+        open.twice();
     }
 
     /// The Stage bodies have no panel of their own here, so they get the generic one: the
@@ -1024,8 +1324,8 @@ mod tests {
             ("blank.ns4n", blank::stage4_piano_preset()),
             ("blank.ns4y", blank::stage4_synth()),
         ] {
-            render_file(name, bytes.clone(), View::Basic);
-            render_file(name, bytes, View::Advanced);
+            render_file(name, bytes.clone(), Face::Edit);
+            render_file(name, bytes, Face::Advanced);
         }
     }
 
@@ -1037,7 +1337,7 @@ mod tests {
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        render_file("blank.ne5t", bytes, View::Basic);
+        render_file("blank.ne5t", bytes, Face::Edit);
     }
 
     /// ⚠️ A song that decodes no further than its container has no Basic view to offer,
@@ -1049,28 +1349,17 @@ mod tests {
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(!fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        render_file("blank.ns3s", bytes, View::Meta);
+        render_file("blank.ns3s", bytes, Face::Metadata);
     }
 
     /// Bytes that do not decode still have a document — it says so and shows the record.
     #[test]
     fn a_file_that_did_not_decode_still_paints() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut document = Document::default();
-        let id = workspace.ingest(
-            "junk.bin".into(),
-            Origin::File("junk.bin".into()),
-            b"not a nord file".to_vec(),
-            &mut log,
+        let said = Open::file("junk.bin", b"not a nord file".to_vec()).twice();
+        assert!(
+            said.iter().any(|word| word.contains("did not decode")),
+            "the record is all these bytes have: {said:?}"
         );
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                document.ui(ui, id, &mut workspace, &mut device, &mut log);
-            });
-        });
     }
 
     /// One second of 44.1 kHz mono — long enough for the encoder's shortest stroke.
@@ -1083,32 +1372,24 @@ mod tests {
 
     #[test]
     fn a_wav_offers_an_encode_and_leaves_itself_alone() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut document = Document::default();
-
         let bytes = wav_bytes();
-        let id = workspace.ingest(
-            "Marimba hit.wav".into(),
-            Origin::File("Marimba hit.wav".into()),
-            bytes.clone(),
-            &mut log,
-        );
+        let mut open = Open::file("Marimba hit.wav", bytes.clone());
         assert_eq!(
-            faces(workspace.get(id).unwrap(), None)
+            faces(open.entity(), None)
                 .iter()
-                .map(|(_, label)| *label)
+                .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Basic", "Meta"],
+            ["Edit", "Metadata"],
         );
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                document.ui(ui, id, &mut workspace, &mut device, &mut log);
-            });
-        });
+        open.frame(Vec::new());
+        let Open {
+            mut document,
+            mut workspace,
+            mut log,
+            id,
+            ..
+        } = open;
         document.answer(id, Asked::Encode, &mut workspace, &mut log);
 
         assert!(document.error.is_none(), "{:?}", document.error);
@@ -1128,63 +1409,59 @@ mod tests {
 
     #[test]
     fn a_zone_decodes_on_request_and_exports_under_the_instruments_name() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut document = Document::default();
-
         let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
         let options = nord_format::formats::nsmp::encode::Options::new("Marimba").root_key(48);
         let bytes = nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
             .unwrap()
             .to_bytes()
             .unwrap();
-        let id = workspace.ingest(
-            "whatever-it-was-called.nsmp".into(),
-            Origin::File("whatever-it-was-called.nsmp".into()),
-            bytes,
-            &mut log,
-        );
-        document.target = Some(id);
-        document.audio.follow(id, workspace.get(id).unwrap().stamp);
+        let mut open = Open::file("whatever-it-was-called.nsmp", bytes);
+        let id = open.id;
+        open.document.target = Some(id);
+        let stamp = open.entity().stamp;
+        open.document.audio.follow(id, stamp);
 
-        assert!(document.audio.get(0).is_none(), "nothing decodes unasked");
-        document.answer(
+        assert!(
+            open.document.audio.get(0).is_none(),
+            "nothing decodes unasked"
+        );
+        open.document.answer(
             id,
             Asked::Zone(sample::Ask::Decode(0)),
-            &mut workspace,
-            &mut log,
+            &mut open.workspace,
+            &mut open.log,
         );
-        let decoded = document.audio.get(0).expect("asked for").as_ref().unwrap();
-        assert!(decoded.audio.seconds() > 0.5);
-        assert_eq!(decoded.audio.channels, 1);
-        assert!(!decoded.envelope.is_empty());
-
+        {
+            let decoded = open.document.audio.get(0).expect("asked for");
+            let decoded = decoded.as_ref().unwrap();
+            assert!(decoded.audio.seconds() > 0.5);
+            assert_eq!(decoded.audio.channels, 1);
+            assert!(!decoded.envelope.is_empty());
+        }
         // With a zone open the document paints its envelope, which nothing else does.
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                document.ui(ui, id, &mut workspace, &mut device, &mut log);
-            });
-        });
+        open.frame(Vec::new());
 
-        assert_eq!(document.instrument_name(id, &workspace), "Marimba");
         assert_eq!(
-            crate::workspace::zone_wav_name(&document.instrument_name(id, &workspace), 1),
+            open.document.instrument_name(id, &open.workspace),
+            "Marimba"
+        );
+        assert_eq!(
+            crate::workspace::zone_wav_name(&open.document.instrument_name(id, &open.workspace), 1),
             "Marimba-zone1.wav",
         );
 
         // Editing the instrument replaces its bytes, so what was decoded from the old
         // ones is dropped rather than kept beside a file it no longer describes.
-        let edited = sample::apply(
-            &workspace.get(id).unwrap().bytes,
-            &[("name".into(), "Vibes".into())],
-        )
-        .unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
-        document.audio.follow(id, workspace.get(id).unwrap().stamp);
-        assert!(document.audio.get(0).is_none(), "decoded from stale bytes");
-        assert_eq!(document.instrument_name(id, &workspace), "Vibes");
+        let edited =
+            sample::apply(&open.entity().bytes, &[("name".into(), "Vibes".into())]).unwrap();
+        open.workspace.replace_bytes(id, edited, &mut open.log);
+        let stamp = open.entity().stamp;
+        open.document.audio.follow(id, stamp);
+        assert!(
+            open.document.audio.get(0).is_none(),
+            "decoded from stale bytes"
+        );
+        assert_eq!(open.document.instrument_name(id, &open.workspace), "Vibes");
     }
 
     #[test]
@@ -1195,8 +1472,8 @@ mod tests {
             .unwrap()
             .to_bytes()
             .unwrap();
-        render_file("Marimba.nsmp", bytes.clone(), View::Basic);
-        render_file("Marimba.nsmp", bytes, View::Meta);
-        render_file("Marimba hit.wav", wav_bytes(), View::Basic);
+        render_file("Marimba.nsmp", bytes.clone(), Face::Edit);
+        render_file("Marimba.nsmp", bytes, Face::Metadata);
+        render_file("Marimba hit.wav", wav_bytes(), Face::Edit);
     }
 }
