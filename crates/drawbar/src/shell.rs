@@ -516,7 +516,7 @@ impl DrawbarApp {
                         .text_style(ui_text())
                         .color(ink),
                 );
-                crate::app::dot(ui, lit).on_hover_text("attached");
+                crate::app::dot(ui, lit, 9.0).on_hover_text("attached");
             });
     }
 

@@ -250,31 +250,16 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
         .collect()
 }
 
-/// The name, the zone map, and each zone's audio once it has been asked for.
+/// The zone map, and each zone's audio once it has been asked for.
+///
+/// The name is the header's: every document's name is edited in the one place.
 pub fn ui(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    name: &mut String,
     sounds: &[Sound],
     sets: &mut Sets,
 ) -> Option<Ask> {
     let mut ask = None;
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [120.0, ui.spacing().interact_size.y],
-            egui::Label::new("Name").halign(egui::Align::LEFT),
-        );
-        let response = ui.add(
-            egui::TextEdit::singleline(name)
-                .desired_width(200.0)
-                .char_limit(snapshot.max_name_len),
-        );
-        // Not committed per keystroke: half a name is a name the format would take.
-        let done = response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
-        if done && *name != snapshot.name {
-            sets.push(("name".to_string(), name.clone()));
-        }
-    });
     if !snapshot.sub_name.is_empty() {
         labelled(ui, "Sub name", &snapshot.sub_name);
     }

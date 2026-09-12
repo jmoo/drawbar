@@ -231,27 +231,15 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<Vec<u8>, String>
     nord_format::to_bytes(&entity).map_err(|e| e.to_string())
 }
 
-/// The name, the zone map, and the audio files behind it.
+/// The zone map and the audio files behind it.
+///
+/// The name is the header's: every document's name is edited in the one place.
 pub fn ui(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,
-    name: &mut String,
     paths: &mut HashMap<u32, String>,
     sets: &mut Sets,
 ) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [120.0, ui.spacing().interact_size.y],
-            egui::Label::new("Name").halign(egui::Align::LEFT),
-        );
-        let response = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
-        // Not committed per keystroke: half a name is a name the format would take.
-        let done = response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
-        if done && *name != snapshot.name {
-            sets.push(("name".to_string(), name.clone()));
-        }
-    });
-
     for zone in &snapshot.zones {
         let id = zone.id;
         ui.horizontal(|ui| {

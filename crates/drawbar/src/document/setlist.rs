@@ -22,6 +22,12 @@ fn song_mut(entity: &mut Entity) -> Option<&mut Cbin<Song>> {
     }
 }
 
+/// How many programs the set list orders, which is the one figure that stands in for a
+/// set list's size — it holds no bytes of its own worth measuring.
+pub fn entries(entity: &Entity) -> Option<usize> {
+    Some(song(entity)?.programs().len())
+}
+
 /// Apply one `path = value`: `slot1 = 2:5`, both numbers as the panel shows them.
 fn set(file: &mut Cbin<Song>, path: &str, value: &str) -> Result<(), String> {
     let slot = path
