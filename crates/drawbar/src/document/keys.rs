@@ -174,21 +174,6 @@ fn dashed(painter: &egui::Painter, corners: &[egui::Pos2], stroke: egui::Stroke)
     }
 }
 
-/// The four sides of a dashed border.
-pub fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
-    dashed(
-        painter,
-        &[
-            rect.left_top(),
-            rect.right_top(),
-            rect.right_bottom(),
-            rect.left_bottom(),
-            rect.left_top(),
-        ],
-        stroke,
-    );
-}
-
 /// Diagonal lines across `rect`, for a stretch of keyboard nothing answers.
 ///
 /// Clipped to `rect`, so the lines that reach past a corner stop at the edge rather than
