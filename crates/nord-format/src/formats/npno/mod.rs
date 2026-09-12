@@ -50,6 +50,10 @@
 
 pub mod codec;
 pub mod encode;
+/// A library laid out from a description. Test-only: behind the `synthetic` feature,
+/// and always available to this crate's own tests.
+#[cfg(any(test, feature = "synthetic"))]
+pub mod synthetic;
 
 use crate::cbin::{self, Cbin, Header, RawBody};
 use crate::error::{try_vec, Error, ParseError};
@@ -880,6 +884,20 @@ impl<'a> Library<'a> {
         }
     }
 
+    /// Keep the strokes `keep` accepts and drop the rest, then uncover the keys whose
+    /// root has gone.
+    ///
+    /// The selection every other transform here is a named case of, for a caller whose
+    /// own is none of them — one layer on one root, say. A stroke carries its own
+    /// predictor seeds and its blocks overlap only each other, so whichever subset is
+    /// left re-lays into a library the writer can lay out.
+    ///
+    /// Inferred from specimens; not confirmed on hardware. [`Library::drop_bank`] and
+    /// [`Library::keep_layers`] are the two selections a hardware read covers.
+    pub fn retain_strokes(&mut self, keep: impl FnMut(&Stroke<'a>) -> bool) -> Change {
+        self.retain(keep)
+    }
+
     /// Uncover every key outside `range`, then drop the roots nothing plays any
     /// more. Keys inside the range keep the roots they had.
     ///
@@ -1056,87 +1074,8 @@ fn block_bytes(channels: u16) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::synthetic::{take, Build};
     use super::*;
-
-    /// A body shaped like a real one: prefix, directory and audio spans laid out
-    /// by the same law the reader checks, with each stroke's audio filled with a
-    /// byte naming it so a re-lay is visible.
-    struct Build {
-        version: u16,
-        channels: u16,
-        /// `(root, bank, layer, blocks)`, in ascending root order.
-        strokes: Vec<(u8, u8, u8, u16)>,
-        /// `(key, root)` routes.
-        map: Vec<(u8, u8)>,
-    }
-
-    impl Build {
-        fn new() -> Build {
-            Build {
-                version: 0x450,
-                channels: 1,
-                strokes: vec![(60, 0, 0, 1), (60, 2, 3, 1), (72, 0, 0, 2)],
-                map: vec![(60, 60), (61, 60), (72, 72)],
-            }
-        }
-
-        fn body(&self) -> Vec<u8> {
-            let block = block_bytes(self.channels);
-            let count = self.strokes.len();
-            let directory_end = DIRECTORY_AT + count * RECORD;
-            let first = first_audio_offset(directory_end, block).unwrap();
-            let audio: usize = self
-                .strokes
-                .iter()
-                .map(|&(_, _, _, blocks)| usize::from(blocks) * block)
-                .sum();
-            let mut body = vec![0u8; first + audio];
-            body[..4].copy_from_slice(CNSP_MAGIC);
-            body[VERSION_AT..VERSION_AT + 2].copy_from_slice(&self.version.to_be_bytes());
-            body[VERSION_ECHO_AT..VERSION_ECHO_AT + 2].copy_from_slice(&self.version.to_be_bytes());
-            body[CHANNELS_AT..CHANNELS_AT + 2].copy_from_slice(&self.channels.to_be_bytes());
-            let name = b"Test Piano#Variant";
-            body[0x1c..0x1c + name.len()].copy_from_slice(name);
-            body[KEY_MAP_AT..KEY_MAP_AT + NOTES].fill(UNCOVERED);
-            for &(key, root) in &self.map {
-                body[KEY_MAP_AT + usize::from(key)] = root;
-            }
-            body[STROKE_COUNT_AT..STROKE_COUNT_AT + 2]
-                .copy_from_slice(&(count as u16).to_be_bytes());
-            for note in 0..NOTES {
-                let n = self
-                    .strokes
-                    .iter()
-                    .filter(|&&(root, ..)| usize::from(root) == note)
-                    .count() as u16;
-                let at = ROOT_COUNTS_AT + note * 2;
-                body[at..at + 2].copy_from_slice(&n.to_be_bytes());
-            }
-            let mut at = first;
-            for (i, &(_, bank, layer, blocks)) in self.strokes.iter().enumerate() {
-                let rec = DIRECTORY_AT + i * RECORD;
-                body[rec..rec + 4].copy_from_slice(&(at as u32).to_be_bytes());
-                body[rec + REC_BANK] = bank;
-                body[rec + REC_LAYER] = layer;
-                body[rec + REC_BLOCKS..rec + REC_BLOCKS + 2].copy_from_slice(&blocks.to_be_bytes());
-                body[rec + REC_ID..rec + REC_ID + 4].copy_from_slice(&(i as u32).to_be_bytes());
-                let span = usize::from(blocks) * block;
-                body[at..at + span].fill(0x40 + i as u8);
-                at += span;
-            }
-            body
-        }
-
-        fn piano(&self) -> Piano {
-            let body = self.body();
-            Piano {
-                file: Cbin {
-                    header: Header::new(FORMAT, (0, 0), 530),
-                    body: RawBody(body),
-                },
-            }
-        }
-    }
 
     #[test]
     fn the_name_field_splits_on_the_separator() {
@@ -1261,9 +1200,12 @@ mod tests {
 
     #[test]
     fn dropping_every_stroke_of_a_root_uncovers_the_keys_it_played() {
-        let mut library_owner = Build::new();
-        library_owner.strokes = vec![(60, 0, 0, 1), (72, 1, 0, 1)];
-        let piano = library_owner.piano();
+        let mut build = Build::new();
+        build.takes = vec![
+            take(60, Bank::Attack, 0, 1),
+            take(72, Bank::Resonance, 0, 1),
+        ];
+        let piano = build.piano();
         let mut library = piano.library().unwrap();
         let change = library.drop_bank(Bank::Resonance);
         assert_eq!(change.strokes_removed, 1);
@@ -1276,12 +1218,12 @@ mod tests {
     #[test]
     fn keeping_the_loudest_layer_keeps_one_per_root_and_bank() {
         let mut build = Build::new();
-        build.strokes = vec![
-            (60, 0, 0, 1),
-            (60, 0, 5, 1),
-            (60, 2, 26, 1),
-            (60, 2, 30, 1),
-            (72, 0, 1, 1),
+        build.takes = vec![
+            take(60, Bank::Attack, 0, 1),
+            take(60, Bank::Attack, 5, 1),
+            take(60, Bank::Release, 26, 1),
+            take(60, Bank::Release, 30, 1),
+            take(72, Bank::Attack, 1, 1),
         ];
         let piano = build.piano();
         let mut library = piano.library().unwrap();
@@ -1297,7 +1239,11 @@ mod tests {
     #[test]
     fn keeping_named_layers_takes_them_wherever_they_occur() {
         let mut build = Build::new();
-        build.strokes = vec![(60, 0, 0, 1), (60, 0, 5, 1), (72, 0, 5, 1)];
+        build.takes = vec![
+            take(60, Bank::Attack, 0, 1),
+            take(60, Bank::Attack, 5, 1),
+            take(72, Bank::Attack, 5, 1),
+        ];
         let piano = build.piano();
         let mut library = piano.library().unwrap();
         library.keep_layers(&Layers::Only([5].into_iter().collect()));
@@ -1307,6 +1253,70 @@ mod tests {
             .map(|s| (s.root, s.layer()))
             .collect();
         assert_eq!(kept, [(60, 5), (72, 5)]);
+    }
+
+    /// The stroke-level selection: one layer on one root, which no named transform
+    /// expresses. What the predicate rejects goes, what it accepts stays verbatim, and
+    /// a root left with no strokes at all stops answering its keys.
+    #[test]
+    fn retaining_strokes_drops_what_the_predicate_rejects_and_nothing_else() {
+        let mut build = Build::new();
+        build.takes = vec![
+            take(60, Bank::Attack, 0, 1),
+            take(60, Bank::Attack, 5, 1),
+            take(72, Bank::Attack, 5, 2),
+        ];
+        let piano = build.piano();
+
+        let mut kept_all = piano.library().unwrap();
+        let unchanged = kept_all.retain_strokes(|_| true);
+        assert_eq!(unchanged, Change::default());
+        assert_eq!(
+            kept_all.to_body().unwrap(),
+            piano.file.body.0,
+            "a predicate that rejects nothing re-lays the body it read"
+        );
+
+        let mut library = piano.library().unwrap();
+        let change = library.retain_strokes(|s| !(s.root == 72 && s.layer() == 5));
+        assert_eq!(
+            change,
+            Change {
+                strokes_removed: 1,
+                roots_removed: 1,
+                keys_uncovered: 1,
+            }
+        );
+        let left: Vec<(u8, u8)> = library
+            .strokes()
+            .iter()
+            .map(|s| (s.root, s.layer()))
+            .collect();
+        assert_eq!(left, [(60, 0), (60, 5)]);
+        assert_eq!(
+            library.key_map()[72],
+            UNCOVERED,
+            "root 72 lost every stroke, so its key answers nothing"
+        );
+        assert_eq!(library.key_map()[60], 60, "and the other root is untouched");
+        library.to_body().unwrap();
+    }
+
+    /// The builder hands back a file, not only a body: a `.npno` another crate's tests
+    /// can read back through the front door.
+    #[test]
+    fn a_synthetic_library_reads_back_as_the_file_it_was_built_as() {
+        let bytes = Build::new().bytes().unwrap();
+        let entity = crate::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let crate::Entity::Piano(piano) = &entity else {
+            panic!("{entity:?} is no piano library");
+        };
+        assert_eq!(
+            piano.name().unwrap(),
+            ("Test Piano".to_string(), "Variant".to_string())
+        );
+        assert_eq!(piano.library().unwrap().strokes().len(), 3);
+        assert_eq!(crate::to_bytes(&entity).unwrap(), bytes);
     }
 
     #[test]

@@ -32,6 +32,13 @@ nord-format = { path = "../nord-format", version = "0.5.0", features = [
 ] }
 rfd = "0.15"
 
+[dev-dependencies]
+# `synthetic` lays out a piano library from a description: the piano editor's tests
+# need a `.npno` and nothing else in the workspace builds one without a template.
+nord-format = { path = "../nord-format", version = "0.5.0", features = [
+  "synthetic",
+] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 nord-usb = { path = "../nord-usb", version = "0.5.0", features = [
   "blocking",
