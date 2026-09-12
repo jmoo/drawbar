@@ -19,6 +19,7 @@ use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
+pub mod capability;
 pub mod controls;
 pub(crate) mod encode;
 mod header;
