@@ -137,6 +137,9 @@ pub struct Doc<'a> {
     shape: Shape,
     /// Every field a section draws, so the Advanced table can flag the rest.
     shown: HashSet<&'a str>,
+    /// The selectors that pick between stored alternatives. Each is the head of the
+    /// cards it picks between, so none of them is also a cell.
+    picks: HashSet<&'a str>,
     /// Each parameter's morph slots, by the parameter's path.
     morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
     fields: usize,
@@ -190,6 +193,7 @@ pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
         count(section, &doc.morphs);
     }
     doc.shown = doc.sections.iter().flat_map(paths).collect();
+    doc.picks = doc.sections.iter().flat_map(selectors).collect();
     doc
 }
 
@@ -296,6 +300,7 @@ fn authored<'a>(
             exhaustive: layout.exhaustive,
         },
         shown: HashSet::new(),
+        picks: HashSet::new(),
         morphs,
         fields: 0,
         slots: 0,
@@ -363,6 +368,7 @@ fn menus<'a>(
         idle: Vec::new(),
         shape: Shape::Menus,
         shown: HashSet::new(),
+        picks: HashSet::new(),
         morphs,
         fields: 0,
         slots: 0,
@@ -387,6 +393,7 @@ fn flat<'a>(
         idle: Vec::new(),
         shape: Shape::Flat,
         shown: HashSet::new(),
+        picks: HashSet::new(),
         morphs,
         fields: 0,
         slots: 0,
@@ -482,6 +489,20 @@ fn count(section: &mut Sect<'_>, morphs: &HashMap<&str, [Option<&Field>; SLOTS.l
         total += nested.count;
     }
     section.count = total;
+}
+
+/// The selectors that pick between a section's stored alternatives, however deep the
+/// layout nested them before they were flattened onto one row.
+fn selectors<'a>(section: &Sect<'a>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = section
+        .pick
+        .map(|selection| selection.field)
+        .into_iter()
+        .collect();
+    for nested in &section.nested {
+        out.extend(selectors(nested));
+    }
+    out
 }
 
 /// Every path a section draws, its nested cards included.
@@ -700,12 +721,7 @@ fn drew(
     if section.fields.iter().any(|field| field.path == PIANO_MODEL) {
         piano.ui(ui);
     }
-    let picks: Vec<&str> = section
-        .nested
-        .iter()
-        .filter_map(|nested| nested.pick.map(|selection| selection.field))
-        .collect();
-    cells(ui, ctx, state, doc, &section.fields, &picks, piano, sets);
+    cells(ui, ctx, state, doc, &section.fields, piano, sets);
 
     let (alternatives, cards): (Vec<&Sect>, Vec<&Sect>) = section
         .nested
@@ -724,7 +740,7 @@ fn drew(
             .show(ui, |ui| {
                 ui.set_width(ui.available_width() - 24.0);
                 card_title(ui, &card.title, None);
-                cells(ui, ctx, state, doc, &card.fields, &[], piano, sets);
+                cells(ui, ctx, state, doc, &card.fields, piano, sets);
             });
     }
     if !alternatives.is_empty() {
@@ -770,7 +786,7 @@ fn side_by_side(
                     if !alternative.selected {
                         ui.set_opacity(0.45);
                     }
-                    cells(ui, ctx, state, doc, &alternative.fields, &[], piano, sets);
+                    cells(ui, ctx, state, doc, &alternative.fields, piano, sets);
                 });
         }
     });
@@ -907,18 +923,16 @@ fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
 // ---- the cells ---------------------------------------------------------------------
 
 /// A run of fields as cells, wrapping where the window is narrow.
-#[allow(clippy::too_many_arguments)]
 fn cells(
     ui: &mut egui::Ui,
     ctx: &Ctx,
     state: &State,
     doc: &Doc<'_>,
     rows: &[&Field],
-    picks: &[&str],
     piano: &mut PianoLookup,
     sets: &mut Sets,
 ) {
-    let built = clustered(rows, doc, picks);
+    let built = clustered(rows, doc);
     if built.is_empty() {
         return;
     }
@@ -937,14 +951,15 @@ fn cells(
 
 /// The cells a run of fields becomes: morph slots folded onto the parameters they move,
 /// drawbar runs merged into registers, and the transpose pair as one control.
-fn clustered<'a>(rows: &[&'a Field], doc: &Doc<'a>, picks: &[&str]) -> Vec<Cell<'a>> {
+fn clustered<'a>(rows: &[&'a Field], doc: &Doc<'a>) -> Vec<Cell<'a>> {
     let mut parts: Vec<Part<'a>> = Vec::new();
     let mut transposed = false;
     for field in rows {
         // ⚠️ The selector that picks one of several stored alternatives is the head of
         // each alternative's own card. Drawn here as well it would be two controls for
-        // one switch.
-        if picks.contains(&field.path.as_str()) {
+        // one switch — and the layout keeps it in the group *above* the ones it picks
+        // between, so it reaches a strip that has no alternatives of its own.
+        if doc.picks.contains(field.path.as_str()) {
             continue;
         }
         if field.path == TRANSPOSE_ENABLED || field.path == TRANSPOSE {
@@ -1997,6 +2012,7 @@ mod tests {
             idle: Vec::new(),
             shape: Shape::Flat,
             shown: HashSet::new(),
+            picks: HashSet::new(),
             morphs: slots_of(&fields),
             fields: 0,
             slots: 0,
@@ -2007,11 +2023,11 @@ mod tests {
             .take(drawbar_widget::BARS)
             .collect();
         assert_eq!(rows.len(), drawbar_widget::BARS);
-        let built = clustered(&rows, &doc, &[]);
+        let built = clustered(&rows, &doc);
         assert_eq!(built.len(), 1);
         assert!(matches!(built.first(), Some(Cell::Register(run)) if run.len() == 9));
 
-        let short = clustered(&rows[..4], &doc, &[]);
+        let short = clustered(&rows[..4], &doc);
         assert_eq!(short.len(), 4);
         assert!(short.iter().all(|cell| matches!(cell, Cell::One(_))));
     }
@@ -2053,6 +2069,7 @@ mod tests {
             idle: Vec::new(),
             shape: Shape::Flat,
             shown: HashSet::new(),
+            picks: HashSet::new(),
             morphs,
             fields: 0,
             slots: 0,
@@ -2061,7 +2078,7 @@ mod tests {
             .iter()
             .filter(|field| field.path == "organ_a_volume_wheel")
             .collect();
-        let built = clustered(&rows, &doc, &[]);
+        let built = clustered(&rows, &doc);
         assert_eq!(built.len(), 1);
     }
 
