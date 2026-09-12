@@ -27,40 +27,78 @@ const GRIP: f32 = 12.0;
 /// How much of the caption ink the grip keeps. It is decoration, not a control.
 const GRIP_ALPHA: f32 = 0.6;
 
-/// What a column of a table asks for: a fixed width, or a share of what the fixed
-/// ones leave.
+/// What a column of a table asks for: a fixed width, a share of what the fixed ones
+/// leave, or a share that stops growing once it holds `max` px and leaves the rest to
+/// the other shares.
 pub enum Track {
     Px(f32),
     Share(f32),
+    Capped { share: f32, max: f32 },
+}
+
+impl Track {
+    fn px(&self) -> f32 {
+        match self {
+            Track::Px(px) => *px,
+            Track::Share(_) | Track::Capped { .. } => 0.0,
+        }
+    }
+
+    fn share(&self) -> f32 {
+        match self {
+            Track::Px(_) => 0.0,
+            Track::Share(share) | Track::Capped { share, .. } => *share,
+        }
+    }
+}
+
+/// What one unit of share buys out of `spare`, once every cap that binds has taken its
+/// maximum and left the rest to the shares still growing.
+///
+/// A cap binds when one share buys more than `max / share`, and each one that binds only
+/// raises what the rest are worth — so caps taken in that order settle in a single pass.
+fn rate(spare: f32, wanted: &[Track]) -> f32 {
+    let mut caps: Vec<(f32, f32)> = wanted
+        .iter()
+        .filter_map(|track| match track {
+            Track::Capped { share, max } => Some((*share, *max)),
+            Track::Px(_) | Track::Share(_) => None,
+        })
+        .collect();
+    caps.sort_by(|(share, max), (other, limit)| (max / share).total_cmp(&(limit / other)));
+
+    let mut spare = spare;
+    let mut pool: f32 = wanted.iter().map(Track::share).sum();
+    for (share, max) in caps {
+        if pool <= 0.0 || spare / pool * share <= max {
+            break;
+        }
+        spare -= max;
+        pool -= share;
+    }
+    match pool > 0.0 {
+        true => spare / pool,
+        false => 0.0,
+    }
 }
 
 /// Where each track sits across `width`, with `gap` between two of them.
 ///
-/// The fixed tracks are laid out first and the shares split what is left. When even the
-/// fixed ones do not fit, every track and every gap shrinks by one factor — so a track
-/// may reach zero, but none is ever negative and none reaches past `width`.
+/// The fixed tracks are laid out first, the shares split what is left, and a share that
+/// reaches its cap passes the remainder to the others. When even the fixed ones do not
+/// fit, every track and every gap shrinks by one factor — so a track may reach zero, but
+/// none is ever negative and none reaches past `width`.
 pub fn tracks(width: f32, wanted: &[Track], gap: f32) -> Vec<Range<f32>> {
     let gaps = gap * (wanted.len().saturating_sub(1)) as f32;
-    let fixed: f32 = wanted
-        .iter()
-        .filter_map(|track| match track {
-            Track::Px(px) => Some(*px),
-            Track::Share(_) => None,
-        })
-        .sum();
-    let shares: f32 = wanted
-        .iter()
-        .filter_map(|track| match track {
-            Track::Share(share) => Some(*share),
-            Track::Px(_) => None,
-        })
-        .sum();
+    let fixed: f32 = wanted.iter().map(Track::px).sum();
     let spare = (width - gaps - fixed).max(0.0);
+    let rate = rate(spare, wanted);
     let asked: Vec<f32> = wanted
         .iter()
         .map(|track| match track {
             Track::Px(px) => *px,
-            Track::Share(share) => spare * share / shares,
+            Track::Share(share) => rate * share,
+            Track::Capped { share, max } => (rate * share).min(*max),
         })
         .collect();
 
@@ -240,6 +278,54 @@ pub fn flat(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn widths(width: f32, wanted: &[Track]) -> Vec<f32> {
+        tracks(width, wanted, 0.0)
+            .iter()
+            .map(|track| track.end - track.start)
+            .collect()
+    }
+
+    /// A capped track grows with the others until it holds `max`, and what it does not
+    /// take goes to the shares beside it rather than to empty space.
+    #[test]
+    fn a_capped_track_stops_at_its_maximum_and_hands_the_rest_to_the_other_shares() {
+        let wanted = [
+            Track::Capped {
+                share: 1.0,
+                max: 40.0,
+            },
+            Track::Share(1.0),
+        ];
+        assert_eq!(widths(60.0, &wanted), vec![30.0, 30.0]);
+        assert_eq!(widths(100.0, &wanted), vec![40.0, 60.0]);
+        assert_eq!(widths(1000.0, &wanted), vec![40.0, 960.0]);
+    }
+
+    /// Every track shrinks to nothing rather than turning negative or running past the
+    /// width, and a cap is a maximum only — it is no floor.
+    #[test]
+    fn a_width_below_the_fixed_tracks_shrinks_a_capped_track_like_any_other() {
+        let wanted = [
+            Track::Px(50.0),
+            Track::Capped {
+                share: 1.0,
+                max: 40.0,
+            },
+            Track::Share(1.0),
+        ];
+        for width in [0.0_f32, 10.0, 50.0] {
+            let held = widths(width, &wanted);
+            assert!(
+                held.iter().all(|track| *track >= 0.0),
+                "at {width}: {held:?}"
+            );
+            assert!(
+                held.iter().sum::<f32>() <= width + 0.01,
+                "at {width}: {held:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_title_is_uppercased_whatever_it_arrives_as() {

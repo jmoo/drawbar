@@ -596,8 +596,12 @@ impl Column {
         match self {
             Column::Mark => Track::Px(18.0),
             Column::Glyph => Track::Px(20.0),
-            // A kind is a handful of known words, and 96 px holds the longest of them.
-            Column::Kind => Track::Px(96.0),
+            // A kind is a handful of known words, and 96 px holds the longest of them —
+            // asked for as a share so a narrow centre spends the room on the name.
+            Column::Kind => Track::Capped {
+                share: 0.7,
+                max: 96.0,
+            },
             Column::Name => Track::Share(1.9),
             Column::Tags => Track::Px(38.0),
             Column::Where => Track::Px(64.0),
@@ -1502,6 +1506,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ⚠️ The kind is worth 96 px and no more, and it is the name that must stay
+    /// readable when the centre is narrow — two programs are told apart by their names,
+    /// not by both being programs.
+    #[test]
+    fn the_kind_reaches_96_px_when_wide_and_yields_to_the_name_when_narrow() {
+        let width_of = |tracks: &[Range<f32>; 9], column: Column| {
+            let track = &tracks[column.index()];
+            track.end - track.start
+        };
+
+        let wide = tracks(900.0);
+        assert!(
+            (width_of(&wide, Column::Kind) - 96.0).abs() < 0.01,
+            "at 900 the kind holds the longest word: {}",
+            width_of(&wide, Column::Kind)
+        );
+
+        let narrow = tracks(430.0);
+        assert!(
+            width_of(&narrow, Column::Name) >= 40.0,
+            "at 430 the name is unreadable: {}",
+            width_of(&narrow, Column::Name)
+        );
+        assert!(
+            width_of(&narrow, Column::Kind) > 0.0,
+            "at 430 the kind vanished"
+        );
     }
 
     /// A column's track is the one at its own index, or every cell after the first
