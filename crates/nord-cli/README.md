@@ -398,7 +398,7 @@ from audio — the length marks, the decay coefficients, the per-note tables, th
 at the body's start — go in as the template donated them: the instrument accepts
 them, and what it makes of them beyond accepting is not known.
 
-A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
+A library is tens of megabytes, so moving one is `nord piano get` and `nord
 piano put`, and the rest of the slot verbs address class 1 the way they address
 programs.
 

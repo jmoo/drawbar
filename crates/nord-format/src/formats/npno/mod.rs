@@ -475,10 +475,10 @@ impl<'a> Stroke<'a> {
     ///
     /// A key sounds the largest value the root holds that is at most
     /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
-    /// value above 31 never plays at all. Confirmed on hardware; the 31 is measured
-    /// to about ±2, so a layer sitting on the bound switches a few velocities either
-    /// side of where the formula puts it. Vendor libraries spread a root over
-    /// 0..[`encode::SOFTEST_LAYER`].
+    /// value above 30 ([`encode::HIGHEST_PLAYED_LAYER`]) never plays at all. Confirmed
+    /// on hardware; the 31 is measured to about ±2, so a layer sitting on the bound
+    /// switches a few velocities either side of where the formula puts it. Vendor
+    /// libraries spread a root over 0..[`encode::SOFTEST_LAYER`].
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
     }

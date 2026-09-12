@@ -24,11 +24,11 @@
 //!
 //! A stroke therefore states whole blocks, and it states every frame it was given.
 //! Where the capped search lands on the frame count exactly, that count is what the
-//! stroke states. Where it cannot — the remainder under 13 ms, shorter than any
-//! width's block — the blocks would have to stop short of the audio, so the stroke is
-//! laid out again with nothing capping any block and ends at the first block to reach
-//! the count, the source read as silent past its end. Such a stroke ends in silence,
-//! up to one block of it, and no frame is dropped for falling between block lengths.
+//! stroke states. Where it cannot — the remainder shorter than any width's block —
+//! the blocks would have to stop short of the audio, so the stroke is laid out again
+//! with nothing capping any block and ends at the first block to reach the count, the
+//! source read as silent past its end. Such a stroke ends in silence, up to one block
+//! of it, and no frame is dropped for falling between block lengths.
 //!
 //! Both layouts code again unchanged. The cap is what the stroke has left to own, so
 //! a stroke whose blocks land on its frame count gives the same search the same room
@@ -188,8 +188,8 @@ impl Recoded {
 ///
 /// The recordings may arrive in any order; the directory sorts them by root, then
 /// bank, then layer, which is the ascending root order the per-root counts index by.
-/// The key map routes every key up to the highest root's own, and the per-key fine
-/// tune starts at zero rather than carrying the template's.
+/// The key map routes every key up to one semitone above the highest root, and the
+/// per-key fine tune starts at zero rather than carrying the template's.
 pub fn build(
     template: &Library<'_>,
     options: &Options,
@@ -431,7 +431,7 @@ fn refuse(what: impl Into<String>) -> Error {
 }
 
 /// The root each key plays: the lowest root the key sits no more than a semitone
-/// above. Keys past the highest root's own key are left uncovered.
+/// above. A key more than a semitone above the highest root is left uncovered.
 ///
 /// Inferred from the key maps of vendor libraries; not confirmed on hardware. Those
 /// also stop short of the lowest keys, which is the acoustic instrument's range
