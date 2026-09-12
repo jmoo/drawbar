@@ -372,12 +372,13 @@ pub fn build(
     Ok(library)
 }
 
-/// The content version the container states where no template donates one: a
-/// library's own version times a hundred, as the instrument reports it.
+/// The content version the container states where no template donates one: a library's
+/// own version times a hundred, as the instrument reports it. Confirmed on hardware
+/// only in that a library stating it loads and plays.
 const CONTENT_VERSION: u32 = 540;
 
-/// The stream version a rule-written prefix states, at [`VERSION_AT`], [`VERSION_REPEAT_AT`]
-/// and [`VERSION_ECHO_AT`].
+/// The stream version a rule-written prefix states, at [`VERSION_AT`],
+/// [`VERSION_REPEAT_AT`] and [`VERSION_ECHO_AT`].
 const RULES_VERSION: u16 = 0x450;
 
 /// u32 the vendor makes distinct per library. The instrument does not read it, so a
@@ -394,7 +395,9 @@ const KIND_AT: usize = 0x18;
 const KIND_TRAILER: [u8; 3] = [0, 0, 2];
 
 /// The per-note tables, [`NOTES`] bytes each, at the value that states nothing about
-/// the note. Sweeping any of them moved nothing measurable. Confirmed on hardware.
+/// the note: no retune at [`FINE_TUNE_AT`], and for the rest the value a library that
+/// has been played holds, sweeping any of them having moved nothing measurable.
+/// Confirmed on hardware.
 const PER_NOTE_TABLES: [(usize, u8); 6] = [
     (0x10c, 0),
     (FINE_TUNE_AT, 0),
@@ -412,9 +415,10 @@ const DAMPER_TOP_AT: usize = 0x40d;
 /// these.
 const PARAMETER_TAIL_AT: usize = 0x40e;
 const PARAMETER_TAIL: [u8; 3] = [10, 108, 1];
-/// Nineteen bytes whose meaning is open; every library holds these.
-const HALF_SCALE_AT: usize = 0x489;
-const HALF_SCALE: [u8; 19] = [128; 19];
+/// Nineteen bytes ahead of the damper cut whose meaning is open; every library holds
+/// these.
+const BEFORE_DAMPER_CUT_AT: usize = 0x489;
+const BEFORE_DAMPER_CUT: [u8; 19] = [128; 19];
 /// The damper cut per note, [`NOTES`] bytes of [`damper_cut`].
 const DAMPER_CUT_AT: usize = 0x49d;
 const _: () = assert!(DAMPER_CUT_AT + NOTES <= PARAMETERS.end);
@@ -441,19 +445,20 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
     prefix[DAMPER_TOP_AT] = rules.damper_top;
     prefix[PARAMETER_TAIL_AT..PARAMETER_TAIL_AT + PARAMETER_TAIL.len()]
         .copy_from_slice(&PARAMETER_TAIL);
-    prefix[HALF_SCALE_AT..HALF_SCALE_AT + HALF_SCALE.len()].copy_from_slice(&HALF_SCALE);
+    prefix[BEFORE_DAMPER_CUT_AT..BEFORE_DAMPER_CUT_AT + BEFORE_DAMPER_CUT.len()]
+        .copy_from_slice(&BEFORE_DAMPER_CUT);
     for note in 0..NOTES {
         prefix[DAMPER_CUT_AT + note] = damper_cut(note);
     }
     prefix
 }
 
-/// How hard the damper takes the note at `note` down, at [`DAMPER_CUT_AT`] `+ note`.
+/// The damper cut's entry for `note`, at [`DAMPER_CUT_AT`] `+ note`.
 ///
 /// A plateau over the lowest notes, a straight fall to the highest key an instrument
-/// plays, and a fixed value past it. Confirmed on hardware: a curve of this shape cuts
-/// a held key within tens of milliseconds, where a flat table of any level takes about
-/// half a second. What axis the instrument reads the table on is open.
+/// plays, and a fixed value past it. Confirmed on hardware: a curve of this shape takes
+/// a held key down within tens of milliseconds, where a flat table of any level takes
+/// about half a second. What axis the instrument reads the table on is open.
 fn damper_cut(note: usize) -> u8 {
     /// The last note of the plateau, and the note the fall ends on.
     const FLAT_TO: usize = 24;
