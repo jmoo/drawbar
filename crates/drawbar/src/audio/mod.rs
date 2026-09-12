@@ -39,6 +39,14 @@ pub fn act(playing: Option<Zone>, zone: Zone) -> Act {
     }
 }
 
+/// The playback rate that carries a stroke `semitones` from the key it was recorded at.
+///
+/// One octave is twice the rate, which is the resampling every sampler does to answer a
+/// key with a stroke recorded at another.
+pub fn rate(semitones: i16) -> f32 {
+    2.0_f32.powf(f32::from(semitones) / 12.0)
+}
+
 #[derive(Default)]
 pub struct Player {
     sound: Sound,
@@ -59,9 +67,20 @@ impl Player {
         let asked = act(self.playing, zone);
         self.stop();
         if let Act::Play(zone) = asked {
-            self.sound.play(&audio.samples, audio.channels)?;
+            self.sound.play(&audio.samples, audio.channels, 1.0)?;
             self.playing = Some(zone);
         }
+        Ok(())
+    }
+
+    /// Play `zone` at `rate` times its recorded pitch, whatever is sounding.
+    ///
+    /// ⚠️ Not a toggle: a struck key must sound even when the zone answering it is the
+    /// one already playing, and two keys of one zone are two different notes.
+    pub fn strike(&mut self, zone: Zone, audio: &Audio, rate: f32) -> Result<(), String> {
+        self.stop();
+        self.sound.play(&audio.samples, audio.channels, rate)?;
+        self.playing = Some(zone);
         Ok(())
     }
 
@@ -97,5 +116,15 @@ mod tests {
         assert_eq!(act(Some(first), second), Act::Play(second));
         // The same zone index in another document is another zone.
         assert_eq!(act(Some(first), elsewhere), Act::Play(elsewhere));
+    }
+
+    /// A key answered by a stroke recorded elsewhere plays at the rate that carries it
+    /// there: an octave is a doubling, and the root key itself is untouched.
+    #[test]
+    fn a_shifted_key_plays_at_the_rate_that_carries_it() {
+        assert_eq!(rate(0), 1.0);
+        assert_eq!(rate(12), 2.0);
+        assert_eq!(rate(-12), 0.5);
+        assert!((rate(7) - 1.498_307).abs() < 1e-5, "{}", rate(7));
     }
 }

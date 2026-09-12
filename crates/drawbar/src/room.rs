@@ -142,10 +142,20 @@ pub fn free_space(
     })
 }
 
-/// The one thing in the queue that most nearly does not fit, and whether it does.
+/// What is left in a class's partition, in bytes.
 ///
-/// ⚠️ Only where the partition has reported its allocation unit: free space is a count
-/// of units, and nothing turns one into bytes without it.
+/// ⚠️ `None` until the partition has reported its allocation unit: free space is a
+/// count of units, and nothing turns one into bytes without it.
+pub fn free_bytes(class: ObjectClass, device: &DeviceState) -> Option<u64> {
+    let unit = device.allocation_unit(class)?;
+    let status = device
+        .inventory
+        .iter()
+        .find(|status| status.class == class)?;
+    Some(status.available().saturating_mul(u64::from(unit.get())))
+}
+
+/// The one thing in the queue that most nearly does not fit, and whether it does.
 pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) -> Option<String> {
     let (name, bytes, class) = queue
         .entries()
@@ -155,12 +165,7 @@ pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) ->
             Some((entity.name.clone(), entity.bytes.len() as u64, held.class))
         })
         .max_by_key(|(_, bytes, _)| *bytes)?;
-    let unit = device.allocation_unit(class)?;
-    let status = device
-        .inventory
-        .iter()
-        .find(|status| status.class == class)?;
-    let free = status.available().saturating_mul(u64::from(unit.get()));
+    let free = free_bytes(class, device)?;
     let verdict = match bytes <= free {
         true => "it fits",
         false => "it does not fit",

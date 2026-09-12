@@ -63,6 +63,19 @@ pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
+/// The ivory of a white key or an unison drawbar stop.
+///
+/// Both faces share it: a key is the same colour under any light, and the stops are the
+/// instrument's own plastic rather than part of the app's dress.
+pub fn stop_white(_visuals: &egui::Visuals) -> egui::Color32 {
+    egui::Color32::from_rgb(0xd8, 0xd6, 0xd0)
+}
+
+/// The ebony of a black key or a mutation drawbar stop.
+pub fn stop_black(_visuals: &egui::Visuals) -> egui::Color32 {
+    egui::Color32::from_rgb(0x2a, 0x2a, 0x2e)
+}
+
 /// The persisted theme choice. `System` follows the host preference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
@@ -128,11 +141,15 @@ impl ThemeChoice {
 
 /// A small filled dot: something changed here, or something is attached here.
 ///
+/// `size` is the box it claims; the dot inside keeps a pixel of air either side, so a
+/// row of them reads as marks rather than as a rule.
+///
 /// ⚠️ Painted rather than typed. The bundled fonts have no glyph for `●`, and a missing
 /// one renders as an empty box — which reads as a checkbox nobody can tick.
-pub fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 3.5, color);
+pub fn dot(ui: &mut egui::Ui, color: egui::Color32, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), size / 2.0 - 1.0, color);
     response
 }
 
@@ -340,9 +357,6 @@ impl eframe::App for DrawbarApp {
     }
 }
 
-/// The room a document editor keeps inside the centre.
-const EDITOR_MARGIN: i8 = 8;
-
 impl DrawbarApp {
     /// The tab strip, and whatever the tab in front is a view of.
     fn centre(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
@@ -380,63 +394,35 @@ impl DrawbarApp {
             });
     }
 
-    /// A document is the one thing in the centre that is a page rather than a region, so
-    /// it is the one thing given a margin. Panels and headers stay full bleed.
+    /// A document owns its own room: the header is full bleed and the body inside it
+    /// keeps the margin.
     fn open_document(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<browser::Act>) {
-        egui::Frame::new()
-            .inner_margin(egui::Margin::same(EDITOR_MARGIN))
-            .show(ui, |ui| {
-                // ⚠️ A view's tab looks like a local document; the banner is the only
-                // visible indication that its bytes still belong to the instrument.
-                if self.workspace.is_view(id) {
-                    if let Some(act) = viewing_banner(ui, id, &self.workspace) {
-                        acts.push(act);
-                    }
-                }
-                let sent =
-                    self.document
-                        .ui(ui, id, &mut self.workspace, &mut self.device, &mut self.log);
-                if let Some(send) = sent {
-                    acts.push(browser::Act::Send {
-                        id: send.id,
-                        class: send.class,
-                        at: send.at,
-                    });
-                }
+        let around = crate::document::Around {
+            queue: &self.queue,
+            tags: self.browser.tags(),
+        };
+        let wants = self.document.ui(
+            ui,
+            id,
+            &mut self.workspace,
+            &mut self.device,
+            &mut self.log,
+            &around,
+        );
+        if let Some(send) = wants.send {
+            acts.push(browser::Act::Send {
+                id: send.id,
+                class: send.class,
+                at: send.at,
             });
+        }
+        if wants.keep {
+            acts.push(browser::Act::Keep(id));
+        }
+        if let Some(item) = wants.open {
+            acts.push(browser::Act::Open(item));
+        }
     }
-}
-
-/// The strip over a document that is a view of a slot rather than an asset on this
-/// computer, and the one way to make it one.
-fn viewing_banner(ui: &mut egui::Ui, id: u64, workspace: &Workspace) -> Option<browser::Act> {
-    let where_ = workspace
-        .get(id)?
-        .origin
-        .slot()
-        .map(|(class, at)| crate::strings::place(class, at))?;
-    let mut keep = false;
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(format!("Viewing {where_} on the instrument."))
-                    .strong()
-                    .small(),
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Edits and Send back work from here; it is not on this computer.",
-                )
-                .small()
-                .weak(),
-            );
-            keep = ui
-                .small_button("Keep on this computer")
-                .on_hover_text("put it in the list, where it stays after this tab closes")
-                .clicked();
-        });
-    });
-    keep.then_some(browser::Act::Keep(id))
 }
 
 /// Dim the window while files hover, so a drop has somewhere it visibly lands.
@@ -509,7 +495,7 @@ pub fn bold() -> egui::FontFamily {
 /// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
 /// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
 /// heavier weight to ask for and no 400 to set the body in.
-fn fonts() -> egui::FontDefinitions {
+pub(crate) fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
     for (family, face, ttf) in [
