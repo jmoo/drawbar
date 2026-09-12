@@ -128,23 +128,40 @@ pub fn ui(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
     );
     let rows = stated(entity);
     let wide = ui.available_width() >= COLUMN_MIN * 2.0;
-    let mut saved = false;
-    match wide {
+    let saved = match wide {
         true => {
-            let width = ui.available_width();
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui(egui::vec2(width / 2.0, 0.0), |ui| facts(ui, &rows));
-                ui.allocate_ui(egui::vec2(width / 2.0 - PAD, 0.0), |ui| {
-                    saved = sentence(ui);
-                });
-            });
+            // ⚠️ Two children with their own rects, not `allocate_ui(vec2(w, 0.0))`: a
+            // zero-height allocation inside a row lets a label wrap at the row's whole
+            // width and run out under the dock.
+            let row = ui.available_rect_before_wrap();
+            let split = row.left() + row.width() / 2.0;
+            let mut left = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_max(
+                        row.min,
+                        egui::pos2(split, row.max.y),
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            facts(&mut left, &rows);
+            let mut right = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_max(
+                        egui::pos2(split + PAD, row.min.y),
+                        row.max,
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            let saved = sentence(&mut right);
+            ui.advance_cursor_after_rect(left.min_rect().union(right.min_rect()));
+            saved
         }
         false => {
             facts(ui, &rows);
             ui.add_space(8.0);
-            saved = sentence(ui);
+            sentence(ui)
         }
-    }
+    };
 
     let body = body(entity);
     let shown = body.len().min(SHOWN);
