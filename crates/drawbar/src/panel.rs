@@ -257,6 +257,23 @@ pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     ui.interact(drawn.rect, drawn.id.with("chevron"), egui::Sense::click())
 }
 
+/// The four sides of a dashed border: the one stroke that says a thing is not there, or
+/// that an act has nothing to act on. egui draws dashes along a line, so a rectangle is
+/// four of them.
+pub fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    const DASH: f32 = 3.0;
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+        rect.left_top(),
+    ];
+    for side in corners.windows(2) {
+        painter.extend(egui::Shape::dashed_line(side, stroke, DASH, DASH));
+    }
+}
+
 /// Dress the buttons in a bar to wear the bar: no fill and no border until the pointer
 /// is on one, which is then the only thing on the bar that is lit.
 ///

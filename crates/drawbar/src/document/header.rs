@@ -673,7 +673,7 @@ fn pill(ui: &mut egui::Ui, held: Pill<'_>) -> egui::Response {
     if let Some(color) = held.stroke {
         let stroke = egui::Stroke::new(1.0_f32, color);
         match held.dashed {
-            true => dashed(&painter, rect, stroke),
+            true => crate::panel::dashed_rect(&painter, rect.shrink(0.5), stroke),
             false => {
                 painter.rect_stroke(rect, RADIUS, stroke, egui::StrokeKind::Inside);
             }
@@ -697,22 +697,6 @@ fn pill(ui: &mut egui::Ui, held: Pill<'_>) -> egui::Response {
         painter.galley(at, word, held.ink);
     }
     response
-}
-
-/// A dashed outline: the one stroke that says an act has nothing to act on.
-fn dashed(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
-    const DASH: f32 = 3.0;
-    let rect = rect.shrink(0.5);
-    let corners = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-        rect.left_top(),
-    ];
-    for side in corners.windows(2) {
-        painter.extend(egui::Shape::dashed_line(side, stroke, DASH, DASH));
-    }
 }
 
 /// A mono readout: the place and the size, which are figures rather than controls.

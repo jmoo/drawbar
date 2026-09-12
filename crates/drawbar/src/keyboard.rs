@@ -457,7 +457,7 @@ pub fn paint_cell(
     let (edge, dashed) = state.edge(&visuals);
     let stroke = egui::Stroke::new(1.0_f32, cell_ink(selected, edge, &visuals));
     match dashed {
-        true => crate::document::keys::dashed_rect(&painter, rect, stroke),
+        true => crate::panel::dashed_rect(&painter, rect, stroke),
         false => {
             painter.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
         }
