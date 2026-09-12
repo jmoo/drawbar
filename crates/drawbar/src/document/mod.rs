@@ -799,7 +799,8 @@ mod tests {
     /// faces in their own words. The old abbreviations are gone from it.
     #[test]
     fn every_kind_wears_the_header_and_names_its_faces() {
-        for kind in [Fresh::Program, Fresh::Live, Fresh::SetList, Fresh::Settings] {
+        let every = Fresh::FAMILIES.iter().flat_map(|family| family.kinds);
+        for kind in every.copied() {
             for dark in [true, false] {
                 let mut open = Open::fresh(kind);
                 open.ctx.set_theme(match dark {
