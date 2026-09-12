@@ -149,7 +149,7 @@ pub enum Ink {
 }
 
 impl Ink {
-    fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
+    pub(super) fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
             Ink::Good => good(visuals),
             Ink::Warn => warn(visuals),
@@ -166,6 +166,7 @@ pub struct SizeLine {
 }
 
 /// The dot and the phrase beside it: one claim about this document.
+#[derive(Clone)]
 pub struct StateLine {
     pub words: String,
     pub ink: Ink,
@@ -206,6 +207,9 @@ pub struct Extras {
     /// The word for an unsaved document, where the editor has a better one than
     /// `edited`.
     pub edited: Option<&'static str>,
+    /// What a saved document claims instead of what the strip works out — a set list
+    /// naming programs the instrument does not have where it says.
+    pub state: Option<StateLine>,
     pub loud: Option<Loud>,
 }
 
@@ -434,7 +438,7 @@ fn right(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
-    let own = action(entity, facts);
+    let own = action(entity, facts.device);
     let loud = facts.extras.loud.as_ref().unwrap_or(&own);
     let label = match stage {
         Stage::Narrow => &loud.short,
@@ -1066,6 +1070,9 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     if entity.is_unsaved() {
         return Some(phrase(Mark::Unsaved, waiting, facts.extras.edited));
     }
+    if let Some(claim) = &facts.extras.state {
+        return Some(claim.clone());
+    }
     let mark = keyboard_mark(entity, facts.device, facts.queue)?;
     Some(phrase(mark, waiting, facts.extras.edited))
 }
@@ -1108,7 +1115,7 @@ fn phrase(mark: Mark, waiting: bool, edited: Option<&'static str>) -> StateLine 
 /// ⚠️ Ordered, and the order is what makes the label honest: a project has nothing to
 /// send whatever is attached, an unattached instrument cannot be written to whatever the
 /// asset is, and a class this app does not write into is never a question of room.
-fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
+pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let send = |hint: String| Loud {
         label: "Queue send".to_string(),
         short: "Send".to_string(),
@@ -1133,7 +1140,7 @@ fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
             send: None,
         };
     }
-    if !facts.device.connected() {
+    if !device.connected() {
         return idle("no instrument attached — nothing to send to".to_string());
     }
     let Some((class, at)) = entity.spot() else {
@@ -1145,7 +1152,7 @@ fn action(entity: &LocalEntity, facts: &Facts<'_>) -> Loud {
             folder(class)
         ));
     }
-    if let Some((over, free)) = over(entity, class, facts.device) {
+    if let Some((over, free)) = over(entity, class, device) {
         return Loud {
             label: format!("Won't fit · {} over", room::measure(over)),
             short: format!("{} over", room::measure(over)),
@@ -1400,25 +1407,12 @@ mod tests {
         assert_eq!(phrase(Mark::Unknown, false, None).words, "on the keyboard");
     }
 
-    fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
-        Facts {
-            faces: &[Face::Edit],
-            showing: Face::Edit,
-            device,
-            queue,
-            tags,
-            view: false,
-            extras: Extras::default(),
-        }
-    }
-
     /// The loud action's three states: a send that can happen, a class this app does not
     /// write into, and an instrument that is not there.
     #[test]
     fn the_loud_action_says_which_of_its_three_states_it_is_in() {
         use crate::device::Device;
 
-        let (queue, tags) = (Queue::default(), Tags::default());
         let (mut workspace, mut log) = workspace();
         let at = Location { bank: 6, slot: 3 };
         let bytes = crate::fields::blank::electro5_song();
@@ -1433,10 +1427,7 @@ mod tests {
             bytes.clone(),
             &mut log,
         );
-        let held = action(
-            workspace.get(id).unwrap(),
-            &facts(&unattached.state, &queue, &tags),
-        );
+        let held = action(workspace.get(id).unwrap(), &unattached.state);
         assert_eq!(held.tone, Tone::Idle, "{}", held.hint);
         assert_eq!(held.send, None, "a dashed action asks for nothing");
         assert!(
@@ -1447,10 +1438,7 @@ mod tests {
 
         let mut attached = Device::new(egui::Context::default());
         attached.pretend_scanned(ObjectClass::SetList, 7, &["Blue Room"]);
-        let held = action(
-            workspace.get(id).unwrap(),
-            &facts(&attached.state, &queue, &tags),
-        );
+        let held = action(workspace.get(id).unwrap(), &attached.state);
         assert_eq!(held.tone, Tone::Ready);
         assert_eq!(held.send, Some((ObjectClass::SetList, at)));
         assert_eq!(held.label, "Queue send");
@@ -1468,10 +1456,7 @@ mod tests {
             bytes,
             &mut log,
         );
-        let held = action(
-            workspace.get(installed).unwrap(),
-            &facts(&attached.state, &queue, &tags),
-        );
+        let held = action(workspace.get(installed).unwrap(), &attached.state);
         assert_eq!(held.tone, Tone::Idle);
         assert_eq!(
             held.hint,
@@ -1483,10 +1468,9 @@ mod tests {
     /// refuses, because nothing here writes an nsmp from one yet.
     #[test]
     fn a_project_offers_a_build_that_refuses_rather_than_a_send() {
-        let (queue, tags) = (Queue::default(), Tags::default());
         let device = crate::device::Device::new(egui::Context::default());
         let (held, id) = opened("clarinet.nsmpproj", project_bytes());
-        let loud = action(held.get(id).unwrap(), &facts(&device.state, &queue, &tags));
+        let loud = action(held.get(id).unwrap(), &device.state);
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.label, "Build → .nsmp");
         assert_eq!(loud.short, "Build");

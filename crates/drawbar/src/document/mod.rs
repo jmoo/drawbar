@@ -29,6 +29,7 @@ mod piano;
 mod project;
 pub(crate) mod sample;
 mod setlist;
+mod verbatim;
 
 use advanced::Advanced;
 use controls::{Ctx, Sets};
@@ -68,6 +69,9 @@ pub struct Wants {
     pub send: Option<SendBack>,
     /// The banner's offer to put a view of a slot on this computer.
     pub keep: bool,
+    /// The thing a body pointed at: a set list's entry is a program of its own, and
+    /// opening it is the browser's act, not the document's.
+    pub open: Option<crate::browser::Item>,
 }
 
 /// What the Edit face asked for that cannot be done while the asset is borrowed to
@@ -75,6 +79,9 @@ pub struct Wants {
 enum Asked {
     Zone(sample::Ask),
     Encode,
+    /// The copy a body with nothing to edit offers, which is the header's Export.
+    Export,
+    Open(crate::browser::Item),
 }
 
 #[derive(Default)]
@@ -106,6 +113,9 @@ pub struct Document {
     player: crate::audio::Player,
     /// The encode panel over a WAV, and the read of the WAV it works from.
     wav: Option<(encode::Draft, encode::Source)>,
+    /// What the set list editor keeps: the half-typed address boxes and whether a
+    /// reorder has been made.
+    list: setlist::State,
 }
 
 impl Document {
@@ -136,6 +146,7 @@ impl Document {
             (self.name, self.variant) = header::boxes(entity, viewing);
             self.paths.clear();
             self.sample = sample::State::default();
+            self.list = setlist::State::default();
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
             self.player.stop();
@@ -173,9 +184,7 @@ impl Document {
                 queue: around.queue,
                 tags: around.tags,
                 view: viewing,
-                // No editor overrides the strip yet; the piano's `188 of 194 MB` and
-                // its refusal to queue a library that does not fit go here.
-                extras: header::Extras::default(),
+                extras: extras(entity, device, workspace),
             },
             (&mut self.name, &mut self.variant),
             &mut sets,
@@ -184,7 +193,7 @@ impl Document {
 
         let mut wants = Wants {
             send: act.send,
-            keep: false,
+            ..Wants::default()
         };
         let mut details = None;
         let mut typed = false;
@@ -219,9 +228,17 @@ impl Document {
                     // the same format, so every control also answers to the document id.
                     ui.push_id(id, |ui| match face {
                         Face::Edit => {
-                            if let Some(from_body) =
-                                self.body(ui, entity, registry.as_deref(), &mut lookup, &mut sets)
-                            {
+                            if let Some(from_body) = self.body(
+                                ui,
+                                entity,
+                                registry.as_deref(),
+                                &mut lookup,
+                                &setlist::Catalogue {
+                                    device: &device.state,
+                                    workspace,
+                                },
+                                &mut sets,
+                            ) {
                                 asked = Some(from_body);
                             }
                         }
@@ -247,8 +264,10 @@ impl Document {
                 device.send(cmd, log);
             }
         }
-        if let Some(asked) = asked {
-            self.answer(id, asked, workspace, log);
+        match asked {
+            Some(Asked::Open(item)) => wants.open = Some(item),
+            Some(asked) => self.answer(id, asked, workspace, log),
+            None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
             if lookup.asked || self.owes_deps(&lookup, at, device) {
@@ -317,6 +336,7 @@ impl Document {
         entity: &LocalEntity,
         registry: Option<&[Field]>,
         piano: &mut panel::PianoLookup,
+        seen: &setlist::Catalogue<'_>,
         sets: &mut Sets,
     ) -> Option<Asked> {
         let Some(decoded) = &entity.entity else {
@@ -329,6 +349,9 @@ impl Document {
             self.project_body(ui, decoded, sets);
             return None;
         }
+        if fields::is_set_list(decoded) {
+            return setlist::ui(ui, &mut self.list, entity, seen, sets).map(Asked::Open);
+        }
         if let Some(fields) = registry {
             if let Some(layout) = nord_format::panel::of(decoded) {
                 panel::program(ui, &self.ctx, layout, fields, piano, sets);
@@ -339,8 +362,7 @@ impl Document {
             }
             return None;
         }
-        setlist::ui(ui, decoded, sets);
-        None
+        verbatim::ui(ui, entity).then_some(Asked::Export)
     }
 
     /// Bytes that did not decode: the encode panel where they are a WAV, and the plain
@@ -453,6 +475,10 @@ impl Document {
                 }
             }
             Asked::Encode => self.encode(id, workspace, log),
+            Asked::Export => workspace.export(id),
+            // ⚠️ Answered where the frame collects what it wants; the browser owns
+            // opening a tab, and nothing here can.
+            Asked::Open(_) => {}
         }
     }
 
@@ -562,6 +588,7 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
                 || fields::is_set_list(e)
                 || sample::is_sample(e)
                 || project::is_project(e)
+                || verbatim::is_verbatim(e)
         }
         // A WAV decodes into nothing, but it is the one thing this app can make an
         // instrument out of, so it gets a panel rather than only a byte record.
@@ -571,14 +598,52 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
         faces.push(Face::Edit);
     }
     faces.push(Face::Metadata);
-    let capabilities = match &entity.entity {
-        Some(e) => sample::is_sample(e) || project::is_project(e),
+    // Whatever the Edit face left out: the capability table, the addresses a set list
+    // stores, or the body a verbatim document keeps.
+    let deeper = match &entity.entity {
+        Some(e) => {
+            sample::is_sample(e)
+                || project::is_project(e)
+                || fields::is_set_list(e)
+                || verbatim::is_verbatim(e)
+        }
         None => false,
     };
-    if registry.is_some() || capabilities {
+    if registry.is_some() || deeper {
         faces.push(Face::Advanced);
     }
     faces
+}
+
+/// What the strip shows instead of what it works out for itself.
+fn extras(entity: &LocalEntity, device: &Device, workspace: &Workspace) -> header::Extras {
+    let Some(decoded) = &entity.entity else {
+        return header::Extras::default();
+    };
+    if fields::is_set_list(decoded) {
+        return header::Extras {
+            state: setlist::claim(
+                decoded,
+                &setlist::Catalogue {
+                    device: &device.state,
+                    workspace,
+                },
+            ),
+            ..header::Extras::default()
+        };
+    }
+    if verbatim::is_verbatim(decoded) {
+        // The same write the strip works out for itself, in the words a body nothing
+        // can edit calls it by.
+        let mut loud = header::action(entity, &device.state);
+        loud.label = "Send as-is".to_string();
+        loud.short = "Send".to_string();
+        return header::Extras {
+            loud: Some(loud),
+            ..header::Extras::default()
+        };
+    }
+    header::Extras::default()
 }
 
 /// The face to show: the one this document was last left on, where that face still
@@ -602,8 +667,9 @@ fn record(ui: &mut egui::Ui, entity: &LocalEntity) {
     }
 }
 
-/// The Advanced face of a body with no field registry: what the format holds, and where
-/// each field of it lands.
+/// The Advanced face of a body with no field registry: what the format holds and where
+/// each field of it lands, the addresses a set list stores, or the bytes a body nothing
+/// describes is keeping.
 fn capabilities(ui: &mut egui::Ui, entity: &LocalEntity) {
     let Some(decoded) = &entity.entity else {
         return;
@@ -614,6 +680,10 @@ fn capabilities(ui: &mut egui::Ui, entity: &LocalEntity) {
     } else if let Some(Ok(snapshot)) = project::snapshot(decoded) {
         capability::table(ui, &project::capabilities());
         capability::offsets(ui, &project::offsets(&snapshot));
+    } else if fields::is_set_list(decoded) {
+        setlist::stored(ui, decoded);
+    } else {
+        verbatim::bytes(ui, entity);
     }
 }
 
@@ -1229,7 +1299,11 @@ mod tests {
             crate::fields::blank::electro5_song(),
             &mut log,
         );
-        assert_eq!(offered(&workspace, song), ["Edit", "Metadata"]);
+        assert_eq!(
+            offered(&workspace, song),
+            ["Edit", "Metadata", "Advanced"],
+            "the four entries, the record, and the addresses as stored"
+        );
 
         let stub = workspace.ingest(
             "blank.ns3s".into(),
@@ -1237,7 +1311,11 @@ mod tests {
             crate::fields::blank::stage3_song(),
             &mut log,
         );
-        assert_eq!(offered(&workspace, stub), ["Metadata"]);
+        assert_eq!(
+            offered(&workspace, stub),
+            ["Edit", "Metadata", "Advanced"],
+            "a body no registry describes still says so, and shows its bytes"
+        );
 
         let junk = workspace.ingest(
             "junk.bin".into(),
@@ -1527,27 +1605,84 @@ mod tests {
         }
     }
 
-    /// An Electro 5 set list has a Basic view of its own — the four slots — and it does
-    /// not come from the registry, which lists nothing for that body.
+    /// An Electro 5 set list has a view of its own — the four entries — and it does not
+    /// come from the registry, which lists nothing for that body. Every face of it
+    /// paints.
     #[test]
     fn a_set_list_has_its_own_view() {
         let bytes = crate::fields::blank::electro5_song();
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        render_file("blank.ne5t", bytes, Face::Edit);
+        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+            render_file("blank.ne5t", bytes.clone(), face);
+        }
     }
 
-    /// ⚠️ A song that decodes no further than its container has no Basic view to offer,
-    /// and must not be given one: an empty page saying nothing is editable stands in
-    /// front of the byte record, which is everything that file has.
+    /// A body no registry describes says which of the two silences it is — nothing to
+    /// draw, rather than nothing read — states what the container does say, and shows
+    /// the bytes it is keeping.
     #[test]
-    fn an_undecoded_song_keeps_the_record_it_has() {
+    fn a_body_with_no_registry_says_why_and_shows_its_bytes() {
         let bytes = crate::fields::blank::stage3_song();
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(!fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        render_file("blank.ns3s", bytes, Face::Metadata);
+
+        let mut open = Open::file("blank.ns3s", bytes);
+        let said = open.twice();
+        let has = |word: &str| said.iter().any(|held| held == word);
+        assert!(has("Nothing to edit here yet"), "{said:?}");
+        assert!(
+            said.iter()
+                .any(|word| word.starts_with("No registry declares this model's fields yet")),
+            "the sentence: {said:?}"
+        );
+        for fact in ["Format", "Model", "Container", "Body", "Version", "Where"] {
+            assert!(has(fact), "{fact} is one of the facts: {said:?}");
+        }
+        assert!(has("Save a copy…"), "the one thing left to do: {said:?}");
+        assert!(
+            has("Send as-is"),
+            "the loud action is the same send in this body's words: {said:?}"
+        );
+        assert!(has("0000") && has("0020"), "the body as hex: {said:?}");
+        assert!(
+            !said.iter().any(|word| word.contains("editable here yet")),
+            "the old apology: {said:?}"
+        );
+
+        open.document.views.insert(open.id, Face::Advanced);
+        let said = open.twice();
+        assert!(
+            said.iter().any(|word| word == "Body bytes"),
+            "the whole body has a face of its own: {said:?}"
+        );
+        assert!(said.iter().any(|word| word == "3 rows"), "{said:?}");
+    }
+
+    /// A set list's header says what the list amounts to, and only when that is
+    /// something to look at: nothing read is not four problems.
+    #[test]
+    fn a_set_lists_header_claims_only_what_the_instrument_showed() {
+        let mut open = Open::file("Blue Room.ne5t", crate::fields::blank::electro5_song());
+        let said = open.twice();
+        assert!(
+            !said.iter().any(|word| word.contains("needs attention")),
+            "nothing is attached, so nothing is claimed: {said:?}"
+        );
+
+        // Bank 1 read, and the slot the second entry names is vacant.
+        open.device.pretend_scanned(
+            ObjectClass::Program,
+            1,
+            &["Africa Split", "", "Gospel Perc"],
+        );
+        let said = open.twice();
+        assert!(
+            said.iter().any(|word| word == "1 entry needs attention"),
+            "{said:?}"
+        );
     }
 
     /// Bytes that do not decode still have a document — it says so and shows the record.
