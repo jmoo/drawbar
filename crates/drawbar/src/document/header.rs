@@ -754,10 +754,14 @@ fn pill(ui: &mut egui::Ui, held: Pill<'_>) -> egui::Response {
 
 /// A mono readout: the place and the size, which are figures rather than controls.
 fn mono(ui: &mut egui::Ui, text: &str, ink: egui::Color32) -> egui::Response {
-    ui.label(
-        egui::RichText::new(text)
-            .font(egui::FontId::monospace(MONO))
-            .color(ink),
+    // Never broken inside: a figure that does not fit moves to the next line whole.
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(egui::FontId::monospace(MONO))
+                .color(ink),
+        )
+        .wrap_mode(egui::TextWrapMode::Extend),
     )
 }
 
