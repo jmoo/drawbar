@@ -11,6 +11,7 @@ use eframe::egui;
 pub enum Glyph {
     ArrowDownToLine,
     ArrowRight,
+    ArrowUpRight,
     AudioLines,
     AudioWaveform,
     Check,
@@ -18,6 +19,7 @@ pub enum Glyph {
     ChevronRight,
     CircleAlert,
     CircleCheck,
+    CircleDashed,
     CircleDot,
     CircleHelp,
     Clock,
@@ -39,6 +41,7 @@ pub enum Glyph {
     Keyboard,
     LibraryBig,
     Link,
+    Link2Off,
     ListMusic,
     Minus,
     Moon,
@@ -71,9 +74,10 @@ pub enum Glyph {
 
 impl Glyph {
     /// Every variant, so a sweep can prove each one still has art behind it.
-    pub const ALL: [Glyph; 58] = [
+    pub const ALL: [Glyph; 61] = [
         Glyph::ArrowDownToLine,
         Glyph::ArrowRight,
+        Glyph::ArrowUpRight,
         Glyph::AudioLines,
         Glyph::AudioWaveform,
         Glyph::Check,
@@ -81,6 +85,7 @@ impl Glyph {
         Glyph::ChevronRight,
         Glyph::CircleAlert,
         Glyph::CircleCheck,
+        Glyph::CircleDashed,
         Glyph::CircleDot,
         Glyph::CircleHelp,
         Glyph::Clock,
@@ -102,6 +107,7 @@ impl Glyph {
         Glyph::Keyboard,
         Glyph::LibraryBig,
         Glyph::Link,
+        Glyph::Link2Off,
         Glyph::ListMusic,
         Glyph::Minus,
         Glyph::Moon,
@@ -138,6 +144,7 @@ impl Glyph {
                 egui::include_image!("../assets/icons/arrow-down-to-line.svg")
             }
             Glyph::ArrowRight => egui::include_image!("../assets/icons/arrow-right.svg"),
+            Glyph::ArrowUpRight => egui::include_image!("../assets/icons/arrow-up-right.svg"),
             Glyph::AudioLines => egui::include_image!("../assets/icons/audio-lines.svg"),
             Glyph::AudioWaveform => egui::include_image!("../assets/icons/audio-waveform.svg"),
             Glyph::Check => egui::include_image!("../assets/icons/check.svg"),
@@ -145,6 +152,7 @@ impl Glyph {
             Glyph::ChevronRight => egui::include_image!("../assets/icons/chevron-right.svg"),
             Glyph::CircleAlert => egui::include_image!("../assets/icons/circle-alert.svg"),
             Glyph::CircleCheck => egui::include_image!("../assets/icons/circle-check.svg"),
+            Glyph::CircleDashed => egui::include_image!("../assets/icons/circle-dashed.svg"),
             Glyph::CircleDot => egui::include_image!("../assets/icons/circle-dot.svg"),
             Glyph::CircleHelp => egui::include_image!("../assets/icons/circle-help.svg"),
             Glyph::Clock => egui::include_image!("../assets/icons/clock.svg"),
@@ -168,6 +176,7 @@ impl Glyph {
             Glyph::Keyboard => egui::include_image!("../assets/icons/keyboard.svg"),
             Glyph::LibraryBig => egui::include_image!("../assets/icons/library-big.svg"),
             Glyph::Link => egui::include_image!("../assets/icons/link.svg"),
+            Glyph::Link2Off => egui::include_image!("../assets/icons/link-2-off.svg"),
             Glyph::ListMusic => egui::include_image!("../assets/icons/list-music.svg"),
             Glyph::Minus => egui::include_image!("../assets/icons/minus.svg"),
             Glyph::Moon => egui::include_image!("../assets/icons/moon.svg"),
