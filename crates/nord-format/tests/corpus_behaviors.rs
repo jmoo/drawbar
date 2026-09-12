@@ -1859,12 +1859,11 @@ fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
 
 /// Whether a stroke's record counts frames past its last non-silent one.
 ///
-/// A stroke states the frames its blocks own, so a coder laying whole blocks over a
-/// recording ends the stroke inside the recording. One that counts silence past it
-/// stretched its last block over frames it was never given, and chose the widths
-/// before it against a source length the file does not hold — so no function of the
-/// stroke's own samples reaches those widths, and all a coder owes such a stroke is
-/// to lose nothing.
+/// A stroke states the frames its blocks own, and a coder laying whole blocks over a
+/// recording states the silence that fills out the last of them. Where that silence
+/// runs to frames the widths before it were never chosen against, no function of the
+/// stroke's own samples reaches those widths again, and all a coder owes such a stroke
+/// is to change nothing but silence.
 fn overhangs_its_audio(audio: &npno::codec::Audio) -> bool {
     audio
         .channels
@@ -1883,7 +1882,8 @@ fn overhangs_its_audio(audio: &npno::codec::Audio) -> bool {
 /// to store, and nothing in the decode reads it.
 ///
 /// A stroke that overhangs its audio is owed the weaker claim instead: it comes back
-/// over whole blocks, no longer than it was, holding every frame that carried signal.
+/// over whole blocks holding every frame that carried signal, differing from what it
+/// was in silence alone.
 #[test]
 fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
     let mut strokes = 0;
@@ -1901,19 +1901,21 @@ fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
             let was = npno::codec::decode(stroke, library.channels()).unwrap();
             if overhangs_its_audio(&was) {
                 let back = npno::codec::decode(coded, library.channels()).unwrap();
-                assert!(
-                    back.frames() <= was.frames(),
-                    "{where_}: {stroke:?} came back longer than it was"
-                );
+                let common = back.frames().min(was.frames());
                 for (now, before) in back.channels.iter().zip(&was.channels) {
                     assert!(
-                        now[..] == before[..back.frames()],
+                        now[..common] == before[..common],
                         "{where_}: {stroke:?} came back holding different frames"
                     );
                     assert!(
-                        before[back.frames()..].iter().all(|&s| s == 0),
+                        before[common..].iter().all(|&s| s == 0),
                         "{where_}: {stroke:?} left off {} frame(s) that carried signal",
-                        was.frames() - back.frames()
+                        was.frames() - common
+                    );
+                    assert!(
+                        now[common..].iter().all(|&s| s == 0),
+                        "{where_}: {stroke:?} came back with {} frame(s) of new signal",
+                        back.frames() - common
                     );
                 }
                 continue;

@@ -22,14 +22,20 @@
 //! ordinary full block whose own trailing overlap sits past the stroke's end, which
 //! is why coding a stroke again needs [`codec::Audio::tail`].
 //!
-//! A stroke therefore states whole blocks. The frames its record declares are the
-//! frames its blocks own, and a recording's last part-block — under 13 ms — is not
-//! stated at all. That is what makes the coding reversible: the cap above is what the
-//! stroke has left to own, so the same search run over the frames a stroke decodes to
-//! is given the same room at every block that laid the stroke out, and reaches the
-//! same widths. A coder that instead stretched its last block past the recording and
-//! counted the silence would state frames its own search was never given, and would
-//! lay the stroke out differently the second time.
+//! A stroke therefore states whole blocks, and it states every frame it was given.
+//! Where the capped search lands on the frame count exactly, that count is what the
+//! stroke states. Where it cannot — the remainder under 13 ms, shorter than any
+//! width's block — the blocks would have to stop short of the audio, so the stroke is
+//! laid out again with nothing capping any block and ends at the first block to reach
+//! the count, the source read as silent past its end. Such a stroke ends in silence,
+//! up to one block of it, and no frame is dropped for falling between block lengths.
+//!
+//! Both layouts code again unchanged. The cap is what the stroke has left to own, so
+//! a stroke whose blocks land on its frame count gives the same search the same room
+//! the second time and reaches the same widths. A stroke laid out with no cap states
+//! the sum of those blocks, and a capped search over that sum admits every one of
+//! them — each is no longer than what is left when it starts, and the cap only ever
+//! removes candidates — so it lays out the same blocks and this time lands exactly.
 //!
 //! Confirmed on hardware: what this codes plays. Libraries built here load and
 //! sound — mono and stereo, attack, resonance and release, from the lowest root to
@@ -112,9 +118,9 @@ pub struct Recording {
     /// One vector per channel at [`codec::RATE`], all the same length. Every
     /// recording of one library states the same channel count, 1 or 2.
     ///
-    /// The stroke holds the whole blocks that cover these frames, so a tail shorter
-    /// than the shortest block — under 13 ms — is not stated. A recording under one
-    /// block long is the exception: it gets a block, silent past its end.
+    /// The stroke holds whole blocks and holds all of these frames, so it states them
+    /// and whatever silence fills out the block they end in — the recording is read as
+    /// silent past its end rather than cut back to a block boundary.
     pub channels: Vec<Vec<i16>>,
 }
 
@@ -461,35 +467,43 @@ struct Coded {
     starts: Vec<usize>,
 }
 
-/// Code the whole blocks that cover `target` frames of `source` — one vector per
-/// channel — and report the frames they own between them.
+/// Where one block sits and what its header will say.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    at: usize,
+    order: u8,
+    width: u8,
+}
+
+/// Code whole blocks over `target` frames of `source` — one vector per channel — and
+/// report the frames they own between them, which is never fewer than `target`.
 ///
-/// A block owns whole frame counts the widths allow, so the blocks stop short of
-/// `target` by whatever is left over when no block is short enough to fit — under
-/// [`shortest_block`] frames, 13 ms, which the stroke does not state. A `target`
-/// under one block is the exception: it gets that block, reaching past the source,
-/// which is read as silent from its end.
+/// Each block is capped at what `target` has left to own, and when the blocks land on
+/// `target` exactly that is the stroke. When instead they would stop short — the
+/// remainder shorter than [`shortest_block`], so that no width's block fits it — the
+/// stroke is laid out again with no cap on any block and ends at the first one to
+/// reach `target`, the source read as silent past its end. What it then owns past
+/// `target` is silence the stroke states rather than audio it drops.
 fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result<Coded, Error> {
     let channels = source.len();
     let block = block_bytes(channels as u16);
     let counts = frame_counts(block, channels);
     let widest = counts[usize::from(MIN_WIDTH)];
-    let shortest = shortest_block(&counts);
     let total = target
         .checked_add(widest)
         .and_then(|total| total.checked_mul(channels).map(|_| total))
         .ok_or_else(|| refuse("a stroke longer than this platform can address"))?;
     let planes = planes(source, seeds, total)?;
 
+    let mut placed = lay_capped(&planes, channels, &counts, target);
+    if placed.is_empty() || owned_by(&placed, &counts) != target {
+        placed = lay_uncapped(&planes, channels, &counts, target);
+    }
+
     let mut audio = Vec::new();
-    let mut starts = Vec::new();
-    let mut at = 0usize;
-    while at == 0 || at + shortest <= target {
-        let left = target.saturating_sub(at).max(shortest);
-        let (order, width) = choose(&planes, at, channels, &counts, left)
-            .expect("order zero states a sample outright, which always fits sixteen bits");
-        let frames = counts[usize::from(width)];
-        let span = at * channels..(at + frames) * channels;
+    for block_at in &placed {
+        let frames = counts[usize::from(block_at.width)];
+        let span = block_at.at * channels..(block_at.at + frames) * channels;
         let peak = planes[0][span.clone()]
             .iter()
             .map(|&v| i64::from(v).abs())
@@ -497,20 +511,84 @@ fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result
             .unwrap_or(0);
         pack(
             &mut audio,
-            order,
-            width,
+            block_at.order,
+            block_at.width,
             attenuation(peak),
-            &planes[usize::from(order)][span],
+            &planes[usize::from(block_at.order)][span],
             block,
         );
-        starts.push(at);
-        at += frames - OVERLAP;
     }
     Ok(Coded {
         audio,
-        owned: at,
-        starts,
+        owned: owned_by(&placed, &counts),
+        starts: placed.iter().map(|b| b.at).collect(),
     })
+}
+
+/// Frames a layout owns between its blocks.
+fn owned_by(placed: &[Placed], counts: &[usize; WIDTHS]) -> usize {
+    placed
+        .last()
+        .map_or(0, |b| b.at + counts[usize::from(b.width)] - OVERLAP)
+}
+
+/// Blocks over the frames from zero, each capped at what `target` has left to own.
+///
+/// They land on `target` exactly or stop short of it by less than
+/// [`shortest_block`], which is the length no width's block fits.
+fn lay_capped(
+    planes: &[Vec<i32>],
+    channels: usize,
+    counts: &[usize; WIDTHS],
+    target: usize,
+) -> Vec<Placed> {
+    let shortest = shortest_block(counts);
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while target - at >= shortest {
+        let block = place(planes, at, channels, counts, Some(target - at));
+        at += counts[usize::from(block.width)] - OVERLAP;
+        out.push(block);
+    }
+    out
+}
+
+/// Blocks over the frames from zero with nothing capping their length, up to and
+/// including the first one whose frames reach `target`.
+///
+/// A capped search over the frames these own admits every one of them — each is no
+/// longer than what is left when it starts — so it lays out the same blocks and lands
+/// on that count exactly, which is what makes the stroke this writes one that codes
+/// again unchanged.
+fn lay_uncapped(
+    planes: &[Vec<i32>],
+    channels: usize,
+    counts: &[usize; WIDTHS],
+    target: usize,
+) -> Vec<Placed> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    loop {
+        let block = place(planes, at, channels, counts, None);
+        at += counts[usize::from(block.width)] - OVERLAP;
+        out.push(block);
+        if at >= target {
+            return out;
+        }
+    }
+}
+
+/// The block starting at frame `at`, `room` being what the stroke has left to own.
+fn place(
+    planes: &[Vec<i32>],
+    at: usize,
+    channels: usize,
+    counts: &[usize; WIDTHS],
+    room: Option<usize>,
+) -> Placed {
+    let (order, width) = choose(planes, at, channels, counts, room)
+        .expect("order zero states a sample outright, which always fits sixteen bits");
+    Placed { at, order, width }
 }
 
 /// Frames the shortest block a header can declare owns: the widest field, and so the
@@ -577,13 +655,14 @@ fn residuals(len: usize) -> Result<Vec<i32>, Error> {
 /// `owned_left` caps a block's owned frames at what the stroke has left to own. The
 /// narrowest width is the longest block, so the cap rules out an opening range of
 /// widths; at [`shortest_block`] it leaves only the widest, which order zero always
-/// reaches, so a cap that large or larger always names a block.
+/// reaches, so a cap that large or larger always names a block. `None` lifts the cap,
+/// which is what a last block reaching past the source is chosen without.
 fn choose(
     planes: &[Vec<i32>],
     at: usize,
     channels: usize,
     counts: &[usize; WIDTHS],
-    owned_left: usize,
+    owned_left: Option<usize>,
 ) -> Option<(u8, u8)> {
     let mut best: Option<(u8, u8)> = None;
     for (order, plane) in planes.iter().enumerate() {
@@ -604,7 +683,7 @@ fn choose(
             if lo < -bound || hi >= bound {
                 break;
             }
-            if frames - OVERLAP <= owned_left {
+            if owned_left.is_none_or(|left| frames - OVERLAP <= left) {
                 narrowest = Some(width);
             }
         }
@@ -850,9 +929,9 @@ mod tests {
         Piano::read_from(&mut std::io::Cursor::new(bytes)).unwrap()
     }
 
-    /// A stroke holds the whole blocks that cover its recording: every frame it states
-    /// is the recording's own, and what it leaves off is the part-block the recording
-    /// ends on, shorter than the shortest block a header can declare.
+    /// A stroke holds whole blocks and every frame of its recording: what it states
+    /// past the recording is silence, and the recording itself comes back sample for
+    /// sample.
     #[test]
     fn a_built_library_decodes_back_to_the_frames_it_was_given() {
         let source = tone(20_000, 220.0, 2);
@@ -864,15 +943,120 @@ mod tests {
         let stroke = &library.strokes()[0];
         let audio = codec::decode(stroke, 2).unwrap();
         assert_eq!(audio.clipped, 0);
-        let shortest = codec::block_frames(MAX_WIDTH, library.block_bytes(), 2) - OVERLAP;
-        let left_off = source[0].len() - audio.frames();
+        let longest = codec::block_frames(MIN_WIDTH, library.block_bytes(), 2) - OVERLAP;
+        let padding = audio
+            .frames()
+            .checked_sub(source[0].len())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the stroke states {} frames of a {} frame recording",
+                    audio.frames(),
+                    source[0].len()
+                )
+            });
         assert!(
-            left_off < shortest,
-            "the stroke leaves off {left_off} frames of {}, a whole block or more",
-            source[0].len()
+            padding < longest,
+            "the stroke states {padding} frames of silence, a whole block or more"
         );
         for (channel, given) in audio.channels.iter().zip(&source) {
-            assert_eq!(channel, &given[..audio.frames()]);
+            assert_eq!(&channel[..given.len()], &given[..]);
+            assert!(channel[given.len()..].iter().all(|&s| s == 0));
+        }
+    }
+
+    /// Nothing a recording holds is dropped for falling between block lengths: the
+    /// coder states the silence that fills out the last block rather than fewer frames
+    /// than it was given, including where the whole signal sits in the frames a
+    /// truncating coder would leave off. The stroke it writes is one a rebuild leaves
+    /// alone.
+    #[test]
+    fn a_recording_that_does_not_fill_its_last_block_keeps_every_frame() {
+        let mut late = vec![vec![0i16; 892]; 2];
+        for (channel, lane) in late.iter_mut().enumerate() {
+            let signal = tone(64, 262.0, 2);
+            lane[892 - 64..].copy_from_slice(&signal[channel]);
+        }
+        let cases: [(&str, Vec<Vec<i16>>); 3] = [
+            ("a recording a block and a half long", tone(700, 262.0, 2)),
+            (
+                "a recording cut between block lengths",
+                tone(9_133, 440.0, 2),
+            ),
+            ("a recording whose signal is all at the end", late),
+        ];
+
+        for (what, source) in cases {
+            let frames = source[0].len();
+            let signal: i64 = source[0].iter().map(|&s| i64::from(s).abs()).sum();
+            assert!(signal > 0, "{what}: the case states no signal");
+            let piano = round_trip(2, &[one(60, Bank::Attack, 0, source.clone())]);
+            let library = piano.library().unwrap();
+            let audio = codec::decode(&library.strokes()[0], 2).unwrap();
+            assert!(
+                audio.frames() >= frames,
+                "{what}: the stroke states {} of {frames} frames",
+                audio.frames()
+            );
+            for (channel, given) in audio.channels.iter().zip(&source) {
+                assert_eq!(
+                    &channel[..frames],
+                    &given[..],
+                    "{what}: frames came back changed"
+                );
+                assert!(
+                    channel[frames..].iter().all(|&s| s == 0),
+                    "{what}: the stroke states something other than silence past the recording"
+                );
+            }
+
+            let again = rebuild(&library).unwrap();
+            for recoded in &again.strokes {
+                assert_eq!(
+                    (recoded.identical, recoded.recoded()),
+                    (recoded.blocks, 0),
+                    "{what}: the rebuild laid the stroke out differently"
+                );
+            }
+            assert_eq!(
+                again.library.to_body().unwrap(),
+                piano.file.body.0,
+                "{what}: the rebuild is a different file"
+            );
+        }
+    }
+
+    /// The two claims above hold wherever a recording ends against the block grid, not
+    /// only at the lengths a case picks: the stroke holds every frame, and coding it
+    /// again reaches the same file.
+    #[test]
+    fn a_recording_of_any_length_codes_to_a_stroke_that_holds_it() {
+        for frames in [
+            1, 63, 64, 65, 445, 446, 447, 509, 891, 892, 893, 1_102, 2_658,
+        ] {
+            for channels in [1u16, 2] {
+                let source = tone(frames, 262.0, usize::from(channels));
+                let piano = round_trip(channels, &[one(60, Bank::Attack, 0, source.clone())]);
+                let library = piano.library().unwrap();
+                let audio = codec::decode(&library.strokes()[0], channels).unwrap();
+                let what = format!("{frames} frame(s) over {channels} channel(s)");
+                assert!(
+                    audio.frames() >= frames,
+                    "{what}: the stroke states {}",
+                    audio.frames()
+                );
+                for (channel, given) in audio.channels.iter().zip(&source) {
+                    assert_eq!(&channel[..frames], &given[..], "{what}: frames changed");
+                    assert!(
+                        channel[frames..].iter().all(|&s| s == 0),
+                        "{what}: not silent"
+                    );
+                }
+                assert_eq!(
+                    rebuild(&library).unwrap().library.to_body().unwrap(),
+                    piano.file.body.0,
+                    "{what}: the rebuild is a different file"
+                );
+            }
         }
     }
 
@@ -883,7 +1067,8 @@ mod tests {
         let library = piano.library().unwrap();
         assert_eq!(library.channels(), 1);
         let audio = codec::decode(&library.strokes()[0], 1).unwrap();
-        assert_eq!(audio.channels[0], source[0][..audio.frames()]);
+        assert_eq!(audio.channels[0][..source[0].len()], source[0][..]);
+        assert!(audio.channels[0][source[0].len()..].iter().all(|&s| s == 0));
     }
 
     #[test]

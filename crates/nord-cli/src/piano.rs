@@ -190,8 +190,9 @@ pub struct BuildArgs {
     /// names all its layers the same way. Files that are not WAVs are skipped, and a
     /// WAV named some other way is refused.
     ///
-    /// A stroke holds the whole blocks that cover its WAV, so a tail under 13 ms is
-    /// not stated; the `frames` column below is the WAV's, not the stroke's.
+    /// A stroke holds whole blocks and every frame of its WAV, so it states the
+    /// silence that fills out the block the WAV ends in; the `frames` column below is
+    /// the WAV's, not the stroke's.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
