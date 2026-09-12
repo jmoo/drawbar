@@ -363,6 +363,25 @@ enum PianoAction {
     /// Cut a library in two at a key, writing both halves.
     Split(piano::SplitArgs),
 
+    /// Build a piano library from a directory of WAVs, against a template library.
+    ///
+    /// The WAVs name the root, bank and layer they are; the template supplies
+    /// everything the audio does not decide — the length marks, the decay
+    /// coefficients, the per-note tables and the stream version — from its own stroke
+    /// of the same bank and nearest root. Any rate resamples onto the lattice the
+    /// instrument plays at. Nothing this writes has been played, so it needs
+    /// `--unverified`.
+    Build(piano::BuildArgs),
+
+    /// Code a library's audio again from the frames it decodes to, and report how each
+    /// stroke's blocks came back.
+    ///
+    /// This is the coder checked against a library it did not write: every block
+    /// should come back byte for byte apart from the attenuation it declares, which is
+    /// a statistic the file's own encoder measured and the decode never reads. Needs
+    /// `--unverified` like `build`.
+    Rebuild(piano::RebuildArgs),
+
     /// Rebuild each library from its parsed model and check the bytes come back
     /// identical; with `--deep` also decode every stroke it holds.
     ///
@@ -789,6 +808,8 @@ fn main() -> ExitCode {
             PianoAction::Edit(args) => piano::edit(&ui, args),
             PianoAction::Trim(args) => piano::trim(&ui, args),
             PianoAction::Split(args) => piano::split(&ui, args),
+            PianoAction::Build(args) => piano::build(&ui, args),
+            PianoAction::Rebuild(args) => piano::rebuild(&ui, args),
             PianoAction::Verify(args) => piano::verify(&ui, args),
         },
         Command::Setlist { action } => match action {
