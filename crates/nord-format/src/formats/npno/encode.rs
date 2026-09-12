@@ -248,12 +248,23 @@ pub fn build(
 
 /// Code every stroke of `library` again from the frames it decodes to, each keeping
 /// its own record and its own place in the directory.
+///
+/// A stroke whose decode saturates is refused rather than coded: the frames it would
+/// be given are the clamped ones, so what came back would be a stroke holding audio
+/// the file does not, and a stream that saturates this predictor is one the codec
+/// does not describe.
 pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
     let block = library.block_bytes();
     let mut strokes = Vec::new();
     let mut report = Vec::new();
     for stroke in library.strokes() {
         let audio = codec::decode(stroke, library.channels())?;
+        if audio.clipped > 0 {
+            return Err(refuse(format!(
+                "{stroke:?}: {} sample(s) left int16 in the decode; coding a stroke this                  codec does not describe would write the saturated frames as new audio",
+                audio.clipped
+            )));
+        }
         let target = audio.frames();
         let mut source = audio.channels;
         for (channel, tail) in source.iter_mut().zip(&audio.tail) {
@@ -1079,6 +1090,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A stroke that saturates the decoder is refused rather than coded again: what a
+    /// recode would write is the clamped reconstruction, which is audio the file it
+    /// came from does not hold.
+    #[test]
+    fn a_stroke_whose_decode_saturates_is_not_coded_again() {
+        let donor = template(1);
+        let mut library = donor.library().unwrap();
+        let block = library.block_bytes();
+        let frames = codec::block_frames(MAX_WIDTH, block, 1);
+        // Order one integrates its residuals, so a block of one large value runs the
+        // reconstruction off the top of int16 within a few frames.
+        let mut audio = Vec::new();
+        pack(&mut audio, 1, MAX_WIDTH, 0, &vec![20_000i32; frames], block);
+        library.strokes[0].audio = Cow::Owned(audio);
+
+        let decoded = codec::decode(&library.strokes()[0], 1).unwrap();
+        assert!(decoded.clipped > 0, "the case does not saturate");
+
+        let error = match rebuild(&library) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a refusal"),
+        };
+        assert!(error.contains("left int16"), "{error}");
     }
 
     #[test]
