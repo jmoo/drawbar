@@ -362,8 +362,8 @@ the instrument plays at. Everything the audio does not decide comes from a templ
 library: the length marks, the decay coefficients, the per-note tables and the
 stream version, taken from the template stroke of the same bank and nearest root.
 `rebuild` codes a library's own strokes again from the frames they decode to and
-prints how each one's blocks came back, which is the coder checked against a file
-it did not write.
+prints how each one's blocks came back: a file this coder wrote comes back byte for
+byte, one it did not comes back block for block.
 
 Two rules decide what a built library plays. Every key up to one semitone above the
 highest root sounds, playing the nearest root at or above it, and keys past that are
@@ -386,15 +386,17 @@ nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
 nord piano rebuild grand.npno -o again.npno
 ```
 
-A library written here loads on the instrument and plays at the original's level:
-hardware-verified for a trim, both for a dropped bank and for dropped velocity
-layers, and for what `build` and `rebuild` code — mono and stereo, attack, resonance
-and release, every root of a full-keyboard library. The other edits — renames,
-retunes, remaps and a narrowed key range — are inferred from specimens and have not
-been played. The fields a build cannot derive from audio — the length marks, the
-decay coefficients, the per-note tables, the word at the body's start — go in as the
-template donated them: the instrument accepts them, and what it makes of them beyond
-accepting is not known.
+A library written here loads on the instrument and plays: hardware-verified for a
+trim, both for a dropped bank and for dropped velocity layers, and for what `build`
+and `rebuild` code — mono and stereo, every key of a full-keyboard library including
+its lowest and highest root, each of three attack layers, the release stroke at
+note-off, a long stroke to its end, the keys between roots transposed, and a vendor
+library coded again playing indistinguishably from the original in level and in
+spectrum. The other edits — renames, retunes, remaps and a narrowed key range — are
+inferred from specimens and have not been played. The fields a build cannot derive
+from audio — the length marks, the decay coefficients, the per-note tables, the word
+at the body's start — go in as the template donated them: the instrument accepts
+them, and what it makes of them beyond accepting is not known.
 
 A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
 piano put`, and the rest of the slot verbs address class 1 the way they address

@@ -376,15 +376,19 @@ enum PianoAction {
     /// the largest layer value its root holds that is at most (127 − velocity)·31/127,
     /// and a root's `l00`, `l01`, … spread over 0..27 so that each layer answers to
     /// its own part of the velocity range.
+    ///
+    /// Hardware-verified: a library built this way loads and plays, mono and stereo,
+    /// on every key it covers.
     Build(piano::BuildArgs),
 
     /// Code a library's audio again from the frames it decodes to, and report how each
     /// stroke's blocks came back.
     ///
-    /// This is the coder checked against a library it did not write: every block
-    /// should come back byte for byte apart from the attenuation it declares, which is
-    /// a statistic the file's own encoder measured and the decode never reads. Each
-    /// stroke keeps its own root, bank and layer value.
+    /// A library this coder wrote comes back byte for byte. One it did not comes back
+    /// block for block apart from the attenuation each block declares, which is a
+    /// statistic the file's own encoder measured and the decode never reads — coded
+    /// again, such a library plays indistinguishably from the original. Each stroke
+    /// keeps its own root, bank and layer value.
     Rebuild(piano::RebuildArgs),
 
     /// Rebuild each library from its parsed model and check the bytes come back

@@ -14,8 +14,11 @@
 //!
 //! A library written here loads on the instrument and plays: confirmed on hardware
 //! for `trim`, both for a dropped bank and for dropped velocity layers, and for what
-//! `build` and `rebuild` code — mono and stereo, every bank, every root of a
-//! full-keyboard library. What `edit` changes — a name, a key's tuning, the root a
+//! `build` and `rebuild` code — mono and stereo, every key of a full-keyboard library
+//! including its lowest and highest root, each of three attack layers, the release
+//! stroke at note-off, a long stroke to its end, the keys between roots transposed,
+//! and a vendor library coded again playing indistinguishably from the original in
+//! level and in spectrum. What `edit` changes — a name, a key's tuning, the root a
 //! key plays — and the narrowed key range `trim --range` and `split` leave behind are
 //! inferred from specimens; not confirmed on hardware. The fields a build cannot
 //! derive from audio — the length marks, the decay coefficients, the per-note tables,

@@ -136,8 +136,8 @@ pub const FINE_TUNE_CENTS_PER_UNIT: f32 = 0.7;
 pub enum Bank {
     /// Played at note-on. Every library has these.
     Attack,
-    /// Played from the note-on while the sustain pedal is down, which the panel's
-    /// acoustics bit 0 enables. Only the larger libraries carry them.
+    /// Played in place of the attack when the sustain pedal is down at note-on, which
+    /// the panel's acoustics bit 0 enables. Only the larger libraries carry them.
     Resonance,
     /// Played at note-off.
     Release,

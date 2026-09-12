@@ -4,8 +4,8 @@
 //! [`build`] takes a **template** library and a set of [`Recording`]s — one per root
 //! note, [`Bank`] and velocity layer, frames at [`codec::RATE`] — and returns a
 //! [`Library`] the parent module's writer turns into a file. [`rebuild`] re-codes a
-//! library's own strokes from the frames they decode to, which is how the coder is
-//! checked against files this crate did not write.
+//! library's own strokes from the frames they decode to: a file this crate did not
+//! write comes back block for block, and one it did write comes back byte for byte.
 //!
 //! # The coding laws
 //!
@@ -38,9 +38,11 @@
 //! removes candidates — so it lays out the same blocks and this time lands exactly.
 //!
 //! Confirmed on hardware: what this codes plays. Libraries built here load and
-//! sound — mono and stereo, attack, resonance and release, from the lowest root to
-//! the highest, a long stroke and a short one — and a vendor library coded again from
-//! its own audio plays at the original's level.
+//! sound — mono and stereo, every key of a full-keyboard library including its lowest
+//! and highest root, each of three attack layers, the release stroke at note-off, a
+//! long stroke to its end, and the keys between roots transposed — and a vendor
+//! library coded again from its own audio plays indistinguishably from the original,
+//! in level and in spectrum.
 //!
 //! That the width and order it *chooses* are the vendor's own choice is inferred from
 //! specimens: given each block's width, order and attenuation, this reproduces the
