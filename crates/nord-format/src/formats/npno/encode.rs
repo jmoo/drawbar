@@ -293,9 +293,9 @@ pub struct Resampled {
 /// the bank interpolates rather than reproduces, so running it at a ratio of one
 /// would filter the source for nothing.
 ///
-/// ⚠️ The bank's cutoff is measured against a 44,100 Hz source. On a faster one it
-/// does not band-limit as far as [`codec::RATE`]'s own Nyquist, and what sits above
-/// that folds back.
+/// The kernel's cutoff follows the rates: a source faster than [`codec::RATE`] is
+/// band-limited to the lattice's own Nyquist before it lands on it, and a slower one
+/// keeps its whole band.
 pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled, Error> {
     if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
         return Err(ParseError::OutOfBounds {
@@ -320,6 +320,7 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
 
     let frames = samples.len() / channels;
     let fields = (frames as u128 * u128::from(codec::RATE) / u128::from(rate)) as usize;
+    let kernel = kernel::Kernel::new(rate, codec::RATE);
     let mut clipped = 0;
     let mut lanes = Vec::with_capacity(channels);
     for channel in 0..channels {
@@ -332,7 +333,7 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
         lanes.push(
             (0..fields)
                 .map(|f| {
-                    let value = kernel::field_at(&lane, f, rate, codec::RATE);
+                    let value = kernel.field(&lane, f);
                     let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
                     clipped += usize::from(i64::from(narrow) != value);
                     narrow
@@ -1322,6 +1323,43 @@ mod tests {
 
         assert!(resample(&[1, 2, 3], 2, codec::RATE).is_err());
         assert!(resample(&[1, 2], 1, 0).is_err());
+    }
+
+    /// A source faster than the lattice is band-limited to the lattice's own Nyquist
+    /// on the way down: a tone above it comes through as near silence rather than
+    /// folded back into the band as a tone the recording never held, and one well
+    /// inside the band comes through at its level.
+    #[test]
+    fn resampling_a_faster_source_drops_what_the_lattice_cannot_hold() {
+        let rate = 96_000;
+        let tone_at = |hertz: f64| -> Vec<i16> {
+            (0..rate as usize / 4)
+                .map(|n| {
+                    let t = n as f64 / f64::from(rate);
+                    (8000.0 * (std::f64::consts::TAU * hertz * t).sin()) as i16
+                })
+                .collect()
+        };
+        // The kernel rings in and out at the ends, so the level is read off the middle.
+        let peak = |lane: &[i16]| {
+            lane[400..lane.len() - 400]
+                .iter()
+                .map(|&s| i32::from(s).abs())
+                .max()
+                .unwrap_or(0)
+        };
+
+        let above = resample(&tone_at(24_000.0), 1, rate).unwrap();
+        assert_eq!(above.clipped, 0);
+        let level = peak(&above.channels[0]);
+        assert!(level < 400, "a 24 kHz tone came through at {level} of 8000");
+
+        let inside = resample(&tone_at(1_000.0), 1, rate).unwrap();
+        let level = peak(&inside.channels[0]);
+        assert!(
+            level > 7_900,
+            "a 1 kHz tone came through at {level} of 8000"
+        );
     }
 
     #[test]

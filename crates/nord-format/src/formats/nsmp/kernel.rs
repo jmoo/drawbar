@@ -25,10 +25,12 @@
 //! `MEASURED`. Where a tap is known only to within an `f32` rounding, a sum landing
 //! within that of a quantiser step can still store one count off the instrument's.
 //!
-//! The ratio is not baked into the bank: the `*_at` entry points run the same taps at
-//! another one, which is what a source at a rate other than
-//! [`SOURCE_RATE`](super::codec::SOURCE_RATE) needs. The cutoff stays where it was
-//! measured, so a faster source is not band-limited as far as the target's Nyquist.
+//! The ratio is not baked into the bank: [`Kernel`] runs the same shape at another
+//! one, which is what a source at a rate other than
+//! [`SOURCE_RATE`](super::codec::SOURCE_RATE) needs. What moves with the ratio is the
+//! cutoff — it keeps the narrower of the two Nyquists, so a source faster than the
+//! target is band-limited to the target's and nothing folds back. At the measured
+//! ratio that is `B` to the bit, and the bank is the measured one.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
@@ -47,7 +49,8 @@ const FIRST: i128 = 15;
 /// Half-width of the support, in source samples.
 const HALF_WIDTH: f64 = 15.0;
 
-/// Cutoff of the sinc as a fraction of the source's Nyquist: `1.0429·17501/22050`.
+/// Cutoff of the sinc as a fraction of the source's Nyquist on the measured lattice:
+/// `1.0429·17501/22050`, the field rate's Nyquist and 4.29 % over.
 const B: f64 = 0.827_745_708_5;
 
 /// Kaiser window shape.
@@ -175,25 +178,44 @@ fn sinc(x: f64) -> f64 {
     y.sin() / y
 }
 
-/// The kernel at `d` source samples from the sample a tap weights, zero off-support.
-fn h(d: f64) -> f64 {
+/// `h` of cutoff `b`: the kernel at `d` source samples from the sample a tap
+/// weights, zero off-support.
+fn h_at(d: f64, b: f64) -> f64 {
     if !(-HALF_WIDTH..HALF_WIDTH).contains(&d) {
         return 0.0;
     }
     let u = d.abs() / HALF_WIDTH;
-    B * sinc(B * d) * bessel_i0(BETA * (1.0 - u * u).sqrt()) / bessel_i0(BETA)
+    b * sinc(b * d) * bessel_i0(BETA * (1.0 - u * u).sqrt()) / bessel_i0(BETA)
 }
 
-/// `h` rounded to `f32` at every lattice point of the `[phase][tap]` bank.
-fn closed_form() -> Box<[[f32; TAPS]; PHASES]> {
+/// The cutoff a lattice of `num` source samples per `den` fields is band-limited to,
+/// as a fraction of the source's Nyquist: the narrower of the two Nyquists, over by
+/// the same 4.29 % the measured bank carries. A faster source is cut at the field
+/// rate's Nyquist so that nothing folds back; a slower one keeps its own band.
+///
+/// Exactly [`B`] at the measured ratio, however the caller spells it.
+fn cutoff(num: u32, den: u32) -> f64 {
+    let keep = f64::from(num.min(den)) / f64::from(num);
+    let measured = f64::from(PITCH_DEN) / f64::from(PITCH_NUM);
+    B * (keep / measured)
+}
+
+/// `h` of cutoff `b` rounded to `f32` at every lattice point of the `[phase][tap]`
+/// bank.
+fn closed_form_at(b: f64) -> Box<[[f32; TAPS]; PHASES]> {
     let mut bank = Box::new([[0.0; TAPS]; PHASES]);
     for (phase, row) in bank.iter_mut().enumerate() {
         let fraction = phase as f64 / PHASES as f64;
         for (j, slot) in row.iter_mut().enumerate() {
-            *slot = h(j as f64 - FIRST as f64 + fraction) as f32;
+            *slot = h_at(j as f64 - FIRST as f64 + fraction, b) as f32;
         }
     }
     bank
+}
+
+/// [`closed_form_at`] at the measured cutoff.
+fn closed_form() -> Box<[[f32; TAPS]; PHASES]> {
+    closed_form_at(B)
 }
 
 /// Lazily build the `[phase][tap]` bank the instrument stores.
@@ -224,11 +246,17 @@ pub fn lattice(field: usize) -> (i128, usize) {
     lattice_at(field, PITCH_NUM, PITCH_DEN)
 }
 
-/// Sum field `f`'s tap products in `f64` on the `num`/`den` lattice; samples outside
-/// `source` are zero.
-pub fn accumulate_at(source: &[i16], field: usize, num: u32, den: u32) -> f64 {
+/// Sum field `f`'s tap products in `f64` over `bank`; samples outside `source` are
+/// zero.
+fn accumulate_over(
+    bank: &[[f32; TAPS]; PHASES],
+    source: &[i16],
+    field: usize,
+    num: u32,
+    den: u32,
+) -> f64 {
     let (base, phase) = lattice_at(field, num, den);
-    let row = &taps()[phase];
+    let row = &bank[phase];
     let mut acc = 0.0f64;
     for (j, &tap) in row.iter().enumerate() {
         let at = base + FIRST - j as i128;
@@ -240,24 +268,60 @@ pub fn accumulate_at(source: &[i16], field: usize, num: u32, den: u32) -> f64 {
     acc
 }
 
-/// [`accumulate_at`] on the lattice the tap bank was measured for.
+/// Sum field `f`'s tap products in `f64` on the lattice the tap bank was measured for;
+/// samples outside `source` are zero.
 pub fn accumulate(source: &[i16], field: usize) -> f64 {
-    accumulate_at(source, field, PITCH_NUM, PITCH_DEN)
+    accumulate_over(taps(), source, field, PITCH_NUM, PITCH_DEN)
 }
 
-/// Return a field in source units on the `num`/`den` lattice, truncating toward zero
-/// once after the full sum.
-pub fn field_at(source: &[i16], at: usize, num: u32, den: u32) -> i64 {
-    accumulate_at(source, at, num, den).trunc() as i64
-}
-
-/// [`field_at`] on the lattice the tap bank was measured for.
+/// Return a field in source units on the lattice the tap bank was measured for,
+/// truncating toward zero once after the full sum.
 pub fn field(source: &[i16], at: usize) -> i64 {
-    field_at(source, at, PITCH_NUM, PITCH_DEN)
+    accumulate(source, at).trunc() as i64
+}
+
+/// The tap bank at one lattice ratio, for a source at a rate of its own.
+///
+/// The taps are the measured ones where the ratio is the measured ratio, whatever
+/// pair of rates spells it, and the same shape at that ratio's own [`cutoff`]
+/// otherwise. Build one per resampling run: a derived bank is computed on
+/// construction, not per field.
+pub struct Kernel {
+    num: u32,
+    den: u32,
+    bank: Option<Box<[[f32; TAPS]; PHASES]>>,
+}
+
+impl Kernel {
+    /// The kernel for a lattice of `num` source samples per `den` fields — a source
+    /// rate and a target rate, in that order, or any ratio equal to theirs.
+    pub fn new(num: u32, den: u32) -> Kernel {
+        let cutoff = cutoff(num, den);
+        Kernel {
+            num,
+            den,
+            bank: (cutoff != B).then(|| closed_form_at(cutoff)),
+        }
+    }
+
+    fn taps(&self) -> &[[f32; TAPS]; PHASES] {
+        self.bank.as_deref().unwrap_or_else(|| taps())
+    }
+
+    /// Sum field `f`'s tap products in `f64`; samples outside `source` are zero.
+    pub fn accumulate(&self, source: &[i16], field: usize) -> f64 {
+        accumulate_over(self.taps(), source, field, self.num, self.den)
+    }
+
+    /// Return a field in source units, truncating toward zero once after the full sum.
+    pub fn field(&self, source: &[i16], at: usize) -> i64 {
+        self.accumulate(source, at).trunc() as i64
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::codec::{FIELD_RATE, SOURCE_RATE};
     use super::*;
 
     #[test]
@@ -272,9 +336,9 @@ mod tests {
         let edge = (B * sinc(B * 15.0) / bessel_i0(BETA)) as f32;
         assert_eq!(taps()[0][0], edge);
         assert!((f64::from(edge) - 4.79e-5).abs() < 1e-7, "{edge}");
-        assert_eq!(h(15.0), 0.0);
-        assert_eq!(h(-15.0 - f64::EPSILON * 16.0), 0.0);
-        assert_ne!(h(-15.0), 0.0);
+        assert_eq!(h_at(15.0, B), 0.0);
+        assert_eq!(h_at(-15.0 - f64::EPSILON * 16.0, B), 0.0);
+        assert_ne!(h_at(-15.0, B), 0.0);
     }
 
     #[test]
@@ -299,7 +363,7 @@ mod tests {
         assert_eq!(points.len(), MEASURED.len());
         for &(phase, tap, value) in &MEASURED {
             assert!(phase < PHASES && tap < TAPS, "phase {phase} tap {tap}");
-            let ideal = h(tap as f64 - FIRST as f64 + phase as f64 / PHASES as f64);
+            let ideal = h_at(tap as f64 - FIRST as f64 + phase as f64 / PHASES as f64, B);
             let off = (f64::from(value) - ideal).abs();
             assert!(off < 2e-7, "phase {phase} tap {tap}: {value} vs {ideal}");
             assert_ne!(value, ideal as f32, "phase {phase} tap {tap}");
@@ -349,6 +413,37 @@ mod tests {
         // Three source samples per two fields alternates whole and half.
         assert_eq!(lattice_at(1, 3, 2), (1, PHASES / 2));
         assert_eq!(lattice_at(2, 3, 2), (3, 0));
+    }
+
+    /// The cutoff follows the ratio, and at the measured ratio it is the measured
+    /// value to the bit — however the caller spells that ratio — so the lattice the
+    /// bank was measured on runs the measured taps and nothing else does.
+    #[test]
+    fn the_cutoff_keeps_the_narrower_nyquist() {
+        assert_eq!(cutoff(PITCH_NUM, PITCH_DEN), B);
+        assert_eq!(cutoff(SOURCE_RATE, FIELD_RATE), B);
+        assert!(Kernel::new(SOURCE_RATE, FIELD_RATE).bank.is_none());
+
+        // A faster source keeps the same band, which is a smaller part of its own.
+        let faster = cutoff(96_000, FIELD_RATE);
+        assert!(faster < B, "{faster}");
+        assert!((faster * 48_000.0 - B * f64::from(SOURCE_RATE) / 2.0).abs() < 1e-6);
+
+        // A slower source keeps its whole band: the cutoff sits over its own Nyquist.
+        let slower = cutoff(22_050, FIELD_RATE);
+        assert!(slower > 1.0, "{slower}");
+        assert!(Kernel::new(22_050, FIELD_RATE).bank.is_some());
+    }
+
+    /// A field on the measured lattice is the same field whichever entry point asks
+    /// for it.
+    #[test]
+    fn the_kernel_at_the_measured_ratio_is_the_free_function() {
+        let source: Vec<i16> = (0..512).map(|n| ((n * 37) % 9001 - 4500) as i16).collect();
+        let kernel = Kernel::new(PITCH_NUM, PITCH_DEN);
+        for f in 0..300 {
+            assert_eq!(kernel.field(&source, f), field(&source, f), "field {f}");
+        }
     }
 
     #[test]
