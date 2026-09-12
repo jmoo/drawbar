@@ -232,6 +232,14 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
     })
 }
 
+/// What [`resample`] produced.
+pub struct Resampled {
+    /// One vector per channel at [`codec::RATE`].
+    pub channels: Vec<Vec<i16>>,
+    /// Samples a sum put outside `i16`, which saturate.
+    pub clipped: usize,
+}
+
 /// 16-bit PCM at `rate`, interleaved by channel, resampled onto the stroke lattice.
 ///
 /// The tap bank is [`nsmp`](crate::formats::nsmp::kernel)'s and the lattice is
@@ -290,14 +298,6 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
         channels: lanes,
         clipped,
     })
-}
-
-/// What [`resample`] produced.
-pub struct Resampled {
-    /// One vector per channel at [`codec::RATE`].
-    pub channels: Vec<Vec<i16>>,
-    /// Samples a sum put outside `i16`, which saturate.
-    pub clipped: usize,
 }
 
 /// The channel count the recordings agree on, or the first thing about them a
