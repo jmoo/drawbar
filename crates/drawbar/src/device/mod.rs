@@ -2217,7 +2217,6 @@ mod tests {
 
         let class = ObjectClass::Program;
         let at = Location { bank: 4, slot: 2 };
-        let visuals = egui::Visuals::dark();
         let sent = |rescan: Rescan| {
             let ctx = egui::Context::default();
             let mut workspace = Workspace::new(ctx.clone());
@@ -2268,12 +2267,12 @@ mod tests {
             let entity = workspace.get(id).expect("it is on the list");
             (
                 entity.link,
-                crate::library::keyboard_mark(entity, &device.state, &queue, &visuals),
+                crate::library::keyboard_mark(entity, &device.state, &queue),
                 log.transcript(),
                 crc,
             )
         };
-        let (good, warn) = (crate::app::good(&visuals), crate::app::warn(&visuals));
+        let (good, warn) = (crate::library::Mark::Agrees, crate::library::Mark::Differs);
         let there = Some((class, at));
 
         let (link, mark, said, _) = sent(Rescan::Same);

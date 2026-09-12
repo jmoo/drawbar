@@ -17,6 +17,7 @@ use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
 use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, Glyph};
+use crate::library::Mark;
 use crate::log::Log;
 use crate::panel::Track;
 use crate::strings::{label, place};
@@ -282,16 +283,24 @@ impl Behind {
         }
     }
 
-    /// The one line every header says it in.
+    /// The three parts of the line, each under the [`Mark`] its ink and its words come
+    /// from — so a header painting them part by part is the legend for every mark in
+    /// the window.
     ///
     /// ⚠️ All three counts, whatever they come to. A part left out at zero hides the
     /// relation the line is for: two changed assets beside an empty queue is exactly
     /// what a reader has to see.
+    pub fn parts(self) -> [(String, Mark); 3] {
+        [
+            (format!("{} queued", self.queued), Mark::Differs),
+            (format!("{} changed", self.changed), Mark::Differs),
+            (format!("{} unsaved", self.unsaved), Mark::Unsaved),
+        ]
+    }
+
+    /// The one line every header says it in, for somewhere that can only take words.
     pub fn said(self) -> String {
-        format!(
-            "{} queued · {} changed · {} unsaved",
-            self.queued, self.changed, self.unsaved
-        )
+        self.parts().map(|(said, _)| said).join(" · ")
     }
 
     /// The action beside the line, which closes the gap the middle count names.
@@ -1264,11 +1273,8 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
 }
 
 /// Anything else the header sets beside the title, in the header's own face.
-pub fn aside(said: &str, visuals: &egui::Visuals) -> egui::RichText {
-    egui::RichText::new(said)
-        .monospace()
-        .size(9.5)
-        .color(warn(visuals))
+pub fn aside(said: &str, tint: egui::Color32) -> egui::RichText {
+    egui::RichText::new(said).monospace().size(9.5).color(tint)
 }
 
 #[cfg(test)]
@@ -1534,6 +1540,27 @@ mod tests {
             "3 queued · 0 changed · 0 unsaved"
         );
         assert_eq!(Behind::default().action(), "Queue 0 changed");
+    }
+
+    /// The line is the legend: each part stands under a mark, and the header paints it
+    /// in that mark's ink and hovers it with that mark's words. The whole line is the
+    /// parts joined, so nowhere says it twice.
+    #[test]
+    fn each_part_of_the_line_stands_under_the_mark_it_explains() {
+        let behind = Behind {
+            queued: 3,
+            changed: 2,
+            unsaved: 1,
+        };
+        assert_eq!(
+            behind.parts(),
+            [
+                ("3 queued".to_string(), Mark::Differs),
+                ("2 changed".to_string(), Mark::Differs),
+                ("1 unsaved".to_string(), Mark::Unsaved),
+            ]
+        );
+        assert_eq!(behind.said(), "3 queued · 2 changed · 1 unsaved");
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue

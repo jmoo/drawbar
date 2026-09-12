@@ -13,7 +13,7 @@ use super::act::{Act, Bulk};
 use super::drag::{kinds_present, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
-use crate::device::{occupancy, read_only, Connection, Device};
+use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
 use crate::newproject::Making;
@@ -305,7 +305,7 @@ impl Browser {
                     indent: indent(0, false),
                     glyph: Some(glyph),
                     name: state.title(),
-                    dot: Some(dot),
+                    dot: Some((dot, state.sentence())),
                     count: Some(count.to_string()),
                     ..Cells::default()
                 },
@@ -520,7 +520,7 @@ impl Browser {
                 name: &entity.name,
                 note: owed.as_deref().or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                dot: crate::library::keyboard_mark(entity, &device.state, queue, ui.visuals()),
+                dot: mark(entity, &device.state, queue, ui.visuals()),
                 tags: wears,
                 child: true,
                 ..Cells::default()
@@ -737,7 +737,7 @@ impl Browser {
                 open: Some(self.open.contains(&Branch::Instrument)),
                 glyph: Some(Glyph::Keyboard),
                 name: &product,
-                dot: Some(crate::app::good(ui.visuals())),
+                dot: Some((crate::app::good(ui.visuals()), "attached")),
                 count: held,
                 ..Cells::default()
             },
@@ -1260,6 +1260,20 @@ impl Browser {
     fn tag_ids(&self) -> Vec<u64> {
         self.tags.all().iter().map(|tag| tag.id).collect()
     }
+}
+
+/// The dot a local row wears, in its own ink and its own words.
+fn mark(
+    entity: &LocalEntity,
+    device: &DeviceState,
+    queue: &Queue,
+    visuals: &egui::Visuals,
+) -> Option<(egui::Color32, &'static str)> {
+    let mark = crate::library::keyboard_mark(entity, device, queue)?;
+    Some((
+        crate::library::mark_ink(mark, visuals),
+        crate::library::mark_words(mark),
+    ))
 }
 
 /// The family to put in front of an asset's kind word, where the word alone would not

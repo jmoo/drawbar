@@ -405,30 +405,62 @@ fn wrote(entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
     })
 }
 
+/// What a mark on a row claims: the dot the tree paints at a row's right end, the ink
+/// the table's WHERE cell carries, and the star a name wears.
+///
+/// Four of them, and every one is explained by [`mark_words`] wherever it is drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    Agrees,
+    Differs,
+    /// A slot nothing can say either way about, which is the unsigned `both` of
+    /// [`Where::Both`].
+    Unknown,
+    Unsaved,
+}
+
+/// The ink a mark is painted in, wherever it is painted.
+pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
+    match mark {
+        Mark::Agrees => crate::app::good(visuals),
+        Mark::Differs => warn(visuals),
+        Mark::Unknown => crate::app::caption(visuals),
+        Mark::Unsaved => visuals.text_color(),
+    }
+}
+
+/// What a mark says, in the only words that explain it.
+///
+/// The one place these are written: a dot's hover, a coloured WHERE cell's, and each
+/// part of the queue's count line — so that line reads as the legend for every mark in
+/// the window.
+pub fn mark_words(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Agrees => "on the keyboard, the same as saved here",
+        Mark::Differs => {
+            "on the keyboard, but different from what is saved here, or waiting to be sent"
+        }
+        Mark::Unknown => "on the keyboard; whether it matches is not known yet",
+        Mark::Unsaved => "edited since it was last saved",
+    }
+}
+
 /// The mark a local row wears at its right end: what the attached instrument holds where
 /// this asset stands.
 ///
-/// ⚠️ The one rule, and the only dot a local row wears. `good` is a slot holding what
-/// this asset was last saved as; `warn` is one holding something else, or a write
-/// already waiting to change it; the caption ink is a slot nothing can say either way
-/// about, which is the unsigned `both` of [`Where::Both`]; nothing at all is an asset
-/// with no slot to stand on.
-pub fn keyboard_mark(
-    entity: &LocalEntity,
-    device: &DeviceState,
-    queue: &Queue,
-    visuals: &egui::Visuals,
-) -> Option<egui::Color32> {
+/// ⚠️ The one rule, and the only dot a local row wears. Nothing at all is an asset with
+/// no slot to stand on.
+pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Option<Mark> {
     let (class, at) = entity.spot()?;
     let info = device.slot(class, at).flatten()?;
     if queue.holds(entity.id) {
-        return Some(warn(visuals));
+        return Some(Mark::Differs);
     }
     match agrees(entity, class, info, queue) {
-        Some(true) => Some(crate::app::good(visuals)),
-        Some(false) => Some(warn(visuals)),
+        Some(true) => Some(Mark::Agrees),
+        Some(false) => Some(Mark::Differs),
         // A green dot is a claim, and nothing here has the evidence to make one.
-        None => Some(crate::app::caption(visuals)),
+        None => Some(Mark::Unknown),
     }
 }
 
@@ -1160,13 +1192,13 @@ fn paint(
         .item
         .local()
         .and_then(|id| workspace.get(id))
-        .and_then(|entity| keyboard_mark(entity, &device.state, queue, &visuals));
+        .and_then(|entity| keyboard_mark(entity, &device.state, queue));
     write(
         cell(Column::Where),
         row.where_.short(),
         egui::FontId::proportional(NAME - 1.0),
         match mark {
-            Some(tint) => cell_ink(selected, tint, &visuals),
+            Some(mark) => cell_ink(selected, mark_ink(mark, &visuals), &visuals),
             None => quiet,
         },
         false,
@@ -1211,6 +1243,7 @@ fn paint(
             box_.on_hover_text(tooltip(
                 row,
                 Column::Mark,
+                mark,
                 browser.tags(),
                 workspace,
                 device,
@@ -1218,9 +1251,14 @@ fn paint(
         })
         .is_some_and(|box_| box_.clicked());
     let response = match under(&response, rect, tracks) {
-        Some(column) => {
-            response.on_hover_text(tooltip(row, column, browser.tags(), workspace, device))
-        }
+        Some(column) => response.on_hover_text(tooltip(
+            row,
+            column,
+            mark,
+            browser.tags(),
+            workspace,
+            device,
+        )),
         None => response,
     };
     if checked {
@@ -1273,12 +1311,14 @@ fn mark(
 
 /// The whole of a cell, which is what a hover asks for.
 ///
-/// Two columns grow a fact the row does not carry: the tags column holds a count and the
-/// hover is where the names are, and the address is one of possibly several slots holding
-/// these very bytes. Both are worked out for the hovered row alone.
+/// Three columns grow a fact the row does not carry: the tags column holds a count and
+/// the hover is where the names are, the address is one of possibly several slots holding
+/// these very bytes, and the WHERE cell's ink is a [`Mark`] the row does not hold. All
+/// three are worked out for the hovered row alone.
 fn tooltip(
     row: &Row,
     column: Column,
+    mark: Option<Mark>,
     tags: &Tags,
     workspace: &Workspace,
     device: &Device,
@@ -1293,7 +1333,12 @@ fn tooltip(
             names if names.is_empty() => "no tags".to_string(),
             names => names.join(", "),
         },
-        Column::Where => row.where_.sentence().to_string(),
+        // The cell takes the mark's ink, so the hover says what that ink claims under
+        // the sentence saying where it is.
+        Column::Where => match mark {
+            Some(mark) => format!("{}\n{}", row.where_.sentence(), mark_words(mark)),
+            None => row.where_.sentence().to_string(),
+        },
         Column::At => match row.at {
             Some((class, at)) => {
                 let where_ = place(class, at);
@@ -1709,7 +1754,6 @@ mod tests {
         let mut log = Log::default();
         let mut queue = Queue::default();
         let tags = Tags::default();
-        let visuals = egui::Visuals::dark();
         let class = ObjectClass::Settings;
         let held_at = at(6, 0);
 
@@ -1754,17 +1798,13 @@ mod tests {
                     .into_iter()
                     .find(|row| matches!(row.item, Item::Local(_)))
                     .map(|row| row.where_),
-                keyboard_mark(entity, &device.state, queue, &visuals),
+                keyboard_mark(entity, &device.state, queue),
             )
         };
 
         assert_eq!(
             said(&workspace, &device, &queue),
-            (
-                None,
-                Some(Where::Both(None)),
-                Some(crate::app::caption(&visuals))
-            ),
+            (None, Some(Where::Both(None)), Some(Mark::Unknown)),
             "an address and a length are not a body"
         );
 
@@ -1790,7 +1830,7 @@ mod tests {
             (
                 Some(true),
                 Some(Where::Both(Some(true))),
-                Some(crate::app::good(&visuals))
+                Some(Mark::Agrees)
             ),
             "this app put those bytes there"
         );
@@ -1803,7 +1843,7 @@ mod tests {
             (
                 Some(false),
                 Some(Where::Both(Some(false))),
-                Some(warn(&visuals))
+                Some(Mark::Differs)
             ),
             "what the instrument reports outlives our own write"
         );
@@ -1819,7 +1859,6 @@ mod tests {
         let mut device = Device::new(ctx);
         let mut log = Log::default();
         let (queue, tags) = (Queue::default(), Tags::default());
-        let visuals = egui::Visuals::dark();
         let held_at = at(6, 0);
 
         let bytes = {
@@ -1856,8 +1895,8 @@ mod tests {
             .map(|row| row.where_);
         assert_eq!(where_, Some(Where::Both(Some(true))));
         assert_eq!(
-            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue, &visuals),
-            Some(crate::app::good(&visuals))
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue),
+            Some(Mark::Agrees)
         );
     }
 
@@ -1873,7 +1912,6 @@ mod tests {
         let mut device = Device::new(ctx);
         let mut log = Log::default();
         let (queue, tags) = (Queue::default(), Tags::default());
-        let visuals = egui::Visuals::dark();
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -1904,7 +1942,7 @@ mod tests {
                 .map(|row| row.where_)
         };
         let mark = |workspace: &Workspace, device: &Device| {
-            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue, &visuals)
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue)
         };
 
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", saved_as))]);
@@ -1919,7 +1957,7 @@ mod tests {
             0,
             "the one slot holding it is the one it is linked to"
         );
-        assert_eq!(mark(&workspace, &device), Some(crate::app::good(&visuals)));
+        assert_eq!(mark(&workspace, &device), Some(Mark::Agrees));
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
 
         workspace.mark_saved(id);
@@ -1929,7 +1967,7 @@ mod tests {
             Some((ObjectClass::Program, held_at)),
             "no slot holds the new baseline, and where it stands is where it stands"
         );
-        assert_eq!(mark(&workspace, &device), Some(warn(&visuals)));
+        assert_eq!(mark(&workspace, &device), Some(Mark::Differs));
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(false))));
     }
 
@@ -2033,10 +2071,58 @@ mod tests {
         assert_eq!(row.where_, Where::Both(None));
         assert_eq!(row.where_.short(), "both");
         assert!(
-            tooltip(&row, Column::At, &tags, &workspace, &device).ends_with("matched by name"),
+            tooltip(&row, Column::At, None, &tags, &workspace, &device)
+                .ends_with("matched by name"),
             "{}",
-            tooltip(&row, Column::At, &tags, &workspace, &device)
+            tooltip(&row, Column::At, None, &tags, &workspace, &device)
         );
+    }
+
+    /// Four marks, four sentences, four inks. Two marks a reader cannot tell apart, or
+    /// two that say the same thing, explain nothing between them.
+    #[test]
+    fn every_mark_is_painted_and_said_apart_from_the_others() {
+        let all = [Mark::Agrees, Mark::Differs, Mark::Unknown, Mark::Unsaved];
+        let said: BTreeSet<&str> = all.iter().map(|mark| mark_words(*mark)).collect();
+        assert_eq!(said.len(), all.len(), "{said:?}");
+
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            let inks: BTreeSet<[u8; 4]> = all
+                .iter()
+                .map(|mark| mark_ink(*mark, &visuals).to_array())
+                .collect();
+            assert_eq!(inks.len(), all.len(), "{inks:?}");
+        }
+    }
+
+    /// A WHERE cell takes its ink from the mark the tree paints as a dot, so its hover
+    /// says what that ink claims as well as where the row is.
+    #[test]
+    fn a_coloured_where_cell_says_what_its_colour_claims() {
+        let ctx = context();
+        let workspace = Workspace::new(ctx.clone());
+        let device = Device::new(ctx);
+        let tags = Tags::default();
+        let held = row(
+            "Africa Split",
+            Kind::Program,
+            Where::Both(Some(false)),
+            Some(at(6, 0)),
+            121,
+        );
+
+        let plain = tooltip(&held, Column::Where, None, &tags, &workspace, &device);
+        assert_eq!(plain, Where::Both(Some(false)).sentence());
+        let marked = tooltip(
+            &held,
+            Column::Where,
+            Some(Mark::Differs),
+            &tags,
+            &workspace,
+            &device,
+        );
+        assert!(marked.starts_with(&plain), "{marked}");
+        assert!(marked.ends_with(mark_words(Mark::Differs)), "{marked}");
     }
 
     /// The sentence the footer says: where the picked rows go, how many of those slots
@@ -2199,8 +2285,7 @@ mod tests {
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();
         let mut queue = Queue::default();
-        let visuals = egui::Visuals::dark();
-        let (good, warn) = (crate::app::good(&visuals), warn(&visuals));
+        let (good, warn) = (Mark::Agrees, Mark::Differs);
 
         let bytes = {
             let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -2226,7 +2311,7 @@ mod tests {
         let held = workspace.get(same).unwrap().saved.crc32.unwrap();
 
         let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
-            keyboard_mark(workspace.get(id).unwrap(), &device.state, queue, &visuals)
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, queue)
         };
         // Nothing scanned: no slot holds anything, so no row says anything about one.
         assert_eq!(mark(&workspace, &device, &queue, same), None);

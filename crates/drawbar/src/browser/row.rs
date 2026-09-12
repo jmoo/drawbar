@@ -17,8 +17,9 @@ pub struct Cells<'a> {
     pub name: &'a str,
     /// A faint word after the name — what kind of thing it is, or where it is owed.
     pub note: Option<&'a str>,
-    /// The dot at the right end: what the instrument holds where this row stands.
-    pub dot: Option<egui::Color32>,
+    /// The dot at the right end, and the words a hover over it says. Every dot means
+    /// something, and nothing else in the row says what.
+    pub dot: Option<(egui::Color32, &'a str)>,
     /// The monospace readout at the right end — how full, or how many.
     pub count: Option<String>,
     /// How many tags it wears, painted at the right end as the tag glyph and a number.
@@ -229,15 +230,16 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         );
         right -= GAP;
     }
-    if let Some(dot) = cells.dot {
+    let dot = cells.dot.map(|(tint, said)| {
         right -= DOT;
-        painter.circle_filled(
+        let box_ = egui::Rect::from_center_size(
             egui::pos2(right + DOT / 2.0, rect.center().y),
-            DOT / 2.0,
-            cell_ink(selected, dot, &visuals),
+            egui::Vec2::splat(DOT),
         );
+        painter.circle_filled(box_.center(), DOT / 2.0, cell_ink(selected, tint, &visuals));
         right -= GAP;
-    }
+        (box_.expand(GAP / 2.0), said)
+    });
 
     let size = match cells.child {
         true => CHILD_NAME,
@@ -267,10 +269,18 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         );
     }
 
-    // A name the row had to cut is a name nothing else in this panel would show.
-    let response = match elided {
-        true => response.on_hover_text(cells.name),
-        false => response,
+    // ⚠️ The dot is not a widget either: a hover rect of its own would take the hit
+    // test off the row. Which text the row's own hover carries is decided by where the
+    // pointer is, the way the library's cells decide it.
+    let over = |box_: egui::Rect| response.hover_pos().is_some_and(|at| box_.contains(at));
+    let said = match dot {
+        Some((box_, said)) if over(box_) => Some(said),
+        // A name the row had to cut is a name nothing else in this panel would show.
+        _ => elided.then_some(cells.name),
+    };
+    let response = match said {
+        Some(said) => response.on_hover_text(said),
+        None => response,
     };
     Drawn {
         response,

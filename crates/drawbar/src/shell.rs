@@ -956,9 +956,22 @@ impl DrawbarApp {
             }
             // An edit does not queue itself, so what a send would carry stands beside
             // what it would walk past, in one line, next to the button that closes the
-            // gap between them.
+            // gap between them. Each part wears the ink and the words of the mark it
+            // stands for, which makes the line the legend for every dot in the window.
             let behind = crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue);
-            ui.label(crate::queue::aside(&behind.said(), ui.visuals()));
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (index, (said, mark)) in behind.parts().into_iter().enumerate() {
+                    if index > 0 {
+                        ui.label(crate::queue::aside("·", crate::app::caption(ui.visuals())));
+                    }
+                    ui.label(crate::queue::aside(
+                        &said,
+                        crate::library::mark_ink(mark, ui.visuals()),
+                    ))
+                    .on_hover_text(crate::library::mark_words(mark));
+                }
+            });
             if ui
                 .add_enabled(
                     behind.changed > 0,
