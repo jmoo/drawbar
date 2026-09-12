@@ -13,11 +13,14 @@
 //! strokes again and reports how each one came back.
 //!
 //! A library written here loads on the instrument and plays: confirmed on hardware
-//! for `trim`, both for a dropped bank and for dropped velocity layers. What `edit`
-//! changes — a name, a key's tuning, the root a key plays — and the narrowed key
-//! range `trim --range` and `split` leave behind are inferred from specimens; not
-//! confirmed on hardware. Nothing whose audio was coded here has been played at all,
-//! which is what `--unverified` acknowledges.
+//! for `trim`, both for a dropped bank and for dropped velocity layers, and for what
+//! `build` and `rebuild` code — mono and stereo, every bank, every root of a
+//! full-keyboard library. What `edit` changes — a name, a key's tuning, the root a
+//! key plays — and the narrowed key range `trim --range` and `split` leave behind are
+//! inferred from specimens; not confirmed on hardware. The fields a build cannot
+//! derive from audio — the length marks, the decay coefficients, the per-note tables,
+//! the word at the body's start — go in as the template donated them: the instrument
+//! accepts them, and what it makes of them beyond accepting is not known.
 //!
 //! These verbs take a file. A library is tens of megabytes, so moving one to or
 //! from the instrument is `nord piano get` and `nord piano put`.
@@ -181,8 +184,11 @@ pub struct TrimArgs {
 pub struct BuildArgs {
     /// A directory of WAVs, one per stroke, named `<root>-b<bank>-l<layer>.wav`:
     /// `060-b0-l00.wav` is MIDI note 60, the attack bank, the loudest layer. Banks are
-    /// 0 attack, 1 pedal resonance, 2 release; layers count from the loudest. Files
-    /// that are not WAVs are skipped, and a WAV named some other way is refused.
+    /// 0 attack, 1 pedal resonance, 2 release; `l00`, `l01`, … count from the loudest
+    /// and are spread over the layer values 0..27 the instrument selects by. Write
+    /// `v12` in place of `l00` to state a layer's value outright; one root's bank
+    /// names all its layers the same way. Files that are not WAVs are skipped, and a
+    /// WAV named some other way is refused.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
@@ -204,10 +210,6 @@ pub struct BuildArgs {
     /// Where to write the library.
     #[arg(short, long, value_name = "FILE")]
     pub out: PathBuf,
-
-    /// Acknowledge that no library whose audio was coded here has been played.
-    #[arg(long)]
-    pub unverified: bool,
 }
 
 #[derive(Args)]
@@ -219,10 +221,6 @@ pub struct RebuildArgs {
     /// Where to write the result.
     #[arg(short, long, value_name = "FILE")]
     pub out: PathBuf,
-
-    /// Acknowledge that no library whose audio was coded here has been played.
-    #[arg(long)]
-    pub unverified: bool,
 }
 
 #[derive(Args)]
@@ -972,32 +970,40 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// The gate the two verbs that code audio sit behind. Every other verb moves a
-/// stroke's bytes without touching them; these two write bytes no instrument has been
-/// handed.
-fn unverified_audio(acknowledged: bool) -> Result<(), String> {
-    if acknowledged {
-        return Ok(());
-    }
-    Err(
-        "no library whose audio was coded here has been played: all that is known is \
-         that the blocks it lays out are the ones a vendor library holds for the same \
-         frames. Pass --unverified to write it anyway."
-            .into(),
-    )
+/// What a WAV's third name component says about its velocity layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LayerName {
+    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
+    /// spread over that root's layers gives it.
+    Index(u8),
+    /// `v12`: the layer value itself, written to the record as it stands.
+    Value(u8),
 }
 
-/// `<root>-b<bank>-l<layer>`, as in `060-b0-l00`.
-fn parse_stroke_name(stem: &str) -> Option<(u8, Bank, u8)> {
+/// One WAV a build reads, and what its name says the stroke is.
+struct StrokeFile {
+    path: PathBuf,
+    root: u8,
+    bank: Bank,
+    layer: LayerName,
+}
+
+/// `<root>-b<bank>-l<layer>` or `<root>-b<bank>-v<value>`, as in `060-b0-l00`.
+fn parse_stroke_name(stem: &str) -> Option<(u8, Bank, LayerName)> {
     let mut parts = stem.split('-');
     let root = parts.next()?.parse().ok()?;
     let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
-    let layer = parts.next()?.strip_prefix('l')?.parse().ok()?;
+    let third = parts.next()?;
+    let layer = if let Some(index) = third.strip_prefix('l') {
+        LayerName::Index(index.parse().ok()?)
+    } else {
+        LayerName::Value(third.strip_prefix('v')?.parse().ok()?)
+    };
     parts.next().is_none().then_some((root, bank, layer))
 }
 
 /// The WAVs in a directory, with what their names say each one is, in stroke order.
-fn stroke_files(dir: &Path) -> Result<Vec<(PathBuf, u8, Bank, u8)>, String> {
+fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
@@ -1009,37 +1015,93 @@ fn stroke_files(dir: &Path) -> Result<Vec<(PathBuf, u8, Bank, u8)>, String> {
             continue;
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let named = parse_stroke_name(&stem).ok_or_else(|| {
+        let (root, bank, layer) = parse_stroke_name(&stem).ok_or_else(|| {
             format!(
                 "{}: a WAV here is named <root>-b<bank>-l<layer>.wav, as in \
-                 060-b0-l00.wav — MIDI note 60, bank 0 (attack), layer 0",
+                 060-b0-l00.wav — MIDI note 60, bank 0 (attack), layer 0; \
+                 <root>-b<bank>-v<value>.wav states the layer value instead",
                 path.display()
             )
         })?;
-        out.push((path, named.0, named.1, named.2));
+        out.push(StrokeFile {
+            path,
+            root,
+            bank,
+            layer,
+        });
     }
     if out.is_empty() {
         return Err(format!("{}: no WAV to build a library from", dir.display()));
     }
-    out.sort_by_key(|(path, root, bank, layer)| (*root, bank.code(), *layer, path.clone()));
+    out.sort_by(|a, b| {
+        (a.root, a.bank.code(), a.layer, &a.path).cmp(&(b.root, b.bank.code(), b.layer, &b.path))
+    });
     Ok(out)
 }
 
+/// The layer value each file's stroke states, in the order the files came in.
+///
+/// A `v` name is that value; an `l` name is spread across its root and bank's own
+/// layers, loudest first. The two forms would each mean something different about how
+/// many layers a spread is over, so one root's bank names its layers one way.
+fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
+    let mut groups: BTreeMap<(u8, u8), Vec<usize>> = BTreeMap::new();
+    for (index, file) in files.iter().enumerate() {
+        groups
+            .entry((file.root, file.bank.code()))
+            .or_default()
+            .push(index);
+    }
+
+    let mut values = vec![0u8; files.len()];
+    for ((root, bank), members) in groups {
+        let states = members
+            .iter()
+            .filter(|&&i| matches!(files[i].layer, LayerName::Value(_)))
+            .count();
+        let what = format!("root {} {}", note::name(root), bank_label(bank));
+        if states != 0 && states != members.len() {
+            return Err(format!(
+                "{what} names some of its layers by index (l..) and some by value \
+                 (v..); one root's bank names them one way"
+            ));
+        }
+        if members
+            .iter()
+            .map(|&i| files[i].layer)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != members.len()
+        {
+            return Err(format!("{what} names one of its layers twice"));
+        }
+        for (rank, &index) in members.iter().enumerate() {
+            values[index] = match files[index].layer {
+                LayerName::Value(value) => value,
+                LayerName::Index(_) => encode::layer_value(rank, members.len()),
+            };
+        }
+    }
+    Ok(values)
+}
+
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
-    unverified_audio(args.unverified)?;
     refuse_in_place(&args.template, &args.out)?;
     let (_, donor) = read(&args.template)?;
     let template = donor.library().map_err(|e| e.to_string())?;
 
     ui.out(ui.dim(format!(
         "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
-        "wav", "root", "bank", "layer", "frames", "seconds"
+        "wav", "root", "bank", "value", "frames", "seconds"
     )));
+    let files = stroke_files(&args.dir)?;
+    let values = layer_values(&files)?;
     let mut recordings = Vec::new();
     let mut clipped = 0usize;
     let mut resampled = 0usize;
-    for (path, root, bank, layer) in stroke_files(&args.dir)? {
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for (file, layer) in files.iter().zip(values) {
+        let path = &file.path;
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let pcm =
             nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
@@ -1050,8 +1112,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         ui.out(format!(
             "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}",
             path.file_name().unwrap_or_default().to_string_lossy(),
-            note::name(root),
-            bank.name(),
+            note::name(file.root),
+            file.bank.name(),
             layer,
             frames,
             frames as f64 / f64::from(codec::RATE),
@@ -1062,8 +1124,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             }
         ));
         recordings.push(encode::Recording {
-            root,
-            bank,
+            root: file.root,
+            bank: file.bank,
             layer,
             channels: audio.channels,
         });
@@ -1096,15 +1158,15 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         ));
     }
     ui.note(format!(
-        "the template supplied the length marks, the decay coefficients and the \
-         per-note tables; what the instrument makes of them on {} is unverified",
+        "{} states the length marks, the decay coefficients, the per-note tables and \
+         the word at the body's start as the template donated them; the instrument \
+         accepts them, and what it makes of them beyond accepting is not known",
         args.out.display()
     ));
     Ok(())
 }
 
 pub fn rebuild(ui: &Ui, args: RebuildArgs) -> Result<(), String> {
-    unverified_audio(args.unverified)?;
     refuse_in_place(&args.file, &args.out)?;
     let (original, piano) = read(&args.file)?;
     let library = piano.library().map_err(|e| e.to_string())?;
@@ -1170,15 +1232,23 @@ mod tests {
 
     #[test]
     fn a_stroke_wav_names_its_root_bank_and_layer() {
-        assert_eq!(parse_stroke_name("060-b0-l00"), Some((60, Bank::Attack, 0)));
-        assert_eq!(parse_stroke_name("36-b2-l7"), Some((36, Bank::Release, 7)));
+        use LayerName::{Index, Value};
         assert_eq!(
-            parse_stroke_name("101-b1-l12"),
-            Some((101, Bank::Resonance, 12))
+            parse_stroke_name("060-b0-l00"),
+            Some((60, Bank::Attack, Index(0)))
+        );
+        assert_eq!(
+            parse_stroke_name("36-b2-l7"),
+            Some((36, Bank::Release, Index(7)))
+        );
+        assert_eq!(
+            parse_stroke_name("101-b1-v12"),
+            Some((101, Bank::Resonance, Value(12)))
         );
         assert_eq!(parse_stroke_name("060-b3-l00"), None, "no such bank");
         assert_eq!(parse_stroke_name("300-b0-l00"), None, "no such note");
         assert_eq!(parse_stroke_name("060-0-l00"), None);
+        assert_eq!(parse_stroke_name("060-b0-x2"), None, "no such layer form");
         assert_eq!(parse_stroke_name("060-b0"), None);
         assert_eq!(parse_stroke_name("060-b0-l00-take2"), None);
         assert_eq!(
@@ -1188,11 +1258,54 @@ mod tests {
         );
     }
 
+    fn wav(root: u8, bank: Bank, layer: LayerName) -> StrokeFile {
+        StrokeFile {
+            path: PathBuf::new(),
+            root,
+            bank,
+            layer,
+        }
+    }
+
+    /// The velocity a layer answers to is its value, so the directory of WAVs decides
+    /// which part of the range each recording plays over.
     #[test]
-    fn writing_coded_audio_needs_the_acknowledgement() {
-        assert!(unverified_audio(true).is_ok());
-        let refused = unverified_audio(false).unwrap_err();
-        assert!(refused.contains("--unverified"), "{refused}");
+    fn indexed_layers_spread_over_their_own_root_and_bank() {
+        let files = [
+            wav(60, Bank::Attack, LayerName::Index(0)),
+            wav(60, Bank::Attack, LayerName::Index(1)),
+            wav(60, Bank::Attack, LayerName::Index(2)),
+            wav(60, Bank::Release, LayerName::Index(0)),
+            wav(72, Bank::Attack, LayerName::Index(0)),
+            wav(72, Bank::Attack, LayerName::Index(1)),
+        ];
+        assert_eq!(layer_values(&files).unwrap(), [0, 14, 27, 0, 0, 27]);
+    }
+
+    #[test]
+    fn a_named_layer_value_is_written_as_it_stands() {
+        let files = [
+            wav(60, Bank::Attack, LayerName::Value(0)),
+            wav(60, Bank::Attack, LayerName::Value(6)),
+            wav(60, Bank::Attack, LayerName::Value(12)),
+        ];
+        assert_eq!(layer_values(&files).unwrap(), [0, 6, 12]);
+    }
+
+    #[test]
+    fn one_root_and_bank_names_its_layers_one_way() {
+        let mixed = [
+            wav(60, Bank::Attack, LayerName::Index(0)),
+            wav(60, Bank::Attack, LayerName::Value(12)),
+        ];
+        let refused = layer_values(&mixed).unwrap_err();
+        assert!(refused.contains("C4 attack"), "{refused}");
+
+        let twice = [
+            wav(60, Bank::Attack, LayerName::Index(0)),
+            wav(60, Bank::Attack, LayerName::Index(0)),
+        ];
+        assert!(layer_values(&twice).is_err(), "a layer named twice");
     }
 
     #[test]

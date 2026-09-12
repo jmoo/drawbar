@@ -28,9 +28,10 @@
 //! The prefix's individual field placements are inferred from specimens; not
 //! confirmed on hardware. Confirmed on hardware: the container layout as
 //! [`Library::to_body`] writes it — a library whose directory and audio this crate
-//! re-laid loads on the instrument and plays at the original's level — and, within
-//! it, that the key map's value is the recording's root note, that a stroke's
-//! [`Bank`] is what it is played for, and that [`Stroke::layer`] indexes softness.
+//! re-laid, and one whose audio [`encode`] coded outright, load on the instrument and
+//! play at the original's level — and, within it, that the key map's value is the
+//! recording's root note, that a stroke's [`Bank`] is what it is played for, and that
+//! [`Stroke::layer`] states the softness the velocity threshold reads.
 //!
 //! Audio follows the directory, one span per record in the directory's own order.
 //! The first span starts at the next `1022 × channels` boundary offset by
@@ -173,9 +174,10 @@ impl fmt::Display for Bank {
 /// Which velocity layers of a root to keep.
 ///
 /// A root's layers are counted within one [`Bank`], since each bank indexes its
-/// own set. Nothing is renumbered: the layer values that survive keep the values
-/// they had, which is safe because the instrument picks by rank among the layers a
-/// root still holds rather than by matching a layer value. Confirmed on hardware.
+/// own set. Nothing is renumbered, and nothing should be: selection reads the value
+/// a layer states rather than its rank among the layers left ([`Stroke::layer`]), so
+/// the survivors keep their place in the velocity range and the softest one left
+/// takes over the velocities below it. Confirmed on hardware.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layers {
     /// The loudest `n` of each root and bank — the `n` lowest layer values.
@@ -460,9 +462,15 @@ impl<'a> Stroke<'a> {
         Bank::from_code(self.bank_code())
     }
 
-    /// Softness index within the root's bank; 0 is the loudest recording, and a
-    /// bank's values need be neither dense nor start at zero. Confirmed on
-    /// hardware.
+    /// Softness value within the root's bank; 0 is the loudest recording, and a
+    /// bank's values need be neither dense nor start at zero.
+    ///
+    /// A key sounds the largest value the root holds that is at most
+    /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
+    /// value above 31 never plays at all. Confirmed on hardware; the 31 is measured
+    /// to about ±2, so a layer sitting on the bound switches a few velocities either
+    /// side of where the formula puts it. Vendor libraries spread a root over
+    /// 0..[`encode::SOFTEST_LAYER`].
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
     }

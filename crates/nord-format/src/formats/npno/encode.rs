@@ -22,14 +22,20 @@
 //! ordinary full block whose own trailing overlap sits past the stroke's end, which
 //! is why coding a stroke again needs [`codec::Audio::tail`].
 //!
-//! Inferred from specimens; not confirmed on hardware. Given each block's width,
-//! order and attenuation, this reproduces the blocks of every specimen read, byte for
-//! byte. The width and order it derives are the ones those files declare, apart from
-//! a handful of libraries whose headers were decided on a signal that is not the one
-//! they store. The attenuation is the same kind of thing one step smaller: it is a
-//! statistic the vendor's encoder recorded rather than a function of the frames it
-//! went on to store, so a block coded again from its own audio can declare a
-//! neighbouring value. Nothing in [`codec`] reads it.
+//! Confirmed on hardware: what this codes plays. Libraries built here load and
+//! sound — mono and stereo, attack, resonance and release, from the lowest root to
+//! the highest, through a long stroke's silent overhang — and a vendor library coded
+//! again from its own audio plays at the original's level.
+//!
+//! That the width and order it *chooses* are the vendor's own choice is inferred from
+//! specimens: given each block's width, order and attenuation, this reproduces the
+//! blocks of every specimen read, byte for byte, and the width and order it derives
+//! are the ones those files declare, apart from a handful of libraries whose headers
+//! were decided on a signal that is not the one they store. The attenuation is the
+//! same kind of thing one step smaller: it is a statistic the vendor's encoder
+//! recorded rather than a function of the frames it went on to store, so a block
+//! coded again from its own audio can declare a neighbouring value. Nothing in
+//! [`codec`] reads it.
 //!
 //! # What the audio does not say
 //!
@@ -37,11 +43,9 @@
 //! one-pole decay coefficients, a per-stroke identifier, and two bytes the later
 //! streams use. Nor does the prefix's bank of per-note tables. [`build`] takes them
 //! from the template — for each recording, the template stroke of the same bank and
-//! nearest root — and rescales the marks to the new stroke's length. That the
-//! instrument reads them as the recording it made them for is unverified.
-//!
-//! ⚠️ No library this module wrote has been played on an instrument. What is known is
-//! that the bytes it lays out are the ones the vendor's own libraries hold.
+//! nearest root — and rescales the marks to the new stroke's length. They go in as
+//! the template donated them: the instrument accepts them, and what it makes of them
+//! beyond accepting is not known.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
@@ -91,13 +95,36 @@ pub struct Recording {
     /// The note it was recorded at.
     pub root: u8,
     pub bank: Bank,
-    /// Softness index within the root's bank, 0 being the loudest recording. The
-    /// instrument picks by rank among the layers a root holds, so the values need be
-    /// neither dense nor start at zero.
+    /// The layer value the stroke record states, 0 being the loudest recording of the
+    /// root and bank. Selection reads this value, not a rank among the layers present
+    /// ([`Stroke::layer`]); [`layer_value`] spreads a root's layers across the
+    /// velocity range the way a vendor library does.
     pub layer: u8,
     /// One vector per channel at [`codec::RATE`], all the same length. Every
     /// recording of one library states the same channel count, 1 or 2.
     pub channels: Vec<Vec<i16>>,
+}
+
+/// The softest layer value a root is given when [`layer_value`] spreads it: the top
+/// of the range vendor libraries use, and well inside the bound above which a layer
+/// is never selected.
+pub const SOFTEST_LAYER: u8 = 27;
+
+/// The value the `index`-th loudest of a root's `layers` takes when the caller states
+/// none: `round(index·27/(layers − 1))`, and 0 for a root holding one.
+///
+/// A key sounds the largest layer value its root holds that is at most
+/// `(127 − velocity)·31/127` ([`Stroke::layer`]), so the spread is what puts a layer
+/// change under each part of the velocity range; values packed at the loud end leave
+/// the softest layer playing almost everywhere. An `index` past the last is that one.
+pub fn layer_value(index: usize, layers: usize) -> u8 {
+    let last = layers.saturating_sub(1);
+    if last == 0 {
+        return 0;
+    }
+    let index = index.min(last);
+    let scale = usize::from(SOFTEST_LAYER);
+    ((index * scale * 2 + last) / (last * 2)) as u8
 }
 
 /// A library rebuilt from its own audio, and how each stroke's blocks compare with
@@ -863,6 +890,42 @@ mod tests {
                 (72, Some(Bank::Attack), 0),
             ]
         );
+    }
+
+    /// The default spread is what decides which velocities reach which layer, so the
+    /// values it produces are the contract, not an implementation detail.
+    #[test]
+    fn the_default_layer_values_spread_a_root_over_the_selection_range() {
+        let spread = |layers| {
+            (0..layers)
+                .map(|i| layer_value(i, layers))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spread(1), vec![0], "a lone layer plays at every velocity");
+        assert_eq!(spread(2), vec![0, 27]);
+        assert_eq!(spread(3), vec![0, 14, 27]);
+        assert_eq!(spread(9), vec![0, 3, 7, 10, 14, 17, 20, 24, 27]);
+        assert_eq!(layer_value(9, 9), 27, "an index past the last is the last");
+        assert_eq!(layer_value(0, 0), 0);
+    }
+
+    /// A layer value is a field of the record, not a position in the directory: a
+    /// library that states its own keeps them when its audio is coded again.
+    #[test]
+    fn a_rebuild_keeps_the_layer_value_every_stroke_states() {
+        let short = tone(6_000, 300.0, 1);
+        let piano = round_trip(
+            1,
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Attack, 6, short.clone()),
+                one(60, Bank::Attack, 12, short),
+            ],
+        );
+        let library = piano.library().unwrap();
+        let again = rebuild(&library).unwrap();
+        let values: Vec<u8> = again.library.strokes().iter().map(|s| s.layer()).collect();
+        assert_eq!(values, [0, 6, 12]);
     }
 
     #[test]

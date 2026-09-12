@@ -365,6 +365,15 @@ stream version, taken from the template stroke of the same bank and nearest root
 prints how each one's blocks came back, which is the coder checked against a file
 it did not write.
 
+Two rules decide what a built library plays. Every key up to one semitone above the
+highest root sounds, playing the nearest root at or above it, and keys past that are
+left uncovered — so a library of roots C2, C3 and C4 covers everything up to C#4 and
+nothing above. Within a root, a key sounds the largest layer value the root holds
+that is at most `(127 − velocity)·31/127`; `l00`, `l01`, … are spread over 0..27 so
+each layer answers to its own part of the velocity range, and `v12` in place of `l00`
+in a WAV's name states a layer's value outright. One root's bank names all its layers
+the same way.
+
 ```sh
 nord piano inspect grand.npno              # roots, layers per bank, keys, tuning
 nord piano inspect grand.npno --strokes    # a line per stroke
@@ -373,18 +382,19 @@ nord piano edit grand.npno --name "My Grand" --tune C4=-2 --map C8=C7 -o out.npn
 nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
 nord piano split grand.npno --at C4 -o halves/
 nord piano verify --deep grand.npno
-nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno --unverified
-nord piano rebuild grand.npno -o again.npno --unverified
+nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
+nord piano rebuild grand.npno -o again.npno
 ```
 
-A trimmed library loads on the instrument and plays at the original's level:
-hardware-verified for a dropped bank and for dropped velocity layers. The other
-edits — renames, retunes, remaps and a narrowed key range — are inferred from
-specimens and have not been played. Nothing whose audio was coded here has been
-played at all, which is what `--unverified` acknowledges: what is known is that
-every block the coder lays out is the one a vendor library holds for the same
-frames, apart from the attenuation statistic each block header declares, which the
-instrument's own decode never reads.
+A library written here loads on the instrument and plays at the original's level:
+hardware-verified for a trim, both for a dropped bank and for dropped velocity
+layers, and for what `build` and `rebuild` code — mono and stereo, attack, resonance
+and release, every root of a full-keyboard library. The other edits — renames,
+retunes, remaps and a narrowed key range — are inferred from specimens and have not
+been played. The fields a build cannot derive from audio — the length marks, the
+decay coefficients, the per-note tables, the word at the body's start — go in as the
+template donated them: the instrument accepts them, and what it makes of them beyond
+accepting is not known.
 
 A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
 piano put`, and the rest of the slot verbs address class 1 the way they address

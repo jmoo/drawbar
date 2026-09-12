@@ -369,8 +369,13 @@ enum PianoAction {
     /// everything the audio does not decide — the length marks, the decay
     /// coefficients, the per-note tables and the stream version — from its own stroke
     /// of the same bank and nearest root. Any rate resamples onto the lattice the
-    /// instrument plays at. Nothing this writes has been played, so it needs
-    /// `--unverified`.
+    /// instrument plays at.
+    ///
+    /// Every key up to one semitone above the highest root sounds, playing the
+    /// nearest root at or above it; keys past that are left uncovered. A key sounds
+    /// the largest layer value its root holds that is at most (127 − velocity)·31/127,
+    /// and a root's `l00`, `l01`, … spread over 0..27 so that each layer answers to
+    /// its own part of the velocity range.
     Build(piano::BuildArgs),
 
     /// Code a library's audio again from the frames it decodes to, and report how each
@@ -378,8 +383,8 @@ enum PianoAction {
     ///
     /// This is the coder checked against a library it did not write: every block
     /// should come back byte for byte apart from the attenuation it declares, which is
-    /// a statistic the file's own encoder measured and the decode never reads. Needs
-    /// `--unverified` like `build`.
+    /// a statistic the file's own encoder measured and the decode never reads. Each
+    /// stroke keeps its own root, bank and layer value.
     Rebuild(piano::RebuildArgs),
 
     /// Rebuild each library from its parsed model and check the bytes come back
