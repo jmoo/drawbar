@@ -492,6 +492,7 @@ fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
 pub enum Column {
     Mark,
     Glyph,
+    Kind,
     Name,
     Tags,
     Where,
@@ -517,9 +518,10 @@ impl Order {
 }
 
 impl Column {
-    pub const ALL: [Column; 8] = [
+    pub const ALL: [Column; 9] = [
         Column::Mark,
         Column::Glyph,
+        Column::Kind,
         Column::Name,
         Column::Tags,
         Column::Where,
@@ -532,6 +534,7 @@ impl Column {
     fn head(self) -> &'static str {
         match self {
             Column::Mark | Column::Glyph => "",
+            Column::Kind => "kind",
             Column::Name => "name",
             Column::Tags => "tags",
             Column::Where => "where",
@@ -546,12 +549,13 @@ impl Column {
         match self {
             Column::Mark => 0,
             Column::Glyph => 1,
-            Column::Name => 2,
-            Column::Tags => 3,
-            Column::Where => 4,
-            Column::At => 5,
-            Column::Size => 6,
-            Column::Needs => 7,
+            Column::Kind => 2,
+            Column::Name => 3,
+            Column::Tags => 4,
+            Column::Where => 5,
+            Column::At => 6,
+            Column::Size => 7,
+            Column::Needs => 8,
         }
     }
 
@@ -560,6 +564,8 @@ impl Column {
         match self {
             Column::Mark => Track::Px(18.0),
             Column::Glyph => Track::Px(20.0),
+            // A kind is a handful of known words, and 96 px holds the longest of them.
+            Column::Kind => Track::Px(96.0),
             Column::Name => Track::Share(1.9),
             Column::Tags => Track::Px(38.0),
             Column::Where => Track::Px(64.0),
@@ -574,7 +580,7 @@ impl Column {
 const GAP: f32 = 8.0;
 
 /// Where each column sits across `width`, laid out by [`crate::panel::tracks`].
-pub fn tracks(width: f32) -> [Range<f32>; 8] {
+pub fn tracks(width: f32) -> [Range<f32>; 9] {
     let wanted = Column::ALL.map(Column::track);
     let held = crate::panel::tracks(width, &wanted, GAP);
     std::array::from_fn(|index| held[index].clone())
@@ -606,7 +612,9 @@ fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
         // A mark is a control rather than a fact about the row, so its head sorts
         // nothing and the tie-breakers stand.
         Column::Mark => Ordering::Equal,
-        Column::Glyph => a.kind.plural().cmp(b.kind.plural()),
+        // The glyph and the word beside it are the same fact, so a click on either
+        // orders the table the same way.
+        Column::Glyph | Column::Kind => word(a).cmp(&word(b)),
         Column::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         Column::Tags => a.tags.cmp(&b.tags),
         Column::Where => a.where_.rank().cmp(&b.where_.rank()),
@@ -614,6 +622,11 @@ fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
         Column::Size => a.size.cmp(&b.size),
         Column::Needs => a.needs.text().cmp(&b.needs.text()),
     }
+}
+
+/// The word the KIND column carries, which is what the glyph beside it stands for.
+fn word(row: &Row) -> String {
+    crate::strings::kind_word(row.kind, row.family)
 }
 
 /// A row with no address sorts after every row that has one, rather than at `0:0`.
@@ -856,7 +869,7 @@ impl Library {
     }
 
     /// 20 px of column heads, each one a click that sorts by it.
-    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 8]) {
+    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 9]) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::click());
         let visuals = ui.visuals().clone();
@@ -1018,7 +1031,7 @@ fn chip(ui: &mut egui::Ui, glyph: Glyph, text: &str, tint: egui::Color32) -> egu
 }
 
 /// Which column the pointer is over, for the tooltip and for the head's sort click.
-fn under(response: &egui::Response, rect: egui::Rect, tracks: &[Range<f32>; 8]) -> Option<Column> {
+fn under(response: &egui::Response, rect: egui::Rect, tracks: &[Range<f32>; 9]) -> Option<Column> {
     let at = response.interact_pointer_pos().or(response.hover_pos())?;
     let x = at.x - rect.left();
     Column::ALL
@@ -1039,7 +1052,7 @@ fn paint(
     ui: &mut egui::Ui,
     row: &Row,
     width: f32,
-    tracks: &[Range<f32>; 8],
+    tracks: &[Range<f32>; 9],
     browser: &mut Browser,
     list: &[Item],
     workspace: &Workspace,
@@ -1108,6 +1121,13 @@ fn paint(
             ink,
         );
     }
+    write(
+        cell(Column::Kind),
+        &word(row),
+        egui::FontId::proportional(NAME - 1.0),
+        quiet,
+        false,
+    );
     write(
         cell(Column::Name),
         &crate::browser::starred(&row.name, row.unsaved),
@@ -1267,7 +1287,7 @@ fn tooltip(
         Column::Mark => {
             "check it to act on several at once; a click on the row picks it alone".to_string()
         }
-        Column::Glyph => crate::strings::kind_word(row.kind, row.family),
+        Column::Glyph | Column::Kind => word(row),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
@@ -2284,6 +2304,56 @@ mod tests {
 
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
+    }
+
+    /// The KIND column carries the word the browser's own note carries, so the table and
+    /// the tree cannot call one thing two things; and the head over it orders by it.
+    #[test]
+    fn the_kind_column_writes_the_browsers_own_word_and_sorts_by_it() {
+        const WIDTH: f32 = 900.0;
+
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let device = Device::new(ctx.clone());
+        let mut log = Log::default();
+        let mut browser = Browser::default();
+        let mut library = Library::default();
+        let (queue, shell) = (Queue::default(), Shell::default());
+        for kind in [Fresh::Settings, Fresh::Program] {
+            workspace.create(kind, &mut log).unwrap();
+        }
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WIDTH, 540.0),
+            )),
+            ..Default::default()
+        };
+        let said = painted(&ctx.run(input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                });
+        }));
+        assert!(said.contains(&"KIND".to_string()), "{said:?}");
+        for word in ["program", "settings"] {
+            assert!(said.contains(&word.to_string()), "{word}: {said:?}");
+        }
+
+        let held = rows(
+            &workspace,
+            &device.state,
+            &queue,
+            browser.tags(),
+            &Filter::default(),
+        );
+        let ordered: Vec<String> = arrange(held, "", Column::Kind, Order::Up)
+            .iter()
+            .map(word)
+            .collect();
+        assert_eq!(ordered, ["program", "settings"]);
     }
 
     /// ⚠️ A row of the table is a row of the tree: it starts the same drag, and a drop
