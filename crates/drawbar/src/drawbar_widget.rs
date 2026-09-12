@@ -23,11 +23,11 @@ const FOOTAGE: [&str; BARS] = ["16", "5⅓", "8", "4", "2⅔", "2", "1⅗", "1�
 /// Every rank, in register order.
 pub const ALL_RANKS: [usize; BARS] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
-fn stop_colour(bar: usize) -> egui::Color32 {
+fn stop_colour(visuals: &egui::Visuals, bar: usize) -> egui::Color32 {
     match bar {
         0 | 1 => egui::Color32::from_rgb(0x6b, 0x4a, 0x33),
-        4 | 6 | 7 => egui::Color32::from_rgb(0x2a, 0x2a, 0x2e),
-        _ => egui::Color32::from_rgb(0xd8, 0xd6, 0xd0),
+        4 | 6 | 7 => crate::app::stop_black(visuals),
+        _ => crate::app::stop_white(visuals),
     }
 }
 
@@ -155,7 +155,7 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8, live: bool) -> bo
         egui::pos2(track.center().x, centre),
         egui::vec2(BAR_W - 2.0, STOP_H),
     );
-    let colour = dim(rank.map_or(NO_RANK, stop_colour));
+    let colour = dim(rank.map_or(NO_RANK, |rank| stop_colour(ui.visuals(), rank)));
     painter.rect_filled(stop, 2.0, colour);
     painter.text(
         stop.center(),
@@ -228,6 +228,30 @@ mod tests {
         assert_eq!(digits(&bars(0x8_8880_0000)), "88 8800 000");
         assert_eq!(digits(&bars(0x0_8765_4321)), "08 7654 321");
         assert_eq!(digits(&[4, 0]), "40");
+    }
+
+    /// The stops and the piano keys are the same two colours, kept in one place: a stop
+    /// that drifted from the key map's ivory would read as a different material.
+    #[test]
+    fn the_stops_are_painted_in_the_key_colours() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            assert_eq!(stop_colour(&visuals, 2), crate::app::stop_white(&visuals));
+            assert_eq!(stop_colour(&visuals, 8), crate::app::stop_white(&visuals));
+            assert_eq!(stop_colour(&visuals, 4), crate::app::stop_black(&visuals));
+            assert_eq!(stop_colour(&visuals, 6), crate::app::stop_black(&visuals));
+            // The sub-octave pair is brown, which is neither.
+            assert_ne!(stop_colour(&visuals, 0), crate::app::stop_white(&visuals));
+            assert_ne!(stop_colour(&visuals, 0), crate::app::stop_black(&visuals));
+        }
+        let (dark, light) = (egui::Visuals::dark(), egui::Visuals::light());
+        assert_eq!(
+            crate::app::stop_white(&dark),
+            crate::app::stop_white(&light)
+        );
+        assert_eq!(
+            crate::app::stop_black(&dark),
+            crate::app::stop_black(&light)
+        );
     }
 
     /// A whole register is nine nibbles wide, which is the encoding this widget rests

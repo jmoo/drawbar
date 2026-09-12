@@ -63,6 +63,19 @@ pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
+/// The ivory of a white key or an unison drawbar stop.
+///
+/// Both faces share it: a key is the same colour under any light, and the stops are the
+/// instrument's own plastic rather than part of the app's dress.
+pub fn stop_white(_visuals: &egui::Visuals) -> egui::Color32 {
+    egui::Color32::from_rgb(0xd8, 0xd6, 0xd0)
+}
+
+/// The ebony of a black key or a mutation drawbar stop.
+pub fn stop_black(_visuals: &egui::Visuals) -> egui::Color32 {
+    egui::Color32::from_rgb(0x2a, 0x2a, 0x2e)
+}
+
 /// The persisted theme choice. `System` follows the host preference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
