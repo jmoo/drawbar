@@ -313,23 +313,33 @@ pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), Strin
 /// edit reads its own destination: a write that truncates first and fails part way
 /// through leaves neither the original nor the edit. The temporary is a sibling so the
 /// rename stays inside one filesystem, where it replaces the target in one step.
+///
+/// ⚠️ A rename replaces the name it is given, so a destination that exists is resolved
+/// first: editing through a symlink rewrites the file it points at and leaves the link,
+/// and the replacement carries the permissions the target already had rather than the
+/// umask default a new file would get.
 pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let name = path
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target
         .file_name()
         .ok_or_else(|| format!("{}: not a file to write", path.display()))?;
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     let mut temp = name.to_os_string();
     temp.push(format!(".nord{}.tmp", std::process::id()));
-    let temp = path.with_file_name(temp);
+    let temp = target.with_file_name(temp);
+    let existing = std::fs::metadata(&target).ok().map(|m| m.permissions());
 
     let failed = |e: std::io::Error| {
         let _ = std::fs::remove_file(&temp);
         format!("{}: {e}", path.display())
     };
     std::fs::write(&temp, bytes).map_err(failed)?;
-    std::fs::rename(&temp, path).map_err(failed)
+    if let Some(permissions) = existing {
+        std::fs::set_permissions(&temp, permissions).map_err(failed)?;
+    }
+    std::fs::rename(&temp, &target).map_err(failed)
 }
 
 /// ⚠️ Fields that do nothing without a companion. The pairing is a fact about the
@@ -563,6 +573,60 @@ pub(crate) mod tests {
         replace_file(&path, b"edited").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"edited".to_vec());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_through_a_symlink_edits_the_file_it_points_at_and_keeps_the_link() {
+        let dir = scratch("write-symlink");
+        let target = dir.join("preset.ne5p");
+        std::fs::write(&target, b"original").unwrap();
+        let link = dir.join("linked.ne5p");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        replace_file(&link, b"edited").unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"edited".to_vec());
+        let kind = std::fs::symlink_metadata(&link).unwrap().file_type();
+        assert!(kind.is_symlink(), "{} is no longer a link", link.display());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_over_an_existing_file_keeps_its_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("write-keeps-mode");
+        let path = dir.join("private.ne5p");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        replace_file(&path, b"edited").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} came back as {mode:o}", path.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_into_a_directory_that_refuses_it_leaves_the_original_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("write-refused");
+        let held = dir.join("held");
+        std::fs::create_dir(&held).unwrap();
+        let target = held.join("preset.ne5p");
+        std::fs::write(&target, b"original").unwrap();
+        let link = dir.join("linked.ne5p");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let err = replace_file(&link, b"edited").unwrap_err();
+
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(err.contains("linked.ne5p"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"original".to_vec());
+        assert_eq!(std::fs::read_dir(&held).unwrap().count(), 1);
     }
 
     /// `-o` pointing back at the input is an overwrite of the file being edited, so
