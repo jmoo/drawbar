@@ -71,6 +71,17 @@ fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
     ))
 }
 
+/// A header whose tag is not NUL-padded. [`Section`] models no field there and
+/// [`Section::write_to`] writes 0, so decoding one would drop the byte and
+/// write the section back different. Raised with [`wrong_opener`], before the
+/// declared length is trusted.
+fn unpadded_tag(tag: &[u8], at: u64, found: u8) -> ParseError {
+    ParseError::AssertFail(format!(
+        "section {} at {at} holds {found} where its tag's padding NUL belongs",
+        String::from_utf8_lossy(tag),
+    ))
+}
+
 fn missing_opener(expected: &[u8]) -> ParseError {
     ParseError::AssertFail(format!(
         "the body does not open with the {} container section; found end of body",
@@ -95,6 +106,9 @@ pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Sect
         };
         if pos == 0 && &head[..3] != CONTAINER {
             return Err(wrong_opener(CONTAINER, &head[..3]));
+        }
+        if head[3] != 0 {
+            return Err(unpadded_tag(&head[..3], pos, head[3]));
         }
         let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
         let end = section_end(pos, HEADER_LEN, len, remaining, &head[..3])?;
@@ -445,6 +459,20 @@ mod tests {
         assert_eq!(
             walk4(&[]).unwrap_err().to_string(),
             "the body does not open with the NSMP container section; found end of body"
+        );
+    }
+
+    /// The byte behind the tag is modelled by no field, so a section carrying
+    /// one cannot be written back as it came.
+    #[test]
+    fn a_tag_not_padded_with_a_nul_is_refused() {
+        let mut hdr = section(HDR, 1, &[7; 4]);
+        hdr[3] = 2;
+        let mut bytes = opener();
+        bytes.extend(hdr);
+        assert_eq!(
+            walk(&bytes).unwrap_err().to_string(),
+            "section hdr at 9 holds 2 where its tag's padding NUL belongs"
         );
     }
 
