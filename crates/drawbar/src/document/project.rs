@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::ops::RangeInclusive;
 
 use eframe::egui;
 use nord_format::formats::nsmpproj::{
@@ -232,7 +233,7 @@ fn drag<H: std::hash::Hash>(
     ui: &mut egui::Ui,
     id: (&str, H),
     value: f64,
-    range: std::ops::RangeInclusive<f64>,
+    range: RangeInclusive<f64>,
     speed: f64,
     decimals: Option<usize>,
 ) -> Option<String> {
@@ -257,6 +258,18 @@ fn frames(ui: &mut egui::Ui, id: (&str, u32), value: f64) -> Option<String> {
 /// A velocity end, which the `map_stroke` holds as a `u8`.
 fn whole(ui: &mut egui::Ui, id: (&str, u32), value: f64, top: f64) -> Option<String> {
     drag(ui, id, value, 0.0..=top, 0.5, Some(0))
+}
+
+/// How far each end of the trim may be dragged: never past the other, because a zone
+/// whose trim-in is at or past its trim-out plays nothing and is refused at build.
+///
+/// A trim a file already states inverted is still inside its own control, so it can be
+/// dragged back rather than left where nothing can reach it.
+fn trim_ends(start: f64, stop: f64) -> (RangeInclusive<f64>, RangeInclusive<f64>) {
+    (
+        0.0..=(stop - 1.0).max(start),
+        (start + 1.0).min(stop)..=f64::MAX,
+    )
 }
 
 /// Apply every set to a fresh decode and re-encode, the same all-or-nothing rule
@@ -421,7 +434,10 @@ fn leaf(path: &str) -> &str {
 /// A project's audio is on disk rather than in the file, so there are no bytes to
 /// measure — the trim is what a zone costs.
 fn length(snapshot: &Snapshot, stroke: &Stroke) -> String {
-    let frames = (stroke.stop - stroke.start).max(0.0);
+    let frames = stroke.stop - stroke.start;
+    if frames < 0.0 {
+        return "inverted trim".to_string();
+    }
     match source(snapshot, stroke).map(|file| file.rate) {
         Some(rate) if rate > 0 => format!("{:.3} s", frames / f64::from(rate)),
         _ => format!("{frames:.0} fr"),
@@ -474,12 +490,13 @@ fn fields(
                 sets.push((format!("stroke{gid}.gain"), v));
             }
         });
+        let (into, out) = trim_ends(stroke.start, stroke.stop);
         sample::cell(ui, "Trim in → out", 150.0, |ui| {
             ui.horizontal(|ui| {
-                if let Some(v) = frames(ui, ("proj_start", gid), stroke.start) {
+                if let Some(v) = drag(ui, ("proj_start", gid), stroke.start, into, 1.0, None) {
                     sets.push((format!("stroke{gid}.start"), v));
                 }
-                if let Some(v) = frames(ui, ("proj_stop", gid), stroke.stop) {
+                if let Some(v) = drag(ui, ("proj_stop", gid), stroke.stop, out, 1.0, None) {
                     sets.push((format!("stroke{gid}.stop"), v));
                 }
             });
@@ -1029,7 +1046,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        ctx.run(input, |ctx| {
+        let _ = ctx.run(input, |ctx| {
             ctx.style_mut(crate::app::metrics);
             egui::CentralPanel::default().show(ctx, |ui| {
                 spelled = whole(ui, ("proj_vmin", 1), 0.0, f64::from(MAX_VELOCITY));
@@ -1145,6 +1162,32 @@ mod tests {
         assert!(facts.contains(&file.path), "{facts}");
         assert!(facts.contains("vel 0–127"), "{facts}");
         assert_eq!(leaf("/Users/x/Nord/low.wav"), "low.wav");
+    }
+
+    /// ⚠️ A zone whose trim-in is at or past its trim-out plays nothing, and the build
+    /// refuses it: neither end can be dragged onto the other, and a trim a file already
+    /// states inverted is named rather than read as a zone of no length.
+    #[test]
+    fn an_inverted_trim_cannot_be_dragged_and_is_named_where_it_is_stated() {
+        let (into, out) = trim_ends(0.0, 44100.0);
+        assert_eq!(*into.end(), 44099.0, "the trim-in stops short of the out");
+        assert_eq!(*out.start(), 1.0, "and the out stops short of the in");
+
+        let (into, out) = trim_ends(900.0, 100.0);
+        assert!(
+            into.contains(&900.0) && out.contains(&100.0),
+            "an inverted trim is still inside its own control, so it can be dragged back"
+        );
+
+        let snapshot = read_back(&project_bytes());
+        let stroke = snapshot.strokes.first().expect("a stroke");
+        assert_eq!(length(&snapshot, stroke), "1.000 s");
+        let inverted = Stroke {
+            start: stroke.stop,
+            stop: stroke.start,
+            ..stroke.clone()
+        };
+        assert_eq!(length(&snapshot, &inverted), "inverted trim");
     }
 
     /// A moved band writes both ends of the zone it moved, under the id the file gives
