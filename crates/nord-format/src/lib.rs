@@ -559,6 +559,15 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
     })
 }
 
+/// Which archive a ZIP is, from the members the walks below will see.
+#[cfg(feature = "bundle")]
+enum ZipKind {
+    Electro5,
+    Drum2,
+    Drum3,
+    Members,
+}
+
 /// One ZIP file: an Electro 5 bundle or backup (it carries a `meta.xml`
 /// manifest), or a Drum bank (members are all one CBIN format).
 #[cfg(feature = "bundle")]
@@ -566,7 +575,14 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     let start = reader.stream_position()?;
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
-        let names: Vec<&str> = zip.file_names().collect();
+        // The entries the walks skip are not members: a directory holds no file, and a
+        // backup manifest describes the archive. Classifying on them would call an
+        // archive of directories a bundle of none, and a `kits/` entry would stop a drum
+        // bank being one.
+        let names: Vec<&str> = zip
+            .file_names()
+            .filter(|name| !is_dir_entry(name) && !name.ends_with("meta.xml"))
+            .collect();
         // An archive with nothing in it would satisfy the all-members checks below
         // vacuously and read as a drum bank holding no programs.
         if names.is_empty() {
@@ -579,25 +595,32 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
                 .extension()
                 .is_some_and(|e| e.to_string_lossy().starts_with("ne5"))
         }) {
-            "bundle"
+            ZipKind::Electro5
         } else if names.iter().all(|n| n.ends_with(".nd2p")) {
-            "nd2"
+            ZipKind::Drum2
         } else if names.iter().all(|n| n.ends_with(".nd3k")) {
-            "nd3"
+            ZipKind::Drum3
         } else {
             // Anything else — a bundle only if every member is a CBIN file,
             // which `zip_raw_members` decides below.
-            "members"
+            ZipKind::Members
         }
     };
     reader.seek(std::io::SeekFrom::Start(start))?;
 
     Ok(Entity::Bundle(match kind {
-        "nd2" => Bundle::Drum2Bank(nd2::bank::read_from(reader)?),
-        "nd3" => Bundle::Drum3KitBank(nd3::kit_bank::read_from(reader)?),
-        "members" => Bundle::Members(formats::zip_raw_members(reader)?),
-        _ => Bundle::Electro5(ne5::Bundle::read_from(reader)?),
+        ZipKind::Drum2 => Bundle::Drum2Bank(nd2::bank::read_from(reader)?),
+        ZipKind::Drum3 => Bundle::Drum3KitBank(nd3::kit_bank::read_from(reader)?),
+        ZipKind::Members => Bundle::Members(formats::zip_raw_members(reader)?),
+        ZipKind::Electro5 => Bundle::Electro5(ne5::Bundle::read_from(reader)?),
     }))
+}
+
+/// A directory entry, spelled as `zip`'s own `is_dir` spells it — the name alone, since
+/// classification reads the archive's names rather than its entries.
+#[cfg(feature = "bundle")]
+fn is_dir_entry(name: &str) -> bool {
+    name.ends_with('/') || name.ends_with('\\')
 }
 
 /// [`from_stream`] over a buffered read of the file at `path`.
@@ -675,13 +698,19 @@ mod bundle_tests {
         out.into_inner()
     }
 
+    /// A stored archive of `members`; a name ending in `/` becomes a directory entry.
     fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let stored = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
         for (name, bytes) in members {
-            zip.start_file(name.to_string(), stored).unwrap();
-            zip.write_all(bytes).unwrap();
+            match name.strip_suffix('/') {
+                Some(directory) => zip.add_directory(directory, stored).unwrap(),
+                None => {
+                    zip.start_file(name.to_string(), stored).unwrap();
+                    zip.write_all(bytes).unwrap();
+                }
+            }
         }
         zip.finish().unwrap().into_inner()
     }
@@ -710,6 +739,33 @@ mod bundle_tests {
     fn an_empty_zip_is_refused() {
         let bytes = archive(&[]);
         assert!(from_stream(&mut Cursor::new(bytes)).is_err());
+    }
+
+    /// A directory entry holds no file and a manifest describes the archive, so an
+    /// archive of nothing else holds no members — the same refusal as an empty one,
+    /// rather than a bundle of none.
+    #[test]
+    fn a_zip_of_directories_and_a_manifest_is_refused() {
+        let bytes = archive(&[("kits/", b""), ("meta.xml", b"<meta/>")]);
+        let err = from_stream(&mut Cursor::new(bytes)).unwrap_err();
+        assert!(
+            err.to_string().contains("no members"),
+            "refused for the wrong reason: {err}"
+        );
+    }
+
+    /// A backup's directory entries are not members, so they do not stop a bank whose
+    /// files are all one CBIN format being read as that bank.
+    #[test]
+    fn a_directory_entry_does_not_hide_a_drum_bank() {
+        let program = member("nd2p");
+        let bytes = archive(&[("kits/", b""), ("kits/One.nd2p", &program)]);
+        let entity = from_stream(&mut Cursor::new(bytes)).unwrap();
+        assert!(
+            matches!(entity, Entity::Bundle(Bundle::Drum2Bank(_))),
+            "a `kits/` entry left it classified as {}",
+            entity.identity().kind,
+        );
     }
 
     /// A ZIP holding anything that is not a CBIN file is not a bundle.
