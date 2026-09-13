@@ -3,9 +3,9 @@
 //! Beside [`crate::store`] because a grouping is stored the same way the list is, under
 //! its own key: two files, read back separately, agreeing about what an id means.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use crate::store::{escape, unescape};
+use crate::named::{self, Line, List, Named};
 use crate::workspace::{LocalEntity, Workspace};
 
 /// Where the folders and their membership are kept between sessions.
@@ -17,11 +17,11 @@ pub(crate) const KEY: &str = "drawbar.folders";
 
 const VERSION: &str = "drawbar folders 1";
 
+/// What a folder line is headed with.
+const FOLDER: &str = "f";
+
 /// One folder on this computer.
-pub struct Folder {
-    pub id: u64,
-    pub name: String,
-}
+pub type Folder = Named;
 
 /// How the local list is grouped.
 ///
@@ -31,53 +31,41 @@ pub struct Folder {
 /// the workspace for that reason.
 #[derive(Default)]
 pub struct Folders {
-    list: Vec<Folder>,
+    list: List,
     /// Which folder an asset is in, by its workspace id. Absent is loose.
-    of: HashMap<u64, u64>,
+    ///
+    /// ⚠️ Ordered, because [`Folders::written`] walks it and a store that comes out in a
+    /// different order every session is a store written every session.
+    of: BTreeMap<u64, u64>,
 }
 
 impl Folders {
     pub fn all(&self) -> &[Folder] {
-        &self.list
+        self.list.all()
     }
 
     pub(crate) fn name_of(&self, id: u64) -> Option<&str> {
-        self.list
-            .iter()
-            .find(|folder| folder.id == id)
-            .map(|folder| folder.name.as_str())
+        self.list.name_of(id)
     }
 
     /// A new folder, under a name nothing else in the list is using.
     pub(crate) fn make(&mut self) -> u64 {
-        let id = self.list.iter().map(|folder| folder.id).max().unwrap_or(0) + 1;
-        let taken = |name: &str| self.list.iter().any(|folder| folder.name == name);
-        let mut name = "New folder".to_string();
-        for nth in 2.. {
-            if !taken(&name) {
-                break;
-            }
-            name = format!("New folder {nth}");
-        }
-        self.list.push(Folder { id, name });
-        id
+        self.list.make("New folder")
     }
 
     pub(crate) fn rename(&mut self, id: u64, name: String) {
-        if let Some(folder) = self.list.iter_mut().find(|folder| folder.id == id) {
-            folder.name = name;
-        }
+        self.list.rename(id, name);
     }
 
     /// Drop a folder. What was in it goes back to the loose part of the list — a folder
     /// holds nothing, so removing one cannot take anything with it.
     pub(crate) fn remove(&mut self, id: u64) {
-        self.list.retain(|folder| folder.id != id);
+        self.list.remove(id);
         self.of.retain(|_, held| *held != id);
     }
 
     pub(crate) fn file(&mut self, entity: u64, folder: Option<u64>) {
-        match folder.filter(|id| self.name_of(*id).is_some()) {
+        match folder.filter(|id| self.list.holds(*id)) {
             Some(id) => self.of.insert(entity, id),
             None => self.of.remove(&entity),
         };
@@ -117,12 +105,9 @@ impl Folders {
     /// `f` lines are the folders and `m` lines are what is in them, so a folder with
     /// nothing in it survives a session like any other.
     pub(crate) fn written(&self) -> String {
-        let mut out = format!("{VERSION}\n");
-        for folder in &self.list {
-            out.push_str(&format!("f\t{}\t{}\n", folder.id, escape(&folder.name)));
-        }
+        let mut out = named::written(VERSION, FOLDER, &self.list);
         for (entity, folder) in &self.of {
-            out.push_str(&format!("m\t{entity}\t{folder}\n"));
+            out.push_str(&named::member(*entity, *folder));
         }
         out
     }
@@ -131,34 +116,19 @@ impl Folders {
     /// at all — half a grouping is worse than none, because a folder nobody made is one
     /// nobody can explain.
     pub(crate) fn read(text: &str) -> Folders {
-        let mut lines = text.lines();
-        if lines.next() != Some(VERSION) {
-            return Folders::default();
-        }
         let mut folders = Folders::default();
-        for line in lines {
-            let mut parts = line.split('\t');
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("f"), Some(id), Some(name)) => {
-                    if let Ok(id) = id.parse() {
-                        folders.list.push(Folder {
-                            id,
-                            name: unescape(name),
-                        });
-                    }
+        for line in named::read(text, VERSION, FOLDER) {
+            match line {
+                Line::Named { id, name } => folders.list.restore(id, name),
+                Line::Member { asset, group } => {
+                    folders.of.insert(asset, group);
                 }
-                (Some("m"), Some(entity), Some(folder)) => {
-                    if let (Ok(entity), Ok(folder)) = (entity.parse(), folder.parse()) {
-                        folders.of.insert(entity, folder);
-                    }
-                }
-                _ => {}
             }
         }
         // A membership naming a folder that is not in the file would be an asset nothing
         // shows and nothing can get back.
-        let known: Vec<u64> = folders.list.iter().map(|folder| folder.id).collect();
-        folders.of.retain(|_, folder| known.contains(folder));
+        let Folders { list, of } = &mut folders;
+        of.retain(|_, folder| list.holds(*folder));
         folders
     }
 }
@@ -226,5 +196,70 @@ mod tests {
             .is_empty());
         let orphaned = Folders::read(&format!("{VERSION}\nm\t7\t3\n"));
         assert_eq!(orphaned.holding(7), None);
+    }
+
+    /// ⚠️ The store is rewritten whenever it differs from what is in it, so a grouping
+    /// that writes its lines in a different order each time is a write each time.
+    #[test]
+    fn one_grouping_is_written_as_the_same_bytes_every_time() {
+        let mut folders = Folders::default();
+        let sunday = folders.make();
+        for entity in [91, 7, 40, 2, 68, 13] {
+            folders.file(entity, Some(sunday));
+        }
+
+        let written = folders.written();
+        assert_eq!(written, folders.written());
+        let members: Vec<&str> = written
+            .lines()
+            .filter_map(|line| line.strip_prefix("m\t"))
+            .filter_map(|line| line.split('\t').next())
+            .collect();
+        assert_eq!(members, ["2", "7", "13", "40", "68", "91"]);
+    }
+
+    /// A line this build did not write is dropped rather than guessed at, and the rest of
+    /// the file is still read.
+    #[test]
+    fn a_line_that_is_not_a_line_is_dropped_and_the_rest_is_read() {
+        let read = |lines: &str| Folders::read(&format!("{VERSION}\n{lines}"));
+
+        let kept = read("f\tx\tNot a number\nf\t1\tSunday\n");
+        assert_eq!(kept.all().len(), 1, "an id that is not a number");
+        assert_eq!(kept.name_of(1), Some("Sunday"));
+
+        let short = read("f\t1\tSunday\nm\t7\n");
+        assert_eq!(short.holding(7), None, "a membership missing its folder");
+
+        let wide = read("f\t1\tSunday\nm\t7\t1\textra\n");
+        assert_eq!(wide.holding(7), None, "a line with a column too many");
+
+        let unknown = read("f\t1\tSunday\nx\t7\t1\n");
+        assert_eq!(unknown.all().len(), 1, "a head this build does not write");
+    }
+
+    /// ⚠️ Two `f` lines claiming one id is a file with two names for one folder, and
+    /// every membership naming that id means whichever of them is kept. The first is, so
+    /// the second is refused rather than quietly renaming a folder on the way in.
+    #[test]
+    fn a_second_folder_line_for_an_id_already_read_is_refused() {
+        let folders = Folders::read(&format!("{VERSION}\nf\t1\tSunday\nf\t1\tMonday\nm\t7\t1\n"));
+
+        assert_eq!(folders.all().len(), 1);
+        assert_eq!(folders.name_of(1), Some("Sunday"));
+        assert_eq!(folders.holding(7), Some(1));
+    }
+
+    /// A name holding a newline would otherwise be two lines, and the second of them a
+    /// line this build refuses.
+    #[test]
+    fn a_folder_named_across_two_lines_comes_back_as_one_name() {
+        let mut folders = Folders::default();
+        let id = folders.make();
+        folders.rename(id, "Sunday\nmorning".into());
+
+        let after = Folders::read(&folders.written());
+        assert_eq!(after.name_of(id), Some("Sunday\nmorning"));
+        assert_eq!(after.all().len(), 1);
     }
 }
