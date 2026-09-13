@@ -1295,7 +1295,10 @@ mod tests {
         let container = entity.container.expect("a fresh program is a CBIN file");
         assert!(container.checksum_ok);
         assert_eq!(container.header.generation, Generation::V1);
-        assert_eq!(container.body_len, ne5::program::BODY_LEN as u64);
+        assert_eq!(
+            usize::try_from(container.body_len).unwrap(),
+            ne5::program::BODY_LEN
+        );
         assert_eq!(container.checksum_label, "crc32:");
     }
 

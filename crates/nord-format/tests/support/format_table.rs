@@ -11,7 +11,7 @@ use nord_format::formats::{
     ns2, ns3, ns4, nsclassic, nw, nw2,
 };
 
-pub fn formats() -> Vec<(&'static str, u64, u32)> {
+pub fn formats() -> Vec<(&'static str, usize, u32)> {
     vec![
         (nc2::program::FORMAT, nc2::program::BODY_LEN, 100),
         (nc2::settings::FORMAT, nc2::settings::BODY_LEN, 100),
@@ -56,28 +56,20 @@ pub fn formats() -> Vec<(&'static str, u64, u32)> {
         (np5::program::FORMAT, np5::program::BODY_LEN, 101),
         (np5::live::FORMAT, np5::live::BODY_LEN, 101),
         (np5::settings::FORMAT, np5::settings::BODY_LEN, 100),
-        (ns2::program::FORMAT, ns2::program::BODY_LEN as u64, 6),
-        (ns2::live::FORMAT, ns2::program::BODY_LEN as u64, 6),
+        (ns2::program::FORMAT, ns2::program::BODY_LEN, 6),
+        (ns2::live::FORMAT, ns2::program::BODY_LEN, 6),
         (ns2::synth::FORMAT, ns2::synth::BODY_LEN, 6),
         (ns2::settings::FORMAT, ns2::settings::BODY_LEN, 4),
-        (ns3::program::FORMAT, ns3::program::BODY_LEN as u64, 304),
-        (ns3::live::FORMAT, ns3::program::BODY_LEN as u64, 304),
+        (ns3::program::FORMAT, ns3::program::BODY_LEN, 304),
+        (ns3::live::FORMAT, ns3::program::BODY_LEN, 304),
         (ns3::song::FORMAT, ns3::song::BODY_LEN, 300),
-        (ns3::synth::FORMAT, ns3::synth::BODY_LEN as u64, 300),
+        (ns3::synth::FORMAT, ns3::synth::BODY_LEN, 300),
         (ns3::settings::FORMAT, ns3::settings::BODY_LEN, 300),
-        (ns4::program::FORMAT, ns4::program::BODY_LEN as u64, 313),
-        (ns4::live::FORMAT, ns4::program::BODY_LEN as u64, 313),
-        (ns4::synth::FORMAT, ns4::synth::BODY_LEN as u64, 208),
-        (
-            ns4::piano_preset::FORMAT,
-            ns4::piano_preset::BODY_LEN as u64,
-            203,
-        ),
-        (
-            ns4::organ_preset::FORMAT,
-            ns4::organ_preset::BODY_LEN as u64,
-            205,
-        ),
+        (ns4::program::FORMAT, ns4::program::BODY_LEN, 313),
+        (ns4::live::FORMAT, ns4::program::BODY_LEN, 313),
+        (ns4::synth::FORMAT, ns4::synth::BODY_LEN, 208),
+        (ns4::piano_preset::FORMAT, ns4::piano_preset::BODY_LEN, 203),
+        (ns4::organ_preset::FORMAT, ns4::organ_preset::BODY_LEN, 205),
         (ns4::settings::FORMAT, ns4::settings::BODY_LEN, 106),
         (
             nsclassic::program::FORMAT,

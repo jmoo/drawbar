@@ -84,7 +84,7 @@ fn every_registered_cbin_writer_matches_both_reviewed_container_generations() {
             header.generation = generation;
             let file = Cbin {
                 header,
-                body: RawBody(vec![0; body_len as usize]),
+                body: RawBody(vec![0; body_len]),
             };
             assert_eq!(written(&file), fixture(&format!("cbin/{name}")), "{name}");
             expected.insert(name);

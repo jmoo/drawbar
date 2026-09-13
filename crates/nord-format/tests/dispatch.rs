@@ -10,12 +10,12 @@ use std::io::Cursor;
 mod format_table;
 use format_table::formats;
 
-fn synthesize(tag: &str, body_len: u64, version: u32, generation: Generation) -> Vec<u8> {
+fn synthesize(tag: &str, body_len: usize, version: u32, generation: Generation) -> Vec<u8> {
     let mut header = Header::new(tag, (0, 0), version);
     header.generation = generation;
     let file = Cbin {
         header,
-        body: RawBody(vec![0u8; body_len as usize]),
+        body: RawBody(vec![0u8; body_len]),
     };
     let mut out = Cursor::new(Vec::new());
     file.write_to(&mut out).unwrap();
@@ -59,7 +59,7 @@ fn nul_padded_tags_are_matched_in_full() {
 fn version_gates_cover_the_decoded_formats_only() {
     let bytes = synthesize(
         ns3::program::FORMAT,
-        ns3::program::BODY_LEN as u64,
+        ns3::program::BODY_LEN,
         999,
         Generation::V1,
     );

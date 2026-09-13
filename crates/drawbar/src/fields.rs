@@ -158,7 +158,7 @@ pub mod blank {
     pub fn stage3_song() -> Vec<u8> {
         let file = Cbin {
             header: Header::new(ns3::song::FORMAT, (0, 0), 0),
-            body: RawBody(vec![0u8; ns3::song::BODY_LEN as usize]),
+            body: RawBody(vec![0u8; ns3::song::BODY_LEN]),
         };
         nord_format::to_bytes(&Entity::Song(Song::Stage3(file))).expect("a stub encodes")
     }

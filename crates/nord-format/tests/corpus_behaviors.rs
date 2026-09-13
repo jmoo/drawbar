@@ -89,7 +89,7 @@ fn cbin_aux_words_have_documented_shapes() {
 fn cbin_body_lengths_match_format_constants() {
     let expected: BTreeMap<&str, u64> = formats()
         .into_iter()
-        .map(|(tag, len, _)| (tag, len))
+        .map(|(tag, len, _)| (tag, len as u64))
         .collect();
     let mut checked = 0;
     for specimen in cbins() {
