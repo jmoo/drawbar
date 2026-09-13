@@ -958,49 +958,25 @@ fn inspect(ui: &Ui, files: &[PathBuf], raw: bool) -> Result<(), String> {
 /// Reports the offset of the first difference, which in a bit-packed format is usually
 /// enough to name the field on its own.
 fn verify(ui: &Ui, files: &[PathBuf]) -> Result<(), String> {
-    let mut failed = 0usize;
-    for path in files {
-        let original = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                ui.out(format!("error  {} ({e})", path.display()));
-                failed += 1;
-                continue;
-            }
-        };
-        let reencoded =
-            nord_format::from_path(path).and_then(|entity| nord_format::to_bytes(&entity));
-        match reencoded {
-            Ok(bytes) if bytes == original => {
-                ui.out(format!(
-                    "ok     {} ({} bytes)",
-                    path.display(),
-                    original.len()
-                ));
-            }
-            Ok(bytes) => {
-                failed += 1;
-                let at = bytes
-                    .iter()
-                    .zip(&original)
-                    .position(|(a, b)| a != b)
-                    .map(|i| format!("{i:#x}"))
-                    .unwrap_or_else(|| "the end (length differs)".to_string());
-                ui.out(format!(
-                    "DIFFER {} (in {} bytes, out {}; first difference at {at})",
-                    path.display(),
-                    original.len(),
-                    bytes.len(),
-                ));
-            }
-            Err(e) => {
-                failed += 1;
-                ui.out(format!("error  {} ({e})", path.display()));
-            }
+    file::check_each(ui, files, "file(s) did not round-trip", |path| {
+        let named = |e: &dyn std::fmt::Display| format!("error  {} ({e})", path.display());
+        let original = std::fs::read(path).map_err(|e| named(&e))?;
+        let reencoded = nord_format::from_path(path)
+            .and_then(|entity| nord_format::to_bytes(&entity))
+            .map_err(|e| named(&e))?;
+        if reencoded == original {
+            return Ok(format!(
+                "ok     {} ({} bytes)",
+                path.display(),
+                original.len()
+            ));
         }
-    }
-    match failed {
-        0 => Ok(()),
-        n => Err(format!("{n} of {} file(s) did not round-trip", files.len())),
-    }
+        Err(format!(
+            "DIFFER {} (in {} bytes, out {}; first difference at {})",
+            path.display(),
+            original.len(),
+            reencoded.len(),
+            file::first_difference(&reencoded, &original),
+        ))
+    })
 }

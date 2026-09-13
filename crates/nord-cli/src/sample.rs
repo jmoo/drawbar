@@ -1025,23 +1025,9 @@ fn exact_frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<f64
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
 pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
-    let mut failed = 0usize;
-    for spec in &args.targets {
-        match verify_target(spec, args.deep) {
-            Ok(line) => ui.out(line),
-            Err(line) => {
-                failed += 1;
-                ui.out(line);
-            }
-        }
-    }
-    if failed > 0 {
-        return Err(format!(
-            "{failed} of {} did not check out",
-            args.targets.len()
-        ));
-    }
-    Ok(())
+    crate::file::check_each(ui, &args.targets, "target(s) did not check out", |spec| {
+        verify_target(spec, args.deep)
+    })
 }
 
 /// One target's verdict line, `Ok` when it checked out and `Err` when it did not.
@@ -1052,7 +1038,10 @@ fn verify_target(spec: &str, walk: bool) -> Result<String, String> {
         .and_then(|entity| nord_format::to_bytes(&entity))
         .map_err(|e| format!("error  {spec} ({e})"))?;
     if round_trip != original {
-        return Err(format!("DIFFER {spec} (re-encode is not byte-identical)"));
+        return Err(format!(
+            "DIFFER {spec} (re-encode is not byte-identical; first difference at {})",
+            crate::file::first_difference(&round_trip, &original),
+        ));
     }
     if !walk {
         return Ok(format!("ok     {spec} ({} bytes)", original.len()));

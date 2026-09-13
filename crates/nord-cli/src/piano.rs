@@ -864,45 +864,34 @@ fn parse_range(spec: &str) -> Result<(u8, u8), String> {
 /// Rebuild each library from its model and compare, and with `--deep` decode every
 /// stroke it holds.
 pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
-    let mut failed = 0usize;
-    let mut strokes = 0usize;
-    let mut frames = 0usize;
-    let mut overlap = 0usize;
-    for path in &args.files {
+    let mut total = Counted::default();
+    let checked = crate::file::check_each(ui, &args.files, "file(s) did not check out", |path| {
         match verify_one(path, args.deep) {
             Ok(counted) => {
-                strokes += counted.strokes;
-                frames += counted.frames;
-                overlap += counted.overlap;
-                ui.out(format!(
+                total.strokes += counted.strokes;
+                total.frames += counted.frames;
+                total.overlap += counted.overlap;
+                Ok(format!(
                     "ok     {} ({})",
                     path.display(),
                     counted.line(args.deep)
-                ));
+                ))
             }
-            Err(line) => {
-                failed += 1;
-                ui.out(format!(
-                    "{} {} ({line})",
-                    ui.danger("FAILED"),
-                    path.display()
-                ));
-            }
+            Err(line) => Err(format!(
+                "{} {} ({line})",
+                ui.danger("FAILED"),
+                path.display()
+            )),
         }
-    }
+    });
     if args.deep {
         ui.note(format!(
-            "{strokes} stroke(s), {frames} frame(s) decoded, {overlap} repeated sample(s) \
-             matched the block before"
+            "{} stroke(s), {} frame(s) decoded, {} repeated sample(s) matched the block \
+             before",
+            total.strokes, total.frames, total.overlap
         ));
     }
-    match failed {
-        0 => Ok(()),
-        n => Err(format!(
-            "{n} of {} file(s) did not check out",
-            args.files.len()
-        )),
-    }
+    checked
 }
 
 #[derive(Default)]
@@ -931,14 +920,9 @@ fn verify_one(path: &Path, deep: bool) -> Result<Counted, String> {
     let library = piano.library().map_err(|e| e.to_string())?;
     let rebuilt = to_bytes(&library, path)?;
     if rebuilt != original {
-        let at = rebuilt
-            .iter()
-            .zip(&original)
-            .position(|(a, b)| a != b)
-            .map(|i| format!("{i:#x}"))
-            .unwrap_or_else(|| "the length".to_string());
         return Err(format!(
-            "the rebuild differs at {at}; in {} bytes, out {}",
+            "the rebuild differs at {}; in {} bytes, out {}",
+            crate::file::first_difference(&rebuilt, &original),
             original.len(),
             rebuilt.len()
         ));

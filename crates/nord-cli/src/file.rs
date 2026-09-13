@@ -1,4 +1,5 @@
-//! The read-only verbs (`get`, `info`, `deps`) pointed at a file instead of a slot.
+//! The read-only verbs (`get`, `info`, `deps`) pointed at a file instead of a slot,
+//! and what every verb that checks a list of them shares.
 //!
 //! Same verbs, no instrument: the object is the file's bytes. What a file does not
 //! carry — the slot name, the names behind dependency ids — is reported as living on
@@ -255,6 +256,47 @@ pub(crate) fn entity_tag(entity: &Entity) -> &'static str {
     entity.identity().format
 }
 
+/// Where two renderings of one object first disagree.
+///
+/// A round trip that comes back different is a field the model does not account for,
+/// and in a bit-packed body the offset usually names that field on its own.
+///
+/// ⚠️ Only reached for two byte strings that differ, so one that is a prefix of the
+/// other differs in its length and nowhere else.
+pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> String {
+    match a.iter().zip(b).position(|(x, y)| x != y) {
+        Some(at) => format!("{at:#x}"),
+        None => "the end (the lengths differ)".to_string(),
+    }
+}
+
+/// Check each target, print its verdict line, and fail with how many did not pass.
+///
+/// The three `verify` verbs differ in what they check and in how a verdict reads; that
+/// a run which lost a target says so, and says how many of how many, is one contract —
+/// and the exit status is what a script reads.
+pub(crate) fn check_each<T>(
+    ui: &Ui,
+    targets: &[T],
+    what: &str,
+    mut check: impl FnMut(&T) -> Result<String, String>,
+) -> Result<(), String> {
+    let mut failed = 0usize;
+    for target in targets {
+        match check(target) {
+            Ok(line) => ui.out(line),
+            Err(line) => {
+                failed += 1;
+                ui.out(line);
+            }
+        }
+    }
+    match failed {
+        0 => Ok(()),
+        n => Err(format!("{n} of {} {what}", targets.len())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +336,34 @@ mod tests {
         assert_eq!(value, format!("{stored:#06x}"));
         // 0x18 is the body's first byte here — the version echo, not a checksum.
         assert_eq!(u16::from_be_bytes([bytes[0x18], bytes[0x19]]), 4);
+    }
+
+    /// The offset is what names the field a round trip lost, so it has to be the first
+    /// byte that moved; bytes that only ran out have no offset to give.
+    #[test]
+    fn a_round_trip_that_differs_says_where_it_first_did() {
+        assert_eq!(first_difference(b"abcd", b"abed"), "0x2");
+        assert_eq!(first_difference(b"Xbcd", b"abcd"), "0x0");
+        let ran_out = "the end (the lengths differ)";
+        assert_eq!(first_difference(b"abcd", b"abcde"), ran_out);
+        assert_eq!(first_difference(b"", b"a"), ran_out);
+    }
+
+    /// A run that lost some of its targets exits with that count, so a script can tell
+    /// it from one that checked out.
+    #[test]
+    fn a_check_of_many_targets_counts_what_failed() {
+        let ui = Ui::piped();
+        let verdict = |target: &&str| match *target {
+            "bad" => Err("DIFFER bad".to_string()),
+            ok => Ok(format!("ok {ok}")),
+        };
+        let what = "file(s) did not round-trip";
+        assert!(check_each(&ui, &["a", "b"], what, verdict).is_ok());
+        assert_eq!(
+            check_each(&ui, &["a", "bad", "bad"], what, verdict).unwrap_err(),
+            "2 of 3 file(s) did not round-trip"
+        );
     }
 
     /// The mismatch error must steer to the noun that does read the file.
