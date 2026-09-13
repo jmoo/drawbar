@@ -526,7 +526,11 @@ impl Draft {
     /// The answer the build has ready, taken once. A refusal stays behind as the line
     /// the dialog paints.
     fn settle(&mut self) -> Option<Result<Built, String>> {
-        let answer = self.job.as_ref()?.poll()?;
+        let answer = match self.job.as_ref()?.poll() {
+            work::Answer::Running => return None,
+            work::Answer::Answered(answer) => answer,
+            work::Answer::Died => Err("coding the library stopped without an answer".to_string()),
+        };
         self.job = None;
         if let Err(why) = &answer {
             self.refused = Some(why.clone());

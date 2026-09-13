@@ -1140,7 +1140,13 @@ impl State {
     /// that document waits on the apply of the plan in hand instead — unless the plan
     /// has caught up with the bytes on its own, when there is nothing left to wait for.
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
-        let made = self.job.as_ref()?.job.poll()?;
+        let made = match self.job.as_ref()?.job.poll() {
+            work::Answer::Running => return None,
+            work::Answer::Answered(made) => made,
+            work::Answer::Died => {
+                Err("laying out the library stopped without an answer".to_string())
+            }
+        };
         let laying = self.job.take()?;
         let fresh = self.plans.get(&laying.id) == Some(&laying.plan);
         match (fresh, made.is_ok()) {

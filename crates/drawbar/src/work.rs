@@ -4,7 +4,7 @@
 //! ⚠️ wasm has one thread. There the work runs where it is asked for and the frame
 //! waits on it; the caller sees the same [`Job`] either way and polls it the same way.
 
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -25,6 +25,16 @@ impl Progress {
     }
 }
 
+/// Where a job is when it is asked.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Answer<T> {
+    Running,
+    Answered(T),
+    /// The worker is gone and no answer is coming: it panicked, or its answer has already
+    /// been taken.
+    Died,
+}
+
 /// One piece of work in flight, answering once.
 pub struct Job<T> {
     rx: Receiver<T>,
@@ -32,10 +42,17 @@ pub struct Job<T> {
 }
 
 impl<T> Job<T> {
-    /// The answer, the first time it is there; `None` while the work runs and forever
-    /// after the answer has been taken.
-    pub fn poll(&self) -> Option<T> {
-        self.rx.try_recv().ok()
+    /// Whether the answer is here, still coming, or never coming.
+    ///
+    /// ⚠️ A job answers once, and the worker goes with its answer. Take the answer and
+    /// drop the job: polling the same job again says [`Answer::Died`], which is the
+    /// truth about the worker and not about the answer already in hand.
+    pub fn poll(&self) -> Answer<T> {
+        match self.rx.try_recv() {
+            Ok(answer) => Answer::Answered(answer),
+            Err(TryRecvError::Empty) => Answer::Running,
+            Err(TryRecvError::Disconnected) => Answer::Died,
+        }
     }
 
     pub fn progress(&self) -> String {
@@ -75,17 +92,31 @@ pub fn run<T: Send + 'static>(
 mod tests {
     use super::*;
 
+    /// Poll until the job stops saying it is running.
+    fn settled<T>(job: &Job<T>) -> Answer<T> {
+        loop {
+            match job.poll() {
+                Answer::Running => std::thread::yield_now(),
+                answer => return answer,
+            }
+        }
+    }
+
     #[test]
     fn a_job_answers_once() {
         let job = run(&egui::Context::default(), |_| 7);
-        let answer = loop {
-            if let Some(answer) = job.poll() {
-                break answer;
-            }
-            std::thread::yield_now();
-        };
-        assert_eq!(answer, 7);
-        assert_eq!(job.poll(), None, "an answer is taken once");
+        assert_eq!(settled(&job), Answer::Answered(7));
+        assert_eq!(settled(&job), Answer::Died, "an answer is taken once");
+    }
+
+    /// ⚠️ A worker that panics answers nothing. A caller that could not tell that from
+    /// "still running" would keep the job, and whatever waits on it, for the rest of the
+    /// session.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_worker_that_panics_is_reported_as_dead() {
+        let job: Job<u32> = run(&egui::Context::default(), |_| panic!("the work gave up"));
+        assert_eq!(settled(&job), Answer::Died);
     }
 
     #[test]
