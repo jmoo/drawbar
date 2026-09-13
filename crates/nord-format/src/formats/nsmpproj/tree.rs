@@ -14,6 +14,11 @@ use std::str::FromStr;
 /// Spaces per level of depth.
 const INDENT: usize = 2;
 
+/// Deepest nesting [`parse`] accepts. The editor writes five levels, and
+/// [`Node::render`], `Drop` and the derived traits all recurse per level, so an
+/// unbounded tree is a stack overflow rather than an error.
+const MAX_DEPTH: usize = 32;
+
 /// Refuse a field value the writer cannot render as one line.
 ///
 /// A value is emitted raw after ` = `, so a line end inside one renders a file
@@ -206,6 +211,12 @@ pub fn parse(text: &str) -> Result<Node, ParseError> {
             if name.is_empty() || name.contains(' ') {
                 return Err(fail(line_no, "a block with no name"));
             }
+            if stack.len() == MAX_DEPTH {
+                return Err(fail(
+                    line_no,
+                    &format!("blocks nested deeper than {MAX_DEPTH}"),
+                ));
+            }
             stack.push(Node::new(name));
         } else {
             return Err(fail(line_no, "not a block, a field or a close brace"));
@@ -279,6 +290,26 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?} parsed");
         }
+    }
+
+    #[test]
+    fn nesting_past_the_depth_cap_is_refused() {
+        let nest = |levels: usize| {
+            let mut text = String::new();
+            for d in 0..levels {
+                let _ = writeln!(text, "{}b{d} {{", " ".repeat(d * INDENT));
+            }
+            for d in (0..levels).rev() {
+                let _ = writeln!(text, "{}}}", " ".repeat(d * INDENT));
+            }
+            text
+        };
+        assert!(parse(&nest(MAX_DEPTH)).is_ok());
+        let err = parse(&nest(MAX_DEPTH + 1)).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!("project line {}: blocks nested deeper than {MAX_DEPTH}", MAX_DEPTH + 1)
+        );
     }
 
     #[test]
