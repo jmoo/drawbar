@@ -351,9 +351,28 @@ velocity layer — and the encoded audio those strokes own. `inspect` reports th
 directory, `decode` writes one stroke to a WAV at the rate the instrument plays it,
 and `edit`, `trim` and `split` rewrite the container: renaming, retuning a key,
 rerouting a key to another root, dropping a bank or the quieter velocity layers,
-narrowing the key range, and cutting a library in two. Nothing re-encodes audio — a
-surviving stroke moves byte for byte — and `trim` and `split` refuse to write over
-the file they read.
+narrowing the key range, and cutting a library in two. None of those re-encodes
+audio — a surviving stroke moves byte for byte — and they refuse to write over the
+file they read.
+
+`build` and `rebuild` do write audio. `build` lays a whole library out from a
+directory of WAVs named `<root>-b<bank>-l<layer>.wav` — `060-b0-l00.wav` is MIDI
+note 60, the attack bank, the loudest layer — resampling any rate onto the lattice
+the instrument plays at. Everything the audio does not decide comes from a template
+library: the length marks, the decay coefficients, the per-note tables and the
+stream version, taken from the template stroke of the same bank and nearest root.
+`rebuild` codes a library's own strokes again from the frames they decode to and
+prints how each one's blocks came back: a file this coder wrote comes back byte for
+byte, one it did not comes back block for block.
+
+Two rules decide what a built library plays. Every key up to one semitone above the
+highest root sounds, playing the nearest root at or above it, and keys past that are
+left uncovered — so a library of roots C2, C3 and C4 covers everything up to C#4 and
+nothing above. Within a root, a key sounds the largest layer value the root holds
+that is at most `(127 − velocity)·31/127`; `l00`, `l01`, … are spread over 0..27 so
+each layer answers to its own part of the velocity range, and `v12` in place of `l00`
+in a WAV's name states a layer's value outright. One root's bank names all its layers
+the same way.
 
 ```sh
 nord piano inspect grand.npno              # roots, layers per bank, keys, tuning
@@ -363,14 +382,30 @@ nord piano edit grand.npno --name "My Grand" --tune C4=-2 --map C8=C7 -o out.npn
 nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
 nord piano split grand.npno --at C4 -o halves/
 nord piano verify --deep grand.npno
+nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
+nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
+nord piano rebuild grand.npno -o again.npno
 ```
 
-A trimmed library loads on the instrument and plays at the original's level:
-hardware-verified for a dropped bank and for dropped velocity layers. The other
-edits — renames, retunes, remaps and a narrowed key range — are inferred from
-specimens and have not been played.
+A library written here loads on the instrument and plays: hardware-verified for a
+trim, both for a dropped bank and for dropped velocity layers, and for what `build`
+and `rebuild` code — mono and stereo, every key of a full-keyboard library including
+its lowest and highest root, each of three attack layers, the release stroke at
+note-off, a long stroke to its end, the keys between roots transposed, and a vendor
+library coded again playing indistinguishably from the original in level and in
+spectrum. The other edits — renames, retunes, remaps and a narrowed key range — are
+inferred from specimens and have not been played.
 
-A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
+The fields a build cannot derive from audio — the length marks, the decay
+coefficients, the per-note tables, the playback parameters, the word at the body's
+start — go in as `--template` donated them: the instrument accepts them, and what it
+makes of them beyond accepting is not known. Given no template, `build` states them by
+rule, and they are then neutral playback parameters: no decay applied over the
+recordings, the layer trims taken from the layer values, and the damper limit `--kind`
+implies. A library written that way has been played and sounds like the same audio
+built against a template.
+
+A library is tens of megabytes, so moving one is `nord piano get` and `nord
 piano put`, and the rest of the slot verbs address class 1 the way they address
 programs.
 
