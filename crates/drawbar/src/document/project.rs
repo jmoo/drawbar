@@ -22,7 +22,7 @@ use nord_format::Entity;
 use super::capability::{Fact, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys;
-use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State};
+use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
 use crate::app;
 use crate::note;
@@ -548,30 +548,33 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
         })
         .collect();
     let rows: Vec<usize> = playing.iter().map(|(row, _, _)| *row).collect();
-    let dragged = sample::velocity_field(
+    let asked = sample::velocity_field(
         ui,
-        state,
         "one window per zone — drag the top or bottom edge",
         SPAN,
         &blocks,
         &rows,
         keys::Handles::Draggable,
+        sample::selected(state),
     );
-    let Some((block, window)) = dragged else {
-        return;
-    };
-    let stroke = playing[block].2;
-    if window.0 != stroke.velocity.0 {
-        sets.push((
-            format!("stroke{}.velocity_min", stroke.id),
-            window.0.to_string(),
-        ));
-    }
-    if window.1 != stroke.velocity.1 {
-        sets.push((
-            format!("stroke{}.velocity_max", stroke.id),
-            window.1.to_string(),
-        ));
+    match asked {
+        Some(VelocityAsk::Open(row)) => sample::pick_row(state, row),
+        Some(VelocityAsk::Window { block, window }) => {
+            let stroke = playing[block].2;
+            if window.0 != stroke.velocity.0 {
+                sets.push((
+                    format!("stroke{}.velocity_min", stroke.id),
+                    window.0.to_string(),
+                ));
+            }
+            if window.1 != stroke.velocity.1 {
+                sets.push((
+                    format!("stroke{}.velocity_max", stroke.id),
+                    window.1.to_string(),
+                ));
+            }
+        }
+        None => {}
     }
 }
 

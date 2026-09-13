@@ -31,6 +31,7 @@ use crate::app;
 use crate::icon::{icon, Glyph};
 use crate::note;
 use crate::room;
+use crate::workspace::Baseline;
 
 pub fn is_sample(entity: &Entity) -> bool {
     matches!(entity, Entity::Sample(_))
@@ -472,9 +473,19 @@ pub struct State {
     audition: Option<keys::Audition>,
     /// What the struck key did, so the sentence outlives the click that made it.
     answer: Option<Answer>,
-    /// The saved bytes' own keyboard map, read once, so a painted key can be told from
-    /// a stored one. `None` inside is a body that carries no map.
-    baseline: Option<(u64, Option<KeyTable>)>,
+    /// The saved bytes a paint mark is measured against.
+    baseline: Option<Saved>,
+}
+
+/// The saved bytes a painted key is told apart from, and the keyboard map they hold.
+///
+/// ⚠️ Keyed by what was saved as well as by which asset: saving moves the baseline
+/// without giving the asset new bytes, and a map read before that is one every stored
+/// value now reads as painted against.
+struct Saved {
+    of: (u64, Option<u32>, usize),
+    /// `None` is a body that carries no map.
+    table: Option<KeyTable>,
 }
 
 /// What a struck key found.
@@ -1279,33 +1290,45 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
         })
         .collect();
     let rows: Vec<usize> = stated.iter().map(|(row, _)| *row).collect();
-    velocity_field(
+    let asked = velocity_field(
         ui,
-        state,
         "every stroke answers the full window",
         span(&map_zones(snapshot), NSMP_SPAN),
         &blocks,
         &rows,
         keys::Handles::Fixed,
+        state.selected,
     );
+    match asked {
+        Some(VelocityAsk::Open(row)) => state.pick(row, true),
+        // Fixed handles never move: nothing here writes a wide zone's window.
+        Some(VelocityAsk::Window { .. }) | None => {}
+    }
+}
+
+/// What the velocity field was asked for, in the rows the caller knows.
+pub(super) enum VelocityAsk {
+    /// Open this row.
+    Open(usize),
+    /// A handle moved: which block, and the window the drag left it with.
+    Window { block: usize, window: (u8, u8) },
 }
 
 /// The key × velocity field both documents draw: the heading with what the windows
-/// cover, the field itself, and the row a click on a block opens.
+/// cover, and the field itself.
 ///
-/// `rows` names the row each block stands for, one per block — the blocks are the zones
-/// that state a window, which on neither document is every row.
-///
-/// Returns the block a handle moved and the window the drag left it with.
+/// `rows` names the row each block stands for, one per block, and `selected` is the row
+/// to highlight — the blocks are the zones that state a window, which on neither
+/// document is every row.
 pub(super) fn velocity_field(
     ui: &mut egui::Ui,
-    state: &mut State,
     note: &str,
     span: keys::Span,
     blocks: &[keys::VelBlock],
     rows: &[usize],
     handles: keys::Handles,
-) -> Option<(usize, (u8, u8))> {
+    selected: Option<usize>,
+) -> Option<VelocityAsk> {
     let visuals = ui.visuals().clone();
     let (cover, ink) = match keys::velocity_holes(blocks).len() {
         0 => ("fully covered".to_string(), app::good(&visuals)),
@@ -1313,9 +1336,7 @@ pub(super) fn velocity_field(
         n => (format!("{n} holes"), app::warn(&visuals)),
     };
     controls::heading(ui, "Velocity", note, Some((&cover, ink)));
-    let picked = state
-        .selected
-        .and_then(|row| rows.iter().position(|held| *held == row));
+    let picked = selected.and_then(|row| rows.iter().position(|held| *held == row));
     let acted = ui
         .horizontal(|ui| {
             ui.add_space(PAD);
@@ -1327,13 +1348,12 @@ pub(super) fn velocity_field(
         })
         .inner;
     ui.add_space(8.0);
-    match acted {
-        Some(keys::VelocityAct::Pick(block)) => {
-            state.pick(rows[block], true);
-            None
-        }
-        Some(keys::VelocityAct::Drag { zone, window, .. }) => Some((zone, window)),
-        None => None,
+    match acted? {
+        keys::VelocityAct::Pick(block) => Some(VelocityAsk::Open(rows[block])),
+        keys::VelocityAct::Drag { zone, window, .. } => Some(VelocityAsk::Window {
+            block: zone,
+            window,
+        }),
     }
 }
 
@@ -1447,7 +1467,7 @@ fn per_key(
             quiet,
         )),
     );
-    let baseline = state.baseline.as_ref().and_then(|(_, held)| held.as_ref());
+    let baseline = state.baseline.as_ref().and_then(|saved| saved.table.as_ref());
     for (label, scale) in [
         ("Gain", keys::Scale::Db(GAIN_FULL)),
         ("Detune", keys::Scale::Cents(DETUNE_FULL)),
@@ -1653,16 +1673,17 @@ fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
     }
 }
 
-/// Read the map the asset was last saved with, once per document.
+/// Read the map the asset was last saved with, once per set of saved bytes.
 ///
 /// ⚠️ Paint marks are the difference between what is held and what was saved, so the
 /// baseline has to be the saved bytes rather than the working copy: measured against
 /// itself, nothing is ever painted.
-pub fn follow(state: &mut State, id: u64, saved: &[u8]) {
-    if state.baseline.as_ref().is_some_and(|(held, _)| *held == id) {
+pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
+    let of = (id, saved.crc32, saved.bytes.len());
+    if state.baseline.as_ref().is_some_and(|held| held.of == of) {
         return;
     }
-    let table = nord_format::from_stream(&mut Cursor::new(saved))
+    let table = nord_format::from_stream(&mut Cursor::new(&saved.bytes))
         .ok()
         .as_ref()
         .and_then(sample)
@@ -1670,7 +1691,7 @@ pub fn follow(state: &mut State, id: u64, saved: &[u8]) {
             Sample::V2(body) => body.key_table().ok(),
             Sample::V3(_) => None,
         });
-    state.baseline = Some((id, table));
+    state.baseline = Some(Saved { of, table });
 }
 
 // ---- the other two faces ------------------------------------------------------------
@@ -2591,6 +2612,33 @@ mod tests {
             "the v2 keyboard map is drawn instead: {said:?}"
         );
         assert!(sets.is_empty());
+    }
+
+    /// ⚠️ A paint mark is the difference between what is held and what was saved, and
+    /// saving moves the baseline without giving the asset new bytes: measured against
+    /// the bytes before the save, an edit that is now stored goes on reading as painted.
+    #[test]
+    fn saving_an_edit_clears_the_paint_marks() {
+        let ctx = dressed();
+        let bytes = v2_bytes();
+        let edited = apply(&bytes, &[("key60.gain".into(), "+1.5 dB".into())]).unwrap();
+        let entity = nord_format::from_stream(&mut Cursor::new(&edited)).unwrap();
+        let snapshot = snapshot(&entity).unwrap().unwrap();
+
+        let mut state = State::default();
+        follow(&mut state, 7, &Baseline::read(bytes));
+        let (said, _) = bodied(&ctx, &mut state, &snapshot);
+        assert!(
+            said.iter().any(|text| text.ends_with("· 1 edited")),
+            "the key is painted against the bytes it was saved as: {said:?}"
+        );
+
+        follow(&mut state, 7, &Baseline::read(edited));
+        let (said, _) = bodied(&ctx, &mut state, &snapshot);
+        assert!(
+            !said.iter().any(|text| text.contains("edited")),
+            "saved, and nothing is painted any more: {said:?}"
+        );
     }
 
     /// Clicking a key a zone answers sounds it and says so; clicking one past every

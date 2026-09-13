@@ -175,7 +175,7 @@ impl Document {
         // Decoded audio belongs to one set of bytes; an edit re-encodes all of them.
         self.audio.follow(id, entity.stamp);
         // Paint marks are measured against the bytes the asset was last saved as.
-        sample::follow(&mut self.sample, id, &entity.saved.bytes);
+        sample::follow(&mut self.sample, id, &entity.saved);
         self.player.settle();
         if let Some(left) = self.piano.settle(ui.input(|input| input.time)) {
             ui.ctx()
