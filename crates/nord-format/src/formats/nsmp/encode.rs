@@ -203,16 +203,10 @@ const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
 ///
 /// ⚠️ Every 1:1 run counts, the loop's included — a marked record opens a run of its
 /// own past the resync, and a field landing in its last record buys the bit exactly
-/// as one in the opening or resync run does. Reading only the first two under-shoots
-/// looped strokes, which quantise one bit coarser than the editor's.
-///
-/// The loop's run is coverage rather than evidence about widths: no specimen carries
-/// the bit there and nowhere else, so [`dead_last_record`] is read off the other two.
+/// as one in the opening or resync run does.
 ///
 /// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
 /// one: both quantise at the peak term alone.
-///
-/// No saving threshold is modelled: no stroke measured refuses while the clause fires.
 ///
 /// Inferred from specimens; not confirmed on hardware, the Electro 5 playing v2 only.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
@@ -834,8 +828,8 @@ fn band(r: usize, cell: usize, rmax: usize) -> usize {
     } else {
         residue + cell
     };
-    // The windows overlap from `j = 7` on, so this settles within a few steps; the bound
-    // is a guard, not a limit anything reaches.
+    // The windows overlap from `j = 3` at 24/32 and from `j = 2` at 32/48, so this
+    // settles within a few steps; the bound is a guard, not a limit anything reaches.
     while length <= 64 * cell {
         if (1..=8).any(|j| j * cell <= length && length <= j * rmax) {
             return length;
@@ -1165,22 +1159,14 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spe
     Ok((out, resync_record))
 }
 
-/// Pad the loop region out to whole packets the way the editor does: sweep its content
-/// records front to back, halving each one that covers more than one cell — the smaller
-/// half first — and carrying on into the second half, pass after pass, until the words
-/// fit.
+/// Pad the loop region out to whole packets: sweep its content records front to back,
+/// halving each one that covers more than one cell — the smaller half first — and
+/// carrying on into the second half, pass after pass, until the words fit.
 ///
-/// A region with nothing left to split is widened instead, and that sweep also runs
-/// front to back, spending each **content** record up to [`widen_cap`] before moving on,
-/// so the last one widened takes only the words still owed. An alignment record is
-/// walked past whether or not it has room — including the marked one the region opens
-/// at, and any further alignment record its 1:1 run needs. A greedy sweep from the back
-/// finishes in fewer, wider records and is observably not what the editor writes.
-///
-/// ⚠️ A record's alignment flag and its predictor order are indistinguishable as the
-/// skip predicate on the specimens: every alignment record is order zero, and no content
-/// record of order zero is reached with words still owed. The flag is the record's class
-/// bit, which is why it is the one used here.
+/// A region with nothing left to split is widened instead, front to back, spending
+/// each content record up to [`widen_cap`] before moving on, so the last one widened
+/// takes only the words still owed. A 1:1 record is walked past by either sweep,
+/// whatever room it has, the marked one the region opens at included.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<(), Error> {

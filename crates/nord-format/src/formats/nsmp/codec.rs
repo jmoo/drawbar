@@ -199,13 +199,15 @@ pub enum Unsupported {
     },
     /// A word violates the record header or content-count grammar.
     Malformed {
-        /// Word index within the stream, counting from [`HEADER_LEN`].
+        /// Word index within the stream, counting from the end of the stroke header
+        /// ([`Layout::header_len`]).
         word: usize,
     },
     /// A record whose fields run past the end of the stroke — some earlier record
     /// was read at the wrong size.
     Desync {
-        /// Word index within the stream, counting from [`HEADER_LEN`].
+        /// Word index within the stream, counting from the end of the stroke header
+        /// ([`Layout::header_len`]).
         word: usize,
     },
     /// Bytes remain after the last complete stream word.
@@ -270,7 +272,8 @@ impl std::error::Error for Unsupported {}
 /// One record, placed on the field lattice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    /// Word index within the stream, counting from [`HEADER_LEN`].
+    /// Word index within the stream, counting from the end of the stroke header
+    /// ([`Layout::header_len`]).
     pub at: usize,
     /// Lattice index of this record's first field.
     pub first_field: usize,
@@ -281,10 +284,9 @@ pub struct Record {
     pub width: u8,
     /// Difference order, 0..=4. Content stores the Nth backward difference.
     pub order: u8,
-    /// Unexplained vendor flag, usually on the directory's resync record.
+    /// Set on the record a loop starts at; the directory's third pointer names it.
     pub mark: bool,
     /// Channel-major signed values at order zero; signed differences otherwise.
-    /// Width two is ordinary draft data, not a skip marker.
     pub values: Vec<i32>,
 }
 
@@ -341,7 +343,8 @@ pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
 }
 
 /// Signed quantiser shift recovered from statistic A's exponent and [`peak`].
-/// Vendor statistic A is unresolved, so library amplitude may decode low.
+/// Dequantising applies the shift alone: statistic A's mantissa carries the zone's
+/// gain, which the instrument applies at playback rather than the decoder.
 pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
     let peak = peak(stroke, layout)?.unsigned_abs().max(1);
     let exponent = i32::from(*stroke.get(STAT_A_EXP_AT)?);
@@ -958,8 +961,6 @@ mod tests {
         let s = stroke(Layout::V3, -8191, exponent_for(8191, 2), 0, &[]);
         assert_eq!(peak(&s, Layout::V3), Some(-8191));
         assert_eq!(shift(&s, Layout::V3), Some(2));
-        // Silence: the wide accumulator starts at −1, so an empty stroke reads −1
-        // where a narrow one reads 0. Both scale against a magnitude of one.
         let silent = stroke(Layout::V3, -1, exponent_for(1, 0), 0, &[]);
         assert_eq!(peak(&silent, Layout::V3), Some(-1));
         assert_eq!(shift(&silent, Layout::V3), Some(0));
