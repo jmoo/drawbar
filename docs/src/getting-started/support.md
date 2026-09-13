@@ -1,33 +1,32 @@
-# Supported instruments and formats
+# What is supported
 
-Drawbar began with the **Electro 5**. Hardware validation has focused on it, and
-specimen evidence is not hardware evidence, so each row below keeps the qualifier
-its claim was established with.
+drawbar was developed against a Nord Electro 5, and that is where its claims have
+been tested. Files from other instruments are supported from documentation and
+sample files. Connecting other instruments over USB has not been tried.
 
-| Family | State |
-|---|---|
-| Electro 5 program, live, song, settings | Decoded and fully supported; values pinned by hardware sweeps |
-| Stage 2, 3 and 4 programs and selected presets | Supported from community documentation and specimen evidence; **not validated on hardware** |
-| Sample instruments (`nsmp`, `nsmp3`, `nsmp4`) | Encoding and decoding of v2/v3/v4; only v2 confirmed with hardware playback |
-| Piano libraries (`npno`) | Audio decoded; renamed, retuned, remapped, trimmed and split; audio encoded outright, built from WAVs or re-coded. Confirmed on hardware: libraries built or re-coded here play on the instrument, mono and stereo, across every key they cover, and a trimmed library plays with a bank or velocity layers dropped. Renaming, retuning, remapping and a narrowed key range, the split's included, are inferred from specimens and have not been played |
-| Everything else | CBIN tags across the model line, the Lead SysEx/MIDI banks and the `.cn3` Electro 2 library — recognized and carried verbatim without decoding their parameters |
+## Files
 
-Writable entities round-trip byte-for-byte, verified against a change-one-knob
-specimen corpus. That establishes preservation of file bytes. It does not
-establish that every decoded parameter or newly encoded sound behaves correctly
-on hardware.
+| Files | What drawbar does | Tested on an instrument |
+|---|---|---|
+| Electro 5 programs, live slots, set lists and settings | View, edit, transfer | Yes |
+| Stage 2, 3 and 4 programs and presets | View, edit | No |
+| Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, audition, transfer | Playback of v2 files. Files encoded as v3 or v4 have not been played |
+| Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs, transfer | Trimmed, built and re-encoded libraries play, mono and stereo, across every key they cover. Renames, retunes, remaps and a narrowed key range have not been played |
+| Other Nord files | Recognised and kept byte for byte, without editing | |
 
-Public tests use self-generated fixtures and USB replay scripts; optional private
-corpus tests check byte-exact file round trips, field isolation, and captured
-protocol exchanges. [Testing](../reference/testing.md) describes both.
+## USB
 
-The support map itself lives in the `nord-format` rustdoc, beside the code it
-describes, and defines the three tiers — decoded, structurally decoded,
-container-verified stub — with each decoded body's byte map:
+Reading and writing programs, set lists, live slots, settings, samples and pianos
+works on the Electro 5 from macOS, Linux and the browser. Windows builds pass the
+protocol tests but have not been run against an instrument. No other instrument
+has been connected, so USB support for other models cannot be guaranteed.
 
-- [The `formats` module on docs.rs](https://docs.rs/nord-format/latest/nord_format/formats/)
-- [File formats](../reference/file-formats.md) in this guide
+## What "tested" means
 
-Management of Nord devices over USB is supported. Which operations are
-implemented, and which of them are hardware-verified, is listed under
-[USB protocol](../reference/usb-protocol.md).
+Every file drawbar writes is read back and checked to be identical, byte for
+byte. That proves the bytes survive. It does not prove that every value means
+what drawbar says, or that every new sound plays as intended. Where a claim has
+been confirmed by playing it on an instrument, this page says so.
+
+Developers can read how the checks work in [Testing](../reference/testing.md)
+and [File formats](../reference/file-formats.md).

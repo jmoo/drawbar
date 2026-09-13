@@ -1,21 +1,14 @@
 # nord-usb
 
-Talk to **Clavia / Nord** keyboards over USB from Rust — the vendor protocol Nord
-Sound Manager speaks, reverse-engineered from packet captures.
+**Talk to a Nord keyboard over USB from Rust.** The protocol Nord Sound Manager
+speaks, worked out from captures, with backends for the desktop (`nusb`), the
+browser (`web`, over WebUSB), and recorded captures (`replay`, no hardware
+needed).
 
-This is the transport-and-protocol half of the Nord toolkit.
-[`nord-format`](../nord-format) owns the bytes of a file; this crate owns getting
-those bytes on and off the instrument. It depends on `nord-format` for the
-container it wraps read data in, and on nothing else at its core — the backends
-are optional features: `nusb` for the desktop (macOS, Linux, Windows; pure Rust),
-`web` for the browser over WebUSB, and `replay` to drive the protocol from
-committed captures with no hardware at all.
-
-> [!WARNING]
-> Alpha software driving real hardware over a reverse-engineered protocol. The
-> verbs listed under [USB protocol][guide] are hardware-verified; everything else
-> is not. Back up your instrument (Nord Sound Manager makes a full backup) before
-> pointing anything here at sounds you can't re-create.
+> ⚠️ Alpha software driving real hardware. Back up your instrument first; Nord
+> Sound Manager makes a full backup.
+> [What is supported](../../docs/src/getting-started/support.md) says which
+> operations have been verified on an instrument.
 
 ## Usage
 
@@ -25,10 +18,10 @@ use nord_usb::transport::UsbTransport;
 
 let mut device = Device::new(UsbTransport::open_first()?);
 
-// `from_user` takes the instrument's own one-indexed numbering: 7:4 on the panel.
+// The instrument's own numbering: 7:4 on the panel.
 let at = Location::from_user(7, 4);
 
-// `read` hands the chain a read-only session: a mutating op does not type-check.
+// `read` hands the closure a read-only session. A write does not type-check here.
 let (info, file) = device
     .read(ObjectClass::Program, async |s| {
         Ok((op::info(s, at).await?, op::read_program(s, at).await?))
@@ -36,38 +29,23 @@ let (info, file) = device
     .await?;
 ```
 
-Mutating operations run through `device.destructive(class, …)` instead, whose
-chain is handed a session that can write.
+Writes go through `device.destructive(class, …)`, which hands the closure a
+session that can write. Both brackets close the transaction whether the closure
+succeeds or fails, and that matters: an abandoned transaction leaves the
+instrument stuck on its progress screen until it is power-cycled.
 
-Both brackets run the closing exchanges whether the chain succeeds or fails. Those
-exchanges are what clear the instrument's progress display; abandoning a
-transaction after a progress label has been sent leaves the device stuck until it
-is power-cycled. A `Session` opened by hand must be `commit()`ed on every path,
-and carries a `Drop` assertion to catch the mistake in debug builds.
+## Learn more
 
-## Build & test
+- [docs.rs](https://docs.rs/nord-usb)
+- [USB protocol](../../docs/src/reference/usb-protocol.md): what works where,
+  the frame layout, and the layering.
+- [Testing](../../docs/src/reference/testing.md): the replay suite.
 
-From `crates/` in the development shell:
+## Building
 
-```sh
-cargo test -p nord-usb --features replay
-```
-
-⚠️ `replay` is not a default feature, so a bare `cargo test -p nord-usb` compiles
-the replay tests out and reports a pass having verified none of the wire encoding.
-The Nix build enables it via `[package.metadata.nix] testFeatures` in `Cargo.toml`
-(`nix build .#nord-usb`); `--features corpus` adds the captures in the private
-corpus at `NORD_CORPUS_ROOT` and implies `replay`. A `web` build needs
-`--cfg=web_sys_unstable_apis`, which `crates/.cargo/config.toml` supplies for the
-wasm target, so run it from `crates/` or below; [`drawbar`](../drawbar) is a
-browser app that drives that backend on hardware.
-
-## More
-
-- [`nord-usb` on docs.rs](https://docs.rs/nord-usb)
-- [USB protocol][guide] — what is implemented and verified where, the frame
-  layout, and the layering
-- [Testing][testing] — the replay sweep, and what a capture has to contain
+`cargo test -p nord-usb --features replay` from `crates/` in `nix develop`.
+Without `replay`, no wire encoding is tested. The `web` feature needs a flag that
+`crates/.cargo/config.toml` supplies, so build it from `crates/`.
 
 ## Disclaimer
 
@@ -75,6 +53,3 @@ Not affiliated with, authorized, or endorsed by Clavia DMI AB. "Nord", "Clavia",
 and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
 hardware this protocol belongs to. All reverse engineering is of traffic to and
 from hardware the author owns, for interoperability.
-
-[guide]: https://drawbar.app/docs/reference/usb-protocol.html
-[testing]: https://drawbar.app/docs/reference/testing.html

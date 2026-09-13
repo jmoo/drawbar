@@ -1,57 +1,44 @@
 # Overview
 
-`nord` is a command-line tool over `nord-format` and `nord-usb`.
+`nord` works on Nord files and on a connected instrument from the terminal. It
+prints data to stdout and everything else to stderr, so its output pipes
+cleanly, and every command that changes the instrument says what it is about to
+replace and refuses without `--yes`.
 
-| Command | What it does |
+```sh
+cargo install nord-cli    # or: nix run github:jmoo/drawbar#nord-cli
+nord --help
+```
+
+## Commands
+
+| Command | Works on |
 |---|---|
-| `inspect` | Decode file(s) and print a readable summary |
-| `verify` | Re-encode file(s) and check the bytes come back identical |
-| `edit` | Change fields inside any editable file, whatever format it holds |
-| `device` | The instrument itself — what is on the bus, and what it holds |
-| `program` | Programs on the instrument (object class 4) |
-| `setlist` | Set lists on the instrument (object class 5) |
-| `live` | The three Live slots (object class 6) |
-| `settings` | The global settings singleton (object class 7) |
-| `sample` | Sample instruments — the library (object class 3), or `.nsmp` files |
-| `piano` | Piano libraries — the library (object class 1), or `.npno` files |
-| `raw` | Hidden: the same verbs, addressed by class number |
+| `inspect` | Files: print what is in them |
+| `verify` | Files: check that they re-encode byte for byte |
+| `edit` | Files: change fields in any editable file |
+| `device` | The instrument: what is attached and what it holds |
+| `program`, `setlist`, `live`, `settings` | Programs, set lists, live slots and settings on the instrument |
+| `sample`, `piano` | Sample instruments and piano libraries, on the instrument or as files |
 
-## Nouns and verbs
-
-`inspect`, `verify` and `edit` work on files. The other nouns are the protocol's
-object classes, and normally talk to an attached instrument — but the read-only
-verbs (`get`, `info`, `deps`) and each noun's `edit` also take a file in place of
-a slot. `program`, `setlist`, `sample` and `piano` share one verb vocabulary:
-
-```
-get put            transfer
-move rename duplicate delete select   organization
-info deps list focus   interrogation
-edit               content (program, setlist, live, settings, sample, piano)
-```
-
-`live` keeps only the read-only subset plus `edit` — the live buffer is the panel
-as it stands, so there is nothing to name, delete, or select. `settings` is a
-singleton with nothing to organize, so it keeps `get`, `info` and `edit`. Other
-class-generic operations remain available through `raw --class 7`.
-
-`nord raw --class N` is those same verbs with the class given as a number. It is
-how to reach a class that has no noun of its own, or to address one by number.
+`program`, `setlist`, `sample` and `piano` share the same verbs: `get` and `put`
+to transfer, `move`, `rename`, `duplicate`, `delete` and `select` to organise,
+`info`, `deps`, `list` and `focus` to look, and `edit`. `live` and `settings`
+keep only the verbs that make sense for them. The read-only verbs and `edit` also
+take a file in place of a slot. `raw --class N` reaches an object class by
+number, for anything without a command of its own.
 
 ## Slots
 
-Slots are written **`BANK:SLOT`**, the way the instrument and Nord Sound Manager
-show them — `7:4` is bank 7, slot 4, both counted from 1. (`7-4` also parses.)
+Slots are written `BANK:SLOT`, counted from 1, the way the instrument shows
+them. `7:4` is bank 7, slot 4.
 
-## Output and interaction
+## Output
 
-- **Data on stdout, everything else on stderr.** `nord program get 7:4 | grep
-  transpose` sees the summary and nothing else.
-- **Color and unicode only on a terminal.** `--color=auto|always|never`;
-  `NO_COLOR` in the environment forces color off. Piped output is plain ASCII.
-- **A pipe is non-interactive.** On a terminal a destructive command asks for
-  confirmation; off one, a missing `--yes` is an error rather than a prompt.
+Colour and Unicode appear only on a terminal, and piped output is plain ASCII.
+`--color=always`, `--color=never` and `NO_COLOR` override that. Off a terminal,
+a command that would ask for confirmation fails instead, unless you pass
+`--yes`.
 
-From here: [working with files](files.md), [talking to an
-instrument](instrument.md), [editing an object](editing.md), and [samples and
-pianos](libraries.md).
+Next: [Files](files.md), [The instrument](instrument.md),
+[Editing](editing.md), and [Samples and pianos](libraries.md).

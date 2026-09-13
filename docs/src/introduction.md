@@ -1,30 +1,30 @@
 # drawbar
 
-> ⚠️ **Use at your own risk. This is alpha software.**
+drawbar reads, edits and moves the sounds on a Nord keyboard. It comes as an app
+that runs in your browser or on your desktop, and as `nord`, a command for your
+terminal.
 
-Drawbar is a blackbox Clavia / Nord reverse engineering project in Rust. It reads
-and writes Nord keyboard files and talks to Nord instruments over USB, on Linux,
-macOS, Windows, and in the browser.
+![drawbar with an instrument attached and a piano library open in its editor](assets/screenshot.png)
 
-![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](assets/screenshot.png)
+> **Alpha software.** Back up your instrument and your files before you use it.
+> The file formats and the USB protocol were worked out by studying real
+> instruments, and [What is supported](getting-started/support.md) says exactly
+> what has been tested on hardware.
 
-| Tool | What it is |
-|---|---|
-| **drawbar** | A cross-platform app — a file browser over the sounds on your computer and on an attached instrument, with an editor for each. Desktop or browser tab. |
-| **nord-cli** | The `nord` command — inspect, verify and edit files, and drive an attached instrument from a terminal. |
+**Open drawbar** at [drawbar.app](https://drawbar.app/) in Chrome or Edge.
+[Install](getting-started/install.md) covers the desktop app and `nord`.
 
-Both sit on two libraries: `nord-format` owns the bytes of a file, and `nord-usb`
-owns getting those bytes on and off the instrument.
+## In this guide
 
-- [Run drawbar in your browser](../)
-- [Source on GitHub](https://github.com/jmoo/drawbar)
+- **drawbar** is the app. Start with [The window](drawbar/overview.md).
+- **nord-cli** is the `nord` command. Start with its
+  [overview](nord-cli/overview.md).
+- **Reference** is for developers: building from source, the file formats, the
+  USB protocol, and how to contribute.
 
-Protocols and formats are decoded by interaction with real Nord devices, not by
-decompiling Clavia software. Hardware validation has focused on the Electro 5.
-Round-trip tests establish that file bytes are preserved; they do not establish
-that every decoded parameter or newly encoded sound behaves correctly on
-hardware. Back up your instrument before pointing anything here at sounds you
-cannot re-create.
+Both tools are built on two Rust libraries you can use in your own projects:
+`nord-format` for files and `nord-usb` for the instrument. The source is on
+[GitHub](https://github.com/jmoo/drawbar).
 
 ## Disclaimer
 

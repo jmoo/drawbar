@@ -1,54 +1,46 @@
 # 🎚️ drawbar
-> #### ⚠️ Use at your own risk, this is alpha software ⚠️
 
-Drawbar is a blackbox Clavia / Nord reverse engineering project in Rust that aims to be portable,
-complete, and well-tested. The core of the project is [nord-format](crates/nord-format/README.md) --
-a minimal dependency library that can read and write Nord keyboard files on Linux, macOS, Windows, and in the browser.
-It is suitable to back any project that supports FFI with Rust (e.g. JS via wasm, Python via PyO3).
+**Read, edit and move the sounds on your Nord keyboard.** In your browser, from
+your terminal, or from your own code.
 
-![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](docs/src/assets/screenshot.png)
+[**Open drawbar**](https://drawbar.app/) · [User guide](docs/src/introduction.md) · [What is supported](docs/src/getting-started/support.md)
 
-## In this repo
+![drawbar with an instrument attached and a piano library open in its editor](docs/src/assets/screenshot.png)
 
-| | Name | Description |
-|---|------|-------------|
-| 🎹 | [nord-format](crates/nord-format/README.md) | Clavia / Nord file parser/writer implementation in Rust |
-| 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | Declarative bit-packed panel definitions — the proc-macro behind nord-format |
-| 🛠️ | [nord-cli](crates/nord-cli/README.md) | Command-line tool for interacting with Clavia / Nord keyboards and files |
-| 🔌 | [nord-usb](crates/nord-usb/README.md) | Clavia / Nord USB protocol implementation in Rust |
-| 🎚️ | [drawbar](crates/drawbar/README.md) | Cross-platform GUI app for Clavia / Nord keyboards — view, edit, transfers, and more — for Windows, macOS, Linux, and web |
+> ⚠️ **Alpha.** Back up your instrument and your files first. Everything here was
+> worked out by studying real instruments, and
+> [what has been tested on hardware](docs/src/getting-started/support.md) is
+> written down.
 
-## Try it out!
+## What's here
 
+| | | |
+|---|---|---|
+| 🎚️ | [drawbar](crates/drawbar/README.md) | The app. Browse the sounds on your computer and your instrument side by side, edit them, and send them back. Browser or desktop. |
+| 🛠️ | [nord-cli](crates/nord-cli/README.md) | `nord`, the same from a terminal, for scripts. |
+| 🎹 | [nord-format](crates/nord-format/README.md) | Rust library: read and write Nord files, byte for byte. |
+| 🔌 | [nord-usb](crates/nord-usb/README.md) | Rust library: talk to a Nord over USB. |
+| 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | The macro behind nord-format's layouts. |
+
+## Try it
+
+Open [drawbar.app](https://drawbar.app/) in Chrome or Edge. Or, with
+[Nix](https://nixos.org/download/):
+
+```sh
+nix run github:jmoo/drawbar#drawbar              # the desktop app
+nix run github:jmoo/drawbar#nord-cli -- --help   # the nord command
 ```
-# Run nord-cli
-nix run .#nord-cli -- program get 1:1
 
-# Run the desktop app
-nix run .#drawbar
-
-# Run drawbar in the browser
-nix run .#drawbar-web
-```
-
-The latest released browser build is published at [drawbar.app](https://drawbar.app/),
-with the user guide at [drawbar.app/docs](https://drawbar.app/docs/).
-`nix build .#docs` builds that guide locally. As well as being a reference implementation, this repo
-documents Nord file structure and protocols: the byte mapping tables are generated from the code and
-browsable in the [rustdoc](https://docs.rs/nord-format/latest/nord_format/formats/).
-
-## Status
-
-This is still alpha software and should be used with caution. Drawbar is a blackbox reverse engineering
-effort -- protocols and formats are decoded by interaction with real Nord devices rather than by
-decompiling Clavia software, and hardware validation has focused on the **Electro 5**. Which instruments,
-formats and USB operations are supported, and which claims are confirmed on hardware rather than inferred
-from specimens, is listed under
-[Supported instruments and formats](https://drawbar.app/docs/getting-started/support.html).
+The [user guide](docs/src/introduction.md) covers both. Developers will find the
+file formats, the USB protocol and
+[how to build from source](docs/src/reference/building.md) in its Reference
+section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
-Not affiliated with, authorized, or endorsed by Clavia DMI AB. (https://www.nordkeyboards.com)
-"Nord", "Clavia", and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
-hardware these formats come from. Committed fixtures are self-generated files and
-protocol captures. Proprietary sound libraries and firmware are not distributed here.
+Not affiliated with, authorized, or endorsed by Clavia DMI AB
+(https://www.nordkeyboards.com). "Nord", "Clavia", and "Electro" are trademarks
+of Clavia DMI AB, used here only to identify the hardware these formats come
+from. Committed fixtures are self-generated files and protocol captures.
+Proprietary sound libraries and firmware are not distributed here.

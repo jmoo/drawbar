@@ -1,32 +1,30 @@
 # Install
 
-The project is Nix-native. With [Nix](https://nixos.org/download/) installed and
-flakes enabled, nothing else needs to be on the machine:
+## In the browser
+
+Open [drawbar.app](https://drawbar.app/). Nothing to install, and your files stay
+in the browser's own storage.
+
+Only Chrome and Edge can connect to an instrument, because Firefox and Safari do
+not support WebUSB. Files work in any browser.
+
+Close Nord Sound Manager before connecting. It keeps the USB connection to
+itself, so nothing else can reach the instrument while it is running.
+
+## On the desktop
+
+With [Nix](https://nixos.org/download/) and flakes enabled:
 
 ```sh
-nix run github:jmoo/drawbar#nord-cli -- --help   # the CLI
-nix run github:jmoo/drawbar#drawbar              # the desktop app
-nix run github:jmoo/drawbar#drawbar-web          # drawbar in the browser
+nix run github:jmoo/drawbar#drawbar
 ```
 
-From a checkout of the repository, `.#` replaces `github:jmoo/drawbar#`. The
-latest released browser build is also hosted one level up from this guide:
-[run drawbar in your browser](../../).
+## The `nord` command
 
-## Browsers
+```sh
+cargo install nord-cli                           # installs `nord`
+nix run github:jmoo/drawbar#nord-cli -- --help   # or run it with Nix
+```
 
-drawbar reaches an instrument through WebUSB, which two browsers decline.
-
-| Browser | Works |
-|---|---|
-| Chrome | yes |
-| Edge | yes |
-| Firefox | no — WebUSB declined |
-| Safari | no — WebUSB declined |
-
-> **Close Nord Sound Manager before connecting.** It claims the vendor interface
-> exclusively, and nothing else — drawbar, `nord`, or Chrome — can attach
-> alongside it.
-
-Building either target from a source checkout is covered in
-[Build and run](../drawbar/build.md).
+There are no packaged downloads yet. To build either from a source checkout, see
+[Building from source](../reference/building.md).

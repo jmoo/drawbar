@@ -1,50 +1,36 @@
 # drawbar
 
-An [egui](https://github.com/emilk/egui) app over
-[`nord-format`](../nord-format) and [`nord-usb`](../nord-usb) — everything
-[`nord-cli`](../nord-cli) can do that is worth a window, reachable from a browser
-tab or a desktop one.
+**Your Nord's sounds, in a window.** See what is on your computer and on your
+instrument side by side, edit programs, samples and pianos, and send them back.
+Runs in the browser or on the desktop.
 
-![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](../../docs/src/assets/screenshot.png)
+![drawbar with an instrument attached and a piano library open in its editor](../../docs/src/assets/screenshot.png)
 
-It opens at <https://drawbar.app/>. The window is a dock shell around your sounds:
-a browser tree over this computer, an attached instrument's folders, kinds and
-tags; a Library table over both places; a Keyboard tab for the instrument; and an
-inspector. Anything you open becomes a document under one header, with an editor
-for Nord Electro 5 and Stage programs, set lists, sample instruments, Sample Editor
-projects and piano libraries. A send waits in a send queue, where you can review
-what it replaces, until you send the queue.
-
-## Usage
+Open [drawbar.app](https://drawbar.app/) in Chrome or Edge, or run the desktop
+app:
 
 ```sh
-nix run .#drawbar            # the desktop app
-nix run .#drawbar-web        # drawbar in the browser
+nix run github:jmoo/drawbar#drawbar
+cargo install drawbar
 ```
 
-The user guide walks through it:
+- Drop Nord files in, or connect an instrument and read what it holds.
+- Edit a program on a panel laid out like the instrument's, or any field in a
+  table.
+- Trim a piano library until it fits, build a sample instrument from WAVs, and
+  listen to either before you send it.
+- Queue your changes and send them in one go, with a review of what each one
+  replaces.
 
-- [Using drawbar](https://drawbar.app/docs/drawbar/overview.html): the window,
-  this computer, the instrument and the send queue.
-- [Editing](https://drawbar.app/docs/drawbar/editing.html),
-  [Samples](https://drawbar.app/docs/drawbar/samples.html) and
-  [Pianos](https://drawbar.app/docs/drawbar/pianos.html): the document editors.
-- [Build and run](https://drawbar.app/docs/drawbar/build.html): the native and web
-  builds in full, and browser support.
+Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
+and read [What is supported](../../docs/src/getting-started/support.md) before
+trusting alpha software with sounds you cannot re-create.
 
-## Build and test
+## Building
 
-From `crates/` inside the development shell:
-
-```sh
-cargo run -p drawbar
-cargo test -p drawbar
-```
-
-`nix build .#drawbar-web` produces the whole servable bundle, the bound wasm
-module beside `index.html`, in one step. The `--target wasm32-unknown-unknown`
-builds must run from `crates/` or below, because `crates/.cargo/config.toml`
-supplies the `--cfg=web_sys_unstable_apis` that WebUSB needs in `web-sys`.
+`nix develop`, then from `crates/`: `cargo run -p drawbar` and `cargo test -p
+drawbar`. `nix build .#drawbar-web` makes the browser bundle. The rest is in
+[Building from source](../../docs/src/reference/building.md).
 
 ## Disclaimer
 

@@ -1,25 +1,20 @@
 # nord-format
 
-Parse and write **Clavia / Nord** keyboard binary file formats from Rust.
+**Read and write Nord keyboard files from Rust, byte for byte.**
 
-This is the pure format-logic crate of the drawbar toolkit: the `CBIN` container
-(both header generations, each with its checksum), and per-model entity layouts
-declared once with `#[bitbody]`. Its dependencies are [`crcxx`], [`thiserror`],
-and the matching `nord-bits-derive` crate (plus `zip` behind the `bundle` feature
-for backup bundles). It does no USB, OS, or I/O beyond `Read`/`Seek`/`Write` — so
-it's trivially testable against a specimen corpus, reusable by higher layers (a
-device/USB crate, a CLI) without dragging in a transport stack, and portable
-anywhere `std` is, wasm included.
+Programs, live slots, set lists, settings, sample instruments and piano
+libraries, from a library with no I/O of its own beyond `Read`, `Seek` and
+`Write`. It builds anywhere `std` does, including the browser.
 
-**Lossless round-trip is the core invariant.** Unknown regions are kept as raw
-byte blocks and decoded values are exposed as read-only views over them, so
-`parse → write` is byte-identical even where the semantics are incomplete — and a
-newly decoded field is never a risk to the write path.
+What you read, you can write back unchanged. Anything the library does not yet
+decode is kept as raw bytes, so a file survives a round trip even where its
+meaning is not fully known, and every editable field is checked to move no other
+bit.
 
 ## Usage
 
-`from_path` / `from_stream` sniff the container and return an [`Entity`]; each
-format lives under `formats::`, named for the four-character CBIN tag it carries.
+`from_path` and `from_stream` detect the format and return an `Entity`. Decoded
+fields read as struct fields:
 
 ```rust
 use nord_format::{from_path, Entity, Program};
@@ -29,19 +24,16 @@ use nord_format::formats::ne5::OrganModel;
 let entity = from_path("patch.ne5p")?;
 
 if let Entity::Program(Program::Electro5(p)) = entity {
-    // `p` is a `Cbin<ne5::Program>`: the CBIN header plus the decoded body,
-    // and it derefs to the body, so the panels read as fields.
+    // `p` is the CBIN header plus the decoded body, and derefs to the body.
     println!("location: {:?}", p.location());
     println!("gain: {:?}", p.center_panel.gain);
 
-    // Organ state is decoded per model + selected preset:
     let preset = p.organ_panel.preset(OrganModel::B3);
     println!("B3 drawbars: {:?}", p.organ_panel.drawbars(OrganModel::B3, preset));
 }
 ```
 
-Every `#[bitbody]` also generates a field registry, so a field is settable by
-being declared — no table of names on the consumer's side:
+Every layout also has a field registry, so any field can be set by its path:
 
 ```rust
 use nord_format::{from_path, to_bytes};
@@ -53,27 +45,20 @@ if let Some(registry) = entity.registry_mut() {
 std::fs::write("out.ne5p", to_bytes(&entity)?)?;
 ```
 
-## Build & test
+## Learn more
 
-From `crates/` in the development shell:
+- The [`formats` module](https://docs.rs/nord-format/latest/nord_format/formats/)
+  on docs.rs lists every supported file and how far its support goes.
+- [File formats](../../docs/src/reference/file-formats.md) in the guide explains
+  the support tiers and the registry.
+- [Testing](../../docs/src/reference/testing.md) explains what the fixture sweep
+  and the private corpus prove.
 
-```sh
-cargo test -p nord-format          # unit + dispatch + the committed fixtures sweep
-```
+## Building
 
-`bundle` adds ZIP-based backup bundles and is off by default so parse-only
-consumers stay lean. The test-only `corpus` feature adds the private specimen
-corpus at `NORD_CORPUS_ROOT` to the sweep (and implies `bundle`, because the
-corpus holds ZIP banks): `nix build .#nord.nord-format-corpus`. `nix build
-.#nord-format` builds and tests the crate on its own.
-
-## More
-
-- [`nord-format` on docs.rs](https://docs.rs/nord-format) — the support map lives
-  in the [`formats`] module docs, beside the code it describes
-- [File formats][guide] — the support tiers, the round-trip invariant, and the
-  field registry
-- [Testing][testing] — what each suite proves
+`cargo test -p nord-format` from `crates/` in `nix develop`. The `bundle` feature
+adds ZIP backup bundles. The test-only `corpus` feature points the sweep at the
+private corpus.
 
 ## Disclaimer
 
@@ -81,10 +66,3 @@ Not affiliated with, authorized, or endorsed by Clavia DMI AB. "Nord", "Clavia",
 and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
 hardware these formats come from. All reverse engineering is of files produced by
 Nord hardware, for interoperability.
-
-[`crcxx`]: https://docs.rs/crcxx
-[`thiserror`]: https://docs.rs/thiserror
-[`Entity`]: https://docs.rs/nord-format
-[`formats`]: https://docs.rs/nord-format/latest/nord_format/formats/
-[guide]: https://drawbar.app/docs/reference/file-formats.html
-[testing]: https://drawbar.app/docs/reference/testing.html
