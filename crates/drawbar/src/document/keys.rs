@@ -681,18 +681,27 @@ pub fn bands(
     if act.is_some() {
         return act;
     }
-    // A handle sits over the band it belongs to, and is the thing the click was for.
-    let picked = response
+    let picked = picked_at(&response, &grabs)?;
+    row_at(rect, span, &bounds, picked.x).map(BandAct::Pick)
+}
+
+/// Where a click on a lane landed.
+///
+/// ⚠️ A handle sits over the row it belongs to and is the thing the click was for, so a
+/// click inside one is never a pick.
+fn picked_at(response: &egui::Response, grabs: &[egui::Rect]) -> Option<egui::Pos2> {
+    response
         .clicked()
         .then(|| response.interact_pointer_pos())
         .flatten()
-        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
-    zones
+        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))
+}
+
+/// The row whose keys `x` falls in.
+fn row_at(rect: egui::Rect, span: Span, bounds: &[(u8, u8)], x: f32) -> Option<usize> {
+    bounds
         .iter()
-        .position(|band| {
-            picked.x >= span.x_of(rect, band.low) && picked.x < span.x_after(rect, band.top)
-        })
-        .map(BandAct::Pick)
+        .position(|(low, top)| x >= span.x_of(rect, *low) && x < span.x_after(rect, *top))
 }
 
 /// The three states a band wears.
@@ -1029,17 +1038,8 @@ pub fn size_cells(
     if act.is_some() {
         return act;
     }
-    let picked = response
-        .clicked()
-        .then(|| response.interact_pointer_pos())
-        .flatten()
-        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
-    cells
-        .iter()
-        .position(|cell| {
-            picked.x >= span.x_of(rect, cell.low) && picked.x < span.x_after(rect, cell.top)
-        })
-        .map(BandAct::Pick)
+    let picked = picked_at(&response, &grabs)?;
+    row_at(rect, span, &bounds, picked.x).map(BandAct::Pick)
 }
 
 /// How many keys a cell spans.
@@ -1309,11 +1309,7 @@ pub fn velocity(
     if act.is_some() {
         return act;
     }
-    let picked = response
-        .clicked()
-        .then(|| response.interact_pointer_pos())
-        .flatten()
-        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
+    let picked = picked_at(&response, &grabs)?;
     blocks
         .iter()
         .position(|block| cell(rect, span, block, block.window).contains(picked))
