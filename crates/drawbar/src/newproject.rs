@@ -343,8 +343,9 @@ fn draft_name(making: Making, paths: &[String]) -> String {
         stem => stem,
     };
     let mut name = stem.to_string();
-    if making == Making::Instrument {
-        fits(&mut name, MAX_NAME_LEN);
+    match making {
+        Making::Project | Making::Piano => {}
+        Making::Instrument => fits(&mut name, MAX_NAME_LEN),
     }
     name
 }

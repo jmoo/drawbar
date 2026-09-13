@@ -1041,13 +1041,9 @@ impl Workspace {
         if self.respell(id, saved).is_none() {
             return;
         }
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
-            return;
-        };
-        // The bytes came off the baseline, so the asset is holding it again — nothing
-        // has to compare the two to know it.
-        entity.saved.stamp = entity.stamp;
-        log.say(format!("“{}” is back as it was last saved.", entity.name));
+        if let Some(entity) = self.get(id) {
+            log.say(format!("“{}” is back as it was last saved.", entity.name));
+        }
     }
 
     /// The bytes it holds are what it is saved as, from now on.
@@ -1128,9 +1124,21 @@ impl Workspace {
             return None;
         }
         let stamp = self.stamp();
+        // The baseline stays where it is; whether the asset is holding it does not. A
+        // revert, and an edit made and then unmade, each put back what it was saved as.
+        let held = self
+            .get(id)
+            .is_some_and(|entity| entity.saved.bytes == bytes);
         let entity = self.entities.iter_mut().find(|e| e.id == id)?;
         let (kept, link, wrote) = (entity.kept, entity.link, entity.wrote);
         let saved = std::mem::take(&mut entity.saved);
+        let saved = Baseline {
+            stamp: match held {
+                true => stamp,
+                false => saved.stamp,
+            },
+            ..saved
+        };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
         let verify = replaced.verify.clone();
@@ -1819,6 +1827,14 @@ mod tests {
         workspace.revert(id, &mut log);
         assert!(!unsaved(&workspace));
         assert_eq!(workspace.get(id).unwrap().bytes, edited);
+
+        // And an edit unmade by hand is the baseline again, whatever route it took.
+        let (_, away) =
+            crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
+        workspace.replace_bytes(id, away, &mut log);
+        assert!(unsaved(&workspace));
+        workspace.replace_bytes(id, edited, &mut log);
+        assert!(!unsaved(&workspace), "it holds what it was saved as again");
     }
 
     /// A write that reached a slot saves the bytes it carried and not the ones the
