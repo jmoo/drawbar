@@ -1004,6 +1004,19 @@ impl Device {
         self.link.disconnect();
     }
 
+    /// Let the instrument go on the way out, and wait for the worker to close the
+    /// session it is in.
+    ///
+    /// ⚠️ The window closing mid-command would otherwise cut a transaction: the
+    /// instrument is left holding an open session until it times out. The wait is
+    /// bounded, because an instrument that has stopped answering must not hold the
+    /// window open.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn release(&mut self) {
+        self.link.disconnect();
+        self.link.join(std::time::Duration::from_secs(2));
+    }
+
     /// Queue one command the user asked for. It runs ahead of the background read, and
     /// after whatever is already in flight — the protocol runs one transaction at a
     /// time.

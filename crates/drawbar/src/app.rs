@@ -323,6 +323,12 @@ impl eframe::App for DrawbarApp {
         self.saved = self.workspace.revision();
     }
 
+    /// eframe calls this once on the way out, after [`Self::save`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.device.release();
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.log.tick(ctx);
         self.workspace.poll(&mut self.log);
