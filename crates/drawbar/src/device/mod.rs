@@ -593,15 +593,29 @@ impl DeviceState {
         seen
     }
 
+    /// A scanned bank's slots, each with the address it answers to, in address order. A
+    /// bank no walk has read has none.
+    ///
+    /// ⚠️ The one place the scan cache's own numbering — a bank as the panel counts it,
+    /// slots from one — becomes the zero-indexed [`Location`] everything else addresses.
+    pub fn slots_of(
+        &self,
+        class: ObjectClass,
+        bank: u32,
+    ) -> impl Iterator<Item = (Location, &Option<ProgramInfo>)> + '_ {
+        self.bank(class, bank)
+            .unwrap_or_default()
+            .iter()
+            .zip(1u32..)
+            .map(move |(held, slot)| (Location::from_user(bank, slot), held))
+    }
+
     /// Every slot of `class` a walk found vacant, in address order.
     pub fn free_slots(&self, class: ObjectClass) -> impl Iterator<Item = Location> + '_ {
         self.banks_of(class).into_iter().flat_map(move |bank| {
-            self.bank(class, bank)
-                .unwrap_or_default()
-                .iter()
-                .enumerate()
+            self.slots_of(class, bank)
                 .filter(|(_, held)| held.is_none())
-                .map(move |(slot, _)| Location::from_user(bank, slot as u32 + 1))
+                .map(|(at, _)| at)
         })
     }
 

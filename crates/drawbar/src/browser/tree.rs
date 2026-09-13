@@ -74,7 +74,9 @@ pub(super) enum Branch {
     Folder(u64),
     Instrument,
     Class(u32),
-    Bank(u32, u32),
+    /// ⚠️ The bank as the panel counts it, which is the numbering the scan cache is keyed
+    /// by — never a [`Location`]'s own zero-indexed one.
+    Bank(u32, u64),
 }
 
 /// Which of the three sections are showing.
@@ -153,6 +155,11 @@ fn nothing(ui: &mut egui::Ui, depth: usize, said: &str) {
 /// and the rows would only narrow the library to what it already shows.
 fn worth_choosing(kinds: &[Kind]) -> bool {
     kinds.len() > 1
+}
+
+/// The open-set key for one bank's rows.
+pub(super) fn bank_branch(class: ObjectClass, bank: u64) -> Branch {
+    Branch::Bank(class.to_raw(), bank)
 }
 
 /// What a local row's kind word needs from beyond the row: the families the list on this
@@ -854,7 +861,7 @@ impl Browser {
         // a slot that is inside something closed.
         if let Some((held, at)) = self.jump.filter(|(held, _)| *held == class) {
             self.open.insert(Branch::Class(class.to_raw()));
-            self.open.insert(Branch::Bank(held.to_raw(), at.bank + 1));
+            self.open.insert(bank_branch(held, at.user_bank()));
         }
         let open = self.open.contains(&Branch::Class(class.to_raw()));
         let progress = device.state.scan.progress(class);
@@ -965,11 +972,10 @@ impl Browser {
         };
         let count = slots.len();
         let held = slots.iter().filter(|slot| slot.is_some()).count();
-        let list: Vec<Item> = (0..count)
-            .map(|index| Item::Slot {
-                class,
-                at: Location::from_user(bank, index as u32 + 1),
-            })
+        let list: Vec<Item> = device
+            .state
+            .slots_of(class, bank)
+            .map(|(at, _)| Item::Slot { class, at })
             .collect();
 
         let depth = match cut {
@@ -988,7 +994,7 @@ impl Browser {
                 false,
                 &Cells {
                     indent: indent(2, true),
-                    open: Some(self.open.contains(&Branch::Bank(class.to_raw(), bank))),
+                    open: Some(self.open.contains(&bank_branch(class, u64::from(bank)))),
                     glyph: Some(Glyph::Folder),
                     name: &name,
                     count: Some(format!("{held}/{count}")),
@@ -997,9 +1003,9 @@ impl Browser {
                 },
             );
             if drawn.response.clicked() {
-                self.twist(Branch::Bank(class.to_raw(), bank));
+                self.twist(bank_branch(class, u64::from(bank)));
             }
-            if !self.open.contains(&Branch::Bank(class.to_raw(), bank)) {
+            if !self.open.contains(&bank_branch(class, u64::from(bank))) {
                 return;
             }
         }

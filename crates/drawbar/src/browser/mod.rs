@@ -679,7 +679,7 @@ mod tests {
             for class in device.state.classes() {
                 browser.open.insert(Branch::Class(class.to_raw()));
                 for bank in 0..=8 {
-                    browser.open.insert(Branch::Bank(class.to_raw(), bank));
+                    browser.open.insert(tree::bank_branch(class, bank));
                 }
             }
         }
