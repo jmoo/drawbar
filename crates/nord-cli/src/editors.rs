@@ -88,7 +88,10 @@ fn unknown(path: &str) -> String {
 }
 
 /// `zone3` → 3, under any label — the 1-based spelling every listing uses.
-fn indexed(part: &str, label: &str) -> Option<usize> {
+///
+/// The width is the ids the formats store, so an id too large to be one is no
+/// path rather than a wrapped id that names some other block.
+fn indexed(part: &str, label: &str) -> Option<u32> {
     part.strip_prefix(label)
         .and_then(|n| n.parse().ok())
         .filter(|&n| n >= 1)
@@ -157,19 +160,25 @@ impl Fields for SampleEditor<'_> {
         if path == "name" {
             return sample.set_name(value).map_err(|e| e.to_string());
         }
+        if !sample.zones_are_editable() {
+            return Err(format!(
+                "{path}: this instrument's zones cannot be edited; --fields lists what can"
+            ));
+        }
         let (zone, field) = path.split_once('.').ok_or_else(|| unknown(path))?;
         let index = indexed(zone, "zone").ok_or_else(|| unknown(path))?;
         // Checked here so the message speaks the CLI's 1-based numbering, not
         // the format crate's 0-based one.
         let zones = sample.zones().map_err(|e| e.to_string())?.len();
-        if index > zones {
-            return Err(format!("no zone {index}: the instrument has {zones}"));
-        }
+        let at = usize::try_from(index - 1)
+            .ok()
+            .filter(|&at| at < zones)
+            .ok_or_else(|| format!("no zone {index}: the instrument has {zones}"))?;
         let value = note::parse(value)?;
         match field {
-            "root_key" => sample.set_root_key(index - 1, value),
-            "top_note" => sample.set_zone_top_note(index - 1, value),
-            "low_note" => sample.set_zone_low_note(index - 1, value),
+            "root_key" => sample.set_root_key(at, value),
+            "top_note" => sample.set_zone_top_note(at, value),
+            "low_note" => sample.set_zone_low_note(at, value),
             _ => return Err(unknown(path)),
         }
         .map_err(|e| e.to_string())
@@ -200,10 +209,19 @@ impl Fields for SongEditor<'_> {
 
     fn set(&mut self, path: &str, value: &str) -> Result<(), String> {
         let slot = indexed(path, "slot")
-            .filter(|&n| n <= song::PROGRAM_COUNT)
+            .filter(|&n| n as usize <= song::PROGRAM_COUNT)
             .ok_or_else(|| unknown(path))?;
         let at = crate::slot::parse(value)?;
-        let target: program::Location = (at.bank as u16, at.slot as u16)
+        let in_range = |n: u32| {
+            u16::try_from(n).map_err(|_| {
+                format!(
+                    "{path}: {value:?} is not a program slot (1:1 .. {}:{})",
+                    program::BANK_COUNT,
+                    program::SLOT_COUNT
+                )
+            })
+        };
+        let target: program::Location = (in_range(at.bank)?, in_range(at.slot)?)
             .try_into()
             .map_err(|e| format!("{path}: {e}"))?;
         self.0.set(slot as u16 - 1, target);
@@ -344,13 +362,13 @@ impl Fields for ProjectEditor<'_> {
                 return Err(unknown(path));
             }
             return project
-                .set_audio_path(id as u32, value)
+                .set_audio_path(id, value)
                 .map_err(|e| e.to_string());
         }
         if let Some(id) = indexed(block, "stroke") {
             let field = StrokeField::parse(field, value).map_err(|e| format!("{path}: {e}"))?;
             return project
-                .set_stroke_field(id as u32, field)
+                .set_stroke_field(id, field)
                 .map_err(|e| e.to_string());
         }
         if block == "velocity" {
@@ -365,7 +383,7 @@ impl Fields for ProjectEditor<'_> {
                 .set_velocity_defaults(defaults)
                 .map_err(|e| e.to_string());
         }
-        let id = indexed(block, "zone").ok_or_else(|| unknown(path))? as u32;
+        let id = indexed(block, "zone").ok_or_else(|| unknown(path))?;
         let zones = project.zones().map_err(|e| e.to_string())?;
         let zone = zones
             .iter()
@@ -498,6 +516,43 @@ mod tests {
         assert_eq!(rows[0].path, "name");
     }
 
+    /// A path `--fields` does not list is not settable either: the listing is the
+    /// contract, and the name stays settable whatever the key map says.
+    #[test]
+    fn uneditable_zone_paths_are_not_settable_either() {
+        let mut sample = sample_with_unreadable_map();
+        let err = SampleEditor(&mut sample)
+            .set("zone1.root_key", "C4")
+            .unwrap_err();
+        assert!(err.contains("cannot be edited"), "{err}");
+        SampleEditor(&mut sample).set("name", "Marimba").unwrap();
+        assert_eq!(sample.name().unwrap(), "Marimba");
+    }
+
+    /// The zone paths the listing prints come back out of it holding what was
+    /// set, and a zone past the last one is refused rather than editing another.
+    #[test]
+    fn sample_zone_paths_round_trip_and_stop_at_the_last_zone() {
+        let mut sample = sample_with_key_map();
+        {
+            let mut editor = SampleEditor(&mut sample);
+            editor.set("zone1.root_key", "B3").unwrap();
+            editor.set("zone2.top_note", "C7").unwrap();
+            let err = editor.set("zone3.root_key", "C4").unwrap_err();
+            assert!(err.contains("no zone 3"), "{err}");
+        }
+        let rows = SampleEditor(&mut sample).rows().unwrap();
+        let value = |path: &str| {
+            rows.iter()
+                .find(|r| r.path == path)
+                .unwrap_or_else(|| panic!("{path} is not listed"))
+                .value
+                .clone()
+        };
+        assert_eq!(value("zone1.root_key"), "B3");
+        assert_eq!(value("zone2.top_note"), "C7");
+    }
+
     /// The paths a listing prints are the paths `set` takes, ids included.
     #[test]
     fn project_paths_round_trip_from_the_listing() {
@@ -600,6 +655,19 @@ mod tests {
         }
     }
 
+    /// An id wider than the format's own is no block at all: truncating one
+    /// would edit whichever block the low bits happen to name.
+    #[test]
+    fn an_overlong_block_id_is_unknown_rather_than_wrapped() {
+        let mut project = project();
+        let before = project.audio_files().unwrap()[0].path.clone();
+        let err = ProjectEditor(&mut project)
+            .set("file4294967297.path", "wrapped.wav")
+            .unwrap_err();
+        assert!(err.contains("unknown field"), "{err}");
+        assert_eq!(project.audio_files().unwrap()[0].path, before);
+    }
+
     /// Setting one end of a key range keeps the other end where it was.
     #[test]
     fn a_key_range_moves_one_end_at_a_time() {
@@ -632,5 +700,20 @@ mod tests {
             assert!(SongEditor(&mut song).set("slot1", bad).is_err(), "{bad}");
         }
         assert!(SongEditor(&mut song).set("slot5", "1:1").is_err());
+    }
+
+    /// An address wider than the location type is refused: narrowing one would
+    /// point the slot at whatever the low bits spell.
+    #[test]
+    fn a_program_address_too_wide_for_a_location_is_refused_rather_than_narrowed() {
+        let mut song = ne5::song::new(
+            (0, 0).try_into().unwrap(),
+            ne5::song::DEFAULT_VERSION,
+            [(0, 0).try_into().unwrap(); 4],
+        );
+        for bad in ["65537:1", "1:65537", "4294967297:1"] {
+            assert!(SongEditor(&mut song).set("slot1", bad).is_err(), "{bad}");
+        }
+        assert_eq!(song.get(0).inner(), (0, 0));
     }
 }
