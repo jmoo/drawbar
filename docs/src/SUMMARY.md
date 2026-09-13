@@ -32,3 +32,7 @@
 - [USB protocol](reference/usb-protocol.md)
 - [Testing](reference/testing.md)
 - [Contributing](reference/contributing.md)
+
+---
+
+[Community](community.md)
