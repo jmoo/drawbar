@@ -242,8 +242,8 @@ impl Advanced {
         ));
     }
 
-    /// The one editable column. A box opens where the value is clicked, commits on Enter
-    /// or on losing focus, and stays open holding what was typed while the library is
+    /// The one editable column. A box opens where the value is clicked, commits when it
+    /// gives up the focus, and stays open holding what was typed while the library is
     /// refusing it.
     fn writes(&mut self, ui: &mut egui::Ui, field: &Field, sets: &mut Sets) {
         let width = COLUMNS[4].1;
@@ -291,8 +291,6 @@ impl Advanced {
                 state.store(ui.ctx(), response.id);
             }
         }
-        // The refusal sits beside the cell it is about: a message at the foot of eight
-        // hundred rows is a message about nothing in particular.
         if let Some(why) = &self.cell.error {
             ui.label(
                 egui::RichText::new(why)
@@ -300,15 +298,26 @@ impl Advanced {
                     .color(crate::app::bad(ui.visuals())),
             );
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // ⚠️ The cell's own keys, which a `TextEdit` gives up the focus on. Read from
+        // the window, an Enter pressed anywhere submitted every cell left open on
+        // screen — including one the library had already refused, which went back to
+        // it and into the log on every press.
+        if !response.lost_focus() {
+            return;
+        }
+        let (escaped, entered) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Enter),
+            )
+        });
+        if escaped {
             self.cell = Cell::default();
             return;
         }
-        let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
         // Losing focus while a refusal is showing keeps the cell open: the typed value
-        // is the only copy of what the operator meant.
-        let settled = entered || (response.lost_focus() && self.cell.error.is_none());
-        if !settled {
+        // is the only copy of what the operator meant, and Enter is what tries again.
+        if self.cell.error.is_some() && !entered {
             return;
         }
         let typed = self.cell.text.trim().to_string();

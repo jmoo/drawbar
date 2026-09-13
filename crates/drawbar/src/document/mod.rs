@@ -2333,6 +2333,38 @@ mod tests {
         assert_eq!(document.advanced.editing(), None, "left behind");
     }
 
+    /// ⚠️ A cell's Enter is the cell's. A cell the library refused stays open holding
+    /// what was typed, and an Enter read from the window submitted it again — and
+    /// logged the refusal again — wherever the operator was typing at the time.
+    #[test]
+    fn an_enter_elsewhere_does_not_submit_a_refused_cell_again() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.document.views.insert(open.id, Face::Advanced);
+        open.frame(Vec::new());
+        open.document
+            .advanced
+            .pretend_editing("center_panel.gain", "200");
+        // One frame takes the focus the cell asked for, the next types Enter in it.
+        open.frame(Vec::new());
+        open.frame(vec![enter()]);
+        assert!(
+            open.document.refusal().is_some(),
+            "the library turned 200 down"
+        );
+        assert_eq!(
+            open.document.advanced.editing(),
+            Some("center_panel.gain"),
+            "and the cell keeps what was typed"
+        );
+
+        // The focus is the header's name box now; the cell is still open behind it.
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        let said = open.log.len();
+        open.frame(vec![enter()]);
+        assert_eq!(open.log.len(), said, "nothing was submitted a second time");
+    }
+
     /// The registry spells an id in decimal; a person spells it the way `nord deps` does.
     #[test]
     fn a_library_id_reads_in_either_spelling() {

@@ -931,6 +931,10 @@ fn name(
 
 /// A single-line name box that commits when it is done rather than per keystroke: half a
 /// name is a name the format would take.
+///
+/// ⚠️ Done is this box giving up the focus, which a single-line `TextEdit` does on Enter.
+/// An Enter read from the window would settle every name box on screen, so a value the
+/// format had already refused went back to it on every Enter the operator pressed.
 fn settled(
     ui: &mut egui::Ui,
     text: &mut String,
@@ -948,7 +952,7 @@ fn settled(
     if let Some(limit) = limit {
         controls::fits(text, limit);
     }
-    response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter))
+    response.lost_focus()
 }
 
 /// What a typed name is stored as: the words that were typed, under the format tag the
@@ -1275,6 +1279,57 @@ mod tests {
             &mut log,
         );
         (workspace, id)
+    }
+
+    /// ⚠️ A name box settles on its own Enter. Read from the window, every box on
+    /// screen settled together, so a name the format had refused went back to it — and
+    /// into the log — on every Enter the operator pressed anywhere.
+    #[test]
+    fn a_name_box_settles_on_its_own_enter_rather_than_the_windows() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        let mut text = "Marimba".to_string();
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = |pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frame = |events: Vec<egui::Event>, text: &mut String| {
+            let mut done = false;
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 100.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    done = settled(ui, text, NAME, None, false);
+                });
+            });
+            done
+        };
+
+        assert!(!frame(Vec::new(), &mut text), "nothing has happened");
+        assert!(
+            !frame(vec![key(egui::Key::Enter)], &mut text),
+            "the box never had the focus"
+        );
+        let _ = frame(vec![at(egui::pos2(40.0, 20.0))], &mut text);
+        assert!(
+            frame(vec![key(egui::Key::Enter)], &mut text),
+            "an Enter typed in the box is the box being done with"
+        );
     }
 
     /// The collapse order is decided on three widths, and a width exactly on one is
