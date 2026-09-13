@@ -47,6 +47,7 @@ glyphs! {
     CircleDashed => "circle-dashed.svg",
     CircleDot => "circle-dot.svg",
     CircleHelp => "circle-help.svg",
+    CircleX => "circle-x.svg",
     Clock => "clock.svg",
     Columns2 => "columns-2.svg",
     Disc3 => "disc-3.svg",

@@ -37,6 +37,48 @@ pub(crate) fn link(ui: &mut egui::Ui, label: &str, url: &str) {
     ui.add(egui::Hyperlink::from_label_and_url(label, url).open_in_new_tab(true));
 }
 
+/// How far a claim about this build has been borne out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Standing {
+    Supported,
+    /// Implemented, but not yet tried on a real instrument.
+    Untested,
+    Unsupported,
+}
+
+/// What to expect of this build, shown beneath the alpha notice.
+pub const EXPECTATIONS: &[(Standing, &str)] = &[
+    (
+        Standing::Supported,
+        "Piano (npno) and sample (nsmp) files can be created, trimmed, modified, encoded, \
+         decoded, auditioned and transferred.",
+    ),
+    (
+        Standing::Supported,
+        "All Nord Electro 5 files can be viewed, edited and transferred: programs, live, \
+         settings, and set lists or songs.",
+    ),
+    (
+        Standing::Supported,
+        "The Nord Electro 5 has full USB support.",
+    ),
+    (
+        Standing::Untested,
+        "nsmp3 and nsmp4 files are fully supported, but playback of files drawbar has edited \
+         or modified has not been tested on a real instrument.",
+    ),
+    (
+        Standing::Untested,
+        "Nord Stage 2, 3 and 4 programs and presets are supported, but not tested on real \
+         instruments.",
+    ),
+    (
+        Standing::Unsupported,
+        "Instruments other than the Nord Electro 5 have not been tested with Connect an \
+         instrument…, so USB support for other models cannot be guaranteed.",
+    ),
+];
+
 /// One line of the notes, in the terms the modal paints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Line<'a> {

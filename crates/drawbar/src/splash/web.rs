@@ -7,9 +7,11 @@ use eframe::egui;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use super::{classify, https, link, plain, title, Commit, Line, GAP, VERSION, WIDTH};
+use super::{
+    classify, https, link, plain, title, Commit, Line, Standing, EXPECTATIONS, GAP, VERSION, WIDTH,
+};
 use crate::about::RELEASES;
-use crate::app::warn;
+use crate::app::{bad, good, warn};
 use crate::icon::{icon, Glyph};
 
 /// Which version's notes have already been read.
@@ -31,6 +33,13 @@ const MOST: usize = 64 * 1024;
 
 /// The most of the modal the notes may claim.
 const NOTES: f32 = 320.0;
+
+/// The height the modal needs around the notes — title, notice, expectations and
+/// Continue — so on a short window the notes scroll rather than push Continue off-screen.
+const AROUND: f32 = 380.0;
+
+/// The notes are never shorter than this, however short the window.
+const FEWEST: f32 = 120.0;
 
 /// The alert beside the notice.
 const GLYPH: f32 = 14.0;
@@ -115,6 +124,8 @@ impl Splash {
             );
         });
         ui.add_space(GAP * 2.0);
+        expectations(ui);
+        ui.add_space(GAP * 2.0);
         ui.separator();
         self.paint_notes(ui);
         ui.separator();
@@ -140,7 +151,7 @@ impl Splash {
             }
             Notes::Read { body, page } => {
                 egui::ScrollArea::vertical()
-                    .max_height(NOTES)
+                    .max_height((ui.ctx().screen_rect().height() - AROUND).clamp(FEWEST, NOTES))
                     .show(ui, |ui| {
                         for line in body.lines() {
                             paint(ui, classify(line));
@@ -157,6 +168,21 @@ impl Splash {
             }
         }
         ui.add_space(GAP * 2.0);
+    }
+}
+
+fn expectations(ui: &mut egui::Ui) {
+    for (standing, claim) in EXPECTATIONS {
+        let (glyph, tint) = match standing {
+            Standing::Supported => (Glyph::CircleCheck, good(ui.visuals())),
+            Standing::Untested => (Glyph::CircleAlert, warn(ui.visuals())),
+            Standing::Unsupported => (Glyph::CircleX, bad(ui.visuals())),
+        };
+        ui.horizontal_top(|ui| {
+            icon(ui, glyph, GLYPH, tint);
+            ui.add(egui::Label::new(*claim).wrap());
+        });
+        ui.add_space(GAP);
     }
 }
 
