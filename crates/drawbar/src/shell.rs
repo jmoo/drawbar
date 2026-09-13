@@ -949,7 +949,7 @@ impl DrawbarApp {
             }
             let ink = crate::app::caption(ui.visuals());
             for page in pages.iter().copied() {
-                let on = self.shell.dock_open && self.shell.page == page;
+                let on = self.shell.dock_open && self.page() == page;
                 if ui
                     .selectable_label(on, caps(page.title()).color(ink))
                     .clicked()
