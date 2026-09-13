@@ -1026,7 +1026,13 @@ struct StrokeFile {
 /// `<root>-b<bank>-l<layer>` or `<root>-b<bank>-v<value>`, as in `060-b0-l00`.
 fn parse_stroke_name(stem: &str) -> Option<(u8, Bank, LayerName)> {
     let mut parts = stem.split('-');
-    let root = parts.next()?.parse().ok()?;
+    // A root past the key tables is no note a library can hold, and a build that took
+    // one would read every WAV before the tables refused it.
+    let root = parts
+        .next()?
+        .parse()
+        .ok()
+        .filter(|&root| usize::from(root) < npno::NOTES)?;
     let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
     let third = parts.next()?;
     let layer = if let Some(index) = third.strip_prefix('l') {
@@ -1185,9 +1191,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     let mut resampled = 0usize;
     for (file, layer) in files.iter().zip(values) {
         let path = &file.path;
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let pcm =
-            nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let pcm = crate::wav::pcm16(path)?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         clipped += audio.clipped;
@@ -1350,6 +1354,11 @@ mod tests {
         );
         assert_eq!(parse_stroke_name("060-b3-l00"), None, "no such bank");
         assert_eq!(parse_stroke_name("300-b0-l00"), None, "no such note");
+        assert_eq!(parse_stroke_name("128-b0-l00"), None, "past the key tables");
+        assert_eq!(
+            parse_stroke_name("127-b0-l00"),
+            Some((127, Bank::Attack, Index(0)))
+        );
         assert_eq!(parse_stroke_name("060-0-l00"), None);
         assert_eq!(parse_stroke_name("060-b0-x2"), None, "no such layer form");
         assert_eq!(parse_stroke_name("060-b0"), None);

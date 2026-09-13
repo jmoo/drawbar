@@ -468,12 +468,12 @@ fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), Strin
     ))
 }
 
-/// One WAV as the encoder needs it: 16-bit at [`codec::SOURCE_RATE`], mono or stereo.
-/// A stereo file becomes a stereo stroke — both channels under one header.
+/// One WAV as this encoder needs it: [`crate::wav::pcm16`] at [`codec::SOURCE_RATE`].
+///
+/// Unlike a piano build, nothing here resamples: the field lattice is defined against
+/// that rate.
 fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let source =
-        nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let source = crate::wav::pcm16(path)?;
     if source.rate != codec::SOURCE_RATE {
         return Err(format!(
             "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
@@ -481,14 +481,6 @@ fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
             path.display(),
             source.rate,
             codec::SOURCE_RATE,
-        ));
-    }
-    if source.channels != 1 && source.channels != 2 {
-        return Err(format!(
-            "{}: {} channels — a stroke's terminator states one cell size, so it can \
-             carry one channel or two and nothing else",
-            path.display(),
-            source.channels,
         ));
     }
     Ok(source)

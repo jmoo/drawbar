@@ -29,6 +29,7 @@ mod sample;
 mod slot;
 mod summary;
 mod ui;
+mod wav;
 
 use clap::{Args, Parser, Subcommand};
 use nord_usb::ObjectClass;
