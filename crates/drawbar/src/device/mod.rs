@@ -395,8 +395,8 @@ pub enum Connection {
 #[derive(Default)]
 pub struct Detail {
     /// The slot it answers for, class and address. ⚠️ Both: every class is addressed in
-    /// the same banks and slots, so a program and a sample sit at 1:1 alike, and an
-    /// address alone would show one of them what the other was asked about.
+    /// the same banks and slots — a program and a sample both sit at 1:1 — so only the
+    /// class tells the two answers apart.
     pub at: Option<(ObjectClass, Location)>,
     /// What the last `info` reported, shaped as [`DeviceState::slot`] shapes a scanned
     /// slot: `Some(None)` is a slot answered empty, and `None` is one never asked about.

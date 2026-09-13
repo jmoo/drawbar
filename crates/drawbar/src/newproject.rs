@@ -260,8 +260,9 @@ pub fn default_roots(paths: &[String]) -> Vec<u8> {
             return named;
         }
     }
-    // ⚠️ Counted in usize. Truncating the count to a u8 put a pick of 257 files back at
-    // middle C, where the run walks off the top key and piles take after take onto it.
+    // ⚠️ Counted in usize: a pick holds as many files as were picked, which is more than
+    // a count of keys, and the run has to walk up from one end of the keyboard whatever
+    // that count is.
     let after_first = paths.len().min(MOST_ZONES).saturating_sub(1);
     let start = u8::try_from(usize::from(HIGHEST_NOTE).saturating_sub(after_first))
         .unwrap_or(LOWEST_NOTE)
@@ -1034,9 +1035,8 @@ mod tests {
         assert_eq!(unique.len(), roots.len(), "one key each");
     }
 
-    /// ⚠️ A pick this long is refused for its count, but the run under that refusal is
-    /// still one key per file from the lowest one — counted in u8 it wrapped to a short
-    /// pick and started again at middle C, on keys the run had already laid.
+    /// ⚠️ A pick this long is refused for its count, but the run laid under that refusal
+    /// still walks up from the lowest key, one file per key while there are keys.
     #[test]
     fn a_pick_longer_than_a_u8_counts_still_walks_up_from_the_lowest_key() {
         let many: Vec<String> = (0..MOST_ZONES + 200).map(|i| format!("{i}.wav")).collect();
