@@ -1,10 +1,10 @@
 //! A piano library laid out from a description, for tests with no library to start
 //! from.
 //!
-//! The body follows the law [`Library::parse`](super::Library) checks: the prefix, the
-//! stroke directory, the zero alignment gap, then one audio span per stroke in
-//! directory order. Each span is filled with a byte naming its stroke, so a re-lay is
-//! visible in the bytes themselves.
+//! The body follows the law [`Library::parse_body`](super::Library) checks: the
+//! prefix, the stroke directory, the zero alignment gap, then one audio span per
+//! stroke in directory order. Each span is filled with a byte naming its stroke, so a
+//! re-lay is visible in the bytes themselves.
 //!
 //! ⚠️ The audio is filler rather than encoded blocks, so [`codec::decode`](super::codec)
 //! refuses it. What this builds is a container to transform, not a sound to play.

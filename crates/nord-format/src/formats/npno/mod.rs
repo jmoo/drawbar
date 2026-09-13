@@ -92,6 +92,17 @@ const CHANNELS_AT: usize = 0x61e;
 const STROKE_COUNT_AT: usize = 0x620;
 const ROOT_COUNTS_AT: usize = 0x622;
 
+/// The kind of instrument the library states; [`encode::Kind`] names the codes.
+const KIND_AT: usize = 0x18;
+
+/// A gain over the whole library, in tenths of a decibel and signed. Confirmed on
+/// hardware.
+const GAIN_AT: usize = 0x40c;
+
+/// The highest key the instrument damps at note-off; keys above it ring on. Confirmed
+/// on hardware.
+const DAMPER_TOP_AT: usize = 0x40d;
+
 /// First byte of the stroke directory, and so the length of the prefix.
 const DIRECTORY_AT: usize = 0x732;
 
@@ -332,34 +343,17 @@ impl Piano {
         self.file.write_to(writer)
     }
 
-    /// The body bytes, after checking they open with the `CNSP` magic.
-    fn cnsp(&self) -> Result<&[u8], Error> {
-        let body = &self.file.body.0;
-        if body.get(..4) != Some(CNSP_MAGIC.as_slice()) {
-            return Err(ParseError::AssertFail(format!(
-                "body opens {:02x?}, not the CNSP stream",
-                body.get(..4).unwrap_or_default()
-            ))
-            .into());
-        }
-        Ok(body)
-    }
-
     /// The body bytes, after checking the magic and that the stream version is one
     /// the prefix offsets are pinned to.
     fn mapped(&self) -> Result<&[u8], Error> {
-        let version = self.stream_version()?;
-        crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)?;
-        self.cnsp()
+        let body = &self.file.body.0;
+        check_mapped(body)?;
+        Ok(body)
     }
 
     /// The stream version at body `0x04`.
     pub fn stream_version(&self) -> Result<u16, Error> {
-        let body = self.cnsp()?;
-        let bytes = body.get(VERSION_AT..VERSION_AT + 2).ok_or_else(|| {
-            ParseError::AssertFail("body ends inside the CNSP header".to_string())
-        })?;
-        Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
+        version_of(&self.file.body.0)
     }
 
     /// The `(name, variant)` pair from the `Name#Variant` field — for
@@ -384,7 +378,7 @@ impl Piano {
     /// The container parsed: the prefix, the stroke directory and each stroke's
     /// audio span.
     pub fn library(&self) -> Result<Library<'_>, Error> {
-        Library::parse(self)
+        Library::parse_body(self.file.header.clone(), &self.file.body.0)
     }
 }
 
@@ -429,6 +423,27 @@ fn midi_key(what: &str, key: u8) -> Result<usize, Error> {
 
 fn short(what: &str) -> Error {
     ParseError::AssertFail(format!("the body ends inside {what}")).into()
+}
+
+/// The stream version at body `0x04`, the `CNSP` magic checked first.
+fn version_of(body: &[u8]) -> Result<u16, Error> {
+    if body.get(..4) != Some(CNSP_MAGIC.as_slice()) {
+        return Err(ParseError::AssertFail(format!(
+            "body opens {:02x?}, not the CNSP stream",
+            body.get(..4).unwrap_or_default()
+        ))
+        .into());
+    }
+    let bytes = body
+        .get(VERSION_AT..VERSION_AT + 2)
+        .ok_or_else(|| ParseError::AssertFail("body ends inside the CNSP header".to_string()))?;
+    Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+/// The magic, and a stream version the prefix offsets are pinned to.
+fn check_mapped(body: &[u8]) -> Result<(), Error> {
+    let version = version_of(body)?;
+    crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)
 }
 
 fn overflow(what: &str) -> Error {
@@ -570,8 +585,8 @@ pub struct Library<'a> {
 }
 
 impl<'a> Library<'a> {
-    fn parse(piano: &'a Piano) -> Result<Library<'a>, Error> {
-        let body = piano.mapped()?;
+    fn parse_body(header: Header, body: &'a [u8]) -> Result<Library<'a>, Error> {
+        check_mapped(body)?;
         let prefix = body
             .get(..DIRECTORY_AT)
             .ok_or_else(|| short("the prefix"))?;
@@ -669,7 +684,7 @@ impl<'a> Library<'a> {
         }
 
         let library = Library {
-            header: piano.file.header.clone(),
+            header,
             prefix: prefix.to_vec(),
             channels,
             strokes,
