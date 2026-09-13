@@ -319,8 +319,6 @@ impl Browser {
         }
     }
 
-    // ---- shared pieces ----------------------------------------------------------
-
     /// The in-place editor, prefilled and selected.
     ///
     /// ⚠️ **Only Enter renames.** Clicking away cancels. An editor that commits on blur

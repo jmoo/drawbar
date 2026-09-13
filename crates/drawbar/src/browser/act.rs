@@ -72,8 +72,8 @@ pub enum Act {
         class: ObjectClass,
         at: Location,
     },
-    /// Queue a local asset for a slot, asking first where the write itself has a
-    /// warning to carry.
+    /// Queue a local asset for a slot, asking first where the write both carries a
+    /// warning and replaces an occupant.
     Send {
         id: u64,
         class: ObjectClass,
@@ -317,9 +317,6 @@ pub fn apply(
     log: &mut Log,
 ) {
     for act in acts {
-        // Taken here rather than by each caller: a drop, a menu and a footer all reach
-        // the queue through an act, and a plan made out of sight is a plan nobody
-        // reviews.
         if enqueues(&act) {
             shell.show_page(Page::Queue);
         }
@@ -800,10 +797,9 @@ fn save_doc(
 /// `ask` is false once the question has been answered, which is what keeps the answer
 /// from raising it again.
 ///
-/// ⚠️ The question is now only about what a **write** carries — a foreign format, a
-/// settings write reloading the panel — and not about the slot being taken. Queueing is
-/// reversible and the queue shows the occupant, so an occupied slot no longer earns a
-/// modal; the one question before anything is actually written is [`Act::AskSendAll`].
+/// ⚠️ It asks only where the write both carries a warning — a foreign format, a settings
+/// write reloading the panel — and replaces an occupant. Every other warning is raised by
+/// [`Act::AskSendAll`], which is the one question before anything is written.
 #[allow(clippy::too_many_arguments)]
 fn send(
     browser: &mut Browser,

@@ -261,8 +261,6 @@ impl Browser {
         }
     }
 
-    // ---- places -----------------------------------------------------------------
-
     #[allow(clippy::too_many_arguments)]
     fn places(
         &mut self,
@@ -750,8 +748,6 @@ impl Browser {
         }
     }
 
-    // ---- the instrument ---------------------------------------------------------
-
     #[allow(clippy::too_many_arguments)]
     fn instrument_rows(
         &mut self,
@@ -1188,8 +1184,6 @@ impl Browser {
             ui.close();
         }
     }
-
-    // ---- kinds and tags ---------------------------------------------------------
 
     fn kinds(
         &mut self,
