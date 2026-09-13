@@ -62,7 +62,8 @@ struct Text {
     text: &'static str,
 }
 
-/// drawbar first, then the bundled material by what it covers, alphabetically.
+/// drawbar first, then the bundled material by what it covers, alphabetically, then the
+/// published field maps drawbar's format placements derive from.
 const NOTICES: &[Notice] = &[
     Notice {
         covers: "drawbar",
@@ -101,6 +102,18 @@ const NOTICES: &[Notice] = &[
         source: Some("Ubuntu font family 0.83; Light from egui's epaint_default_fonts 0.32.3"),
         licence: "Ubuntu Font Licence 1.0",
         text: include_str!("../assets/fonts/LICENCE.txt"),
+    },
+    Notice {
+        covers: "Stage 2 and 3 field maps",
+        source: Some("nord-documentation by Christian Florentz"),
+        licence: "BSD 3-Clause",
+        text: include_str!("../licences/nord-documentation.txt"),
+    },
+    Notice {
+        covers: "Stage 4 field tables",
+        source: Some("ns4decode by Randy"),
+        licence: "MIT",
+        text: include_str!("../licences/ns4decode.txt"),
     },
 ];
 

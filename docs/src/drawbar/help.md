@@ -12,5 +12,5 @@ report.
 
 **Help ▸ About drawbar** shows the version, links to the source, the guide and
 the releases, the trademark disclaimer, and every licence a copy of drawbar has
-to carry: drawbar's own, the bundled fonts and icons, and the Rust crates
-compiled in. Click a row to read it.
+to carry: drawbar's own, the bundled fonts and icons, the Stage field maps it
+decodes with, and the Rust crates compiled in. Click a row to read it.
