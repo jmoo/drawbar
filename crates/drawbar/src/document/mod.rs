@@ -631,15 +631,18 @@ impl Document {
                 }
             }
             Asked::Zone(sample::Ask::Play(zone)) => {
-                let Some(Ok(decoded)) = self.audio.get(zone) else {
-                    return;
-                };
-                if let Err(why) =
-                    self.player
-                        .toggle((id, zone), &decoded.audio.samples, decoded.audio.channels)
-                {
-                    log.error(why);
-                    log.trouble("This computer would not play that zone.");
+                // ⚠️ An edit drops the decode of a zone that goes on sounding, so
+                // stopping the one that is sounding cannot wait on audio in hand.
+                if self.player.playing() == Some((id, zone)) {
+                    self.player.stop();
+                } else if let Some(Ok(decoded)) = self.audio.get(zone) {
+                    if let Err(why) =
+                        self.player
+                            .toggle((id, zone), &decoded.audio.samples, decoded.audio.channels)
+                    {
+                        log.error(why);
+                        log.trouble("This computer would not play that zone.");
+                    }
                 }
             }
             Asked::Zone(sample::Ask::Save(zone)) => {

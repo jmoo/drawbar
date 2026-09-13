@@ -1391,35 +1391,34 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     let mut ask = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        match sound.decoded {
-            None => {
+        match (sound.playing, sound.decoded) {
+            // ⚠️ Stopping cannot wait on a decode: an edit drops the audio of a zone
+            // that goes on sounding, and this is the only control that stops it.
+            (true, _) => {
+                if action(ui, "Stop", Glyph::X, true) {
+                    ask = Some(Ask::Play(index));
+                }
+            }
+            (false, None) => {
                 if action(ui, "Show audio", Glyph::AudioLines, true) {
                     ask = Some(Ask::Decode(index));
                 }
             }
-            Some(Err(why)) => {
+            (false, Some(Err(why))) => {
                 ui.label(
                     egui::RichText::new(format!("not decoded: {why}"))
                         .size(FACTS_TEXT)
                         .color(crate::app::bad(ui.visuals())),
                 );
             }
-            Some(Ok(_)) => {
-                let label = match sound.playing {
-                    true => "Stop",
-                    false => "Play",
-                };
-                let glyph = match sound.playing {
-                    true => Glyph::X,
-                    false => Glyph::AudioLines,
-                };
-                if action(ui, label, glyph, true) {
+            (false, Some(Ok(_))) => {
+                if action(ui, "Play", Glyph::AudioLines, true) {
                     ask = Some(Ask::Play(index));
                 }
-                if action(ui, "Save WAV…", Glyph::Waves, false) {
-                    ask = Some(Ask::Save(index));
-                }
             }
+        }
+        if matches!(sound.decoded, Some(Ok(_))) && action(ui, "Save WAV…", Glyph::Waves, false) {
+            ask = Some(Ask::Save(index));
         }
     });
     if let Some(Ok(decoded)) = sound.decoded {
@@ -2612,6 +2611,67 @@ mod tests {
             "the v2 keyboard map is drawn instead: {said:?}"
         );
         assert!(sets.is_empty());
+    }
+
+    /// One frame of the actions of an open zone: what they painted and where, and what
+    /// a click asked the document for.
+    fn actions(
+        ctx: &egui::Context,
+        sound: &Sound,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, Option<Ask>) {
+        let mut ask = None;
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ask = zone_audio(ui, 0, sound);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, ask)
+    }
+
+    /// ⚠️ Every edit drops the decoded audio and the zone that was sounding goes on
+    /// sounding: the control that stops it has to stand with nothing decoded, or the
+    /// sound has nothing on screen to stop it.
+    #[test]
+    fn a_sounding_zone_is_stopped_from_the_row_with_nothing_decoded() {
+        let ctx = dressed();
+        let sounding = Sound {
+            decoded: None,
+            playing: true,
+        };
+        let (said, ask) = actions(&ctx, &sounding, Vec::new());
+        assert!(ask.is_none(), "nothing was clicked");
+        let stop = said
+            .iter()
+            .find(|(text, _)| text == "Stop")
+            .unwrap_or_else(|| panic!("a sounding zone offers no Stop: {said:?}"))
+            .1;
+        let (_, ask) = actions(&ctx, &sounding, press(stop.center()));
+        assert_eq!(ask, Some(Ask::Play(0)));
+
+        // Silent and undecoded, the row offers the decode instead.
+        let quiet = Sound {
+            decoded: None,
+            playing: false,
+        };
+        let (said, _) = actions(&ctx, &quiet, Vec::new());
+        assert!(
+            said.iter().any(|(text, _)| text == "Show audio"),
+            "{said:?}"
+        );
     }
 
     /// ⚠️ A paint mark is the difference between what is held and what was saved, and
