@@ -1996,7 +1996,7 @@ fn a_piano_written_from_rules_alone_is_the_library_that_was_played() {
                 root: stroke.root,
                 bank: stroke.bank().expect("a named bank"),
                 layer: stroke.layer(),
-                channels: audio.channels,
+                channels: audio.lanes,
             }
         })
         .collect();

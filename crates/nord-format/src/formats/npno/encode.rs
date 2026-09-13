@@ -569,7 +569,7 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
             )));
         }
         let target = audio.frames();
-        let mut source = audio.channels;
+        let mut source = audio.lanes;
         for (channel, tail) in source.iter_mut().zip(&audio.tail) {
             channel.extend_from_slice(tail);
         }
@@ -1312,7 +1312,7 @@ mod tests {
             padding < longest,
             "the stroke states {padding} frames of silence, a whole block or more"
         );
-        for (channel, given) in audio.channels.iter().zip(&source) {
+        for (channel, given) in audio.lanes.iter().zip(&source) {
             assert_eq!(&channel[..given.len()], &given[..]);
             assert!(channel[given.len()..].iter().all(|&s| s == 0));
         }
@@ -1351,7 +1351,7 @@ mod tests {
                 "{what}: the stroke states {} of {frames} frames",
                 audio.frames()
             );
-            for (channel, given) in audio.channels.iter().zip(&source) {
+            for (channel, given) in audio.lanes.iter().zip(&source) {
                 assert_eq!(
                     &channel[..frames],
                     &given[..],
@@ -1398,7 +1398,7 @@ mod tests {
                     "{what}: the stroke states {}",
                     audio.frames()
                 );
-                for (channel, given) in audio.channels.iter().zip(&source) {
+                for (channel, given) in audio.lanes.iter().zip(&source) {
                     assert_eq!(&channel[..frames], &given[..], "{what}: frames changed");
                     assert!(
                         channel[frames..].iter().all(|&s| s == 0),
@@ -1450,8 +1450,8 @@ mod tests {
         let library = piano.library().unwrap();
         assert_eq!(library.channels(), 1);
         let audio = codec::decode(&library.strokes()[0], 1).unwrap();
-        assert_eq!(audio.channels[0][..source[0].len()], source[0][..]);
-        assert!(audio.channels[0][source[0].len()..].iter().all(|&s| s == 0));
+        assert_eq!(audio.lanes[0][..source[0].len()], source[0][..]);
+        assert!(audio.lanes[0][source[0].len()..].iter().all(|&s| s == 0));
     }
 
     #[test]

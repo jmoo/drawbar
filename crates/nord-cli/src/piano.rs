@@ -644,7 +644,7 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
     write_file(ui, &args.out, &wav)?;
 
     let peak = audio
-        .channels
+        .lanes
         .iter()
         .flatten()
         .map(|s| i32::from(*s).abs())

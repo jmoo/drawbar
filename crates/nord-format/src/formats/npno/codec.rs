@@ -75,7 +75,7 @@ pub fn block_frames(width: u8, block_bytes: usize, channels: usize) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
     /// One vector per channel, each [`Audio::frames`] long.
-    pub channels: Vec<Vec<i16>>,
+    pub lanes: Vec<Vec<i16>>,
     /// The [`OVERLAP`] frames per channel the last block carries past the stroke's
     /// end. The stroke does not own them and nothing plays them; they are here
     /// because coding that block again needs them.
@@ -91,7 +91,7 @@ pub struct Audio {
 impl Audio {
     /// Samples per channel.
     pub fn frames(&self) -> usize {
-        self.channels.first().map_or(0, Vec::len)
+        self.lanes.first().map_or(0, Vec::len)
     }
 
     pub fn seconds(&self) -> f64 {
@@ -101,9 +101,9 @@ impl Audio {
     /// The frames interleaved by channel, which is what a WAV wants.
     pub fn interleaved(&self) -> Vec<i16> {
         let frames = self.frames();
-        let mut out = Vec::with_capacity(frames * self.channels.len());
+        let mut out = Vec::with_capacity(frames * self.lanes.len());
         for frame in 0..frames {
-            out.extend(self.channels.iter().map(|c| c[frame]));
+            out.extend(self.lanes.iter().map(|c| c[frame]));
         }
         out
     }
@@ -336,7 +336,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
     }
 
     Ok(Audio {
-        channels: out,
+        lanes: out,
         tail: narrowed,
         clipped,
         overlap_checked,
@@ -402,7 +402,7 @@ mod tests {
         let audio = block(8, 0, 1, &residuals);
         let decoded = decode(&stroke(&audio, (frames - OVERLAP) as u32, 1, [0; 4]), 1).unwrap();
         assert_eq!(decoded.frames(), frames - OVERLAP);
-        assert_eq!(&decoded.channels[0][..4], &[-30, -29, -28, -27]);
+        assert_eq!(&decoded.lanes[0][..4], &[-30, -29, -28, -27]);
         assert_eq!(decoded.clipped, 0);
     }
 
@@ -415,7 +415,7 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(&decoded.channels[0][..4], &[103, 106, 109, 112]);
+        assert_eq!(&decoded.lanes[0][..4], &[103, 106, 109, 112]);
     }
 
     #[test]
@@ -498,8 +498,8 @@ mod tests {
         // The repeat is emitted once, by the block that repeats it, so the two
         // blocks' frames run on continuously.
         let repeated: Vec<i16> = first[owned..].iter().map(|&v| v as i16).collect();
-        assert_eq!(&decoded.channels[0][owned..owned + OVERLAP], &repeated[..]);
-        assert_eq!(decoded.channels[0][owned + OVERLAP], 0);
+        assert_eq!(&decoded.lanes[0][owned..owned + OVERLAP], &repeated[..]);
+        assert_eq!(decoded.lanes[0][owned + OVERLAP], 0);
     }
 
     #[test]
@@ -510,9 +510,9 @@ mod tests {
             .collect();
         let audio = block(8, 0, 2, &residuals);
         let decoded = decode(&stroke(&audio, (frames - OVERLAP) as u32, 1, [0; 4]), 2).unwrap();
-        assert_eq!(decoded.channels.len(), 2);
-        assert!(decoded.channels[0].iter().all(|&s| s == 10));
-        assert!(decoded.channels[1].iter().all(|&s| s == -10));
+        assert_eq!(decoded.lanes.len(), 2);
+        assert!(decoded.lanes[0].iter().all(|&s| s == 10));
+        assert!(decoded.lanes[1].iter().all(|&s| s == -10));
         assert_eq!(decoded.interleaved()[..4], [10, -10, 10, -10]);
     }
 }
