@@ -1478,7 +1478,7 @@ fn stroke_header(
     let (q, stream) = (&encoded.q, &encoded.stream);
     let mut head = vec![0u8; layout.header_len()];
     head[0..4].copy_from_slice(&zone.global_id.to_be_bytes());
-    head[5] = zone.root_key;
+    head[super::stroke::ROOT_KEY] = zone.root_key;
     // Unexplained: real programs hold this, and the panel cannot produce it.
     head[6..8].copy_from_slice(&[0x88, 0xba]);
     // The channel count, stated a second time — the terminator's cell size says it too,
@@ -1487,9 +1487,9 @@ fn stroke_header(
 
     let (mantissa, exponent) =
         statistic_a(file_peak, q.shift, gain_units(gain_decibels(zone.gain)));
-    head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
-    head[12] = exponent;
-    head[13..16].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
+    head[codec::MANTISSA_AT..codec::MANTISSA_AT + 3].copy_from_slice(&mantissa.to_be_bytes()[1..]);
+    head[codec::STAT_A_EXP_AT] = exponent;
+    head[codec::PEAK_AT..codec::PEAK_AT + 3].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
 
     let base = (body_at + layout.header_len()) / layout.word() % WRAP;
     let pointer = |word: usize| ((base + word) % WRAP) as u16;
@@ -1502,7 +1502,7 @@ fn stroke_header(
         pointer(stream.terminator),
     ];
     for (i, p) in directory.iter().enumerate() {
-        let at = 20 + 9 * i;
+        let at = codec::SEEK_AT + codec::SEEK_STRIDE * i;
         head[at..at + 2].copy_from_slice(&p.to_be_bytes());
         // Unexplained: real programs hold this, and the panel cannot produce it.
         if i < 3 {
@@ -1755,15 +1755,14 @@ struct WideSchema {
     /// The preset a project that touches none renders as.
     /// Unexplained: real programs hold this, and the panel cannot produce it.
     sty_payload: &'static [u8],
+    /// Where the category's dynamics curve writes into that payload, and what.
+    sty_dynamics: &'static [(usize, u8)],
 }
 
-/// The `map`'s gain-and-detune unit: a u24 linear gain then an s24 detune. It opens
-/// the section as the instrument's own level and then repeats once per key.
-const LEVEL_LEN: usize = 6;
-
-/// One such unit at `gain`, with no detune.
-fn level(gain: u32) -> [u8; LEVEL_LEN] {
-    let mut out = [0u8; LEVEL_LEN];
+/// One gain-and-detune unit at `gain`, with no detune. It opens the `map` section as
+/// the instrument's own level and then repeats once per key.
+fn level(gain: u32) -> [u8; super::keymap::RECORD_LEN] {
+    let mut out = [0u8; super::keymap::RECORD_LEN];
     out[..3].copy_from_slice(&gain.to_be_bytes()[1..]);
     out
 }
@@ -1795,18 +1794,19 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             container_payload: [0x00, 0x02, 0x00, 0x0c],
             hdr: 10,
             map: 14,
-            key_stride: LEVEL_LEN,
+            key_stride: super::keymap::RECORD_LEN,
             map_gap: &[],
             map_tail: &[0x00],
             sty: super::sty::VERSION_V3,
             sty_payload: &STY_V3_PAYLOAD,
+            sty_dynamics: &STY_V3_DYNAMICS,
         }),
         Layout::V4 => Some(WideSchema {
             container: 40,
             container_payload: [0x00, 0x02, 0x00, 0x05],
             hdr: 11,
             map: 21,
-            key_stride: LEVEL_LEN + 4,
+            key_stride: super::keymap::RECORD_LEN + 4,
             map_gap: &[
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
                 0x02, 0x02, 0x02, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00,
@@ -1815,12 +1815,10 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             map_tail: &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
             sty: super::sty::VERSION_V4,
             sty_payload: &STY_V4_PAYLOAD,
+            sty_dynamics: &STY_V4_DYNAMICS,
         }),
     }
 }
-
-/// Keys the wide `map`'s per-key table describes.
-const KEYS: usize = 128;
 
 /// The wide `hdr` section: the same prefix at a wider name field, with the sub-name
 /// the vendor's filenames append left empty.
@@ -1856,17 +1854,20 @@ fn cat4() -> Section4 {
 /// own builder fills it in — so every quad names its own key.
 fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section4 {
     let mut payload = Vec::with_capacity(
-        LEVEL_LEN
-            + KEYS * schema.key_stride
+        super::keymap::RECORD_LEN
+            + super::keymap::KEYS * schema.key_stride
             + schema.map_gap.len()
             + 1
             + super::zone::WIDE_RECORD_LEN * zones.len()
             + schema.map_tail.len(),
     );
     payload.extend_from_slice(&level(map_gain));
-    for key in 0..KEYS as u8 {
-        payload.extend_from_slice(&level(super::keymap::GAIN_UNITY));
-        payload.extend(std::iter::repeat_n(key, schema.key_stride - LEVEL_LEN));
+    for key in 0..super::keymap::KEYS as u8 {
+        payload.extend_from_slice(&level(super::zone::GAIN_UNITY));
+        payload.extend(std::iter::repeat_n(
+            key,
+            schema.key_stride - super::keymap::RECORD_LEN,
+        ));
     }
     payload.extend_from_slice(schema.map_gap);
     payload.push(zones.len() as u8);
@@ -1882,15 +1883,10 @@ fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section
 }
 
 /// The wide `sty` preset, including the dynamics group a project controls.
-fn sty4(schema: &WideSchema, layout: Layout, preset: Preset) -> Section4 {
+fn sty4(schema: &WideSchema, preset: Preset) -> Section4 {
     let mut payload = schema.sty_payload.to_vec();
     if preset.dynamics_enabled {
-        let dynamics = match layout {
-            Layout::V2 => unreachable!("a narrow layout has no wide preset"),
-            Layout::V3 => &STY_V3_DYNAMICS[..],
-            Layout::V4 => &STY_V4_DYNAMICS[..],
-        };
-        for &(at, value) in dynamics {
+        for &(at, value) in schema.sty_dynamics {
             payload[at] = value;
         }
     }
@@ -2144,7 +2140,7 @@ fn wide_chain(
             payload,
         });
     }
-    sections.push(sty4(schema, layout, instrument.preset));
+    sections.push(sty4(schema, instrument.preset));
     let chain_len: usize = sections.iter().map(Section4::encoded_len).sum();
     sections.push(meta4(chain_len));
 
@@ -2709,7 +2705,8 @@ mod tests {
         stroke.extend_from_slice(&[0x80, 0x00, 0x18]);
         let end = (HEADER_LEN / 3 + spec.span(MONO)) as u16;
         for (i, p) in [HEADER_LEN as u16 / 3, 0, end, end].iter().enumerate() {
-            stroke[20 + 9 * i..22 + 9 * i].copy_from_slice(&p.to_be_bytes());
+            let at = codec::SEEK_AT + codec::SEEK_STRIDE * i;
+            stroke[at..at + 2].copy_from_slice(&p.to_be_bytes());
         }
         let walked = codec::walk(&stroke, 0, codec::Layout::V2).unwrap();
         assert_eq!(walked.records[0].values, values);
@@ -3060,8 +3057,9 @@ mod tests {
             for shift in 0..6 {
                 let (mantissa, exponent) = statistic_a(peak, shift, u64::from(GAIN_UNITY));
                 let mut stroke = vec![0u8; HEADER_LEN];
-                stroke[12] = exponent;
-                stroke[13..16].copy_from_slice(&peak.to_be_bytes()[1..]);
+                stroke[codec::STAT_A_EXP_AT] = exponent;
+                stroke[codec::PEAK_AT..codec::PEAK_AT + 3]
+                    .copy_from_slice(&peak.to_be_bytes()[1..]);
                 assert_eq!(
                     codec::shift(&stroke, codec::Layout::V2),
                     Some(shift),

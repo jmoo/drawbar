@@ -5,7 +5,7 @@ use super::Chain;
 use crate::error::ParseError;
 
 /// Within a stroke payload: the MIDI note the sample was recorded at.
-const ROOT_KEY: usize = 5;
+pub(super) const ROOT_KEY: usize = 5;
 
 /// Encoded audio is emitted in fixed-size packets; the count varies with how
 /// compressible the material is.

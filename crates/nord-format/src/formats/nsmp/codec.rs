@@ -134,11 +134,14 @@ impl Layout {
     }
 }
 
+/// Statistic A's mantissa: a 24-bit big-endian value in front of its exponent byte.
+pub(super) const MANTISSA_AT: usize = 9;
+
 /// Statistic A's exponent byte; [`shift`] recovers the quantiser scale from it.
-const STAT_A_EXP_AT: usize = 12;
+pub(super) const STAT_A_EXP_AT: usize = 12;
 
 /// Statistic B: the content peak as a 24-bit big-endian value.
-const PEAK_AT: usize = 13;
+pub(super) const PEAK_AT: usize = 13;
 
 /// Where the wide stroke header's two float32s sit: the zone's playing gain in
 /// decibels, then the stroke's loop decay amount. Both big-endian.
@@ -153,8 +156,8 @@ const EXPONENT_BIAS: i32 = 22;
 pub(crate) const SHIFT_LIMIT: i32 = 32;
 
 /// Word directory: `u16` big-endian at this offset, on a 9-byte stride.
-const SEEK_AT: usize = 20;
-const SEEK_STRIDE: usize = 9;
+pub(super) const SEEK_AT: usize = 20;
+pub(super) const SEEK_STRIDE: usize = 9;
 
 /// Period of a 16-bit directory pointer, in words.
 /// Openings use the first alias; terminators use the last in-range alias.
