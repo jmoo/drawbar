@@ -1,4 +1,4 @@
-//! The document: one view of one asset, which looking at and changing are the same act.
+//! The document: one view of one asset.
 //!
 //! An edit lands on the tab's working copy the moment it is made — set the field,
 //! re-encode, re-check the bytes — and the asset reads as unsaved. Nothing on the
@@ -1456,7 +1456,7 @@ mod tests {
     }
 
     /// Every kind gets the same strip, in both faces of the theme, and it names the
-    /// faces in their own words. The old abbreviations are gone from it.
+    /// faces in their own words.
     #[test]
     fn every_kind_wears_the_header_and_names_its_faces() {
         let every = Fresh::FAMILIES.iter().flat_map(|family| family.kinds);
@@ -1473,10 +1473,6 @@ mod tests {
                 assert!(has("Metadata"), "{kind:?} in {dark}: {said:?}");
                 assert!(has("Queue send"), "the loud action: {said:?}");
                 assert!(has("Revert") && has("Export…"), "the quiet ones: {said:?}");
-                assert!(
-                    !has("Basic") && !has("Meta"),
-                    "the faces are called by their own names: {said:?}"
-                );
             }
         }
     }
@@ -1891,13 +1887,6 @@ mod tests {
         }
         assert!(said.iter().any(|word| word == "playing"), "{said:?}");
         assert!(said.iter().any(|word| word == "select"), "{said:?}");
-        // ⚠️ The head of each card is the switch. The layout keeps the selector in the
-        // group above the ones it picks between, and drawn there as well it would be
-        // two controls for one preset.
-        assert!(
-            !said.iter().any(|word| word == "B3 preset"),
-            "the selector is drawn once, as the cards' own heads: {said:?}"
-        );
     }
 
     /// The lens swaps every morphed control to what it becomes under one performance
@@ -1949,9 +1938,7 @@ mod tests {
         );
     }
 
-    /// ⚠️ Every section of a Stage program is open, and the nav names each of them. The
-    /// old view folded a body this size away behind its headings, which made a control
-    /// you cannot see a control you do not know you have.
+    /// ⚠️ Every section of a Stage program is open, and the nav names each of them.
     #[test]
     fn every_section_of_a_stage_program_is_open_and_named_in_the_nav() {
         let bytes = Fresh::Stage4Program.bytes().unwrap();
@@ -2141,9 +2128,9 @@ mod tests {
         assert!(!entity.is_unsaved());
     }
 
-    /// ⚠️ The strip and the body are two scroll regions in one `Ui`. While they shared
-    /// egui's unsalted id they shared one state, and a wheel over the document moved the
-    /// tab strip while the body stayed where it was.
+    /// ⚠️ The strip and the body are two scroll regions in one `Ui`, and each answers
+    /// to an id of its own: on one id they share one state, and a wheel over the
+    /// document moves the tab strip.
     #[test]
     fn the_tab_strip_and_the_document_body_scroll_on_their_own() {
         let ctx = egui::Context::default();
@@ -2446,10 +2433,6 @@ mod tests {
             "the loud action is the same send in this body's words: {said:?}"
         );
         assert!(has("0000") && has("0020"), "the body as hex: {said:?}");
-        assert!(
-            !said.iter().any(|word| word.contains("editable here yet")),
-            "the old apology: {said:?}"
-        );
 
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();

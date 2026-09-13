@@ -1105,8 +1105,8 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
 /// The one claim the header makes about this document: what it holds that is not what it
 /// was saved as, or what the attached instrument holds where this document stands.
 ///
-/// ⚠️ Ordered. Unsaved comes first because an edit is what the reader just did, and a
-/// slot that agrees with the *saved* bytes says nothing about the ones in front of them.
+/// ⚠️ Ordered, unsaved first: a slot that agrees with the *saved* bytes says nothing
+/// about the ones in front of the reader.
 fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
@@ -1496,7 +1496,6 @@ mod tests {
         assert_eq!(phrase(Mark::Unknown, false).words, "on the keyboard");
     }
 
-    /// An editor's own word for an unsaved document stands in the strip, and it is warn
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
         Facts {
             faces: &[Face::Edit],
@@ -1511,6 +1510,7 @@ mod tests {
         }
     }
 
+    /// An editor's own word for an unsaved document stands in the strip, and it is warn
     /// ink whatever the editor called it — the header has no red to reach for.
     #[test]
     fn an_editors_own_state_phrase_keeps_the_strips_ink() {

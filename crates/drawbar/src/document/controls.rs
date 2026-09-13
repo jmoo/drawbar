@@ -63,8 +63,7 @@ pub fn fits(text: &mut String, limit: usize) {
 
 /// A titled panel.
 ///
-/// The instrument's front panel does not fold its sections away, and neither does this:
-/// a control you cannot see is a control you do not know you have.
+/// The instrument's front panel does not fold its sections away, and neither does this.
 pub fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -79,8 +78,7 @@ pub fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui))
 /// at the right.
 ///
 /// ⚠️ Not [`crate::panel::panel_header`], which is the shell's: MICRO caps on
-/// `faint_bg_color`, with a bar across the dock. A document's sections are part of the
-/// page they are on, and a row of grey bars down a page reads as a stack of panels.
+/// `faint_bg_color`, with a bar across the dock.
 pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, egui::Color32)>) {
     const ROW: f32 = 18.0;
     const PAD: f32 = 12.0;

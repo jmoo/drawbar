@@ -175,8 +175,7 @@ impl Advanced {
         });
         ui.separator();
 
-        // Declaration order: it is the order the body is laid out in, which is what an
-        // engineer reading a dump alongside this is following.
+        // Declaration order, which is the order the body is laid out in.
         for field in rows {
             self.row(ui, field, table, sets);
         }
