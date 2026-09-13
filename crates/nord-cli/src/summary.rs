@@ -167,7 +167,7 @@ fn keyboard(ui: &Ui, p: &ne5::Program) {
         "part mix",
         format!(
             "{} {}",
-            p.center_panel.part_mix.as_string(),
+            p.center_panel.part_mix.to_string(),
             ui.dim("(lower/upper %)")
         ),
     ));
