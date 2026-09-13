@@ -176,7 +176,7 @@ fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
 }
 
 /// The target decoded, but not to what this noun edits.
-fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
+pub(crate) fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
     format!(
         "this command edits {} ({}); the target holds {}{}",
         class.label(),

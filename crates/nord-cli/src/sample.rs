@@ -26,8 +26,8 @@ use nord_format::formats::nsmpproj::{self, NewZone, Project, Stroke, Zone, LOWES
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
-use crate::edit::{print_byte_diff, write_file};
-use crate::editors::{self, SampleEditor};
+use crate::edit::{print_byte_diff, write_edit, write_file};
+use crate::editors;
 use crate::note;
 use crate::slot::Target;
 use crate::ui::Ui;
@@ -39,26 +39,8 @@ pub struct EditArgs {
     #[arg(value_name = "FILE|BANK:SLOT")]
     pub target: String,
 
-    /// `path=value`, repeatable: `name=NAME`, `zone1.root_key=NOTE`,
-    /// `zone1.top_note=NOTE`. Notes are names (`C4`, `F#3`) or numbers (0-127).
-    #[arg(long = "set", value_name = "PATH=VALUE")]
-    pub set: Vec<String>,
-
-    /// Report what would change — including which bytes — and write nothing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// List every settable field with its current value, then exit.
-    #[arg(long)]
-    pub fields: bool,
-
-    /// Write the edited sample here instead of over the input file.
-    #[arg(short, long, value_name = "FILE")]
-    pub out: Option<PathBuf>,
-
-    /// Confirm the write. Editing a slot, or a file in place, needs it.
-    #[arg(long)]
-    pub yes: bool,
+    #[command(flatten)]
+    pub common: crate::edit::SetArgs,
 }
 
 pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
@@ -73,19 +55,17 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
 
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
-    let sample = match &mut entity {
-        Entity::Sample(sample) => sample,
-        Entity::SampleProject(_) => {
-            return Err(
-                "this is a Sample Editor project, not a sample instrument — try `nord edit`".into(),
-            )
-        }
-        _ => return Err("sample edit only understands sample instruments (.nsmp)".into()),
-    };
+    if !matches!(entity, Entity::Sample(_)) {
+        return Err(crate::edit::mismatch(&mut entity, ObjectClass::Sample));
+    }
 
-    let Some(changed) = editors::stage(ui, args.fields, &args.set, &mut SampleEditor(sample))?
-    else {
-        // `--fields` has listed them and is done.
+    let staged = editors::stage(
+        ui,
+        args.common.fields,
+        &args.common.set,
+        crate::edit::editor_for(&mut entity)?.as_mut(),
+    )?;
+    let Some(changed) = staged else {
         return Ok(());
     };
     if changed == 0 {
@@ -96,29 +76,21 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
     let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
     print_byte_diff(ui, &original, &edited);
 
-    if args.dry_run {
+    if args.common.dry_run {
         ui.note("--dry-run: nothing written");
         return Ok(());
     }
 
-    match (target, args.out) {
+    match (target, args.common.out) {
+        (Target::File(path), out) => write_edit(ui, &path, out, args.common.yes, &edited),
         // An explicit destination is the unambiguous case, whatever the source was.
         (_, Some(out)) => write_file(ui, &out, &edited),
-        (Target::File(path), None) => {
-            ui.note(format!(
-                "about to {} {} in place",
-                ui.danger("overwrite"),
-                path.display()
-            ));
-            ui.confirm(args.yes)?;
-            write_file(ui, &path, &edited)
-        }
         (Target::Slot(at), None) => crate::device::send(
             ui,
             &edited,
             at,
             ObjectClass::Sample,
-            args.yes,
+            args.common.yes,
             "the edited sample",
             None,
             None,
@@ -315,7 +287,7 @@ fn body(bytes: &[u8]) -> Result<nord_format::Sample, String> {
         Entity::Sample(sample) => Ok(sample),
         other => Err(format!(
             "a {} file, not a sample instrument",
-            other.identity().format
+            crate::file::entity_tag(&other)
         )),
     }
 }
@@ -664,7 +636,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             return Err(format!(
                 "{}: a {} file, not a Sample Editor project",
                 args.project.display(),
-                other.identity().format
+                crate::file::entity_tag(&other)
             ))
         }
     };
@@ -1289,14 +1261,6 @@ fn destination(name: Option<String>, out: Option<PathBuf>) -> Result<(String, Pa
     }
 }
 
-/// The Unix time [`Project::new`] stamps on every `m_modifyDate`.
-fn modified() -> Result<u32, String> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| format!("system clock is before the Unix epoch: {e}"))?;
-    u32::try_from(elapsed.as_secs()).map_err(|_| "system time does not fit m_modifyDate".into())
-}
-
 /// `nord sample project new`: a Sample Editor project from one WAV per zone.
 pub fn project_new(ui: &Ui, args: ProjectNewArgs) -> Result<(), String> {
     let specs: Vec<ZoneSpec> = args
@@ -1312,7 +1276,8 @@ pub fn project_new(ui: &Ui, args: ProjectNewArgs) -> Result<(), String> {
         zones.push(zone(spec, &wav, &out)?);
     }
 
-    let project = Project::new(&name, &zones, modified()?).map_err(|e| e.to_string())?;
+    let project =
+        Project::new(&name, &zones, crate::edit::unix_seconds_now()?).map_err(|e| e.to_string())?;
 
     for z in &zones {
         ui.out(format!(
@@ -1527,6 +1492,66 @@ mod tests {
             stem(&Target::File("kit/Bass.nsmp".into()), &instrument("Vibes")),
             "Bass",
         );
+    }
+
+    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
+    /// meets the guard that spelling it with no `-o` meets.
+    #[test]
+    fn an_output_that_is_the_input_takes_the_in_place_guard() {
+        let dir = scratch();
+        let path = dir.join("kit.nsmp");
+        let original = encoded("Kit");
+        std::fs::write(&path, &original).unwrap();
+
+        let args = EditArgs {
+            target: path.display().to_string(),
+            common: crate::edit::SetArgs {
+                set: vec!["name=Vibes".into()],
+                dry_run: false,
+                fields: false,
+                out: Some(dir.join(".").join("kit.nsmp")),
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains("--yes"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file the verb does not take is named by its format and steered to the command
+    /// that does read it.
+    #[test]
+    fn a_project_under_sample_edit_is_steered_to_the_file_verb() {
+        let dir = scratch();
+        let path = dir.join("kit.nsmpproj");
+        let project = Project::new(
+            "Kit",
+            &[NewZone {
+                path: "kit.wav".into(),
+                sample_rate: 44_100,
+                frames: 44_100,
+                root_key: 60,
+            }],
+            0,
+        )
+        .unwrap();
+        std::fs::write(&path, project.render()).unwrap();
+
+        let args = EditArgs {
+            target: path.display().to_string(),
+            common: crate::edit::SetArgs {
+                set: vec!["name=Vibes".into()],
+                dry_run: false,
+                fields: false,
+                out: None,
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains(nsmpproj::FORMAT), "{err}");
+        assert!(err.contains("nord edit"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A target that will not open is a failure of the run, not a gap in the codec's

@@ -22,7 +22,7 @@ use clap::{Args, ValueEnum};
 use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Library, UNCOVERED};
 use nord_format::Entity;
 
-use crate::edit::write_file;
+use crate::edit::{write_edit, write_file};
 use crate::note;
 use crate::ui::Ui;
 
@@ -313,21 +313,11 @@ fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
     match entity {
         Entity::Piano(piano) => Ok((bytes, piano)),
         other => Err(format!(
-            "{}: this is a {}, not a piano library (.npno)",
+            "{}: a {} file, not a piano library ({})",
             path.display(),
-            entity_kind(&other)
+            crate::file::entity_tag(&other),
+            npno::FORMAT,
         )),
-    }
-}
-
-fn entity_kind(entity: &Entity) -> &'static str {
-    match entity {
-        Entity::Sample(_) => "sample instrument",
-        Entity::SampleProject(_) => "Sample Editor project",
-        Entity::Program(_) => "program",
-        Entity::Live(_) => "live slot",
-        Entity::Settings(_) => "settings file",
-        _ => "file of another format",
     }
 }
 
@@ -707,20 +697,9 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
     }
 
     let edited = to_bytes(&library, &args.file)?;
-    match args.out {
-        Some(out) => write_file(ui, &out, &edited),
-        None => {
-            ui.note(format!(
-                "about to {} {} in place",
-                ui.danger("overwrite"),
-                args.file.display()
-            ));
-            ui.confirm(args.yes)?;
-            write_file(ui, &args.file, &edited)?;
-            ui.note(format!("{} bytes in, {} out", original.len(), edited.len()));
-            Ok(())
-        }
-    }
+    write_edit(ui, &args.file, args.out, args.yes, &edited)?;
+    ui.note(format!("{} bytes in, {} out", original.len(), edited.len()));
+    Ok(())
 }
 
 /// `-4` is fine-tune units; `+2.1c` is cents, rounded to the nearest unit.
@@ -1380,6 +1359,53 @@ mod tests {
             None,
             "notes are numbers here"
         );
+    }
+
+    /// The smallest library this crate can write: one silent attack stroke at C4.
+    fn library() -> Vec<u8> {
+        let rules = encode::Rules {
+            kind: encode::Kind::Grand,
+            gain: 50,
+            damper_top: 96,
+        };
+        let recordings = [encode::Recording {
+            root: 60,
+            bank: Bank::Attack,
+            layer: 0,
+            channels: vec![vec![0i16; 4096]],
+        }];
+        let built = encode::build(
+            &encode::Donor::Rules(rules),
+            &encode::Options::new("Kit"),
+            &recordings,
+        )
+        .unwrap();
+        to_bytes(&built, Path::new("kit.npno")).unwrap()
+    }
+
+    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
+    /// meets the guard that spelling it with no `-o` meets.
+    #[test]
+    fn an_output_that_is_the_input_takes_the_in_place_guard() {
+        let dir = crate::edit::tests::scratch("piano-edit-in-place");
+        let path = dir.join("kit.npno");
+        let original = library();
+        std::fs::write(&path, &original).unwrap();
+
+        let args = EditArgs {
+            file: path.clone(),
+            name: Some("Vibes".into()),
+            variant: None,
+            voicing: None,
+            tune: Vec::new(),
+            map: Vec::new(),
+            out: Some(dir.join(".").join("kit.npno")),
+            yes: false,
+        };
+        let err = edit(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains("--yes"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn wav(root: u8, bank: Bank, layer: LayerName) -> StrokeFile {
