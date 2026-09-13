@@ -37,9 +37,9 @@ file formats, the USB protocol and
 [how to build from source](docs/src/reference/building.md) in its Reference
 section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Commnity
+## Community
 
-Check out other similar projects including projects that helped in the development of drawbar @ [Community](docs/src/community.md).
+Check out other projects including ones that helped in the development of drawbar @ [Community](docs/src/community.md).
 
 ## Disclaimer
 
