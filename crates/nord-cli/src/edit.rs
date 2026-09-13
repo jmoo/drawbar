@@ -181,9 +181,31 @@ pub(crate) fn stage(
 }
 
 pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    replace_file(path, bytes)?;
     ui.note(format!("wrote {} ({} bytes)", path.display(), bytes.len()));
     Ok(())
+}
+
+/// Put `bytes` at `path`, leaving whatever was there untouched if that cannot be done.
+///
+/// ⚠️ The bytes land in a sibling file that is then renamed over the target, because an
+/// edit reads its own destination: a write that truncates first and fails part way
+/// through leaves neither the original nor the edit. The temporary is a sibling so the
+/// rename stays inside one filesystem, where it replaces the target in one step.
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a file to write", path.display()))?;
+    let mut temp = name.to_os_string();
+    temp.push(format!(".nord{}.tmp", std::process::id()));
+    let temp = path.with_file_name(temp);
+
+    let failed = |e: std::io::Error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("{}: {e}", path.display())
+    };
+    std::fs::write(&temp, bytes).map_err(failed)?;
+    std::fs::rename(&temp, path).map_err(failed)
 }
 
 /// ⚠️ Fields that do nothing without a companion. The pairing is a fact about the
@@ -380,6 +402,36 @@ mod tests {
             steer(&nord_format::from_stream(&mut std::io::Cursor::new(pipe_library())).unwrap()),
             "",
         );
+    }
+
+    fn scratch(what: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nord-{what}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An edit's destination is usually its own source, so a write that cannot
+    /// finish has to leave that file as it was rather than truncated.
+    #[test]
+    fn a_write_that_cannot_finish_leaves_its_directory_as_it_was() {
+        let dir = scratch("write-fails");
+        let missing = dir.join("no-such-directory").join("out.ne5p");
+        assert!(replace_file(&missing, b"edited").is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_write_over_an_existing_file_replaces_the_whole_of_it() {
+        let dir = scratch("write-replaces");
+        let path = dir.join("out.ne5p");
+        std::fs::write(&path, b"the longer file that was here before").unwrap();
+        replace_file(&path, b"edited").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"edited".to_vec());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
     /// The smallest container-verified stub: enough bytes to decode, nothing to edit.

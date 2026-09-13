@@ -92,7 +92,7 @@ pub fn get(
     match (body, out) {
         (true, Some(out)) => {
             let wire_body = &read.body.0;
-            std::fs::write(&out, wire_body).map_err(|e| format!("{}: {e}", out.display()))?;
+            crate::edit::replace_file(&out, wire_body)?;
             ui.note(format!(
                 "unwrapped the {format} body of {} -> {} ({} bytes)",
                 path.display(),
