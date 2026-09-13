@@ -224,16 +224,26 @@ fn indexed(part: &str, label: &str) -> Option<u32> {
 }
 
 /// A drag over one number, spelling the new value only once it has moved.
+///
+/// `decimals` caps what the drag can land on: egui aims at the roundest value within a
+/// pointer's width of where the drag reached, and at a fractional display scale that is
+/// a half — which a field holding a whole number refuses.
 fn drag<H: std::hash::Hash>(
     ui: &mut egui::Ui,
     id: (&str, H),
     value: f64,
     range: std::ops::RangeInclusive<f64>,
     speed: f64,
+    decimals: Option<usize>,
 ) -> Option<String> {
     let mut moved = value;
     let response = ui.push_id(id, |ui| {
-        ui.add(egui::DragValue::new(&mut moved).range(range).speed(speed))
+        ui.add(
+            egui::DragValue::new(&mut moved)
+                .range(range)
+                .speed(speed)
+                .max_decimals_opt(decimals),
+        )
     });
     (response.inner.changed() && moved != value).then(|| moved.to_string())
 }
@@ -241,7 +251,12 @@ fn drag<H: std::hash::Hash>(
 /// A frame position. Nothing in the format caps one: the editor repairs a
 /// position past the file's end on load.
 fn frames(ui: &mut egui::Ui, id: (&str, u32), value: f64) -> Option<String> {
-    drag(ui, id, value, 0.0..=f64::MAX, 1.0)
+    drag(ui, id, value, 0.0..=f64::MAX, 1.0, None)
+}
+
+/// A velocity end, which the `map_stroke` holds as a `u8`.
+fn whole(ui: &mut egui::Ui, id: (&str, u32), value: f64, top: f64) -> Option<String> {
+    drag(ui, id, value, 0.0..=top, 0.5, Some(0))
 }
 
 /// Apply every set to a fresh decode and re-encode, the same all-or-nothing rule
@@ -446,28 +461,16 @@ fn fields(
         let top = f64::from(MAX_VELOCITY);
         sample::cell(ui, "Velocity window", 112.0, |ui| {
             ui.horizontal(|ui| {
-                if let Some(v) = drag(
-                    ui,
-                    ("proj_vmin", gid),
-                    stroke.velocity.0 as f64,
-                    0.0..=top,
-                    0.5,
-                ) {
+                if let Some(v) = whole(ui, ("proj_vmin", gid), stroke.velocity.0 as f64, top) {
                     sets.push((format!("stroke{gid}.velocity_min"), v));
                 }
-                if let Some(v) = drag(
-                    ui,
-                    ("proj_vmax", gid),
-                    stroke.velocity.1 as f64,
-                    0.0..=top,
-                    0.5,
-                ) {
+                if let Some(v) = whole(ui, ("proj_vmax", gid), stroke.velocity.1 as f64, top) {
                     sets.push((format!("stroke{gid}.velocity_max"), v));
                 }
             });
         });
         sample::cell(ui, "Gain", 80.0, |ui| {
-            if let Some(v) = drag(ui, ("proj_gain", gid), stroke.gain, 0.0..=16.0, 0.01) {
+            if let Some(v) = drag(ui, ("proj_gain", gid), stroke.gain, 0.0..=16.0, 0.01, None) {
                 sets.push((format!("stroke{gid}.gain"), v));
             }
         });
@@ -1013,6 +1016,68 @@ mod tests {
                 false => b,
             })
             .unwrap_or_else(|| panic!("{word} was never painted: {said:?}"))
+    }
+
+    /// One frame of the velocity-min control on its own, and what it spelled.
+    fn velocity_box(ctx: &egui::Context, events: Vec<egui::Event>) -> Option<String> {
+        let mut spelled = None;
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(200.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                spelled = whole(ui, ("proj_vmin", 1), 0.0, f64::from(MAX_VELOCITY));
+            });
+        });
+        spelled
+    }
+
+    /// ⚠️ A velocity end is a `u8`: egui aims at the roundest value within a pointer's
+    /// width of where a drag reached, and at a fractional display scale that is a half
+    /// the field refuses. Every value the control spells has to be one the format takes.
+    #[test]
+    fn a_dragged_velocity_end_is_spelled_as_a_whole_number() {
+        let ctx = dressed();
+        ctx.set_pixels_per_point(1.5);
+        let at = egui::pos2(30.0, 20.0);
+        velocity_box(&ctx, Vec::new());
+        velocity_box(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let mut spelled = None;
+        for step in [10.0, 3.0, 3.0] {
+            let to = egui::pos2(at.x + step, at.y);
+            spelled = velocity_box(&ctx, vec![egui::Event::PointerMoved(to)]).or(spelled);
+        }
+
+        let spelled = spelled.expect("the drag moved the control");
+        assert!(
+            spelled.parse::<u8>().is_ok(),
+            "the control spelled {spelled:?}, which is not a velocity"
+        );
+        assert!(
+            apply(
+                &project_bytes(),
+                &[("stroke1.velocity_min".into(), spelled.clone())]
+            )
+            .is_ok(),
+            "and the format takes {spelled:?}"
+        );
     }
 
     /// ⚠️ A block is not a row either: the velocity field draws one block per zone that
