@@ -39,7 +39,7 @@ section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Commnity
 
-Check out other similar projects @ [Community](docs/src/community.md).
+Check out other similar projects including projects that helped in the development of drawbar @ [Community](docs/src/community.md).
 
 ## Disclaimer
 
