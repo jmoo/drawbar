@@ -251,9 +251,9 @@ pub fn at_source_rate(frames: u64, rate: u32) -> Option<u64> {
 /// The key each file is taken to have been recorded at.
 ///
 /// A note name on the end of a filename, where **every** file carries a distinct one —
-/// that is the convention the corpus specimens are named by, and a run where one file
-/// disagrees is a guess worth not making. Otherwise a chromatic run from middle C,
-/// pulled down where it would not fit under the highest key a project maps.
+/// a run where one file disagrees is a guess worth not making. Otherwise a chromatic run
+/// from middle C, pulled down where it would not fit under the highest key a project
+/// maps.
 pub fn default_roots(paths: &[String]) -> Vec<u8> {
     let named: Option<Vec<u8>> = paths.iter().map(|path| trailing_note(path)).collect();
     if let Some(named) = named {
