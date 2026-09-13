@@ -201,25 +201,12 @@ impl Group {
     /// A member the body does not register is skipped rather than reported: the tests
     /// hold layouts to naming only real fields, so a caller need not carry the case.
     pub fn members_of<'a>(&self, specs: &'a [FieldSpec]) -> Vec<&'a str> {
-        let mut out = Vec::new();
-        for member in self.members {
-            match member.strip_suffix(".*") {
-                Some(prefix) => out.extend(
-                    specs
-                        .iter()
-                        .filter(|spec| under(&spec.name, prefix))
-                        .filter(|spec| spec.morph_parent().is_none())
-                        .map(|spec| spec.name.as_str()),
-                ),
-                None => out.extend(
-                    specs
-                        .iter()
-                        .find(|spec| spec.name == *member)
-                        .map(|spec| spec.name.as_str()),
-                ),
-            }
-        }
-        out
+        members_in(self.members, specs, |member| {
+            specs.iter().find(|spec| spec.name == member)
+        })
+        .into_iter()
+        .map(|spec| spec.name.as_str())
+        .collect()
     }
 
     /// Every group under this one, this one included, depth first.
@@ -230,6 +217,69 @@ impl Group {
         }
         out
     }
+}
+
+/// What a layout reads off a registered field, whether it is holding the body's specs or
+/// one body's values: where the field sits, and which parameter it rides on if it is a
+/// morph slot.
+trait Placed {
+    fn path(&self) -> &str;
+    fn morph_parent(&self) -> Option<String>;
+}
+
+impl Placed for FieldSpec {
+    fn path(&self) -> &str {
+        &self.name
+    }
+
+    fn morph_parent(&self) -> Option<String> {
+        FieldSpec::morph_parent(self)
+    }
+}
+
+impl Placed for Field {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn morph_parent(&self) -> Option<String> {
+        self.spec.morph_parent()
+    }
+}
+
+/// The items `members` names, in reading order, with any `prefix.*` expanded — a body's
+/// controls, morph slots left to the parameters they are drawn on.
+///
+/// `find` resolves a plain member: a scan where a caller holds only the list, an index
+/// lookup where a whole layout is being resolved against one body.
+fn members_in<'a, T: Placed>(
+    members: &[&str],
+    items: &'a [T],
+    find: impl Fn(&str) -> Option<&'a T>,
+) -> Vec<&'a T> {
+    let mut out = Vec::new();
+    for member in members {
+        match member.strip_suffix(".*") {
+            Some(prefix) => out.extend(
+                items
+                    .iter()
+                    .filter(|item| under(item.path(), prefix))
+                    .filter(|item| item.morph_parent().is_none()),
+            ),
+            None => out.extend(find(member)),
+        }
+    }
+    out
+}
+
+/// The items `claimed` does not answer for, in registry order. A morph slot whose
+/// parameter is claimed is not among them: it is drawn on that parameter's control.
+fn unclaimed<'a, T: Placed>(items: &'a [T], claimed: impl Fn(&str) -> bool) -> Vec<&'a T> {
+    items
+        .iter()
+        .filter(|item| !claimed(item.path()))
+        .filter(|item| !item.morph_parent().is_some_and(|parent| claimed(&parent)))
+        .collect()
 }
 
 /// Whether `path` is a field of the body at `prefix` — one dotted segment deeper, not
@@ -262,11 +312,8 @@ impl Panel {
     /// parameter's control, so a caller that has rendered the parameter has rendered it.
     pub fn leftovers<'a>(&self, specs: &'a [FieldSpec]) -> Vec<&'a str> {
         let named = self.named(specs);
-        let claimed = |path: &str| named.contains(&path);
-        specs
-            .iter()
-            .filter(|spec| !claimed(&spec.name))
-            .filter(|spec| !spec.morph_parent().is_some_and(|parent| claimed(&parent)))
+        unclaimed(specs, |path| named.contains(&path))
+            .into_iter()
             .map(|spec| spec.name.as_str())
             .collect()
     }
@@ -310,16 +357,7 @@ impl Panel {
             .iter()
             .map(|group| resolve_group(group, fields, &index, true, &mut claimed))
             .collect();
-        let leftovers = fields
-            .iter()
-            .filter(|field| !claimed.contains(field.path.as_str()))
-            .filter(|field| {
-                !field
-                    .spec
-                    .morph_parent()
-                    .is_some_and(|parent| claimed.contains(parent.as_str()))
-            })
-            .collect();
+        let leftovers = unclaimed(fields, |path| claimed.contains(path));
         Resolved {
             sections,
             leftovers,
@@ -336,18 +374,7 @@ fn resolve_group<'a>(
 ) -> Section<'a> {
     let relevant = parent_relevant && group.when.as_ref().is_none_or(|when| when.holds_in(index));
 
-    let mut own: Vec<&'a Field> = Vec::new();
-    for member in group.members {
-        match member.strip_suffix(".*") {
-            Some(prefix) => own.extend(
-                fields
-                    .iter()
-                    .filter(|field| under(&field.path, prefix))
-                    .filter(|field| field.spec.morph_parent().is_none()),
-            ),
-            None => own.extend(index.get(member).copied()),
-        }
-    }
+    let own = members_in(group.members, fields, |member| index.get(member).copied());
     claimed.extend(own.iter().map(|field| field.path.as_str()));
 
     let groups = group
