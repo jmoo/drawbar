@@ -1007,6 +1007,48 @@ mod tests {
             .to_string()
     }
 
+    #[test]
+    fn two_fields_may_not_claim_the_same_bit() {
+        let leaves = quote! {
+            struct Leaves {
+                #[bits(0..=7)]
+                a: u8,
+                #[bits(7..=14)]
+                b: u16,
+            }
+        };
+        assert!(refused(quote!(2), leaves).contains("bits 7..=14 overlap `a`, at 0..=7"));
+
+        let mixed = quote! {
+            struct Mixed {
+                #[at(0x00..0x01)]
+                child: Child,
+                #[bits(7..=7)]
+                flag: bool,
+            }
+        };
+        assert!(refused(quote!(2), mixed).contains("bits 7..=7 overlap `child`, at 0..=7"));
+    }
+
+    #[test]
+    fn a_placement_may_not_run_past_the_end_of_the_body() {
+        let leaf = quote! {
+            struct Leaf {
+                #[bits(0..=16)]
+                wide: u32,
+            }
+        };
+        assert!(refused(quote!(2), leaf).contains("bit 16 is past the end of a 2-byte body"));
+
+        let nested = quote! {
+            struct Nested {
+                #[at(0..3)]
+                child: Child,
+            }
+        };
+        assert!(refused(quote!(2), nested).contains("bit 23 is past the end of a 2-byte body"));
+    }
+
     /// A second placement is refused rather than silently dropped: the field would
     /// otherwise be decoded from the first range alone.
     #[test]
