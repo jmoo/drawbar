@@ -77,6 +77,11 @@ pub const EXPECTATIONS: &[(Standing, &str)] = &[
         "Instruments other than the Nord Electro 5 have not been tested with Connect an \
          instrument…, so USB support for other models cannot be guaranteed.",
     ),
+    (
+        Standing::Unsupported,
+        "Long-term storage in drawbar is not guaranteed while it is in alpha. Back up your \
+         files elsewhere.",
+    ),
 ];
 
 /// One line of the notes, in the terms the modal paints.
