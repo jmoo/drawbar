@@ -20,8 +20,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui;
 use nord_format::formats::npno::encode::{
-    build, layer_value, resample, Donor, Kind, Options, Recording, Rules,
-    HIGHEST_PLAYED_LAYER,
+    build, layer_value, resample, Donor, Kind, Options, Recording, Rules, HIGHEST_PLAYED_LAYER,
 };
 use nord_format::formats::npno::{Bank, Library};
 use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
