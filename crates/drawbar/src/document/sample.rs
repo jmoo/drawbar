@@ -468,14 +468,12 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
         .collect()
 }
 
-// ---- what the editor keeps between frames -------------------------------------------
-
 /// Which zone is open, what was last struck, and the map the paints are measured
 /// against. Nothing here is an edit: an edit is on the working copy the moment it is
 /// made.
 ///
-/// ⚠️ Reset when the document changes, which the mock-up's tab strip does too: a row
-/// index belongs to the instrument it was opened on.
+/// ⚠️ Reset when the document changes: a row index belongs to the instrument it was
+/// opened on.
 #[derive(Default)]
 pub struct State {
     selected: Option<usize>,
@@ -545,8 +543,6 @@ pub fn selected(state: &State) -> Option<usize> {
 pub fn pick_row(state: &mut State, row: usize) {
     state.pick(row, true);
 }
-
-// ---- the key map --------------------------------------------------------------------
 
 /// One zone as the key map draws it, whichever format states it.
 pub struct MapZone {
@@ -841,8 +837,6 @@ fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
         .collect()
 }
 
-// ---- the rows -----------------------------------------------------------------------
-
 /// One row of the zone list, in the words it prints.
 pub struct RowSpec {
     pub name: String,
@@ -1014,8 +1008,6 @@ pub fn rows(
     }
 }
 
-// ---- the cells of an open row -------------------------------------------------------
-
 const LABEL_TEXT: f32 = 9.5;
 const VALUE_TEXT: f32 = 11.5;
 const ACTION_H: f32 = 20.0;
@@ -1131,8 +1123,6 @@ pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, accent: bool) -> boo
     );
     response.clicked()
 }
-
-// ---- the Edit face ------------------------------------------------------------------
 
 /// What the document knows about one zone's audio while it draws the zone.
 pub struct Sound<'a> {
@@ -1441,8 +1431,6 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     ask
 }
 
-// ---- the per-key lanes --------------------------------------------------------------
-
 const LANE_LABEL_W: f32 = 80.0;
 const LANE_AXIS_W: f32 = 34.0;
 const LANE_SUMMARY_W: f32 = 150.0;
@@ -1701,8 +1689,6 @@ pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
         });
     state.baseline = Some(Saved { of, table });
 }
-
-// ---- the other two faces ------------------------------------------------------------
 
 /// The identity cell an instrument puts on the header: what the file states about
 /// itself that the strip cannot carry.
@@ -1971,8 +1957,6 @@ pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
     });
     rows
 }
-
-// ---- paint -------------------------------------------------------------------------
 
 /// Height of the drawn envelope.
 const WAVE_HEIGHT: f32 = 44.0;
@@ -2501,8 +2485,6 @@ mod tests {
         }];
         assert_eq!(span(&past, NSMP_SPAN), keys::Span { low: 17, high: 108 });
     }
-
-    // ---- the pinned map ------------------------------------------------------------
 
     /// A context dressed as the app dresses it: the semibold family a band and a row
     /// are set in is not bound by default, and laying one out without it panics.

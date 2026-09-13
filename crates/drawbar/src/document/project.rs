@@ -252,6 +252,8 @@ fn drag<H: std::hash::Hash>(
 
 /// A frame position. Nothing in the format caps one: the editor repairs a
 /// position past the file's end on load.
+///
+/// Inferred from specimens; not confirmed on hardware.
 fn frames(ui: &mut egui::Ui, id: (&str, u32), value: f64) -> Option<String> {
     drag(ui, id, value, 0.0..=f64::MAX, 1.0, None)
 }
