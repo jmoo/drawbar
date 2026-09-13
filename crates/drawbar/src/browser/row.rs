@@ -40,8 +40,6 @@ pub struct Cells<'a> {
 /// ended up.
 pub struct Drawn {
     pub response: egui::Response,
-    /// Where the name was painted, which is what a row too narrow for it cut it to.
-    pub name: egui::Rect,
     /// The triangle's box, where the row has one. A click there opens the branch rather
     /// than picking the row.
     pub chevron: Option<egui::Rect>,
@@ -250,7 +248,6 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     let galley = painter.layout_job(job);
     let elided = galley.elided;
     let at = egui::pos2(x, middle(galley.size().y));
-    let name = egui::Rect::from_min_size(at, galley.size());
     x += galley.size().x + GAP;
     painter.galley(at, galley, egui::Color32::PLACEHOLDER);
 
@@ -282,11 +279,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         Some(said) => response.on_hover_text(said),
         None => response,
     };
-    Drawn {
-        response,
-        name,
-        chevron,
-    }
+    Drawn { response, chevron }
 }
 
 #[cfg(test)]
@@ -350,19 +343,17 @@ mod tests {
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
-    /// ⚠️ A name too long for the panel is cut with an ellipsis rather than painted over
-    /// the count beside it, and the whole of it is one hover away.
+    /// ⚠️ A name too long for the panel is cut rather than painted over the count beside
+    /// it, and the whole of it is what the row's own hover then carries.
     #[test]
-    fn a_name_too_long_for_its_row_is_cut_and_offered_on_hover() {
+    fn a_name_too_long_for_its_row_is_cut_to_the_room_left() {
         let ctx = egui::Context::default();
         let long = "Africa Split, the one with the long tail and the second manual";
-        let mut cut = egui::Rect::NOTHING;
-        let mut whole = egui::Rect::NOTHING;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("places")
                 .exact_width(232.0)
                 .show(ctx, |ui| {
-                    cut = row(
+                    row(
                         ui,
                         false,
                         &Cells {
@@ -370,25 +361,34 @@ mod tests {
                             count: Some("128/400".into()),
                             ..Cells::default()
                         },
-                    )
-                    .name;
-                    whole = row(
+                    );
+                    row(
                         ui,
                         false,
                         &Cells {
                             name: "Africa Split",
                             ..Cells::default()
                         },
-                    )
-                    .name;
+                    );
                 });
         });
-        assert!(cut.width() > 0.0, "something was painted");
+
+        let painted = crate::browser::bench::galleys(&output);
+        let cut = painted
+            .iter()
+            .find(|galley| galley.text() == long)
+            .expect("the long name was painted");
+        assert!(cut.elided, "a name with no room for it is cut");
         assert!(
-            cut.right() <= 232.0,
-            "it stayed inside the panel: {}",
-            cut.right()
+            cut.size().x <= 232.0,
+            "and stays inside the panel: {}",
+            cut.size().x
         );
-        assert!(whole.width() < cut.width(), "a short name is not cut");
+        assert!(
+            painted
+                .iter()
+                .any(|galley| galley.text() == "Africa Split" && !galley.elided),
+            "a short name is painted whole"
+        );
     }
 }

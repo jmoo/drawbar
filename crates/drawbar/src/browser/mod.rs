@@ -38,7 +38,7 @@ pub use drag::{
     families_present, kinds_present, landing, qualified, Carried, Held, Item, Kind, Landing, Onto,
 };
 pub use instrument::about;
-pub use row::{cell_ink, starred, Cells, Drawn};
+pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
 pub use tree::new_menu;
 
