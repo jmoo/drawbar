@@ -62,9 +62,9 @@ pub enum Bundle {
     Drum3KitBank(nd3::kit_bank::KitBank),
     Electro5(ne5::Bundle),
     /// A ZIP of CBIN files under any mix of tags — every model's bundle/backup
-    /// shape, verified against real factory restores (`.no3b`, `.nc2b`,
-    /// `.nl4b`). Members are kept container-verified and raw, under their
-    /// archive paths — which encode the slot, uninterpreted here.
+    /// shape. Reported by public interop documentation; no specimen has been read.
+    /// Members are kept container-verified and raw, under their archive paths —
+    /// which encode the slot, uninterpreted here.
     Members(Vec<(String, Cbin<RawBody>)>),
 }
 
@@ -251,16 +251,22 @@ impl Sample {
         }
     }
 
-    /// Move a zone's lowest note, on the generations that store one — the rest
-    /// tile, and refuse.
+    /// Whether this generation stores a zone's lowest note.
+    ///
+    /// False where zones tile — a zone reaches down to one above the next-lower zone's
+    /// top, so only the top note is stored — which is what makes
+    /// [`Self::set_zone_low_note`] refuse there.
+    pub fn has_low_note(&self) -> bool {
+        matches!(self, Sample::V3(_))
+    }
+
+    /// Move a zone's lowest note, on the generations that store one — see
+    /// [`Self::has_low_note`].
     pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
         match self {
-            Sample::V2(_) => Err(ParseError::AssertFail(
-                "v2 zones tile: a zone reaches down to one above the next-lower zone's \
-                 top, so only the top note is stored"
-                    .into(),
-            )
-            .into()),
+            Sample::V2(_) => {
+                Err(ParseError::AssertFail("v2 stores no low note".into()).into())
+            }
             Sample::V3(s) => s.set_zone_low_note(index, note),
         }
     }
@@ -443,7 +449,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
     use Entity as E;
 
     Ok(match tag {
-        // The shared library formats.
         nsmp::FORMAT => {
             let file: Cbin<nsmp::AnyBody> = cbin::read(reader, nsmp::FORMAT)?;
             let header = file.header;
@@ -458,7 +463,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
             E::PianoLibrary(nsclassic::piano_library::read_from(reader)?)
         }
 
-        // Electro.
         ne3::program::FORMAT => E::Program(Program::Electro3(ne3::program::read_from(reader)?)),
         ne3::organ_preset::FORMAT => {
             E::OrganPreset(OrganPreset::Electro3(ne3::organ_preset::read_from(reader)?))
@@ -477,7 +481,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         ne7::live::FORMAT => E::Live(Live::Electro7(ne7::live::read_from(reader)?)),
         ne7::settings::FORMAT => E::Settings(Settings::Electro7(ne7::settings::read_from(reader)?)),
 
-        // Stage.
         nsclassic::program::FORMAT => E::Program(Program::StageClassic(
             nsclassic::program::read_from(reader)?,
         )),
@@ -504,7 +507,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         }
         ns4::settings::FORMAT => E::Settings(Settings::Stage4(ns4::settings::read_from(reader)?)),
 
-        // Piano and Grand.
         np::program::FORMAT => E::Program(Program::Piano1(np::program::read_from(reader)?)),
         np::live::FORMAT => E::Live(Live::Piano1(np::live::read_from(reader)?)),
         np::settings::FORMAT => E::Settings(Settings::Piano1(np::settings::read_from(reader)?)),
@@ -524,14 +526,12 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         ng2::live::FORMAT => E::Live(Live::Grand(ng2::live::read_from(reader)?)),
         ng2::settings::FORMAT => E::Settings(Settings::Grand(ng2::settings::read_from(reader)?)),
 
-        // Wave.
         nw::program::FORMAT => E::Program(Program::Wave(nw::program::read_from(reader)?)),
         nw::settings::FORMAT => E::Settings(Settings::Wave(nw::settings::read_from(reader)?)),
         nw2::program::FORMAT => E::Program(Program::Wave2(nw2::program::read_from(reader)?)),
         nw2::live::FORMAT => E::Live(Live::Wave2(nw2::live::read_from(reader)?)),
         nw2::settings::FORMAT => E::Settings(Settings::Wave2(nw2::settings::read_from(reader)?)),
 
-        // Organs.
         nc2::program::FORMAT => E::Program(Program::C2(nc2::program::read_from(reader)?)),
         nc2::settings::FORMAT => E::Settings(Settings::C2(nc2::settings::read_from(reader)?)),
         nc2d::program::FORMAT => E::Program(Program::C2D(nc2d::program::read_from(reader)?)),
@@ -551,7 +551,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         }
         nla1::settings::FORMAT => E::Settings(Settings::LeadA1(nla1::settings::read_from(reader)?)),
 
-        // Drums.
         nd2::program::FORMAT => E::Program(Program::Drum2(nd2::program::read_from(reader)?)),
         nd3::kit::FORMAT => E::Program(Program::Drum3(nd3::kit::read_from(reader)?)),
 
