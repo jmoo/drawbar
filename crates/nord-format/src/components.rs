@@ -952,8 +952,7 @@ impl Debug for StageTranspose {
 
 /// The master clock rate the Stage 2 and 3 store in a program: `stored + 30` BPM.
 ///
-/// Reported by the Nord User Forum's ns3-program-viewer documentation
-/// (github.com/Chris55/ns3-program-viewer); not confirmed on hardware.
+/// Reported by Chris55/nord-documentation; not confirmed on hardware.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MasterTempo {
     inner: u8,
@@ -1381,9 +1380,8 @@ sparse_enum!(
 sparse_enum!(
     /// A Stage split boundary, one of the ten notes the panel offers.
     ///
-    /// The Stage 2 and 3 store the same ten-note table. Reported by the Nord User
-    /// Forum's ns3-program-viewer documentation (github.com/Chris55/ns3-program-viewer);
-    /// not confirmed on hardware.
+    /// The Stage 2 and 3 store the same ten-note table. Reported by
+    /// Chris55/nord-documentation; not confirmed on hardware.
     SplitNote, 4, {
         0 => F2, "F2";
         1 => C3, "C3";
@@ -1401,7 +1399,7 @@ sparse_enum!(
 sparse_enum!(
     /// A Stage 3 split crossfade width, in semitones.
     ///
-    /// Reported by the ns3-program-viewer documentation; not confirmed on hardware.
+    /// Reported by Chris55/nord-documentation; not confirmed on hardware.
     SplitWidth, 2, {
         0 => One, "1";
         1 => Six, "6";
@@ -1412,7 +1410,7 @@ sparse_enum!(
 sparse_enum!(
     /// The program category byte the Stage 2 and 3 keep in the header's `aux` word.
     ///
-    /// Reported by the ns3-program-viewer documentation; not confirmed on hardware.
+    /// Reported by Chris55/nord-documentation; not confirmed on hardware.
     /// The gaps are real: no name is known for the values between these.
     ProgramCategory, 8, {
         0x00 => Acoustic, "Acoustic";
