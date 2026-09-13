@@ -6,6 +6,8 @@ Drawbar is a blackbox Clavia / Nord reverse engineering project in Rust. It read
 and writes Nord keyboard files and talks to Nord instruments over USB, on Linux,
 macOS, Windows, and in the browser.
 
+![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](assets/screenshot.png)
+
 | Tool | What it is |
 |---|---|
 | **drawbar** | A cross-platform app — a file browser over the sounds on your computer and on an attached instrument, with an editor for each. Desktop or browser tab. |

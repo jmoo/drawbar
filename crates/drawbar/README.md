@@ -5,6 +5,8 @@ An [egui](https://github.com/emilk/egui) app over
 [`nord-cli`](../nord-cli) can do that is worth a window, reachable from a browser
 tab or a desktop one.
 
+![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](../../docs/src/assets/screenshot.png)
+
 The window is a file browser over the places your sounds live: files on this
 computer — dropped, opened, pulled off the instrument, or made fresh — beside an
 attached instrument's own folders, so moving a sound between the two is a short
