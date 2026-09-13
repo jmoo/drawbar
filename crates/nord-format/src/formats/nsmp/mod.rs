@@ -330,8 +330,8 @@ impl Cbin<SampleV3> {
             .sections
             .iter()
             .filter(|s| s.is(section::STK4))
-            .map(|s| match (s.payload.get(0..4), s.payload.get(5)) {
-                (Some(gid), Some(&root)) => Ok((u32::from_be_bytes(gid.try_into().unwrap()), root)),
+            .map(|s| match (stroke_gid(s), s.payload.get(5)) {
+                (Some(gid), Some(&root)) => Ok((gid, root)),
                 _ => Err(ParseError::AssertFail(format!(
                     "stroke payload is {} bytes, too short for its id fields",
                     s.payload.len()
@@ -474,13 +474,7 @@ impl Cbin<SampleV3> {
             .body
             .sections
             .iter()
-            .position(|s| {
-                s.is(section::STK4)
-                    && s.payload
-                        .get(0..4)
-                        .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                        == Some(gid)
-            })
+            .position(|s| s.is(section::STK4) && stroke_gid(s) == Some(gid))
             .ok_or_else(|| {
                 ParseError::AssertFail(format!(
                     "zone {index} names stroke {gid}, which the file does not contain"
@@ -522,13 +516,7 @@ impl Cbin<SampleV3> {
             .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
         let mut at = 0;
         for section in &self.body.sections {
-            if section.is(section::STK4)
-                && section
-                    .payload
-                    .get(0..4)
-                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                    == Some(zone.stroke_gid)
-            {
+            if section.is(section::STK4) && stroke_gid(section) == Some(zone.stroke_gid) {
                 return Ok((at + section::HEADER4_LEN, section.payload.as_slice()));
             }
             at += section.encoded_len();
@@ -547,6 +535,14 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
 
 /// The global id a `stk` payload leads with.
 fn stroke_id(section: &Section) -> Option<u32> {
+    let b = section.payload.get(0..4)?;
+    Some(u32::from_be_bytes(b.try_into().ok()?))
+}
+
+/// The global id a v3/v4 `stk` payload leads with. Unlike [`stroke_id`]'s
+/// narrow counterpart it is compared whole: a wide zone record stores the same
+/// u32.
+fn stroke_gid(section: &section::Section4) -> Option<u32> {
     let b = section.payload.get(0..4)?;
     Some(u32::from_be_bytes(b.try_into().ok()?))
 }
