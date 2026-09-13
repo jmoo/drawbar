@@ -579,7 +579,6 @@ pub fn micro() -> egui::TextStyle {
 pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(8.0, 4.0);
-    // A button was 1px taller than its own text; a strip of them read as a solid bar.
     spacing.button_padding = egui::vec2(7.0, 3.0);
     // Panels own their inner padding, so the shared margin claims none of it.
     spacing.window_margin = egui::Margin::same(0);
