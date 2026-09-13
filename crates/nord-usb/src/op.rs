@@ -360,6 +360,47 @@ pub async fn write<T: Transport>(
     transfer_in(session, at, &file, name, timestamp).await
 }
 
+/// A [`cmd::BEGIN_WRITE`] argument block: the address, the body's length, the format
+/// tag, the timestamp, the `0xffffffff` word, and the slot's name, length-prefixed.
+///
+/// `BEGIN_WRITE` is the only frame of a write that carries a name; it becomes the slot's.
+pub fn begin_write_args(
+    at: Location,
+    body_len: usize,
+    tag: &[u8; 4],
+    timestamp: u32,
+    name: &str,
+) -> Result<Vec<u8>> {
+    let body_len = u32::try_from(body_len)
+        .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
+    let name_len = u32::try_from(name.len())
+        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
+    let mut args = Vec::new();
+    at.write_to(&mut args);
+    args.extend_from_slice(&body_len.to_be_bytes());
+    args.extend_from_slice(tag);
+    args.extend_from_slice(&timestamp.to_be_bytes());
+    args.extend_from_slice(&u32::MAX.to_be_bytes());
+    args.extend_from_slice(&name_len.to_be_bytes());
+    args.extend_from_slice(name.as_bytes());
+    Ok(args)
+}
+
+/// A [`cmd::WRITE_DATA`] argument block: the address, the chunk's offset and length,
+/// then the chunk.
+pub fn write_data_args(at: Location, offset: usize, chunk: &[u8]) -> Result<Vec<u8>> {
+    let offset = u32::try_from(offset)
+        .map_err(|_| Error::InvalidArgument("the offset is larger than the wire format".into()))?;
+    let len = u32::try_from(chunk.len())
+        .map_err(|_| Error::InvalidArgument("the chunk is larger than the wire format".into()))?;
+    let mut args = Vec::new();
+    at.write_to(&mut args);
+    args.extend_from_slice(&offset.to_be_bytes());
+    args.extend_from_slice(&len.to_be_bytes());
+    args.extend_from_slice(chunk);
+    Ok(args)
+}
+
 /// The write transfer itself, identical for every class.
 async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
@@ -370,21 +411,10 @@ async fn transfer_in<T: Transport>(
 ) -> Result<()> {
     let body = &file.body.0;
     let chunk_size = write_chunk()?;
-    let body_len = u32::try_from(body.len())
-        .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
-    let name_len = u32::try_from(name.len())
-        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
 
     session.notify(&ui::label("Downloading...")?).await?;
 
-    let mut begin = Vec::new();
-    at.write_to(&mut begin);
-    begin.extend_from_slice(&body_len.to_be_bytes());
-    begin.extend_from_slice(&file.header.tag);
-    begin.extend_from_slice(&timestamp.to_be_bytes());
-    begin.extend_from_slice(&u32::MAX.to_be_bytes());
-    begin.extend_from_slice(&name_len.to_be_bytes());
-    begin.extend_from_slice(name.as_bytes());
+    let begin = begin_write_args(at, body.len(), &file.header.tag, timestamp, name)?;
     session
         .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
         .await?;
@@ -393,12 +423,7 @@ async fn transfer_in<T: Transport>(
     let mut painted = None;
     while offset < body.len() {
         let end = offset.saturating_add(chunk_size).min(body.len());
-        let chunk = &body[offset..end];
-        let mut data = Vec::new();
-        at.write_to(&mut data);
-        data.extend_from_slice(&(offset as u32).to_be_bytes());
-        data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
-        data.extend_from_slice(chunk);
+        let data = write_data_args(at, offset, &body[offset..end])?;
         if end == body.len() {
             // Only the final chunk is acknowledged.
             session
