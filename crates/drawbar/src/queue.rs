@@ -285,7 +285,8 @@ impl Behind {
             queued: queue.len(),
             changed: changed(workspace, device, queue).len(),
             unsaved: workspace
-                .documents()
+                .entities()
+                .iter()
                 .filter(|entity| entity.is_unsaved())
                 .count(),
         }

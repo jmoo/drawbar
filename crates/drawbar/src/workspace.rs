@@ -666,7 +666,6 @@ enum Incoming {
 
 pub struct Workspace {
     entities: Vec<LocalEntity>,
-    selected: Option<u64>,
     next_id: u64,
     /// Bumped by every change to the list, so the shell can tell when the store is
     /// behind without comparing every asset's bytes.
@@ -684,7 +683,6 @@ impl Workspace {
         let (tx, rx) = std::sync::mpsc::channel();
         Workspace {
             entities: Vec::new(),
-            selected: None,
             next_id: 1,
             revision: 0,
             ctx,
@@ -694,24 +692,13 @@ impl Workspace {
         }
     }
 
-    pub fn selected(&self) -> Option<&LocalEntity> {
-        let id = self.selected?;
-        self.entities.iter().find(|e| e.id == id)
-    }
-
-    /// Point the document view at one entity. The browser's own selection is separate:
-    /// clicking a row in the sidebar does not change what the open tab is showing.
-    pub fn select(&mut self, id: Option<u64>) {
-        self.selected = id;
-    }
-
-    /// Counts changes to the list, not to any one asset.
     /// The context the app draws in, for the acts that ask the window itself for
     /// something rather than the list.
     pub fn ctx(&self) -> &egui::Context {
         &self.ctx
     }
 
+    /// Counts changes to the list, not to any one asset.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -725,13 +712,6 @@ impl Workspace {
     /// What "This computer" shows: everything except the views of a slot.
     pub fn listed(&self) -> impl Iterator<Item = &LocalEntity> {
         self.entities.iter().filter(|e| e.kept)
-    }
-
-    /// Every document in memory, the views of slots included — everything a tab can be
-    /// showing and an edit can have touched. [`Workspace::listed`] is the narrower set
-    /// this computer's own list holds.
-    pub fn documents(&self) -> impl Iterator<Item = &LocalEntity> {
-        self.entities.iter()
     }
 
     pub fn get(&self, id: u64) -> Option<&LocalEntity> {
@@ -828,9 +808,6 @@ impl Workspace {
         if self.entities.len() == before && rescued.is_empty() {
             return;
         }
-        if self.selected.is_some_and(|id| self.get(id).is_none()) {
-            self.selected = self.entities.last().map(|e| e.id);
-        }
         self.revision += 1;
     }
 
@@ -892,7 +869,6 @@ impl Workspace {
             }
         };
         self.entities.push(entity);
-        self.selected = Some(id);
         (id, arrival)
     }
 
@@ -1141,9 +1117,6 @@ impl Workspace {
         };
         let gone = self.entities.remove(at);
         self.revision += 1;
-        if self.selected == Some(id) {
-            self.selected = self.entities.last().map(|e| e.id);
-        }
         log.say(format!("Removed “{}” from this computer.", gone.name));
     }
 
@@ -1196,7 +1169,6 @@ impl Workspace {
         if let Some(next) = next_id {
             self.next_id = self.next_id.max(next);
         }
-        self.selected = self.entities.last().map(|e| e.id);
         self.revision += 1;
         refused
     }
@@ -1561,7 +1533,6 @@ mod tests {
         workspace.close_views(|_| false, |_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_none());
         assert!(workspace.get(local).is_some(), "kept is kept");
-        assert_eq!(workspace.selected().map(|e| e.id), Some(local));
     }
 
     /// ⚠️ The loss this rule exists to stop. A view is the only copy of what it holds —
