@@ -1387,10 +1387,10 @@ impl Device {
                 DeviceEvent::Focus { class, at } => {
                     self.state.focus.insert(class.to_raw(), at);
                 }
+                // A bank that holds nothing is an answer like any other: dropping it
+                // would leave the names it used to hold standing.
                 DeviceEvent::BankScanned { class, bank, slots } => {
-                    if !slots.is_empty() {
-                        self.state.banks.insert((class.to_raw(), bank), slots);
-                    }
+                    self.state.banks.insert((class.to_raw(), bank), slots);
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
@@ -1716,6 +1716,31 @@ mod tests {
         }
         assert!(read_only(ObjectClass::Unknown(9)));
         assert!(!sendable(ObjectClass::Unknown(9)));
+    }
+
+    /// A bank a walk found empty is an answer like any other. A folder emptied on the
+    /// instrument must not go on showing the names it used to hold, and must not read
+    /// as one nothing has looked at.
+    #[test]
+    fn a_bank_that_scans_as_empty_replaces_what_it_held() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let class = ObjectClass::Sample;
+
+        device.pretend_scanned(class, 1, &["Marimba"]);
+        assert_eq!(device.state.bank(class, 1).map(<[_]>::len), Some(1));
+
+        device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 1,
+            slots: Vec::new(),
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        let slots = device.state.bank(class, 1).expect("the bank was read");
+        assert!(slots.is_empty(), "read and empty, not never read");
     }
 
     #[test]
