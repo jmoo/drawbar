@@ -358,8 +358,7 @@ pub fn build(
         channels,
         strokes: Vec::new(),
     };
-    library.set_name(&options.name)?;
-    library.set_variant(&options.variant)?;
+    library.set_name_and_variant(&options.name, &options.variant)?;
 
     let mut order: Vec<&Recording> = recordings.iter().collect();
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
@@ -1761,6 +1760,29 @@ mod tests {
         let whole = build(&Donor::Template(&library), &options, &recordings).unwrap();
         let stripped = build(&Donor::Template(&skeleton), &options, &recordings).unwrap();
         assert_eq!(stripped.to_body().unwrap(), whole.to_body().unwrap());
+    }
+
+    /// A built library states the name and the variant the caller gives, so the name is
+    /// measured against that variant rather than against the one the template carries.
+    #[test]
+    fn a_name_that_fits_beside_the_variant_it_is_given_is_built() {
+        let name = "Studio Nine";
+        let donated = "Concert Grand Sml XL";
+        let donor = template(1);
+        let mut library = donor.library().unwrap();
+        library.set_variant(donated).unwrap();
+        assert!(
+            library.clone().set_name(name).is_err(),
+            "the name fits beside the template's variant, so the case states nothing"
+        );
+
+        let built = build(
+            &Donor::Template(&library),
+            &Options::new(name),
+            &[one(60, Bank::Attack, 0, tone(6_000, 300.0, 1))],
+        )
+        .expect("a name and an empty variant that fit the field they share");
+        assert_eq!(built.name(), (name.to_string(), String::new()));
     }
 
     #[test]
