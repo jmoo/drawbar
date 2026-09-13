@@ -229,6 +229,11 @@ pub struct VelocityDefaults {
 /// The highest velocity a window end may name.
 pub const MAX_VELOCITY: u8 = 127;
 
+/// The highest MIDI note a root key or key range may name. Wider than the keys
+/// [`LOWEST_NOTE`]..=[`HIGHEST_NOTE`] the editor lays `note_info` out for: a
+/// zone may reach past them.
+pub const MAX_NOTE: u8 = 127;
+
 /// One field of one stroke, with the value to give it.
 ///
 /// The trim and loop points sit in the `common_zone`'s `common_stroke`; gain
@@ -400,6 +405,16 @@ fn velocity(v: u8) -> Result<String, ParseError> {
         return Err(ParseError::OutOfBounds {
             value: v.to_string(),
             bound: format!("0..={MAX_VELOCITY}"),
+        });
+    }
+    Ok(v.to_string())
+}
+
+fn note(v: u8) -> Result<String, ParseError> {
+    if v > MAX_NOTE {
+        return Err(ParseError::OutOfBounds {
+            value: v.to_string(),
+            bound: format!("0..={MAX_NOTE}"),
         });
     }
     Ok(v.to_string())
@@ -597,8 +612,8 @@ impl Project {
     }
 
     pub fn set_root_key(&mut self, zone_id: u32, key: u8) -> Result<(), ParseError> {
-        self.map_zone_mut(zone_id)?
-            .set_field("m_rootKey", key.to_string())
+        let key = note(key)?;
+        self.map_zone_mut(zone_id)?.set_field("m_rootKey", key)
     }
 
     /// Set a zone's key range. Nothing checks it against the neighbours: the
@@ -610,9 +625,12 @@ impl Project {
                 bound: "a key range with its bottom at or below its top".into(),
             });
         }
+        // Both ends before either lands: a half-written range is a zone the
+        // editor plays over keys the caller never asked for.
+        let (bottom, top) = (note(bottom)?, note(top)?);
         let zone = self.map_zone_mut(zone_id)?;
-        zone.set_field("m_btmNote", bottom.to_string())?;
-        zone.set_field("m_topNote", top.to_string())
+        zone.set_field("m_btmNote", bottom)?;
+        zone.set_field("m_topNote", top)
     }
 
     /// The instrument's `samplib_attrs` block.
@@ -1420,6 +1438,19 @@ mod tests {
             .set_stroke_field(99, StrokeField::Gain(1.0))
             .is_err());
         assert_eq!(project.render(), before);
+    }
+
+    #[test]
+    fn a_key_past_the_midi_domain_is_refused() {
+        let mut project = three_zones();
+        let before = project.render();
+        assert!(project.set_root_key(130, 128).is_err());
+        assert!(project.set_key_range(131, 62, 128).is_err());
+        assert!(project.set_key_range(131, 128, 200).is_err());
+        assert_eq!(project.render(), before);
+
+        assert!(project.set_root_key(130, MAX_NOTE).is_ok());
+        assert!(project.set_key_range(131, 0, MAX_NOTE).is_ok());
     }
 
     #[test]
