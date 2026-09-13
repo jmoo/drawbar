@@ -64,9 +64,9 @@ pub const SETTINGS_SECTIONS: [Section; 5] = [
 /// Registry path, the section it belongs in, and its label.
 ///
 /// Grouped by section and alphabetical by path inside each group; a test holds it that
-/// way. Display order is not this order — see `panel::reading_order`.
+/// way. Display order is not this order: a document is laid out by the
+/// `nord_format::panel::Panel` its format declares, resolved in `document::field`.
 const FIELDS: &[(&str, Section, &str)] = &[
-    // ── Keyboard & split ───────────────────────────────────────────────────────
     ("center_panel.gain", Section::Keyboard, "Program level"),
     (
         "center_panel.lower_control",
@@ -132,7 +132,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Keyboard,
         "Upper sustain pedal",
     ),
-    // ── Organ ──────────────────────────────────────────────────────────────────
     ("center_panel.drawbar_live", Section::Organ, "Drawbars live"),
     ("center_panel.organ_type", Section::Organ, "Organ model"),
     ("organ_panel.b3_bass_bar1", Section::Organ, "Bass drawbar 1"),
@@ -254,7 +253,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Vox preset 2 vibrato",
     ),
     ("organ_panel.vox_vib", Section::Organ, "Vox vibrato"),
-    // ── Piano ──────────────────────────────────────────────────────────────────
     ("piano_panel.acoustics", Section::Piano, "Acoustics"),
     ("piano_panel.category", Section::Piano, "Type"),
     ("piano_panel.clav_model", Section::Piano, "Clavinet model"),
@@ -262,7 +260,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ("piano_panel.mono", Section::Piano, "Mono"),
     ("piano_panel.piano_model", Section::Piano, "Model"),
     ("piano_panel.touch", Section::Piano, "Touch"),
-    // ── Sample ─────────────────────────────────────────────────────────────────
     ("sample_panel.attack", Section::Sample, "Attack"),
     (
         "sample_panel.decay_release",
@@ -273,7 +270,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ("sample_panel.filter", Section::Sample, "Filter"),
     ("sample_panel.id", Section::Sample, "Sample library id"),
     ("sample_panel.number", Section::Sample, "Sample number"),
-    // ── Effects ────────────────────────────────────────────────────────────────
     ("effects_panel.fx1", Section::Effects, "Effect 1"),
     (
         "effects_panel.fx1_control",
@@ -315,14 +311,12 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Rotary fast",
     ),
     ("effects_panel.rotary_stop", Section::Effects, "Rotary stop"),
-    // ── EQ ─────────────────────────────────────────────────────────────────────
     ("effects_panel.equalizer_bass", Section::Eq, "Bass"),
     ("effects_panel.equalizer_freq", Section::Eq, "Mid frequency"),
     ("effects_panel.equalizer_freq_gain", Section::Eq, "Mid gain"),
     ("effects_panel.equalizer_on", Section::Eq, "Equalizer"),
     ("effects_panel.equalizer_part", Section::Eq, "Applies to"),
     ("effects_panel.equalizer_treble", Section::Eq, "Treble"),
-    // ── Settings: System ───────────────────────────────────────────────────────
     ("b3_trig_mode", Section::System, "Organ key trigger"),
     ("ctrl_pedal_gain", Section::System, "Control pedal gain"),
     ("ctrl_pedal_type", Section::System, "Control pedal type"),
@@ -337,7 +331,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Sustain pedal function",
     ),
     ("sustain_pedal_type", Section::System, "Sustain pedal type"),
-    // ── Settings: MIDI ─────────────────────────────────────────────────────────
     ("control_change_mode", Section::Midi, "Control change"),
     ("global_channel", Section::Midi, "Global channel"),
     (
@@ -353,7 +346,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Upper receive channel",
     ),
     ("upper_split_channel", Section::Midi, "Upper split channel"),
-    // ── Settings: Sound ────────────────────────────────────────────────────────
     ("b3_key_bounce", Section::Sound, "Key bounce"),
     ("b3_key_click_level", Section::Sound, "Key click level"),
     (
@@ -401,7 +393,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ),
     ("rotary_rotor_speed", Section::Sound, "Rotor speed"),
     ("rotary_speaker_type", Section::Sound, "Rotary speaker"),
-    // ── Settings: at power-on ──────────────────────────────────────────────────
     ("startup_live_mode", Section::Startup, "Start in Live mode"),
     ("startup_live_slot", Section::Startup, "Live slot"),
     ("startup_program", Section::Startup, "Program"),
@@ -647,8 +638,6 @@ fn slot_pair(raw: &str) -> Option<String> {
     Some(format!("{}:{}", bank + 1, slot + 1))
 }
 
-// ── what a thing is called ───────────────────────────────────────────────────────
-
 /// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
 /// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it and a
 /// reader need not be shown it.
@@ -674,8 +663,6 @@ pub fn display_name(name: &str) -> &str {
     }
 }
 
-// ── where things are ─────────────────────────────────────────────────────────────
-
 /// What the browser calls a class's folder.
 pub fn folder(class: ObjectClass) -> &'static str {
     match class {
@@ -699,8 +686,6 @@ pub fn shown(at: Location) -> String {
 pub fn place(class: ObjectClass, at: Location) -> String {
     format!("{} {}", folder(class), shown(at))
 }
-
-// ── what the attached instrument takes ───────────────────────────────────────────
 
 /// How much of a set the attached instrument takes: `6 of 9 fit the Nord Electro 5D 73`.
 ///

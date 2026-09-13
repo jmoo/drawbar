@@ -517,8 +517,6 @@ fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
         })
 }
 
-// ---- narrowing and ordering ------------------------------------------------------
-
 /// One column of the table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Column {
@@ -673,8 +671,6 @@ fn address(row: &Row) -> (bool, u32, u32, u32) {
     }
 }
 
-// ---- the consequence of a selection -----------------------------------------------
-
 /// What sending the picked rows would do, in one sentence.
 pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String {
     let mut going: Vec<(ObjectClass, Location)> =
@@ -751,8 +747,6 @@ fn spans(going: &[(ObjectClass, Location)]) -> String {
     }
     runs.join(", ")
 }
-
-// ---- the view ----------------------------------------------------------------------
 
 /// The height of a row, of the head over them, and of the bar over that.
 const ROW: f32 = 24.0;
