@@ -97,6 +97,70 @@ fn info_rejects_a_response_for_a_different_location() {
     assert!(t.is_exhausted());
 }
 
+/// A frame whose checksum does not cover its bytes cannot be paired with the request
+/// that asked for it, so the transaction is released rather than carried on.
+#[test]
+fn a_reply_whose_crc_is_wrong_is_refused_and_releases_the_session() {
+    let at = nord_usb::Location { bank: 1, slot: 2 };
+    let mut corrupt = response(cmd::INFO, &slot_args(at));
+    *corrupt.bytes.last_mut().expect("the trailing CRC") ^= 0x01;
+
+    let mut t = ReplayTransport::new(
+        session_open(ObjectClass::Program)
+            .into_iter()
+            .chain([
+                request(cmd::INFO, &slot_args(at)),
+                corrupt,
+                ui_request(ui::GOODBYE),
+                ui_response(ui::GOODBYE, 0),
+            ])
+            .collect(),
+    );
+    let err = pollster::block_on(async {
+        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let err = op::info(&mut session, at)
+            .await
+            .expect_err("a frame whose CRC does not match its bytes is not a reply");
+        session.commit().await.unwrap();
+        err
+    });
+
+    assert!(matches!(err, nord_usb::Error::BadCrc { .. }), "{err}");
+    assert!(
+        t.is_exhausted(),
+        "the desynchronized session did not send GOODBYE, leaving the device half-open"
+    );
+}
+
+/// A request the device never answers desynchronizes every later reply, so the session
+/// is released within the same transaction rather than left half-open.
+#[test]
+fn a_request_that_reads_nothing_within_the_limit_releases_the_session() {
+    let mut t = LimitTransport {
+        replies: VecDeque::from([
+            Some(ui_response(ui::HELLO, 0).bytes),
+            Some(response(cmd::SESSION_OPEN, &[]).bytes),
+            None,
+            Some(ui_response(ui::GOODBYE, 0).bytes),
+        ]),
+        limits: Vec::new(),
+    };
+    let err = pollster::block_on(async {
+        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let err = op::status(&mut session)
+            .await
+            .expect_err("the device said nothing about the class within the read limit");
+        session.commit().await.unwrap();
+        err
+    });
+
+    assert!(matches!(err, nord_usb::Error::Transport(_)), "{err}");
+    assert!(
+        t.replies.is_empty(),
+        "the GOODBYE reply was left unread, so the release never happened"
+    );
+}
+
 #[test]
 fn probe_surfaces_a_short_statusless_reply() {
     let command = 0x99;
