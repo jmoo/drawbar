@@ -55,18 +55,18 @@ pub async fn drive(
     args: &[String],
     dir: &Path,
 ) -> Result<Option<Produced>> {
-    match verb {
-        "status" if class.is_none() => op::inventory(t).await.map(|_| None),
-        "recover" => op::recover(t).await.map(|_| None),
-        "geometry" => {
+    match (verb, class) {
+        ("status", None) => op::inventory(t).await.map(|_| None),
+        ("recover", None) => op::recover(t).await.map(|_| None),
+        ("geometry", None) => {
             let read = session!(t, ObjectClass::Program, |s| Geometry::read(&mut s))?;
             *geometry = Some(read);
             Ok(None)
         }
-        "get" | "read" | "get-body" | "read-body" => {
+        ("get" | "read" | "get-body" | "read-body", _) => {
             drive_read(t, need_class(class)?, verb, args, dir).await
         }
-        "put" | "move" | "duplicate" | "rename" | "delete" => {
+        ("put" | "move" | "duplicate" | "rename" | "delete", _) => {
             drive_write(t, geometry, need_class(class)?, verb, args, dir).await
         }
         _ => drive_query(t, geometry, class, verb, args).await,
