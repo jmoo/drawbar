@@ -1652,11 +1652,7 @@ fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets:
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
             if let Some(moved) = bars(ui, positions) {
-                for (part, (was, now)) in run.iter().zip(positions.iter().zip(moved)) {
-                    if *was != now {
-                        sets.push((part.field.path.clone(), now.to_string()));
-                    }
-                }
+                sets.extend(bar_sets(run, &positions, &moved));
             }
             let stem = ranked(run[0].field).map_or(run[0].field.path.as_str(), |(stem, _)| stem);
             named_caption(ui, stem, edited, "rank is a position, not a pitch");
@@ -1670,6 +1666,55 @@ fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets:
     });
 }
 
+/// What a moved register writes: the bars that landed somewhere else, and no others. A
+/// bar nobody touched is a field that must not be written.
+fn bar_sets(
+    run: &[Part<'_>],
+    was: &[u8; drawbar_widget::BARS],
+    now: &[u8; drawbar_widget::BARS],
+) -> Sets {
+    run.iter()
+        .zip(was)
+        .zip(now)
+        .filter(|((_, was), now)| was != now)
+        .map(|((part, _), now)| (part.field.path.clone(), now.to_string()))
+        .collect()
+}
+
+/// The bits one step of a pattern owns: how far up the stored word they sit, and the mask
+/// that takes them. `None` for a step the declared width cannot address.
+///
+/// ⚠️ [`PackedOrder::HighFirst`] numbers the steps down from the top of the word, so step
+/// 0 is the highest bits rather than the lowest.
+fn step_bits(step: usize, steps: u8, bits_per_step: u8, order: PackedOrder) -> Option<(u32, u64)> {
+    let last = usize::from(steps).checked_sub(1)?;
+    if step > last {
+        return None;
+    }
+    let nth = match order {
+        PackedOrder::LowFirst => step,
+        PackedOrder::HighFirst => last - step,
+    };
+    let width = u32::from(bits_per_step);
+    let shift = width.checked_mul(u32::try_from(nth).ok()?)?;
+    let mask = u64::MAX.checked_shr(u64::BITS.checked_sub(width)?)?;
+    (shift.checked_add(width)? <= u64::BITS).then_some((shift, mask))
+}
+
+/// The stored word after a click on one step: that step's own bits move on to the next
+/// value they can hold, wrapping at the top, and no other bit moves.
+fn stepped(
+    stored: u64,
+    step: usize,
+    steps: u8,
+    bits_per_step: u8,
+    order: PackedOrder,
+) -> Option<u64> {
+    let (shift, mask) = step_bits(step, steps, bits_per_step, order)?;
+    let next = ((stored >> shift) & mask).wrapping_add(1) & mask;
+    Some((stored & !(mask << shift)) | (next << shift))
+}
+
 /// A per-step grid. A click moves one step on to the next value it can hold.
 fn pattern(
     ui: &mut egui::Ui,
@@ -1679,19 +1724,13 @@ fn pattern(
     order: PackedOrder,
 ) -> Option<String> {
     let stored = word(&field.value)?;
-    let mask = (1u64 << bits_per_step) - 1;
-    let at = |step: usize| -> u32 {
-        let nth = match order {
-            PackedOrder::LowFirst => step,
-            PackedOrder::HighFirst => usize::from(steps) - 1 - step,
-        };
-        u32::from(bits_per_step) * nth as u32
-    };
     let mut moved = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
         for step in 0..usize::from(steps) {
-            let shift = at(step);
+            let Some((shift, mask)) = step_bits(step, steps, bits_per_step, order) else {
+                continue;
+            };
             let held = (stored >> shift) & mask;
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(11.0, 14.0), egui::Sense::click());
@@ -1704,8 +1743,7 @@ fn pattern(
                 .on_hover_text(format!("step {} — {held} · step order inferred", step + 1))
                 .clicked()
             {
-                let next = (held + 1) & mask;
-                moved = Some((stored & !(mask << shift)) | (next << shift));
+                moved = stepped(stored, step, steps, bits_per_step, order);
             }
         }
     });
