@@ -43,6 +43,9 @@ const MOST_ZONES: usize = (HIGHEST_NOTE - LOWEST_NOTE) as usize + 1;
 /// The root a file that names none is taken to have been recorded at.
 const MIDDLE_C: u8 = 60;
 
+/// The top of MIDI's own range: a stroke's root is a key, and 128 names none.
+const HIGHEST_MIDI_NOTE: u8 = 127;
+
 /// The top of the scale a layer value is selected on — see [`Stroke::layer`]. A value
 /// past [`nord_format::formats::npno::encode::HIGHEST_PLAYED_LAYER`] is one `build`
 /// refuses, in its own words.
@@ -307,7 +310,8 @@ fn stroke_name(path: &str) -> Option<(u8, Bank, LayerTag)> {
         (None, None) => return None,
     };
     let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
-    Some((parts.next()?.parse().ok()?, bank, layer))
+    let root: u8 = parts.next()?.parse().ok()?;
+    (root <= HIGHEST_MIDI_NOTE).then_some((root, bank, layer))
 }
 
 /// Whether a dropped file is one an open draft takes rather than a document to open.
@@ -677,7 +681,8 @@ impl Coding {
 /// A [`LayerTag::Value`] is that value; a [`LayerTag::Index`] is spread across its root
 /// and bank's own layers, loudest first. The two forms would each mean something
 /// different about how many layers a spread is over, so one root's bank names its
-/// layers one way.
+/// layers one way — and names each of them once, since the spread would otherwise hand
+/// two takes claiming one layer two different values.
 fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
     let mut groups: BTreeMap<(u8, Bank), Vec<usize>> = BTreeMap::new();
     for (index, take) in takes.iter().enumerate() {
@@ -689,19 +694,25 @@ fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
 
     let mut values = vec![0u8; takes.len()];
     for ((root, bank), mut members) in groups {
+        let what = || format!("root {} {}", note::name(root), bank.name());
         let stated = members
             .iter()
             .filter(|&&i| matches!(takes[i].layer, LayerTag::Value(_)))
             .count();
         if stated != 0 && stated != members.len() {
             return Err(format!(
-                "root {} {} names some of its layers by index and some by value; one \
-                 root's bank names them one way",
-                note::name(root),
-                bank.name(),
+                "{} names some of its layers by index and some by value; one root's \
+                 bank names them one way",
+                what()
             ));
         }
         members.sort_by_key(|&i| takes[i].layer);
+        if members
+            .windows(2)
+            .any(|pair| takes[pair[0]].layer == takes[pair[1]].layer)
+        {
+            return Err(format!("{} names one of its layers twice", what()));
+        }
         let layers = members.len();
         for (rank, index) in members.into_iter().enumerate() {
             values[index] = match takes[index].layer {
@@ -1219,6 +1230,7 @@ mod tests {
             Some((101, Bank::Resonance, LayerTag::Value(12)))
         );
         assert_eq!(stroke_name("060-b3-l00.wav"), None, "no such bank");
+        assert_eq!(stroke_name("200-b0-l00.wav"), None, "no such key");
         assert_eq!(stroke_name("060-b0-x2.wav"), None, "no such layer form");
         assert_eq!(stroke_name("060-b0.wav"), None);
 
@@ -1262,6 +1274,22 @@ mod tests {
         assert!(
             apart.refusal().is_none(),
             "a bank of its own names its layers its own way"
+        );
+    }
+
+    /// Two takes claiming one layer of a root and bank would be spread to two different
+    /// values, which is neither of the things their names said.
+    #[test]
+    fn one_roots_bank_names_each_of_its_layers_once() {
+        let twice = piano_draft(&["a-060-b0-l00", "b-060-b0-l00"]);
+        let why = twice.refusal().expect("one layer named twice");
+        assert!(why.contains("C4"), "{why}");
+        assert!(why.contains("names one of its layers twice"), "{why}");
+
+        let apart = piano_draft(&["a-060-b0-l00", "b-060-b1-l00"]);
+        assert!(
+            apart.refusal().is_none(),
+            "a bank of its own numbers its own layers"
         );
     }
 
@@ -1321,19 +1349,19 @@ mod tests {
         assert_eq!(Library::borrow(&built.bytes).unwrap().damper_top(), 100);
     }
 
-    /// ⚠️ Everything a library states about its strokes beyond the one rule the dialog
-    /// holds is stated by the coder, in its own words, with the takes still there.
+    /// ⚠️ Everything a library states about its strokes beyond the rules the dialog holds
+    /// is stated by the coder, in its own words, with the takes still there.
     #[test]
     fn what_the_coder_refuses_comes_back_as_the_dialogs_own_line() {
-        let mut draft = piano_draft(&["a-060-b0-v03", "b-060-b0-v03"]);
+        let mut draft = piano_draft(&["a-060-b0-v31", "b-072-b0-v31"]);
         assert!(
             draft.refusal().is_none(),
             "the dialog states no rule about this"
         );
 
         draft.begin(&egui::Context::default(), None).unwrap();
-        let why = finish(&mut draft).expect_err("one stroke named twice");
-        assert!(why.contains("recorded twice"), "{why}");
+        let why = finish(&mut draft).expect_err("a layer no velocity selects");
+        assert!(why.contains("no velocity selects"), "{why}");
         assert_eq!(draft.refused.as_deref(), Some(why.as_str()));
         assert_eq!(draft.takes.len(), 2, "the takes stay, to be fixed");
     }
