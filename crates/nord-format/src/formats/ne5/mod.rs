@@ -9,7 +9,7 @@ pub use song::Song;
 pub mod program;
 pub use program::{
     B3PercSpeed, B3Vib, Drawbars, EqualizerPart, FarfisaVib, Fx1Type, Fx2Type, Fx3Type, Fx5Type,
-    OrganModel, OrganType, PianoCategory, Program, Routing, VoxVib,
+    OrganModel, OrganType, PianoCategory, Preset, Program, Routing, VoxVib,
 };
 #[cfg(feature = "bundle")]
 pub mod bundle;

@@ -353,13 +353,16 @@ fn organ(ui: &Ui, p: &ne5::Program) {
             (OrganModel::Farfisa, "farf"),
             (OrganModel::Pipe, "pipe"),
         ] {
-            for preset in 1..=2u8 {
+            for preset in [ne5::Preset::One, ne5::Preset::Two] {
                 let mark = if Some(model) == sel_model { "*" } else { " " };
                 let live = if o.preset(model) == preset { "<" } else { " " };
 
                 // The bass manual's two bars live outside the block, and the nine
                 // nibbles are stale there: `OrganPanel::b3_bass_drawbars`.
-                let bars = if selected.is_b3_bass() && model == OrganModel::B3 && preset == 1 {
+                let bars = if selected.is_b3_bass()
+                    && model == OrganModel::B3
+                    && preset == ne5::Preset::One
+                {
                     // Dots align the two-bar bass manual without inventing seven bars.
                     let b = o.b3_bass_drawbars();
                     let plain = format!("{}{}.......", b[0], b[1]);

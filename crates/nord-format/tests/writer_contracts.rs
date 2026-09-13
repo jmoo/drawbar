@@ -44,7 +44,8 @@ fn fresh_ne5_writers_match_reviewed_minimal_fixtures() {
         (0, 2).try_into().unwrap(),
         1,
         [slot(5, 9), slot(0, 1), slot(0, 2), slot(5, 8)],
-    );
+    )
+    .unwrap();
 
     assert_eq!(written(&program), fixture("ne5/default.ne5p"));
     assert_eq!(written(&live), fixture("ne5/default.ne5l"));

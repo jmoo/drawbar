@@ -8,7 +8,7 @@
 //! than placement and are spelled here by hand.
 
 use nord_format::bank::Item;
-use nord_format::formats::ne5::{self, OrganModel};
+use nord_format::formats::ne5::{self, OrganModel, Preset};
 use nord_format::{Entity, Live, Program, Sample, Settings, Song};
 
 /// Every spelling `path` decodes to in `entity` — a sidecar value matching any
@@ -19,7 +19,10 @@ pub fn lookup(entity: &Entity, path: &str) -> Result<Vec<String>, String> {
         Entity::Song(Song::Electro5(song)) => match path {
             "location" => return Ok(vec![format!("{:?}", song.location().inner())]),
             "programs" => {
-                let refs: Vec<(u16, u16)> = (0..4).map(|slot| song.get(slot).inner()).collect();
+                let refs: Vec<(u16, u16)> = ne5::song::Slot::ALL
+                    .into_iter()
+                    .map(|slot| song.get(slot).inner())
+                    .collect();
                 return Ok(vec![format!("{refs:?}")]);
             }
             _ => {}
@@ -167,8 +170,10 @@ fn model(name: &str) -> Result<OrganModel, String> {
     }
 }
 
-fn preset(digit: &str) -> Result<u8, String> {
-    digit
-        .parse()
-        .map_err(|_| format!("bad preset argument {digit}"))
+fn preset(digit: &str) -> Result<Preset, String> {
+    match digit {
+        "1" => Ok(Preset::One),
+        "2" => Ok(Preset::Two),
+        other => Err(format!("bad preset argument {other}")),
+    }
 }

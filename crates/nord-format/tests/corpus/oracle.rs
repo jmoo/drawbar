@@ -6,7 +6,7 @@
 use crate::lookup;
 use crate::sidecar::{sidecar_of, SPECIMEN_KEYS};
 use libtest_mimic::Failed;
-use nord_format::formats::ne5::OrganModel;
+use nord_format::formats::ne5::{OrganModel, Preset};
 use nord_format::formats::nsmp;
 use nord_format::{Entity, Live, Program, Sample};
 use serde_json::Value;
@@ -142,7 +142,7 @@ fn check_trait(name: &str, entity: &Entity, wrong: &mut Vec<String>) {
                 }
             };
             let bass = organ.b3_bass_drawbars();
-            let main = organ.drawbars(OrganModel::B3, 1);
+            let main = organ.drawbars(OrganModel::B3, Preset::One);
             if bass != [0, 0] && [main[0], main[1]] == bass {
                 wrong.push(
                     "bass drawbars also appear in the main block's shadow nibbles — \

@@ -19,7 +19,7 @@ mod sample;
 
 pub use center::{CenterPanel, OrganType};
 pub use effects::{EffectsPanel, EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Routing};
-pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, VoxVib};
+pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, Preset, VoxVib};
 pub use panel::PANEL;
 pub use piano::{PianoCategory, PianoPanel};
 pub use sample::SamplePanel;
@@ -341,7 +341,7 @@ mod tests {
             .set_field("organ_panel.b3_preset1_drawbars", "0x087654321")
             .unwrap();
         assert_eq!(
-            program.organ_panel.drawbars(OrganModel::B3, 1),
+            program.organ_panel.drawbars(OrganModel::B3, Preset::One),
             [0, 8, 7, 6, 5, 4, 3, 2, 1],
         );
 

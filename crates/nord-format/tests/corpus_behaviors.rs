@@ -621,6 +621,7 @@ fn ne5_live_slots_occupy_one_three_slot_bank() {
 #[test]
 fn ne5_drawbars_survive_a_rewrite() {
     use nord_format::formats::ne5::OrganModel::{Farfisa, Pipe, Vox, B3};
+    use nord_format::formats::ne5::Preset;
 
     let mut seen = 0;
     for (specimen, _) in ne5_programs() {
@@ -630,7 +631,7 @@ fn ne5_drawbars_survive_a_rewrite() {
             unreachable!()
         };
         for model in [B3, Vox, Farfisa, Pipe] {
-            for preset in [1, 2] {
+            for preset in [Preset::One, Preset::Two] {
                 let bars = program.organ_panel.drawbars(model, preset);
                 if bars.iter().all(|&bar| bar <= 8) {
                     program
