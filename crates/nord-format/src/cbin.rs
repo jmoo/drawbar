@@ -69,8 +69,9 @@ impl Generation {
 /// format spells all four bytes and nothing pads implicitly.
 pub type Tag = [u8; 4];
 
-/// `format` as its 4-byte tag. A format constant of any other length is a bug in
-/// the format module, not a file condition, hence the panic.
+/// `format` as its 4-byte tag. Every format module's constant is four bytes by a
+/// compile-time assertion; a caller-supplied string of any other length is a bug in
+/// the caller, not a file condition, hence the panic.
 #[track_caller]
 fn tag(format: &str) -> Tag {
     format

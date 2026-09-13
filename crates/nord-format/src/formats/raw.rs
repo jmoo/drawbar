@@ -21,6 +21,8 @@ macro_rules! raw_format {
 
             pub const FORMAT: &str = $tag;
 
+            const _: () = assert!(FORMAT.len() == 4, "a CBIN tag is four bytes");
+
             $(
                 /// The body length every corpus specimen holds. Observed, never
                 /// enforced on read: a raw body cannot misread, so a file of

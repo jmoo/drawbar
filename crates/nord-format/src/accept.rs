@@ -593,6 +593,22 @@ const CARRIES: &[(&str, Family)] = &[
     (nd3::kit::FORMAT, Family::Drum3),
 ];
 
+// Every hand-written `FORMAT` reaches one of these two tables, and the stub macro
+// asserts its own — so a tag of the wrong length fails the build rather than the
+// first `cbin::tag` call.
+const _: () = {
+    let mut i = 0;
+    while i < TAKES.len() {
+        assert!(TAKES[i].2.len() == 4, "a CBIN tag is four bytes");
+        i += 1;
+    }
+    let mut i = 0;
+    while i < CARRIES.len() {
+        assert!(CARRIES[i].0.len() == 4, "a CBIN tag is four bytes");
+        i += 1;
+    }
+};
+
 impl Family {
     pub const ALL: [Family; 24] = [
         Family::Electro3,
