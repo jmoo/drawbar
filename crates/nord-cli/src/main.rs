@@ -142,8 +142,7 @@ enum Command {
     /// noun of its own, or to address a class by number.
     #[command(hide = true)]
     Raw {
-        /// Object class: 1 pianos, 3 samples, 4 programs, 5 set lists, 6 live.
-        #[arg(long, global = true, value_name = "N", default_value_t = 4)]
+        #[arg(long, global = true, value_name = "N", default_value_t = 4, help = class_help())]
         class: u32,
 
         #[command(subcommand)]
@@ -869,6 +868,17 @@ impl From<LiveSlotAction> for SlotAction {
             LiveSlotAction::Deps { at } => SlotAction::Deps { at },
         }
     }
+}
+
+/// `nord raw --class` help, naming every class [`ObjectClass::from_raw`] recognises.
+fn class_help() -> String {
+    // Every class `from_raw` names has a one-byte code.
+    let named: Vec<String> = (0..=u8::MAX.into())
+        .map(ObjectClass::from_raw)
+        .filter(|class| !matches!(class, ObjectClass::Unknown(_)))
+        .map(|class| format!("{} {}", class.to_raw(), class.label()))
+        .collect();
+    format!("Object class: {}", named.join(", "))
 }
 
 /// Dispatch one verb against a fixed object class, whichever noun asked for it.
