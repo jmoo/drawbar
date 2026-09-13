@@ -1,10 +1,11 @@
 //! The sample panel.
 
+use crate::components::SampleRef;
 use crate::formats::ne5::Level;
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 
-// 0x46..=0x4c — the sample panel.
+// 0x46..=0x4d — the sample panel.
 
 /// The sample panel: which sample plays, its envelope, and its level.
 #[bitbody(8)]
@@ -22,7 +23,7 @@ pub struct SamplePanel {
     /// The sample (`.nsmp`) this program depends on, laid out exactly as
     /// [`PianoPanel::id`].
     #[bits(22..=53)]
-    pub id: u32,
+    pub id: SampleRef,
     #[bits(54..=55)]
     pub dynamics: RangedU8<3>,
     #[bits(56..=56)]

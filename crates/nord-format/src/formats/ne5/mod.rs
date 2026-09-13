@@ -37,17 +37,6 @@ impl Instrument {
         *self as u8
     }
 
-    pub fn as_u16(&self) -> u16 {
-        *self as u16
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Instrument::Organ => "organ",
-            Instrument::Piano => "piano",
-            Instrument::Sample => "sample",
-        }
-    }
 }
 
 impl crate::bits::Packed for Instrument {

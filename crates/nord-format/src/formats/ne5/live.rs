@@ -35,7 +35,7 @@ pub fn location(file: &Cbin<Program>) -> Result<Location, Error> {
 /// A default live buffer addressed to `location`.
 pub fn new(location: Location) -> Cbin<Program> {
     Cbin {
-        header: Header::new(FORMAT, location.inner(), 4),
+        header: Header::new(FORMAT, location.inner(), program::DEFAULT_VERSION),
         body: Program::default(),
     }
 }

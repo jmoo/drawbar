@@ -223,9 +223,9 @@ fn voices(ui: &Ui, p: &ne5::Program) {
         format!(
             "{} {}  {} {}",
             ui.dim("piano"),
-            dep_id(piano.id),
+            dep_id(piano.id.id()),
             ui.dim("sample"),
-            dep_id(sample.id),
+            dep_id(sample.id.id()),
         ),
     ));
 }
