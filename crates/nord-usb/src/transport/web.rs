@@ -19,7 +19,7 @@
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{UsbDevice, UsbDirection, UsbEndpoint, UsbTransferStatus};
+use web_sys::{UsbDevice, UsbDirection, UsbTransferStatus};
 
 use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::error::{Error, Result};
@@ -91,10 +91,9 @@ fn out_packet(device: &UsbDevice) -> Option<usize> {
         .configuration()?
         .interfaces()
         .iter()
-        .map(|iface| web_sys::UsbInterface::from(iface).alternate())
+        .map(|iface| iface.alternate())
         .filter(|alt| alt.interface_class() == CLASS_VENDOR_SPECIFIC)
         .flat_map(|alt| alt.endpoints().iter().collect::<Vec<_>>())
-        .map(UsbEndpoint::from)
         .find(|ep| {
             ep.direction() == UsbDirection::Out && ep.endpoint_number() == endpoint_number(EP_OUT)
         })?;
