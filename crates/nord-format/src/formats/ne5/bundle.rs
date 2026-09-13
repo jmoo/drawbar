@@ -42,8 +42,7 @@ impl Bundle {
             let mut file = zip.by_index(i)?;
             let name = file.name().to_string();
 
-            let mut buffer: Vec<u8> = Vec::new();
-            file.read_to_end(&mut buffer)?;
+            let buffer = crate::formats::zip_member_bytes(&mut file)?;
             let mut cursor = std::io::Cursor::new(buffer);
 
             match from_stream(&mut cursor) {
