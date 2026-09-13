@@ -1232,7 +1232,7 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
             bound: format!(
                 "a loop with {pad} more word(s) of room in it — the encoded loop has to \
                  be whole packets long, and no record of this one may be widened past \
-                 {cap}; loop over more of the audio"
+                 {cap}"
             ),
         }
         .into());
@@ -1306,9 +1306,7 @@ fn pack(
             value: format!("a stream of {total} words"),
             bound: format!(
                 "{MAX_STREAM_WORDS} words, the reach of the stroke header's 16-bit word \
-                 directory; shorten the source or code it with {:?}, which is several \
-                 times denser on anything smooth",
-                Predictor::Minimising
+                 directory"
             ),
         }
         .into());
