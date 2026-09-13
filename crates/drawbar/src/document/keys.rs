@@ -1544,7 +1544,9 @@ pub fn lane(
         ));
     }
 
-    match response.is_pointer_button_down_on() {
+    let painting =
+        response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
+    match painting {
         true => strokes(ui, rect, span),
         false => Vec::new(),
     }
@@ -1559,11 +1561,23 @@ fn snap(value: f32) -> f32 {
 }
 
 /// Every key this frame's pointer positions painted, in the order they arrived. A drag
-/// off the end of the lane keeps painting the key it left by, as the design has it.
+/// off the end of the lane keeps painting the key it left by.
 fn strokes(ui: &egui::Ui, rect: egui::Rect, span: Span) -> Vec<(u8, f32)> {
     let mut out: Vec<(u8, f32)> = Vec::new();
     ui.input(|input| {
-        for event in &input.events {
+        // ⚠️ A move from before this frame's press is the pointer on its way to the lane,
+        // not a stroke. A frame that presses nothing carries on the drag it is already in.
+        let opened = input.events.iter().rposition(|event| {
+            matches!(
+                event,
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                }
+            )
+        });
+        for event in &input.events[opened.unwrap_or(0)..] {
             let at = match event {
                 egui::Event::PointerMoved(at) => *at,
                 egui::Event::PointerButton {
@@ -2285,9 +2299,49 @@ mod tests {
         ];
         let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
         assert_eq!(drawn, vec![(60, 0.0), (61, 0.5), (62, -0.5)]);
-    }
 
-    // ---- the hatch ------------------------------------------------------------------
+        let release = |button| {
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
+
+        // The pointer crossing the lane on its way to the key it presses paints nothing:
+        // a stroke starts where the button goes down.
+        let events = vec![
+            egui::Event::PointerMoved(at(62, rect.top() + 28.5)),
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerMoved(at(61, rect.top() + 9.5)),
+        ];
+        let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
+        assert_eq!(drawn, vec![(60, 0.0), (61, 0.5)]);
+        frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
+
+        // Only the drawing button draws. A right-hand drag is somebody reaching for a
+        // menu, not an edit to every key it passes over.
+        let events = vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerMoved(at(61, rect.top() + 9.5)),
+        ];
+        let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
+        assert!(drawn.is_empty(), "a secondary drag painted {drawn:?}");
+    }
 
     /// A hatch is the only thing in the map drawn out of lines, and the lines that reach
     /// past a corner must stop at the edge rather than crossing the band beside it.
