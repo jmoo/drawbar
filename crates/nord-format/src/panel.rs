@@ -274,7 +274,7 @@ fn members_in<'a, T: Placed>(
 
 /// The items `claimed` does not answer for, in registry order. A morph slot whose
 /// parameter is claimed is not among them: it is drawn on that parameter's control.
-fn unclaimed<'a, T: Placed>(items: &'a [T], claimed: impl Fn(&str) -> bool) -> Vec<&'a T> {
+fn unclaimed<T: Placed>(items: &[T], claimed: impl Fn(&str) -> bool) -> Vec<&T> {
     items
         .iter()
         .filter(|item| !claimed(item.path()))

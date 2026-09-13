@@ -116,11 +116,9 @@ pub fn new(
     programs: [program::Location; PROGRAM_COUNT],
 ) -> Result<Cbin<Song>, Error> {
     program::known_version(FORMAT, version, KNOWN_VERSIONS)?;
-    let echo = u16::try_from(version).map_err(|_| {
-        crate::error::ParseError::OutOfBounds {
-            value: format!("version {version}"),
-            bound: "a version the body's 16-bit echo can hold".into(),
-        }
+    let echo = u16::try_from(version).map_err(|_| crate::error::ParseError::OutOfBounds {
+        value: format!("version {version}"),
+        bound: "a version the body's 16-bit echo can hold".into(),
     })?;
     let [a, b, c, d] = programs;
     Ok(Cbin {
@@ -260,10 +258,7 @@ mod tests {
         song.set(Slot::B, (5, 20).try_into()?);
 
         assert_eq!(song.location(), (0, 1));
-        for (slot, want) in Slot::ALL
-            .into_iter()
-            .zip([(1, 2), (5, 20), (3, 4), (4, 5)])
-        {
+        for (slot, want) in Slot::ALL.into_iter().zip([(1, 2), (5, 20), (3, 4), (4, 5)]) {
             assert_eq!(song.get(slot), want, "{slot:?}");
         }
 

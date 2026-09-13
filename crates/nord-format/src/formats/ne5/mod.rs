@@ -36,7 +36,6 @@ impl Instrument {
     pub fn as_u8(&self) -> u8 {
         *self as u8
     }
-
 }
 
 impl crate::bits::Packed for Instrument {

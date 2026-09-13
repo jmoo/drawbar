@@ -863,7 +863,10 @@ mod tests {
             Family::from_product("Nord Stage EX 76"),
             Some(Family::StageClassic)
         );
-        assert_eq!(Family::from_product("Nord Stage 3 88"), Some(Family::Stage3));
+        assert_eq!(
+            Family::from_product("Nord Stage 3 88"),
+            Some(Family::Stage3)
+        );
         // No product string is known for the `no3` organ, so its label is not one.
         assert_eq!(Family::from_product("Nord no3 organ"), None);
         assert_eq!(Family::from_product("Some other keyboard"), None);

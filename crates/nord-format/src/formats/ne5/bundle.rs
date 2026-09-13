@@ -120,7 +120,9 @@ impl Default for Bundle {
 fn note_displaced<T>(skipped: &mut Vec<(String, String)>, displaced: Option<Entry<T>>, by: &str) {
     let Some(entry) = displaced else { return };
     skipped.push((
-        entry.name.unwrap_or_else(|| "an unnamed member".to_string()),
+        entry
+            .name
+            .unwrap_or_else(|| "an unnamed member".to_string()),
         format!("{by} claims the same slot"),
     ));
 }

@@ -842,7 +842,8 @@ mod tests {
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
-        );
+        )
+        .unwrap();
         nord_format::to_bytes(&nord_format::Entity::Song(nord_format::Song::Electro5(
             song,
         )))

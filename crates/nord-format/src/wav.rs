@@ -277,7 +277,10 @@ mod tests {
         no_pad[4..8].copy_from_slice(&39u32.to_le_bytes());
         no_pad[40..44].copy_from_slice(&3u32.to_le_bytes());
         let err = read_pcm16(&no_pad).unwrap_err().to_string();
-        assert!(err.contains("pad byte"), "refused for the wrong reason: {err}");
+        assert!(
+            err.contains("pad byte"),
+            "refused for the wrong reason: {err}"
+        );
 
         let mut stereo_half_frame = mono_pcm16(&[1], 44_100).unwrap();
         stereo_half_frame[22..24].copy_from_slice(&2u16.to_le_bytes());
@@ -307,7 +310,10 @@ mod tests {
         let declared = u32::from_le_bytes(trailing[4..8].try_into().unwrap()) + 4;
         trailing[4..8].copy_from_slice(&declared.to_le_bytes());
         let err = read_pcm16(&trailing).unwrap_err().to_string();
-        assert!(err.contains("trailing"), "refused for the wrong reason: {err}");
+        assert!(
+            err.contains("trailing"),
+            "refused for the wrong reason: {err}"
+        );
     }
 
     #[test]

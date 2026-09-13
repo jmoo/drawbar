@@ -65,7 +65,8 @@ where
     /// A bank holds one item per slot, so a caller walking several files has to decide
     /// what a displacement means; returning the loser is what lets it.
     pub fn replace(&mut self, name: Option<String>, item: T) -> Option<Entry<T>> {
-        self.items.insert(item.location().as_u16(), Entry { name, item })
+        self.items
+            .insert(item.location().as_u16(), Entry { name, item })
     }
 
     pub fn get(&self, location: L) -> Option<&Entry<T>> {

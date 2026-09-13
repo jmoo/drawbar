@@ -264,9 +264,7 @@ impl Sample {
     /// [`Self::has_low_note`].
     pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
         match self {
-            Sample::V2(_) => {
-                Err(ParseError::AssertFail("v2 stores no low note".into()).into())
-            }
+            Sample::V2(_) => Err(ParseError::AssertFail("v2 stores no low note".into()).into()),
             Sample::V3(s) => s.set_zone_low_note(index, note),
         }
     }
