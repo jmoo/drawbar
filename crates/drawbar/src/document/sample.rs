@@ -479,8 +479,11 @@ pub struct State {
 
 /// What a struck key found.
 struct Answer {
-    /// The zone that answered it, where one did.
+    /// The row of the zone that answered it, where one did.
     zone: Option<usize>,
+    /// How far the key is from that zone's root, which is what resamples the stroke.
+    /// Zero where no zone answers.
+    semitones: i16,
     words: String,
     sounded: bool,
 }
@@ -523,6 +526,11 @@ pub fn pick_row(state: &mut State, row: usize) {
 
 /// One zone as the key map draws it, whichever format states it.
 pub struct MapZone {
+    /// The row of the zone list this band stands for.
+    ///
+    /// ⚠️ Not the band's own index: a project draws only the zones that answer a key, so
+    /// the third band there may be the fourth row.
+    pub row: usize,
     pub low: u8,
     pub top: u8,
     pub root: u8,
@@ -544,9 +552,10 @@ pub enum Sounds {
 
 /// What the key map was asked for this frame.
 pub enum MapAct {
-    /// A handle moved: every zone's `(low, top)` after the clamp, in the order given.
+    /// A handle moved: every band's `(low, top)` after the clamp, in the order given.
     Bounds(Vec<(u8, u8)>),
-    /// A key was struck and a zone answers it, `semitones` from its root.
+    /// A key was struck and a zone answers it, `semitones` from its root. `zone` is the
+    /// row it stands on — see [`MapZone::row`].
     Struck { zone: usize, semitones: i16 },
 }
 
@@ -629,8 +638,20 @@ pub fn key_map(
             ),
         })
         .collect();
-    match keys::bands(ui, span, &lane, state.selected, state.lit(), edges) {
-        Some(keys::BandAct::Pick(zone)) => state.pick(zone, true),
+    // A band is not a row, so both the highlight going in and the pick coming out are
+    // translated — see [`MapZone::row`].
+    let band_of = |row: Option<usize>| {
+        row.and_then(|row| zones.iter().position(|zone| zone.row == row))
+    };
+    match keys::bands(
+        ui,
+        span,
+        &lane,
+        band_of(state.selected),
+        band_of(state.lit()),
+        edges,
+    ) {
+        Some(keys::BandAct::Pick(band)) => state.pick(zones[band].row, true),
         Some(keys::BandAct::Drag { bounds, .. }) => act = Some(MapAct::Bounds(bounds)),
         None => {}
     }
@@ -651,13 +672,11 @@ pub fn key_map(
     if let Some(note) = struck {
         state.audition = Some(keys::Audition::new(note, now));
         let answer = answered(zones, note, sounds);
-        if answer.sounded {
-            if let Some(zone) = answer.zone {
-                act = Some(MapAct::Struck {
-                    zone,
-                    semitones: i16::from(note) - i16::from(zones[zone].root),
-                });
-            }
+        if let (true, Some(row)) = (answer.sounded, answer.zone) {
+            act = Some(MapAct::Struck {
+                zone: row,
+                semitones: answer.semitones,
+            });
         }
         state.answer = Some(answer);
     }
@@ -680,17 +699,17 @@ pub fn key_map(
 /// window the struck velocity is outside.
 fn answered(zones: &[MapZone], note: u8, sounds: Sounds) -> Answer {
     let velocity = keys::AUDITION_VELOCITY;
-    let Some(index) = zones
+    let Some(zone) = zones
         .iter()
-        .position(|zone| note >= zone.low && note <= zone.top)
+        .find(|zone| note >= zone.low && note <= zone.top)
     else {
         return Answer {
             zone: None,
+            semitones: 0,
             words: format!("{} — no zone answers this key; silence.", note::name(note)),
             sounded: false,
         };
     };
-    let zone = &zones[index];
     let found = format!(
         "{} at vel {velocity} → {} · root {} · {}",
         note::name(note),
@@ -698,22 +717,22 @@ fn answered(zones: &[MapZone], note: u8, sounds: Sounds) -> Answer {
         note::name(zone.root),
         keys::shifted(note, zone.root)
     );
-    match (zone.velocity, sounds) {
-        (Some((low, high)), _) if !(low..=high).contains(&velocity) => Answer {
-            zone: Some(index),
-            words: format!("{found} — outside its velocity window {low}–{high}; silence"),
-            sounded: false,
-        },
-        (_, Sounds::NotUntilBuilt) => Answer {
-            zone: Some(index),
-            words: format!("{found} — a project is built into an instrument before it plays"),
-            sounded: false,
-        },
-        (_, Sounds::Now) => Answer {
-            zone: Some(index),
-            words: found,
-            sounded: true,
-        },
+    let (words, sounded) = match (zone.velocity, sounds) {
+        (Some((low, high)), _) if !(low..=high).contains(&velocity) => (
+            format!("{found} — outside its velocity window {low}–{high}; silence"),
+            false,
+        ),
+        (_, Sounds::NotUntilBuilt) => (
+            format!("{found} — a project is built into an instrument before it plays"),
+            false,
+        ),
+        (_, Sounds::Now) => (found, true),
+    };
+    Answer {
+        zone: Some(zone.row),
+        semitones: i16::from(note) - i16::from(zone.root),
+        words,
+        sounded,
     }
 }
 
@@ -788,6 +807,7 @@ fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
         .iter()
         .enumerate()
         .map(|(index, zone)| MapZone {
+            row: index,
             low: bottom(&snapshot.zones, index).unwrap_or(NSMP_SPAN.low),
             top: zone.top_note,
             root: zone.root_key,
@@ -2337,6 +2357,7 @@ mod tests {
     fn a_struck_key_says_which_zone_answers_it() {
         let zones = [
             MapZone {
+                row: 0,
                 low: 61,
                 top: 96,
                 root: 72,
@@ -2344,6 +2365,7 @@ mod tests {
                 velocity: None,
             },
             MapZone {
+                row: 1,
                 low: 24,
                 top: 40,
                 root: 48,
@@ -2383,6 +2405,7 @@ mod tests {
     #[test]
     fn the_span_widens_to_hold_every_zone() {
         let inside = [MapZone {
+            row: 0,
             low: 36,
             top: 84,
             root: 60,
@@ -2392,6 +2415,7 @@ mod tests {
         assert_eq!(span(&inside, NSMP_SPAN), NSMP_SPAN);
 
         let past = [MapZone {
+            row: 0,
             low: 17,
             top: 108,
             root: 60,

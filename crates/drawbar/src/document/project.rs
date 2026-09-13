@@ -305,8 +305,10 @@ fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
     snapshot
         .zones
         .iter()
-        .filter(|zone| zone.enabled)
-        .map(|zone| MapZone {
+        .enumerate()
+        .filter(|(_, zone)| zone.enabled)
+        .map(|(row, zone)| MapZone {
+            row,
             low: zone.bottom_note,
             top: zone.top_note,
             root: zone.root_key,
@@ -804,25 +806,22 @@ mod tests {
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project_bytes() -> Vec<u8> {
-        let project = Project::new(
-            "Marimba",
-            &[
-                NewZone {
-                    path: "low.wav".into(),
-                    sample_rate: 44100,
-                    frames: 44100,
-                    root_key: 48,
-                },
-                NewZone {
-                    path: "high.wav".into(),
-                    sample_rate: 44100,
-                    frames: 44100,
-                    root_key: 72,
-                },
-            ],
-            0,
-        )
-        .unwrap();
+        project_of(&[48, 72])
+    }
+
+    /// A project of one zone per root key, each playing a WAV of its own — what the
+    /// editor writes for a new instrument.
+    fn project_of(roots: &[u8]) -> Vec<u8> {
+        let zones: Vec<NewZone> = roots
+            .iter()
+            .map(|root| NewZone {
+                path: format!("root{root}.wav"),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key: *root,
+            })
+            .collect();
+        let project = Project::new("Marimba", &zones, 0).unwrap();
         nord_format::to_bytes(&Entity::SampleProject(project)).unwrap()
     }
 
@@ -926,6 +925,102 @@ mod tests {
         }
         assert_eq!(SPAN.low, LOWEST_NOTE);
         assert_eq!(SPAN.high, HIGHEST_NOTE);
+    }
+
+    /// A context dressed as the app dresses it: the semibold family a band is set in is
+    /// not bound by default, and laying one out without it panics.
+    fn dressed() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        ctx.set_visuals(egui::Visuals::dark());
+        ctx
+    }
+
+    /// One frame of the pinned map over `snapshot`: what it painted and where, and what
+    /// it wrote.
+    fn mapped(
+        ctx: &egui::Context,
+        state: &mut State,
+        snapshot: &Snapshot,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, Sets) {
+        let mut sets = Sets::new();
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                map(ui, state, snapshot, &mut sets);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, sets)
+    }
+
+    fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => into.push((
+                text.galley.text().to_string(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+            _ => {}
+        }
+    }
+
+    fn press(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// ⚠️ A band is not a row: the map draws only the zones that answer a key, so a
+    /// click on the last band must open the last row even with a zone switched off
+    /// between them.
+    #[test]
+    fn clicking_a_band_opens_the_row_it_stands_for() {
+        let ctx = dressed();
+        let mut snapshot = read_back(&project_of(&[48, 60, 72]));
+        snapshot.zones[1].enabled = false;
+        let bottom = snapshot.zones[2].id;
+
+        let mut state = State::default();
+        let (said, _) = mapped(&ctx, &mut state, &snapshot, Vec::new());
+        assert_eq!(sample::selected(&state), None);
+        let band = said
+            .iter()
+            .find(|(text, _)| *text == format!("Zone {bottom}"))
+            .unwrap_or_else(|| panic!("the bottom zone's band was never painted: {said:?}"))
+            .1;
+
+        let (_, sets) = mapped(&ctx, &mut state, &snapshot, press(band.center()));
+        assert_eq!(
+            sample::selected(&state),
+            Some(2),
+            "the second band stands on the third zone"
+        );
+        assert!(sets.is_empty(), "a pick is not an edit");
     }
 
     /// A zone's row reads the file it plays and how long the trim leaves it.
