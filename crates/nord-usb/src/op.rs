@@ -9,7 +9,7 @@ use nord_format::cbin::{Cbin, RawBody};
 use crate::envelope;
 use crate::error::{Error, Result};
 use crate::session::ReadWrite;
-use crate::session::Session;
+use crate::session::{Session, WRITE_LIMIT};
 use crate::transport::Transport;
 use crate::wire::{
     cmd, read_u32, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
@@ -445,9 +445,9 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
 
 /// Drain queued replies until the transport stays quiet.
 async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
-    for _ in 0..DRAIN_CAP {
+    for _ in 0..RECOVER_DRAIN_CAP {
         match transport
-            .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+            .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
             .await?
         {
             Some(_) => continue,
@@ -458,10 +458,26 @@ async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
 }
 
 /// How long to wait for a straggler before deciding the stream is quiet.
-const DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
+const RECOVER_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Upper bound on stragglers, so a device that will not stop talking cannot hang this.
-const DRAIN_CAP: usize = 16;
+const RECOVER_DRAIN_CAP: usize = 16;
+
+/// Send one frame of the recovery sequence, naming the endpoint when it is not accepted.
+///
+/// ⚠️ An unbounded write here blocks forever on the very instrument this exists for: a
+/// stalled bulk OUT endpoint never accepts the frame and never fails either.
+async fn send_recovery<T: Transport>(transport: &mut T, msg: &Message, what: &str) -> Result<()> {
+    if transport.write_timeout(&msg.encode(), WRITE_LIMIT).await? {
+        return Ok(());
+    }
+    Err(Error::Transport(format!(
+        "the device did not accept {what} within {}s: bulk OUT endpoint {:#04x} is \
+         stalled, and only a power cycle clears it",
+        WRITE_LIMIT.as_secs(),
+        crate::transport::EP_OUT
+    )))
+}
 
 /// Release UI and class state left by an abandoned session.
 ///
@@ -474,15 +490,15 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
     // ⚠️ Bounded reads: the instrument this is for is the one that has stopped
     // answering, and no reply to either frame is the expected outcome, not a failure.
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
-    transport.write(&goodbye.encode()).await?;
+    send_recovery(transport, &goodbye, "GOODBYE").await?;
     let _ = transport
-        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
         .await?;
 
     let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
-    transport.write(&close.encode()).await?;
+    send_recovery(transport, &close, "SESSION_CLOSE").await?;
     let _ = transport
-        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
         .await?;
     Ok(())
 }
@@ -941,5 +957,43 @@ mod tests {
     fn cleaning_progress_requires_all_three_words() {
         let err = cleaning_progress(&[0; 11]).expect_err("a partial cleaning reply");
         assert!(matches!(err, Error::Truncated { got: 11, need: 12 }));
+    }
+
+    /// A transport that never accepts a frame and never says so, which is the state a
+    /// stalled bulk OUT endpoint leaves the instrument in.
+    struct Stalled;
+
+    impl Transport for Stalled {
+        async fn write(&mut self, _buf: &[u8]) -> Result<()> {
+            panic!("recovery frames must carry a deadline");
+        }
+
+        async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
+            panic!("recovery reads must carry a deadline");
+        }
+
+        async fn write_timeout(
+            &mut self,
+            _buf: &[u8],
+            _limit: std::time::Duration,
+        ) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn read_timeout(
+            &mut self,
+            _max: usize,
+            _limit: std::time::Duration,
+        ) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn recover_names_the_stalled_endpoint_instead_of_waiting_forever() {
+        let err = pollster::block_on(recover(&mut Stalled)).expect_err("the write is refused");
+        let message = err.to_string();
+        assert!(message.contains("GOODBYE"), "{message}");
+        assert!(message.contains("0x03"), "{message}");
     }
 }
