@@ -843,11 +843,7 @@ fn stored_name(
                 name.unwrap_or(held.name),
             ))
         }
-        Shape::Fields
-        | Shape::SetList
-        | Shape::Verbatim
-        | Shape::Wav
-        | Shape::Undecoded => None,
+        Shape::Fields | Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
     }
 }
 

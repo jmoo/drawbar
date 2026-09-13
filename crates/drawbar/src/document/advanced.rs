@@ -691,7 +691,9 @@ mod tests {
         let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
         let mut advanced = Advanced::default();
 
-        let before = advanced.decoded(workspace.get(id).expect("it is open")).to_string();
+        let before = advanced
+            .decoded(workspace.get(id).expect("it is open"))
+            .to_string();
         assert!(
             before.contains("organ_type"),
             "it is the decode: {before:.200}"
@@ -706,7 +708,10 @@ mod tests {
         workspace.replace_bytes(id, edited, &mut log);
 
         let after = advanced.decoded(workspace.get(id).expect("it is open"));
-        assert_ne!(before, after, "the dump is of the bytes in front of the reader");
+        assert_ne!(
+            before, after,
+            "the dump is of the bytes in front of the reader"
+        );
     }
 
     /// A pair is counted from one, and a half holding the none marker is spelled as one
