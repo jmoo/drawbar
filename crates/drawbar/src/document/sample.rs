@@ -2303,7 +2303,7 @@ mod tests {
         }
 
         // Bytes that decode as something else are refused before any path is read.
-        let song = crate::fields::blank::electro5_song();
+        let song = crate::workspace::Fresh::SetList.bytes().unwrap();
         assert_eq!(
             apply(&song, &[("name".into(), "Vibes".into())]).unwrap_err(),
             "not a sample instrument"
