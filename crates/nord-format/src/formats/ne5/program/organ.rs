@@ -38,19 +38,19 @@ pub enum Preset {
     Two,
 }
 
-impl Preset {
-    /// The flag as the file stores it: preset 2 is the set bit.
-    pub fn selected(self) -> bool {
-        matches!(self, Preset::Two)
-    }
-}
-
 impl From<bool> for Preset {
     fn from(preset2_selected: bool) -> Preset {
         match preset2_selected {
             true => Preset::Two,
             false => Preset::One,
         }
+    }
+}
+
+impl From<Preset> for bool {
+    /// The `…_preset2_selected` flag as the file stores it.
+    fn from(preset: Preset) -> bool {
+        matches!(preset, Preset::Two)
     }
 }
 
@@ -235,7 +235,7 @@ impl OrganPanel {
 
     /// Play `preset` on `model`.
     pub fn set_preset(&mut self, model: OrganModel, preset: Preset) {
-        *self.preset_selected_mut(model) = preset.selected();
+        *self.preset_selected_mut(model) = preset.into();
     }
 
     /// Store nine drawbar positions, `0..=8`. A higher one is refused rather than
@@ -321,28 +321,28 @@ impl OrganPanel {
     // ── which field a model and preset name ─────────────────────────────────────
 
     fn drawbar_block(&self, model: OrganModel, preset: Preset) -> &Drawbars {
-        match (model, preset.selected()) {
-            (OrganModel::B3, false) => &self.b3_preset1_drawbars,
-            (OrganModel::B3, true) => &self.b3_preset2_drawbars,
-            (OrganModel::Vox, false) => &self.vox_preset1_drawbars,
-            (OrganModel::Vox, true) => &self.vox_preset2_drawbars,
-            (OrganModel::Farfisa, false) => &self.farfisa_preset1_drawbars,
-            (OrganModel::Farfisa, true) => &self.farfisa_preset2_drawbars,
-            (OrganModel::Pipe, false) => &self.pipe_preset1_drawbars,
-            (OrganModel::Pipe, true) => &self.pipe_preset2_drawbars,
+        match (model, preset) {
+            (OrganModel::B3, Preset::One) => &self.b3_preset1_drawbars,
+            (OrganModel::B3, Preset::Two) => &self.b3_preset2_drawbars,
+            (OrganModel::Vox, Preset::One) => &self.vox_preset1_drawbars,
+            (OrganModel::Vox, Preset::Two) => &self.vox_preset2_drawbars,
+            (OrganModel::Farfisa, Preset::One) => &self.farfisa_preset1_drawbars,
+            (OrganModel::Farfisa, Preset::Two) => &self.farfisa_preset2_drawbars,
+            (OrganModel::Pipe, Preset::One) => &self.pipe_preset1_drawbars,
+            (OrganModel::Pipe, Preset::Two) => &self.pipe_preset2_drawbars,
         }
     }
 
     fn drawbar_block_mut(&mut self, model: OrganModel, preset: Preset) -> &mut Drawbars {
-        match (model, preset.selected()) {
-            (OrganModel::B3, false) => &mut self.b3_preset1_drawbars,
-            (OrganModel::B3, true) => &mut self.b3_preset2_drawbars,
-            (OrganModel::Vox, false) => &mut self.vox_preset1_drawbars,
-            (OrganModel::Vox, true) => &mut self.vox_preset2_drawbars,
-            (OrganModel::Farfisa, false) => &mut self.farfisa_preset1_drawbars,
-            (OrganModel::Farfisa, true) => &mut self.farfisa_preset2_drawbars,
-            (OrganModel::Pipe, false) => &mut self.pipe_preset1_drawbars,
-            (OrganModel::Pipe, true) => &mut self.pipe_preset2_drawbars,
+        match (model, preset) {
+            (OrganModel::B3, Preset::One) => &mut self.b3_preset1_drawbars,
+            (OrganModel::B3, Preset::Two) => &mut self.b3_preset2_drawbars,
+            (OrganModel::Vox, Preset::One) => &mut self.vox_preset1_drawbars,
+            (OrganModel::Vox, Preset::Two) => &mut self.vox_preset2_drawbars,
+            (OrganModel::Farfisa, Preset::One) => &mut self.farfisa_preset1_drawbars,
+            (OrganModel::Farfisa, Preset::Two) => &mut self.farfisa_preset2_drawbars,
+            (OrganModel::Pipe, Preset::One) => &mut self.pipe_preset1_drawbars,
+            (OrganModel::Pipe, Preset::Two) => &mut self.pipe_preset2_drawbars,
         }
     }
 
@@ -365,25 +365,25 @@ impl OrganPanel {
     }
 
     fn vib_flag(&self, model: OrganModel, preset: Preset) -> Option<&bool> {
-        Some(match (model, preset.selected()) {
-            (OrganModel::B3, false) => &self.b3_preset1_vib,
-            (OrganModel::B3, true) => &self.b3_preset2_vib,
-            (OrganModel::Vox, false) => &self.vox_preset1_vib,
-            (OrganModel::Vox, true) => &self.vox_preset2_vib,
-            (OrganModel::Farfisa, false) => &self.farfisa_preset1_vib,
-            (OrganModel::Farfisa, true) => &self.farfisa_preset2_vib,
+        Some(match (model, preset) {
+            (OrganModel::B3, Preset::One) => &self.b3_preset1_vib,
+            (OrganModel::B3, Preset::Two) => &self.b3_preset2_vib,
+            (OrganModel::Vox, Preset::One) => &self.vox_preset1_vib,
+            (OrganModel::Vox, Preset::Two) => &self.vox_preset2_vib,
+            (OrganModel::Farfisa, Preset::One) => &self.farfisa_preset1_vib,
+            (OrganModel::Farfisa, Preset::Two) => &self.farfisa_preset2_vib,
             (OrganModel::Pipe, _) => return None,
         })
     }
 
     fn vib_flag_mut(&mut self, model: OrganModel, preset: Preset) -> Option<&mut bool> {
-        Some(match (model, preset.selected()) {
-            (OrganModel::B3, false) => &mut self.b3_preset1_vib,
-            (OrganModel::B3, true) => &mut self.b3_preset2_vib,
-            (OrganModel::Vox, false) => &mut self.vox_preset1_vib,
-            (OrganModel::Vox, true) => &mut self.vox_preset2_vib,
-            (OrganModel::Farfisa, false) => &mut self.farfisa_preset1_vib,
-            (OrganModel::Farfisa, true) => &mut self.farfisa_preset2_vib,
+        Some(match (model, preset) {
+            (OrganModel::B3, Preset::One) => &mut self.b3_preset1_vib,
+            (OrganModel::B3, Preset::Two) => &mut self.b3_preset2_vib,
+            (OrganModel::Vox, Preset::One) => &mut self.vox_preset1_vib,
+            (OrganModel::Vox, Preset::Two) => &mut self.vox_preset2_vib,
+            (OrganModel::Farfisa, Preset::One) => &mut self.farfisa_preset1_vib,
+            (OrganModel::Farfisa, Preset::Two) => &mut self.farfisa_preset2_vib,
             (OrganModel::Pipe, _) => return None,
         })
     }
