@@ -6,8 +6,6 @@
 //! Audio buffer source in a browser tab, each with a `play`/`stop` pair and no state
 //! of its own that the app has to mirror.
 
-use nord_format::formats::nsmp::codec::Audio;
-
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,15 +57,16 @@ impl Player {
         self.playing
     }
 
-    /// Start `zone`, or stop it if it is the one already sounding.
+    /// Start `zone`, or stop it if it is the one already sounding. `samples` are
+    /// interleaved by channel, at whatever rate the backend was built for.
     ///
     /// ⚠️ Nothing is marked as sounding until the backend has taken it: a device that
     /// refuses must not leave a Stop button over silence.
-    pub fn toggle(&mut self, zone: Zone, audio: &Audio) -> Result<(), String> {
+    pub fn toggle(&mut self, zone: Zone, samples: &[i16], channels: u16) -> Result<(), String> {
         let asked = act(self.playing, zone);
         self.stop();
         if let Act::Play(zone) = asked {
-            self.sound.play(&audio.samples, audio.channels, 1.0)?;
+            self.sound.play(samples, channels, 1.0)?;
             self.playing = Some(zone);
         }
         Ok(())
@@ -77,9 +76,15 @@ impl Player {
     ///
     /// ⚠️ Not a toggle: a struck key must sound even when the zone answering it is the
     /// one already playing, and two keys of one zone are two different notes.
-    pub fn strike(&mut self, zone: Zone, audio: &Audio, rate: f32) -> Result<(), String> {
+    pub fn strike(
+        &mut self,
+        zone: Zone,
+        samples: &[i16],
+        channels: u16,
+        rate: f32,
+    ) -> Result<(), String> {
         self.stop();
-        self.sound.play(&audio.samples, audio.channels, rate)?;
+        self.sound.play(samples, channels, rate)?;
         self.playing = Some(zone);
         Ok(())
     }

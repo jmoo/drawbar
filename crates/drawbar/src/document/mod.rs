@@ -79,6 +79,7 @@ pub struct Wants {
 /// draw it: audio, or a new asset made out of this one.
 enum Asked {
     Zone(sample::Ask),
+    Root(piano::Ask),
     Encode,
     /// The copy a body with nothing to edit offers, which is the header's Export.
     Export,
@@ -116,6 +117,8 @@ pub struct Document {
     player: crate::audio::Player,
     /// The encode panel over a WAV, and the read of the WAV it works from.
     wav: Option<(encode::Draft, encode::Source)>,
+    /// The piano library's plan, the facts it is a plan over, and its decoded strokes.
+    piano: piano::State,
     /// What the field document keeps between frames: the morph lens, where the reader
     /// is, and the two decodes a pending count is measured across. Never an edit.
     fields: field::State,
@@ -157,6 +160,7 @@ impl Document {
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
             self.player.stop();
+            self.piano.leave();
             // Reading a WAV copies every sample, so it happens on arrival and never per
             // frame — the panel works from what is read here.
             self.wav = match decoded.is_none() && encode::is_wav(&entity.bytes) {
@@ -172,9 +176,19 @@ impl Document {
         // Paint marks are measured against the bytes the asset was last saved as.
         sample::follow(&mut self.sample, id, &entity.saved.bytes);
         self.player.settle();
+        if let Some(left) = self.piano.settle(ui.input(|input| input.time)) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
         if self.player.playing().is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        // An apply says where it is from another thread, and a header frozen on
+        // `applying…` is a window that looks hung.
+        if self.piano.applying() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         let faces = faces(entity, registry.as_deref());
@@ -205,7 +219,10 @@ impl Document {
                 queue: around.queue,
                 tags: around.tags,
                 view: viewing,
-                extras: extras(entity, device, workspace, pending),
+                extras: match decoded.is_some_and(piano::is_piano) {
+                    true => self.piano.begin(id, entity, &device.state),
+                    false => extras(entity, device, workspace, pending),
+                },
             },
             (&mut self.name, &mut self.variant),
             &mut sets,
@@ -239,9 +256,7 @@ impl Document {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
             if face == Face::Edit {
-                asked = self
-                    .pinned(ui, entity, doc.as_ref(), &mut sets)
-                    .map(Asked::Zone);
+                asked = self.pinned(ui, entity, doc.as_ref(), &mut sets);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -277,10 +292,16 @@ impl Document {
                                 self.advanced.table(ui, &table, &mut sets);
                                 typed = !sets.is_empty();
                             }
+                            None if entity.entity.as_ref().is_some_and(piano::is_piano) => {
+                                self.piano.advanced(ui)
+                            }
                             None => capabilities(ui, entity),
                         },
                         Face::Metadata => {
-                            record(ui, entity);
+                            match entity.entity.as_ref().is_some_and(piano::is_piano) {
+                                true => self.piano.meta(ui),
+                                false => record(ui, entity),
+                            }
                             details = self.advanced.meta(ui, entity, device)
                         }
                     });
@@ -299,6 +320,7 @@ impl Document {
             Some(Asked::Advanced) => {
                 self.views.insert(id, Face::Advanced);
             }
+            Some(Asked::Export) => self.export(ui.ctx(), id, workspace),
             Some(asked) => self.answer(id, asked, workspace, log),
             None => {}
         }
@@ -314,10 +336,11 @@ impl Document {
             self.target = None;
         }
         if act.export {
-            workspace.export(id);
+            self.export(ui.ctx(), id, workspace);
         }
         if act.revert {
             workspace.revert(id, log);
+            self.piano.forget(id);
             self.error = None;
             // Reread on the next frame: the name box is holding an edit that is gone.
             self.target = None;
@@ -330,12 +353,121 @@ impl Document {
                 self.advanced.settled(outcome);
             }
         }
+        self.replan(id, workspace, log);
         if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
             // The strip was drawn from the bytes this frame then edited; one more frame
             // shows what the edit made of them.
             ui.ctx().request_repaint();
         }
         wants
+    }
+
+    /// Take up the plan a piano library's frame left behind, where the library accepts
+    /// it.
+    ///
+    /// ⚠️ Nothing is rebuilt here. The plan is checked against the baseline — a name the
+    /// format refuses, or a switch that would leave the library with no strokes, is
+    /// turned down now rather than refusing every later edit — and the bytes it makes
+    /// are laid out only when something has to carry them: see [`piano::State::start`].
+    fn replan(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+        let Some(plan) = self.piano.drafted() else {
+            return;
+        };
+        let checked = match workspace.get(id) {
+            Some(entity) => piano::planned(&entity.saved.bytes, &plan).map(|_| ()),
+            None => return,
+        };
+        match checked {
+            Ok(()) => {
+                self.piano.commit(plan);
+                self.error = None;
+            }
+            Err(why) => {
+                self.piano.discard();
+                log.error(why.clone());
+                self.error = Some(why);
+            }
+        }
+    }
+
+    /// Whether this document holds an edit its bytes do not.
+    pub fn pends(&self, id: u64) -> bool {
+        self.piano.pending(id)
+    }
+
+    /// Hold back the acts that would carry a piano library's bytes while its plan is
+    /// still only a plan, and start the apply they are waiting for.
+    ///
+    /// ⚠️ Run after the frame's own acts are collected and before any of them are: an
+    /// act let through here writes the bytes as they stand, which for a pending plan is
+    /// the library before the trim.
+    ///
+    /// It polls before it answers, because on a target with one thread the apply runs
+    /// where it is started and what it was holding comes back with this frame's acts.
+    pub fn settle(
+        &mut self,
+        ctx: &egui::Context,
+        acts: Vec<crate::browser::Act>,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Vec<crate::browser::Act> {
+        let mut out: Vec<crate::browser::Act> = acts
+            .into_iter()
+            .filter_map(|act| {
+                // Wherever the gesture came from: the saved bytes are about to be put
+                // back, and a plan over bytes nothing holds is not an edit of anything.
+                if let crate::browser::Act::Revert(id) = &act {
+                    self.piano.forget(*id);
+                }
+                self.piano.hold(ctx, act, workspace)
+            })
+            .collect();
+        out.extend(self.released(ctx, workspace, log));
+        out
+    }
+
+    /// The acts an apply that has answered was holding, and the bytes it made put back
+    /// under the document.
+    pub fn released(
+        &mut self,
+        ctx: &egui::Context,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Vec<crate::browser::Act> {
+        let Some(applied) = self.piano.answered(ctx, workspace) else {
+            return Vec::new();
+        };
+        match applied.made {
+            Some(Ok(bytes)) => {
+                self.error = None;
+                workspace.replace_bytes(applied.id, bytes, log);
+            }
+            Some(Err(why)) => {
+                log.error(why.clone());
+                log.trouble("That library could not be laid out, so nothing was written.");
+                self.error = Some(why);
+            }
+            None => {}
+        }
+        applied.acts
+    }
+
+    /// Hand the document's bytes to the user, once the plan in hand is in them.
+    fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace) {
+        if self
+            .piano
+            .hold(ctx, crate::browser::Act::Export(id), workspace)
+            .is_some()
+        {
+            workspace.export(id);
+        }
+    }
+
+    /// The root the speakers are on, where it is this document's.
+    fn sounding_root(&self) -> Option<u8> {
+        let (id, root) = self.player.playing()?;
+        (Some(id) == self.target).then_some(())?;
+        u8::try_from(root).ok()
     }
 
     /// Whether this frame should read the slot's dependencies without being asked to.
@@ -384,6 +516,10 @@ impl Document {
         }
         if fields::is_set_list(decoded) {
             return setlist::ui(ui, &mut self.list, entity, seen, sets).map(Asked::Open);
+        }
+        if piano::is_piano(decoded) {
+            let sounding = self.sounding_root();
+            return self.piano.ui(ui, sounding).map(Asked::Root);
         }
         if let Some(doc) = doc {
             return field::body(ui, &self.ctx, &mut self.fields, doc, piano, sets)
@@ -442,14 +578,17 @@ impl Document {
         entity: &LocalEntity,
         doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
-    ) -> Option<sample::Ask> {
+    ) -> Option<Asked> {
         if let Some(doc) = doc {
             field::nav(ui, &mut self.fields, doc);
             return None;
         }
         let decoded = entity.entity.as_ref()?;
+        if piano::is_piano(decoded) {
+            return self.piano.map(ui).map(Asked::Root);
+        }
         if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-            return sample::map(ui, &mut self.sample, &snapshot, sets);
+            return sample::map(ui, &mut self.sample, &snapshot, sets).map(Asked::Zone);
         }
         if let Some(Ok(snapshot)) = project::snapshot(decoded) {
             project::map(ui, &mut self.sample, &snapshot, sets);
@@ -473,7 +612,12 @@ impl Document {
                     return;
                 };
                 let rate = crate::audio::rate(semitones);
-                if let Err(why) = self.player.strike((id, zone), &decoded.audio, rate) {
+                if let Err(why) = self.player.strike(
+                    (id, zone),
+                    &decoded.audio.samples,
+                    decoded.audio.channels,
+                    rate,
+                ) {
                     log.error(why);
                     log.trouble("This computer would not play that zone.");
                 }
@@ -482,7 +626,10 @@ impl Document {
                 let Some(Ok(decoded)) = self.audio.get(zone) else {
                     return;
                 };
-                if let Err(why) = self.player.toggle((id, zone), &decoded.audio) {
+                if let Err(why) =
+                    self.player
+                        .toggle((id, zone), &decoded.audio.samples, decoded.audio.channels)
+                {
                     log.error(why);
                     log.trouble("This computer would not play that zone.");
                 }
@@ -506,11 +653,59 @@ impl Document {
                     }
                 }
             }
+            Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
             Asked::Encode => self.encode(id, workspace, log),
-            Asked::Export => workspace.export(id),
             // ⚠️ Answered where the frame collects what it wants: the browser owns
-            // opening a tab, and the face is the frame's own to switch.
-            Asked::Open(_) | Asked::Advanced => {}
+            // opening a tab, the face is the frame's own to switch, and an export waits
+            // on the plan — see [`Document::export`].
+            Asked::Export | Asked::Open(_) | Asked::Advanced => {}
+        }
+    }
+
+    /// Hear or write one root of a piano library. The stroke is decoded on the way,
+    /// once, because either answer needs it.
+    fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
+        let root = ask.root();
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        if let Err(why) = self.piano.decode(entity, root) {
+            log.error(why);
+            log.trouble("That root could not be decoded.");
+            return;
+        }
+        let Some(sound) = self.piano.sound(root) else {
+            return;
+        };
+        match ask {
+            piano::Ask::Play(_) => {
+                if let Err(why) =
+                    self.player
+                        .toggle((id, usize::from(root)), sound.samples, sound.channels)
+                {
+                    log.error(why);
+                    log.trouble("This computer would not play that root.");
+                }
+            }
+            piano::Ask::Strike { semitones, .. } => {
+                let rate = crate::audio::rate(semitones);
+                if let Err(why) =
+                    self.player
+                        .strike((id, usize::from(root)), sound.samples, sound.channels, rate)
+                {
+                    log.error(why);
+                    log.trouble("This computer would not play that root.");
+                }
+            }
+            piano::Ask::Save(_) => {
+                match nord_format::wav::pcm16(sound.samples, sound.rate, sound.channels) {
+                    Ok(bytes) => workspace.save_bytes(sound.name, bytes),
+                    Err(e) => {
+                        log.error(e.to_string());
+                        log.trouble("That root could not be written as a WAV.");
+                    }
+                }
+            }
         }
     }
 
@@ -583,7 +778,9 @@ impl Document {
         } else if decoded.is_some_and(project::is_project) {
             project::apply(&bytes, &sets)
         } else if decoded.is_some_and(piano::is_piano) {
-            piano::apply(&bytes, &sets)
+            // A piano's sets land in its plan, and the plan is what makes its bytes —
+            // see [`Document::replan`].
+            self.piano.take(&sets).map(|()| bytes.clone())
         } else if decoded.is_some_and(fields::is_set_list) {
             setlist::apply(&bytes, &sets)
         } else {
@@ -620,6 +817,7 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
                 || fields::is_set_list(e)
                 || sample::is_sample(e)
                 || project::is_project(e)
+                || piano::is_piano(e)
                 || verbatim::is_verbatim(e)
         }
         // A WAV decodes into nothing, but it is the one thing this app can make an
@@ -638,6 +836,7 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
                 || project::is_project(e)
                 || fields::is_set_list(e)
                 || verbatim::is_verbatim(e)
+                || piano::is_piano(e)
         }
         None => false,
     };
@@ -2197,6 +2396,126 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.zones[0].top_note, 84, "the edit stands");
+    }
+
+    fn piano_bytes() -> Vec<u8> {
+        nord_format::formats::npno::synthetic::Build::new()
+            .bytes()
+            .expect("the builder lays out a library")
+    }
+
+    /// A piano library is a document like any other: it offers all three faces, and the
+    /// panel that decides what goes on the instrument is one of them.
+    #[test]
+    fn a_piano_document_offers_every_face_and_paints_on_each_of_them() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        assert_eq!(
+            faces(open.entity(), None)
+                .iter()
+                .map(|face| face.label())
+                .collect::<Vec<_>>(),
+            ["Edit", "Metadata", "Advanced"],
+        );
+
+        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+            for dark in [true, false] {
+                let mut open = Open::file("Test Piano.npno", piano_bytes());
+                open.ctx.set_theme(match dark {
+                    true => egui::ThemePreference::Dark,
+                    false => egui::ThemePreference::Light,
+                });
+                open.document.views.insert(open.id, face);
+                let said = open.twice();
+                let has = |word: &str| said.iter().any(|held| held == word);
+                assert!(has("Test Piano"), "{face:?} in {dark}: {said:?}");
+                match face {
+                    Face::Edit => assert!(has("Trim to fit"), "{said:?}"),
+                    Face::Metadata => {
+                        assert!(has("Metadata") && has("Container"), "{said:?}");
+                        assert!(!has("Key map"), "the map is the Edit face's: {said:?}");
+                    }
+                    Face::Advanced => {
+                        assert!(has("What this format holds") && has("Offsets"), "{said:?}")
+                    }
+                }
+            }
+        }
+        // And the map is pinned above the body rather than drawn inside it.
+        open.document.views.insert(open.id, Face::Edit);
+        assert!(open.twice().iter().any(|word| word == "Key map"));
+    }
+
+    /// ⚠️ A library is hundreds of megabytes, so an edit to one is a plan and the bytes
+    /// are left alone. What would carry those bytes waits for the plan to be laid over
+    /// them — and is let go the moment it has been.
+    #[test]
+    fn a_piano_lays_its_plan_out_before_anything_carries_its_bytes() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        let named = |open: &Open| {
+            piano::snapshot(open.entity().entity.as_ref().unwrap())
+                .unwrap()
+                .unwrap()
+                .name
+        };
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![enter()]);
+
+        assert!(open.document.pends(open.id), "the rename is a plan");
+        assert_eq!(
+            open.entity().bytes,
+            open.entity().saved.bytes,
+            "and nothing has copied the body for it",
+        );
+        assert_eq!(named(&open), "Test Piano", "nor written it");
+
+        let ctx = open.ctx.clone();
+        let mut acts = open.document.settle(
+            &ctx,
+            vec![crate::browser::Act::SaveDoc(open.id)],
+            &mut open.workspace,
+            &mut open.log,
+        );
+        assert!(acts.is_empty(), "the save waits for the apply");
+        for _ in 0..100_000 {
+            acts = open
+                .document
+                .released(&ctx, &mut open.workspace, &mut open.log);
+            if !acts.is_empty() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(acts.as_slice(), [crate::browser::Act::SaveDoc(id)] if *id == open.id),
+            "the save is what comes back",
+        );
+        assert!(named(&open).contains('X'), "{}", named(&open));
+        assert!(open.entity().is_unsaved(), "and it is the save's to settle");
+        assert!(!open.document.pends(open.id));
+    }
+
+    /// A revert is the end of a plan wherever the gesture came from: the File menu
+    /// raises the same act the header's own control does.
+    #[test]
+    fn reverting_a_piano_from_the_menu_drops_the_plan_it_was_holding() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![enter()]);
+        assert!(open.document.pends(open.id));
+
+        let ctx = open.ctx.clone();
+        let acts = open.document.settle(
+            &ctx,
+            vec![crate::browser::Act::Revert(open.id)],
+            &mut open.workspace,
+            &mut open.log,
+        );
+        assert_eq!(acts.len(), 1, "the revert itself still runs");
+        assert!(!open.document.pends(open.id), "the plan is gone with it");
     }
 
     #[test]
