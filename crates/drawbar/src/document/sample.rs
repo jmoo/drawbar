@@ -1278,36 +1278,62 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
             }
         })
         .collect();
+    let rows: Vec<usize> = stated.iter().map(|(row, _)| *row).collect();
+    velocity_field(
+        ui,
+        state,
+        "every stroke answers the full window",
+        span(&map_zones(snapshot), NSMP_SPAN),
+        &blocks,
+        &rows,
+        keys::Handles::Fixed,
+    );
+}
+
+/// The key × velocity field both documents draw: the heading with what the windows
+/// cover, the field itself, and the row a click on a block opens.
+///
+/// `rows` names the row each block stands for, one per block — the blocks are the zones
+/// that state a window, which on neither document is every row.
+///
+/// Returns the block a handle moved and the window the drag left it with.
+pub(super) fn velocity_field(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    note: &str,
+    span: keys::Span,
+    blocks: &[keys::VelBlock],
+    rows: &[usize],
+    handles: keys::Handles,
+) -> Option<(usize, (u8, u8))> {
     let visuals = ui.visuals().clone();
-    let holes = keys::velocity_holes(&blocks);
-    let (cover, ink) = match holes.len() {
+    let (cover, ink) = match keys::velocity_holes(blocks).len() {
         0 => ("fully covered".to_string(), app::good(&visuals)),
         1 => ("1 hole".to_string(), app::warn(&visuals)),
         n => (format!("{n} holes"), app::warn(&visuals)),
     };
-    controls::heading(
-        ui,
-        "Velocity",
-        "every stroke answers the full window",
-        Some((&cover, ink)),
-    );
-    let span = span(&map_zones(snapshot), NSMP_SPAN);
+    controls::heading(ui, "Velocity", note, Some((&cover, ink)));
+    let picked = state
+        .selected
+        .and_then(|row| rows.iter().position(|held| *held == row));
     let acted = ui
         .horizontal(|ui| {
             ui.add_space(PAD);
             let room = (ui.available_width() - PAD).max(64.0);
             ui.allocate_ui(egui::vec2(room, 0.0), |ui| {
-                let picked = stated
-                    .iter()
-                    .position(|(row, _)| Some(*row) == state.selected);
-                keys::velocity(ui, span, &blocks, picked, keys::Handles::Fixed)
+                keys::velocity(ui, span, blocks, picked, handles)
             })
             .inner
         })
         .inner;
     ui.add_space(8.0);
-    if let Some(keys::VelocityAct::Pick(block)) = acted {
-        state.pick(stated[block].0, true);
+    match acted {
+        Some(keys::VelocityAct::Pick(block)) => {
+            state.pick(rows[block], true);
+            None
+        }
+        Some(keys::VelocityAct::Drag { zone, window, .. }) => Some((zone, window)),
+        None => None,
     }
 }
 

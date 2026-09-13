@@ -520,18 +520,19 @@ fn fields(
 /// The key × velocity field: one window per zone, and every edge draggable, because a
 /// project is where a window is stated.
 fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mut Sets) {
-    let playing: Vec<(&Zone, &Stroke)> = snapshot
+    let playing: Vec<(usize, &Zone, &Stroke)> = snapshot
         .zones
         .iter()
-        .filter(|zone| zone.enabled)
-        .filter_map(|zone| played(snapshot, zone).map(|stroke| (zone, stroke)))
+        .enumerate()
+        .filter(|(_, zone)| zone.enabled)
+        .filter_map(|(row, zone)| played(snapshot, zone).map(|stroke| (row, zone, stroke)))
         .collect();
     if playing.is_empty() {
         return;
     }
     let blocks: Vec<keys::VelBlock> = playing
         .iter()
-        .map(|(zone, stroke)| keys::VelBlock {
+        .map(|(_, zone, stroke)| keys::VelBlock {
             low: zone.bottom_note,
             top: zone.top_note,
             window: stroke.velocity,
@@ -546,59 +547,31 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
             ),
         })
         .collect();
-    let holes = keys::velocity_holes(&blocks);
-    let visuals = ui.visuals().clone();
-    let (cover, ink) = match holes.len() {
-        0 => ("fully covered".to_string(), app::good(&visuals)),
-        1 => ("1 hole".to_string(), app::warn(&visuals)),
-        n => (format!("{n} holes"), app::warn(&visuals)),
-    };
-    controls::heading(
+    let rows: Vec<usize> = playing.iter().map(|(row, _, _)| *row).collect();
+    let dragged = sample::velocity_field(
         ui,
-        "Velocity",
+        state,
         "one window per zone — drag the top or bottom edge",
-        Some((&cover, ink)),
+        SPAN,
+        &blocks,
+        &rows,
+        keys::Handles::Draggable,
     );
-    // The field draws only the zones that answer, so its indices are not the rows'.
-    let block_of = |row: usize| {
-        let id = snapshot.zones.get(row)?.id;
-        playing.iter().position(|(zone, _)| zone.id == id)
+    let Some((block, window)) = dragged else {
+        return;
     };
-    let picked = sample::selected(state).and_then(block_of);
-    let acted = ui
-        .horizontal(|ui| {
-            ui.add_space(PAD);
-            let room = (ui.available_width() - PAD).max(64.0);
-            ui.allocate_ui(egui::vec2(room, 0.0), |ui| {
-                keys::velocity(ui, SPAN, &blocks, picked, keys::Handles::Draggable)
-            })
-            .inner
-        })
-        .inner;
-    ui.add_space(8.0);
-    match acted {
-        Some(keys::VelocityAct::Pick(index)) => {
-            let id = playing[index].0.id;
-            if let Some(row) = snapshot.zones.iter().position(|zone| zone.id == id) {
-                sample::pick_row(state, row);
-            }
-        }
-        Some(keys::VelocityAct::Drag { zone, window, .. }) => {
-            let (_, stroke) = playing[zone];
-            if window.0 != stroke.velocity.0 {
-                sets.push((
-                    format!("stroke{}.velocity_min", stroke.id),
-                    window.0.to_string(),
-                ));
-            }
-            if window.1 != stroke.velocity.1 {
-                sets.push((
-                    format!("stroke{}.velocity_max", stroke.id),
-                    window.1.to_string(),
-                ));
-            }
-        }
-        None => {}
+    let stroke = playing[block].2;
+    if window.0 != stroke.velocity.0 {
+        sets.push((
+            format!("stroke{}.velocity_min", stroke.id),
+            window.0.to_string(),
+        ));
+    }
+    if window.1 != stroke.velocity.1 {
+        sets.push((
+            format!("stroke{}.velocity_max", stroke.id),
+            window.1.to_string(),
+        ));
     }
 }
 
@@ -993,6 +966,74 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    /// One frame of the body over `snapshot`: what it painted and where, and what it
+    /// wrote.
+    fn bodied(
+        ctx: &egui::Context,
+        state: &mut State,
+        snapshot: &Snapshot,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, Sets) {
+        let mut sets = Sets::new();
+        let mut paths = HashMap::new();
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |page| {
+                ui(page, state, snapshot, &mut paths, &mut sets);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, sets)
+    }
+
+    /// The highest place a word was painted: the velocity field stands above the rows,
+    /// and both name a zone the same way.
+    fn highest(said: &[(String, egui::Rect)], word: &str) -> egui::Rect {
+        said.iter()
+            .filter(|(text, _)| text == word)
+            .map(|(_, at)| *at)
+            .reduce(|a, b| match a.center().y < b.center().y {
+                true => a,
+                false => b,
+            })
+            .unwrap_or_else(|| panic!("{word} was never painted: {said:?}"))
+    }
+
+    /// ⚠️ A block is not a row either: the velocity field draws one block per zone that
+    /// answers, so a click on the last block must open the last row.
+    #[test]
+    fn clicking_a_velocity_block_opens_the_row_it_stands_for() {
+        let ctx = dressed();
+        let mut snapshot = read_back(&project_of(&[48, 60, 72]));
+        snapshot.zones[1].enabled = false;
+        let bottom = snapshot.zones[2].id;
+
+        let mut state = State::default();
+        let (said, _) = bodied(&ctx, &mut state, &snapshot, Vec::new());
+        let block = highest(&said, &format!("Zone {bottom}"));
+        // Below the block's name, which sits over the handle at the window's top edge.
+        let at = egui::pos2(block.center().x, block.center().y + 20.0);
+
+        let (_, sets) = bodied(&ctx, &mut state, &snapshot, press(at));
+        assert_eq!(
+            sample::selected(&state),
+            Some(2),
+            "the second block stands on the third zone"
+        );
+        assert!(sets.is_empty(), "a pick is not an edit");
     }
 
     /// ⚠️ A band is not a row: the map draws only the zones that answer a key, so a
