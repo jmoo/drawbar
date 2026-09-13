@@ -187,7 +187,6 @@ fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Loc
         DeviceCmd::Get {
             class,
             at,
-            body: false,
             why: Purpose::Compare,
         },
         log,

@@ -16,7 +16,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
 use crate::browser::{cell_ink, families_present, qualified, Act, Browser, Bulk, Item, Kind};
-use crate::device::{fit, sendable, Device, DeviceState};
+use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::{chip, Track};
@@ -170,12 +170,12 @@ pub struct Row {
 }
 
 impl Row {
-    /// Where a send would write this row, which is [`crate::device::sendable`]'s rule
+    /// Where a send would write this row, which is [`crate::device::read_only`]'s rule
     /// over an asset that came off a slot. A row that is already on the instrument goes
     /// nowhere.
     fn destination(&self) -> Option<(ObjectClass, Location)> {
         let (class, at) = self.at?;
-        (matches!(self.item, Item::Local(_)) && sendable(class)).then_some((class, at))
+        (matches!(self.item, Item::Local(_)) && !read_only(class)).then_some((class, at))
     }
 }
 

@@ -9,7 +9,7 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::{Item, Kind};
 use super::Browser;
 use crate::device::{
-    fit, sendable, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
+    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
 };
 use crate::filter::Narrow;
 use crate::log::Log;
@@ -395,7 +395,6 @@ pub fn apply(
                     DeviceCmd::Get {
                         class,
                         at,
-                        body: false,
                         why: Purpose::View,
                     },
                     log,
@@ -405,7 +404,6 @@ pub fn apply(
                 DeviceCmd::Get {
                     class,
                     at,
-                    body: false,
                     why: Purpose::Copy,
                 },
                 log,
@@ -612,7 +610,7 @@ fn write_note(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> 
 /// then the slot it came off, and only where this app will write into that class at all.
 pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     let (class, at) = entity.spot()?;
-    crate::device::sendable(class).then_some((class, at))
+    (!read_only(class)).then_some((class, at))
 }
 
 /// Where queueing an asset for sending would put it.
@@ -641,7 +639,7 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
         return Bound::At(class, at);
     }
     let home = Kind::of(entity.entity.as_ref()).home();
-    let Some(class) = home.filter(|class| sendable(*class) && state.classes().contains(class))
+    let Some(class) = home.filter(|class| !read_only(*class) && state.classes().contains(class))
     else {
         return Bound::Nowhere;
     };

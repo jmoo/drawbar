@@ -4215,7 +4215,7 @@ mod tests {
                     "replace / add a stroke" => assert!(crate::newproject::Making::FROM_WAVS
                         .contains(&crate::newproject::Making::Piano)),
                     "write to the instrument" => {
-                        assert!(crate::device::sendable(ObjectClass::Piano))
+                        assert!(!crate::device::read_only(ObjectClass::Piano))
                     }
                     other => panic!("{other} claims editable with no plan behind it"),
                 }

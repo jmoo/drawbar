@@ -16,7 +16,7 @@ use super::controls::Sets;
 use super::{encode, piano, project, sample, setlist, SendBack};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
-use crate::device::{sendable, DeviceState};
+use crate::device::{read_only, DeviceState};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
@@ -1156,7 +1156,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let Some((class, at)) = entity.spot() else {
         return idle("this stands on no slot — there is nothing to replace".to_string());
     };
-    if !sendable(class) {
+    if read_only(class) {
         return idle(format!(
             "nothing here knows what {} holds, so nothing is written there",
             folder(class)

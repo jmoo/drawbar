@@ -466,8 +466,7 @@ mod tests {
         });
         device.state.detail = Detail {
             at: Some(at),
-            info: None,
-            asked: true,
+            info: Some(None),
             deps: Some(vec![
                 Dependency {
                     flag: 1,

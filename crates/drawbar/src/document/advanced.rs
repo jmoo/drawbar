@@ -599,8 +599,8 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
     if device.state.detail.at != Some(at) {
         return asked;
     }
-    match (&device.state.detail.info, device.state.detail.asked) {
-        (Some(info), _) => {
+    match &device.state.detail.info {
+        Some(Some(info)) => {
             egui::Grid::new("slot_detail")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -620,10 +620,10 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
                     );
                 });
         }
-        (None, true) => {
+        Some(None) => {
             ui.label(egui::RichText::new("the slot is empty").weak());
         }
-        (None, false) => {}
+        None => {}
     }
     if let Some(deps) = &device.state.detail.deps {
         ui.separator();

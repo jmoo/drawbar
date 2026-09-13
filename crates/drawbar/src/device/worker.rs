@@ -187,13 +187,8 @@ async fn execute<T: Transport>(
             Ok(Some(note))
         }
 
-        DeviceCmd::Get {
-            class,
-            at,
-            body,
-            why,
-        } => {
-            let (info, bytes) = match read_object(device, class, at, body).await {
+        DeviceCmd::Get { class, at, why } => {
+            let (info, bytes) = match read_object(device, class, at).await {
                 Ok(read) => read,
                 // Status 1 is a vacant slot, not a failure.
                 Err(Error::DeviceStatus(1)) => {
@@ -209,7 +204,7 @@ async fn execute<T: Transport>(
                 bytes.len()
             );
             emit.send(DeviceEvent::Got {
-                name: entity_name(&info, body),
+                name: entity_name(&info),
                 origin: Origin::Device { class, at },
                 bytes,
                 why,
@@ -551,7 +546,7 @@ async fn scan_bank<T: Transport>(
         .await?
         .banks(class)?
         .iter()
-        .find(|held| held.index + 1 == bank)
+        .find(|held| super::user_bank(held.index) == Some(bank))
         .ok_or_else(|| {
             Error::InvalidArgument(format!(
                 "the instrument declares no bank {bank} in {}",
@@ -841,20 +836,16 @@ async fn walk_open_bank<T: Transport, C>(
     })
 }
 
-/// Read metadata plus either the wire body or a complete CBIN file.
+/// Read a slot's metadata and a complete CBIN file of what it holds.
 async fn read_object<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-    body: bool,
 ) -> Result<(ProgramInfo, Vec<u8>), Error> {
     device
         .read(class, async |s| {
             let info = op::info(s, at).await?;
-            let file = match body {
-                true => op::read_body(s, at).await?,
-                false => op::read_program(s, at).await?,
-            };
+            let file = op::read_program(s, at).await?;
             Ok((info, file))
         })
         .await
@@ -947,17 +938,11 @@ fn unix_now() -> Result<u32, Error> {
     Ok(seconds as u32)
 }
 
-/// Name a fetched entity after its slot; raw body dumps receive a `.body` suffix.
-fn entity_name(info: &ProgramInfo, body: bool) -> String {
+/// Name a fetched entity after its slot.
+fn entity_name(info: &ProgramInfo) -> String {
     let name = info.name.trim();
-    let name = match name.is_empty() {
-        true => "unnamed",
-        false => name,
-    };
-    // A `--body` dump is a fragment of a file, not one; the suffix keeps it from being
-    // handed back in as a whole object.
-    match body {
-        true => format!("{name}.body"),
+    match name.is_empty() {
+        true => "unnamed".to_string(),
         false => name.to_string(),
     }
 }
@@ -1006,8 +991,7 @@ mod tests {
             crc32: Some(0),
             name: "Africa Split".into(),
         };
-        assert_eq!(entity_name(&info, false), "Africa Split");
-        assert_eq!(entity_name(&info, true), "Africa Split.body");
+        assert_eq!(entity_name(&info), "Africa Split");
     }
 
     #[test]
@@ -1052,7 +1036,7 @@ mod tests {
             crc32: None,
             name: "  ".into(),
         };
-        assert_eq!(entity_name(&info, false), "unnamed");
+        assert_eq!(entity_name(&info), "unnamed");
     }
 
     #[test]
@@ -1446,7 +1430,6 @@ mod wire_tests {
             DeviceCmd::Get {
                 class: ObjectClass::Program,
                 at,
-                body: false,
                 why: Purpose::Compare,
             },
         );
