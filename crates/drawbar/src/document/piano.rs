@@ -76,6 +76,10 @@ const SPAN: Span = Span { low: 21, high: 108 };
 /// A save moves both halves at once.
 type Mark = (usize, Option<u32>);
 
+fn mark(entity: &LocalEntity) -> Mark {
+    (entity.saved.bytes.len(), entity.saved.crc32)
+}
+
 /// Every edit a piano document holds, against the baseline it is an edit of.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -223,6 +227,18 @@ impl Plan {
         match keep {
             true => self.layers.remove(&layer),
             false => self.layers.insert(layer),
+        };
+    }
+
+    /// Take one root's exception to a layer's switch.
+    ///
+    /// ⚠️ An exception that agrees with the switch is dropped rather than recorded: a
+    /// plan holding one reads as an edit, and every save and send would lay the library
+    /// out again for the bytes it already holds.
+    fn except(&mut self, root: u8, layer: u8, keep: bool) {
+        match keep == !self.layers.contains(&layer) {
+            true => self.roots.remove(&(root, layer)),
+            false => self.roots.insert((root, layer), keep),
         };
     }
 
@@ -979,7 +995,7 @@ impl State {
             self.open = None;
             return Extras::default();
         }
-        let baseline = (entity.saved.bytes.len(), entity.saved.crc32);
+        let baseline = mark(entity);
         let moved = self
             .open
             .as_ref()
@@ -1041,14 +1057,35 @@ impl State {
 
     /// Take one of the header's `path = value` sets into the plan.
     pub fn take(&mut self, sets: &Sets) -> Result<(), String> {
+        let State { open, draft, .. } = self;
+        let facts = open.as_ref().and_then(|open| open.facts.as_ref().ok());
         for (path, value) in sets {
             match path.as_str() {
-                "name" => self.draft.name = Some(value.clone()),
-                "variant" => self.draft.variant = Some(value.clone()),
+                "name" => draft.name = renamed(value, facts.map(|facts| facts.name.as_str())),
+                "variant" => {
+                    draft.variant = renamed(value, facts.map(|facts| facts.variant.as_str()));
+                }
                 _ => return Err(format!("unknown field {path:?}")),
             }
         }
         Ok(())
+    }
+
+    /// What this document's plan will save its name and its variant as, where it renames
+    /// them. The header's box holds what a save writes rather than what the bytes still
+    /// say, so that typing the stored name back clears the rename.
+    ///
+    /// ⚠️ Nothing over a plan standing against another baseline: a save makes what it
+    /// held gone, and [`State::begin`] is what starts the plan again.
+    pub fn renaming(&self, entity: &LocalEntity) -> (Option<String>, Option<String>) {
+        let plan = self
+            .plans
+            .get(&entity.id)
+            .filter(|plan| plan.against == mark(entity));
+        (
+            plan.and_then(|plan| plan.name.clone()),
+            plan.and_then(|plan| plan.variant.clone()),
+        )
     }
 
     /// The plan this frame left behind, where it is not the one in hand.
@@ -1075,7 +1112,11 @@ impl State {
     }
 
     /// Forget this document's plan, and anything waiting on it. Revert puts the saved
-    /// bytes back, and a plan over bytes nothing holds is not an edit of anything.
+    /// bytes back and a removal takes them away, and a plan over bytes nothing holds is
+    /// not an edit of anything.
+    ///
+    /// ⚠️ Only the document being drawn loses its draft and its facts: forgetting
+    /// another document's plan must not close the open one.
     pub fn forget(&mut self, id: u64) {
         self.plans.remove(&id);
         self.laid.remove(&id);
@@ -1083,8 +1124,10 @@ impl State {
         if self.job.as_ref().is_some_and(|job| job.id == id) {
             self.job = None;
         }
-        self.draft = Plan::default();
-        self.open = None;
+        if self.open.as_ref().is_some_and(|open| open.id == id) {
+            self.draft = Plan::default();
+            self.open = None;
+        }
     }
 
     /// Nothing is open any more: the selection, the open rows, the key table and the
@@ -1135,10 +1178,11 @@ impl State {
 
     /// The apply that has answered, where one has.
     ///
-    /// ⚠️ An answer over a plan that has since moved is dropped rather than written: the
-    /// bytes it made are of a library nobody asked for any more. Whatever was waiting on
-    /// that document waits on the apply of the plan in hand instead — unless the plan
-    /// has caught up with the bytes on its own, when there is nothing left to wait for.
+    /// ⚠️ An answer over a plan that has since moved, or over a document the workspace
+    /// no longer holds, is dropped rather than written: the bytes it made are of a
+    /// library nobody asked for any more. Whatever was waiting on that document waits on
+    /// the apply of the plan in hand instead — unless the plan has caught up with the
+    /// bytes on its own, or the document is gone, when there is nothing left to wait for.
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
         let made = match self.job.as_ref()?.job.poll() {
             work::Answer::Running => return None,
@@ -1148,7 +1192,8 @@ impl State {
             }
         };
         let laying = self.job.take()?;
-        let fresh = self.plans.get(&laying.id) == Some(&laying.plan);
+        let fresh =
+            workspace.get(laying.id).is_some() && self.plans.get(&laying.id) == Some(&laying.plan);
         match (fresh, made.is_ok()) {
             (true, true) => {
                 self.laid.insert(laying.id, laying.plan);
@@ -1204,6 +1249,12 @@ impl State {
             name: crate::workspace::stroke_wav_name(&facts.name, root, bank, layer),
         })
     }
+}
+
+/// A typed half of the name field as the plan holds it: nothing where it is what the
+/// baseline already states, and a plan that renames nothing is no edit.
+fn renamed(typed: &str, stored: Option<&str>) -> Option<String> {
+    (stored != Some(typed)).then(|| typed.to_string())
 }
 
 /// The document an act must wait for, where it is one that would carry a document's
@@ -2417,7 +2468,7 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
         plan.switch_layer(layer, keep);
     }
     if let Some((root, layer, keep)) = excepted {
-        plan.roots.insert((root, layer), keep);
+        plan.except(root, layer, keep);
     }
 }
 
@@ -2432,6 +2483,16 @@ fn root_layers(facts: &Facts, root: usize) -> Vec<u8> {
     values.sort_unstable();
     values.dedup();
     values
+}
+
+/// Drop every layer one root still keeps: the ones it records whose switch is on. A
+/// layer the root has no stroke of has nothing to drop, and one its switch has already
+/// dropped needs no exception of its own.
+fn drop_root(facts: &Facts, plan: &mut Plan, index: usize) {
+    let note = facts.roots[index].note;
+    for layer in root_layers(facts, index) {
+        plan.except(note, layer, false);
+    }
 }
 
 /// What a stroke is attenuated by under this plan, in decibels.
@@ -2496,6 +2557,10 @@ fn row_ink(visuals: &egui::Visuals, picked: bool, in_range: bool) -> RowInk {
 /// How many lamps a root's row carries before the layers are better read in the lanes
 /// above it.
 const ROW_LAMPS: usize = 6;
+
+/// How far the trim control reaches, in decibels. A stroke recording more than this is
+/// shown as the file states it.
+const TRIM_REACH: u16 = 48;
 
 /// One row per root: what it answers, which of its layers it keeps, what it costs, and
 /// the facts and actions under it when it is open.
@@ -2726,12 +2791,10 @@ fn roots(
         view.picked = Some(index);
     }
     if let Some((root, layer, keep)) = excepted {
-        plan.roots.insert((root, layer), keep);
+        plan.except(root, layer, keep);
     }
     if let Some(index) = dropped {
-        for (_, layer) in &layers {
-            plan.roots.insert((facts.roots[index].note, *layer), false);
-        }
+        drop_root(facts, plan, index);
     }
     ask
 }
@@ -2815,15 +2878,25 @@ fn open_row(
                         )
                         .halign(egui::Align::LEFT),
                     );
-                    let mut decibels = f64::from(trim_of(facts, plan, strike));
-                    let set = ui
-                        .add(
-                            egui::DragValue::new(&mut decibels)
-                                .range(0.0..=48.0)
-                                .speed(0.1)
-                                .suffix(" dB"),
-                        )
-                        .on_hover_text("+0x34 in the stroke record, 1 dB a unit");
+                    let held = trim_of(facts, plan, strike);
+                    let mut decibels = f64::from(held);
+                    // ⚠️ `clamp_existing_to_range`: egui otherwise pulls a stored trim
+                    // past the bound back to it and reports the change, which would
+                    // plan a retrim of a stroke nobody touched.
+                    let set = ui.add(
+                        egui::DragValue::new(&mut decibels)
+                            .range(0.0..=f64::from(TRIM_REACH))
+                            .clamp_existing_to_range(false)
+                            .speed(0.1)
+                            .suffix(" dB"),
+                    );
+                    let set = match held > TRIM_REACH {
+                        true => set.on_hover_text(format!(
+                            "+0x34 in the stroke record, 1 dB a unit — it holds {held} dB, \
+                             past the {TRIM_REACH} dB this control sets"
+                        )),
+                        false => set.on_hover_text("+0x34 in the stroke record, 1 dB a unit"),
+                    };
                     if set.changed() {
                         let key = (root.note, strike.bank, strike.layer);
                         let picked = decibels.round() as u16;
@@ -3623,6 +3696,56 @@ mod tests {
         );
     }
 
+    /// A segment clicked off and back on is no edit: an exception that agrees with its
+    /// switch is dropped, so nothing is left for a save to lay the library out for.
+    #[test]
+    fn a_per_root_exception_put_back_leaves_the_plan_empty() {
+        let mut plan = plan();
+        plan.except(ROOTS[1], LAYERS[0], false);
+        assert!(!plan.keeps_layer(ROOTS[1], LAYERS[0]));
+        assert!(!plan.is_empty());
+
+        plan.except(ROOTS[1], LAYERS[0], true);
+        assert!(plan.is_empty(), "{plan:?}");
+
+        // Under a switch that is off it is the other way about: keeping the layer is
+        // the exception, and dropping it again says only what the switch says.
+        plan.switch_layer(LAYERS[0], false);
+        plan.except(ROOTS[1], LAYERS[0], false);
+        assert!(plan.roots.is_empty(), "the switch already drops it");
+        plan.except(ROOTS[1], LAYERS[0], true);
+        assert_eq!(plan.roots.get(&(ROOTS[1], LAYERS[0])), Some(&true));
+    }
+
+    /// Dropping a root takes the layers it records whose switch is still on, and the
+    /// master switches speak over every exception it left.
+    #[test]
+    fn dropping_a_root_excepts_only_the_layers_its_switch_still_keeps() {
+        let facts = facts();
+        let mut plan = plan();
+        plan.switch_layer(LAYERS[0], false);
+        drop_root(&facts, &mut plan, 1);
+
+        let excepted: Vec<(u8, u8)> = plan.roots.keys().copied().collect();
+        assert_eq!(
+            excepted,
+            [(ROOTS[1], LAYERS[1]), (ROOTS[1], LAYERS[2])],
+            "the layer its switch already dropped needs no exception",
+        );
+        assert!(
+            plan.keeps_layer(ROOTS[0], LAYERS[1]),
+            "and no other root moved"
+        );
+
+        for layer in LAYERS {
+            plan.switch_layer(layer, false);
+        }
+        for layer in LAYERS {
+            plan.switch_layer(layer, true);
+        }
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
     /// A plan that would leave the library with nothing to play is refused, and the
     /// rebuild says so rather than writing an empty directory.
     #[test]
@@ -4298,6 +4421,10 @@ mod tests {
 
     impl Editor {
         fn new(free: u64) -> Editor {
+            Editor::of(bytes(), free)
+        }
+
+        fn of(saved: Vec<u8>, free: u64) -> Editor {
             let ctx = egui::Context::default();
             // Dressed the way the app dresses it: without the bold face bound, laying
             // out a root's name panics mid-frame.
@@ -4308,7 +4435,7 @@ mod tests {
             let id = workspace.ingest(
                 "Test Piano.npno".into(),
                 Origin::File("Test Piano.npno".into()),
-                bytes(),
+                saved,
                 &mut log,
             );
             Editor {
@@ -4323,6 +4450,23 @@ mod tests {
 
         fn frame(&mut self, events: Vec<egui::Event>) -> Painted {
             self.driven(events, |_| {})
+        }
+
+        /// What a settled name box does: the set into the plan, and the plan kept where
+        /// the library takes it.
+        fn typed(&mut self, path: &str, value: &str) {
+            self.state
+                .take(&vec![(path.to_string(), value.to_string())])
+                .expect("the piano knows the field");
+            if let Some(plan) = self.state.drafted() {
+                self.state.commit(plan);
+            }
+        }
+
+        /// What the header's box holds over this document.
+        fn boxes(&self) -> (Option<String>, Option<String>) {
+            self.state
+                .renaming(self.workspace.get(self.id).expect("it is open"))
         }
 
         /// Wait for the apply in flight to answer, the way a frame polls it.
@@ -4585,6 +4729,66 @@ mod tests {
         assert!(!editor.state.pending(editor.id));
     }
 
+    /// The name box holds what a save will write, so typing the stored name back into
+    /// it clears the rename rather than leaving one standing over bytes that hold it.
+    #[test]
+    fn a_name_typed_back_to_the_stored_one_clears_the_rename() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.frame(Vec::new());
+        let stored = facts().name;
+
+        editor.typed("name", "Wurly 200A");
+        assert_eq!(
+            editor.boxes(),
+            (Some("Wurly 200A".to_string()), None),
+            "the box shows what a save would write",
+        );
+        assert!(editor.state.pending(editor.id));
+
+        editor.typed("name", &stored);
+        assert_eq!(editor.boxes(), (None, None), "the box is back on the bytes");
+        assert!(
+            editor.state.plans[&editor.id].is_empty(),
+            "and the plan edits nothing at all: {:?}",
+            editor.state.plans[&editor.id],
+        );
+        assert!(
+            !editor.state.pending(editor.id),
+            "so nothing is left to apply"
+        );
+    }
+
+    /// A stored trim past what this editor's control reaches is shown as the file holds
+    /// it. Pulling it back to the bound would retrim a stroke nobody touched.
+    #[test]
+    fn a_stored_trim_above_the_controls_reach_is_shown_rather_than_re_planned() {
+        let mut held = plan();
+        let stroke = (ROOTS[2], Bank::Attack.code(), LAYERS[0]);
+        held.trims.insert(stroke, TRIM_REACH + 12);
+        let saved = rebuild(&bytes(), &held).expect("the library takes the trim");
+
+        let mut editor = Editor::of(saved, facts().total * 2);
+        editor.frame(Vec::new());
+        editor.state.view.picked = Some(2);
+        editor.state.view.open_rows.insert(2);
+        let opened = editor.frame(Vec::new());
+
+        assert!(opened.said("ANSWERS FROM"), "the row is open");
+        assert!(
+            opened
+                .words
+                .iter()
+                .any(|word| word.starts_with("60") && word.ends_with(" dB")),
+            "{:?}",
+            opened.words,
+        );
+        assert!(
+            editor.state.plans[&editor.id].trims.is_empty(),
+            "opening the row planned a retrim: {:?}",
+            editor.state.plans[&editor.id].trims,
+        );
+    }
+
     /// A save lays the plan out first: the act waits, the bytes it makes are the ones a
     /// rebuild from the baseline makes, and only then is the document saved.
     #[test]
@@ -4689,6 +4893,53 @@ mod tests {
         assert!(applied.made.is_none(), "the bytes it made are of nothing");
         assert_eq!(applied.acts.len(), 1, "and the save is let go regardless");
         assert!(editor.state.job.is_none(), "with nothing left to lay out");
+    }
+
+    /// A document that is removed takes its plan with it: nothing is left pending over
+    /// bytes the workspace no longer holds, nothing is waiting on them, and no apply is
+    /// still laying them out.
+    #[test]
+    fn a_removed_document_takes_its_plan_and_its_apply_with_it() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        assert!(editor
+            .state
+            .hold(&editor.ctx, Act::SaveDoc(editor.id), &editor.workspace)
+            .is_none());
+        assert!(editor.state.applying());
+
+        let another = editor.workspace.ingest(
+            "Other Piano.npno".into(),
+            Origin::File("Other Piano.npno".into()),
+            bytes(),
+            &mut editor.log,
+        );
+        editor.state.forget(another);
+        assert!(
+            editor.state.open.is_some(),
+            "another document's removal closed the open one",
+        );
+
+        editor.state.forget(editor.id);
+        assert!(!editor.state.applying(), "nothing is still being laid out");
+        assert!(!editor.state.pending(editor.id), "no plan is left standing");
+        assert!(editor.state.held.is_empty(), "nor anything waiting on one");
+    }
+
+    /// ⚠️ An apply that answers over a document the workspace no longer holds made the
+    /// bytes of a library nothing can carry. They are dropped rather than written back.
+    #[test]
+    fn an_apply_that_answers_for_a_removed_document_is_dropped() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        editor
+            .state
+            .start(&editor.ctx, editor.id, &editor.workspace);
+        editor.workspace.remove(editor.id, &mut editor.log);
+
+        let applied = editor.awaited();
+        assert!(applied.made.is_none(), "nothing holds the bytes it made");
+        assert!(applied.acts.is_empty(), "and nothing was waiting on them");
     }
 
     /// A save is the end of the plan: what was dropped is gone, and the rows show the

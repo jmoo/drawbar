@@ -152,7 +152,7 @@ impl Document {
             self.fetched_deps = false;
             self.advanced.leave();
             self.ctx = Ctx::default();
-            (self.name, self.variant) = header::boxes(entity, viewing);
+            (self.name, self.variant) = header::boxes(entity, viewing, self.piano.renaming(entity));
             self.paths.clear();
             self.sample = sample::State::default();
             self.fields = field::State::default();
@@ -219,6 +219,7 @@ impl Document {
                 queue: around.queue,
                 tags: around.tags,
                 view: viewing,
+                renaming: self.piano.renaming(entity),
                 extras: match decoded.is_some_and(piano::is_piano) {
                     true => self.piano.begin(id, entity, &device.state),
                     false => extras(entity, device, workspace, pending),
@@ -415,8 +416,9 @@ impl Document {
             .into_iter()
             .filter_map(|act| {
                 // Wherever the gesture came from: the saved bytes are about to be put
-                // back, and a plan over bytes nothing holds is not an edit of anything.
-                if let crate::browser::Act::Revert(id) = &act {
+                // back or taken away, and a plan over bytes nothing holds is not an edit
+                // of anything.
+                if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
                     self.piano.forget(*id);
                 }
                 self.piano.hold(ctx, act, workspace)

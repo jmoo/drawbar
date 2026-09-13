@@ -247,6 +247,9 @@ pub(super) struct Facts<'a> {
     /// Whether this is a view of the instrument's own copy rather than an asset held
     /// here.
     pub view: bool,
+    /// What a piano library's plan will save its name and its variant as, from
+    /// [`piano::State::renaming`]: the box holds what a save writes.
+    pub renaming: (Option<String>, Option<String>),
     pub extras: Extras,
 }
 
@@ -357,7 +360,7 @@ fn left(
     let glyph = Kind::of(entity.entity.as_ref()).glyph();
     icon(ui, glyph, KIND, accent(&visuals));
 
-    let (held, stored) = named(entity, facts.view);
+    let (held, stored) = named(entity, facts.view, facts.renaming.clone());
     act.rename = name(ui, entity, &held, &stored, boxes, sets);
 
     let (badge, hint) = badge(entity);
@@ -794,8 +797,13 @@ enum Named {
     Device,
 }
 
-/// What the name box holds, and what typing in it does.
-fn named(entity: &LocalEntity, view: bool) -> (Named, String) {
+/// What the name box holds, and what typing in it does. `renaming` is what a piano
+/// library's plan will save each half as, where it renames it.
+fn named(
+    entity: &LocalEntity,
+    view: bool,
+    renaming: (Option<String>, Option<String>),
+) -> (Named, String) {
     let decoded = entity.entity.as_ref();
     if let Some(Ok(held)) = decoded.and_then(sample::snapshot) {
         return (
@@ -818,13 +826,14 @@ fn named(entity: &LocalEntity, view: bool) -> (Named, String) {
         );
     }
     if let Some(Ok(held)) = decoded.and_then(piano::snapshot) {
+        let (name, variant) = renaming;
         return (
             Named::Stored {
                 limit: None,
-                variant: Some(held.variant),
+                variant: Some(variant.unwrap_or(held.variant)),
                 width: PIANO_NAME,
             },
-            held.name,
+            name.unwrap_or(held.name),
         );
     }
     let settings = Kind::of(decoded) == Kind::Settings;
@@ -835,8 +844,12 @@ fn named(entity: &LocalEntity, view: bool) -> (Named, String) {
 }
 
 /// What the name boxes hold when a document opens.
-pub(super) fn boxes(entity: &LocalEntity, view: bool) -> (String, String) {
-    let (held, stored) = named(entity, view);
+pub(super) fn boxes(
+    entity: &LocalEntity,
+    view: bool,
+    renaming: (Option<String>, Option<String>),
+) -> (String, String) {
+    let (held, stored) = named(entity, view, renaming);
     let variant = match held {
         Named::Stored { variant, .. } => variant.unwrap_or_default(),
         Named::Asset | Named::Device => String::new(),
@@ -1415,6 +1428,7 @@ mod tests {
             queue,
             tags,
             view: false,
+            renaming: (None, None),
             extras: Extras::default(),
         }
     }
