@@ -265,8 +265,7 @@ pub fn default_roots(paths: &[String]) -> Vec<u8> {
     let after_first = paths.len().min(MOST_ZONES).saturating_sub(1);
     let start = u8::try_from(usize::from(HIGHEST_NOTE).saturating_sub(after_first))
         .unwrap_or(LOWEST_NOTE)
-        .min(MIDDLE_C)
-        .max(LOWEST_NOTE);
+        .clamp(LOWEST_NOTE, MIDDLE_C);
     (start..=HIGHEST_NOTE)
         .chain(std::iter::repeat(HIGHEST_NOTE))
         .take(paths.len())

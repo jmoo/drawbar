@@ -1299,8 +1299,6 @@ mod tests {
     /// badge, the content or stream version in the hover.
     #[test]
     fn every_kind_says_what_format_it_is() {
-        use crate::fields::blank;
-
         let (mut workspace, mut log) = workspace();
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
         assert_eq!(
