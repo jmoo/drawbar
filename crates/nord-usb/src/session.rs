@@ -434,7 +434,9 @@ impl<T: Transport, C> Drop for Session<'_, T, C> {
     }
 }
 
-#[cfg(test)]
+// Where a panic aborts rather than unwinds, the panic these tests observe would take
+// the test binary with it.
+#[cfg(all(test, panic = "unwind"))]
 mod tests {
     use super::*;
 
