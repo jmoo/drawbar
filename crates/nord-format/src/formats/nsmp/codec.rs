@@ -180,6 +180,13 @@ const MAX_ORDER: usize = 4;
 pub enum Unsupported {
     /// Shorter than the fixed header, so there is no stream to walk.
     Short,
+    /// The directory's opening pointer names no word in the stroke. Where the chain
+    /// begins comes from the directory alone, because the slack in front of a stream
+    /// can hold stale words that look like records.
+    Directory {
+        /// The opening pointer, as the header states it.
+        pointer: u16,
+    },
     /// A word violates the record header or content-count grammar.
     Malformed {
         /// Word index within the stream, counting from [`HEADER_LEN`].
@@ -210,6 +217,7 @@ impl Unsupported {
     pub fn reason(self) -> &'static str {
         match self {
             Unsupported::Short => "short-stroke",
+            Unsupported::Directory { .. } => "bad-directory",
             Unsupported::Malformed { .. } => "malformed-record",
             Unsupported::Desync { .. } => "desync",
             Unsupported::PartialWord { .. } => "partial-word",
@@ -223,6 +231,10 @@ impl fmt::Display for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Unsupported::Short => write!(f, "the stroke is shorter than its own header"),
+            Unsupported::Directory { pointer } => write!(
+                f,
+                "the directory's opening pointer {pointer} names no word in the stroke"
+            ),
             Unsupported::Malformed { word } => {
                 write!(f, "word {word} is not a record header")
             }
@@ -442,16 +454,21 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             .iter()
             .fold(0u32, |v, &b| (v << 8) | u32::from(b))
     };
-    let directory = Directory::read(stroke);
+    let directory = Directory::read(stroke).ok_or(Unsupported::Short)?;
 
-    // Prefer the directory: stale allocation slack can look like a record.
-    let first_record = directory
-        .map(|d| Directory::resolve(d.first_record, stroke_at, layout))
-        .filter(|&at| at < words)
-        .unwrap_or_else(|| (0..words).find(|&at| word(at) != 0).unwrap_or(words));
-    let last = directory
-        .map(|d| Directory::resolve_end(d.terminator, stroke_at, layout, words))
-        .filter(|&at| at < words);
+    let first_record = Directory::resolve(directory.first_record, stroke_at, layout);
+    if first_record >= words {
+        return Err(Unsupported::Directory {
+            pointer: directory.first_record,
+        });
+    }
+    let last = Some(Directory::resolve_end(
+        directory.terminator,
+        stroke_at,
+        layout,
+        words,
+    ))
+    .filter(|&at| at < words);
 
     // Stereo affects V4 record sizing, so read it from the directory's terminator
     // before walking the first record.
@@ -835,6 +852,20 @@ mod tests {
             walk(&s, 0, layout),
             Err(Unsupported::Malformed { word: terminator })
         );
+    }
+
+    #[test]
+    fn an_opening_pointer_outside_the_stream_is_refused_rather_than_searched_for() {
+        for layout in BOTH {
+            let values = run(layout, 6);
+            let mut s = stroke(layout, 1, 22, 2, &[block(layout, false, 4, 0, &values)]);
+            s[SEEK_AT..SEEK_AT + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+            assert_eq!(
+                walk(&s, 0, layout),
+                Err(Unsupported::Directory { pointer: u16::MAX }),
+                "{layout:?}"
+            );
+        }
     }
 
     #[test]
