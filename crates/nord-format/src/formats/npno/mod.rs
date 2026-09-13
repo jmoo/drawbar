@@ -92,6 +92,17 @@ const CHANNELS_AT: usize = 0x61e;
 const STROKE_COUNT_AT: usize = 0x620;
 const ROOT_COUNTS_AT: usize = 0x622;
 
+/// The kind of instrument the library states; [`encode::Kind`] names the codes.
+const KIND_AT: usize = 0x18;
+
+/// A gain over the whole library, in tenths of a decibel and signed. Confirmed on
+/// hardware.
+const GAIN_AT: usize = 0x40c;
+
+/// The highest key the instrument damps at note-off; keys above it ring on. Confirmed
+/// on hardware.
+const DAMPER_TOP_AT: usize = 0x40d;
+
 /// First byte of the stroke directory, and so the length of the prefix.
 const DIRECTORY_AT: usize = 0x732;
 
@@ -127,12 +138,12 @@ const MARKS: usize = 4;
 /// over the stroke's own; it is non-decreasing across its entries, and a stroke of any
 /// bank carries it — including a release stroke, which zeroes only the coefficient at
 /// [`REC_DECAY`]. Nothing here derives them from audio. Confirmed on hardware.
-const DECAYS: usize = 14;
+pub const DECAYS: usize = 14;
 const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
 
 /// One [`REC_DECAYS`] entry applying nothing: 1.0 in the ladder's fixed point, where
 /// the vendor's own entries sit just below it.
-const LADDER_UNITY: u32 = 0x0080_0000;
+pub const LADDER_UNITY: u32 = 0x0080_0000;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
@@ -332,34 +343,17 @@ impl Piano {
         self.file.write_to(writer)
     }
 
-    /// The body bytes, after checking they open with the `CNSP` magic.
-    fn cnsp(&self) -> Result<&[u8], Error> {
-        let body = &self.file.body.0;
-        if body.get(..4) != Some(CNSP_MAGIC.as_slice()) {
-            return Err(ParseError::AssertFail(format!(
-                "body opens {:02x?}, not the CNSP stream",
-                body.get(..4).unwrap_or_default()
-            ))
-            .into());
-        }
-        Ok(body)
-    }
-
     /// The body bytes, after checking the magic and that the stream version is one
     /// the prefix offsets are pinned to.
     fn mapped(&self) -> Result<&[u8], Error> {
-        let version = self.stream_version()?;
-        crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)?;
-        self.cnsp()
+        let body = &self.file.body.0;
+        check_mapped(body)?;
+        Ok(body)
     }
 
     /// The stream version at body `0x04`.
     pub fn stream_version(&self) -> Result<u16, Error> {
-        let body = self.cnsp()?;
-        let bytes = body.get(VERSION_AT..VERSION_AT + 2).ok_or_else(|| {
-            ParseError::AssertFail("body ends inside the CNSP header".to_string())
-        })?;
-        Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
+        version_of(&self.file.body.0)
     }
 
     /// The `(name, variant)` pair from the `Name#Variant` field — for
@@ -384,7 +378,7 @@ impl Piano {
     /// The container parsed: the prefix, the stroke directory and each stroke's
     /// audio span.
     pub fn library(&self) -> Result<Library<'_>, Error> {
-        Library::parse(self)
+        Library::parse_body(self.file.header.clone(), &self.file.body.0)
     }
 }
 
@@ -429,6 +423,27 @@ fn midi_key(what: &str, key: u8) -> Result<usize, Error> {
 
 fn short(what: &str) -> Error {
     ParseError::AssertFail(format!("the body ends inside {what}")).into()
+}
+
+/// The stream version at body `0x04`, the `CNSP` magic checked first.
+fn version_of(body: &[u8]) -> Result<u16, Error> {
+    if body.get(..4) != Some(CNSP_MAGIC.as_slice()) {
+        return Err(ParseError::AssertFail(format!(
+            "body opens {:02x?}, not the CNSP stream",
+            body.get(..4).unwrap_or_default()
+        ))
+        .into());
+    }
+    let bytes = body
+        .get(VERSION_AT..VERSION_AT + 2)
+        .ok_or_else(|| ParseError::AssertFail("body ends inside the CNSP header".to_string()))?;
+    Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+/// The magic, and a stream version the prefix offsets are pinned to.
+fn check_mapped(body: &[u8]) -> Result<(), Error> {
+    let version = version_of(body)?;
+    crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)
 }
 
 fn overflow(what: &str) -> Error {
@@ -508,6 +523,21 @@ impl<'a> Stroke<'a> {
         be16(&self.record, REC_BLOCKS)
     }
 
+    /// The `+0x34` trim, in decibels the instrument attenuates the stroke by.
+    pub fn trim(&self) -> u16 {
+        be16(&self.record, REC_TRIM)
+    }
+
+    /// The `+0x2e` decay coefficient, which a release stroke zeroes.
+    pub fn decay(&self) -> u32 {
+        be32(&self.record, REC_DECAY)
+    }
+
+    /// The [`DECAYS`]-entry decay ladder from `+0x36`.
+    pub fn ladder(&self) -> [u32; DECAYS] {
+        std::array::from_fn(|entry| be32(&self.record, REC_DECAYS + entry * 4))
+    }
+
     /// The identifier at `+0x6e`. Distinguishes a recording across libraries;
     /// what else it means is open. Inferred from specimens; not confirmed on
     /// hardware.
@@ -570,8 +600,35 @@ pub struct Library<'a> {
 }
 
 impl<'a> Library<'a> {
-    fn parse(piano: &'a Piano) -> Result<Library<'a>, Error> {
-        let body = piano.mapped()?;
+    /// A whole `.npno` file parsed over a borrowed slice: the body is taken as a
+    /// subslice, so every stroke's audio points into `file` rather than a copy of it.
+    ///
+    /// The container's checksum is not verified here — the caller has inspected the
+    /// container.
+    pub fn borrow(file: &'a [u8]) -> Result<Library<'a>, Error> {
+        let mut head: &[u8] = file;
+        let (header, _) = cbin::read_header(&mut head)?;
+        if header.tag.as_slice() != FORMAT.as_bytes() {
+            return Err(ParseError::WrongFormat {
+                expected: FORMAT,
+                got: String::from_utf8_lossy(&header.tag).into_owned(),
+            }
+            .into());
+        }
+        let start = usize::try_from(header.generation.body_start())
+            .map_err(|_| overflow("the container's header"))?;
+        let trailer = usize::try_from(header.generation.trailer_len())
+            .map_err(|_| overflow("the container's checksum trailer"))?;
+        let end = file
+            .len()
+            .checked_sub(trailer)
+            .ok_or_else(|| short("the container's checksum trailer"))?;
+        let body = file.get(start..end).ok_or_else(|| short("the header"))?;
+        Library::parse_body(header, body)
+    }
+
+    fn parse_body(header: Header, body: &'a [u8]) -> Result<Library<'a>, Error> {
+        check_mapped(body)?;
         let prefix = body
             .get(..DIRECTORY_AT)
             .ok_or_else(|| short("the prefix"))?;
@@ -669,7 +726,7 @@ impl<'a> Library<'a> {
         }
 
         let library = Library {
-            header: piano.file.header.clone(),
+            header,
             prefix: prefix.to_vec(),
             channels,
             strokes,
@@ -707,6 +764,20 @@ impl<'a> Library<'a> {
 
     pub fn strokes(&self) -> &[Stroke<'a>] {
         &self.strokes
+    }
+
+    /// Retrim the `index`-th stroke, in the decibels [`Stroke::trim`] reads.
+    pub fn set_trim(&mut self, index: usize, decibels: u16) -> Result<(), Error> {
+        let count = self.strokes.len();
+        let stroke = self
+            .strokes
+            .get_mut(index)
+            .ok_or_else(|| ParseError::OutOfBounds {
+                value: format!("stroke {index}"),
+                bound: format!("the {count} strokes the directory holds"),
+            })?;
+        stroke.record[REC_TRIM..REC_TRIM + 2].copy_from_slice(&decibels.to_be_bytes());
+        Ok(())
     }
 
     /// The `(name, variant)` pair, from the same field [`Piano::name`] reads.
@@ -761,6 +832,33 @@ impl<'a> Library<'a> {
         let at = FINE_TUNE_AT + midi_key("key", key)?;
         self.prefix[at] = units as u8;
         Ok(())
+    }
+
+    /// The gain over the whole library at `0x40c`, in tenths of a decibel.
+    pub fn gain(&self) -> i8 {
+        self.prefix[GAIN_AT] as i8
+    }
+
+    pub fn set_gain(&mut self, tenths: i8) {
+        self.prefix[GAIN_AT] = tenths as u8;
+    }
+
+    /// The highest key the instrument damps at note-off, at `0x40d`.
+    pub fn damper_top(&self) -> u8 {
+        self.prefix[DAMPER_TOP_AT]
+    }
+
+    /// Move the damper limit. [`encode::ALL_KEYS_DAMPED`] leaves no key ringing; a
+    /// key past the last MIDI note is refused.
+    pub fn set_damper_top(&mut self, key: u8) -> Result<(), Error> {
+        self.prefix[DAMPER_TOP_AT] = midi_key("damper limit", key)? as u8;
+        Ok(())
+    }
+
+    /// The instrument kind the library states at `0x18`; [`encode::Kind::from_code`]
+    /// names it.
+    pub fn kind_code(&self) -> u8 {
+        self.prefix[KIND_AT]
     }
 
     /// The long name at `0x3c` and the voicing at `0x5c`, which only
@@ -1331,6 +1429,46 @@ mod tests {
         assert_eq!(crate::to_bytes(&entity).unwrap(), bytes);
     }
 
+    /// A borrowed library is a view over the caller's own bytes: tens of megabytes of
+    /// audio stay where they were read, and what the view states is what the file
+    /// states.
+    #[test]
+    fn borrowing_a_file_reads_it_without_copying_the_audio() {
+        let bytes = Build::new().bytes().unwrap();
+        let library = Library::borrow(&bytes).unwrap();
+
+        let base = bytes.as_ptr() as usize;
+        let within = base..base + bytes.len();
+        for stroke in library.strokes() {
+            let at = stroke.audio().as_ptr() as usize;
+            assert!(
+                within.contains(&at),
+                "{stroke:?} holds a copy of its audio, not the caller's bytes"
+            );
+        }
+        assert_eq!(library.name(), ("Test Piano".into(), "Variant".into()));
+        assert_eq!(library.strokes().len(), 3);
+        assert_eq!(library.to_body().unwrap(), Build::new().body());
+    }
+
+    #[test]
+    fn borrowing_refuses_a_container_that_is_not_a_whole_piano_library() {
+        let bytes = Build::new().bytes().unwrap();
+
+        let mut other = bytes.clone();
+        other[0x08..0x0c].copy_from_slice(b"nsmp");
+        let error = Library::borrow(&other).unwrap_err().to_string();
+        assert!(error.contains("expected a npno file, got nsmp"), "{error}");
+
+        let error = Library::borrow(&bytes[..bytes.len() - 1])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ends inside a stroke's audio span"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn cutting_the_range_drops_the_roots_nothing_plays_any_more() {
         let piano = Build::new().piano();
@@ -1427,6 +1565,72 @@ mod tests {
         library.set_fine_tune(60, -4).unwrap();
         assert_eq!(library.fine_tune(60).unwrap(), -4);
         assert_eq!(library.to_body().unwrap()[FINE_TUNE_AT + 60], 0xfc);
+    }
+
+    /// Offsets at which two bodies of the same length differ: an edit's footprint.
+    fn changed(before: &[u8], after: &[u8]) -> Vec<usize> {
+        assert_eq!(before.len(), after.len(), "the body changed length");
+        (0..before.len())
+            .filter(|&at| before[at] != after[at])
+            .collect()
+    }
+
+    #[test]
+    fn the_gain_and_the_damper_limit_each_write_one_byte_of_the_prefix() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+
+        library.set_gain(-20);
+        let gained = library.to_body().unwrap();
+        assert_eq!(library.gain(), -20);
+        assert_eq!(gained[GAIN_AT], 0xec, "tenths of a decibel, signed");
+        assert_eq!(changed(&before, &gained), [GAIN_AT]);
+
+        library.set_damper_top(90).unwrap();
+        let damped = library.to_body().unwrap();
+        assert_eq!(library.damper_top(), 90);
+        assert_eq!(changed(&gained, &damped), [DAMPER_TOP_AT]);
+    }
+
+    #[test]
+    fn a_damper_limit_past_the_last_midi_note_is_refused_without_moving_the_one_held() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        library.set_damper_top(encode::ALL_KEYS_DAMPED).unwrap();
+        let before = library.to_body().unwrap();
+        assert!(library.set_damper_top(NOTES as u8).is_err());
+        assert_eq!(library.damper_top(), encode::ALL_KEYS_DAMPED);
+        assert_eq!(library.to_body().unwrap(), before);
+    }
+
+    /// The trim is a u16, so a value that fits one byte and one that does not must each
+    /// reach the field whole, and neither may touch the record beside it.
+    #[test]
+    fn a_retrim_writes_both_bytes_of_one_strokes_own_field() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        assert!(library.strokes().iter().all(|s| s.trim() == 0));
+        let before = library.to_body().unwrap();
+        let at = DIRECTORY_AT + RECORD + REC_TRIM;
+
+        library.set_trim(1, 7).unwrap();
+        let low = library.to_body().unwrap();
+        assert_eq!(library.strokes()[1].trim(), 7);
+        assert_eq!(changed(&before, &low), [at + 1]);
+
+        library.set_trim(1, 0x0107).unwrap();
+        let high = library.to_body().unwrap();
+        assert_eq!(library.strokes()[1].trim(), 0x0107);
+        assert_eq!(changed(&low, &high), [at]);
+
+        let error = library.set_trim(3, 4).unwrap_err().to_string();
+        assert!(error.contains("stroke 3"), "{error}");
+        assert_eq!(
+            library.to_body().unwrap(),
+            high,
+            "a refused retrim leaves the directory alone"
+        );
     }
 
     #[test]

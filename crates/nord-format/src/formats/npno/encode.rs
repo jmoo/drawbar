@@ -76,10 +76,11 @@
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, Bank, Library, Stroke, CNSP_MAGIC, DECAYS, DIRECTORY_AT,
-    FINE_TUNE_AT, FORMAT, KEY_MAP_AT, LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS,
-    REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_SEEDS,
-    REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
+    be32, block_bytes, midi_key, Bank, Library, Stroke, CNSP_MAGIC, DAMPER_TOP_AT, DECAYS,
+    DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT, LADDER_UNITY, MARKS, NOTES,
+    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
+    REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT,
+    VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{Error, ParseError};
@@ -153,6 +154,35 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub const ALL: [Kind; 10] = [
+        Kind::ElectricGrand,
+        Kind::ElectricPiano,
+        Kind::Wurlitzer,
+        Kind::Clavinet,
+        Kind::Grand,
+        Kind::Upright,
+        Kind::Harpsichord,
+        Kind::DigitalPiano,
+        Kind::Hybrid,
+        Kind::Mallet,
+    ];
+
+    pub fn from_code(code: u8) -> Option<Kind> {
+        match code {
+            1 => Some(Kind::ElectricGrand),
+            2 => Some(Kind::ElectricPiano),
+            3 => Some(Kind::Wurlitzer),
+            4 => Some(Kind::Clavinet),
+            5 => Some(Kind::Grand),
+            6 => Some(Kind::Upright),
+            7 => Some(Kind::Harpsichord),
+            14 => Some(Kind::DigitalPiano),
+            15 => Some(Kind::Hybrid),
+            16 => Some(Kind::Mallet),
+            _ => None,
+        }
+    }
+
     pub fn code(self) -> u8 {
         match self {
             Kind::ElectricGrand => 1,
@@ -389,9 +419,9 @@ const FILE_ID: u32 = 1;
 /// The stream version again, ahead of the echo at [`VERSION_ECHO_AT`].
 const VERSION_REPEAT_AT: usize = 0x16;
 
-/// [`Kind::code`], then a model id within the kind and the library's version digit —
-/// neither of which a rule-written prefix claims — then a format constant.
-const KIND_AT: usize = 0x18;
+/// The three bytes after [`KIND_AT`]: a model id within the kind and the library's
+/// version digit — neither of which a rule-written prefix claims — then a format
+/// constant.
 const KIND_TRAILER: [u8; 3] = [0, 0, 2];
 
 /// The per-note tables, [`NOTES`] bytes each, at the value that states nothing about
@@ -407,10 +437,8 @@ const PER_NOTE_TABLES: [(usize, u8); 6] = [
     (0x38c, 0),
 ];
 
-/// The playback parameters, zero but for the fields below.
+/// The playback parameters, zero but for the fields [`rules_prefix`] writes into them.
 const PARAMETERS: std::ops::Range<usize> = 0x40c..0x60f;
-const GAIN_AT: usize = 0x40c;
-const DAMPER_TOP_AT: usize = 0x40d;
 /// The three bytes after the damper limit, whose meaning is open; every library holds
 /// these.
 const PARAMETER_TAIL_AT: usize = 0x40e;
@@ -1484,35 +1512,44 @@ mod tests {
             ],
         );
         let library = piano.library().unwrap();
-        let donated: Vec<u32> = (0..DECAYS).map(|c| 0x0000_1000u32 + c as u32).collect();
+        let donated: [u32; DECAYS] = std::array::from_fn(|c| 0x0000_1000u32 + c as u32);
         for stroke in library.strokes() {
             let record = stroke.record();
             let marks: Vec<u32> = (0..MARKS)
                 .map(|m| be32(record, REC_MARKS + m * 4))
                 .collect();
-            let ladder: Vec<u32> = (0..DECAYS)
-                .map(|c| be32(record, REC_DECAYS + c * 4))
-                .collect();
             assert_eq!(
-                ladder, donated,
+                stroke.ladder(),
+                donated,
                 "a stroke of any bank inherits the donor's ladder unchanged"
             );
             if stroke.bank() == Some(Bank::Release) {
                 assert_eq!(marks, [0; MARKS], "a release stroke declares no marks");
                 assert_eq!(
-                    be32(record, REC_DECAY),
+                    stroke.decay(),
                     0,
                     "a release stroke zeroes the coefficient at +0x2e"
                 );
             } else {
                 assert!(marks.iter().all(|&m| m > 0 && m < stroke.frames()));
                 assert_ne!(
-                    be32(record, REC_DECAY),
+                    stroke.decay(),
                     0,
                     "a stroke of another bank inherits the donor's coefficient at +0x2e"
                 );
             }
         }
+    }
+
+    /// The kind byte is what the instrument files a library under, so every kind must
+    /// read back as itself and no other code may name one.
+    #[test]
+    fn every_kind_reads_back_from_the_code_it_writes() {
+        for kind in Kind::ALL {
+            assert_eq!(Kind::from_code(kind.code()), Some(kind));
+        }
+        let named: Vec<Kind> = (0..=u8::MAX).filter_map(Kind::from_code).collect();
+        assert_eq!(named, Kind::ALL, "a code names a kind ALL does not list");
     }
 
     /// Building without a template needs no library to donate anything, and what comes
@@ -1539,9 +1576,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(built.prefix[KIND_AT], Kind::Wurlitzer.code());
-        assert_eq!(built.prefix[GAIN_AT] as i8, -20);
-        assert_eq!(built.prefix[DAMPER_TOP_AT], 97);
+        assert_eq!(Kind::from_code(built.kind_code()), Some(Kind::Wurlitzer));
+        assert_eq!(built.gain(), -20);
+        assert_eq!(built.damper_top(), 97);
         assert_eq!(built.stream_version(), RULES_VERSION);
         assert_eq!(
             Rules::new(Kind::Wurlitzer).damper_top,
@@ -1557,7 +1594,7 @@ mod tests {
                 (
                     s.layer(),
                     be16(record, REC_WINDOW),
-                    be16(record, REC_TRIM),
+                    s.trim(),
                     be32(record, REC_ID),
                 )
             })
@@ -1566,7 +1603,11 @@ mod tests {
         for stroke in built.strokes() {
             let record = stroke.record();
             assert!((0..MARKS).all(|m| be32(record, REC_MARKS + m * 4) == 0));
-            assert!((0..DECAYS).all(|c| be32(record, REC_DECAYS + c * 4) == LADDER_UNITY));
+            assert_eq!(
+                (stroke.decay(), stroke.ladder()),
+                (0, [LADDER_UNITY; DECAYS]),
+                "a rule-written stroke of any bank applies no decay over the recording"
+            );
         }
 
         let again = rebuild(&built).unwrap();
