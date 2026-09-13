@@ -170,10 +170,12 @@ fn model(name: &str) -> Result<OrganModel, String> {
     }
 }
 
+/// The organ has two presets. Anything else is a sidecar defect, not a preset the
+/// accessor should fold onto one of them.
 fn preset(digit: &str) -> Result<Preset, String> {
     match digit {
         "1" => Ok(Preset::One),
         "2" => Ok(Preset::Two),
-        other => Err(format!("bad preset argument {other}")),
+        other => Err(format!("organ preset {other}, which is not 1 or 2")),
     }
 }

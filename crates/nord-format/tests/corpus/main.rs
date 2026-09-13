@@ -93,15 +93,10 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         }
     }
 
-    // All-ones bodies are unwritten slots, so their fields may be outside every table.
-    let all_ones = info
+    let unwritten = info
         .as_ref()
-        .map(|i| {
-            let body = cbin_body(&bytes, i);
-            !body.is_empty() && body.iter().all(|&b| b == 0xff)
-        })
-        .unwrap_or(false);
-    if !all_ones {
+        .is_some_and(|i| scan::unwritten(cbin_body(&bytes, i)));
+    if !unwritten {
         if let Some(values) = registry::field_values(&entity) {
             let unknown: Vec<String> = values
                 .into_iter()
@@ -133,10 +128,7 @@ fn known_unexplained(field: &str, value: &str) -> bool {
 }
 
 /// The trials for one tree, named `<label>/<path under root>`. The mutation
-/// check runs on the whole tree when `mutate_all`, else on the specimens with a
-/// sidecar plus the first of each container shape: the check is a property of
-/// the code path, and what more specimens add is diverse baselines, which those
-/// already are.
+/// check runs on the whole tree when `mutate_all`, else on [`scan::sampled`].
 fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial>) {
     let (specimens, sidecars) = scan::walk(root);
     let mut shapes_seen = std::collections::BTreeSet::new();
@@ -150,9 +142,7 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
     for path in specimens {
         let name = rel(root, &path);
         let kind = name.split('/').next().unwrap_or_default().to_string();
-        let mutate = mutate_all
-            || sidecar::sidecar_of(&path).exists()
-            || scan::shape(&path).is_none_or(|s| shapes_seen.insert(s));
+        let mutate = mutate_all || scan::sampled(&path, &mut shapes_seen);
         trials.push(
             Trial::test(format!("{label}/{name}"), move || specimen(&path, mutate)).with_kind(kind),
         );
@@ -176,11 +166,39 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
     }
 }
 
+/// The field-path reader's own contract, as a trial because this target owns its
+/// harness and `#[test]` never runs here.
+fn lookup_trial(fixtures: &Path) -> Trial {
+    let program = fixtures.join("ne5/default.ne5p");
+    Trial::test("lookup: an organ accessor names preset 1 or 2", move || {
+        let bytes =
+            fs::read(&program).map_err(|e| Failed::from(format!("{}: {e}", program.display())))?;
+        let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
+            .map_err(|e| Failed::from(e.to_string()))?;
+        let asked = |preset: &str| format!("organ_panel.b3_perc_on({preset})");
+        for preset in ["1", "2"] {
+            lookup::lookup(&entity, &asked(preset))
+                .map_err(|e| Failed::from(format!("{}: {e}", asked(preset))))?;
+        }
+        for preset in ["", "0", "3", "9", "12", "+1", "one"] {
+            if let Ok(spellings) = lookup::lookup(&entity, &asked(preset)) {
+                return Err(format!(
+                    "{} answered {spellings:?} where the organ has no such preset",
+                    asked(preset)
+                )
+                .into());
+            }
+        }
+        Ok(())
+    })
+}
+
 fn main() {
     let args = Arguments::from_args();
     let mut trials = Vec::new();
 
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    trials.push(lookup_trial(&fixtures));
     trials_for("fixtures", &fixtures, true, &mut trials);
 
     #[cfg(feature = "corpus")]
