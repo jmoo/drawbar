@@ -26,20 +26,34 @@ struct Notice {
     text: &'static str,
 }
 
-/// The Rust crates under one licence, each distinct text of it once.
+/// The Rust crates under one licence: its text once, and who holds copyright in what.
 struct Group {
     licence: &'static str,
-    texts: &'static [Text],
+    /// The licence, from `crates/drawbar/licences/<id>.txt`.
+    text: &'static str,
+    holders: &'static [Holder],
+    /// How many crates under the licence have a file that names no copyright holder.
+    unattributed: usize,
+    /// Crates whose licence file says more than [`Group::text`] does.
+    variants: &'static [Text],
 }
 
 impl Group {
     /// The licence and how many crates are under it, e.g. `MIT · 2 crates`.
     fn summary(&self) -> String {
-        match self.texts.iter().map(|text| text.crates.len()).sum() {
+        let held: usize = self.holders.iter().map(|holder| holder.crates.len()).sum();
+        let varied: usize = self.variants.iter().map(|text| text.crates.len()).sum();
+        match self.unattributed + held + varied {
             1 => format!("{} · 1 crate", self.licence),
             count => format!("{} · {count} crates", self.licence),
         }
     }
+}
+
+/// One copyright notice and the crates, as `name version`, whose licence file carries it.
+struct Holder {
+    notice: &'static str,
+    crates: &'static [&'static str],
 }
 
 /// One licence text and the crates, as `name version`, that carry it.
@@ -170,12 +184,27 @@ fn licences(ui: &mut egui::Ui) {
     }
     for group in crates::GROUPS {
         row(ui, "Rust crates", &group.summary(), |ui| {
-            for text in group.texts {
-                terms(ui, Some(&text.crates.join(", ")), text.text);
+            for holder in group.holders {
+                credit(ui, holder.notice, holder.crates);
+            }
+            terms(ui, None, group.text);
+            for variant in group.variants {
                 ui.add_space(GAP);
+                terms(ui, Some(&variant.crates.join(", ")), variant.text);
             }
         });
     }
+}
+
+/// A copyright notice and the crates whose licence file carries it.
+fn credit(ui: &mut egui::Ui, notice: &str, crates: &[&str]) {
+    ui.label(
+        egui::RichText::new(notice)
+            .font(egui::FontId::monospace(MONO))
+            .weak(),
+    );
+    ui.label(egui::RichText::new(crates.join(", ")).small().weak());
+    ui.add_space(GAP);
 }
 
 /// Collapsed, what a licence covers and its name; open, the terms.
@@ -286,14 +315,19 @@ mod tests {
             let Some((_, required)) = phrases.iter().find(|(id, _)| *id == group.licence) else {
                 panic!("no phrases known for {:?}", group.licence);
             };
-            for text in group.texts {
+            let texts = std::iter::once((group.licence, group.text)).chain(
+                group
+                    .variants
+                    .iter()
+                    .map(|variant| (variant.crates[0], variant.text)),
+            );
+            for (carrier, text) in texts {
                 // Hard wrapping differs between copies of the same licence.
-                let words = text.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 for phrase in *required {
                     assert!(
                         words.contains(phrase),
-                        "{:?}: the {:?} text lacks {phrase:?}",
-                        text.crates,
+                        "{carrier}: the {:?} text lacks {phrase:?}",
                         group.licence
                     );
                 }
@@ -303,54 +337,88 @@ mod tests {
 
     #[test]
     fn no_crate_text_is_an_unfilled_licence_template() {
-        let unfilled: Vec<_> = crates::GROUPS
-            .iter()
-            .flat_map(|group| group.texts)
-            .filter(|text| {
-                let text = text.text.to_lowercase();
-                ["<year>", "<owner>", "<copyright holder"]
-                    .iter()
-                    .any(|placeholder| text.contains(placeholder))
-            })
-            .flat_map(|text| text.crates)
-            .collect();
-        assert!(
-            unfilled.is_empty(),
-            "these crates' notices name no copyright holder: {unfilled:?}"
-        );
+        let unfilled = |text: &str| {
+            let text = text.to_lowercase();
+            ["<year>", "<owner>", "<copyright holder"]
+                .iter()
+                .any(|placeholder| text.contains(placeholder))
+        };
+        for group in crates::GROUPS {
+            assert!(!unfilled(group.text), "{} is a template", group.licence);
+            for holder in group.holders {
+                assert!(
+                    !unfilled(holder.notice),
+                    "{:?} names no copyright holder",
+                    holder.crates
+                );
+            }
+            for variant in group.variants {
+                assert!(
+                    !unfilled(variant.text),
+                    "{:?} carry a template",
+                    variant.crates
+                );
+            }
+        }
+    }
+
+    /// A licence sentence about copyright must not be filed as a notice of one.
+    #[test]
+    fn every_holder_notice_claims_a_copyright() {
+        for group in crates::GROUPS {
+            for holder in group.holders {
+                let notice = holder.notice.to_lowercase();
+                assert!(
+                    ["copyright", "(c)", "©"]
+                        .iter()
+                        .any(|claim| notice.contains(claim)),
+                    "{:?}: {:?} claims no copyright",
+                    holder.crates,
+                    holder.notice
+                );
+            }
+        }
     }
 
     #[test]
-    fn a_group_summary_counts_the_crates_across_its_texts() {
+    fn a_group_summary_counts_every_crate_under_its_licence() {
         let one = Group {
             licence: "ISC",
-            texts: &[Text {
+            text: "",
+            holders: &[Holder {
+                notice: "Copyright (c) 2015, Simonas Kazlauskas",
                 crates: &["libloading 0.8.9"],
+            }],
+            unattributed: 0,
+            variants: &[],
+        };
+        let four = Group {
+            licence: "MIT",
+            text: "",
+            holders: &[Holder {
+                notice: "Copyright (c) 2015 nwin",
+                crates: &["png 0.17.16", "png 0.18.1"],
+            }],
+            unattributed: 1,
+            variants: &[Text {
+                crates: &["zip 2.4.2"],
                 text: "",
             }],
         };
-        let three = Group {
-            licence: "MIT",
-            texts: &[
-                Text {
-                    crates: &["hex 0.4.3"],
-                    text: "",
-                },
-                Text {
-                    crates: &["png 0.17.16", "png 0.18.1"],
-                    text: "",
-                },
-            ],
-        };
         assert_eq!(one.summary(), "ISC · 1 crate");
-        assert_eq!(three.summary(), "MIT · 3 crates");
+        assert_eq!(four.summary(), "MIT · 4 crates");
     }
 
-    /// A summary sums each text's crates.
+    /// A summary sums each holder's and each variant's crates, so a repeat inflates it.
     #[test]
     fn no_crate_is_listed_twice_under_one_licence() {
         for group in crates::GROUPS {
-            let mut crates: Vec<_> = group.texts.iter().flat_map(|text| text.crates).collect();
+            let mut crates: Vec<_> = group
+                .holders
+                .iter()
+                .flat_map(|holder| holder.crates)
+                .chain(group.variants.iter().flat_map(|variant| variant.crates))
+                .collect();
             crates.sort_unstable();
             let repeated = crates.windows(2).find(|pair| pair[0] == pair[1]);
             assert_eq!(repeated, None, "{} lists a crate twice", group.licence);
