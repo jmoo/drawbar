@@ -989,3 +989,14 @@ fn verify(ui: &Ui, files: &[PathBuf]) -> Result<(), String> {
         ))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_class_help_names_the_settings_singleton() {
+        let help = class_help();
+        assert!(help.contains("7 settings"), "{help}");
+    }
+}
