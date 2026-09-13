@@ -136,7 +136,8 @@ impl WebUsbTransport {
             .await
             .map_err(map_err("opening the device"))?;
 
-        // Inferred, not confirmed on hardware: an unconfigured device uses configuration 1.
+        // An unconfigured device uses configuration 1.
+        // Inferred from specimens; not confirmed on hardware.
         if device.configuration().is_none() {
             JsFuture::from(device.select_configuration(1))
                 .await
@@ -179,11 +180,11 @@ impl WebUsbTransport {
     }
 
     /// End a frame the device would otherwise still be reading — see
-    /// [`needs_terminator`].
+    /// [`needs_terminator`], whose rule is confirmed on hardware through the desktop
+    /// backend.
     ///
-    /// The rule is confirmed on hardware through the desktop backend; that an empty
-    /// `transferOut` is the zero-length packet that satisfies it is inferred from the
-    /// WebUSB specification, not confirmed on hardware.
+    /// An empty `transferOut` is the zero-length packet that satisfies it. Per the
+    /// WebUSB specification.
     async fn terminate(&mut self, written: usize) -> Result<()> {
         if !needs_terminator(written, self.out_packet) {
             return Ok(());

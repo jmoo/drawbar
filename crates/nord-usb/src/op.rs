@@ -119,10 +119,11 @@ pub async fn read_body<T: Transport, C>(
 /// Body bytes to ask for in one `READ`. A body larger than this arrives across several
 /// requests with the offset advancing by exactly this much and a short final chunk.
 ///
-/// Confirmed from captures: NSM asks for `32720`. Some objects are instead read at
-/// `32726` throughout — a fixed 6-byte difference that is per object, not per chunk, and
-/// unexplained. Both fit inside one `READ_BUFFER`, and the host chooses the number, so
-/// the smaller is used uniformly.
+/// NSM asks for `32720`. Inferred from specimens; not confirmed on hardware.
+///
+/// Unexplained: some objects are read at `32726` throughout — a fixed 6-byte difference
+/// that is per object, not per chunk. Both fit inside one `READ_BUFFER`, and the host
+/// chooses the number, so the smaller is used uniformly.
 const READ_CHUNK: u32 = 32720;
 
 /// Body bytes per `WRITE_DATA` frame. The whole frame must stay under the device's

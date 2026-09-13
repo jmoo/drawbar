@@ -157,11 +157,11 @@ pub mod cmd {
 
     /// Erases an entire partition.
     ///
-    /// Reported by independent interop projects as erase-all-in-partition; **not
-    /// confirmed on hardware, deliberately.** A session is class-scoped, so the session
-    /// is what aims this: opened on a library class it takes the whole piano or sample
-    /// store, which is hundreds of megabytes and a long restore from a backup. Named
-    /// here so it can be recognised and refused, not so it can be sent.
+    /// Inferred from independent interop projects; not confirmed on hardware, and
+    /// deliberately not to be. A session is class-scoped, so the session is what aims
+    /// this: opened on a library class it takes the whole piano or sample store, which is
+    /// hundreds of megabytes and a long restore from a backup. Named here so it can be
+    /// recognised and refused, not so it can be sent.
     pub const ERASE_ALL: u32 = 0x24;
 
     /// Highest command the instrument has ever been seen to answer.
@@ -178,10 +178,13 @@ pub mod cmd {
     pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
     /// Unsolicited device → host notification — no request pairs with it, so it
-    /// arrives in place of whatever reply the host reads for next. Observed on
-    /// hardware, queued by a front-panel STORE while a cable session was possible;
-    /// absent from the capture corpus, so NSM presumably drains it silently.
-    /// Hypothesis, not confirmed: "an object changed".
+    /// arrives in place of whatever reply the host reads for next. Queued by a
+    /// front-panel STORE while a cable session was possible.
+    ///
+    /// Confirmed on hardware.
+    ///
+    /// Unexplained: what it announces. It is absent from the capture corpus, so nothing
+    /// pins the meaning down beyond the store that produced it.
     pub const CHANGED: u32 = 0x2c;
 
     /// Enable/disable change notifications for a class: `class, on`. The reported
