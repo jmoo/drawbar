@@ -434,9 +434,18 @@ impl Document {
         workspace: &mut Workspace,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
-        let Some(applied) = self.piano.answered(ctx, workspace) else {
-            return Vec::new();
-        };
+        match self.piano.answered(ctx, workspace) {
+            Some(applied) => self.put_back(applied, workspace, log),
+            None => Vec::new(),
+        }
+    }
+
+    fn put_back(
+        &mut self,
+        applied: piano::Applied,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Vec<crate::browser::Act> {
         match applied.made {
             Some(Ok(bytes)) => {
                 self.error = None;
@@ -2477,15 +2486,19 @@ mod tests {
             &mut open.workspace,
             &mut open.log,
         );
-        assert!(acts.is_empty(), "the save waits for the apply");
-        for _ in 0..100_000 {
+        assert!(
+            acts.is_empty() || !open.document.pends(open.id),
+            "the save waits for the apply",
+        );
+        if acts.is_empty() {
+            let applied = open
+                .document
+                .piano
+                .awaited(&ctx, &open.workspace)
+                .expect("the apply the save waits on is in flight");
             acts = open
                 .document
-                .released(&ctx, &mut open.workspace, &mut open.log);
-            if !acts.is_empty() {
-                break;
-            }
-            std::thread::yield_now();
+                .put_back(applied, &mut open.workspace, &mut open.log);
         }
         assert!(
             matches!(acts.as_slice(), [crate::browser::Act::SaveDoc(id)] if *id == open.id),

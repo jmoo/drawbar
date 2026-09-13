@@ -41,6 +41,13 @@ impl<T> Job<T> {
     pub fn progress(&self) -> String {
         self.progress.said()
     }
+
+    /// The answer, waited for rather than polled: `None` once it has been taken, or
+    /// where the work panicked before answering.
+    #[cfg(test)]
+    pub fn wait(&self) -> Option<T> {
+        self.rx.recv().ok()
+    }
 }
 
 /// Start `work`, and ask for a repaint when it answers.

@@ -1142,6 +1142,24 @@ impl State {
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
         let made = self.job.as_ref()?.job.poll()?;
         let laying = self.job.take()?;
+        Some(self.finished(laying, made, ctx, workspace))
+    }
+
+    /// [`Self::answered`], waiting for the apply in flight instead of polling it.
+    #[cfg(test)]
+    pub fn awaited(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
+        let made = self.job.as_ref()?.job.wait()?;
+        let laying = self.job.take()?;
+        Some(self.finished(laying, made, ctx, workspace))
+    }
+
+    fn finished(
+        &mut self,
+        laying: Laying,
+        made: Result<Vec<u8>, String>,
+        ctx: &egui::Context,
+        workspace: &Workspace,
+    ) -> Applied {
         let fresh = self.plans.get(&laying.id) == Some(&laying.plan);
         match (fresh, made.is_ok()) {
             (true, true) => {
@@ -1158,7 +1176,7 @@ impl State {
             acts: self.freed(workspace),
         };
         self.next(ctx, workspace);
-        Some(applied)
+        applied
     }
 
     /// The held acts with nothing left to wait for: their document's bytes hold its
@@ -4319,15 +4337,11 @@ mod tests {
             self.driven(events, |_| {})
         }
 
-        /// Wait for the apply in flight to answer, the way a frame polls it.
+        /// The apply in flight, waited for.
         fn awaited(&mut self) -> Applied {
-            for _ in 0..100_000 {
-                if let Some(applied) = self.state.answered(&self.ctx, &self.workspace) {
-                    return applied;
-                }
-                std::thread::yield_now();
-            }
-            panic!("the apply never answered");
+            self.state
+                .awaited(&self.ctx, &self.workspace)
+                .expect("an apply is in flight")
         }
 
         /// Lay the plan in hand out and put the bytes under the document, which is what
