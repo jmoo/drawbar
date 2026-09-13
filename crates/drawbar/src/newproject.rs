@@ -30,7 +30,8 @@ use nord_format::formats::nsmpproj::{NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE
 use nord_format::wav::Pcm16;
 use nord_format::Entity;
 
-use crate::document::encode::{fits, refusal as encodable, Source};
+use crate::document::controls::fits;
+use crate::document::encode::{refusal as encodable, Source};
 use crate::document::note_picker;
 use crate::log::Log;
 use crate::note;
@@ -341,10 +342,11 @@ fn draft_name(making: Making, paths: &[String]) -> String {
         "" => "Untitled",
         stem => stem,
     };
-    match making {
-        Making::Project | Making::Piano => stem.to_string(),
-        Making::Instrument => fits(stem),
+    let mut name = stem.to_string();
+    if making == Making::Instrument {
+        fits(&mut name, MAX_NAME_LEN);
     }
+    name
 }
 
 impl Draft {

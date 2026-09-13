@@ -12,7 +12,7 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::controls::Sets;
+use super::controls::{self, Sets};
 use super::{encode, piano, project, sample, setlist, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
@@ -941,13 +941,13 @@ fn settled(
     let mut edit = egui::TextEdit::singleline(text)
         .desired_width(width)
         .margin(egui::Margin::symmetric(4, 1));
-    if let Some(limit) = limit {
-        edit = edit.char_limit(limit);
-    }
     if mono {
         edit = edit.font(egui::FontId::monospace(MONO));
     }
     let response = ui.add(edit);
+    if let Some(limit) = limit {
+        controls::fits(text, limit);
+    }
     response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter))
 }
 

@@ -14,6 +14,7 @@ use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
 use nord_format::wav::Pcm16;
 
+use super::controls;
 use super::sample::note_picker;
 use crate::note;
 
@@ -40,28 +41,16 @@ impl Draft {
     /// octaves above it, and the one generation that has been played here.
     pub fn new(label: &str) -> Draft {
         let stem = label.rsplit_once('.').map_or(label, |(stem, _)| stem);
+        let mut name = stem.to_string();
+        controls::fits(&mut name, MAX_NAME_LEN);
         Draft {
-            name: fits(stem),
+            name,
             root_key: 60,
             top_note: 84,
             plain: false,
             layout: Layout::V2,
         }
     }
-}
-
-/// The longest prefix of `label` the name field takes. The limit is in bytes and the
-/// cut is on a character boundary, so a name of accented letters loses a letter rather
-/// than becoming a name the encoder refuses.
-pub fn fits(label: &str) -> String {
-    let mut out = String::new();
-    for c in label.chars() {
-        if out.len() + c.len_utf8() > MAX_NAME_LEN {
-            break;
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// The read of a WAV the panel works over, decoded once per set of bytes.
@@ -194,11 +183,8 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
                 [120.0, ui.spacing().interact_size.y],
                 egui::Label::new("Name").halign(egui::Align::LEFT),
             );
-            ui.add(
-                egui::TextEdit::singleline(&mut draft.name)
-                    .desired_width(200.0)
-                    .char_limit(MAX_NAME_LEN),
-            );
+            ui.add(egui::TextEdit::singleline(&mut draft.name).desired_width(200.0));
+            controls::fits(&mut draft.name, MAX_NAME_LEN);
         });
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -377,6 +363,18 @@ mod tests {
     fn a_long_filename_opens_the_panel_on_a_name_that_fits() {
         let draft = Draft::new("an extremely long marimba sample name.wav");
         assert_eq!(draft.name.len(), MAX_NAME_LEN);
+        let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
+        assert!(instrument(&draft, &source).is_ok());
+    }
+
+    /// ⚠️ The name field's limit is bytes. A name of accented letters counted in
+    /// letters is twice the length the encoder takes, and it refuses after the panel
+    /// has accepted it.
+    #[test]
+    fn a_name_of_accented_letters_is_cut_by_bytes_rather_than_by_letters() {
+        let draft = Draft::new(&format!("{}.wav", "é".repeat(MAX_NAME_LEN)));
+        assert!(draft.name.len() <= MAX_NAME_LEN, "{:?}", draft.name);
+        assert_eq!(draft.name.chars().count(), MAX_NAME_LEN / 2);
         let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
         assert!(instrument(&draft, &source).is_ok());
     }

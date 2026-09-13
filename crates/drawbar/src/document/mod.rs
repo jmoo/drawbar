@@ -1669,6 +1669,35 @@ mod tests {
         );
     }
 
+    /// ⚠️ A stored name box holds what the field holds, which is a number of **bytes**.
+    /// A box counting characters takes an accented name of twice that length, and the
+    /// format's refusal arrives only once the operator has typed the whole of it.
+    #[test]
+    fn a_stored_name_box_holds_no_more_bytes_than_the_field_does() {
+        let mut open = Open::file("whatever.nsmp", sample_bytes());
+        let held = |open: &Open| {
+            sample::snapshot(open.entity().entity.as_ref().expect("it decoded"))
+                .expect("an instrument")
+                .expect("it reads")
+        };
+        let limit = held(&open).max_name_len;
+        assert!(limit > 2, "there is room for an accented letter");
+
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("é".repeat(limit))]);
+        open.frame(vec![enter()]);
+
+        let stored = held(&open).name;
+        assert!(stored.contains('é'), "what was typed landed: {stored:?}");
+        assert!(stored.len() <= limit, "{} bytes: {stored:?}", stored.len());
+        assert_eq!(
+            open.document.refusal(),
+            None,
+            "the box never offers the field more than it holds"
+        );
+    }
+
     /// A program wears its tags as chips on the identity row, and a program wearing none
     /// has no row for them.
     #[test]
