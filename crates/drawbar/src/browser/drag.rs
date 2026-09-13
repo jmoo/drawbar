@@ -11,7 +11,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::{read_only, DeviceState};
 use crate::icon::Glyph;
 use crate::strings::folder;
-use crate::workspace::Workspace;
+use crate::workspace::{LocalEntity, Workspace};
 
 /// What an asset is, which is what decides the folder it belongs in.
 ///
@@ -204,12 +204,27 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect()
 }
 
+/// The family to put in front of an asset's kind word, or nothing where the word alone
+/// says what the asset is.
+///
+/// One answer for the tree and for the library's table, which draw the same word.
+pub fn qualifier(
+    entity: &LocalEntity,
+    kept: &[Family],
+    instrument: Option<Family>,
+) -> Option<Family> {
+    let family = Family::of_tag(&entity.tag());
+    qualified(kept, family, instrument)
+        .then_some(family)
+        .flatten()
+}
+
 /// Whether a kind's word needs the family in front of it to say what it is.
 ///
 /// True where the word alone would not settle it: the kept assets are from more than one
 /// family, or the asset is not the attached instrument's own. With one family on this
 /// computer and that instrument attached, `program` can only mean one thing.
-pub fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>) -> bool {
+fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>) -> bool {
     if kept.len() > 1 {
         return true;
     }

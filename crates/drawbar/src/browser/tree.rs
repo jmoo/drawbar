@@ -10,7 +10,7 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::{Act, Bulk};
-use super::drag::{kinds_present, Item, Kind, Onto};
+use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
@@ -155,6 +155,16 @@ fn worth_choosing(kinds: &[Kind]) -> bool {
     kinds.len() > 1
 }
 
+/// What a local row's kind word needs from beyond the row: the families the list on this
+/// computer spans, and the attached instrument's own.
+///
+/// Read once a frame rather than per row — every row asks the same question of the whole
+/// list.
+struct Naming {
+    kept: Vec<Family>,
+    instrument: Option<Family>,
+}
+
 /// Where a duplicate of a slot lands: the first slot of its own folder that a walk found
 /// free and nothing is already waiting for.
 ///
@@ -257,9 +267,13 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         self.computer_row(ui, workspace, device, filter, acts);
+        let naming = Naming {
+            kept: super::families_present(workspace),
+            instrument: device.state.product().and_then(Family::from_product),
+        };
         if self.open.contains(&Branch::Computer) {
             for id in self.folder_ids() {
-                self.folder_row(ui, id, workspace, device, queue, acts);
+                self.folder_row(ui, id, workspace, device, queue, &naming, acts);
             }
             let loose: Vec<Item> = workspace
                 .listed()
@@ -268,7 +282,9 @@ impl Browser {
                 .collect();
             for entity in workspace.listed() {
                 if self.folders.holding(entity.id).is_none() {
-                    self.local_row(ui, entity, None, &loose, workspace, device, queue, acts);
+                    self.local_row(
+                        ui, entity, None, &loose, workspace, device, queue, &naming, acts,
+                    );
                 }
             }
             if loose.is_empty() && self.folders.all().is_empty() {
@@ -402,6 +418,7 @@ impl Browser {
         self.folders.all().iter().map(|folder| folder.id).collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn folder_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -409,6 +426,7 @@ impl Browser {
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
+        naming: &Naming,
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Folder(id);
@@ -482,7 +500,9 @@ impl Browser {
             nothing(ui, 2, "empty — drag sounds in");
         }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
-            self.local_row(ui, entity, Some(id), &inside, workspace, device, queue, acts);
+            self.local_row(
+                ui, entity, Some(id), &inside, workspace, device, queue, naming, acts,
+            );
         }
     }
 
@@ -496,6 +516,7 @@ impl Browser {
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
+        naming: &Naming,
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Local(entity.id);
@@ -520,7 +541,8 @@ impl Browser {
 
         let owed = queue.entry(entity.id).map(destination);
         let wears = self.tags.worn(entity.id).len();
-        let word = crate::strings::kind_word(kind, qualifier(entity, workspace, device));
+        let word =
+            crate::strings::kind_word(kind, qualifier(entity, &naming.kept, naming.instrument));
         let drawn = row(
             ui,
             selected,
@@ -1289,16 +1311,6 @@ fn mark(
         crate::library::mark_ink(mark, visuals),
         crate::library::mark_words(mark),
     ))
-}
-
-/// The family to put in front of an asset's kind word, where the word alone would not
-/// say whose files these are.
-fn qualifier(entity: &LocalEntity, workspace: &Workspace, device: &Device) -> Option<Family> {
-    let family = Family::of_tag(&entity.tag());
-    let instrument = device.state.product().and_then(Family::from_product);
-    super::qualified(&super::families_present(workspace), family, instrument)
-        .then_some(family)
-        .flatten()
 }
 
 /// Where a queued asset is going, for the note that says so.

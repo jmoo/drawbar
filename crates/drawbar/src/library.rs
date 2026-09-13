@@ -15,7 +15,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, families_present, qualified, Act, Browser, Bulk, Item, Kind};
+use crate::browser::{cell_ink, families_present, qualifier, Act, Browser, Bulk, Item, Kind};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
@@ -310,13 +310,10 @@ fn local(
     kept: &[Family],
     instrument: Option<Family>,
 ) -> Row {
-    let family = Family::of_tag(&entity.tag());
     Row {
         item: Item::Local(entity.id),
         kind: Kind::of(entity.entity.as_ref()),
-        family: qualified(kept, family, instrument)
-            .then_some(family)
-            .flatten(),
+        family: qualifier(entity, kept, instrument),
         name: entity.name.clone(),
         tags,
         unsaved: entity.is_unsaved(),
