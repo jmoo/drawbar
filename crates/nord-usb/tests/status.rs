@@ -11,11 +11,14 @@
 
 #![cfg(feature = "replay")]
 
+#[path = "support/frames.rs"]
+mod frames;
 #[path = "support/scripts.rs"]
 mod scripts;
 
+use frames::{notify, request, response, session_close, session_open, slot_args};
 use nord_usb::op;
-use nord_usb::transport::{Direction, ReplayTransport, Step};
+use nord_usb::transport::ReplayTransport;
 use nord_usb::wire::ObjectClass;
 use nord_usb::Session;
 
@@ -295,8 +298,7 @@ fn a_rebuilt_file_is_a_container_the_envelope_reads_back() {
 /// final chunk all fail it.
 #[test]
 fn a_large_body_is_read_in_chunks() {
-    use nord_usb::wire::{cmd, ui, Message, Service};
-    use Direction::{In, Out};
+    use nord_usb::wire::{cmd, ui};
 
     const CHUNK: u32 = 32720;
     const TAIL: u32 = 777;
@@ -307,31 +309,7 @@ fn a_large_body_is_read_in_chunks() {
 
     // bank 8 slot 14 -> 7, 13 on the wire.
     let at = nord_usb::Location::from_user(8, 14);
-    let mut slot = Vec::new();
-    at.write_to(&mut slot);
-
-    let request = |command: u32, args: &[u8]| Step {
-        direction: Out,
-        bytes: Message::new(Service::Program, 10, command, args.to_vec()).encode(),
-    };
-    let response = |command: u32, rest: &[u8]| Step {
-        direction: In,
-        bytes: Message::new(
-            Service::Program,
-            10,
-            command,
-            [&0u32.to_be_bytes()[..], rest].concat(),
-        )
-        .encode(),
-    };
-    let notify = |msg: Message| Step {
-        direction: Out,
-        bytes: msg.encode(),
-    };
-    let ui_frame = |command: u32, args: &[u8]| Step {
-        direction: Out,
-        bytes: Message::new(Service::Ui, ui::SUBSYSTEM, command, args.to_vec()).encode(),
-    };
+    let slot = slot_args(at);
 
     let mut info_args = slot.clone();
     info_args.extend_from_slice(&body_len.to_be_bytes());
@@ -343,26 +321,14 @@ fn a_large_body_is_read_in_chunks() {
     info_args.extend_from_slice(b"chunked ");
     info_args.extend_from_slice(&0u32.to_be_bytes()); // crc32: none
 
-    let mut script = vec![
-        ui_frame(ui::HELLO, &[]),
-        Step {
-            direction: In,
-            bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO + 1, vec![0; 4]).encode(),
-        },
-        request(
-            cmd::SESSION_OPEN,
-            &ObjectClass::Program.to_raw().to_be_bytes(),
-        ),
-        response(
-            cmd::SESSION_OPEN + 1,
-            &ObjectClass::Program.to_raw().to_be_bytes(),
-        ),
+    let mut script = session_open(ObjectClass::Program);
+    script.extend([
         request(cmd::INFO, &slot),
-        response(cmd::INFO + 1, &info_args),
+        response(cmd::INFO, &info_args),
         notify(ui::label("Uploading...").unwrap()),
         request(cmd::BEGIN_READ, &slot),
-        response(cmd::BEGIN_READ + 1, &slot),
-    ];
+        response(cmd::BEGIN_READ, &slot),
+    ]);
 
     // Expected progress is independent of the production calculation.
     for (offset, want, pct) in [
@@ -377,21 +343,13 @@ fn a_large_body_is_read_in_chunks() {
 
         let mut resp = req.clone();
         resp.extend_from_slice(&body[offset as usize..(offset + want) as usize]);
-        script.push(response(cmd::READ + 1, &resp));
+        script.push(response(cmd::READ, &resp));
         script.push(notify(ui::percent(pct)));
     }
 
-    script.extend([
-        request(cmd::END_TRANSFER, &slot),
-        response(cmd::END_TRANSFER + 1, &slot),
-        request(cmd::SESSION_CLOSE, &[]),
-        response(cmd::SESSION_CLOSE + 1, &[]),
-        ui_frame(ui::GOODBYE, &[]),
-        Step {
-            direction: In,
-            bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE + 1, vec![0; 4]).encode(),
-        },
-    ]);
+    script.push(request(cmd::END_TRANSFER, &slot));
+    script.push(response(cmd::END_TRANSFER, &slot));
+    script.extend(session_close());
 
     let mut t = ReplayTransport::new(script);
     let got = pollster::block_on(async {

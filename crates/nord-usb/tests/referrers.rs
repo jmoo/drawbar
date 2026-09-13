@@ -4,50 +4,17 @@
 
 #![cfg(feature = "replay")]
 
+#[path = "support/frames.rs"]
+mod frames;
+
+use frames::{refusal, request, response, session_close, session_open, slot_args};
 use nord_usb::op;
-use nord_usb::transport::{Direction, ReplayTransport, Step};
-use nord_usb::wire::{cmd, ui, Bank, Message, ObjectClass, Service};
+use nord_usb::transport::{ReplayTransport, Step};
+use nord_usb::wire::{cmd, Bank, ObjectClass};
 use nord_usb::{Location, Session};
 
 fn set_list(slot: u32) -> Location {
     Location { bank: 0, slot }
-}
-
-fn out(bytes: Vec<u8>) -> Step {
-    Step {
-        direction: Direction::Out,
-        bytes,
-    }
-}
-
-fn request(command: u32, args: &[u8]) -> Step {
-    out(Message::new(Service::Program, 10, command, args.to_vec()).encode())
-}
-
-fn response(command: u32, rest: &[u8]) -> Step {
-    Step {
-        direction: Direction::In,
-        bytes: Message::new(
-            Service::Program,
-            10,
-            command,
-            [&0u32.to_be_bytes()[..], rest].concat(),
-        )
-        .encode(),
-    }
-}
-
-fn refusal(command: u32, status: u32) -> Step {
-    Step {
-        direction: Direction::In,
-        bytes: Message::new(Service::Program, 10, command, status.to_be_bytes().to_vec()).encode(),
-    }
-}
-
-fn slot_args(at: Location) -> Vec<u8> {
-    let mut v = Vec::new();
-    at.write_to(&mut v);
-    v
 }
 
 /// A `0x1e` reply for a set list: the fields ahead of the name, the name, then the CRC.
@@ -61,7 +28,7 @@ fn info_reply(at: Location, version: u32, name: &str) -> Step {
     args.extend_from_slice(&(name.len() as u32).to_be_bytes());
     args.extend_from_slice(name.as_bytes());
     args.extend_from_slice(&0u32.to_be_bytes());
-    response(cmd::INFO + 1, &args)
+    response(cmd::INFO, &args)
 }
 
 /// A `0x28` reply for a set list: its four program slots, all live, addressed by
@@ -83,31 +50,7 @@ fn deps_reply(at: Location, programs: &[Location]) -> Step {
             args.extend_from_slice(&w.to_be_bytes());
         }
     }
-    response(cmd::DEPENDENCIES + 1, &args)
-}
-
-fn session_open(class: ObjectClass) -> Vec<Step> {
-    vec![
-        out(Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO, Vec::new()).encode()),
-        Step {
-            direction: Direction::In,
-            bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO + 1, vec![0; 4]).encode(),
-        },
-        request(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()),
-        response(cmd::SESSION_OPEN + 1, &class.to_raw().to_be_bytes()),
-    ]
-}
-
-fn session_close() -> Vec<Step> {
-    vec![
-        request(cmd::SESSION_CLOSE, &[]),
-        response(cmd::SESSION_CLOSE + 1, &[]),
-        out(Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new()).encode()),
-        Step {
-            direction: Direction::In,
-            bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE + 1, vec![0; 4]).encode(),
-        },
-    ]
+    response(cmd::DEPENDENCIES, &args)
 }
 
 /// The one bank the scan is bounded by, as the Electro 5's set list partition declares
@@ -143,9 +86,9 @@ fn walk_of_three() -> Vec<Step> {
     ] {
         steps.push(cursor(from));
         match found {
-            Some(slot) => steps.push(response(cmd::NEXT_SLOT + 1, &slot_args(set_list(slot)))),
+            Some(slot) => steps.push(response(cmd::NEXT_SLOT, &slot_args(set_list(slot)))),
             // Status 1 past the last occupied slot is how a walk ends.
-            None => steps.push(refusal(cmd::NEXT_SLOT + 1, 1)),
+            None => steps.push(refusal(cmd::NEXT_SLOT, 1)),
         }
     }
     steps
@@ -265,7 +208,7 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
     let mut steps = session_open(ObjectClass::SetList);
     steps.extend(walk_of_three());
     steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(0))));
-    steps.push(response(cmd::DEPENDENCIES + 1, &deps));
+    steps.push(response(cmd::DEPENDENCIES, &deps));
     for slot in [1, 2] {
         steps.push(request(cmd::DEPENDENCIES, &slot_args(set_list(slot))));
         steps.push(deps_reply(set_list(slot), &[]));
@@ -286,7 +229,7 @@ fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
     });
     args.extend_from_slice(&0u32.to_be_bytes());
     steps.push(request(cmd::NEXT_SLOT, &args));
-    steps.push(refusal(cmd::NEXT_SLOT + 1, op::ENUMERATION_DISABLED));
+    steps.push(refusal(cmd::NEXT_SLOT, op::ENUMERATION_DISABLED));
 
     let mut t = ReplayTransport::new(steps);
     let err = pollster::block_on(async {
@@ -365,7 +308,7 @@ fn a_walk_that_outruns_its_bank_is_an_error_rather_than_a_truncated_list() {
         });
         args.extend_from_slice(&0u32.to_be_bytes()); // direction: forward
         steps.push(request(cmd::NEXT_SLOT, &args));
-        steps.push(response(cmd::NEXT_SLOT + 1, &slot_args(set_list(slot))));
+        steps.push(response(cmd::NEXT_SLOT, &slot_args(set_list(slot))));
         from = slot;
     }
 

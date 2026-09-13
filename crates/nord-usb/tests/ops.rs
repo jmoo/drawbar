@@ -5,11 +5,17 @@
 
 #![cfg(feature = "replay")]
 
+#[path = "support/frames.rs"]
+mod frames;
 #[path = "support/scripts.rs"]
 mod scripts;
 
-use nord_usb::transport::{Direction, ReplayTransport, Step, Transport};
-use nord_usb::wire::{cmd, Message, ObjectClass, Service};
+use frames::{
+    notify, refusal, reply, request, response, session_close, session_open, slot_args, ui_request,
+    ui_response, words,
+};
+use nord_usb::transport::{ReplayTransport, Step, Transport};
+use nord_usb::wire::{cmd, ui, Message, ObjectClass, Service};
 use nord_usb::{op, Result, Session};
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -18,64 +24,21 @@ fn replaying(name: &str) -> ReplayTransport {
     ReplayTransport::new(scripts::fixture(name).steps())
 }
 
-fn frame(direction: Direction, message: Message) -> Step {
-    Step {
-        direction,
-        bytes: message.encode(),
-    }
-}
-
-fn subsystem(service: Service) -> u32 {
-    match service {
-        Service::Ui => 1,
-        _ => 10,
-    }
-}
-
-fn request(service: Service, command: u32, args: Vec<u8>) -> Step {
-    frame(
-        Direction::Out,
-        Message::new(service, subsystem(service), command, args),
-    )
-}
-
-fn response(service: Service, command: u32, payload: &[u32]) -> Step {
-    response_with_status(service, command, 0, payload)
-}
-
-fn response_with_status(service: Service, command: u32, status: u32, payload: &[u32]) -> Step {
-    let mut args = Vec::with_capacity((payload.len() + 1) * 4);
-    args.extend_from_slice(&status.to_be_bytes());
-    for word in payload {
-        args.extend_from_slice(&word.to_be_bytes());
-    }
-    frame(
-        Direction::In,
-        Message::new(service, subsystem(service), command + 1, args),
-    )
-}
-
 fn session_frames(class: ObjectClass, middle: Vec<Step>) -> ReplayTransport {
-    let mut steps = vec![
-        request(Service::Ui, nord_usb::wire::ui::HELLO, vec![]),
-        response(Service::Ui, nord_usb::wire::ui::HELLO, &[]),
-        request(
-            Service::Program,
-            cmd::SESSION_OPEN,
-            class.to_raw().to_be_bytes().to_vec(),
-        ),
-        response(Service::Program, cmd::SESSION_OPEN, &[]),
-    ];
-    steps.extend(middle);
-    steps.extend([
-        request(Service::Program, cmd::SESSION_CLOSE, vec![]),
-        response(Service::Program, cmd::SESSION_CLOSE, &[]),
-        request(Service::Ui, nord_usb::wire::ui::GOODBYE, vec![]),
-        response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]),
-    ]);
-    ReplayTransport::new(steps)
+    ReplayTransport::new(
+        session_open(class)
+            .into_iter()
+            .chain(middle)
+            .chain(session_close())
+            .collect(),
+    )
 }
 
+/// A transport that answers from a list and records the read limit each answer was
+/// asked for. An entry of `None` is the device saying nothing before the limit passed.
+///
+/// It accepts whatever is sent, so only a test whose claim is about *when* the host
+/// reads belongs on it; everything else uses a script the exact-match transport polices.
 struct LimitTransport {
     replies: VecDeque<Option<Vec<u8>>>,
     limits: Vec<Duration>,
@@ -99,30 +62,23 @@ impl Transport for LimitTransport {
 #[test]
 fn info_rejects_a_response_for_a_different_location() {
     let requested = nord_usb::Location { bank: 1, slot: 2 };
-    let reply = response(
-        Service::Program,
-        cmd::INFO,
-        &[
-            0,
-            3,
-            0,
-            u32::from_be_bytes(*b"ne5p"),
-            4,
-            u32::MAX,
-            u32::MAX,
-            0,
+    let reported = words(&[
+        0,
+        3,
+        0,
+        u32::from_be_bytes(*b"ne5p"),
+        4,
+        u32::MAX,
+        u32::MAX,
+        0,
+    ]);
+    let mut t = session_frames(
+        ObjectClass::Program,
+        vec![
+            request(cmd::INFO, &slot_args(requested)),
+            response(cmd::INFO, &reported),
         ],
     );
-    let request = request(
-        Service::Program,
-        cmd::INFO,
-        [
-            requested.bank.to_be_bytes().as_slice(),
-            requested.slot.to_be_bytes().as_slice(),
-        ]
-        .concat(),
-    );
-    let mut t = session_frames(ObjectClass::Program, vec![request, reply]);
     let err = pollster::block_on(async {
         let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
         let err = nord_usb::op::info(&mut session, requested)
@@ -144,12 +100,16 @@ fn info_rejects_a_response_for_a_different_location() {
 #[test]
 fn probe_surfaces_a_short_statusless_reply() {
     let command = 0x99;
-    let reply = Message::new(Service::Program, 10, 0x77, vec![0xab, 0xcd]);
     let mut t = session_frames(
         ObjectClass::Program,
         vec![
-            request(Service::Program, command, vec![1, 2]),
-            frame(Direction::In, reply),
+            request(command, &[1, 2]),
+            reply(Message::new(
+                Service::Program,
+                frames::SUBSYSTEM,
+                0x77,
+                vec![0xab, 0xcd],
+            )),
         ],
     );
     let (command, status, payload) = pollster::block_on(async {
@@ -177,12 +137,12 @@ fn probe_surfaces_a_short_statusless_reply() {
 fn probe_limit_covers_close_without_changing_ordinary_reads() {
     let mut t = LimitTransport {
         replies: VecDeque::from([
-            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
-            Some(response(Service::Program, cmd::SESSION_OPEN, &[]).bytes),
+            Some(ui_response(ui::HELLO, 0).bytes),
+            Some(response(cmd::SESSION_OPEN, &[]).bytes),
             None,
-            Some(response(Service::Program, cmd::STATUS, &[1, 2, 3, 4, 5]).bytes),
-            Some(response(Service::Program, cmd::SESSION_CLOSE, &[]).bytes),
-            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
+            Some(response(cmd::STATUS, &words(&[1, 2, 3, 4, 5])).bytes),
+            Some(response(cmd::SESSION_CLOSE, &[]).bytes),
+            Some(ui_response(ui::GOODBYE, 0).bytes),
         ]),
         limits: Vec::new(),
     };
@@ -225,16 +185,15 @@ fn inventory_propagates_transport_failure_while_opening_a_class() {
 
 #[test]
 fn inventory_propagates_a_malformed_status_after_closing_the_session() {
-    let mut transport = LimitTransport {
-        replies: VecDeque::from([
-            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
-            Some(response(Service::Program, cmd::SESSION_OPEN, &[]).bytes),
-            Some(response(Service::Program, cmd::STATUS, &[1, 2]).bytes),
-            Some(response(Service::Program, cmd::SESSION_CLOSE, &[]).bytes),
-            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
-        ]),
-        limits: Vec::new(),
-    };
+    // The sweep stops at the class that failed, so one class's frames are the whole
+    // exchange.
+    let class = ObjectClass::INVENTORY[0];
+    let mut steps = session_open(class);
+    steps.push(request(cmd::STATUS, &class.to_raw().to_be_bytes()));
+    steps.push(response(cmd::STATUS, &words(&[1, 2])));
+    steps.extend(session_close());
+
+    let mut transport = ReplayTransport::new(steps);
     let err = pollster::block_on(op::inventory(&mut transport))
         .expect_err("a malformed status must not become an empty inventory");
     assert!(matches!(
@@ -242,30 +201,28 @@ fn inventory_propagates_a_malformed_status_after_closing_the_session() {
         nord_usb::Error::Truncated { got: 8, need: 12 }
     ));
     assert!(
-        transport.replies.is_empty(),
+        transport.is_exhausted(),
         "the failed session was not closed"
     );
 }
 
 #[test]
 fn inventory_skips_a_class_that_refuses_its_status() {
-    let mut replies = VecDeque::new();
-    for _ in nord_usb::wire::ObjectClass::INVENTORY {
-        replies.extend([
-            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
-            Some(response(Service::Program, cmd::SESSION_OPEN, &[]).bytes),
-            Some(response_with_status(Service::Program, cmd::STATUS, 5, &[]).bytes),
-            Some(response(Service::Program, cmd::SESSION_CLOSE, &[]).bytes),
-            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
-        ]);
+    let mut steps = Vec::new();
+    for class in ObjectClass::INVENTORY {
+        steps.extend(session_open(class));
+        steps.push(request(cmd::STATUS, &class.to_raw().to_be_bytes()));
+        steps.push(refusal(cmd::STATUS, 5));
+        steps.extend(session_close());
     }
-    let mut transport = LimitTransport {
-        replies,
-        limits: Vec::new(),
-    };
+
+    let mut transport = ReplayTransport::new(steps);
     let statuses = pollster::block_on(op::inventory(&mut transport)).unwrap();
     assert!(statuses.is_empty());
-    assert!(transport.replies.is_empty());
+    assert!(
+        transport.is_exhausted(),
+        "a refused status must still close its class session"
+    );
 }
 
 /// The sample partition's block, so a one-byte body reserves exactly one block.
@@ -284,35 +241,33 @@ fn sample_unit() -> nord_usb::wire::AllocationUnit {
 
 #[test]
 fn inventory_skips_a_class_whose_session_the_device_refuses() {
-    let mut replies = VecDeque::new();
-    for _ in nord_usb::wire::ObjectClass::INVENTORY {
-        replies.extend([
-            Some(response(Service::Ui, nord_usb::wire::ui::HELLO, &[]).bytes),
-            Some(response_with_status(Service::Program, cmd::SESSION_OPEN, 5, &[]).bytes),
-            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
-        ]);
+    let mut steps = Vec::new();
+    for class in ObjectClass::INVENTORY {
+        steps.push(ui_request(ui::HELLO));
+        steps.push(ui_response(ui::HELLO, 0));
+        steps.push(request(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()));
+        steps.push(refusal(cmd::SESSION_OPEN, 5));
+        steps.push(ui_request(ui::GOODBYE));
+        steps.push(ui_response(ui::GOODBYE, 0));
     }
-    let mut transport = LimitTransport {
-        replies,
-        limits: Vec::new(),
-    };
+
+    let mut transport = ReplayTransport::new(steps);
     let statuses = pollster::block_on(op::inventory(&mut transport)).unwrap();
     assert!(statuses.is_empty());
     assert!(
-        transport.replies.is_empty(),
+        transport.is_exhausted(),
         "a refused open must still release the UI session before the next class"
     );
 }
 
 #[test]
 fn inventory_propagates_a_refused_hello_rather_than_reporting_nothing() {
-    let mut transport = LimitTransport {
-        replies: VecDeque::from([
-            Some(response_with_status(Service::Ui, nord_usb::wire::ui::HELLO, 5, &[]).bytes),
-            Some(response(Service::Ui, nord_usb::wire::ui::GOODBYE, &[]).bytes),
-        ]),
-        limits: Vec::new(),
-    };
+    let mut transport = ReplayTransport::new(vec![
+        ui_request(ui::HELLO),
+        ui_response(ui::HELLO, 5),
+        ui_request(ui::GOODBYE),
+        ui_response(ui::GOODBYE, 0),
+    ]);
     let err = pollster::block_on(op::inventory(&mut transport))
         .expect_err("a refused HELLO is not one class declining to answer");
     assert!(
@@ -320,7 +275,7 @@ fn inventory_propagates_a_refused_hello_rather_than_reporting_nothing() {
         "wrong error: {err}"
     );
     assert!(
-        transport.replies.is_empty(),
+        transport.is_exhausted(),
         "the sweep carried on to another class after the UI refused it"
     );
 }
@@ -332,25 +287,14 @@ fn write_stops_on_a_malformed_cleaning_reply_without_polling_again() {
     let mut transport = session_frames(
         ObjectClass::Sample,
         vec![
-            request(
-                Service::Program,
-                cmd::STATUS,
-                ObjectClass::Sample.to_raw().to_be_bytes().to_vec(),
-            ),
-            response(Service::Program, cmd::STATUS, &[0, 0, 0, 0, 0]),
-            frame(
-                Direction::Out,
-                nord_usb::wire::ui::label("Cleaning...").unwrap(),
-            ),
-            frame(Direction::Out, nord_usb::wire::ui::percent(0)),
-            request(
-                Service::Program,
-                cmd::WRITE_PREPARE,
-                1u32.to_be_bytes().to_vec(),
-            ),
-            response(Service::Program, cmd::WRITE_PREPARE, &[]),
-            request(Service::Program, cmd::WRITE_PREPARE_2, vec![]),
-            response(Service::Program, cmd::WRITE_PREPARE_2, &[0, 0]),
+            request(cmd::STATUS, &ObjectClass::Sample.to_raw().to_be_bytes()),
+            response(cmd::STATUS, &words(&[0, 0, 0, 0, 0])),
+            notify(ui::label("Cleaning...").unwrap()),
+            notify(ui::percent(0)),
+            request(cmd::WRITE_PREPARE, &1u32.to_be_bytes()),
+            response(cmd::WRITE_PREPARE, &[]),
+            request(cmd::WRITE_PREPARE_2, &[]),
+            response(cmd::WRITE_PREPARE_2, &words(&[0, 0])),
         ],
     );
     let err = pollster::block_on(async {
