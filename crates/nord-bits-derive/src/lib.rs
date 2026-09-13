@@ -250,9 +250,7 @@ const MORPH_SUFFIXES: [&str; 3] = ["_wheel", "_aftertouch", "_ctrl_pedal"];
 
 /// The parameter a slot named `x_wheel` morphs, when the body registers an `x`.
 ///
-/// The convention is the formats' own and it is systematic, so binding here costs one
-/// pass over the field list and saves every caller a table of names. A slot whose
-/// parameter is not beside it binds to nothing rather than to a guess.
+/// A slot whose parameter is not beside it binds to nothing rather than to a guess.
 fn morphed_parent<'a>(field: &str, registered: &[&'a str]) -> Option<&'a str> {
     let stem = MORPH_SUFFIXES
         .iter()
