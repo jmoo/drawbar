@@ -17,7 +17,7 @@
 //! `project new` writes the Sample Editor's own `.nsmpproj` save file from a
 //! set of WAVs, one zone per file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -361,36 +361,68 @@ fn stem(origin: &Target, body: &nord_format::Sample) -> String {
     }
 }
 
+/// Where a decode puts its WAVs, and the ones it has already put there.
+///
+/// ⚠️ Targets are named after their own stem, and two of them can share one — the same
+/// instrument in two directories, or a file and a slot of the same name. Without this
+/// the second target's audio replaces the first's under the same filename.
+struct Wavs<'a> {
+    dir: &'a Path,
+    written: BTreeSet<PathBuf>,
+}
+
+impl Wavs<'_> {
+    /// The path one zone's WAV takes, or a refusal where this run already wrote it.
+    fn claim(&mut self, name: &str) -> Result<PathBuf, String> {
+        let path = self.dir.join(name);
+        if !self.written.insert(path.clone()) {
+            return Err(format!(
+                "{}: an earlier target already wrote this file; decode targets that share \
+                 a name into separate directories",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+}
+
 /// `nord sample decode`: the encoded audio back to WAV, and what did not decode.
 pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
     if let Some(dir) = &args.out {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+    let mut wavs = args.out.as_deref().map(|dir| Wavs {
+        dir,
+        written: BTreeSet::new(),
+    });
     let mut coverage = Coverage::default();
     let mut failed = 0usize;
     for spec in &args.targets {
         ui.out(ui.bold(spec));
-        match decode_target(ui, spec, args.out.as_deref(), &mut coverage) {
+        match decode_target(ui, spec, wavs.as_mut(), &mut coverage) {
             Ok(()) => coverage.files += 1,
             Err(e) => {
                 failed += 1;
                 // A whole file that will not open is not a codec gap, so it is
                 // reported rather than counted against coverage.
-                ui.out(format!("  {} {e}", ui.danger("error")));
+                ui.note(format!("  {} {e}", ui.danger("error")));
             }
         }
     }
     ui.note(coverage.line());
-    if failed == args.targets.len() {
-        return Err("nothing decoded".into());
+    match failed {
+        0 => Ok(()),
+        n => Err(format!(
+            "{n} of {} target(s) did not decode",
+            args.targets.len()
+        )),
     }
-    Ok(())
 }
 
 fn decode_target(
     ui: &Ui,
     spec: &str,
-    out: Option<&Path>,
+    mut out: Option<&mut Wavs<'_>>,
     coverage: &mut Coverage,
 ) -> Result<(), String> {
     let origin = crate::slot::target(spec)?;
@@ -428,8 +460,8 @@ fn decode_target(
                     audio.seconds(),
                     ui.dim(notes.join(", ")),
                 );
-                if let Some(dir) = out {
-                    let file = dir.join(format!("{stem}-zone{n}.wav"));
+                if let Some(wavs) = out.as_mut() {
+                    let file = wavs.claim(&format!("{stem}-zone{n}.wav"))?;
                     let wav =
                         nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels)
                             .map_err(|e| format!("{}: {e}", file.display()))?;
@@ -1314,12 +1346,16 @@ mod tests {
         nord_format::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
     }
 
-    fn instrument(name: &str) -> nord_format::Sample {
+    fn encoded(name: &str) -> Vec<u8> {
         let options = encode::Options::new(name).root_key(60);
-        let bytes = encode::instrument(&vec![0i16; 4096], &options)
+        encode::instrument(&vec![0i16; 4096], &options)
             .unwrap()
             .to_bytes()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn instrument(name: &str) -> nord_format::Sample {
+        let bytes = encoded(name);
         match nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap() {
             Entity::Sample(sample) => sample,
             other => panic!("encoded a {}", other.identity().format),
@@ -1491,6 +1527,53 @@ mod tests {
             stem(&Target::File("kit/Bass.nsmp".into()), &instrument("Vibes")),
             "Bass",
         );
+    }
+
+    /// A target that will not open is a failure of the run, not a gap in the codec's
+    /// coverage, so the exit status says so even where other targets decoded.
+    #[test]
+    fn a_decode_that_loses_one_target_of_several_fails() {
+        let dir = scratch();
+        let kit = dir.join("kit.nsmp");
+        std::fs::write(&kit, encoded("Kit")).unwrap();
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        let targets = |specs: &[&Path]| DecodeArgs {
+            targets: specs.iter().map(|p| p.display().to_string()).collect(),
+            out: None,
+        };
+
+        decode(&ui, targets(&[&kit])).expect("a target that decodes");
+        let err = decode(&ui, targets(&[&kit, &dir.join("absent.nsmp")])).unwrap_err();
+        assert!(err.contains("1 of 2"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two targets can be named the same thing in different directories, and the
+    /// second one's zones must not land on top of the first one's WAVs.
+    #[test]
+    fn a_second_target_of_the_same_name_does_not_overwrite_the_first_targets_wavs() {
+        let dir = scratch();
+        let out = dir.join("wavs");
+        let mut kits = Vec::new();
+        for side in ["a", "b"] {
+            let held = dir.join(side);
+            std::fs::create_dir_all(&held).unwrap();
+            let kit = held.join("kit.nsmp");
+            std::fs::write(&kit, encoded("Kit")).unwrap();
+            kits.push(kit.display().to_string());
+        }
+
+        let err = decode(
+            &Ui::new(crate::ui::ColorChoice::Never),
+            DecodeArgs {
+                targets: kits,
+                out: Some(out.clone()),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("1 of 2"), "{err}");
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
