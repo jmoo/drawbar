@@ -58,6 +58,16 @@ impl<T> Job<T> {
     pub fn progress(&self) -> String {
         self.progress.said()
     }
+
+    /// [`Self::poll`], blocking until the worker answers or goes: never
+    /// [`Answer::Running`].
+    #[cfg(test)]
+    pub fn wait(&self) -> Answer<T> {
+        match self.rx.recv() {
+            Ok(answer) => Answer::Answered(answer),
+            Err(_) => Answer::Died,
+        }
+    }
 }
 
 /// Start `work`, and ask for a repaint when it answers.
