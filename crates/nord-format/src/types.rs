@@ -128,164 +128,105 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> PartialEq<i32> for RangedI8
     }
 }
 
-/// An unsigned value constrained to `0..=MAX`.
-///
-/// The counterpart to [`RangedI8`] for fields that are still plain integers — knob
-/// positions, model slots, selectors. Expressing the bound in the type means the value
-/// cannot be built too wide for its slot, so encoding it can never fail.
-///
-/// `MAX` is what the *slot* holds, not what the instrument uses: tightening it to the
-/// real range would reject files this decoder currently accepts.
-#[derive(Copy, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RangedU8<const MAX: u8> {
-    inner: u8,
-}
-
-impl<const MAX: u8> RangedU8<MAX> {
-    /// The largest value this type can hold.
-    pub const MAX: u8 = MAX;
-
-    pub fn new(value: u8) -> Result<Self, ParseError> {
-        value.try_into()
-    }
-
-    pub fn as_u8(&self) -> u8 {
-        self.inner
-    }
-
-    pub fn inner(&self) -> u8 {
-        self.inner
-    }
-}
-
-impl<const MAX: u8> Packed for RangedU8<MAX> {
-    const MAX_BITS: u32 = bits_for(MAX as u64);
-    const DECODE_BITS: u32 = u8::BITS;
-    type Error = ParseError;
-
-    fn from_bits(bits: u64) -> Result<Self, ParseError> {
-        (bits as u8).try_into()
-    }
-
-    fn to_bits(&self) -> u64 {
-        self.inner as u64
-    }
-}
-
-impl<const MAX: u8> TryFrom<u8> for RangedU8<MAX> {
-    type Error = ParseError;
-
-    fn try_from(value: u8) -> Result<Self, ParseError> {
-        if value > MAX {
-            return Err(ParseError::OutOfBounds {
-                value: format!("{value}"),
-                bound: format!("0..={MAX}"),
-            });
+/// An unsigned `0..=MAX` value over `$inner`, named `$as_inner` where a caller wants the
+/// plain integer back.
+macro_rules! ranged_unsigned {
+    ($(#[$doc:meta])* $name:ident, $inner:ident, $as_inner:ident $(,)?) => {
+        $(#[$doc])*
+        #[derive(Copy, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name<const MAX: $inner> {
+            inner: $inner,
         }
-        Ok(RangedU8 { inner: value })
-    }
-}
 
-impl<const MAX: u8> From<RangedU8<MAX>> for u8 {
-    fn from(value: RangedU8<MAX>) -> u8 {
-        value.inner
-    }
-}
+        impl<const MAX: $inner> $name<MAX> {
+            /// The largest value this type can hold.
+            pub const MAX: $inner = MAX;
 
-impl<const MAX: u8> Debug for RangedU8<MAX> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
+            pub fn new(value: $inner) -> Result<Self, ParseError> {
+                value.try_into()
+            }
 
-impl<const MAX: u8> std::fmt::Display for RangedU8<MAX> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
+            pub fn $as_inner(&self) -> $inner {
+                self.inner
+            }
 
-impl<const MAX: u8> PartialEq<u8> for RangedU8<MAX> {
-    fn eq(&self, other: &u8) -> bool {
-        self.inner == *other
-    }
-}
-
-/// An unsigned value constrained to `0..=MAX`, for a slot wider than a byte.
-///
-/// [`RangedU8`] with a wider inner type, and the same rule about `MAX`: it is the
-/// slot's bound, not the instrument's.
-#[derive(Copy, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RangedU16<const MAX: u16> {
-    inner: u16,
-}
-
-impl<const MAX: u16> RangedU16<MAX> {
-    /// The largest value this type can hold.
-    pub const MAX: u16 = MAX;
-
-    pub fn new(value: u16) -> Result<Self, ParseError> {
-        value.try_into()
-    }
-
-    pub fn as_u16(&self) -> u16 {
-        self.inner
-    }
-
-    pub fn inner(&self) -> u16 {
-        self.inner
-    }
-}
-
-impl<const MAX: u16> Packed for RangedU16<MAX> {
-    const MAX_BITS: u32 = bits_for(MAX as u64);
-    const DECODE_BITS: u32 = u16::BITS;
-    type Error = ParseError;
-
-    fn from_bits(bits: u64) -> Result<Self, ParseError> {
-        (bits as u16).try_into()
-    }
-
-    fn to_bits(&self) -> u64 {
-        self.inner as u64
-    }
-}
-
-impl<const MAX: u16> TryFrom<u16> for RangedU16<MAX> {
-    type Error = ParseError;
-
-    fn try_from(value: u16) -> Result<Self, ParseError> {
-        if value > MAX {
-            return Err(ParseError::OutOfBounds {
-                value: format!("{value}"),
-                bound: format!("0..={MAX}"),
-            });
+            pub fn inner(&self) -> $inner {
+                self.inner
+            }
         }
-        Ok(RangedU16 { inner: value })
-    }
+
+        impl<const MAX: $inner> Packed for $name<MAX> {
+            const MAX_BITS: u32 = bits_for(MAX as u64);
+            const DECODE_BITS: u32 = $inner::BITS;
+            type Error = ParseError;
+
+            fn from_bits(bits: u64) -> Result<Self, ParseError> {
+                (bits as $inner).try_into()
+            }
+
+            fn to_bits(&self) -> u64 {
+                self.inner as u64
+            }
+        }
+
+        impl<const MAX: $inner> TryFrom<$inner> for $name<MAX> {
+            type Error = ParseError;
+
+            fn try_from(value: $inner) -> Result<Self, ParseError> {
+                if value > MAX {
+                    return Err(ParseError::OutOfBounds {
+                        value: format!("{value}"),
+                        bound: format!("0..={MAX}"),
+                    });
+                }
+                Ok($name { inner: value })
+            }
+        }
+
+        impl<const MAX: $inner> From<$name<MAX>> for $inner {
+            fn from(value: $name<MAX>) -> $inner {
+                value.inner
+            }
+        }
+
+        impl<const MAX: $inner> Debug for $name<MAX> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.inner)
+            }
+        }
+
+        impl<const MAX: $inner> std::fmt::Display for $name<MAX> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.inner)
+            }
+        }
+
+        impl<const MAX: $inner> PartialEq<$inner> for $name<MAX> {
+            fn eq(&self, other: &$inner) -> bool {
+                self.inner == *other
+            }
+        }
+    };
 }
 
-impl<const MAX: u16> From<RangedU16<MAX>> for u16 {
-    fn from(value: RangedU16<MAX>) -> u16 {
-        value.inner
-    }
+ranged_unsigned! {
+    /// An unsigned value constrained to `0..=MAX`.
+    ///
+    /// The counterpart to [`RangedI8`] for fields that are still plain integers — knob
+    /// positions, model slots, selectors. Expressing the bound in the type means the value
+    /// cannot be built too wide for its slot, so encoding it can never fail.
+    ///
+    /// `MAX` is what the *slot* holds, not what the instrument uses: tightening it to the
+    /// real range would reject files this decoder currently accepts.
+    RangedU8, u8, as_u8
 }
 
-impl<const MAX: u16> Debug for RangedU16<MAX> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
-
-impl<const MAX: u16> std::fmt::Display for RangedU16<MAX> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
-
-impl<const MAX: u16> PartialEq<u16> for RangedU16<MAX> {
-    fn eq(&self, other: &u16) -> bool {
-        self.inner == *other
-    }
+ranged_unsigned! {
+    /// An unsigned value constrained to `0..=MAX`, for a slot wider than a byte.
+    ///
+    /// [`RangedU8`] with a wider inner type, and the same rule about `MAX`: it is the
+    /// slot's bound, not the instrument's.
+    RangedU16, u16, as_u16
 }
 
 /// A pair of u16 coordinates over an `X_COUNT` × `Y_COUNT` space.
