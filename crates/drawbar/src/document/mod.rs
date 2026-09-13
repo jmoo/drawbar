@@ -1709,8 +1709,8 @@ mod tests {
             "nothing is worn, so there is no cell: {said:?}"
         );
 
-        let friday = open.tags.make("Friday — Blue Room");
-        let organ = open.tags.make("Organ-heavy");
+        let friday = open.tags.make("Friday — Blue Room").unwrap();
+        let organ = open.tags.make("Organ-heavy").unwrap();
         for tag in [friday, organ] {
             open.tags.set(open.id, tag, true);
         }

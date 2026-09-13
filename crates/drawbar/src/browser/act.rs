@@ -340,12 +340,14 @@ pub fn apply(
             }
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
-            Act::NewFolder => {
-                let id = browser.folders.make();
+            Act::NewFolder => match browser.folders.make() {
                 // ⚠️ Edit the unique name chosen by `make`, not its generic seed.
-                let name = browser.folders.name_of(id).unwrap_or_default().to_string();
-                browser.start_rename(Item::Folder(id), &name);
-            }
+                Some(id) => {
+                    let name = browser.folders.name_of(id).unwrap_or_default().to_string();
+                    browser.start_rename(Item::Folder(id), &name);
+                }
+                None => log.trouble("The folder list is full, so there is no new folder."),
+            },
             Act::RemoveFolder(id) => {
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Folder(id));
@@ -358,13 +360,15 @@ pub fn apply(
                     browser.tags.set(id, tag, false);
                 }
             }
-            Act::NewTag(wanted) => {
-                let id = browser.tags.make(&wanted);
+            Act::NewTag(wanted) => match browser.tags.make(&wanted) {
                 // ⚠️ Edit the unique name chosen by `make`, not the generic seed it
                 // started from: two tags of one name are one row twice.
-                let name = browser.tags.name_of(id).unwrap_or_default().to_string();
-                browser.start_rename(Item::Tag(id), &name);
-            }
+                Some(id) => {
+                    let name = browser.tags.name_of(id).unwrap_or_default().to_string();
+                    browser.start_rename(Item::Tag(id), &name);
+                }
+                None => log.trouble("The tag list is full, so there is no new tag."),
+            },
             Act::RenameTag { id, name } => browser.tags.rename(id, name),
             Act::RemoveTag(id) => {
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
@@ -379,12 +383,16 @@ pub fn apply(
                     true => {
                         log.say("Nothing on this computer is picked, so there is no gig to save.")
                     }
-                    false => {
-                        let tag = browser.tags.make("New gig");
-                        tag_all(browser, workspace, log, &ids, tag);
-                        let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
-                        browser.start_rename(Item::Tag(tag), &name);
-                    }
+                    false => match browser.tags.make("New gig") {
+                        Some(tag) => {
+                            tag_all(browser, workspace, log, &ids, tag);
+                            let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
+                            browser.start_rename(Item::Tag(tag), &name);
+                        }
+                        None => {
+                            log.trouble("The tag list is full, so there is no gig to save it under.")
+                        }
+                    },
                 }
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
@@ -1927,7 +1935,7 @@ mod tests {
     fn a_folder_queues_only_what_can_go_back_to_a_slot() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let bytes = program(&mut workspace, &mut log);
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),

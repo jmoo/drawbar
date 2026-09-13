@@ -48,8 +48,9 @@ impl Folders {
         self.list.name_of(id)
     }
 
-    /// A new folder, under a name nothing else in the list is using.
-    pub(crate) fn make(&mut self) -> u64 {
+    /// A new folder, under a name nothing else in the list is using, or nothing where
+    /// the list has no id left ([`List::make`]).
+    pub(crate) fn make(&mut self) -> Option<u64> {
         self.list.make("New folder")
     }
 
@@ -144,7 +145,7 @@ mod tests {
         let mut folders = Folders::default();
         let names: Vec<String> = (0..3)
             .map(|_| {
-                let id = folders.make();
+                let id = folders.make().unwrap();
                 folders.name_of(id).expect("it was made").to_string()
             })
             .collect();
@@ -159,7 +160,7 @@ mod tests {
     #[test]
     fn removing_a_folder_leaves_what_was_in_it_on_this_computer() {
         let mut folders = Folders::default();
-        let (kept, gone) = (folders.make(), folders.make());
+        let (kept, gone) = (folders.make().unwrap(), folders.make().unwrap());
         folders.file(7, Some(kept));
         folders.file(8, Some(gone));
         folders.remove(gone);
@@ -177,7 +178,7 @@ mod tests {
     #[test]
     fn the_folders_and_what_is_in_them_survive_a_session() {
         let mut folders = Folders::default();
-        let (sunday, empty) = (folders.make(), folders.make());
+        let (sunday, empty) = (folders.make().unwrap(), folders.make().unwrap());
         folders.rename(sunday, "Sunday\tmorning".into());
         folders.file(7, Some(sunday));
         folders.file(8, Some(sunday));
@@ -203,7 +204,7 @@ mod tests {
     #[test]
     fn one_grouping_is_written_as_the_same_bytes_every_time() {
         let mut folders = Folders::default();
-        let sunday = folders.make();
+        let sunday = folders.make().unwrap();
         for entity in [91, 7, 40, 2, 68, 13] {
             folders.file(entity, Some(sunday));
         }
@@ -255,7 +256,7 @@ mod tests {
     #[test]
     fn a_folder_named_across_two_lines_comes_back_as_one_name() {
         let mut folders = Folders::default();
-        let id = folders.make();
+        let id = folders.make().unwrap();
         folders.rename(id, "Sunday\nmorning".into());
 
         let after = Folders::read(&folders.written());

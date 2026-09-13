@@ -505,7 +505,7 @@ mod tests {
         let workspace = Workspace::new(ctx.clone());
         let queue = Queue::default();
         let mut labels = Tags::default();
-        let sunday = labels.make("Sunday");
+        let sunday = labels.make("Sunday").unwrap();
         labels.set(7, sunday, true);
         let mut said = Vec::new();
         // Twice: the second pass runs with the widget state the first left behind.
@@ -717,7 +717,7 @@ mod tests {
     fn the_selections_tags_are_chips_and_nothing_at_all_where_there_are_none() {
         let ctx = context();
         let mut labels = Tags::default();
-        let (both, some) = (labels.make("Sunday"), labels.make("Loud"));
+        let (both, some) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
         for tag in [both, some] {
             labels.set(7, tag, true);
         }

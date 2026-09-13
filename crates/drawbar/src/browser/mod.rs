@@ -633,13 +633,13 @@ mod tests {
         }
         // A folder with something in it, one with nothing, and a view of a slot: three
         // row shapes the list has no other way of reaching.
-        let full = browser.folders.make();
-        browser.folders.make();
+        let full = browser.folders.make().unwrap();
+        browser.folders.make().unwrap();
         let filed = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(filed, Some(full));
         // A tag on something, and one on nothing: the two shapes the section holds.
-        let sunday = browser.tags.make("Sunday");
-        browser.tags.make("Loud");
+        let sunday = browser.tags.make("Sunday").unwrap();
+        browser.tags.make("Loud").unwrap();
         browser.tags.set(filed, sunday, true);
         let bytes = workspace.get(filed).unwrap().bytes.clone();
         workspace.view(
@@ -786,7 +786,7 @@ mod tests {
         for id in &ids {
             browser.selection.toggle(Item::Local(*id));
         }
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         let head = browser
             .held(Item::Local(ids[0]), &workspace, &device.state)
             .unwrap();
@@ -822,7 +822,7 @@ mod tests {
     #[test]
     fn a_drop_onto_a_row_inside_a_folder_never_unfiles_it() {
         let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(id, Some(folder));
         let head = browser
@@ -977,7 +977,7 @@ mod tests {
     fn a_grouping_forgets_the_assets_the_list_came_back_without() {
         let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
         let here = workspace.create(Fresh::Program, &mut log).unwrap();
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         browser.folders.file(here, Some(folder));
         // As a store that could not keep everything reads back: a membership for an
         // asset the list does not hold.
@@ -1052,7 +1052,7 @@ mod tests {
             bytes,
             &mut log,
         );
-        let tag = browser.tags.make("Sunday");
+        let tag = browser.tags.make("Sunday").unwrap();
         assert!(workspace.is_view(id));
 
         apply(

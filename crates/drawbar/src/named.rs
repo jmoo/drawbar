@@ -36,8 +36,18 @@ impl List {
 
     /// A new one, called `wanted` where nothing else in the list is and `wanted 2`,
     /// `wanted 3` … where something is.
-    pub fn make(&mut self, wanted: &str) -> u64 {
-        let id = self.0.iter().map(|held| held.id).max().unwrap_or(0) + 1;
+    ///
+    /// ⚠️ Nothing where the list holds [`u64::MAX`], which a stored grouping can name.
+    /// Ids only rise, so that a removed one never comes back under a membership still
+    /// meaning the row that had it, and there is no id above the last.
+    pub fn make(&mut self, wanted: &str) -> Option<u64> {
+        let id = self
+            .0
+            .iter()
+            .map(|held| held.id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)?;
         let mut name = wanted.to_string();
         for nth in 2.. {
             if !self.0.iter().any(|held| held.name == name) {
@@ -46,7 +56,7 @@ impl List {
             name = format!("{wanted} {nth}");
         }
         self.0.push(Named { id, name });
-        id
+        Some(id)
     }
 
     pub fn rename(&mut self, id: u64, name: String) {
@@ -130,4 +140,21 @@ fn parse(line: &str, kind: &str) -> Option<Line> {
         });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⚠️ A stored row can name any id, and the one above the last does not exist. Ids
+    /// only rise, so a list holding it has none left to make a new thing under rather
+    /// than an id to wrap onto.
+    #[test]
+    fn a_list_holding_the_last_id_makes_nothing_more() {
+        let mut list = List::default();
+        list.restore(u64::MAX, "Sunday".into());
+        assert_eq!(list.make("Loud"), None);
+        assert_eq!(list.all().len(), 1, "and nothing was added");
+        assert_eq!(list.name_of(u64::MAX), Some("Sunday"));
+    }
 }

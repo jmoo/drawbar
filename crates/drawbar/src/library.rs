@@ -1650,7 +1650,7 @@ mod tests {
         );
         device.relink(&mut workspace);
         workspace.create(Fresh::Live, &mut log).unwrap();
-        let sunday = tags.make("Sunday");
+        let sunday = tags.make("Sunday").unwrap();
         tags.set(both, sunday, true);
 
         let names = |filter: &Filter| -> Vec<String> {

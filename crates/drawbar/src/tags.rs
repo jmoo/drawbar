@@ -45,8 +45,9 @@ impl Tags {
         self.list.name_of(id)
     }
 
-    /// A new tag, under a name nothing else in the list is using.
-    pub(crate) fn make(&mut self, wanted: &str) -> u64 {
+    /// A new tag, under a name nothing else in the list is using, or nothing where the
+    /// list has no id left ([`List::make`]).
+    pub(crate) fn make(&mut self, wanted: &str) -> Option<u64> {
         self.list.make(wanted)
     }
 
@@ -157,7 +158,7 @@ mod tests {
         let names: Vec<String> = ["Sunday", "Sunday", "Sunday"]
             .iter()
             .map(|wanted| {
-                let id = tags.make(wanted);
+                let id = tags.make(wanted).unwrap();
                 tags.name_of(id).expect("it was made").to_string()
             })
             .collect();
@@ -169,7 +170,7 @@ mod tests {
     #[test]
     fn an_asset_wears_every_tag_it_is_given() {
         let mut tags = Tags::default();
-        let (sunday, loud) = (tags.make("Sunday"), tags.make("Loud"));
+        let (sunday, loud) = (tags.make("Sunday").unwrap(), tags.make("Loud").unwrap());
         tags.set(7, sunday, true);
         tags.set(7, loud, true);
         assert_eq!(tags.worn(7).len(), 2);
@@ -186,7 +187,7 @@ mod tests {
     #[test]
     fn removing_a_tag_leaves_every_other_tag_where_it_was() {
         let mut tags = Tags::default();
-        let (gone, kept) = (tags.make("Sunday"), tags.make("Loud"));
+        let (gone, kept) = (tags.make("Sunday").unwrap(), tags.make("Loud").unwrap());
         tags.set(7, gone, true);
         tags.set(7, kept, true);
         tags.set(8, gone, true);
@@ -202,7 +203,7 @@ mod tests {
     #[test]
     fn a_tag_is_on_all_only_when_every_picked_asset_wears_it() {
         let mut tags = Tags::default();
-        let sunday = tags.make("Sunday");
+        let sunday = tags.make("Sunday").unwrap();
         tags.set(7, sunday, true);
         assert!(tags.on_all(&[7], sunday));
         assert!(!tags.on_all(&[7, 8], sunday), "8 does not wear it");
@@ -218,7 +219,7 @@ mod tests {
     #[test]
     fn the_tags_and_what_wears_them_survive_a_session() {
         let mut tags = Tags::default();
-        let (sunday, unworn) = (tags.make("Sunday"), tags.make("Loud"));
+        let (sunday, unworn) = (tags.make("Sunday").unwrap(), tags.make("Loud").unwrap());
         tags.rename(sunday, "Sunday\tmorning".into());
         tags.set(7, sunday, true);
         tags.set(8, sunday, true);
@@ -275,7 +276,7 @@ mod tests {
     #[test]
     fn a_tag_named_across_two_lines_comes_back_as_one_name() {
         let mut tags = Tags::default();
-        let id = tags.make("Sunday");
+        let id = tags.make("Sunday").unwrap();
         tags.rename(id, "Sunday\nmorning".into());
 
         let after = Tags::read(&tags.written());
