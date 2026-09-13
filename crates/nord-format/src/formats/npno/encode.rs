@@ -1724,6 +1724,25 @@ mod tests {
         .contains("one channel count"));
     }
 
+    /// A donor is read for its prefix and its stroke records, so a library stripped of
+    /// its audio donates everything the whole one does.
+    #[test]
+    fn a_template_donates_the_same_library_with_its_audio_dropped() {
+        let donor = template(1);
+        let library = donor.library().unwrap();
+        let skeleton = library.without_audio();
+        assert!(skeleton.strokes().iter().all(|s| s.audio().is_empty()));
+
+        let options = Options::new("Synth").variant("Test");
+        let recordings = [
+            one(60, Bank::Attack, 0, tone(6_000, 300.0, 1)),
+            one(72, Bank::Release, 4, tone(3_000, 500.0, 1)),
+        ];
+        let whole = build(&Donor::Template(&library), &options, &recordings).unwrap();
+        let stripped = build(&Donor::Template(&skeleton), &options, &recordings).unwrap();
+        assert_eq!(stripped.to_body().unwrap(), whole.to_body().unwrap());
+    }
+
     #[test]
     fn a_template_with_only_release_strokes_cannot_donate_to_an_attack_stroke() {
         let donor = template(1);

@@ -766,6 +766,25 @@ impl<'a> Library<'a> {
         &self.strokes
     }
 
+    /// This library's prefix and stroke records with no audio behind them: what a
+    /// [`encode::Donor::Template`] reads, and nothing [`Library::to_body`] can lay out.
+    pub fn without_audio(&self) -> Library<'static> {
+        Library {
+            header: self.header.clone(),
+            prefix: self.prefix.clone(),
+            channels: self.channels,
+            strokes: self
+                .strokes
+                .iter()
+                .map(|stroke| Stroke {
+                    root: stroke.root,
+                    record: stroke.record,
+                    audio: Cow::Owned(Vec::new()),
+                })
+                .collect(),
+        }
+    }
+
     /// Retrim the `index`-th stroke, in the decibels [`Stroke::trim`] reads.
     pub fn set_trim(&mut self, index: usize, decibels: u16) -> Result<(), Error> {
         let count = self.strokes.len();
