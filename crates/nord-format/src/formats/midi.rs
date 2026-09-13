@@ -4,7 +4,8 @@
 //! extracting them means walking MTrk events, which is unimplemented. ⚠️ The
 //! `.mid` and `.syx` editions of a bank are not interchangeable on every model:
 //! the Lead 2X pairs carry the same messages in the same order, the Lead 3 pairs
-//! the same set in a different order.
+//! the same set in a different order. Inferred from specimens; not confirmed on
+//! hardware.
 
 use crate::error::{Error, ParseError};
 use std::io::{Read, Write};

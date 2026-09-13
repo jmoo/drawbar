@@ -139,10 +139,10 @@ pub(crate) fn zip_members(
 
 /// Every member of a ZIP archive as a container-verified CBIN file, tags mixed.
 ///
-/// The shape independent interop projects report for every model's bundles and
-/// backups: a plain ZIP of ordinary program files, the member path encoding the
-/// slot. No such archive is in the corpus, so members stay raw rather than
-/// dispatching to their format modules. A member that is not a CBIN file fails
+/// The shape every model's bundles and backups take: a plain ZIP of ordinary
+/// program files, the member path encoding the slot. Reported by public interop
+/// documentation; no specimen has been read. Members therefore stay raw rather
+/// than dispatching to their format modules. A member that is not a CBIN file fails
 /// the read — this is the arbiter of whether an unrecognised ZIP is a bundle.
 #[cfg(feature = "bundle")]
 pub(crate) fn zip_raw_members(

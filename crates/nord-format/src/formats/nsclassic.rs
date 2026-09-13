@@ -1,9 +1,10 @@
 //! Nord Stage Classic and Stage EX (`.nspg`, `.nss`, `.nsp`) — container-verified,
 //! bodies unmapped.
 //!
-//! The two products share every tag, and the EX ships the Classic's 297 synth
-//! patches byte-for-byte; only programs differ between them. Named for the model
-//! because its tags share no usable prefix (`nspg`, `nss\0`, `nsp\0`).
+//! The two products share every tag, and the EX ships the Classic's synth patches
+//! byte-for-byte; only programs differ between them. Inferred from specimens; not
+//! confirmed on hardware. Named for the model because its tags share no usable
+//! prefix (`nspg`, `nss\0`, `nsp\0`).
 //!
 //! ⚠️ Two of the three tags are three characters plus a NUL.
 
