@@ -35,13 +35,6 @@ takes nothing from that work without confirming it on an instrument of its own.
 The project's documentation is thorough, and marks what has been verified on
 hardware.
 
-### [chardigio/nord-electro-6-skill](https://github.com/chardigio/nord-electro-6-skill) · MIT
-
-A macOS tool, packaged as a Claude Code skill, that manages Electro 6 programs
-over USB. Its protocol notes are the most complete public table of the
-file-transfer messages, taken from disassembling Nord Sound Manager, and are
-frank about the messages that left the instrument needing a power cycle.
-
 ## Adding to this list
 
 If you maintain a project that works with Nord files or instruments, open a pull
