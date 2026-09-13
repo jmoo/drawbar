@@ -22,10 +22,12 @@ use nord_format::formats::npno::encode::{
     Stem, HIGHEST_PLAYED_LAYER,
 };
 use nord_format::formats::npno::{Bank, Library};
-use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
+use nord_format::formats::nsmp::codec::Layout;
 use nord_format::formats::nsmp::zone::derive_top_notes;
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
-use nord_format::formats::nsmpproj::{NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE};
+use nord_format::formats::nsmpproj::{
+    project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
+};
 use nord_format::wav::Pcm16;
 use nord_format::Entity;
 
@@ -124,7 +126,7 @@ pub struct Take {
     pub path: String,
     /// The file as it read, or the reader's own complaint.
     pub source: Source,
-    /// Frames as a project counts them — see [`at_source_rate`]. Zero where the file
+    /// Frames as a project counts them — see [`project_frames`]. Zero where the file
     /// did not read, or holds no audio.
     pub frames: u64,
     pub root_key: u8,
@@ -140,7 +142,7 @@ impl Take {
     fn new(path: String, bytes: &[u8], root_key: u8, bank: Bank, layer: LayerTag) -> Take {
         let source = Source::read(bytes);
         let frames = match &source {
-            Source::Read(pcm) => at_source_rate(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
+            Source::Read(pcm) => project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
             Source::Unreadable(_) => 0,
         };
         Take {
@@ -192,21 +194,6 @@ pub struct Draft {
     job: Option<Job<Result<Built, String>>>,
     /// What the coder last refused, kept beside the takes so they can be fixed.
     refused: Option<String>,
-}
-
-/// Frames at the 44 100 Hz basis a project counts in, whatever the file's own rate.
-///
-/// The editor stores positions against that rate for every file — a 0.1 s file stores
-/// 4410 at 22 050 Hz and at 96 000 Hz alike.
-pub fn at_source_rate(frames: u64, rate: u32) -> Option<u64> {
-    if rate == 0 {
-        return None;
-    }
-    let rate = u64::from(rate);
-    frames
-        .checked_mul(u64::from(SOURCE_RATE))
-        .and_then(|scaled| scaled.checked_add(rate / 2))
-        .map(|scaled| scaled / rate)
 }
 
 /// The key each file is taken to have been recorded at.
@@ -724,7 +711,7 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
                                     egui::RichText::new(format!(
                                         "{} Hz, {:.2} s",
                                         pcm.rate,
-                                        take.frames as f64 / f64::from(SOURCE_RATE)
+                                        take.frames as f64 / PROJECT_RATE as f64
                                     ))
                                     .small()
                                     .weak(),
@@ -921,23 +908,7 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 mod tests {
     use super::*;
     use nord_format::formats::npno::encode::SOFTEST_LAYER;
-
-    #[test]
-    fn frames_are_counted_at_the_source_rate() {
-        assert_eq!(at_source_rate(44_100, 44_100), Some(44_100));
-        assert_eq!(at_source_rate(22_050, 22_050), Some(44_100));
-        assert_eq!(at_source_rate(96_000, 96_000), Some(44_100));
-        // The 0.1 s case the format module states outright.
-        assert_eq!(at_source_rate(2_205, 22_050), Some(4_410));
-        assert_eq!(at_source_rate(9_600, 96_000), Some(4_410));
-        assert_eq!(
-            at_source_rate(1, 48_000),
-            Some(1),
-            "rounded to nearest, the way `nord sample project new` counts"
-        );
-        assert_eq!(at_source_rate(1, 0), None, "a rateless file has no basis");
-        assert_eq!(at_source_rate(u64::MAX, 44_100), None, "no wrapping");
-    }
+    use nord_format::formats::nsmp::codec::SOURCE_RATE;
 
     #[test]
     fn root_keys_are_read_off_the_names_or_counted_from_middle_c() {

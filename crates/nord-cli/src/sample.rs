@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{self, codec, encode};
-use nord_format::formats::nsmpproj::{self, NewZone, Project, Stroke, Zone, LOWEST_NOTE};
+use nord_format::formats::nsmpproj::{self, NewZone, Project, Stroke, Zone, LOWEST_NOTE, PROJECT_RATE};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -1152,10 +1152,6 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
     Ok(note)
 }
 
-/// The rate every frame position in a project counts at, whatever the file's
-/// own `m_sampleRate` says. See the `nsmpproj` module doc.
-const PROJECT_RATE: u64 = 44_100;
-
 /// One `--zone WAV=NOTE`, before the file behind it has been read.
 #[derive(Debug)]
 struct ZoneSpec {
@@ -1177,18 +1173,14 @@ fn zone_spec(spec: &str) -> Result<ZoneSpec, String> {
     })
 }
 
-/// A frame count restated at [`PROJECT_RATE`], to the nearest whole frame — the
-/// ratio does not divide for every rate, and the field holds frames.
+/// A WAV's frame count as the project states it, named where it cannot be stated.
 fn project_frames(frames: usize, rate: u32) -> Result<u64, String> {
-    let rate = u64::from(rate);
     if rate == 0 {
         return Err("the WAV declares 0 Hz".into());
     }
     u64::try_from(frames)
         .ok()
-        .and_then(|f| f.checked_mul(PROJECT_RATE))
-        .and_then(|scaled| scaled.checked_add(rate / 2))
-        .map(|rounded| rounded / rate)
+        .and_then(|frames| nsmpproj::project_frames(frames, rate))
         .ok_or_else(|| format!("{frames} frames at {rate} Hz overflows a frame count"))
 }
 
@@ -1361,24 +1353,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn a_frame_count_is_stated_at_the_project_rate_whatever_the_wav_says() {
-        assert_eq!(project_frames(4410, 44_100).unwrap(), 4410);
-        assert_eq!(project_frames(2205, 22_050).unwrap(), 4410);
-        assert_eq!(project_frames(9600, 96_000).unwrap(), 4410);
-        assert_eq!(
-            project_frames(1, 48_000).unwrap(),
-            1,
-            "rounded, not floored"
-        );
-        assert!(project_frames(1, 0).is_err());
-    }
-
+    /// A count the project cannot state stops the zone being written, naming which
+    /// of the two ways the WAV cannot be counted.
     #[test]
     #[cfg(target_pointer_width = "64")]
-    fn a_frame_count_refuses_rounding_that_would_overflow() {
+    fn a_frame_count_a_project_cannot_state_is_refused_by_name() {
+        assert_eq!(project_frames(2205, 22_050).unwrap(), 4410);
+        let rateless = project_frames(1, 0).unwrap_err();
+        assert!(rateless.contains("0 Hz"), "{rateless}");
         let frames = (u64::MAX / PROJECT_RATE) as usize;
-        assert!(project_frames(frames, u32::MAX).is_err());
+        let over = project_frames(frames, u32::MAX).unwrap_err();
+        assert!(over.contains("overflows"), "{over}");
     }
 
     #[test]

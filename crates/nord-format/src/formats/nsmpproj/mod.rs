@@ -25,9 +25,8 @@
 //! start at 129 and rise with the root key; stroke global ids and audio-file ids
 //! are the same numbers, rising from 1 in the same order.
 //!
-//! Frame positions are stored as `%f` decimals. Inferred from specimens: they
-//! count at 44 100 Hz whatever `m_sampleRate` says — a 0.1 s file stores
-//! `m_end = 4410` at 22 050 Hz and 96 000 Hz alike.
+//! Frame positions are stored as `%f` decimals, counted at [`PROJECT_RATE`]
+//! rather than at the file's own rate.
 
 pub mod tree;
 
@@ -57,6 +56,26 @@ pub const HIGHEST_NOTE: u8 = 108;
 
 /// The id of the lowest zone; ids rise with the root key.
 pub const FIRST_ZONE_ID: u32 = 129;
+
+/// The rate every frame position in a project counts at, whatever the file's own
+/// `m_sampleRate` says — a 0.1 s file stores `m_end = 4410` at 22 050 Hz and at
+/// 96 000 Hz alike. Inferred from specimens; not confirmed on hardware.
+pub const PROJECT_RATE: u64 = 44_100;
+
+/// A frame count restated at [`PROJECT_RATE`], to the nearest whole frame — the ratio
+/// does not divide for every rate, and the fields hold frames.
+///
+/// `None` where the file declares no rate, and where the rounding would overflow.
+pub fn project_frames(frames: u64, rate: u32) -> Option<u64> {
+    let rate = u64::from(rate);
+    if rate == 0 {
+        return None;
+    }
+    frames
+        .checked_mul(PROJECT_RATE)
+        .and_then(|scaled| scaled.checked_add(rate / 2))
+        .map(|rounded| rounded / rate)
+}
 
 /// Lowest secondary start the editor keeps, in frames. Below it a stroke's
 /// `m_startSecondary` is repaired on load, see [`repaired_secondary_start`].
@@ -1089,6 +1108,18 @@ const MAP_STROKE_DEFAULTS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every position in a project counts at the project's own rate, so a file
+    /// recorded at another one is restated rather than stored as it counted.
+    #[test]
+    fn a_frame_count_is_restated_at_the_project_rate() {
+        assert_eq!(project_frames(4_410, 44_100), Some(4_410));
+        assert_eq!(project_frames(2_205, 22_050), Some(4_410));
+        assert_eq!(project_frames(9_600, 96_000), Some(4_410));
+        assert_eq!(project_frames(1, 48_000), Some(1), "rounded, not floored");
+        assert_eq!(project_frames(1, 0), None, "a rateless file has no basis");
+        assert_eq!(project_frames(u64::MAX, 44_100), None, "no wrapping");
+    }
 
     fn three_zones() -> Project {
         let zone = |path: &str, root_key| NewZone {
