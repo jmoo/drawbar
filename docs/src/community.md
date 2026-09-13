@@ -1,28 +1,46 @@
 # Community
 
+Other projects that work with Nord files and instruments. The first two are where
+drawbar's Stage support comes from.
 
 ## Used by drawbar
 
-#### [Chris55/nord-documentation](https://github.com/Chris55/nord-documentation) - Christian Florentz (BSD-3 Clause)
+### [Chris55/nord-documentation](https://github.com/Chris55/nord-documentation) · Christian Florentz · BSD-3-Clause
 
-Rendered at [chris55.github.io/nord-documentation](https://chris55.github.io/nord-documentation/):
-byte maps for the Stage 2 and Stage 3 program files and the Lead A1, built by
-diffing saved files one control at a time. The first public decode of the
-Stage 2 and 3 formats and the source of drawbar's Stage 2 and 3 field placements.
+Rendered at [chris55.github.io/nord-documentation](https://chris55.github.io/nord-documentation/).
+Byte maps for the Stage 2 and Stage 3 program files and the Lead A1, built by
+diffing saved files one control at a time, without decompiling anything. The
+first public decode of the Stage 2 and 3 formats, and the source of drawbar's
+Stage 2 and 3 field placements.
 
-#### [ns4decode](https://ns4decode.netlify.app) - Randy (MIT)
+### [ns4decode](https://ns4decode.netlify.app) · Randy · MIT
 
-By Randy (MIT): a Stage 4 file viewer
-that publishes its offset tables. The first public decode of the Stage 4 program
-and preset files and the source of drawbar's Stage 4 placements.
+A Stage 4 file viewer that publishes its offset tables. The first public decode
+of the Stage 4 program and preset files, and the source of drawbar's Stage 4
+placements.
 
+## Other projects
 
-## Other Projects
+### [Chris55/ns3-program-viewer](https://github.com/Chris55/ns3-program-viewer) · Christian Florentz · GPL-3.0-or-later
 
-### [Chris55/ns3-program-viewer](https://github.com/Chris55/ns3-program-viewer) - Christian Florentz (GPL)
+A read-only web viewer for Stage 2, 2EX and 3 programs, built on the byte maps
+above.
 
-A read-only web viewer for Stage 2, 2EX and 3 programs.
+### [simonflore/opennord](https://github.com/simonflore/opennord) · AGPL-3.0
 
+A browser companion for the Stage 4 and Stage 2 that reads, organises and
+transfers programs and samples. Its Stage 4 decode and USB work come from
+studying Nord Sound Manager's binary. drawbar keeps to files and captures, so it
+takes nothing from that work without confirming it on an instrument of its own.
+The project's documentation is thorough, and marks what has been verified on
+hardware.
+
+### [chardigio/nord-electro-6-skill](https://github.com/chardigio/nord-electro-6-skill) · MIT
+
+A macOS tool, packaged as a Claude Code skill, that manages Electro 6 programs
+over USB. Its protocol notes are the most complete public table of the
+file-transfer messages, taken from disassembling Nord Sound Manager, and are
+frank about the messages that left the instrument needing a power cycle.
 
 ## Adding to this list
 

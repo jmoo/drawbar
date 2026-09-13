@@ -39,7 +39,9 @@ section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Community
 
-Check out other projects including ones that helped in the development of drawbar @ [Community](docs/src/community.md).
+Other projects that work with Nord files and instruments, including the ones
+drawbar's Stage support builds on, are listed under
+[Community](docs/src/community.md).
 
 ## Disclaimer
 
