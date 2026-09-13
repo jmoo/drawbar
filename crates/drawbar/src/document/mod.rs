@@ -213,9 +213,9 @@ impl Opened {
     ///
     /// ⚠️ Reading a WAV copies every sample, so it happens here and never per frame —
     /// the encode panel works from what is read once.
-    fn new(asset: Asset<'_>, view: bool) -> Opened {
+    fn new(asset: Asset<'_>, view: bool, renaming: (Option<String>, Option<String>)) -> Opened {
         let entity = asset.entity;
-        let (name, variant) = header::boxes(entity, asset.shape, view);
+        let (name, variant) = header::boxes(entity, asset.shape, view, renaming);
         Opened {
             id: entity.id,
             ctx: Ctx::default(),
@@ -286,7 +286,11 @@ impl Document {
         let shape = asset.shape;
 
         if self.opened() != Some(id) {
-            self.open = Some(Opened::new(asset, viewing));
+            self.open = Some(Opened::new(
+                asset,
+                viewing,
+                self.piano.renaming(asset.entity),
+            ));
             self.advanced.leave();
             // ⚠️ Leaving the tab is leaving the sound: a zone that goes on playing over
             // another document is a sound with nothing on screen to stop it.
@@ -2465,8 +2469,14 @@ mod tests {
     #[test]
     fn a_body_with_no_editor_of_its_own_is_verbatim_whatever_kind_it_is() {
         let held = |bytes: Vec<u8>| shape(Open::file("held", bytes).entity());
-        assert_eq!(held(fields::blank::stage4_program()), Shape::Fields);
-        assert_eq!(held(fields::blank::electro5_song()), Shape::SetList);
+        assert_eq!(
+            held(crate::workspace::Fresh::Stage4Program.bytes().unwrap()),
+            Shape::Fields
+        );
+        assert_eq!(
+            held(crate::workspace::Fresh::SetList.bytes().unwrap()),
+            Shape::SetList
+        );
         assert_eq!(held(sample_bytes()), Shape::Sample);
         assert_eq!(held(project_bytes()), Shape::Project);
         assert_eq!(held(piano_bytes()), Shape::Piano);

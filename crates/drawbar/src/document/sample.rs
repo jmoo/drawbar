@@ -2734,14 +2734,14 @@ mod tests {
         let snapshot = snapshot(&entity).unwrap().unwrap();
 
         let mut state = State::default();
-        follow(&mut state, 7, &Baseline::read(bytes));
+        follow(&mut state, 7, &Baseline::read(bytes, 1));
         let (said, _) = bodied(&ctx, &mut state, &snapshot);
         assert!(
             said.iter().any(|text| text.ends_with("· 1 edited")),
             "the key is painted against the bytes it was saved as: {said:?}"
         );
 
-        follow(&mut state, 7, &Baseline::read(edited));
+        follow(&mut state, 7, &Baseline::read(edited, 2));
         let (said, _) = bodied(&ctx, &mut state, &snapshot);
         assert!(
             !said.iter().any(|text| text.contains("edited")),

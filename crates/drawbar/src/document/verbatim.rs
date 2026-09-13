@@ -254,7 +254,6 @@ fn readable(byte: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::Fresh;
 
     /// The body on the page is the container's own range, which is the same body the
     /// wire carries.

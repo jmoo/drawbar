@@ -187,7 +187,7 @@ pub struct Baseline {
 impl Baseline {
     /// The baseline of bytes nothing has inspected yet, stamped as `stamp` — which is
     /// [`Workspace::stamp_for`]'s to decide.
-    fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
+    pub(crate) fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
         Baseline {
             bytes,
