@@ -5,10 +5,6 @@
 //! [`section`]s: an `hdr` carrying the name, a `cat` of category strings, a `map`
 //! ending in the [`zone`] table, one [`stroke`] per zone, and a trailing `sty`.
 //!
-//! Both container generations occur: across the corpus every v2 specimen is type 0 and
-//! every v4 is type 1, while v3 is split. The container handles the difference; the
-//! chain is the same.
-//!
 //! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
 //! and can retune, rename and remap them without touching a byte of audio, in either
 //! chain. The [`codec`] decodes that audio to samples in every generation — it is one
@@ -133,9 +129,10 @@ impl Chain {
 /// strokes verbatim.
 ///
 /// ⚠️ The v2 pool also holds versions that are not `2xx` — 8 (the original
-/// Sample Library) and 200 (Sample Library 2.0; independent interop projects
-/// report the number tracks the library release, not the codec) — so the gate
-/// is "at least 300", not "exactly 2xx".
+/// Sample Library) and 200 (Sample Library 2.0) — so the gate is "at least
+/// 300", not "exactly 2xx". Inferred from specimens; not confirmed on hardware.
+/// That the number tracks the library release rather than the codec is reported
+/// by public interop documentation.
 #[derive(Debug)]
 pub enum AnyBody {
     V2(Sample),

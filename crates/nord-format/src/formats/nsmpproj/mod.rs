@@ -714,13 +714,14 @@ impl Project {
     ///
     /// `modified` is the Unix time stamped on every `m_modifyDate`.
     ///
-    /// Unexplained: `m_crc` and `m_crcProj` (the editor's checksum of the
-    /// generated instrument — algorithm unknown) are written as 0, and
-    /// `m_startSecondary` (an analysis result the editor stores, within a
-    /// percent of `end / 8` in every specimen) as exactly that. Confirmed in
-    /// Nord Sample Editor 3: it opens such a project (and asks for the audio
-    /// files if they are not where the paths say), repairing derived state on
-    /// load.
+    /// `m_crc` and `m_crcProj` carry the editor's checksum of the generated
+    /// instrument, whose algorithm is not derived, and are written as 0;
+    /// `m_startSecondary` is an analysis result within a percent of `end / 8`
+    /// on every specimen, and is written as exactly that.
+    /// Inferred from specimens; not confirmed on hardware.
+    ///
+    /// Nord Sample Editor 3 opens the result — asking for the audio files if
+    /// they are not where the paths say — and repairs derived state on load.
     pub fn new(name: &str, zones: &[NewZone], modified: u32) -> Result<Project, ParseError> {
         if zones.is_empty() {
             return Err(ParseError::AssertFail(
@@ -913,15 +914,18 @@ fn active_eq_fields(node: &Node, scope: &str) -> Result<Vec<String>, ParseError>
         .collect()
 }
 
-/// A `common_stroke` over a whole file, with the loop points the editor
-/// derives for an untouched import: the loop starts halfway, runs to one frame
-/// short of the end, and cross-fades over 15% of its length.
+/// A `common_stroke` from frame 1 to the end of the file, with the loop points
+/// the editor derives for an untouched import: the loop starts halfway, runs to
+/// one frame short of the end, and cross-fades over 15% of its length.
 ///
 /// Inferred from specimens. A few hold a loop start half a frame above
 /// `end / 2` — an analysis result, like `m_startSecondary`, that nothing here
 /// reproduces.
 fn common_stroke(global_id: u32, frames: u64, date: &str) -> Node {
     let end = frames as f64;
+    // The editor writes `m_start = 1` for an untouched import; the encoded audio
+    // and `m_startSecondary` count from it, not from frame 0.
+    // Inferred from specimens; not confirmed on hardware.
     let start = 1.0;
     let loop_start = end / 2.0;
     let loop_length = loop_start - 1.0;
