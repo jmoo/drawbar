@@ -327,6 +327,15 @@ mod key {
 /// click alone.
 const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 
+/// The user guide, published beside the browser build.
+///
+/// Relative in a tab, so the guide is the one on whichever host is serving the app; a
+/// window has no page to be relative to and reaches for the published one.
+#[cfg(target_arch = "wasm32")]
+pub(crate) const GUIDE: &str = "docs/";
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const GUIDE: &str = "https://jmoo.github.io/drawbar/docs/";
+
 /// The key text beside a menu label — a window's, never a tab's.
 fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
     match WINDOWED {
@@ -612,8 +621,18 @@ impl DrawbarApp {
         drop_down(ui, "View", |ui| self.view_menu(ui, frame, acts));
         drop_down(ui, "Instrument", |ui| self.instrument_menu(ui, acts));
         drop_down(ui, "Help", |ui| {
+            if item(ui, "User guide", None) {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(GUIDE));
+            }
+            if item(ui, "What's new", None) {
+                self.whats_new(ui.ctx());
+            }
+            ui.separator();
             if item(ui, "Copy activity log", None) {
                 acts.push(Act::CopyLog);
+            }
+            if item(ui, "About drawbar", None) {
+                self.about_open = true;
             }
         });
     }

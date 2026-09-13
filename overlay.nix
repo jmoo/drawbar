@@ -2,6 +2,7 @@ final: prev:
 let
   inherit (final.lib)
     attrNames
+    cleanSource
     cleanSourceWith
     concatMap
     concatMapAttrs
@@ -44,6 +45,8 @@ let
         && (
           crane.filterCargoSources path type
           || hasSuffix ".script" path
+          # The About box's test compares its copy against this.
+          || path == toString (workspace + "/LICENSE")
           # The committed specimens and replay scripts, whatever their extensions.
           || hasInfix "/tests/fixtures/" path
           || hasInfix "/tests/scripts/" path
@@ -393,6 +396,58 @@ let
       }
     );
 
+  # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
+  # of the source means a local `mdbook build` cannot change this derivation.
+  docs = final.stdenvNoCC.mkDerivation {
+    pname = "drawbar-docs";
+    inherit (manifests.drawbar) version;
+
+    src = cleanSourceWith {
+      name = "docs";
+      src = cleanSource ./docs;
+      filter = path: type: !(type == "directory" && hasSuffix "/book" path);
+    };
+
+    nativeBuildInputs = [ final.mdbook ];
+
+    dontConfigure = true;
+    dontInstall = true;
+
+    buildPhase = ''
+      runHook preBuild
+      mdbook build --dest-dir "$out"
+
+      # A book whose summary renders nothing still exits 0.
+      if [ ! -f "$out/index.html" ]; then
+        echo "mdbook rendered no index.html" >&2
+        exit 1
+      fi
+      runHook postBuild
+    '';
+
+    meta.description = "the drawbar user guide";
+  };
+
+  # The GitHub Pages tree: the browser build at the root, the guide under /docs.
+  # Copies, not links: the tree leaves the store as a tarball.
+  # `web` is a parameter so the deployed tree can pair a released bundle with
+  # this checkout's guide; scripts/site.bash overrides it.
+  site = makeOverridable (
+    { web }:
+    final.runCommand "drawbar-site-${web.version}"
+      {
+        meta.description = "drawbar and its guide, laid out for GitHub Pages";
+      }
+      ''
+        mkdir -p "$out/docs"
+        cp -rL ${web}/. "$out/"
+        cp -rL ${docs}/. "$out/docs/"
+
+        # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
+        touch "$out/.nojekyll"
+      ''
+  ) { web = drawbar-web; };
+
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
   # the host-independent web bundle.
   crossed =
@@ -486,7 +541,7 @@ in
     // {
       # `all` excludes corpus roll-ups; the R2 tier needs credentials this build
       # cannot assume.
-      all = final.linkFarm "all" (crates // crossed);
+      all = final.linkFarm "all" (crates // crossed // { inherit docs; });
 
       # Clippy over every crate and target, with each crate's test features on so the
       # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
@@ -525,7 +580,12 @@ in
       # consumer enumerating them cannot write the list down.
       crossPackages = crossed;
 
-      # `nix run .#drawbar-web`: serve the browser bundle on loopback and open it.
+      # `site` stays out of `all`: it only rearranges outputs `all` already
+      # builds, and the Pages deploy reaches it through scripts/site.bash.
+      inherit docs site;
+
+      # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
+      # guide the app links to is there under /docs.
       drawbar-web-launch = final.writeShellApplication {
         name = "drawbar-web";
         runtimeInputs = [ final.miniserve ];
@@ -538,7 +598,7 @@ in
           # the wasm. `no-cache` forces revalidation; the ETag still answers 304.
           miniserve --index index.html --interfaces 127.0.0.1 --port "$port" \
             --header "Cache-Control: no-cache" \
-            ${final.nord.drawbar-web} &
+            ${final.nord.site} &
           server=$!
           trap 'kill "$server" 2>/dev/null || true' EXIT
 

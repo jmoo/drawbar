@@ -41,20 +41,21 @@
             };
 
             # `nix run` prefers apps over packages, so `nix run .#drawbar-web`
-            # launches the bundle that `nix build .#drawbar-web` produces.
+            # launches the site that `nix build .#site` produces.
             apps.drawbar-web = {
-              meta.description = "serve the drawbar browser build and open it";
+              meta.description = "serve the drawbar browser build with its guide and open it";
               program = pkgs.lib.getExe pkgs.nord.drawbar-web-launch;
               type = "app";
             };
 
             devShells.default = pkgs.lib.crane.devShell {
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/*.bash (see their `nix-deps` lines)
+              # scripts/*.bash (see their `nix-deps` lines), plus `mdbook serve docs`.
               packages = with pkgs; [
                 curl
                 gh
                 jq
+                mdbook
                 rust-analyzer
               ];
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
@@ -81,7 +82,7 @@
 
             legacyPackages = pkgs;
 
-            packages = pkgs.nord.crates // pkgs.nord.crossPackages;
+            packages = pkgs.nord.crates // pkgs.nord.crossPackages // { inherit (pkgs.nord) docs site; };
 
             treefmt = {
               programs = {

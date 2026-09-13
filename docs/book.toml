@@ -1,0 +1,14 @@
+[book]
+language = "en"
+src = "src"
+title = "drawbar"
+
+[output.html]
+additional-css = ["theme/drawbar.css"]
+default-theme = "light"
+edit-url-template = "https://github.com/jmoo/drawbar/edit/master/docs/{path}"
+git-repository-url = "https://github.com/jmoo/drawbar"
+# mdBook does not rewrite url() inside a supplied theme file, so hashed asset
+# names would break theme/fonts/fonts.css.
+hash-files = false
+preferred-dark-theme = "coal"

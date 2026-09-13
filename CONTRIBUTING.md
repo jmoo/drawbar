@@ -188,6 +188,12 @@ Cargo from `crates/` inside the development shell; the parent
 - `nix build .#nord.all-corpus-full` uses the R2 corpus tier and requires a
   seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
   the corpus assemblies.
+- `nix build .#docs` renders the user guide, the mdBook under `docs/`.
+  `mdbook serve docs` previews it from the development shell.
+- `nix build .#site` assembles this checkout's Pages tree for local preview: its
+  browser build at the root, its guide at `/docs`. `nix run .#drawbar-web`
+  serves that tree. `scripts/site.bash` assembles the tree that is deployed,
+  which is the same layout with the app taken from the latest `drawbar-v*` tag.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
 would change, and treats Clippy warnings as failures. The public suite must
@@ -198,6 +204,12 @@ committed fixtures, plus the private corpus when enabled, and applies sidecar
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
 `NORD_CORPUS_DEPLOY_KEY`; forks cannot receive that secret, so the job skips them.
+
+Every push to `master` deploys to GitHub Pages after the release job runs: the
+guide from `master`, the app from the latest `drawbar-v*` tag. A docs-only
+change therefore goes live without a release, and an app change goes live once
+its version is bumped and the release job tags it. The deploy hangs off that job
+because a tag `GITHUB_TOKEN` creates fires no workflow event of its own.
 
 Nix style is two spaces and alphabetized attribute-set keys. Use a dotted path
 for one child (`a.b.c = v`) and braces for two or more children, decided per

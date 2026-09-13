@@ -1,0 +1,451 @@
+/* drawbar mdBook theme. Tokens mirror the app palette in
+   crates/drawbar/src/app.rs.
+   mdBook's five theme names collapse onto two faces:
+   light/rust -> drawbar light, coal/navy/ayu -> drawbar dark.
+   Selectors are doubled (`html.light` and `.light`) because `html.x`
+   is needed to outspecify mdBook's own variables.css. */
+
+/* --- drawbar tokens ------------------------------------------------------ */
+
+html.light, html.rust, .light, .rust {
+  color-scheme: light;
+
+  --db-panel-fill: #f2f1ee;
+  --db-window-fill: #faf9f7;
+  --db-faint-bg: #dcd8ce;
+  --db-extreme-bg: #ffffff;
+  --db-accent: #b01e12;
+  --db-good: #0f622a;
+  --db-warn: #8a4b00;
+  --db-bad: #a3140c;
+  --db-unlit: #828282;
+  --db-selection-fill: #e9a99f;
+  --db-rule: #bfbbb1;
+  --db-ink: #282828;
+  --db-ink-weak: #56534d;
+  --db-ink-strong: #000000;
+
+  /* The copy button's icon is a black SVG in a ::before; only a filter tints it. */
+  --copy-button-filter: opacity(0.5);
+  --copy-button-filter-hover: opacity(1);
+}
+
+html.coal, html.navy, html.ayu, .coal, .navy, .ayu {
+  color-scheme: dark;
+
+  --db-panel-fill: #161719;
+  --db-window-fill: #1c1d20;
+  --db-faint-bg: #222326;
+  --db-extreme-bg: #0a0a0a;
+  --db-accent: #d6463a;
+  --db-good: #60c070;
+  --db-warn: #e0a030;
+  --db-bad: #e05040;
+  --db-unlit: #5a5a5a;
+  --db-selection-fill: #7a2424;
+  --db-rule: #3c3c3c;
+  --db-ink: #e2e0da;
+  --db-ink-weak: #a8a5a0;
+  --db-ink-strong: #f5f3ee;
+
+  --copy-button-filter: invert(0.72);
+  --copy-button-filter-hover: invert(1);
+}
+
+/* --- mdBook variables, driven from the tokens above ---------------------- */
+
+html.light, html.rust, html.coal, html.navy, html.ayu,
+.light, .rust, .coal, .navy, .ayu {
+  --bg: var(--db-window-fill);
+  --fg: var(--db-ink);
+
+  --sidebar-bg: var(--db-panel-fill);
+  --sidebar-fg: var(--db-ink);
+  --sidebar-non-existant: var(--db-unlit);
+  --sidebar-active: var(--db-accent);
+  --sidebar-header-border-color: var(--db-rule);
+  --sidebar-spacer: var(--db-rule);
+  /* Holds the longest chapter title on one line when it is active and bold,
+     with room to spare for a non-overlay scrollbar. */
+  --sidebar-target-width: 30rem;
+  /* mdBook reserves this strip between the sidebar and the page wrapper; at 0
+     the sidebar's border meets the menu bar's. */
+  --sidebar-resize-indicator-width: 0px;
+
+  --scrollbar: var(--db-unlit);
+
+  /* general.css sets `code { font-family: var(--mono-font) !important }`. */
+  --mono-font: "Hack", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --icons: var(--db-ink-weak);
+  --icons-hover: var(--db-accent);
+
+  --links: var(--db-bad);
+
+  --inline-code-color: var(--db-ink-strong);
+
+  --theme-popup-bg: var(--db-panel-fill);
+  --theme-popup-border: var(--db-rule);
+  --theme-hover: var(--db-faint-bg);
+
+  --quote-bg: var(--db-faint-bg);
+  --quote-border: var(--db-accent);
+
+  --warning-border: var(--db-warn);
+
+  --table-border-color: var(--db-rule);
+  --table-header-bg: var(--db-faint-bg);
+  --table-alternate-bg: var(--db-panel-fill);
+
+  --searchbar-border-color: var(--db-rule);
+  --searchbar-bg: var(--db-extreme-bg);
+  --searchbar-fg: var(--db-ink);
+  --searchbar-shadow-color: transparent;
+  --searchresults-header-fg: var(--db-ink-weak);
+  --searchresults-border-color: var(--db-rule);
+  --searchresults-li-bg: var(--db-faint-bg);
+  --search-mark-bg: var(--db-selection-fill);
+
+  --footnote-highlight: var(--db-selection-fill);
+  --overlay-bg: color-mix(in srgb, var(--db-extreme-bg) 55%, transparent);
+
+  --color-scheme: light dark;
+
+  /* panel geometry, verbatim from the app */
+  --db-radius: 2px;
+}
+
+/* --- type ---------------------------------------------------------------- */
+
+html {
+  font-family: "Ubuntu", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+body,
+.menu-title,
+.sidebar,
+.nav-chapters,
+#mdbook-searchbar,
+#mdbook-searchresults {
+  font-family: "Ubuntu", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Prose is set for reading, not for panel density: the app's 12.5px body
+   token stays where it belongs (labels, tables, chrome). */
+.content main {
+  font-size: 1.65rem;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6 {
+  font-weight: 700;
+  color: var(--db-ink-strong);
+  letter-spacing: -0.005em;
+  line-height: 1.2;
+}
+
+.content h1 {
+  font-size: 2.9rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--db-rule);
+}
+.content h2 { font-size: 2.2rem; margin-top: 3.2rem; }
+.content h3 { font-size: 1.8rem; }
+.content h4,
+.content h5,
+.content h6 {
+  font-size: 1.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--db-ink-weak);
+}
+
+.content a,
+.content a:visited {
+  color: var(--links);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.content a:hover {
+  color: var(--db-accent);
+  text-decoration-thickness: 2px;
+}
+
+.content strong { color: var(--db-ink-strong); }
+.content hr { border: none; border-top: 1px solid var(--db-rule); margin: 3rem 0; }
+
+/* --- code ---------------------------------------------------------------- */
+
+code,
+pre,
+kbd,
+.content code,
+.content pre > code {
+  font-family: "Hack", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-ligatures: none;
+}
+
+.content code {
+  font-size: 0.88em;
+  padding: 0.1em 0.35em;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-faint-bg);
+  color: var(--inline-code-color);
+}
+
+.content pre {
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-extreme-bg);
+  padding: 0;
+}
+
+.content pre > code,
+.content pre > code.hljs {
+  display: block;
+  padding: 1.4rem 1.6rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-size: 1.4rem;
+  line-height: 1.55;
+  color: var(--db-ink);
+}
+
+.content pre > .buttons {
+  background: transparent;
+}
+.content pre > .buttons button {
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-panel-fill);
+  color: var(--icons);
+  cursor: pointer;
+}
+.content pre > .buttons button:hover {
+  border-color: var(--db-accent);
+  color: var(--db-accent);
+}
+
+/* Syntax colours are the panel's signal colours — the same five the LEDs use. */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-name { color: var(--db-accent); font-weight: 400; }
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string { color: var(--db-good); }
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-quote,
+.hljs-variable,
+.hljs-template-variable { color: var(--db-warn); }
+
+.hljs-title,
+.hljs-section,
+.hljs-selector-id,
+.hljs-type,
+.hljs-built_in,
+.hljs-class .hljs-title { color: var(--db-ink-strong); font-weight: 700; }
+
+.hljs-comment { color: var(--db-unlit); font-style: italic; }
+.hljs-deletion { color: var(--db-bad); }
+.hljs-meta,
+.hljs-attr,
+.hljs-selector-attr,
+.hljs-selector-class { color: var(--db-ink-weak); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
+
+/* --- chrome: menu bar, sidebar, nav ------------------------------------- */
+
+#mdbook-menu-bar,
+#mdbook-menu-bar.bordered {
+  background: var(--db-panel-fill);
+  border-bottom: 1px solid var(--db-rule);
+  border-top: none;
+}
+#mdbook-menu-bar .fa-svg,
+#mdbook-menu-bar .icon-button {
+  color: var(--icons);
+}
+#mdbook-menu-bar .icon-button:hover,
+#mdbook-menu-bar .fa-svg:hover {
+  color: var(--icons-hover);
+}
+.menu-title {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--db-ink);
+}
+
+.sidebar {
+  border-right: 1px solid var(--db-rule);
+}
+.sidebar .sidebar-scrollbox {
+  padding: 1.2rem 1rem 3rem;
+}
+/* chrome.css sizes the drag target from the indicator width zeroed above,
+   which would leave no handle; it now grips the sidebar's inner edge. */
+html.js .sidebar .sidebar-resize-handle {
+  width: 6px;
+}
+.chapter li.chapter-item {
+  line-height: 1.45;
+  margin: 0;
+  padding: 0.15rem 0;
+}
+.chapter li a {
+  flex: 1;
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--db-radius);
+  font-size: 1.45rem;
+}
+.chapter li a:hover {
+  background: var(--db-faint-bg);
+  color: var(--db-ink-strong);
+}
+.chapter li a.active {
+  background: var(--db-faint-bg);
+  border-left: 2px solid var(--db-accent);
+  padding-left: calc(0.6rem - 2px);
+  color: var(--db-ink-strong);
+  font-weight: 700;
+}
+.chapter li.part-title {
+  margin: 2rem 0 0.4rem;
+  padding-left: 0.6rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--db-ink-weak);
+}
+.chapter .spacer {
+  background: var(--db-rule);
+}
+.chapter li a strong { color: var(--db-unlit); }
+
+.nav-chapters {
+  color: var(--icons);
+  border-radius: 0;
+}
+.nav-chapters:hover {
+  background: var(--db-faint-bg);
+  color: var(--db-accent);
+  text-decoration: none;
+}
+
+/* --- blockquote, tables, admonitions ------------------------------------ */
+
+.content blockquote {
+  margin: 2rem 0;
+  padding: 1rem 1.6rem;
+  border: 1px solid var(--db-rule);
+  border-left: 3px solid var(--quote-border);
+  border-radius: 0;
+  background: var(--quote-bg);
+  color: var(--db-ink);
+}
+.content blockquote > :first-child { margin-top: 0; }
+.content blockquote > :last-child { margin-bottom: 0; }
+
+.content table {
+  border-collapse: collapse;
+  border: 1px solid var(--table-border-color);
+  font-size: 1.45rem;
+}
+.content table thead th {
+  background: var(--table-header-bg);
+  border-bottom: 1px solid var(--table-border-color);
+  font-weight: 700;
+  text-align: left;
+  letter-spacing: 0.02em;
+}
+.content table td,
+.content table th {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--table-border-color);
+}
+.content table tbody tr:nth-child(2n) { background: var(--table-alternate-bg); }
+.content table tbody tr:nth-child(2n+1) { background: transparent; }
+
+/* --- search -------------------------------------------------------------- */
+
+#mdbook-searchbar {
+  border: 1px solid var(--searchbar-border-color);
+  border-radius: var(--db-radius);
+  background: var(--searchbar-bg);
+  color: var(--searchbar-fg);
+  font-size: 1.5rem;
+  padding: 0.7rem 1rem;
+}
+#mdbook-searchbar:focus {
+  outline: none;
+  border-color: var(--db-accent);
+}
+#mdbook-searchresults a { line-height: 1.6; }
+#mdbook-searchresults mark {
+  background: var(--search-mark-bg);
+  color: var(--db-ink-strong);
+  padding: 0 0.1em;
+  border-radius: var(--db-radius);
+}
+#mdbook-searchresults-header {
+  color: var(--searchresults-header-fg);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 1.2rem;
+}
+
+/* --- theme popup --------------------------------------------------------- */
+
+.theme-popup {
+  border: 1px solid var(--theme-popup-border);
+  border-radius: var(--db-radius);
+  background: var(--theme-popup-bg);
+  padding: 0.3rem;
+}
+.theme-popup .theme {
+  border-radius: var(--db-radius);
+  padding: 0.4rem 0.8rem;
+  font-size: 1.4rem;
+  color: var(--db-ink);
+}
+.theme-popup .theme:hover { background: var(--theme-hover); }
+
+/* Both faces are reachable from the picker; these three are aliases of the
+   dark face, so hide them and leave Light / Coal as the two real choices. */
+.theme-popup .theme#mdbook-theme-rust,
+.theme-popup .theme#mdbook-theme-navy,
+.theme-popup .theme#mdbook-theme-ayu { display: none; }
+
+/* --- selection, focus, misc --------------------------------------------- */
+
+::selection {
+  background: var(--db-selection-fill);
+}
+
+:focus-visible {
+  outline: 2px solid var(--db-accent);
+  outline-offset: 1px;
+}
+
+.footnote-definition { font-size: 1.45rem; color: var(--db-ink-weak); }
+.footnote-definition sup.footnote-definition-label { color: var(--db-accent); }
+
+.boring { opacity: 0.5; }
