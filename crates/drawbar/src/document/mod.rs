@@ -184,6 +184,12 @@ impl Document {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
+        // An apply says where it is from another thread, and a header frozen on
+        // `applying…` is a window that looks hung.
+        if self.piano.applying() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         let faces = faces(entity, registry.as_deref());
         let face = showing(&faces, self.views.get(&id).copied().unwrap_or_default());
@@ -314,6 +320,7 @@ impl Document {
             Some(Asked::Advanced) => {
                 self.views.insert(id, Face::Advanced);
             }
+            Some(Asked::Export) => self.export(ui.ctx(), id, workspace),
             Some(asked) => self.answer(id, asked, workspace, log),
             None => {}
         }
@@ -329,7 +336,7 @@ impl Document {
             self.target = None;
         }
         if act.export {
-            workspace.export(id);
+            self.export(ui.ctx(), id, workspace);
         }
         if act.revert {
             workspace.revert(id, log);
@@ -347,6 +354,9 @@ impl Document {
             }
         }
         self.replan(id, workspace, log);
+        if self.piano.asked_apply() {
+            self.piano.start(ui.ctx(), id, workspace);
+        }
         if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
             // The strip was drawn from the bytes this frame then edited; one more frame
             // shows what the edit made of them.
@@ -355,35 +365,104 @@ impl Document {
         wants
     }
 
-    /// Rebuild a piano library's bytes from the plan its frame left behind.
+    /// Take up the plan a piano library's frame left behind, where the library accepts
+    /// it.
     ///
-    /// ⚠️ The plan is tried before it is kept, so the one in hand always rebuilds: a
-    /// name the format refuses, or a switch that would leave the library with no
-    /// strokes, is turned down here rather than refusing every later edit.
-    fn replan(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
+    /// ⚠️ Nothing is rebuilt here. The plan is checked against the baseline — a name the
+    /// format refuses, or a switch that would leave the library with no strokes, is
+    /// turned down now rather than refusing every later edit — and the bytes it makes
+    /// are laid out only when something has to carry them: see [`piano::State::start`].
+    fn replan(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
         let Some(plan) = self.piano.drafted() else {
             return;
         };
-        let made = {
-            let Some(entity) = workspace.get(id) else {
-                return;
-            };
-            piano::rebuild(&entity.saved.bytes, &plan)
-                .map(|bytes| (bytes != entity.bytes).then_some(bytes))
+        let checked = match workspace.get(id) {
+            Some(entity) => piano::planned(&entity.saved.bytes, &plan).map(|_| ()),
+            None => return,
         };
-        match made {
-            Ok(bytes) => {
+        match checked {
+            Ok(()) => {
                 self.piano.commit(plan);
                 self.error = None;
-                if let Some(bytes) = bytes {
-                    workspace.replace_bytes(id, bytes, log);
-                }
             }
             Err(why) => {
                 self.piano.discard();
                 log.error(why.clone());
                 self.error = Some(why);
             }
+        }
+    }
+
+    /// Whether this document holds an edit its bytes do not.
+    pub fn pends(&self, id: u64) -> bool {
+        self.piano.pending(id)
+    }
+
+    /// Hold back the acts that would carry a piano library's bytes while its plan is
+    /// still only a plan, and start the apply they are waiting for.
+    ///
+    /// ⚠️ Run after the frame's own acts are collected and before any of them are: an
+    /// act let through here writes the bytes as they stand, which for a pending plan is
+    /// the library before the trim.
+    ///
+    /// It polls before it answers, because on a target with one thread the apply runs
+    /// where it is started and what it was holding comes back with this frame's acts.
+    pub fn settle(
+        &mut self,
+        ctx: &egui::Context,
+        acts: Vec<crate::browser::Act>,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Vec<crate::browser::Act> {
+        let mut out: Vec<crate::browser::Act> = acts
+            .into_iter()
+            .filter_map(|act| {
+                // Wherever the gesture came from: the saved bytes are about to be put
+                // back, and a plan over bytes nothing holds is not an edit of anything.
+                if let crate::browser::Act::Revert(id) = &act {
+                    self.piano.forget(*id);
+                }
+                self.piano.hold(ctx, act, workspace)
+            })
+            .collect();
+        out.extend(self.released(ctx, workspace, log));
+        out
+    }
+
+    /// The acts an apply that has answered was holding, and the bytes it made put back
+    /// under the document.
+    pub fn released(
+        &mut self,
+        ctx: &egui::Context,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Vec<crate::browser::Act> {
+        let Some(applied) = self.piano.answered(ctx, workspace) else {
+            return Vec::new();
+        };
+        match applied.made {
+            Some(Ok(bytes)) => {
+                self.error = None;
+                workspace.replace_bytes(applied.id, bytes, log);
+            }
+            Some(Err(why)) => {
+                log.error(why.clone());
+                log.trouble("That library could not be laid out, so nothing was written.");
+                self.error = Some(why);
+            }
+            None => {}
+        }
+        applied.acts
+    }
+
+    /// Hand the document's bytes to the user, once the plan in hand is in them.
+    fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace) {
+        if self
+            .piano
+            .hold(ctx, crate::browser::Act::Export(id), workspace)
+            .is_some()
+        {
+            workspace.export(id);
         }
     }
 
@@ -579,10 +658,10 @@ impl Document {
             }
             Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
             Asked::Encode => self.encode(id, workspace, log),
-            Asked::Export => workspace.export(id),
             // ⚠️ Answered where the frame collects what it wants: the browser owns
-            // opening a tab, and the face is the frame's own to switch.
-            Asked::Open(_) | Asked::Advanced => {}
+            // opening a tab, the face is the frame's own to switch, and an export waits
+            // on the plan — see [`Document::export`].
+            Asked::Export | Asked::Open(_) | Asked::Advanced => {}
         }
     }
 
@@ -590,17 +669,16 @@ impl Document {
     /// once, because either answer needs it.
     fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
         let root = ask.root();
-        if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
-            self.piano.decode(decoded, root);
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        if let Err(why) = self.piano.decode(entity, root) {
+            log.error(why);
+            log.trouble("That root could not be decoded.");
+            return;
         }
-        let sound = match self.piano.sound(root) {
-            Some(Ok(sound)) => sound,
-            Some(Err(why)) => {
-                log.error(why);
-                log.trouble("That root could not be decoded.");
-                return;
-            }
-            None => return,
+        let Some(sound) = self.piano.sound(root) else {
+            return;
         };
         match ask {
             piano::Ask::Play(_) => {
@@ -2368,6 +2446,79 @@ mod tests {
         // And the map is pinned above the body rather than drawn inside it.
         open.document.views.insert(open.id, Face::Edit);
         assert!(open.twice().iter().any(|word| word == "Key map"));
+    }
+
+    /// ⚠️ A library is hundreds of megabytes, so an edit to one is a plan and the bytes
+    /// are left alone. What would carry those bytes waits for the plan to be laid over
+    /// them — and is let go the moment it has been.
+    #[test]
+    fn a_piano_lays_its_plan_out_before_anything_carries_its_bytes() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        let named = |open: &Open| {
+            piano::snapshot(open.entity().entity.as_ref().unwrap())
+                .unwrap()
+                .unwrap()
+                .name
+        };
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![enter()]);
+
+        assert!(open.document.pends(open.id), "the rename is a plan");
+        assert_eq!(
+            open.entity().bytes,
+            open.entity().saved.bytes,
+            "and nothing has copied the body for it",
+        );
+        assert_eq!(named(&open), "Test Piano", "nor written it");
+
+        let ctx = open.ctx.clone();
+        let mut acts = open.document.settle(
+            &ctx,
+            vec![crate::browser::Act::SaveDoc(open.id)],
+            &mut open.workspace,
+            &mut open.log,
+        );
+        assert!(acts.is_empty(), "the save waits for the apply");
+        for _ in 0..100_000 {
+            acts = open
+                .document
+                .released(&ctx, &mut open.workspace, &mut open.log);
+            if !acts.is_empty() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(acts.as_slice(), [crate::browser::Act::SaveDoc(id)] if *id == open.id),
+            "the save is what comes back",
+        );
+        assert!(named(&open).contains('X'), "{}", named(&open));
+        assert!(open.entity().is_unsaved(), "and it is the save's to settle");
+        assert!(!open.document.pends(open.id));
+    }
+
+    /// A revert is the end of a plan wherever the gesture came from: the File menu
+    /// raises the same act the header's own control does.
+    #[test]
+    fn reverting_a_piano_from_the_menu_drops_the_plan_it_was_holding() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        open.frame(Vec::new());
+        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![enter()]);
+        assert!(open.document.pends(open.id));
+
+        let ctx = open.ctx.clone();
+        let acts = open.document.settle(
+            &ctx,
+            vec![crate::browser::Act::Revert(open.id)],
+            &mut open.workspace,
+            &mut open.log,
+        );
+        assert_eq!(acts.len(), 1, "the revert itself still runs");
+        assert!(!open.document.pends(open.id), "the plan is gone with it");
     }
 
     #[test]
