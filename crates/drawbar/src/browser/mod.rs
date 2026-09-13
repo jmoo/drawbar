@@ -308,14 +308,14 @@ impl Browser {
             }
             Item::Folder(_) | Item::Tag(_) => None,
             // What is already on the instrument fits it by having got there.
-            Item::Slot { class, at } => (!read_only(class)
-                && device.slot(class, at).flatten().is_some())
-            .then_some(Held {
-                what: item,
-                kind: Kind::from_class(class),
-                filed: None,
-                fits: true,
-            }),
+            Item::Slot { class, at } => {
+                (!read_only(class) && device.slot(class, at).flatten().is_some()).then_some(Held {
+                    what: item,
+                    kind: Kind::from_class(class),
+                    filed: None,
+                    fits: true,
+                })
+            }
         }
     }
 

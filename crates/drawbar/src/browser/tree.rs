@@ -506,7 +506,15 @@ impl Browser {
         }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
             self.local_row(
-                ui, entity, Some(id), &inside, workspace, device, queue, naming, acts,
+                ui,
+                entity,
+                Some(id),
+                &inside,
+                workspace,
+                device,
+                queue,
+                naming,
+                acts,
             );
         }
     }

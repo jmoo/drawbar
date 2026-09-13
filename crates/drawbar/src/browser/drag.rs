@@ -348,7 +348,10 @@ pub enum Onto {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Landing {
     /// Device to this computer: a copy comes back.
-    Copy { class: ObjectClass, at: Location },
+    Copy {
+        class: ObjectClass,
+        at: Location,
+    },
     /// This computer to a slot.
     Send {
         id: u64,
@@ -362,9 +365,14 @@ pub enum Landing {
         to: Location,
     },
     /// Into one of this computer's folders. Nothing leaves this computer.
-    File { id: u64, folder: u64 },
+    File {
+        id: u64,
+        folder: u64,
+    },
     /// Out of the folder it is in, back to the loose part of the list.
-    Unfile { id: u64 },
+    Unfile {
+        id: u64,
+    },
     No(&'static str),
 }
 
