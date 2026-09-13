@@ -26,6 +26,7 @@ use super::capability::{Fact, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::header::{Body, Cell};
 use super::keys;
+use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
 use crate::icon::{icon, Glyph};
 use crate::note;
@@ -808,44 +809,26 @@ pub struct RowSpec {
     pub hint: String,
 }
 
-/// The page's own side margin, which every row and heading keeps.
-const PAD: f32 = 12.0;
-const HEAD_H: f32 = 20.0;
 const ROW_H: f32 = 26.0;
-const GAP: f32 = 10.0;
 const MARK: f32 = 6.0;
-/// The first column, the size column, and the chevron's own.
-const NAME_W: f32 = 56.0;
-const SIZE_W: f32 = 74.0;
-const CHEVRON_W: f32 = 20.0;
 /// How far an open row's body is indented, measured from the page's edge.
 const INDENT: f32 = 68.0;
 /// Which of the five columns holds the size, which is the one set right to left.
 const SIZE_COLUMN: usize = 3;
-const HEAD_TEXT: f32 = 9.0;
-const NAME_TEXT: f32 = 11.5;
 const ROW_MONO: f32 = 11.0;
 const FACTS_TEXT: f32 = 11.0;
 const SIZE_TEXT: f32 = 10.5;
 const CHEVRON: f32 = 12.0;
 
-/// The five columns of the row grid: each one's left edge and width.
-fn columns(rect: egui::Rect) -> [(f32, f32); 5] {
-    let fixed = NAME_W + SIZE_W + CHEVRON_W + GAP * 4.0 + PAD * 2.0;
-    let free = (rect.width() - fixed).max(0.0);
-    let answers = free * 1.1 / 2.6;
-    let facts = free - answers;
-    let mut left = rect.left() + PAD;
-    let mut out = [(0.0, 0.0); 5];
-    for (cell, width) in out
-        .iter_mut()
-        .zip([NAME_W, answers, facts, SIZE_W, CHEVRON_W])
-    {
-        *cell = (left, width);
-        left += width + GAP;
-    }
-    out
-}
+/// The five columns of the row grid: the name, what the zone answers, what it is made
+/// of, its size, and the chevron's own.
+const GRID: [Width; 5] = [
+    Width::Fixed(56.0),
+    Width::Share(1.1),
+    Width::Share(1.5),
+    Width::Fixed(74.0),
+    Width::Fixed(20.0),
+];
 
 /// The zone list: the column heads, one row per zone, and the body of each open row
 /// drawn by `open`.
@@ -861,36 +844,12 @@ pub fn rows(
 ) {
     let visuals = ui.visuals().clone();
     let hairline = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
-    let (head, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), HEAD_H),
-        egui::Sense::hover(),
+    table::heads(
+        ui,
+        GRID,
+        [heads.0, "Answers", heads.1, "Size", ""],
+        &[SIZE_COLUMN],
     );
-    {
-        let painter = ui.painter();
-        painter.hline(head.x_range(), head.top() + 0.5, hairline);
-        painter.hline(head.x_range(), head.bottom() - 0.5, hairline);
-        let heads = [heads.0, "Answers", heads.1, "Size", ""];
-        for (column, ((left, width), text)) in columns(head).into_iter().zip(heads).enumerate() {
-            if text.is_empty() {
-                continue;
-            }
-            let galley = painter.layout_no_wrap(
-                text.to_uppercase(),
-                egui::FontId::proportional(HEAD_TEXT),
-                app::caption(&visuals),
-            );
-            // The size column reads right to left, so its head stands over its figures.
-            let left = match column == SIZE_COLUMN {
-                true => left + width - galley.size().x,
-                false => left,
-            };
-            painter.galley(
-                egui::pos2(left, head.center().y - galley.size().y / 2.0),
-                galley,
-                app::caption(&visuals),
-            );
-        }
-    }
 
     let lit = state.lit();
     for (index, spec) in specs.iter().enumerate() {
@@ -919,7 +878,7 @@ pub fn rows(
             true => visuals.selection.stroke.color,
             false => visuals.weak_text_color(),
         };
-        let cells = columns(rect);
+        let cells = table::columns(rect, GRID);
         let dot = match (picked, lit == Some(index)) {
             (_, true) => app::good(&visuals),
             (true, false) => app::accent(&visuals),

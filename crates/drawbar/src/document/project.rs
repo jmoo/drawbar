@@ -23,6 +23,7 @@ use super::capability::{Fact, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State};
+use super::table::PAD;
 use crate::app;
 use crate::note;
 
@@ -598,9 +599,6 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
         None => {}
     }
 }
-
-/// The page's own side margin, the same one the rows keep.
-const PAD: f32 = 12.0;
 
 /// The instrument's own parameters. A project is the source, so these are the only
 /// sound parameters the editors can write.

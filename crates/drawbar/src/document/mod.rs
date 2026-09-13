@@ -30,6 +30,7 @@ mod piano;
 mod project;
 pub(crate) mod sample;
 mod setlist;
+mod table;
 mod verbatim;
 
 use advanced::Advanced;

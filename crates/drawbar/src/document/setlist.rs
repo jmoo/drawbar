@@ -15,6 +15,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::capability::{facts, Fact};
 use super::controls::{self, Sets};
+use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
 use crate::browser::{Item, Kind};
 use crate::device::DeviceState;
@@ -351,47 +352,29 @@ fn reorder(addresses: &[Location], from: usize, to: usize) -> Sets {
 #[derive(Clone, Copy)]
 struct Carried(usize);
 
-const PAD: f32 = 12.0;
-const HEAD_H: f32 = 20.0;
 const ROW_H: f32 = 30.0;
-const GAP: f32 = 10.0;
-const GRIP_W: f32 = 22.0;
-const INDEX_W: f32 = 34.0;
-const KIND_W: f32 = 22.0;
-const ADDRESS_W: f32 = 118.0;
-const OPEN_W: f32 = 22.0;
 const BOX_W: f32 = 34.0;
 const BOX_H: f32 = 20.0;
 const DOT: f32 = 6.0;
-const HEAD_TEXT: f32 = 9.0;
-const NAME_TEXT: f32 = 11.5;
 const SUB_TEXT: f32 = 10.0;
 const STATE_TEXT: f32 = 10.5;
 const MONO: f32 = 11.0;
 const GLYPH: f32 = 13.0;
 const MARK: f32 = 11.0;
 
-/// The seven columns: each one's left edge and width.
-fn columns(rect: egui::Rect) -> [(f32, f32); 7] {
-    let fixed = GRIP_W + INDEX_W + KIND_W + ADDRESS_W + OPEN_W + GAP * 6.0 + PAD * 2.0;
-    let free = (rect.width() - fixed).max(0.0);
-    let name = free * 1.6 / 2.6;
-    let mut left = rect.left() + PAD;
-    let mut out = [(0.0, 0.0); 7];
-    for (cell, width) in out.iter_mut().zip([
-        GRIP_W,
-        INDEX_W,
-        KIND_W,
-        name,
-        ADDRESS_W,
-        free - name,
-        OPEN_W,
-    ]) {
-        *cell = (left, width);
-        left += width + GAP;
-    }
-    out
-}
+/// The seven columns: the drag handle, the place in the set, the kind, the name, the
+/// address, what stands there, and the way out.
+const COLUMNS: [Width; 7] = [
+    Width::Fixed(22.0),
+    Width::Fixed(34.0),
+    Width::Fixed(22.0),
+    Width::Share(1.6),
+    Width::Fixed(118.0),
+    Width::Share(1.0),
+    Width::Fixed(22.0),
+];
+
+const HEADS: [&str; 7] = ["", "#", "", "Plays", "Bank : slot", "State", ""];
 
 /// The four programs the set list plays, in the order it plays them.
 ///
@@ -414,7 +397,7 @@ pub fn ui(
         "drag to reorder · type a bank and slot as the panel shows them, numbered from 1",
         Some((&reading, tint)),
     );
-    heads(ui);
+    table::heads(ui, COLUMNS, HEADS, &[]);
 
     let mut opened = None;
     let mut moved = None;
@@ -435,34 +418,6 @@ pub fn ui(
     opened
 }
 
-fn heads(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), HEAD_H),
-        egui::Sense::hover(),
-    );
-    let quiet = app::caption(ui.visuals());
-    let hairline = egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
-    let painter = ui.painter();
-    painter.hline(rect.x_range(), rect.top() + 0.5, hairline);
-    painter.hline(rect.x_range(), rect.bottom() - 0.5, hairline);
-    let heads = ["", "#", "", "Plays", "Bank : slot", "State", ""];
-    for ((left, _), text) in columns(rect).into_iter().zip(heads) {
-        if text.is_empty() {
-            continue;
-        }
-        let galley = painter.layout_no_wrap(
-            text.to_uppercase(),
-            egui::FontId::proportional(HEAD_TEXT),
-            quiet,
-        );
-        painter.galley(
-            egui::pos2(left, rect.center().y - galley.size().y / 2.0),
-            galley,
-            quiet,
-        );
-    }
-}
-
 /// One entry. Returns the move a drop asked for and the item an arrow asked to open.
 fn entry(
     ui: &mut egui::Ui,
@@ -478,7 +433,7 @@ fn entry(
         egui::vec2(ui.available_width(), ROW_H),
         egui::Sense::hover(),
     );
-    let cells = columns(rect);
+    let cells = table::columns(rect, COLUMNS);
     let quiet = app::caption(&visuals);
     let hairline = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
     let carried = response.dnd_hover_payload::<Carried>();
