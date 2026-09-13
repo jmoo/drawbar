@@ -42,8 +42,9 @@ lost. Store them first.
 ## Set lists and samples
 
 A set list's fields are the slots it plays, `slot1` to `slot4`. A sample
-instrument's are its name and each zone's root key and top note, with notes
-written as names (`C4` is middle C) or as numbers.
+instrument's are its name and each zone's root key and top note, plus its low
+note in the layouts that store one. Notes are written as names (`C4` is middle
+C) or as numbers, and `--fields` lists exactly what a given file offers.
 
 ```sh
 nord setlist edit song.ne5t --set slot1=2:5 --set slot4=8:50 -o out.ne5t
