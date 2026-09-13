@@ -61,11 +61,9 @@ fn population() -> Vec<Pick> {
         .collect::<Vec<_>>();
     let mut shapes = BTreeSet::new();
     for specimen in scan::corpus() {
-        let sampled = sidecar::sidecar_of(&specimen.path).exists()
-            || scan::shape(&specimen.path).is_none_or(|shape| shapes.insert(shape));
         out.push(Pick {
             specimen,
-            sampled,
+            sampled: scan::sampled(&specimen.path, &mut shapes),
             instrument: true,
         });
     }
@@ -137,7 +135,7 @@ fn measure() -> BTreeMap<String, Body> {
             .expect("a parsed CBIN")
             .body
             .0;
-        if !body.is_empty() && body.iter().all(|&byte| byte == 0xff) {
+        if scan::unwritten(&body) {
             continue;
         }
         let entry = bodies.entry(key).or_insert_with(|| {
@@ -194,7 +192,9 @@ fn measure() -> BTreeMap<String, Body> {
     bodies
 }
 
-// Ranges are body-relative and come from the last full-corpus measurement.
+// Body-relative bit ranges that some specimen varies, no reader claims, and no
+// sampled flip moves. Each is reviewed debt: a bit the corpus proves is live and
+// this crate cannot yet name.
 const KNOWN_BLIND: &[(&str, &[(usize, usize)])] = &[
     (
         "ne5-Program",
@@ -350,6 +350,9 @@ fn known_blind(key: &str) -> Option<&'static [(usize, usize)]> {
         .find(|(name, _)| *name == key)
         .map(|(_, ranges)| *ranges)
 }
+fn expand(ranges: &[(usize, usize)]) -> BTreeSet<usize> {
+    ranges.iter().flat_map(|&(lo, hi)| lo..=hi).collect()
+}
 fn known_rejections(key: &str) -> &'static [usize] {
     KNOWN_REJECTIONS
         .iter()
@@ -396,21 +399,32 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
                 "{key}: no sampled specimen supplied mutation answers"
             ));
         }
-        let blind = runs(
-            body.facts
-                .iter()
-                .enumerate()
-                .filter(|(_, fact)| fact.blind())
-                .map(|(bit, _)| bit),
-        );
+        let blind = body
+            .facts
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| fact.blind())
+            .map(|(bit, _)| bit)
+            .collect::<BTreeSet<_>>();
         match known_blind(key) {
-            Some(expected) if blind != expected => failures.push(format!(
-                "{key}: blind bits changed: expected [{}], got [{}]",
-                show(expected),
-                show(&blind)
-            )),
             None => failures.push(format!("{key}: no reviewed blind-bit contract")),
-            _ => {}
+            Some(reviewed) => {
+                let reviewed = expand(reviewed);
+                let new = runs(blind.difference(&reviewed).copied());
+                if !new.is_empty() {
+                    failures.push(format!(
+                        "{key}: bits vary that no reader claims and no flip moves: [{}]",
+                        show(&new)
+                    ));
+                }
+                let answered = runs(reviewed.difference(&blind).copied());
+                if !answered.is_empty() {
+                    failures.push(format!(
+                        "{key}: blind-bit debt is paid and its entries are stale: [{}]",
+                        show(&answered)
+                    ));
+                }
+            }
         }
         let refusal_only = body
             .facts
@@ -418,11 +432,22 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
             .enumerate()
             .filter(|(_, fact)| fact.refusal_only())
             .map(|(bit, _)| bit)
+            .collect::<BTreeSet<_>>();
+        let reviewed_refusals: BTreeSet<usize> = known_rejections(key).iter().copied().collect();
+        let new = refusal_only
+            .difference(&reviewed_refusals)
             .collect::<Vec<_>>();
-        let expected_refusals = known_rejections(key);
-        if refusal_only != expected_refusals {
+        if !new.is_empty() {
             failures.push(format!(
-                "{key}: refusal-only bits changed: expected {expected_refusals:?}, got {refusal_only:?}"
+                "{key}: flipping these bits only ever makes the file unreadable: {new:?}"
+            ));
+        }
+        let answered = reviewed_refusals
+            .difference(&refusal_only)
+            .collect::<Vec<_>>();
+        if !answered.is_empty() {
+            failures.push(format!(
+                "{key}: refusal-only debt is paid and its entries are stale: {answered:?}"
             ));
         }
         let missing = body
