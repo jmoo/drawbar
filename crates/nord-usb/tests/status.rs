@@ -122,9 +122,7 @@ fn a_status_reply_truncated_inside_an_optional_word_is_refused() {
 }
 
 #[test]
-fn wrong_bytes_are_caught() {
-    // Opening the wrong class must not silently "work": the bytes differ from the
-    // script, so the exact-match transport rejects them.
+fn an_exact_replay_rejects_a_frame_that_differs_from_the_script() {
     let mut t = program_status();
     let err = pollster::block_on(async {
         match Session::open(&mut t, ObjectClass::Piano).await {
@@ -136,8 +134,14 @@ fn wrong_bytes_are_caught() {
         }
     });
     assert!(
-        err.is_some(),
-        "opening the wrong object class should have been rejected"
+        matches!(err, Some(nord_usb::Error::Replay(_))),
+        "opening the wrong object class was not rejected: {err:?}"
+    );
+    assert_eq!(
+        t.position(),
+        2,
+        "the HELLO exchange is in the script and the class it opens is not, so exactly \
+         the first two frames may be consumed"
     );
 }
 
