@@ -19,14 +19,36 @@ pub struct Row {
     pub accepts: String,
 }
 
+/// Column the values line up in, wide enough for the longest registry path.
+pub const PATH_WIDTH: usize = 40;
+
 /// A body whose fields are listed and set by hand-written accessors.
 pub trait Fields {
     fn rows(&self) -> Result<Vec<Row>, String>;
     fn set(&mut self, path: &str, value: &str) -> Result<(), String>;
+
+    /// What `--fields` prints. A body whose registry knows a field's placement
+    /// and control prints those columns too.
+    fn list(&self, ui: &Ui) -> Result<(), String> {
+        ui.out(format!(
+            "{:<PATH_WIDTH$} {:<40} {}",
+            "path", "value", "accepts"
+        ));
+        for row in self.rows()? {
+            ui.out(format!(
+                "{:<PATH_WIDTH$} {:<40} {}",
+                row.path, row.value, row.accepts
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// List the fields (`--fields`, `None`) or apply every `--set`, returning how
-/// many fields moved — the accessor-backed twin of the registry staging.
+/// many fields moved.
+///
+/// The one staging: a file and a slot, a noun and the file verb, an
+/// accessor-backed body and a generated registry all reach it.
 pub fn stage(
     ui: &Ui,
     fields: bool,
@@ -37,7 +59,7 @@ pub fn stage(
         if !sets.is_empty() {
             return Err("--fields lists and writes nothing; drop it to apply --set".into());
         }
-        list(ui, editor)?;
+        editor.list(ui)?;
         return Ok(None);
     }
     if sets.is_empty() {
@@ -53,14 +75,17 @@ pub fn stage(
             .ok_or_else(|| format!("expected PATH=VALUE, got {assignment:?}"))?;
         editor.set(path.trim(), value.trim())?;
     }
+    crate::edit::warn_on_sticky_pairs(ui, sets);
     let after = editor.rows()?;
 
     let mut changed = 0;
     for (b, a) in before.iter().zip(&after) {
+        // The stored spelling, not the rendering: two stored values can read the
+        // same way, and it is the bits that get written.
         if b.value != a.value {
             changed += 1;
             ui.out(format!(
-                "{:<30} {} -> {}",
+                "{:<PATH_WIDTH$} {} -> {}",
                 a.path,
                 b.value,
                 ui.bold(&a.value)
@@ -68,17 +93,6 @@ pub fn stage(
         }
     }
     Ok(Some(changed))
-}
-
-fn list(ui: &Ui, editor: &dyn Fields) -> Result<(), String> {
-    ui.out(format!("{:<30} {:<40} {}", "path", "value", "accepts"));
-    for row in editor.rows()? {
-        ui.out(format!(
-            "{:<30} {:<40} {}",
-            row.path, row.value, row.accepts
-        ));
-    }
-    Ok(())
 }
 
 const NOTE_ACCEPTS: &str = "a note name (C4, F#3) or 0-127";
@@ -361,9 +375,7 @@ impl Fields for ProjectEditor<'_> {
             if field != "path" {
                 return Err(unknown(path));
             }
-            return project
-                .set_audio_path(id, value)
-                .map_err(|e| e.to_string());
+            return project.set_audio_path(id, value).map_err(|e| e.to_string());
         }
         if let Some(id) = indexed(block, "stroke") {
             let field = StrokeField::parse(field, value).map_err(|e| format!("{path}: {e}"))?;

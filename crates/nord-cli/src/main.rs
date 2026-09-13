@@ -745,26 +745,8 @@ pub struct EditArgs {
     )]
     pub target: Option<String>,
 
-    /// `path=value`, repeatable. Paths are `nord-format`'s field names.
-    #[arg(long = "set", value_name = "PATH=VALUE")]
-    pub set: Vec<String>,
-
-    /// Report what would change — including which bytes — and write nothing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// List every settable field with its placement and current value, then exit. With
-    /// no target, lists the fields of a fresh default.
-    #[arg(long)]
-    pub fields: bool,
-
-    /// Write the edit here instead of over the input file.
-    #[arg(short, long, value_name = "FILE")]
-    pub out: Option<PathBuf>,
-
-    /// Confirm the write. Editing a slot, or a file in place, needs it.
-    #[arg(long)]
-    pub yes: bool,
+    #[command(flatten)]
+    pub common: edit::SetArgs,
 }
 
 fn main() -> ExitCode {

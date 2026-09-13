@@ -12,14 +12,14 @@
 //! then refuse without `--yes`. Editing a file in place takes the same guard;
 //! `-o` avoids it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nord_format::fields::{ControlKind, Field, Registry, Unit};
 use nord_format::formats::ne5;
 use nord_format::{Entity, Live, Program, Settings, Song};
 use nord_usb::ObjectClass;
 
-use crate::editors;
+use crate::editors::{self, Fields, Row, PATH_WIDTH};
 use crate::slot::Target;
 use crate::ui::Ui;
 use crate::EditArgs;
@@ -42,23 +42,19 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
 
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
-    let (staged, what) = match (&mut entity, class) {
-        (Entity::Program(Program::Electro5(p)), ObjectClass::Program) => {
-            (stage(ui, &args, p)?, "the edited program")
-        }
-        (Entity::Live(Live::Electro5(l)), ObjectClass::Live) => {
-            (stage(ui, &args, l)?, "the edited live slot")
-        }
-        (Entity::Settings(Settings::Electro5(s)), ObjectClass::Settings) => {
-            (stage(ui, &args, s)?, "the edited settings")
-        }
-        (Entity::Song(Song::Electro5(s)), ObjectClass::SetList) => (
-            editors::stage(ui, args.fields, &args.set, &mut editors::SongEditor(s))?,
-            "the edited set list",
-        ),
-        _ => return Err(mismatch(&entity, class)),
+    let what = match (&entity, class) {
+        (Entity::Program(Program::Electro5(_)), ObjectClass::Program) => "the edited program",
+        (Entity::Live(Live::Electro5(_)), ObjectClass::Live) => "the edited live slot",
+        (Entity::Settings(Settings::Electro5(_)), ObjectClass::Settings) => "the edited settings",
+        (Entity::Song(Song::Electro5(_)), ObjectClass::SetList) => "the edited set list",
+        _ => return Err(mismatch(&mut entity, class)),
     };
-    // `--fields` has listed them and is done.
+    let staged = editors::stage(
+        ui,
+        args.common.fields,
+        &args.common.set,
+        editor_for(&mut entity)?.as_mut(),
+    )?;
     let Some(changed) = staged else {
         return Ok(());
     };
@@ -70,12 +66,12 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
     let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
     print_byte_diff(ui, &original, &edited);
 
-    if args.dry_run {
+    if args.common.dry_run {
         ui.note("--dry-run: nothing written");
         return Ok(());
     }
 
-    match (target, args.out) {
+    match (target, args.common.out) {
         // An explicit destination is the unambiguous case, whatever the source was.
         (_, Some(out)) => write_file(ui, &out, &edited),
         (Some(Target::File(path)), None) => {
@@ -84,17 +80,76 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
                 ui.danger("overwrite"),
                 path.display()
             ));
-            ui.confirm(args.yes)?;
+            ui.confirm(args.common.yes)?;
             write_file(ui, &path, &edited)
         }
         // The slot keeps whatever it is already called, so the write carries no name.
         (Some(Target::Slot(at)), None) => {
-            crate::device::send(ui, &edited, at, class, args.yes, what, None, None)
+            crate::device::send(ui, &edited, at, class, args.common.yes, what, None, None)
         }
         (None, None) => {
             Err("editing a fresh default needs -o: there is nothing to write back to".into())
         }
     }
+}
+
+/// The flags an `edit` takes wherever it is reached from: the nouns, the file verb,
+/// and the accessor-backed editors under both.
+#[derive(clap::Args)]
+pub struct SetArgs {
+    /// `path=value`, repeatable. Paths are what `--fields` lists.
+    #[arg(long = "set", value_name = "PATH=VALUE")]
+    pub set: Vec<String>,
+
+    /// Report what would change — including which bytes — and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// List every settable field with its current value, then exit.
+    #[arg(long)]
+    pub fields: bool,
+
+    /// Write the edit here instead of over the input file.
+    #[arg(short, long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+
+    /// Confirm the write. Editing a slot, or a file in place, needs it.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// What sets this entity's fields, or `None` where nothing in it is settable.
+///
+/// The one dispatch: [`editable`], the noun edits and the file verb all read it, so a
+/// body cannot be editable under one and not the other.
+pub(crate) fn editor(entity: &mut Entity) -> Option<Box<dyn Fields + '_>> {
+    if entity.registry().is_some() {
+        return entity
+            .registry_mut()
+            .map(|r| Box::new(Registered(r)) as Box<dyn Fields>);
+    }
+    match entity {
+        Entity::Song(Song::Electro5(song)) => Some(Box::new(editors::SongEditor(song))),
+        Entity::Sample(sample) => Some(Box::new(editors::SampleEditor(sample))),
+        Entity::SampleProject(project) => Some(Box::new(editors::ProjectEditor(project))),
+        _ => None,
+    }
+}
+
+/// Whether anything in this entity is settable.
+pub(crate) fn editable(entity: &mut Entity) -> bool {
+    editor(entity).is_some()
+}
+
+/// [`editor`], with the refusal a caller with nothing to edit has to print.
+pub(crate) fn editor_for(entity: &mut Entity) -> Result<Box<dyn Fields + '_>, String> {
+    let id = entity.identity();
+    editor(entity).ok_or_else(|| {
+        format!(
+            "nothing in a {} ({}) is settable yet; `nord inspect` still reads it",
+            id.kind, id.format,
+        )
+    })
 }
 
 /// The bytes of a fresh default object: what a target-less `--fields` lists and a
@@ -120,7 +175,7 @@ fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
 }
 
 /// The target decoded, but not to what this noun edits.
-fn mismatch(entity: &Entity, class: ObjectClass) -> String {
+fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
     format!(
         "this command edits {} ({}); the target holds {}{}",
         class.label(),
@@ -132,52 +187,68 @@ fn mismatch(entity: &Entity, class: ObjectClass) -> String {
 
 /// The `edit` that reads this entity's files — empty for something nothing
 /// edits, so the message never points at a command that does not exist.
-fn steer(entity: &Entity) -> &'static str {
-    match crate::file::entity_tag(entity) {
-        "ne5p" => " — try `nord program edit`",
-        "ne5l" => " — try `nord live edit`",
-        "ne5s" => " — try `nord settings edit`",
-        "ne5t" => " — try `nord setlist edit`",
-        "nsmp" => " — try `nord sample edit`",
+fn steer(entity: &mut Entity) -> String {
+    match crate::file::noun(crate::file::entity_tag(entity)) {
+        Some(noun) => format!(" — try `nord {noun} edit`"),
         // Everything else editable — the Stage bodies, the Sample Editor
         // project — has no noun of its own and lives under the file verb.
-        _ if crate::file_edit::editable(entity) => " — try `nord edit`",
-        _ => "",
+        None if editable(entity) => " — try `nord edit`".to_string(),
+        None => String::new(),
     }
 }
 
-/// List the fields (`--fields`, `None`) or apply every `--set`, returning how many
-/// fields moved.
-pub(crate) fn stage(
-    ui: &Ui,
-    args: &EditArgs,
-    file: &mut dyn Registry,
-) -> Result<Option<usize>, String> {
-    if args.fields {
-        if !args.set.is_empty() {
-            return Err("--fields lists and writes nothing; drop it to apply --set".into());
+/// The generated registry as one more set of [`Fields`], so a declared field and an
+/// accessor-backed one are staged, listed and reported by the same code.
+pub(crate) struct Registered<'a>(pub &'a mut dyn Registry);
+
+impl Registered<'_> {
+    fn row(f: &Field) -> Row {
+        // A field too wide to enumerate lists no values; its stored bits are the
+        // spelling, and the current one is already in the value column.
+        let accepts = match (f.spec.legal)() {
+            v if v.is_empty() => "stored bits, decimal or 0x…".to_string(),
+            v if v.len() > 12 => format!("{} .. {}", v.first().unwrap(), v.last().unwrap()),
+            v => v.join(", "),
+        };
+        Row {
+            path: f.path.clone(),
+            value: f.value.clone(),
+            accepts,
         }
-        list_fields(ui, file);
-        return Ok(None);
     }
-    if args.set.is_empty() {
-        return Err("nothing to do: pass --set PATH=VALUE, or --fields to see what exists".into());
+}
+
+impl Fields for Registered<'_> {
+    fn rows(&self) -> Result<Vec<Row>, String> {
+        Ok(self.0.fields().iter().map(Registered::row).collect())
     }
 
-    // Every change lands before anything is written, so a bad path or an out-of-range
-    // value cannot leave a half-edited program behind.
-    let before = file.fields();
-    for assignment in &args.set {
-        let (path, value) = assignment
-            .split_once('=')
-            .ok_or_else(|| format!("expected PATH=VALUE, got {assignment:?}"))?;
-        file.set_field(path.trim(), value)
-            .map_err(|e| e.to_string())?;
+    fn set(&mut self, path: &str, value: &str) -> Result<(), String> {
+        self.0.set_field(path, value).map_err(|e| e.to_string())
     }
-    warn_on_sticky_pairs(ui, &args.set);
 
-    let after = file.fields();
-    Ok(Some(report_changes(ui, &before, &after)))
+    fn list(&self, ui: &Ui) -> Result<(), String> {
+        ui.out(format!(
+            "{:<PATH_WIDTH$} {:<12} {:<14} {:<28} {}",
+            "path", "bits", "control", "value", "accepts"
+        ));
+        for f in self.0.fields() {
+            let row = Registered::row(&f);
+            let value = if f.value == f.display {
+                row.value
+            } else {
+                format!("{} {}", f.value, ui.dim(&f.display))
+            };
+            ui.out(format!(
+                "{:<PATH_WIDTH$} {:<12} {:<14} {value:<28} {}",
+                row.path,
+                f.spec.placement,
+                ui.dim(control(f.spec.control)),
+                row.accepts,
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -219,7 +290,7 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 const STICKY_PAIRS: [(&str, &str); 1] =
     [("center_panel.transpose", "center_panel.transpose_enabled")];
 
-fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
+pub(crate) fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
     let paths: Vec<&str> = sets
         .iter()
         .filter_map(|s| s.split_once('=').map(|(p, _)| p.trim()))
@@ -232,26 +303,6 @@ fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
             ));
         }
     }
-}
-
-/// Echo every field whose value moved, before and after.
-///
-/// Display lives on the value, so this prints exactly what `nord inspect` would.
-fn report_changes(ui: &Ui, before: &[Field], after: &[Field]) -> usize {
-    let mut changed = 0;
-    for (b, a) in before.iter().zip(after) {
-        if b.display == a.display {
-            continue;
-        }
-        changed += 1;
-        ui.out(format!(
-            "{:<40} {} -> {}",
-            a.path,
-            b.display,
-            ui.bold(&a.display),
-        ));
-    }
-    changed
 }
 
 /// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
@@ -332,33 +383,6 @@ fn control(kind: ControlKind) -> String {
     }
 }
 
-fn list_fields(ui: &Ui, file: &dyn Registry) {
-    ui.out(format!(
-        "{:<40} {:<12} {:<14} {:<28} {}",
-        "path", "bits", "control", "value", "accepts"
-    ));
-    for f in file.fields() {
-        // A field too wide to enumerate lists no values; its stored bits are the
-        // spelling, and the current one is already in the value column.
-        let accepts = match (f.spec.legal)() {
-            v if v.is_empty() => "stored bits, decimal or 0x…".to_string(),
-            v if v.len() > 12 => format!("{} .. {}", v.first().unwrap(), v.last().unwrap()),
-            v => v.join(", "),
-        };
-        let value = if f.value == f.display {
-            f.value.clone()
-        } else {
-            format!("{} {}", f.value, ui.dim(&f.display))
-        };
-        ui.out(format!(
-            "{:<40} {:<12} {:<14} {value:<28} {accepts}",
-            f.path,
-            f.spec.placement,
-            ui.dim(control(f.spec.control)),
-        ));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,41 +391,75 @@ mod tests {
     /// format with no noun, to the file verb — never to a command that does not exist.
     #[test]
     fn a_mismatched_target_steers_to_the_command_that_edits_it() {
-        let live = Entity::Live(Live::Electro5(ne5::live::new((0, 0).try_into().unwrap())));
-        let err = mismatch(&live, ObjectClass::Program);
+        let mut live = Entity::Live(Live::Electro5(ne5::live::new((0, 0).try_into().unwrap())));
+        let err = mismatch(&mut live, ObjectClass::Program);
         assert!(err.contains("nord live edit"), "{err}");
 
-        let program = Entity::Program(Program::Electro5(ne5::program::new(
+        let mut program = Entity::Program(Program::Electro5(ne5::program::new(
             (0, 0).try_into().unwrap(),
         )));
-        let err = mismatch(&program, ObjectClass::Live);
+        let err = mismatch(&mut program, ObjectClass::Live);
         assert!(err.contains("nord program edit"), "{err}");
 
-        let settings = Entity::Settings(Settings::Electro5(ne5::settings::new()));
-        let err = mismatch(&settings, ObjectClass::Program);
+        let mut settings = Entity::Settings(Settings::Electro5(ne5::settings::new()));
+        let err = mismatch(&mut settings, ObjectClass::Program);
         assert!(err.contains("nord settings edit"), "{err}");
 
-        let song = Entity::Song(Song::Electro5(ne5::song::new(
+        let mut song = Entity::Song(Song::Electro5(ne5::song::new(
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
         )));
-        let err = mismatch(&song, ObjectClass::Program);
+        let err = mismatch(&mut song, ObjectClass::Program);
         assert!(err.contains("nord setlist edit"), "{err}");
 
         // A registry body with no noun of its own goes to the file verb.
-        let stage = nord_format::from_stream(&mut std::io::Cursor::new(
+        let mut stage = nord_format::from_stream(&mut std::io::Cursor::new(
             crate::file_edit::tests::stage3_program(),
         ))
         .unwrap();
-        let err = mismatch(&stage, ObjectClass::Program);
+        let err = mismatch(&mut stage, ObjectClass::Program);
         assert!(err.contains("nord edit"), "{err}");
 
         // A piano library has no edit anywhere, so no steer may be invented.
-        assert_eq!(
-            steer(&nord_format::from_stream(&mut std::io::Cursor::new(pipe_library())).unwrap()),
-            "",
+        let mut pipe = nord_format::from_stream(&mut std::io::Cursor::new(pipe_library())).unwrap();
+        assert_eq!(steer(&mut pipe), "");
+    }
+
+    /// Every editable shape answers, and the stubs say no — the one dispatch the
+    /// file verb, the noun edits and the steers all rest on.
+    #[test]
+    fn editable_knows_every_shape() {
+        let mut stage3 = nord_format::from_stream(&mut std::io::Cursor::new(
+            crate::file_edit::tests::stage3_program(),
+        ))
+        .unwrap();
+        assert!(editable(&mut stage3));
+
+        let mut song = Entity::Song(Song::Electro5(ne5::song::new(
+            (0, 0).try_into().unwrap(),
+            ne5::song::DEFAULT_VERSION,
+            [(0, 0).try_into().unwrap(); 4],
+        )));
+        assert!(editable(&mut song));
+
+        let mut project = Entity::SampleProject(
+            nord_format::formats::nsmpproj::Project::new(
+                "X",
+                &[nord_format::formats::nsmpproj::NewZone {
+                    path: "x.wav".into(),
+                    sample_rate: 44100,
+                    frames: 44100,
+                    root_key: 60,
+                }],
+                0,
+            )
+            .unwrap(),
         );
+        assert!(editable(&mut project));
+
+        let mut stub = nord_format::from_stream(&mut std::io::Cursor::new(pipe_library())).unwrap();
+        assert!(!editable(&mut stub));
     }
 
     fn scratch(what: &str) -> std::path::PathBuf {

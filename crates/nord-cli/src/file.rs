@@ -27,15 +27,25 @@ pub(crate) fn tag(class: ObjectClass) -> Option<&'static str> {
     }
 }
 
+/// Every class a noun addresses, so a tag reads back to the command that takes it.
+const NAMED: [ObjectClass; 6] = [
+    ObjectClass::Piano,
+    ObjectClass::Sample,
+    ObjectClass::Program,
+    ObjectClass::SetList,
+    ObjectClass::Live,
+    ObjectClass::Settings,
+];
+
 /// The noun that reads a tag's files, for steering a mismatch to the right command.
-fn noun(format: &str) -> Option<&'static str> {
-    match format {
-        "ne5p" => Some("nord program"),
-        "ne5t" => Some("nord setlist"),
-        "ne5l" => Some("nord live"),
-        "nsmp" => Some("nord sample"),
-        _ => None,
-    }
+///
+/// [`tag`] read backwards: a class that names its files steers to its own noun, so a
+/// format cannot be claimed by a command that does not read it.
+pub(crate) fn noun(format: &str) -> Option<String> {
+    NAMED
+        .into_iter()
+        .find(|&class| tag(class) == Some(format))
+        .map(crate::slot::noun)
 }
 
 /// Refuse a file whose format tag belongs to another class's noun: summarizing a set
@@ -44,7 +54,7 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     match tag(class) {
         Some(want) if want != format => {
             let steer = match noun(format) {
-                Some(n) => format!(" — try `{n}`"),
+                Some(n) => format!(" — try `nord {n}`"),
                 None => String::new(),
             };
             Err(format!(
