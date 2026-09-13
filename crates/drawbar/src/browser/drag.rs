@@ -367,15 +367,13 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
         (Item::Slot { .. }, Onto::Group(_)) => {
             Landing::No("copy it to this computer first, then drag it into the folder")
         }
-        // The kind first: a folder this app cannot name is the home of no kind, so the
-        // refusal it earns says which folder it is rather than talking about pianos.
+        // A folder this app cannot name is the home of no kind, so the kind check is
+        // also what keeps a drop out of one.
         (Item::Local(_), Onto::Slot { class, .. }) => {
             if carried.kind.home() != Some(class) {
                 Landing::No("that folder holds a different kind of thing")
             } else if !carried.fits {
                 Landing::No("the instrument does not take files of that format")
-            } else if read_only(class) {
-                Landing::No("pianos are installed on the instrument, not moved into it")
             } else {
                 Landing::Send
             }
@@ -391,7 +389,7 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
             if from != class {
                 Landing::No("things only move within their own folder")
             } else if read_only(class) {
-                Landing::No("the instrument arranges this folder itself")
+                Landing::No("nothing here knows what that folder holds")
             } else if was == at {
                 Landing::No("it is already there")
             } else {
@@ -505,16 +503,17 @@ mod tests {
         }
     }
 
-    /// A piano is a library the instrument installs and indexes for itself, and it is
-    /// the only folder a drop cannot land in. The buffer classes take one.
+    /// Every folder this app can name takes a drop — the two libraries and the buffer
+    /// classes alike. A partition it cannot name is the home of no kind, so nothing
+    /// carries into one.
     #[test]
-    fn only_the_piano_folder_refuses_a_drop() {
-        assert!(!landing(
-            &local(Kind::from_class(ObjectClass::Piano)),
-            onto(ObjectClass::Piano, 0, 0)
-        )
-        .allowed());
-        for class in [ObjectClass::Live, ObjectClass::Settings] {
+    fn a_drop_lands_in_every_folder_this_app_can_name() {
+        for class in [
+            ObjectClass::Piano,
+            ObjectClass::Sample,
+            ObjectClass::Live,
+            ObjectClass::Settings,
+        ] {
             let kind = Kind::from_class(class);
             assert!(
                 landing(&local(kind), onto(class, 0, 0)).allowed(),
@@ -522,6 +521,11 @@ mod tests {
                 folder(class)
             );
         }
+        assert!(!landing(
+            &local(Kind::from_class(ObjectClass::Piano)),
+            onto(ObjectClass::Unknown(9), 0, 0)
+        )
+        .allowed());
     }
 
     /// Slot to slot is the instrument's swap, and only inside one folder.
@@ -559,8 +563,8 @@ mod tests {
         let cases = [
             landing(&local(Kind::Program), Onto::Computer),
             landing(
-                &local(Kind::from_class(ObjectClass::Piano)),
-                onto(ObjectClass::Piano, 0, 0),
+                &slot(ObjectClass::Unknown(9), 0, 0),
+                onto(ObjectClass::Unknown(9), 1, 0),
             ),
             landing(&local(Kind::Other), onto(ObjectClass::Program, 0, 0)),
             landing(
