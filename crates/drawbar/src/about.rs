@@ -14,8 +14,8 @@ mod crates;
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
 
-const WHAT: &str = "A black-box Clavia / Nord reverse-engineering project in Rust that aims to be \
-                    portable, complete, and well-tested.";
+const WHAT: &str = "Your Nord's sounds, in a window: browse what is on your computer and on your \
+                    instrument, edit programs, samples and pianos, and send them back.";
 
 /// What one licence covers in the app, and its terms.
 struct Notice {
