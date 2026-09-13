@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::act::{Act, Bulk};
+use super::act::{will_write, Act, Bulk};
 use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
@@ -808,7 +808,9 @@ impl Browser {
             .into_iter()
             .filter_map(|class| device.state.scan.progress(class))
             .any(|progress| progress.running);
-        let waiting = queue.len();
+        // The label states what the batch would do, so it counts what the batch takes:
+        // an entry this instrument has already refused is not one of them.
+        let waiting = will_write(queue).count();
         // What this row stands for on this computer: everything that came off a slot of
         // the instrument it names.
         let off_it = Browser::standing_for(workspace, |entity| entity.spot().is_some());
