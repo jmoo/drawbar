@@ -163,8 +163,12 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
             None => unreadable += 1,
         }
     }
-    let count = restored.len();
-    workspace.restore(restored, next_id, log);
+    let read = restored.len();
+    // A line the list itself refuses — an id with no room for the next, or one already
+    // standing — is as unreadable as one that would not parse.
+    let refused = workspace.restore(restored, next_id, log);
+    let count = read.saturating_sub(refused);
+    let unreadable = unreadable + refused;
     if unreadable > 0 {
         log.warn(format!("{unreadable} saved line(s) did not read"));
     }
@@ -316,6 +320,15 @@ mod tests {
         for name in ["plain", "with\ttab", "with\nnewline", "back\\slash", "\\t"] {
             assert_eq!(unescape(&escape(name)), name);
         }
+    }
+
+    /// The bytes of a program a store line can carry, made the way the app makes one.
+    fn a_program() -> Vec<u8> {
+        let (mut workspace, mut log) = workspace();
+        let id = workspace
+            .create(crate::workspace::Fresh::Program, &mut log)
+            .unwrap();
+        workspace.get(id).unwrap().bytes.clone()
     }
 
     fn workspace() -> (Workspace, Log) {
@@ -511,6 +524,52 @@ mod tests {
         // A version-1 line is four fields, and a fifth is a line this is not.
         assert!(entry("7\tfresh\tname\tZm9v", Shape::Four).is_some());
         assert!(entry("7\tfresh\tname\tZm9v\tYmFy", Shape::Four).is_none());
+    }
+
+    /// The last id there is leaves no room for the next one, so the line is refused
+    /// rather than taken — a store says what the next id is, and there would not be one.
+    #[test]
+    fn a_line_whose_id_leaves_no_room_for_the_next_is_refused() {
+        let mut store = Fake::default();
+        eframe::Storage::set_string(
+            &mut store,
+            KEY,
+            format!(
+                "{VERSION}\n1\n{}\tfresh\tlast.ne5p\t{}\n",
+                u64::MAX,
+                BASE64_STANDARD.encode(a_program()),
+            ),
+        );
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        assert!(after.entities().is_empty());
+        assert!(after.get(u64::MAX).is_none());
+        assert!(log.iter().any(|entry| entry.text.contains("did not read")));
+    }
+
+    /// An id names one asset. Two lines claiming the same one are two assets nothing
+    /// could tell apart afterwards — a tab, a send or a removal would reach whichever
+    /// came first — so the second is refused.
+    #[test]
+    fn a_second_line_under_an_id_already_restored_is_refused() {
+        let line = format!(
+            "7\tfresh\tone.ne5p\t{}\n",
+            BASE64_STANDARD.encode(a_program()),
+        );
+        let mut store = Fake::default();
+        eframe::Storage::set_string(&mut store, KEY, format!("{VERSION}\n8\n{line}{line}"));
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        assert_eq!(after.entities().len(), 1);
+        assert_eq!(after.get(7).expect("the first line").name, "one.ne5p");
+        assert!(log.iter().any(|entry| entry.text.contains("did not read")));
+        assert!(
+            log.status().1.contains("1 sound is back"),
+            "{}",
+            log.status().1
+        );
     }
 
     /// A list the version before this one wrote is read rather than thrown away: its

@@ -1152,15 +1152,18 @@ impl Workspace {
         self.next_id
     }
 
-    /// Put back what a previous session held.
+    /// Put back what a previous session held, answering with how many of them were
+    /// refused.
     ///
     /// Every asset is decoded and re-checked on the way in: bytes out of a store have
     /// been sitting somewhere this app does not control and get no more trust than bytes
-    /// off a disk.
+    /// off a disk. An id is refused on the same terms: one that leaves no room for the
+    /// next, and one already standing in the list, are each a line nothing can restore.
     ///
     /// ⚠️ Restore decodes and re-encodes every asset before the first wasm frame. The
     /// tab cannot yield while checking up to the store budget.
-    pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) {
+    pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
+        let mut refused = 0;
         for Saved {
             id,
             name,
@@ -1169,6 +1172,14 @@ impl Workspace {
             unsaved,
         } in saved
         {
+            let Some(next) = id.checked_add(1) else {
+                refused += 1;
+                continue;
+            };
+            if self.entities.iter().any(|e| e.id == id) {
+                refused += 1;
+                continue;
+            }
             let stamp = self.stamp();
             let baseline = Baseline::read(saved);
             let bytes = unsaved.unwrap_or_else(|| baseline.bytes.clone());
@@ -1179,7 +1190,7 @@ impl Workspace {
             if let Some(e) = &entity.parse_error {
                 log.warn(format!("{}: {e}", entity.name));
             }
-            self.next_id = self.next_id.max(id + 1);
+            self.next_id = self.next_id.max(next);
             self.entities.push(entity);
         }
         if let Some(next) = next_id {
@@ -1187,6 +1198,7 @@ impl Workspace {
         }
         self.selected = self.entities.last().map(|e| e.id);
         self.revision += 1;
+        refused
     }
 
     /// Make one of the fresh defaults and add it to the list.
