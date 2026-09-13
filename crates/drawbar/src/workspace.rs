@@ -1098,14 +1098,16 @@ impl Workspace {
     /// them, and answer with what the re-encode check made of them.
     ///
     /// ⚠️ The saved baseline is not one of those things: it moves only when the asset is
-    /// saved, so an edit and the revert of it are measured against the same bytes.
+    /// saved, so an edit and the revert of it are measured against the same bytes. Nor is
+    /// the link, or the write this app made — both are evidence about a slot, which an
+    /// edit here says nothing about.
     fn respell(&mut self, id: u64, bytes: Vec<u8>) -> Option<VerifyState> {
         if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
             return None;
         }
         let stamp = self.stamp();
         let entity = self.entities.iter_mut().find(|e| e.id == id)?;
-        let (kept, link) = (entity.kept, entity.link);
+        let (kept, link, wrote) = (entity.kept, entity.link, entity.wrote);
         let saved = std::mem::replace(
             &mut entity.saved,
             Baseline {
@@ -1120,6 +1122,7 @@ impl Workspace {
             kept,
             link,
             saved,
+            wrote,
             ..replaced
         };
         Some(verify)
@@ -1489,6 +1492,35 @@ mod tests {
         );
         // The detail of what arrived is still recorded, view or not.
         assert!(log.iter().any(|entry| entry.text.contains("verified")));
+    }
+
+    /// ⚠️ A write is what this app knows about a slot without reading it back — the
+    /// whole of the Agrees mark for a class whose slots report no checksum. An edit and
+    /// the revert of it leave the slot alone, so they must leave that evidence alone.
+    #[test]
+    fn an_edit_and_a_revert_leave_the_write_this_app_made() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let at = Location { bank: 6, slot: 3 };
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let sent = workspace.get(id).unwrap().bytes.clone();
+        workspace.landed(id, ObjectClass::Program, at, sent.clone());
+        let wrote = |workspace: &Workspace| {
+            workspace
+                .get(id)
+                .unwrap()
+                .wrote
+                .map(|held| (held.class, held.at, held.crc32))
+        };
+        let landed = wrote(&workspace).expect("a write this app made");
+
+        let (_, edited) =
+            crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        assert_eq!(wrote(&workspace), Some(landed), "an edit is not a write");
+
+        workspace.revert(id, &mut log);
+        assert_eq!(wrote(&workspace), Some(landed), "and neither is a revert");
     }
 
     /// A view outlives nothing: once no tab holds it, it is gone. What was kept stays
