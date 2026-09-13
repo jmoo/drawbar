@@ -9,3 +9,10 @@ conversions both ways, preserving unclaimed bits verbatim through a re-encode.
 internals (`crate::bits`, `crate::cbin`, …), so the macro only expands correctly
 inside that crate; it is published only because crates.io requires it. Depend on
 `nord-format`, which pins the exact matching version.
+
+## Disclaimer
+
+Not affiliated with, authorized, or endorsed by Clavia DMI AB. "Nord", "Clavia",
+and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
+hardware these formats come from. All reverse engineering is of files produced by
+Nord hardware, for interoperability.
