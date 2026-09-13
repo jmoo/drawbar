@@ -50,8 +50,8 @@ pub fn entries(entity: &Entity) -> Option<usize> {
 fn set(file: &mut Cbin<Song>, path: &str, value: &str) -> Result<(), String> {
     let slot = path
         .strip_prefix("slot")
-        .and_then(|n| n.parse::<u16>().ok())
-        .filter(|&n| (1..=song::PROGRAM_COUNT as u16).contains(&n))
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|n| song::Slot::at(n.checked_sub(1)?))
         .ok_or_else(|| format!("unknown field {path:?}"))?;
     let (bank, at) = value
         .split_once(':')
@@ -67,7 +67,7 @@ fn set(file: &mut Cbin<Song>, path: &str, value: &str) -> Result<(), String> {
     let target: program::Location = (bank - 1, at - 1)
         .try_into()
         .map_err(|e| format!("{path}: {e}"))?;
-    file.set(slot - 1, target);
+    file.set(slot, target);
     Ok(())
 }
 
@@ -201,9 +201,10 @@ impl Row {
         saved: Option<&Cbin<Song>>,
         seen: &Catalogue<'_>,
     ) -> Row {
-        let at = panel(file.get(index as u16));
+        let slot = song::Slot::at(index).expect("a set list entry");
+        let at = panel(file.get(slot));
         let was = saved
-            .map(|saved| panel(saved.get(index as u16)))
+            .map(|saved| panel(saved.get(slot)))
             .filter(|held| *held != at);
         let (name, open, stands) = resolve(at, seen);
         Row {
@@ -815,7 +816,7 @@ pub fn stored(ui: &mut egui::Ui, entity: &Entity) {
         .iter()
         .enumerate()
         .map(|(index, path)| {
-            let at = file.get(index as u16);
+            let at = file.get(song::Slot::at(index).expect("a set list entry"));
             Fact {
                 key: path,
                 value: format!("{} · {:#05x}", shown(panel(at)), at.as_u16()),
@@ -860,7 +861,7 @@ mod tests {
         let out = apply(&bytes, &[("slot2".into(), "3:14".into())]).unwrap();
         let entity = nord_format::from_stream(&mut std::io::Cursor::new(&out)).unwrap();
         let file = song(&entity).unwrap();
-        assert_eq!(file.get(1).inner(), (2, 13));
+        assert_eq!(file.get(song::Slot::B).inner(), (2, 13));
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), out);
     }
 

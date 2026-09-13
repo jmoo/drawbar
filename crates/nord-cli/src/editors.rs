@@ -205,11 +205,13 @@ pub struct SongEditor<'a>(pub &'a mut Cbin<Song>);
 
 impl Fields for SongEditor<'_> {
     fn rows(&self) -> Result<Vec<Row>, String> {
-        Ok((0..song::PROGRAM_COUNT as u16)
-            .map(|slot| {
+        Ok(song::Slot::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(n, slot)| {
                 let (bank, at) = self.0.get(slot).inner();
                 Row {
-                    path: format!("slot{}", slot + 1),
+                    path: format!("slot{}", n + 1),
                     value: format!("{}:{}", bank + 1, at + 1),
                     accepts: format!(
                         "a program slot, BANK:SLOT (1:1 .. {}:{})",
@@ -223,7 +225,7 @@ impl Fields for SongEditor<'_> {
 
     fn set(&mut self, path: &str, value: &str) -> Result<(), String> {
         let slot = indexed(path, "slot")
-            .filter(|&n| n as usize <= song::PROGRAM_COUNT)
+            .and_then(|n| song::Slot::at(usize::try_from(n - 1).ok()?))
             .ok_or_else(|| unknown(path))?;
         let at = crate::slot::parse(value)?;
         let in_range = |n: u32| {
@@ -238,7 +240,7 @@ impl Fields for SongEditor<'_> {
         let target: program::Location = (in_range(at.bank)?, in_range(at.slot)?)
             .try_into()
             .map_err(|e| format!("{path}: {e}"))?;
-        self.0.set(slot as u16 - 1, target);
+        self.0.set(slot, target);
         Ok(())
     }
 }
@@ -701,9 +703,10 @@ mod tests {
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
-        );
+        )
+        .unwrap();
         SongEditor(&mut song).set("slot2", "3:14").unwrap();
-        assert_eq!(song.get(1).inner(), (2, 13));
+        assert_eq!(song.get(song::Slot::B).inner(), (2, 13));
         let rows = SongEditor(&mut song).rows().unwrap();
         assert_eq!(rows[1].path, "slot2");
         assert_eq!(rows[1].value, "3:14");

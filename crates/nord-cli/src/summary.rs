@@ -648,12 +648,12 @@ pub fn print(ui: &Ui, entity: &Entity) {
             ui.out(field(ui, 2, "type", "Electro 5 song / set (ne5t)"));
             ui.out(field(ui, 2, "location", shown_at(bank, slot)));
             section(ui, "Programs");
-            for slot in 0..ne5::song::PROGRAM_COUNT as u16 {
+            for (n, slot) in ne5::song::Slot::ALL.into_iter().enumerate() {
                 let p = s.get(slot);
                 ui.out(field(
                     ui,
                     4,
-                    &format!("slot {}", slot + 1),
+                    &format!("slot {}", n + 1),
                     shown_at(p.x(), p.y()),
                 ));
             }

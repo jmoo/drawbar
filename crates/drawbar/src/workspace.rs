@@ -568,11 +568,14 @@ impl Fresh {
             ))),
             // A set list is four pointers and nothing else, so the only starting point
             // there is one is the first four programs.
-            Fresh::SetList => Entity::Song(Song::Electro5(ne5::song::new(
-                (0, 0).try_into().map_err(|e| format!("{e}"))?,
-                ne5::song::DEFAULT_VERSION,
-                [at(0)?, at(1)?, at(2)?, at(3)?],
-            ))),
+            Fresh::SetList => Entity::Song(Song::Electro5(
+                ne5::song::new(
+                    (0, 0).try_into().map_err(|e| format!("{e}"))?,
+                    ne5::song::DEFAULT_VERSION,
+                    [at(0)?, at(1)?, at(2)?, at(3)?],
+                )
+                .map_err(|e| format!("{e}"))?,
+            )),
             Fresh::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
             Fresh::Stage2Program => zeroed!(
                 ns2::Program,

@@ -162,11 +162,14 @@ fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
             (0, 0).try_into().map_err(first)?,
         ))),
         ObjectClass::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
-        ObjectClass::SetList => Entity::Song(Song::Electro5(ne5::song::new(
-            (0, 0).try_into().map_err(first)?,
-            ne5::song::DEFAULT_VERSION,
-            [(0, 0).try_into().map_err(first)?; 4],
-        ))),
+        ObjectClass::SetList => Entity::Song(Song::Electro5(
+            ne5::song::new(
+                (0, 0).try_into().map_err(first)?,
+                ne5::song::DEFAULT_VERSION,
+                [(0, 0).try_into().map_err(first)?; 4],
+            )
+            .map_err(|e| e.to_string())?,
+        )),
         other => return Err(format!("edit does not exist for {}", other.label())),
     };
     nord_format::to_bytes(&entity).map_err(|e| e.to_string())
@@ -435,11 +438,14 @@ pub(crate) mod tests {
         let err = mismatch(&mut settings, ObjectClass::Program);
         assert!(err.contains("nord settings edit"), "{err}");
 
-        let mut song = Entity::Song(Song::Electro5(ne5::song::new(
-            (0, 0).try_into().unwrap(),
-            ne5::song::DEFAULT_VERSION,
-            [(0, 0).try_into().unwrap(); 4],
-        )));
+        let mut song = Entity::Song(Song::Electro5(
+            ne5::song::new(
+                (0, 0).try_into().unwrap(),
+                ne5::song::DEFAULT_VERSION,
+                [(0, 0).try_into().unwrap(); 4],
+            )
+            .unwrap(),
+        ));
         let err = mismatch(&mut song, ObjectClass::Program);
         assert!(err.contains("nord setlist edit"), "{err}");
 

@@ -677,7 +677,8 @@ mod registry_tests {
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
-        );
+        )
+        .unwrap();
         assert!(Entity::Song(Song::Electro5(song)).registry().is_none());
     }
 }

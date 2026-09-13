@@ -52,27 +52,50 @@ pub struct Song {
     pub d: program::Location,
 }
 
+/// Which of the four programs a song plays — the entries in panel order.
+///
+/// A song holds exactly these four, so naming one is total: [`Song::get`] and
+/// [`Song::set`] cannot be asked for a fifth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl Slot {
+    /// The four entries in panel order.
+    pub const ALL: [Slot; PROGRAM_COUNT] = [Slot::A, Slot::B, Slot::C, Slot::D];
+
+    /// The entry at a zero-based index, or `None` past the fourth.
+    pub fn at(index: usize) -> Option<Slot> {
+        Self::ALL.get(index).copied()
+    }
+}
+
 impl Song {
     /// The four programs the song plays, in panel order.
     pub fn programs(&self) -> [program::Location; PROGRAM_COUNT] {
         [self.a, self.b, self.c, self.d]
     }
 
-    pub fn get(&self, slot: u16) -> program::Location {
-        match self.programs().get(slot as usize) {
-            Some(at) => *at,
-            None => panic!("no slot {slot}: a song holds {PROGRAM_COUNT} programs"),
+    pub fn get(&self, slot: Slot) -> program::Location {
+        match slot {
+            Slot::A => self.a,
+            Slot::B => self.b,
+            Slot::C => self.c,
+            Slot::D => self.d,
         }
     }
 
-    pub fn set(&mut self, slot: u16, location: program::Location) {
-        match slot {
-            0 => self.a = location,
-            1 => self.b = location,
-            2 => self.c = location,
-            3 => self.d = location,
-            _ => panic!("no slot {slot}: a song holds {PROGRAM_COUNT} programs"),
-        }
+    pub fn set(&mut self, slot: Slot, location: program::Location) {
+        *match slot {
+            Slot::A => &mut self.a,
+            Slot::B => &mut self.b,
+            Slot::C => &mut self.c,
+            Slot::D => &mut self.d,
+        } = location;
     }
 }
 
@@ -84,24 +107,33 @@ pub fn location(file: &Cbin<Song>) -> Result<Location, Error> {
 /// A song at `location` playing `programs`, written as schema `version`.
 ///
 /// ⚠️ The version is the caller's to state: the header and the body's echo must agree,
-/// and they only do because both are set from this one argument.
+/// and they only do because both are set from this one argument. A version
+/// [`read_from`] would refuse is refused here too, rather than written and then
+/// unreadable.
 pub fn new(
     location: Location,
     version: u32,
     programs: [program::Location; PROGRAM_COUNT],
-) -> Cbin<Song> {
+) -> Result<Cbin<Song>, Error> {
+    program::known_version(FORMAT, version, KNOWN_VERSIONS)?;
+    let echo = u16::try_from(version).map_err(|_| {
+        crate::error::ParseError::OutOfBounds {
+            value: format!("version {version}"),
+            bound: "a version the body's 16-bit echo can hold".into(),
+        }
+    })?;
     let [a, b, c, d] = programs;
-    Cbin {
+    Ok(Cbin {
         header: Header::new(FORMAT, location.inner(), version),
         body: Song {
             raw: [0; BODY_LEN],
-            version: version as u16,
+            version: echo,
             a,
             b,
             c,
             d,
         },
-    }
+    })
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Song>, Error> {
@@ -126,39 +158,53 @@ mod tests {
     use crate::error::Error;
     use std::io::Cursor;
 
+    fn song_of(programs: [(u16, u16); PROGRAM_COUNT]) -> Result<Cbin<Song>, Error> {
+        let mut at = [program::Location::default(); PROGRAM_COUNT];
+        for (slot, pair) in at.iter_mut().zip(programs) {
+            *slot = pair.try_into()?;
+        }
+        new((0, 1).try_into()?, DEFAULT_VERSION, at)
+    }
+
     #[test]
-    fn read_write_new_song() -> Result<(), Error> {
-        let song = new(
-            (0, 1).try_into()?,
-            DEFAULT_VERSION,
-            [
-                (1, 2).try_into()?,
-                (2, 3).try_into()?,
-                (3, 4).try_into()?,
-                (4, 5).try_into()?,
-            ],
-        );
+    fn a_songs_four_programs_survive_a_round_trip() -> Result<(), Error> {
+        let song = song_of([(1, 2), (2, 3), (3, 4), (4, 5)])?;
 
-        // Assert song was created with correct values
         assert_eq!(song.location(), (0, 1));
-        assert_eq!(song.get(0), (1, 2));
-        assert_eq!(song.get(1), (2, 3));
-        assert_eq!(song.get(2), (3, 4));
-        assert_eq!(song.get(3), (4, 5));
+        for (slot, want) in Slot::ALL.into_iter().zip([(1, 2), (2, 3), (3, 4), (4, 5)]) {
+            assert_eq!(song.get(slot), want, "{slot:?}");
+        }
 
-        // Read/Write song to result
-        let mut write_result = Vec::new();
-        song.write_to(&mut Cursor::new(&mut write_result)).unwrap();
+        let mut bytes = Vec::new();
+        song.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
 
-        let result = read_from(&mut Cursor::new(&mut write_result)).unwrap();
+        assert_eq!(song.location(), back.location());
+        for slot in Slot::ALL {
+            assert_eq!(song.get(slot), back.get(slot), "{slot:?}");
+        }
 
-        // Assert those values are the same after writing and reading
-        assert_eq!(song.location(), result.location());
-        assert_eq!(song.get(0), result.get(0));
-        assert_eq!(song.get(1), result.get(1));
-        assert_eq!(song.get(2), result.get(2));
-        assert_eq!(song.get(3), result.get(3));
+        Ok(())
+    }
 
+    /// The body echoes the header's version, and both come from the one argument — so a
+    /// version the read would refuse cannot be written in the first place.
+    #[test]
+    fn a_version_no_read_accepts_is_not_written() -> Result<(), Error> {
+        let at = [program::Location::default(); PROGRAM_COUNT];
+        for version in KNOWN_VERSIONS {
+            assert!(new((0, 0).try_into()?, *version, at).is_ok(), "v{version}");
+        }
+        let err = new((0, 0).try_into()?, 2, at).expect_err("version 2 must not be written");
+        assert!(
+            matches!(
+                err,
+                Error::Parse(crate::error::ParseError::UnsupportedVersion { version: 2, .. })
+            ),
+            "refused for the wrong reason: {err}",
+        );
+        // The echo is 16 bits wide, and `as` would have written 0 for this one.
+        assert!(new((0, 0).try_into()?, 0x1_0000, at).is_err());
         Ok(())
     }
 
@@ -180,7 +226,7 @@ mod tests {
                     (3, 4).try_into()?,
                     (4, 5).try_into()?,
                 ],
-            );
+            )?;
 
             let mut bytes = Vec::new();
             song.write_to(&mut Cursor::new(&mut bytes)).unwrap();
@@ -201,47 +247,44 @@ mod tests {
 
             let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
             assert_eq!(back.header.version, version);
-            assert_eq!(back.get(0), song.get(0));
+            assert_eq!(back.get(Slot::A), song.get(Slot::A));
         }
         Ok(())
     }
 
+    /// Writing one entry moves that entry and leaves the other three where they were.
     #[test]
-    fn update_song_program() -> Result<(), Error> {
-        let mut song = new(
-            (0, 1).try_into()?,
-            DEFAULT_VERSION,
-            [
-                (1, 2).try_into()?,
-                (2, 3).try_into()?,
-                (3, 4).try_into()?,
-                (4, 5).try_into()?,
-            ],
-        );
+    fn setting_one_entry_leaves_the_others_alone() -> Result<(), Error> {
+        let mut song = song_of([(1, 2), (2, 3), (3, 4), (4, 5)])?;
 
-        // Update program 1
-        song.set(1, (5, 20).try_into()?);
+        song.set(Slot::B, (5, 20).try_into()?);
 
-        // Assert song was updated with correct values
         assert_eq!(song.location(), (0, 1));
-        assert_eq!(song.get(0), (1, 2));
-        assert_eq!(song.get(1), (5, 20));
-        assert_eq!(song.get(2), (3, 4));
-        assert_eq!(song.get(3), (4, 5));
+        for (slot, want) in Slot::ALL
+            .into_iter()
+            .zip([(1, 2), (5, 20), (3, 4), (4, 5)])
+        {
+            assert_eq!(song.get(slot), want, "{slot:?}");
+        }
 
-        // Read/Write song to result
-        let mut write_result = Vec::new();
-        song.write_to(&mut Cursor::new(&mut write_result)).unwrap();
+        let mut bytes = Vec::new();
+        song.write_to(&mut Cursor::new(&mut bytes)).unwrap();
+        let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
 
-        let result = read_from(&mut Cursor::new(&mut write_result)).unwrap();
-
-        // Assert those values are the same after writing and reading
-        assert_eq!(song.location(), result.location());
-        assert_eq!(song.get(0), result.get(0));
-        assert_eq!(song.get(1), result.get(1));
-        assert_eq!(song.get(2), result.get(2));
-        assert_eq!(song.get(3), result.get(3));
+        assert_eq!(song.location(), back.location());
+        for slot in Slot::ALL {
+            assert_eq!(song.get(slot), back.get(slot), "{slot:?}");
+        }
 
         Ok(())
+    }
+
+    /// Four entries, and the index that names them stops there.
+    #[test]
+    fn a_song_holds_four_entries_and_no_fifth() {
+        assert_eq!(Slot::ALL.len(), PROGRAM_COUNT);
+        assert_eq!(Slot::at(0), Some(Slot::A));
+        assert_eq!(Slot::at(PROGRAM_COUNT - 1), Some(Slot::D));
+        assert_eq!(Slot::at(PROGRAM_COUNT), None);
     }
 }

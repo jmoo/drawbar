@@ -172,7 +172,8 @@ pub mod blank {
             here,
             ne5::song::DEFAULT_VERSION,
             [at(0), at(1), at(2), at(3)],
-        );
+        )
+        .expect("the default version is a known one");
         nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).expect("a song encodes")
     }
 
