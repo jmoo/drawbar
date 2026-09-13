@@ -43,6 +43,7 @@
 //! constants are inferred from specimens; not confirmed on hardware — the Electro 5
 //! plays only v2.
 
+use crate::formats::predictor;
 use std::fmt;
 
 /// Stream units for one sample generation.
@@ -183,7 +184,7 @@ const COUNT_MASK: u32 = 0x3fff;
 
 /// Field values the predictor keeps. The order field is three bits wide, but only
 /// 0 to 4 occur and a fourth-order difference reaches no further back than this.
-const MAX_ORDER: usize = 4;
+const MAX_ORDER: usize = predictor::MAX_ORDER;
 
 /// Why a stroke stream could not be walked or decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,18 +618,7 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
             } else {
                 (0, k)
             };
-            let history = &mut history[channel];
-            let mut value = i64::from(residual);
-            for j in 1..=order {
-                let term = binomial(order, j).saturating_mul(history[j - 1]);
-                value = if j.is_multiple_of(2) {
-                    value.saturating_sub(term)
-                } else {
-                    value.saturating_add(term)
-                };
-            }
-            history.copy_within(0..MAX_ORDER - 1, 1);
-            history[0] = value;
+            let value = predictor::predict(&mut history[channel], order, i64::from(residual));
 
             let at = record.first_field + k * channels + channel;
             let Some(slot) = samples.get_mut(at) else {
@@ -651,15 +641,6 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
         clipped,
         differenced,
     })
-}
-
-/// `C(n, k)`, for the small orders a record header can express.
-fn binomial(n: usize, k: usize) -> i64 {
-    let mut c = 1i64;
-    for i in 0..k {
-        c = c * (n - i) as i64 / (i + 1) as i64;
-    }
-    c
 }
 
 /// One field, `width` bits big-endian from `bit`, sign-extended.
