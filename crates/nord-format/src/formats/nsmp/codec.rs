@@ -1137,6 +1137,37 @@ mod tests {
         assert_eq!(audio.samples, interleaved);
     }
 
+    /// A v4 stereo stroke of one split 1:1 record, whose header word states `count`
+    /// fields at `width` over a body packed for 66 of them.
+    fn v4_split_stroke(width: u8, count: usize) -> Vec<u8> {
+        let layout = Layout::V4;
+        let values: Vec<i32> = (0..66).map(|k| k % 31 - 15).collect();
+        let mut s = stroke(layout, 1, 22, 0, &[split_block(layout, width, &values)]);
+        let term = s.len() - layout.word();
+        s[term..].copy_from_slice(&((1u32 << 23) | (2 * layout.cell()) as u32).to_be_bytes());
+        let head = layout.header_len();
+        let raw = (1u32 << 23) | (u32::from(width - 1) << 19) | count as u32;
+        s[head..head + layout.word()].copy_from_slice(&raw.to_be_bytes());
+        s
+    }
+
+    #[test]
+    fn a_v4_stereo_opening_whose_channels_outrun_the_terminator_is_a_desync() {
+        assert!(walk(&v4_split_stroke(5, 66), 0, Layout::V4).is_ok());
+        assert_eq!(
+            walk(&v4_split_stroke(5, 80), 0, Layout::V4),
+            Err(Unsupported::Desync { word: 0 })
+        );
+    }
+
+    #[test]
+    fn a_v4_stereo_record_needs_whole_channel_pairs() {
+        assert_eq!(
+            walk(&v4_split_stroke(5, 33), 0, Layout::V4),
+            Err(Unsupported::Malformed { word: 0 })
+        );
+    }
+
     #[test]
     fn a_stereo_record_needs_whole_channel_pairs() {
         let layout = Layout::V3;
