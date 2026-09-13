@@ -63,7 +63,7 @@ pub enum Bundle {
     Drum3KitBank(nd3::kit_bank::KitBank),
     Electro5(ne5::Bundle),
     /// A ZIP of CBIN files under any mix of tags — every model's bundle/backup
-    /// shape. Reported by public interop documentation; no specimen has been read.
+    /// shape. Reported by public documentation; not confirmed on hardware.
     /// Members are kept container-verified and raw, under their archive paths —
     /// which encode the slot, uninterpreted here.
     Members(Vec<(String, Cbin<RawBody>)>),

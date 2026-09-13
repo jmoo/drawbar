@@ -24,11 +24,11 @@
 //! - **Container-verified stubs** — everything else: body kept verbatim, waiting
 //!   to be reverse-engineered. Each stub module's doc records what is known of it.
 //!
-//! Provenance is marked where each fact is stated, in three phrases: *confirmed
-//! on hardware*, *inferred from specimens*, *unexplained*. Broadly, the Electro 5
-//! bodies are pinned by change-one-setting hardware sweeps; the Stage bodies come
-//! from community byte maps and corpus measurement, not confirmed on hardware —
-//! each module says which.
+//! Provenance is marked where each fact is stated, in four phrases: *confirmed
+//! on hardware*, *inferred from specimens*, *reported by public documentation*,
+//! *unexplained*. Broadly, the Electro 5 bodies are pinned by change-one-setting
+//! hardware sweeps; the Stage bodies come from community byte maps and corpus
+//! measurement, not confirmed on hardware — each module says which.
 
 pub(crate) mod predictor;
 pub(crate) mod raw;
@@ -141,8 +141,8 @@ pub(crate) fn zip_members(
 /// Every member of a ZIP archive as a container-verified CBIN file, tags mixed.
 ///
 /// The shape every model's bundles and backups take: a plain ZIP of ordinary
-/// program files, the member path encoding the slot. Reported by public interop
-/// documentation; no specimen has been read. Members therefore stay raw rather
+/// program files, the member path encoding the slot. Reported by public
+/// documentation; not confirmed on hardware. Members therefore stay raw rather
 /// than dispatching to their format modules. A member that is not a CBIN file fails
 /// the read — this is the arbiter of whether an unrecognised ZIP is a bundle.
 #[cfg(feature = "bundle")]

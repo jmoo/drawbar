@@ -131,8 +131,8 @@ impl Chain {
 /// ⚠️ The v2 pool also holds versions that are not `2xx` — 8 (the original
 /// Sample Library) and 200 (Sample Library 2.0) — so the gate is "at least
 /// 300", not "exactly 2xx". Inferred from specimens; not confirmed on hardware.
-/// That the number tracks the library release rather than the codec is reported
-/// by public interop documentation.
+/// The number tracks the library release rather than the codec. Reported by
+/// public documentation; not confirmed on hardware.
 #[derive(Debug)]
 pub enum AnyBody {
     V2(Sample),

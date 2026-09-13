@@ -157,8 +157,8 @@ pub mod cmd {
 
     /// Erases an entire partition.
     ///
-    /// Inferred from independent interop projects; not confirmed on hardware, and
-    /// deliberately not to be. A session is class-scoped, so the session is what aims
+    /// Reported by public documentation; not confirmed on hardware, and deliberately
+    /// not to be. A session is class-scoped, so the session is what aims
     /// this: opened on a library class it takes the whole piano or sample store, which is
     /// hundreds of megabytes and a long restore from a backup. Named here so it can be
     /// recognised and refused, not so it can be sent.
