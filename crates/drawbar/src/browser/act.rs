@@ -1346,7 +1346,11 @@ mod tests {
         let onto = crate::browser::Onto::Slot { class, at: at(3) };
         assert_eq!(
             crate::browser::landing(&carried, onto),
-            crate::browser::Landing::Send
+            crate::browser::Landing::Send {
+                id,
+                class,
+                at: at(3)
+            }
         );
 
         send(

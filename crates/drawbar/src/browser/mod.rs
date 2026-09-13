@@ -83,6 +83,22 @@ pub fn renamed(original: &str, typed: &str) -> Option<String> {
     }
 }
 
+/// What a verdict runs, or nothing at all for a refusal — which [`Browser::land`] reports
+/// rather than runs.
+fn act_of(verdict: Landing) -> Option<Act> {
+    Some(match verdict {
+        Landing::Copy { class, at } => Act::Copy { class, at },
+        Landing::Send { id, class, at } => Act::Send { id, class, at },
+        Landing::Rearrange { class, from, to } => Act::Rearrange { class, from, to },
+        Landing::File { id, folder } => Act::File {
+            id,
+            folder: Some(folder),
+        },
+        Landing::Unfile { id } => Act::File { id, folder: None },
+        Landing::No(_) => return None,
+    })
+}
+
 pub struct Browser {
     selection: Selection,
     rename: Option<Rename>,
@@ -372,55 +388,28 @@ impl Browser {
         self.land(&carried, onto, acts);
     }
 
-    /// Run the drop, for the pressed row and for everything it carried.
-    ///
-    /// ⚠️ The rest of the selection follows only where the verdict is one act repeated.
-    /// A send and a rearrange name **one** destination, and handing several rows to one
-    /// slot would write them over each other; those take the pressed row alone.
+    /// Run the drop, for the pressed row and for everything it carried, which follows it
+    /// only where the verdict [`Landing::repeats`].
     fn land(&mut self, carried: &Arc<Carried>, onto: Onto, acts: &mut Vec<Act>) {
         let verdict = landing(&carried.head, onto);
-        match verdict {
-            Landing::No(why) => acts.push(Act::Refused(format!(
+        if let Landing::No(why) = verdict {
+            return acts.push(Act::Refused(format!(
                 "“{}” cannot go there — {why}.",
                 carried.name
-            ))),
-            Landing::Send | Landing::Rearrange => self.one(carried.head, verdict, onto, acts),
-            Landing::Copy | Landing::File | Landing::Unfile => {
-                for held in carried.all() {
-                    if landing(&held, onto) == verdict {
-                        self.one(held, verdict, onto, acts);
-                    }
-                }
+            )));
+        }
+        if !verdict.repeats() {
+            return acts.extend(act_of(verdict));
+        }
+        for held in carried.all() {
+            let each = landing(&held, onto);
+            if each.same(verdict) {
+                acts.extend(act_of(each));
             }
         }
     }
 
-    fn one(&mut self, held: Held, verdict: Landing, onto: Onto, acts: &mut Vec<Act>) {
-        match (verdict, held.what, onto) {
-            (Landing::Copy, Item::Slot { class, at }, _) => acts.push(Act::Copy { class, at }),
-            (Landing::Rearrange, Item::Slot { at: from, .. }, Onto::Slot { class, at }) => acts
-                .push(Act::Rearrange {
-                    class,
-                    from,
-                    to: at,
-                }),
-            (Landing::Send, Item::Local(id), Onto::Slot { class, at }) => {
-                acts.push(Act::Send { id, class, at })
-            }
-            (Landing::File, Item::Local(id), Onto::Group(folder)) => acts.push(Act::File {
-                id,
-                folder: Some(folder),
-            }),
-            (Landing::Unfile, Item::Local(id), Onto::Computer) => {
-                acts.push(Act::File { id, folder: None })
-            }
-            // Every allowed pairing is spelled out above; a shape that reaches here is a
-            // verdict about a drag that did not come from where it says it did.
-            _ => {}
-        }
-    }
-
-    /// Ask before a slot is replaced or emptied. The only dialogs left in the app.
+    /// Ask before a slot is replaced or emptied.
     fn dialog(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let Some(ask) = &self.ask else {
             return;
