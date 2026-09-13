@@ -1251,7 +1251,7 @@ fn paint(
     } else if response.clicked() {
         browser.pick(ui, row.item, list);
     }
-    response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, acts));
+    response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, queue, acts));
 }
 
 /// The 11 px box that says whether a row is checked, and takes the click that changes

@@ -155,6 +155,15 @@ fn worth_choosing(kinds: &[Kind]) -> bool {
     kinds.len() > 1
 }
 
+/// Where a duplicate of a slot lands: the first slot of its own folder that a walk found
+/// free and nothing is already waiting for.
+///
+/// ⚠️ The same exclusion a queued asset is placed by. Two writes handed one address are
+/// one write.
+fn spare_slot(device: &DeviceState, class: ObjectClass, queue: &Queue) -> Option<Location> {
+    device.first_free(class, &queue.waiting_in(class))
+}
+
 /// Where a drop onto a row of the local list lands: the folder that row is drawn under,
 /// or the loose part of the list.
 pub(super) fn onto_list(folder: Option<u64>) -> Onto {
@@ -549,7 +558,7 @@ impl Browser {
             self.start_rename(item, &entity.name);
         }
 
-        response.context_menu(|ui| self.menu(ui, item, workspace, device, acts));
+        response.context_menu(|ui| self.menu(ui, item, workspace, device, queue, acts));
     }
 
     /// The menu a row standing for a set of assets offers: what can be asked of the
@@ -597,6 +606,7 @@ impl Browser {
         item: Item,
         workspace: &Workspace,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         self.aim(item);
@@ -609,7 +619,7 @@ impl Browser {
         }
         match item {
             Item::Local(id) => self.local_menu(ui, id, workspace, device, acts),
-            Item::Slot { class, at } => self.slot_menu(ui, class, at, device, acts),
+            Item::Slot { class, at } => self.slot_menu(ui, class, at, device, queue, acts),
             Item::Folder(_) | Item::Tag(_) => {}
         }
     }
@@ -802,10 +812,11 @@ impl Browser {
             .filter_map(|entity| entity.origin.slot())
             .collect();
         for class in device.state.classes() {
-            self.class_row(ui, device, class, &viewed, workspace, acts);
+            self.class_row(ui, device, class, &viewed, workspace, queue, acts);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn class_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -813,6 +824,7 @@ impl Browser {
         class: ObjectClass,
         viewed: &[(ObjectClass, Location)],
         workspace: &Workspace,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         // A jump wins over whatever the branch was left in: the point of it is to reach
@@ -901,7 +913,7 @@ impl Browser {
         // The live buffer and the settings singleton divide into one bank.
         let cut = banks.len() > 1;
         for bank in banks {
-            self.bank_rows(ui, device, class, bank, cut, viewed, workspace, acts);
+            self.bank_rows(ui, device, class, bank, cut, viewed, workspace, queue, acts);
         }
     }
 
@@ -922,6 +934,7 @@ impl Browser {
         cut: bool,
         viewed: &[(ObjectClass, Location)],
         workspace: &Workspace,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         let Some(slots) = device.state.bank(class, bank) else {
@@ -972,7 +985,7 @@ impl Browser {
                 continue;
             };
             self.slot_row(
-                ui, device, class, *at, depth, &list, viewed, workspace, acts,
+                ui, device, class, *at, depth, &list, viewed, workspace, queue, acts,
             );
         }
     }
@@ -988,6 +1001,7 @@ impl Browser {
         list: &[Item],
         viewed: &[(ObjectClass, Location)],
         workspace: &Workspace,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         let held = device
@@ -1071,7 +1085,7 @@ impl Browser {
         if held.is_none() {
             return;
         }
-        response.context_menu(|ui| self.menu(ui, item, workspace, device, acts));
+        response.context_menu(|ui| self.menu(ui, item, workspace, device, queue, acts));
     }
 
     /// What a slot offers. A vacant one offers nothing, so nothing is drawn for it.
@@ -1081,6 +1095,7 @@ impl Browser {
         class: ObjectClass,
         at: Location,
         device: &Device,
+        queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
         let Some(name) = device
@@ -1097,7 +1112,7 @@ impl Browser {
             return;
         }
         let item = Item::Slot { class, at };
-        let free = device.state.first_free(class, &[]);
+        let free = spare_slot(&device.state, class, queue);
         if ui
             .button("Open")
             .on_hover_text("a view of this slot; nothing joins the list on this computer")
@@ -1121,7 +1136,7 @@ impl Browser {
         }
         if ui
             .add_enabled(free.is_some(), egui::Button::new("Duplicate"))
-            .on_disabled_hover_text("every slot read so far is taken")
+            .on_disabled_hover_text("every slot read so far is taken or already spoken for")
             .clicked()
         {
             if let Some(to) = free {
@@ -1455,6 +1470,35 @@ mod tests {
         );
         filter.keep_kinds(&kinds_present(&workspace, &device.state));
         assert_eq!(filter.kind, None, "the instrument took its folders with it");
+    }
+
+    /// ⚠️ A duplicate goes where nothing else is going. A slot something in the queue is
+    /// already bound for is spoken for, and two writes handed one address are one write.
+    #[test]
+    fn a_duplicate_lands_past_the_slot_the_queue_is_bound_for() {
+        let (_browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        assert_eq!(
+            spare_slot(&device.state, class, &queue),
+            Some(Location::from_user(7, 2))
+        );
+
+        crate::queue::enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            Location::from_user(7, 2),
+        );
+        assert_eq!(
+            spare_slot(&device.state, class, &queue),
+            Some(Location::from_user(7, 3)),
+            "7:2 is already waiting for something"
+        );
     }
 
     /// A caption earns its line by saying something the location column does not. The
