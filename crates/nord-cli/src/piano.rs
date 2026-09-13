@@ -12,25 +12,6 @@
 //! from a directory of WAVs, the other codes a library's own strokes again and reports
 //! how each one came back.
 //!
-//! A library written here loads on the instrument and plays: confirmed on hardware
-//! for `trim`, both for a dropped bank and for dropped velocity layers, and for what
-//! `build` and `rebuild` code — mono and stereo, every key of a full-keyboard library
-//! including its lowest and highest root, each of three attack layers, the release
-//! stroke at note-off, a long stroke to its end, the keys between roots transposed,
-//! and a vendor library coded again playing indistinguishably from the original in
-//! level and in spectrum. What `edit` changes — a name, a key's tuning, the root a
-//! key plays — and the narrowed key range `trim --range` and `split` leave behind are
-//! inferred from specimens; not confirmed on hardware.
-//!
-//! The fields a build cannot derive from audio — the length marks, the decay
-//! coefficients, the per-note tables, the playback parameters, the word at the body's
-//! start — go in as `--template` donated them: the instrument accepts them, and what
-//! it makes of them beyond accepting is not known. Given no template, `build` states
-//! them by rule instead, and they are then neutral playback parameters: no decay
-//! applied over the recordings, the layer trims taken from the layer values, and the
-//! damper limit the kind of instrument implies. Confirmed on hardware: a library
-//! written that way plays, and sounds like the same audio built against a template.
-//!
 //! These verbs take a file. A library is tens of megabytes, so moving one to or
 //! from the instrument is `nord piano get` and `nord piano put`.
 
@@ -748,9 +729,13 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
 /// `-4` is fine-tune units; `+2.1c` is cents, rounded to the nearest unit.
 fn parse_tune(value: &str) -> Result<i8, String> {
     if let Some(cents) = value.strip_suffix(['c', 'C']) {
+        // `nan` and `inf` parse; rounding either one lands on 0, which is a tuning
+        // nobody asked for rather than the refusal the value deserves.
         let cents: f32 = cents
             .parse()
-            .map_err(|_| format!("{value:?} is not a number of cents"))?;
+            .ok()
+            .filter(|c: &f32| c.is_finite())
+            .ok_or_else(|| format!("{value:?} is not a number of cents"))?;
         let units = (cents / npno::FINE_TUNE_CENTS_PER_UNIT).round();
         return i8::try_from(units as i32)
             .map_err(|_| format!("{cents} c is more than the per-key fine tune reaches"));
@@ -1159,7 +1144,8 @@ fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
             };
             if values[index] > encode::HIGHEST_PLAYED_LAYER {
                 return Err(format!(
-                    "{}: no velocity selects layer value {}; {} is the largest a key ever                      sounds",
+                    "{}: no velocity selects layer value {}; {} is the largest a key ever \
+                     sounds",
                     files[index].path.display(),
                     values[index],
                     encode::HIGHEST_PLAYED_LAYER
@@ -1494,6 +1480,15 @@ mod tests {
         assert_eq!(parse_tune("2.1c").unwrap(), 3);
         assert!(parse_tune("400c").is_err());
         assert!(parse_tune("loud").is_err());
+    }
+
+    /// A cent count that is not a number cannot round to one: `nan` and `inf` parse as
+    /// floats, and rounding them would silently tune the key to 0.
+    #[test]
+    fn a_cent_count_that_is_not_finite_is_refused_rather_than_rounded() {
+        for bad in ["nanc", "NaNc", "infc", "-infc"] {
+            assert!(parse_tune(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
