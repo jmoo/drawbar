@@ -6,6 +6,8 @@ complete, and well-tested. The core of the project is [nord-format](crates/nord-
 a minimal dependency library that can read and write Nord keyboard files on Linux, macOS, Windows, and in the browser.
 It is suitable to back any project that supports FFI with Rust (e.g. JS via wasm, Python via PyO3).
 
+![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](docs/src/assets/screenshot.png)
+
 ## In this repo
 
 | | Name | Description |
