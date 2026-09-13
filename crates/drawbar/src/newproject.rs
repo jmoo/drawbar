@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use eframe::egui;
 use nord_format::formats::npno::encode::{
     build, layer_value, resample, Donor, Kind, Options, Recording, Rules,
+    HIGHEST_PLAYED_LAYER,
 };
 use nord_format::formats::npno::{Bank, Library};
 use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
@@ -45,13 +46,6 @@ const MIDDLE_C: u8 = 60;
 
 /// The top of MIDI's own range: a stroke's root is a key, and 128 names none.
 const HIGHEST_MIDI_NOTE: u8 = 127;
-
-/// The top of the scale a layer value is selected on — see [`Stroke::layer`]. A value
-/// past [`nord_format::formats::npno::encode::HIGHEST_PLAYED_LAYER`] is one `build`
-/// refuses, in its own words.
-///
-/// [`Stroke::layer`]: nord_format::formats::npno::Stroke::layer
-const TOP_LAYER: u8 = 31;
 
 /// What a pick of WAVs is turned into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -483,16 +477,14 @@ impl Draft {
 
     /// The file the picked WAVs make, in the frame that asks for it.
     ///
-    /// ⚠️ Coding a library takes longer than a frame, so the dialog runs it off one —
-    /// [`Draft::begin`]. This is the same build with nothing to report progress to.
+    /// ⚠️ The two kinds a frame can make. Coding a library takes longer than one, so the
+    /// dialog starts that build instead — [`Draft::begin`] — and nothing here can hand
+    /// back a library.
     fn bytes(&self) -> Result<Vec<u8>, String> {
         match self.making {
             Making::Project => self.project(),
             Making::Instrument => self.instrument(),
-            Making::Piano => self
-                .coding(None)?
-                .run(&Progress::default())
-                .map(|built| built.bytes),
+            Making::Piano => Err("a piano library is coded off the frame".to_string()),
         }
     }
 
@@ -896,8 +888,11 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
             ui.selectable_value(&mut take.layer, LayerTag::Value(number), "value");
         });
     let mut set = number;
+    // The value scale is the format's: past HIGHEST_PLAYED_LAYER is a stroke no velocity
+    // selects, which `build` refuses. An index is a rank among the takes sharing a root
+    // and bank, and no root is played at more layers than that either.
     if ui
-        .add(egui::DragValue::new(&mut set).range(0..=TOP_LAYER))
+        .add(egui::DragValue::new(&mut set).range(0..=HIGHEST_PLAYED_LAYER))
         .changed()
     {
         take.layer = take.layer.with(set);
