@@ -557,7 +557,8 @@ impl Fresh {
         )
     }
 
-    fn bytes(self) -> Result<Vec<u8>, String> {
+    /// The file this makes, byte for byte what [`Workspace::create`] puts on the list.
+    pub(crate) fn bytes(self) -> Result<Vec<u8>, String> {
         let at = |slot: u16| -> Result<ne5::program::Location, String> {
             (0, slot).try_into().map_err(|e| format!("{e}"))
         };

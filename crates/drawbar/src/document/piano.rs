@@ -3417,7 +3417,7 @@ mod tests {
     use super::*;
     use crate::device::{pretend_allocation_unit, Device};
     use crate::log::Log;
-    use crate::workspace::{Origin, Workspace};
+    use crate::workspace::{Fresh, Origin, Workspace};
 
     /// The roots the test library records, and the layer values it spreads them over.
     const ROOTS: [u8; 3] = [48, 60, 72];
@@ -3640,7 +3640,7 @@ mod tests {
     fn a_body_that_is_no_piano_library_is_refused_before_anything_is_written() {
         let mut plan = plan();
         plan.name = Some("Wurly 200A".to_string());
-        let refused = rebuild(&crate::fields::blank::electro5_song(), &plan);
+        let refused = rebuild(&Fresh::SetList.bytes().unwrap(), &plan);
         assert!(refused.is_err(), "a set list is not a piano library");
     }
 

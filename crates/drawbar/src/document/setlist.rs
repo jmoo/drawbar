@@ -966,7 +966,7 @@ mod tests {
             let id = workspace.ingest(
                 "Blue Room.ne5t".into(),
                 Origin::File("Blue Room.ne5t".into()),
-                crate::fields::blank::electro5_song(),
+                Fresh::SetList.bytes().unwrap(),
                 &mut log,
             );
             Shown {
@@ -1176,7 +1176,7 @@ mod tests {
         }]);
         assert_eq!(sets, [("slot1".to_string(), "3:1".to_string())]);
         assert!(
-            apply(&crate::fields::blank::electro5_song(), &sets).is_ok(),
+            apply(&Fresh::SetList.bytes().unwrap(), &sets).is_ok(),
             "and the format takes what was typed"
         );
     }

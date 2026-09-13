@@ -1991,7 +1991,8 @@ fn contiguous(legal: &[String]) -> Option<(i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fields::{apply, blank};
+    use crate::fields::apply;
+    use crate::workspace::Fresh;
     use nord_format::formats::{ne5, ns4};
     use nord_format::{Entity, Program};
 
@@ -2069,7 +2070,7 @@ mod tests {
         ));
         assert!(ranked(packed).is_none());
 
-        let (stage4, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (stage4, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let bar = stage4
             .iter()
             .find(|field| field.path == "organ_a.drawbar_1")
@@ -2081,7 +2082,7 @@ mod tests {
     /// nine cells rather than drawing a register that is not there.
     #[test]
     fn nine_ranked_bars_merge_into_one_register() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let doc = Doc {
             sections: Vec::new(),
             leftovers: Vec::new(),
@@ -2112,7 +2113,7 @@ mod tests {
     /// parameter and is never a cell of its own.
     #[test]
     fn a_morph_slot_is_drawn_on_the_parameter_it_moves() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let morphs = slots_of(&fields);
         let slots = morphs
             .get("organ_a_volume")
@@ -2136,7 +2137,7 @@ mod tests {
     /// keeps a cell rather than disappearing.
     #[test]
     fn a_slot_with_no_parameter_beside_it_still_gets_a_cell() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let mut morphs = slots_of(&fields);
         morphs.remove("organ_a_volume");
         let doc = Doc {
@@ -2254,7 +2255,7 @@ mod tests {
     /// nothing folds above a field count.
     #[test]
     fn a_stage4_program_opens_every_section_it_has() {
-        let bytes = blank::stage4_program();
+        let bytes = Fresh::Stage4Program.bytes().unwrap();
         let (fields, _) = apply(&bytes, &[]).unwrap();
         let decoded =
             nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
@@ -2365,8 +2366,8 @@ mod tests {
     #[test]
     fn every_control_kind_the_registry_declares_paints_a_control() {
         let (_, electro5) = electro5();
-        let (stage4, _) = apply(&blank::stage4_program(), &[]).unwrap();
-        let (stage2, _) = apply(&blank::stage2_program(), &[]).unwrap();
+        let (stage4, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
+        let (stage2, _) = apply(&Fresh::Stage2Program.bytes().unwrap(), &[]).unwrap();
 
         let mut seen: Vec<&'static str> = Vec::new();
         for field in stage4.iter().chain(&electro5).chain(&stage2) {
@@ -2412,7 +2413,7 @@ mod tests {
     /// there writes the slot rather than the panel value beside it.
     #[test]
     fn an_edit_under_the_lens_writes_the_morph_slot() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let morphs = slots_of(&fields);
         let part = Part {
             field: fields
@@ -2479,7 +2480,7 @@ mod tests {
             ("organ_section_enabled".to_string(), "true".to_string()),
             ("organ_a_layer_enabled".to_string(), "true".to_string()),
         ];
-        let (_, bytes) = apply(&blank::stage4_program(), &playing).unwrap();
+        let (_, bytes) = apply(&Fresh::Stage4Program.bytes().unwrap(), &playing).unwrap();
         let (fields, _) = apply(&bytes, &[]).unwrap();
         let decoded =
             nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
@@ -2509,7 +2510,7 @@ mod tests {
     /// the slot's. The parameter it hangs on may be untouched.
     #[test]
     fn the_edited_dot_follows_the_field_the_cell_writes() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let morphs = slots_of(&fields);
         let part = Part {
             field: fields
@@ -2561,7 +2562,7 @@ mod tests {
     fn a_wide_field_commits_on_enter_or_blur_and_drops_what_escape_typed() {
         const TYPED: &str = "0xfeed";
 
-        let (stage2, _) = apply(&blank::stage2_program(), &[]).unwrap();
+        let (stage2, _) = apply(&Fresh::Stage2Program.bytes().unwrap(), &[]).unwrap();
         let field = stage2
             .iter()
             .find(|field| {
@@ -2632,7 +2633,7 @@ mod tests {
     /// may be named rather than spelled `true`/`false`.
     #[test]
     fn a_lamp_writes_the_spelling_its_field_lists() {
-        let (stage4, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (stage4, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let field = stage4
             .iter()
             .find(|field| matches!(field.spec.control, ControlKind::Toggle))
@@ -2704,7 +2705,7 @@ mod tests {
     /// not rewritten with what they already hold.
     #[test]
     fn a_register_writes_only_the_bars_that_moved() {
-        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let run: Vec<Part> = fields
             .iter()
             .filter(|field| ranked(field).is_some() && field.path.starts_with("organ_a."))
@@ -2764,12 +2765,12 @@ mod tests {
             );
             groups.into_iter().map(|group| group.title).collect()
         };
-        let stage4 = titles(blank::stage4_program());
+        let stage4 = titles(Fresh::Stage4Program.bytes().unwrap());
         assert_eq!(stage4.first().map(String::as_str), Some("General"));
         assert!(stage4.contains(&"Organ a".to_string()), "{stage4:?}");
 
-        let stage2 = titles(blank::stage2_program());
+        let stage2 = titles(Fresh::Stage2Program.bytes().unwrap());
         assert!(stage2.contains(&"Slot a — organ".to_string()), "{stage2:?}");
-        assert_eq!(titles(blank::stage3_synth()), ["General"]);
+        assert_eq!(titles(Fresh::Stage3Synth.bytes().unwrap()), ["General"]);
     }
 }

@@ -150,6 +150,7 @@ pub fn named_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Fresh;
 
     /// ⚠️ A document's section heading is part of the page, not a bar across it: it says
     /// its three parts in sentence case and paints no ground of its own. The shell's
@@ -194,7 +195,7 @@ mod tests {
     /// of them on open is a stall the operator spends watching an empty document.
     #[test]
     fn a_field_is_read_as_it_is_drawn_and_only_once() {
-        let bytes = crate::fields::blank::stage4_program();
+        let bytes = Fresh::Stage4Program.bytes().unwrap();
         let (fields, _) = crate::fields::apply(&bytes, &[]).unwrap();
         let ctx = Ctx::default();
         assert!(fields.len() > 800);

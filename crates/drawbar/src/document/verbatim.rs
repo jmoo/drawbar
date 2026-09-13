@@ -264,6 +264,7 @@ fn readable(byte: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Fresh;
 
     /// The kinds with an editor of their own are not swept up by the catch-all, and the
     /// ones with nothing else are.
@@ -277,11 +278,11 @@ mod tests {
             "a song that decodes no further than its container"
         );
         assert!(
-            !is_verbatim(&decode(fields::blank::electro5_song())),
+            !is_verbatim(&decode(Fresh::SetList.bytes().unwrap())),
             "a set list has its own four rows"
         );
         assert!(
-            !is_verbatim(&decode(fields::blank::stage4_program())),
+            !is_verbatim(&decode(Fresh::Stage4Program.bytes().unwrap())),
             "a registry body has its panel"
         );
     }

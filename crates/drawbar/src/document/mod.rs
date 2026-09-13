@@ -1645,7 +1645,7 @@ mod tests {
     /// control, and says so above the sections.
     #[test]
     fn the_morph_lens_shows_what_a_control_becomes_under_the_wheel() {
-        let mut open = Open::file("blank.ns4y", crate::fields::blank::stage4_synth());
+        let mut open = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap());
         open.set(&[("synth_a_volume", "40"), ("synth_a_volume_wheel", "211")]);
         let panel = open.twice();
         assert!(
@@ -1681,7 +1681,7 @@ mod tests {
     /// knob — unpolished has to look unpolished.
     #[test]
     fn a_path_with_no_label_yet_reads_as_its_prettified_self() {
-        let said = Open::file("blank.ns4y", crate::fields::blank::stage4_synth()).twice();
+        let said = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()).twice();
         assert!(!strings::known("synth_a_volume"));
         assert!(
             said.iter().any(|word| word == "Synth a volume"),
@@ -1695,7 +1695,7 @@ mod tests {
     /// you cannot see a control you do not know you have.
     #[test]
     fn every_section_of_a_stage_program_is_open_and_named_in_the_nav() {
-        let bytes = crate::fields::blank::stage4_program();
+        let bytes = Fresh::Stage4Program.bytes().unwrap();
         let (registry, _) = fields::apply(&bytes, &[]).unwrap();
         let resolved = nord_format::formats::ns4::program::PANEL.resolve(&registry);
         let titles: Vec<&str> = resolved
@@ -1763,7 +1763,7 @@ mod tests {
         let song = workspace.ingest(
             "blank.ne5t".into(),
             Origin::File("blank.ne5t".into()),
-            crate::fields::blank::electro5_song(),
+            Fresh::SetList.bytes().unwrap(),
             &mut log,
         );
         assert_eq!(
@@ -2071,14 +2071,13 @@ mod tests {
     /// big ones as folds, the small ones open with every control drawn.
     #[test]
     fn a_stage_document_paints_from_the_registry_alone() {
-        use crate::fields::blank;
         for (name, bytes) in [
-            ("blank.ns2p", blank::stage2_program()),
-            ("blank.ns3y", blank::stage3_synth()),
-            ("blank.ns4p", blank::stage4_program()),
-            ("blank.ns4o", blank::stage4_organ_preset()),
-            ("blank.ns4n", blank::stage4_piano_preset()),
-            ("blank.ns4y", blank::stage4_synth()),
+            ("blank.ns2p", Fresh::Stage2Program.bytes().unwrap()),
+            ("blank.ns3y", Fresh::Stage3Synth.bytes().unwrap()),
+            ("blank.ns4p", Fresh::Stage4Program.bytes().unwrap()),
+            ("blank.ns4o", Fresh::Stage4Organ.bytes().unwrap()),
+            ("blank.ns4n", Fresh::Stage4Piano.bytes().unwrap()),
+            ("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()),
         ] {
             render_file(name, bytes.clone(), Face::Edit);
             render_file(name, bytes, Face::Advanced);
@@ -2090,7 +2089,7 @@ mod tests {
     /// paints.
     #[test]
     fn a_set_list_has_its_own_view() {
-        let bytes = crate::fields::blank::electro5_song();
+        let bytes = Fresh::SetList.bytes().unwrap();
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
@@ -2145,7 +2144,7 @@ mod tests {
     /// something to look at: nothing read is not four problems.
     #[test]
     fn a_set_lists_header_claims_only_what_the_instrument_showed() {
-        let mut open = Open::file("Blue Room.ne5t", crate::fields::blank::electro5_song());
+        let mut open = Open::file("Blue Room.ne5t", Fresh::SetList.bytes().unwrap());
         let said = open.twice();
         assert!(
             !said.iter().any(|word| word.contains("needs attention")),

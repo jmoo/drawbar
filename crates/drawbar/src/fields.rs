@@ -143,18 +143,19 @@ pub fn byte_diff(before: &[u8], after: &[u8]) -> Vec<DiffRow> {
         .collect()
 }
 
-/// Blank files of the formats the workspace has no fresh default for, so a test can open
-/// a document of one.
+/// A blank Stage 3 song, so a test can open a document of one.
 ///
-/// A zeroed body is a legal one: every field's type decodes the whole of its slot, and
-/// the version is the newest the decode is validated against.
+/// ⚠️ Not a [`Fresh`]: the body is an undecoded stub, so the New menu offers none and
+/// [`Fresh::bytes`] builds none. Every other blank body a test opens is a `Fresh`.
+///
+/// [`Fresh`]: crate::workspace::Fresh
+/// [`Fresh::bytes`]: crate::workspace::Fresh::bytes
 #[cfg(test)]
 pub mod blank {
     use nord_format::cbin::{Cbin, Header, RawBody};
-    use nord_format::formats::{ne5, ns2, ns3, ns4};
-    use nord_format::{Entity, OrganPreset, PianoPreset, Program, Song, Synth};
+    use nord_format::formats::ns3;
+    use nord_format::{Entity, Song};
 
-    /// A Stage 3 song, which decodes no further than its container.
     pub fn stage3_song() -> Vec<u8> {
         let file = Cbin {
             header: Header::new(ns3::song::FORMAT, (0, 0), 0),
@@ -162,89 +163,13 @@ pub mod blank {
         };
         nord_format::to_bytes(&Entity::Song(Song::Stage3(file))).expect("a stub encodes")
     }
-
-    /// An Electro 5 set list pointing at the first four programs.
-    pub fn electro5_song() -> Vec<u8> {
-        let at =
-            |slot: u16| -> ne5::program::Location { (0, slot).try_into().expect("a program slot") };
-        let here: ne5::song::Location = (0, 0).try_into().expect("a song slot");
-        let song = ne5::song::new(
-            here,
-            ne5::song::DEFAULT_VERSION,
-            [at(0), at(1), at(2), at(3)],
-        )
-        .expect("the default version is a known one");
-        nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).expect("a song encodes")
-    }
-
-    macro_rules! blank {
-        ($name:ident, $body:ty, $len:expr, $format:expr, $versions:expr, $wrap:expr) => {
-            pub fn $name() -> Vec<u8> {
-                let body = <$body>::try_from([0u8; $len]).expect("a zeroed body decodes");
-                let version = *$versions.last().expect("a format knows a version");
-                let file = Cbin {
-                    header: Header::new($format, (0, 0), version),
-                    body,
-                };
-                nord_format::to_bytes(&$wrap(file)).expect("a blank file encodes")
-            }
-        };
-    }
-
-    blank!(
-        stage2_program,
-        ns2::Program,
-        ns2::program::BODY_LEN,
-        ns2::program::FORMAT,
-        ns2::program::KNOWN_VERSIONS,
-        |f| Entity::Program(Program::Stage2(f))
-    );
-    blank!(
-        stage3_synth,
-        ns3::SynthPreset,
-        ns3::synth::BODY_LEN,
-        ns3::synth::FORMAT,
-        ns3::synth::KNOWN_VERSIONS,
-        |f| Entity::Synth(Synth::Stage3(f))
-    );
-    blank!(
-        stage4_program,
-        ns4::Program,
-        ns4::program::BODY_LEN,
-        ns4::program::FORMAT,
-        ns4::program::KNOWN_VERSIONS,
-        |f| Entity::Program(Program::Stage4(f))
-    );
-    blank!(
-        stage4_organ_preset,
-        ns4::organ_preset::OrganPreset,
-        ns4::organ_preset::BODY_LEN,
-        ns4::organ_preset::FORMAT,
-        ns4::organ_preset::KNOWN_VERSIONS,
-        |f| Entity::OrganPreset(OrganPreset::Stage4(f))
-    );
-    blank!(
-        stage4_piano_preset,
-        ns4::piano_preset::PianoPreset,
-        ns4::piano_preset::BODY_LEN,
-        ns4::piano_preset::FORMAT,
-        ns4::piano_preset::KNOWN_VERSIONS,
-        |f| Entity::PianoPreset(PianoPreset::Stage4(f))
-    );
-    blank!(
-        stage4_synth,
-        ns4::synth::SynthPreset,
-        ns4::synth::BODY_LEN,
-        ns4::synth::FORMAT,
-        ns4::synth::KNOWN_VERSIONS,
-        |f| Entity::Synth(Synth::Stage4(f))
-    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::drawbar_widget;
+    use crate::workspace::Fresh;
     use nord_format::formats::ne5;
     use nord_format::Program;
 
@@ -325,12 +250,12 @@ mod tests {
     #[test]
     fn every_registry_backed_body_reads_and_writes() {
         for bytes in [
-            blank::stage2_program(),
-            blank::stage3_synth(),
-            blank::stage4_organ_preset(),
-            blank::stage4_piano_preset(),
-            blank::stage4_program(),
-            blank::stage4_synth(),
+            Fresh::Stage2Program.bytes().unwrap(),
+            Fresh::Stage3Synth.bytes().unwrap(),
+            Fresh::Stage4Organ.bytes().unwrap(),
+            Fresh::Stage4Piano.bytes().unwrap(),
+            Fresh::Stage4Program.bytes().unwrap(),
+            Fresh::Stage4Synth.bytes().unwrap(),
         ] {
             let (fields, out) = apply(&bytes, &[]).expect("a blank body round-trips");
             assert!(!fields.is_empty());

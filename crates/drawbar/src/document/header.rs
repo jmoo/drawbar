@@ -1320,7 +1320,7 @@ mod tests {
             )
         );
 
-        let (held, id) = opened("blank.ne5t", blank::electro5_song());
+        let (held, id) = opened("blank.ne5t", Fresh::SetList.bytes().unwrap());
         assert_eq!(
             badge(held.get(id).unwrap()),
             (
@@ -1358,7 +1358,7 @@ mod tests {
         let settings = workspace.create(Fresh::Settings, &mut log).unwrap();
         assert!(sized(workspace.get(settings).unwrap()).is_none());
 
-        let (held, id) = opened("blank.ne5t", crate::fields::blank::electro5_song());
+        let (held, id) = opened("blank.ne5t", Fresh::SetList.bytes().unwrap());
         assert_eq!(sized(held.get(id).unwrap()).unwrap().text, "4 entries");
 
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -1460,7 +1460,7 @@ mod tests {
 
         let (mut workspace, mut log) = workspace();
         let at = Location { bank: 6, slot: 3 };
-        let bytes = crate::fields::blank::electro5_song();
+        let bytes = Fresh::SetList.bytes().unwrap();
 
         let unattached = Device::new(egui::Context::default());
         let id = workspace.ingest(
