@@ -249,6 +249,10 @@ pub fn enqueue(
 /// An edit queues nothing; saving one that stands for a slot does. This is the gap
 /// between the two — what a send would walk straight past — and it is the same
 /// comparison [`crate::library::Where::Both`] shows in the table.
+///
+/// ⚠️ Over an asset's link, which is the one slot it stands on. An asset the attached
+/// instrument refuses has none however well its origin matches, and counting one would
+/// offer a send that [`enqueue`] refuses on every click.
 pub fn changed(
     workspace: &Workspace,
     device: &DeviceState,
@@ -258,7 +262,7 @@ pub fn changed(
         .listed()
         .filter(|entity| !queue.holds(entity.id))
         .filter_map(|entity| {
-            let (class, at) = entity.spot()?;
+            let (class, at) = entity.link?;
             let info = device.slot(class, at).flatten()?;
             (crate::library::agrees(entity, class, info, queue) == Some(false))
                 .then_some((entity.id, class, at))
@@ -1471,6 +1475,7 @@ mod tests {
         }
         // Edited and not saved: the slot still holds what this was saved as.
         edit(&mut workspace, unsaved, &mut log);
+        device.relink(&mut workspace);
 
         assert_eq!(
             counts(&workspace, &queue),
@@ -1529,6 +1534,7 @@ mod tests {
             edit(&mut workspace, id, &mut log);
             workspace.mark_saved(id);
         }
+        device.relink(&mut workspace);
 
         queue_changed(&workspace, &mut device, &mut queue, &mut log);
 

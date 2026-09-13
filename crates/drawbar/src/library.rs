@@ -449,9 +449,9 @@ pub fn mark_words(mark: Mark) -> &'static str {
 /// this asset stands.
 ///
 /// ⚠️ The one rule, and the only dot a local row wears. Nothing at all is an asset with
-/// no slot to stand on.
+/// no slot to stand on — its link, which is the slot [`whereabouts`] reads and no other.
 pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Option<Mark> {
-    let (class, at) = entity.spot()?;
+    let (class, at) = entity.link?;
     let info = device.slot(class, at).flatten()?;
     if queue.holds(entity.id) {
         return Some(Mark::Differs);
@@ -1760,6 +1760,47 @@ mod tests {
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
     }
 
+    /// ⚠️ One rule for the word, the dot and the count. An asset the attached instrument
+    /// refuses stands on nothing however well its origin names a slot, so reading it
+    /// against that slot would paint a difference and offer a send that
+    /// [`crate::queue::enqueue`] refuses on every click.
+    #[test]
+    fn a_foreign_asset_is_neither_marked_against_a_slot_nor_counted_as_changed() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let queue = Queue::default();
+        let class = ObjectClass::Program;
+        let held_at = at(6, 0);
+
+        let bytes = {
+            let id = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
+            let bytes = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            bytes
+        };
+        let id = workspace.ingest(
+            "Africa-Split.ns4p".into(),
+            Origin::Device { class, at: held_at },
+            bytes,
+            &mut log,
+        );
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("every CBIN container has one");
+        // An Electro 5 whose Programs 7:1 holds something other than this.
+        device.pretend_bodies(class, 7, &[Some(("Squabble B", crc ^ 1))]);
+        device.relink(&mut workspace);
+
+        let entity = workspace.get(id).expect("it is on the list");
+        assert!(!fit(&device.state, entity).allowed(), "a Stage 4 program");
+        assert_eq!(whereabouts(entity, &device.state, &queue), Where::Foreign);
+        assert_eq!(keyboard_mark(entity, &device.state, &queue), None);
+        assert!(crate::queue::changed(&workspace, &device.state, &queue).is_empty());
+    }
+
     /// Equality is claimed only where something says so. A settings folder holds one
     /// slot and that slot reports no checksum, so an asset matched to it stands in both
     /// places with nothing said about the two bodies — until a read fetches the occupant,
@@ -2325,7 +2366,10 @@ mod tests {
         let same = off(&mut workspace, 0, &mut log);
         let other = off(&mut workspace, 1, &mut log);
         let waiting = off(&mut workspace, 2, &mut log);
-        let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        // Typed here, and no slot holds its body: there is nothing for it to stand on.
+        let (_, typed) = crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
+            .expect("the registry takes the set");
+        let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, typed, &mut log);
         let held = workspace.get(same).unwrap().saved.crc32.unwrap();
 
         let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
@@ -2343,6 +2387,7 @@ mod tests {
                 Some(("off-2", held)),
             ],
         );
+        device.relink(&mut workspace);
         assert_eq!(mark(&workspace, &device, &queue, same), Some(good));
         assert_eq!(mark(&workspace, &device, &queue, other), Some(warn));
         assert_eq!(
