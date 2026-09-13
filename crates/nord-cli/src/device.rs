@@ -1434,12 +1434,13 @@ pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
 /// Read-only, and outside the bulk protocol: no session is opened, so nothing here can
 /// desync or wedge one. A request the device does not implement stalls the endpoint,
 /// which arrives as an error and is reported as a dash rather than as data.
-#[allow(clippy::too_many_arguments)]
+///
+/// `len` is the transfer's `wLength`, which the host controller states in 16 bits.
 pub fn controls(
     ui: &Ui,
     from: u8,
     to: u8,
-    len: usize,
+    len: u16,
     interface: bool,
     value: u16,
     index: u16,
@@ -1464,7 +1465,7 @@ pub fn controls(
             request,
             value,
             index,
-            len,
+            usize::from(len),
             std::time::Duration::from_millis(500),
         );
         match got {
@@ -1845,6 +1846,7 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn replacement_refuses_unusable_geometry_before_deleting() {
@@ -1899,6 +1901,18 @@ mod tests {
                 "{class:?}: the geometry session must close"
             );
         }
+    }
+
+    /// A control transfer's `wLength` is 16 bits, and the sweep allocates the buffer
+    /// before the request goes out, so a wider count is refused at the flag.
+    #[test]
+    fn a_control_sweep_cannot_ask_for_more_bytes_than_a_transfer_carries() {
+        let sweep = |len: &str| {
+            crate::Cli::try_parse_from(["nord", "device", "controls", "--len", len]).is_ok()
+        };
+        assert!(sweep("65535"));
+        assert!(!sweep("65536"));
+        assert!(!sweep("4294967296"));
     }
 
     /// The rescue file is the last copy of a program that no longer exists on the

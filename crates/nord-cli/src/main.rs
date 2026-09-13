@@ -168,9 +168,9 @@ enum DeviceAction {
         #[arg(long, default_value_t = 15)]
         to: u8,
 
-        /// Bytes to ask each request for.
+        /// Bytes to ask each request for. A control transfer's wLength is 16 bits.
         #[arg(long, default_value_t = 64)]
-        len: usize,
+        len: u16,
 
         /// Address the interface rather than the device.
         #[arg(long)]
