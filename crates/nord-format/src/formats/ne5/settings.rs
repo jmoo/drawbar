@@ -180,7 +180,7 @@ pub struct Settings {
     pub startup_live_slot: LiveSlot,
     #[bits(21..=29)]
     pub startup_program: program::Location,
-    /// Inferred from backup and panel captures; not confirmed on hardware.
+    /// Inferred from specimens; not confirmed on hardware.
     #[bits(30..=37)]
     pub startup_song: song::Location,
 }
@@ -830,7 +830,10 @@ mod tests {
         let mut raw = [0u8; BODY_LEN];
         raw[body(0x32)] = 0x01;
         raw[body(0x33)] = 0xfc;
-        assert!(Settings::try_from(raw).is_err(), "101 cents decoded");
+        assert!(
+            Settings::try_from(raw).is_err(),
+            "a stored 127 decoded, and biased by 50 that is +77 cents"
+        );
     }
 
     /// Channels are stored zero-based with 16 for off, so the two ends and the off value
