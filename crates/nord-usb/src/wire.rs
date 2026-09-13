@@ -1150,6 +1150,22 @@ mod tests {
             .collect()
     }
 
+    /// A response frame carrying `payload` behind a success status, so a decoder can be
+    /// given bytes no device would send.
+    fn response(command: u32, payload: &[u8]) -> Message {
+        let mut args = 0u32.to_be_bytes().to_vec();
+        args.extend_from_slice(payload);
+        let bytes = Message::new(Service::Program, 10, command + 1, args).encode();
+        Message::decode_response(&bytes).expect("a well-formed response frame")
+    }
+
+    /// A `[u32 length][bytes]` record, as every name on the wire is written.
+    fn length_prefixed(len: u32, bytes: &[u8]) -> Vec<u8> {
+        let mut out = len.to_be_bytes().to_vec();
+        out.extend_from_slice(bytes);
+        out
+    }
+
     #[test]
     fn only_the_buffer_classes_overwrite_in_place_and_hold_no_name() {
         for class in [ObjectClass::Live, ObjectClass::Settings] {
@@ -1450,5 +1466,185 @@ mod tests {
             assert!(d.name.is_empty());
             assert!(d.is_required(), "a slot-addressed dependency is required");
         }
+    }
+
+    /// Every count, length and record in a partition table is the device's word, and a
+    /// reply that outruns its own payload must name how far past the end it reached.
+    #[test]
+    fn a_partition_table_overrunning_its_payload_is_truncated() {
+        let record = [length_prefixed(3, b"abc"), vec![0; PARTITION_FIELDS]].concat();
+
+        let mut claims_two = vec![2u8];
+        claims_two.extend_from_slice(&record);
+        assert!(
+            matches!(
+                Partition::decode_all(&response(cmd::PARTITIONS, &claims_two)),
+                Err(Error::Truncated { got: 37, need: 41 })
+            ),
+            "a count larger than the payload holds"
+        );
+
+        let mut long_name = vec![1u8];
+        long_name.extend_from_slice(&length_prefixed(16, b"ab"));
+        assert!(
+            matches!(
+                Partition::decode_all(&response(cmd::PARTITIONS, &long_name)),
+                Err(Error::Truncated { got: 7, need: 21 })
+            ),
+            "a name length past the end of the payload"
+        );
+
+        let mut short_fields = vec![1u8];
+        short_fields.extend_from_slice(&length_prefixed(3, b"abc"));
+        short_fields.extend_from_slice(&[0; 10]);
+        assert!(
+            matches!(
+                Partition::decode_all(&response(cmd::PARTITIONS, &short_fields)),
+                Err(Error::Truncated { got: 18, need: 37 })
+            ),
+            "a record cut inside its trailing fields"
+        );
+    }
+
+    /// The bank table is what bounds every walk, so a short one must fail rather than
+    /// report fewer banks than the device has.
+    #[test]
+    fn a_bank_table_overrunning_its_payload_is_truncated() {
+        let echo = 4u32.to_be_bytes();
+        let record = [length_prefixed(3, b"abc"), 50u32.to_be_bytes().to_vec()].concat();
+
+        let claims_two = [&echo[..], &[2u8][..], &record[..]].concat();
+        assert!(
+            matches!(
+                Bank::decode_all(&response(cmd::BANKS, &claims_two)),
+                Err(Error::Truncated { got: 16, need: 20 })
+            ),
+            "a count larger than the payload holds"
+        );
+
+        let long_name = [&echo[..], &[1u8][..], &length_prefixed(32, b"ab")[..]].concat();
+        assert!(
+            matches!(
+                Bank::decode_all(&response(cmd::BANKS, &long_name)),
+                Err(Error::Truncated { got: 11, need: 41 })
+            ),
+            "a name length past the end of the payload"
+        );
+
+        let short_capacity = [
+            &echo[..],
+            &[1u8][..],
+            &length_prefixed(3, b"abc")[..],
+            &[0, 0][..],
+        ]
+        .concat();
+        assert!(
+            matches!(
+                Bank::decode_all(&response(cmd::BANKS, &short_capacity)),
+                Err(Error::Truncated { got: 14, need: 16 })
+            ),
+            "a record cut inside its slot count"
+        );
+    }
+
+    /// A dependency list decides what a bundle walk collects, so a row that does not fit
+    /// its payload must be an error rather than a shorter list.
+    #[test]
+    fn a_dependency_list_overrunning_its_payload_is_truncated() {
+        // Echoed bank and slot, then the row count.
+        let header = |count: u32| [0u32.to_be_bytes(), 0u32.to_be_bytes(), count.to_be_bytes()];
+        // flag, reserved, class, id, name_len, has_location, bank, slot — no padding.
+        let row = |name_len: u32| {
+            let mut row = vec![1u8];
+            for word in [0u32, 4, 0, name_len, 0, 0, 0] {
+                row.extend_from_slice(&word.to_be_bytes());
+            }
+            row
+        };
+
+        assert!(
+            matches!(
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &[0; 11])),
+                Err(Error::Truncated { got: 11, need: 12 })
+            ),
+            "a reply too short to carry its own count"
+        );
+
+        let claims_two = [&header(2).concat()[..], &row(0)[..]].concat();
+        assert!(
+            matches!(
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &claims_two)),
+                Err(Error::Truncated { got: 41, need: 58 })
+            ),
+            "a count larger than the payload holds"
+        );
+
+        let long_name = [&header(1).concat()[..], &row(256)[..17]].concat();
+        assert!(
+            matches!(
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &long_name)),
+                Err(Error::Truncated { got: 29, need: 285 })
+            ),
+            "a name length past the end of the payload"
+        );
+
+        let cut_location = [&header(1).concat()[..], &row(0)[..21]].concat();
+        assert!(
+            matches!(
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &cut_location)),
+                Err(Error::Truncated { got: 33, need: 41 })
+            ),
+            "a row cut inside its trailing location words"
+        );
+    }
+
+    /// Object info is read before every transfer, so a reply that does not reach its own
+    /// name must fail rather than decode a shorter one.
+    #[test]
+    fn object_info_shorter_than_its_fields_is_truncated() {
+        assert!(
+            matches!(
+                ProgramInfo::decode(&response(cmd::INFO, &[0; 31])),
+                Err(Error::Truncated { got: 31, need: 32 })
+            ),
+            "a reply stopping inside the fixed fields"
+        );
+
+        let mut claims_a_name = vec![0u8; ProgramInfo::NAME_LEN_AT];
+        claims_a_name.extend_from_slice(&5u32.to_be_bytes());
+        assert!(
+            matches!(
+                ProgramInfo::decode(&response(cmd::INFO, &claims_a_name)),
+                Err(Error::Truncated { got: 32, need: 37 })
+            ),
+            "a name length past the end of the payload"
+        );
+    }
+
+    /// The frame's own length word and the bytes that arrived must agree, or the reader
+    /// is looking at part of one message and the start of another.
+    #[test]
+    fn a_frame_that_contradicts_its_length_word_is_refused() {
+        let mut bytes = hex(MOVE);
+        let declared = bytes.len() + 4;
+        bytes[..4].copy_from_slice(&(declared as u32).to_be_bytes());
+        assert!(
+            matches!(
+                Message::decode(&bytes),
+                Err(Error::LengthMismatch {
+                    declared: 38,
+                    actual: 34
+                })
+            ),
+            "a length word longer than the frame"
+        );
+
+        assert!(
+            matches!(
+                Message::decode(&[0; 17]),
+                Err(Error::Truncated { got: 17, need: 18 })
+            ),
+            "a frame with no room for a header and a CRC"
+        );
     }
 }
