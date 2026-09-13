@@ -69,9 +69,6 @@ pub enum Error {
     InvalidArgument(String),
 
     #[error(transparent)]
-    Format(#[from] nord_format::error::Error),
-
-    #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 

@@ -718,22 +718,6 @@ pub async fn occupied_slots<T: Transport, C>(
     Ok(found)
 }
 
-/// The library objects an entity actually needs. **Read-only.**
-///
-/// [`dependencies`] returns what the device reports, which includes rows that are not
-/// dependencies at all — see [`Dependency::is_required`]. This is the one to build on;
-/// reach for the unfiltered list only when the extra rows are themselves the subject.
-pub async fn required_dependencies<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-    at: Location,
-) -> Result<Vec<Dependency>> {
-    Ok(dependencies(session, at)
-        .await?
-        .into_iter()
-        .filter(Dependency::is_required)
-        .collect())
-}
-
 /// List the piano/sample library objects an entity depends on, as the device reports
 /// them — including rows that are not dependencies at all.
 ///

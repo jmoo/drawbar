@@ -84,16 +84,6 @@ impl Recorder {
         }
     }
 
-    /// Write a free-form comment line, to mark what the following frames belong to.
-    pub fn comment(&mut self, text: &str) {
-        if self.failed.is_some() {
-            return;
-        }
-        if let Err(e) = writeln!(self.file, "\n# {text}") {
-            self.failed = Some(e);
-        }
-    }
-
     /// The first I/O error the recorder hit, if any. Recording stops at that point.
     pub fn check(&mut self) -> Result<()> {
         match self.failed.take() {

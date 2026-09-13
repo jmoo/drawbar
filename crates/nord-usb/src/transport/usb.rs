@@ -177,13 +177,6 @@ impl UsbTransport {
         }
     }
 
-    /// Label the frames that follow in the script. No-op when not recording.
-    pub fn mark(&mut self, what: &str) {
-        if let Some(r) = self.record.as_mut() {
-            r.comment(what);
-        }
-    }
-
     /// Record that the transaction just performed failed. No-op when not recording.
     pub fn mark_expect(&mut self, e: &Error) {
         if let Some(r) = self.record.as_mut() {
@@ -257,24 +250,6 @@ impl UsbTransport {
             build: word(0x05)?,
             max_transfer: u32::from_le_bytes([max[0], max[1], max[2], max[3]]),
         })
-    }
-
-    /// One read on the interrupt endpoint (`0x81`), or `None` on timeout. Nothing is
-    /// known to arrive here outside the firmware-update handshake.
-    pub async fn interrupt_read(
-        &mut self,
-        len: usize,
-        timeout: Duration,
-    ) -> Result<Option<Vec<u8>>> {
-        use crate::deadline::with_timeout;
-        let buf = nusb::transfer::RequestBuffer::new(len);
-        match with_timeout(self.interface.interrupt_in(0x81, buf), timeout).await {
-            Some(completion) => {
-                completion.status.map_err(map_err("interrupt read"))?;
-                Ok(Some(completion.data))
-            }
-            None => Ok(None),
-        }
     }
 
     /// One vendor control read on endpoint 0, outside the bulk protocol entirely.
