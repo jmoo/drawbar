@@ -651,13 +651,15 @@ fn generate_fields(
         let ty_str = quote!(#ty).to_string().replace(' ', "");
         common_field(&mut generated, field, placement, &ty_str);
         let refinement = refinement(field, &registered)?;
+        let registered_leaf = !placement.nested && matches!(field.vis, syn::Visibility::Public(_));
+        if !registered_leaf && (refinement.morphs.is_some() || refinement.rank.is_some()) {
+            return Err(syn::Error::new_spanned(
+                field,
+                "a refinement belongs on a registered (pub) leaf: a nested body registers a \
+                 prefix, and a private field registers nothing",
+            ));
+        }
         if placement.nested {
-            if refinement.morphs.is_some() || refinement.rank.is_some() {
-                return Err(syn::Error::new_spanned(
-                    field,
-                    "a refinement belongs on a leaf: a nested body registers a prefix, not a control",
-                ));
-            }
             nested_field(&mut generated, field, placement, &ty_str);
         } else {
             leaf_field(
@@ -1035,6 +1037,42 @@ mod tests {
             }
         };
         assert!(refused(quote!(2), twice_at).contains("one placement per field"));
+    }
+
+    /// A refinement describes a control in the field registry, and only a `pub` leaf is
+    /// in it.
+    #[test]
+    fn a_refinement_outside_the_registry_is_refused() {
+        let private = quote! {
+            struct Private {
+                #[bits(0..=6)]
+                pub gain: u8,
+                #[bits(7..=7)]
+                #[rank(3)]
+                bar: Drawbar,
+            }
+        };
+        assert!(refused(quote!(1), private).contains("registered (pub) leaf"));
+
+        let private_morph = quote! {
+            struct PrivateMorph {
+                #[bits(0..=6)]
+                pub gain: u8,
+                #[bits(7..=7)]
+                #[morphs(gain)]
+                gain_wheel: MorphTarget,
+            }
+        };
+        assert!(refused(quote!(1), private_morph).contains("registered (pub) leaf"));
+
+        let nested = quote! {
+            struct NestedRank {
+                #[at(0x00..0x01)]
+                #[rank(3)]
+                pub child: Child,
+            }
+        };
+        assert!(refused(quote!(1), nested).contains("registered (pub) leaf"));
     }
 
     #[test]
