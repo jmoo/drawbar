@@ -540,7 +540,7 @@ fn container(ui: &mut egui::Ui, entity: &LocalEntity) {
         row(ui, "format", container.tag());
         row(ui, "version", container.header.version.to_string());
         row(ui, "slot", stored_slot(container.header.slot()));
-        row(ui, "body", format!("{} bytes", container.body_len));
+        row(ui, "body", format!("{} bytes", container.body_len()));
         row(ui, "file", format!("{} bytes", entity.bytes.len()));
         row(
             ui,

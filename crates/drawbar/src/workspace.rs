@@ -105,7 +105,10 @@ impl VerifyState {
 #[derive(Clone)]
 pub struct Container {
     pub header: Header,
-    pub body_len: u64,
+    /// Where the body sits in the file, checked against the file's own length when it
+    /// was read. The one derivation of it: anything wanting the body reads this rather
+    /// than adding a declared length to a start of its own.
+    pub body: std::ops::Range<usize>,
     pub checksum_ok: bool,
     /// `crc32:` or `crc16:` — the two generations keep it in different places.
     pub checksum_label: &'static str,
@@ -123,7 +126,8 @@ impl Container {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
         let start = usize::try_from(info.header.generation.body_start()).ok()?;
         let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
-        let body_crc32 = nord_usb::envelope::crc32(bytes.get(start..end)?);
+        let body = start..end;
+        let body_crc32 = nord_usb::envelope::crc32(bytes.get(body.clone())?);
         // `Header` omits the generation-specific checksum field. What the file stores is
         // what is shown; it parts from the body's own hash exactly when the file is bad.
         let (checksum_label, checksum) = match info.header.generation {
@@ -139,7 +143,7 @@ impl Container {
         };
         Some(Container {
             header: info.header,
-            body_len: info.body_len,
+            body,
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
@@ -149,6 +153,11 @@ impl Container {
 
     pub fn tag(&self) -> String {
         String::from_utf8_lossy(&self.header.tag).into_owned()
+    }
+
+    /// How long the body is, which is the length of the range it sits in.
+    pub fn body_len(&self) -> u64 {
+        self.body.len() as u64
     }
 }
 
@@ -1313,10 +1322,7 @@ mod tests {
         let container = entity.container.expect("a fresh program is a CBIN file");
         assert!(container.checksum_ok);
         assert_eq!(container.header.generation, Generation::V1);
-        assert_eq!(
-            usize::try_from(container.body_len).unwrap(),
-            ne5::program::BODY_LEN
-        );
+        assert_eq!(container.body.len(), ne5::program::BODY_LEN);
         assert_eq!(container.checksum_label, "crc32:");
     }
 

@@ -1810,7 +1810,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.clone();
         let held = workspace.get(id).unwrap();
         let crc = held.saved.crc32.expect("a container");
-        let body_len = held.container.as_ref().expect("a container").body_len;
+        let body_len = held.container.as_ref().expect("a container").body_len();
 
         // The walk reports what such a slot reports: a name and a length, and no
         // checksum at all — the length being this asset's own.

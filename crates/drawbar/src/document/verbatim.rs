@@ -36,15 +36,19 @@ const WHY: &str = "No registry declares this model's fields yet, so there is not
                    and nothing to write differently. The file can still be sent, copied, \
                    tagged and placed; every byte goes up exactly as it came down.";
 
-/// Where the body sits in the file: the container's own answer, so nothing is copied to
-/// show it.
+/// Where the body sits in the file: the range the container settled on the way in, so
+/// nothing is copied to show it and nothing works the range out a second time.
+///
+/// Bytes carrying no container the app could read have no body of their own to show, so
+/// the file is what it shows.
 fn body(entity: &LocalEntity) -> &[u8] {
     let Some(container) = &entity.container else {
         return &entity.bytes;
     };
-    let start = container.header.generation.body_start() as usize;
-    let end = start.saturating_add(container.body_len as usize);
-    entity.bytes.get(start..end).unwrap_or(&entity.bytes)
+    entity
+        .bytes
+        .get(container.body.clone())
+        .unwrap_or(&entity.bytes)
 }
 
 fn generation(generation: Generation) -> &'static str {
@@ -80,7 +84,7 @@ fn stated(entity: &LocalEntity) -> Vec<Fact> {
     });
     rows.push(Fact {
         key: "Body",
-        value: format!("{} · verbatim", room::measure(container.body_len)),
+        value: format!("{} · verbatim", room::measure(container.body_len())),
         note: "kept byte for byte — no registry for this model",
     });
     rows.push(Fact {
@@ -251,6 +255,45 @@ fn readable(byte: u8) -> char {
 mod tests {
     use super::*;
     use crate::workspace::Fresh;
+
+    /// The body on the page is the container's own range, which is the same body the
+    /// wire carries.
+    ///
+    /// ⚠️ Bytes whose container could not be read have no body range at all, so the
+    /// page shows the file rather than a window worked out from a length it never
+    /// checked.
+    #[test]
+    fn the_body_shown_is_the_range_the_container_settled() {
+        let held = |name: &str, bytes: Vec<u8>| {
+            let ctx = egui::Context::default();
+            let mut workspace = crate::workspace::Workspace::new(ctx);
+            let mut log = crate::log::Log::default();
+            let id = workspace.ingest(
+                name.to_string(),
+                crate::workspace::Origin::File(name.to_string()),
+                bytes,
+                &mut log,
+            );
+            (workspace, id)
+        };
+
+        let bytes = crate::fields::blank::stage3_song();
+        let (workspace, id) = held("blank.ns3s", bytes.clone());
+        let entity = workspace.get(id).expect("it is open");
+        assert_eq!(
+            body(entity),
+            entity.raw_body().expect("the wire takes it").as_slice(),
+            "the page and the wire read one body"
+        );
+
+        let (workspace, id) = held("cut.ns3s", bytes[..12].to_vec());
+        let entity = workspace.get(id).expect("it is open");
+        assert!(
+            entity.container.is_none(),
+            "a file shorter than its own container is not one"
+        );
+        assert_eq!(body(entity), entity.bytes.as_slice());
+    }
 
     /// ⚠️ The dump lays out only the rows it was asked for. A piano library is
     /// hundreds of megabytes, and one galley per sixteen bytes of it is a frame that
