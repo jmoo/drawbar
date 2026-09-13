@@ -380,8 +380,6 @@ pub struct Options {
     secondary_start: Option<f64>,
     shift: Option<u8>,
     layout: Layout,
-    map_gain: f64,
-    loop_decay: f32,
 }
 
 impl Options {
@@ -398,23 +396,7 @@ impl Options {
             secondary_start: None,
             shift: None,
             layout: Layout::V2,
-            map_gain: 1.0,
-            loop_decay: DEFAULT_LOOP_DECAY,
         }
-    }
-
-    /// The stroke's loop decay amount, in the project's own units. Reaches the wide
-    /// stroke header alone; the narrow chain has no field for it.
-    pub fn loop_decay(mut self, amount: f32) -> Options {
-        self.loop_decay = amount;
-        self
-    }
-
-    /// The instrument's own playing gain, a linear ratio applied on top of every
-    /// zone's. Clamped at [`MAX_MAP_GAIN_DB`] as the editor clamps it.
-    pub fn map_gain(mut self, gain: f64) -> Options {
-        self.map_gain = gain;
-        self
     }
 
     /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`. The audio is the same
@@ -504,8 +486,6 @@ pub struct Looped {
 pub struct Plan {
     /// Which generation's units the stream is written in.
     pub layout: Layout,
-    /// Source frames the stroke covers — frames, not samples: a stereo frame is two.
-    pub frames: usize,
     /// Channels interleaved into the stream: 1 or 2.
     pub channels: usize,
     /// Fields in the stream — the source plus a ring-out past its end, or, when the
@@ -787,7 +767,6 @@ impl Plan {
         let resync = band(head - warmup);
         Ok(Plan {
             layout,
-            frames,
             channels,
             fields,
             resync_at,
@@ -1101,11 +1080,12 @@ fn choose_order(widths: &[u8], extending: Option<(u8, u8)>) -> (u8, u8) {
     (order, narrowest)
 }
 
-/// Partition 1:1 values and like-coded content cells into records.
+/// Partition 1:1 values and like-coded content cells into records, with the index of
+/// the record the resync run opens at — what the header's second pointer names.
 ///
 /// A loop appends a third regime — its own 1:1 run, marked, and the content after it —
 /// grown to a whole number of packets by [`pad_to_packet`].
-fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec>, Error> {
+fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spec>, usize), Error> {
     let mut out = Vec::new();
     let mut at = 0usize;
     let (cell, chunk, stride) = (plan.cell(), plan.chunk(), plan.channels);
@@ -1182,12 +1162,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
         ))
         .into());
     }
-    if resync_record >= out.len() {
-        return Err(
-            ParseError::AssertFail("the record plan produced no resync record".into()).into(),
-        );
-    }
-    Ok(out)
+    Ok((out, resync_record))
 }
 
 /// Pad the loop region out to whole packets the way the editor does: sweep its content
@@ -1391,12 +1366,7 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units:
     words[at * word..(at + 1) * word].copy_from_slice(&head.to_be_bytes()[4 - word..]);
 
     let stored = |k: usize| -> u64 {
-        let field = spec.first + k;
-        let value = if spec.order == 0 {
-            i64::from(values[field])
-        } else {
-            residual(values, field, spec.order, units.channels)
-        };
+        let value = residual(values, spec.first + k, spec.order, units.channels);
         (value as u64) & ((1u64 << spec.width) - 1)
     };
     let put = |words: &mut [u8], mut bit: usize, raw: u64| {
@@ -1567,16 +1537,7 @@ fn encode_stroke(
         }
         .into());
     }
-    let specs = records(&q.values, &plan, predictor)?;
-    let resync_record = specs
-        .iter()
-        .position(|s| s.first == plan.resync_at)
-        .ok_or_else(|| {
-            ParseError::AssertFail(format!(
-                "no record begins at the planned resync field {}",
-                plan.resync_at
-            ))
-        })?;
+    let (specs, resync_record) = records(&q.values, &plan, predictor)?;
     let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
     Ok(Encoded { q, stream })
 }
@@ -1965,7 +1926,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
     multi_zone(
         Instrument {
             name: &options.name,
-            map_gain: options.map_gain,
+            map_gain: 1.0,
             predictor: options.predictor,
             layout: options.layout,
             preset: Preset::default(),
@@ -1980,7 +1941,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
             secondary_start,
             shift: options.shift,
             gain: 1.0,
-            loop_decay: options.loop_decay,
+            loop_decay: DEFAULT_LOOP_DECAY,
         }],
     )
 }
@@ -2833,7 +2794,6 @@ mod tests {
         let warmup = if last == chunk { chunk } else { chunk + last };
         let plan = Plan {
             layout,
-            frames: 0,
             channels: 1,
             fields: warmup,
             resync_at: warmup,
@@ -2906,7 +2866,6 @@ mod tests {
         let fields = at + last;
         let plan = Plan {
             layout,
-            frames: 0,
             channels: 1,
             fields,
             resync_at: at,
@@ -2981,14 +2940,11 @@ mod tests {
             let source = sine(440.0, 32_000.0, 30_000);
             let plan = plan(source.len(), 1).unwrap();
             let q = quantise(&source, &plan, None);
-            for spec in records(&q.values, &plan, predictor).unwrap() {
+            let (specs, _) = records(&q.values, &plan, predictor).unwrap();
+            for spec in specs {
                 let limit = 1i64 << (spec.width - 1);
                 for k in 0..spec.count {
-                    let v = if spec.order == 0 {
-                        i64::from(q.values[spec.first + k])
-                    } else {
-                        residual(&q.values, spec.first + k, spec.order, 1)
-                    };
+                    let v = residual(&q.values, spec.first + k, spec.order, 1);
                     assert!((-limit..limit).contains(&v), "{spec:?} field {k} = {v}");
                 }
                 assert!(spec.width <= PEAK_WIDTH || spec.order > 0);
@@ -3001,7 +2957,7 @@ mod tests {
         let source = sine(440.0, 20_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
         let q = quantise(&source, &plan, None);
-        let specs = records(&q.values, &plan, Predictor::Plain).unwrap();
+        let (specs, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
 
         let mut at = 0;
         for spec in &specs {
@@ -3022,8 +2978,8 @@ mod tests {
         let source = sine(60.0, 30_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
         let q = quantise(&source, &plan, None);
-        let plain = records(&q.values, &plan, Predictor::Plain).unwrap();
-        let minimised = records(&q.values, &plan, Predictor::Minimising).unwrap();
+        let (plain, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
+        let (minimised, _) = records(&q.values, &plan, Predictor::Minimising).unwrap();
 
         let bits = |specs: &[Spec]| -> usize { specs.iter().map(|s| s.span(MONO)).sum() };
         assert!(
