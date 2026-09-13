@@ -11,7 +11,7 @@ mod scan;
 #[path = "support/sidecar.rs"]
 mod sidecar;
 
-use scan::{corpus, named, Specimen};
+use scan::{corpus, named, v2_named, v2_samples, Specimen};
 
 fn sample_streams() -> impl Iterator<
     Item = (
@@ -36,24 +36,41 @@ fn sample_streams() -> impl Iterator<
         })
 }
 
-fn v2_samples() -> impl Iterator<
-    Item = (
-        &'static Specimen,
-        &'static nord_format::cbin::Cbin<nsmp::Sample>,
-    ),
-> {
-    corpus()
-        .iter()
-        .filter_map(|specimen| match &specimen.entity {
-            Entity::Sample(Sample::V2(sample)) => Some((specimen, sample)),
-            _ => None,
-        })
+/// The four counts a walked stream states about its own shape: the fields it
+/// covers, the 1:1 fields it opens with, the field its second 1:1 run starts at,
+/// and how many fields that run covers.
+struct Landmarks {
+    fields: usize,
+    warmup: usize,
+    resync_at: usize,
+    resync: usize,
 }
 
-fn v2_named(name: &str) -> nord_format::cbin::Cbin<nsmp::Sample> {
-    match nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap() {
-        Entity::Sample(Sample::V2(sample)) => sample,
-        other => panic!("{name} decoded as {other:?}"),
+fn landmarks(stream: &nsmp::codec::Stream) -> Landmarks {
+    let warmup = stream
+        .records
+        .iter()
+        .take_while(|record| record.one_to_one)
+        .map(|record| record.values.len())
+        .sum::<usize>();
+    let resync_at = stream
+        .records
+        .iter()
+        .skip_while(|record| record.one_to_one)
+        .find(|record| record.one_to_one)
+        .expect("a stream returns to 1:1 records after its lattice content")
+        .first_field;
+    let resync = stream
+        .records
+        .iter()
+        .filter(|record| record.one_to_one && record.first_field >= resync_at)
+        .map(|record| record.values.len())
+        .sum::<usize>();
+    Landmarks {
+        fields: stream.fields,
+        warmup,
+        resync_at,
+        resync,
     }
 }
 
@@ -303,6 +320,44 @@ fn non_overridden_zones_match_the_editors_default_layout() {
     assert!(checked > 0, "no sidecar-backed zone layout checked");
 }
 
+/// The file bytes our render of `T-sil.nsmp`'s project does not reproduce, each with
+/// what holds it. The editor's silent render is not digitally silent: its opening
+/// warmup record carries a handful of ±1 fields, which is also what lifts its
+/// statistic B off zero. Everything downstream of that is one of these three bytes
+/// or the checksum over them.
+///
+/// Inferred from specimens; not confirmed on hardware.
+const SILENT_DIFFERENCES: &[(usize, &str)] = &[
+    (
+        0x18,
+        "the CBIN body crc32, which follows any body difference",
+    ),
+    (
+        0x19,
+        "the CBIN body crc32, which follows any body difference",
+    ),
+    (
+        0x1a,
+        "the CBIN body crc32, which follows any body difference",
+    ),
+    (
+        0x1b,
+        "the CBIN body crc32, which follows any body difference",
+    ),
+    (
+        0x410,
+        "the low byte of the stroke header's statistic B: the editor's peak is 1, ours 0",
+    ),
+    (
+        0x47d,
+        "the first content word of the opening warmup record, where the editor dithers",
+    ),
+    (
+        0x47e,
+        "the first content word of the opening warmup record, where the editor dithers",
+    ),
+];
+
 #[test]
 fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     let expected = &named("T-sil.nsmp").bytes;
@@ -316,12 +371,42 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     .unwrap()
     .to_bytes()
     .unwrap();
-
     assert_eq!(actual.len(), expected.len());
-    let differing = (0..expected.len())
-        .filter(|&index| actual[index] != expected[index])
+
+    for (at, what) in SILENT_DIFFERENCES {
+        assert_ne!(
+            actual[*at], expected[*at],
+            "{at:#x} no longer differs: {what}"
+        );
+    }
+    let unreviewed = (0..expected.len())
+        .filter(|index| actual[*index] != expected[*index])
+        .filter(|index| !SILENT_DIFFERENCES.iter().any(|(at, _)| at == index))
+        .map(|index| format!("{index:#x}"))
         .collect::<Vec<_>>();
-    assert_eq!(differing, [0x18, 0x19, 0x1a, 0x1b, 0x410, 0x47d, 0x47e]);
+    assert!(
+        unreviewed.is_empty(),
+        "bytes no reviewed row names: {unreviewed:?}"
+    );
+
+    let loud_fields = |bytes: &[u8]| {
+        let sample = match nord_format::from_stream(&mut Cursor::new(bytes)).unwrap() {
+            Entity::Sample(Sample::V2(sample)) => sample,
+            other => panic!("T-sil decoded as {other:?}"),
+        };
+        let (at, stroke) = sample.stroke_streams()[0];
+        nsmp::codec::decode(stroke, at, nsmp::codec::Layout::V2)
+            .unwrap()
+            .samples
+            .iter()
+            .filter(|sample| **sample != 0)
+            .count()
+    };
+    assert_eq!(loud_fields(&actual), 0, "our render of a silent source");
+    assert!(
+        loud_fields(expected) > 0,
+        "the editor's render of a silent source, which the three body bytes record"
+    );
 }
 
 /// `A-silence-C4`'s project: `m_start` 1, `m_stop` 4410, `m_startSecondary` 552.128186,
@@ -429,30 +514,11 @@ fn the_stereo_plan_lands_on_the_editors_landmarks_at_every_length() {
         assert_eq!(stream.cell, Some(48), "{name}");
 
         let plan = nsmp::encode::Plan::new(nsmp::codec::Layout::V2, frames, 2, secondary).unwrap();
-        assert_eq!(stream.fields, plan.fields, "{name}: fields");
-
-        let warmup = stream
-            .records
-            .iter()
-            .take_while(|r| r.one_to_one)
-            .map(|r| r.values.len())
-            .sum::<usize>();
-        assert_eq!(warmup, plan.warmup, "{name}: warmup");
-
-        let resync = stream
-            .records
-            .iter()
-            .skip_while(|r| r.one_to_one)
-            .find(|r| r.one_to_one)
-            .unwrap();
-        assert_eq!(resync.first_field, plan.resync_at, "{name}: resync field");
-        let resync_fields = stream
-            .records
-            .iter()
-            .filter(|r| r.one_to_one && r.first_field >= plan.resync_at)
-            .map(|r| r.values.len())
-            .sum::<usize>();
-        assert_eq!(resync_fields, plan.resync, "{name}: resync length");
+        let walked = landmarks(&stream);
+        assert_eq!(walked.fields, plan.fields, "{name}: fields");
+        assert_eq!(walked.warmup, plan.warmup, "{name}: warmup");
+        assert_eq!(walked.resync_at, plan.resync_at, "{name}: resync field");
+        assert_eq!(walked.resync, plan.resync, "{name}: resync length");
     }
 }
 
@@ -502,41 +568,28 @@ fn a_stereo_strokes_channels_decode_to_the_signals_they_were_authored_from() {
 
 #[test]
 fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
-    let landmarks = |name: &str| {
+    let walk_named = |name: &str| {
         let sample = v2_named(name);
         let (at, stroke) = sample.stroke_streams()[0];
         let stream = nsmp::codec::walk(stroke, at, nsmp::codec::Layout::V2).unwrap();
-        let warmup = stream
-            .records
-            .iter()
-            .take_while(|r| r.one_to_one)
-            .map(|r| r.values.len())
-            .sum::<usize>();
-        let resync = stream
-            .records
-            .iter()
-            .skip_while(|r| r.one_to_one)
-            .find(|r| r.one_to_one)
-            .unwrap()
-            .first_field;
-        let resync_fields = stream
-            .records
-            .iter()
-            .filter(|r| r.one_to_one && r.first_field >= resync)
-            .map(|r| r.values.len())
-            .sum::<usize>();
+        let counts = landmarks(&stream);
         (
             stream.channels,
             stream.cell,
-            [stream.fields, warmup, resync, resync_fields],
+            [
+                counts.fields,
+                counts.warmup,
+                counts.resync_at,
+                counts.resync,
+            ],
         )
     };
 
-    let (channels, cell, mono) = landmarks("C-44k-16-mono.nsmp");
+    let (channels, cell, mono) = walk_named("C-44k-16-mono.nsmp");
     assert_eq!(channels, 1);
     assert_eq!(cell, Some(24));
     for name in ["C-44k-16-stL.nsmp", "C-44k-16-stLR.nsmp"] {
-        let (channels, cell, stereo) = landmarks(name);
+        let (channels, cell, stereo) = walk_named(name);
         assert_eq!(channels, 2, "{name}");
         assert_eq!(
             cell,
@@ -553,7 +606,7 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
     let both =
         nsmp::encode::Plan::new(nsmp::codec::Layout::V2, 4_409, 2, MONO_SECONDARY_START).unwrap();
     assert_eq!(both.fields, 2 * mono.fields);
-    assert_eq!(both.fields, landmarks("C-44k-16-stL.nsmp").2[0]);
+    assert_eq!(both.fields, walk_named("C-44k-16-stL.nsmp").2[0]);
     assert_eq!(both.resync_at, 2 * mono.resync_at);
 }
 
@@ -569,29 +622,11 @@ fn count_laws_reproduce_editor_landmarks() {
         let (stroke_at, stroke) = sample.stroke_streams()[0];
         let stream = nsmp::codec::walk(stroke, stroke_at, nsmp::codec::Layout::V2).unwrap();
 
-        assert_eq!(stream.fields, plan.fields, "{name}: fields");
-        let warmup = stream
-            .records
-            .iter()
-            .take_while(|record| record.one_to_one)
-            .map(|record| record.values.len())
-            .sum::<usize>();
-        assert_eq!(warmup, plan.warmup, "{name}: warmup");
-
-        let resync = stream
-            .records
-            .iter()
-            .skip_while(|record| record.one_to_one)
-            .find(|record| record.one_to_one)
-            .unwrap();
-        assert_eq!(resync.first_field, plan.resync_at, "{name}: resync field");
-        let resync_fields = stream
-            .records
-            .iter()
-            .filter(|record| record.one_to_one && record.first_field >= plan.resync_at)
-            .map(|record| record.values.len())
-            .sum::<usize>();
-        assert_eq!(resync_fields, plan.resync, "{name}: resync length");
+        let walked = landmarks(&stream);
+        assert_eq!(walked.fields, plan.fields, "{name}: fields");
+        assert_eq!(walked.warmup, plan.warmup, "{name}: warmup");
+        assert_eq!(walked.resync_at, plan.resync_at, "{name}: resync field");
+        assert_eq!(walked.resync, plan.resync, "{name}: resync length");
     }
 }
 
