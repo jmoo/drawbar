@@ -1206,7 +1206,24 @@ impl State {
     /// the apply of the plan in hand instead — unless the plan has caught up with the
     /// bytes on its own, or the document is gone, when there is nothing left to wait for.
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
-        let made = match self.job.as_ref()?.job.poll() {
+        let answer = self.job.as_ref()?.job.poll();
+        self.finished(answer, ctx, workspace)
+    }
+
+    /// [`Self::answered`], waiting for the apply in flight instead of polling it.
+    #[cfg(test)]
+    pub fn awaited(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
+        let answer = self.job.as_ref()?.job.wait();
+        self.finished(answer, ctx, workspace)
+    }
+
+    fn finished(
+        &mut self,
+        answer: work::Answer<Result<Vec<u8>, String>>,
+        ctx: &egui::Context,
+        workspace: &Workspace,
+    ) -> Option<Applied> {
+        let made = match answer {
             work::Answer::Running => return None,
             work::Answer::Answered(made) => made,
             work::Answer::Died => {
@@ -4571,15 +4588,11 @@ mod tests {
                 .renaming(self.workspace.get(self.id).expect("it is open"))
         }
 
-        /// Wait for the apply in flight to answer, the way a frame polls it.
+        /// The apply in flight, waited for.
         fn awaited(&mut self) -> Applied {
-            for _ in 0..100_000 {
-                if let Some(applied) = self.state.answered(&self.ctx, &self.workspace) {
-                    return applied;
-                }
-                std::thread::yield_now();
-            }
-            panic!("the apply never answered");
+            self.state
+                .awaited(&self.ctx, &self.workspace)
+                .expect("an apply is in flight")
         }
 
         /// Lay the plan in hand out and put the bytes under the document, which is what
