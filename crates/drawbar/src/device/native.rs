@@ -91,8 +91,8 @@ impl Link {
         let Some(worker) = self.worker.take() else {
             return;
         };
-        let until = Instant::now() + wait;
-        while !worker.is_finished() && Instant::now() < until {
+        let since = Instant::now();
+        while !worker.is_finished() && since.elapsed() < wait {
             std::thread::sleep(SETTLE);
         }
         if worker.is_finished() {
