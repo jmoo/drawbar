@@ -380,3 +380,95 @@ fn a_large_body_is_read_in_chunks() {
     );
     assert!(t.is_exhausted(), "did not consume the whole exchange");
 }
+
+/// The partition of a byte-granular class, so a write reserves nothing and is the
+/// transfer alone.
+fn byte_granular_unit(class: ObjectClass) -> nord_usb::wire::AllocationUnit {
+    let mut fields = 1u32.to_be_bytes().to_vec();
+    fields.resize(29, 0);
+    nord_usb::wire::Partition {
+        index: class.to_raw(),
+        name: "Prog".into(),
+        native: false,
+        fields,
+    }
+    .allocation_unit()
+    .unwrap()
+}
+
+/// A body larger than one `WRITE_DATA` leaves in several frames, of which only the last
+/// is acknowledged — the intermediate chunks are fire-and-forget, so a reply scripted for
+/// one would be read as the answer to a later request.
+///
+/// The framing is built rather than captured. The test checks three chunks at offsets
+/// 0 / 32720 / 65440 with lengths 32720 / 32720 / 777, in that order, under an
+/// exact-match transport. A whole-body single frame, a wrong offset, an acknowledged
+/// intermediate chunk, or a dropped tail all fail it.
+#[test]
+fn a_large_body_is_written_in_chunks() {
+    use nord_usb::wire::{cmd, ui, Message, Service};
+
+    const CHUNK: usize = 32720;
+    const TAIL: usize = 777;
+
+    let at = nord_usb::Location::from_user(8, 14);
+    // Position-dependent, so a chunk sent from the wrong offset is caught.
+    let body: Vec<u8> = (0..CHUNK * 2 + TAIL).map(|i| (i % 251) as u8).collect();
+    let file = nord_usb::envelope::wrap("ne5p", at, 4, &body).unwrap();
+    let (name, timestamp) = ("chunked", 1_787_428_287);
+
+    let mut script = session_open(ObjectClass::Program);
+    script.push(notify(ui::label("Downloading...").unwrap()));
+    script.push(request(
+        cmd::BEGIN_WRITE,
+        &op::begin_write_args(at, body.len(), b"ne5p", timestamp, name).unwrap(),
+    ));
+    script.push(response(cmd::BEGIN_WRITE, &slot_args(at)));
+
+    // Expected progress is independent of the production calculation.
+    for (offset, len, pct, acknowledged) in [
+        (0, CHUNK, 49u16, false),
+        (CHUNK, CHUNK, 98, false),
+        (CHUNK * 2, TAIL, 100, true),
+    ] {
+        let args = op::write_data_args(at, offset, &body[offset..offset + len]).unwrap();
+        match acknowledged {
+            true => {
+                script.push(request(cmd::WRITE_DATA, &args));
+                script.push(response(cmd::WRITE_DATA, &slot_args(at)));
+            }
+            false => script.push(notify(Message::new(
+                Service::Program,
+                frames::SUBSYSTEM,
+                cmd::WRITE_DATA,
+                args,
+            ))),
+        }
+        script.push(notify(ui::percent(pct)));
+    }
+
+    script.push(request(cmd::END_TRANSFER, &slot_args(at)));
+    script.push(response(cmd::END_TRANSFER, &slot_args(at)));
+    script.extend(session_close());
+
+    let mut t = ReplayTransport::new(script);
+    pollster::block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::Program)
+            .await
+            .unwrap()
+            .allow_destructive_writes();
+        let written = op::write(
+            &mut s,
+            byte_granular_unit(ObjectClass::Program),
+            at,
+            &file,
+            name,
+            timestamp,
+        )
+        .await;
+        let closed = s.commit().await;
+        written.expect("the chunked write");
+        closed.expect("the transaction closed");
+    });
+    assert!(t.is_exhausted(), "did not consume the whole exchange");
+}
