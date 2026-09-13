@@ -455,8 +455,10 @@ fn decode_target(
     Ok(())
 }
 
-/// The gate the wide generations sit behind. v2 has no gate: mono, stereo and looped
-/// v2 encodes play on an Electro 5.
+/// The gate the wide generations sit behind.
+///
+/// v2 has no gate. Confirmed on hardware: mono, stereo and looped v2 encodes play on an
+/// Electro 5.
 fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), String> {
     if generation == 2 || acknowledged {
         return Ok(());
@@ -1754,11 +1756,21 @@ mod tests {
             nord_format::formats::nsmp::section::STK,
         )
         .unwrap();
-        let first = stroke.payload[20..22].to_vec();
-        stroke.payload[38..40].copy_from_slice(&first);
+        let first = stroke.payload[FIRST_RECORD..][..POINTER].to_vec();
+        stroke.payload[MARK..][..POINTER].copy_from_slice(&first);
+        // The offsets below are restated, so the poke is only the intended one if the
+        // directory the codec reads back now names the first record as its loop.
+        let directory = codec::Directory::read(&stroke.payload).expect("a directory");
+        assert_eq!(directory.mark, directory.first_record);
 
         assert!(deep_body(&sample)
             .unwrap_err()
             .contains("does not carry the mark bit"));
     }
+
+    /// The stroke header's directory: four big-endian pointers, at `codec::SEEK_AT` and
+    /// every `codec::SEEK_STRIDE` after it, which `nsmp` keeps to itself.
+    const POINTER: usize = 2;
+    const FIRST_RECORD: usize = 20;
+    const MARK: usize = FIRST_RECORD + 9 * 2;
 }
