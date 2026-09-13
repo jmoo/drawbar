@@ -149,11 +149,7 @@ fn read(project: &Project) -> Result<Snapshot, String> {
                 bottom_note: z.bottom_note,
                 top_note: z.top_note,
                 enabled: z.enabled,
-                played: z
-                    .strokes
-                    .iter()
-                    .find(|s| s.enabled)
-                    .map(|s| s.global_id),
+                played: z.strokes.iter().find(|s| s.enabled).map(|s| s.global_id),
             })
             .collect(),
         files: project

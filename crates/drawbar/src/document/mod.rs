@@ -636,10 +636,11 @@ impl Document {
                 if self.player.playing() == Some((id, zone)) {
                     self.player.stop();
                 } else if let Some(Ok(decoded)) = self.audio.get(zone) {
-                    if let Err(why) =
-                        self.player
-                            .toggle((id, zone), &decoded.audio.samples, decoded.audio.channels)
-                    {
+                    if let Err(why) = self.player.toggle(
+                        (id, zone),
+                        &decoded.audio.samples,
+                        decoded.audio.channels,
+                    ) {
                         log.error(why);
                         log.trouble("This computer would not play that zone.");
                     }

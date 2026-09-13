@@ -1200,11 +1200,8 @@ mod tests {
             device: &shown.device.state,
             workspace: &shown.workspace,
         };
-        let claim = claim(
-            entity.entity.as_ref().expect("a set list decodes"),
-            &seen,
-        )
-        .expect("a vacant slot is trouble");
+        let claim = claim(entity.entity.as_ref().expect("a set list decodes"), &seen)
+            .expect("a vacant slot is trouble");
 
         assert_eq!(claim.words, "1 entry needs attention");
         assert!(

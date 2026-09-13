@@ -112,13 +112,13 @@ fn read(sample: &Sample) -> Result<Snapshot, String> {
             .iter()
             .enumerate()
             .map(|(index, zone)| {
-                let (gain, velocity) = told.records.get(index).copied().unwrap_or_default();
+                let stated = told.records.get(index).copied().unwrap_or_default();
                 Zone {
                     root_key: zone.root_key,
                     top_note: zone.top_note,
                     low_note: zone.low_note,
-                    gain,
-                    velocity,
+                    gain: stated.gain,
+                    velocity: stated.velocity,
                     bytes: zone.stream.len(),
                 }
             })
@@ -139,10 +139,17 @@ struct Told {
     categories: Vec<String>,
     key_table: Option<KeyTable>,
     record_len: usize,
-    /// One per zone in stored order: the record's own gain, and the velocity window it
-    /// answers, where this generation's record holds them.
-    records: Vec<(Option<u32>, Option<(u8, u8)>)>,
+    /// One per zone, in stored order.
+    records: Vec<Stated>,
     version: u32,
+}
+
+/// What a zone record states beyond its notes, where its generation holds it: the
+/// record's own gain on the narrow chain, the velocity window it answers on the wide one.
+#[derive(Clone, Copy, Default)]
+struct Stated {
+    gain: Option<u32>,
+    velocity: Option<(u8, u8)>,
 }
 
 fn told(sample: &Sample) -> Result<Told, String> {
@@ -160,7 +167,10 @@ fn told(sample: &Sample) -> Result<Told, String> {
                 .zones()
                 .map_err(|e| e.to_string())?
                 .iter()
-                .map(|zone| (Some(zone.gain), None))
+                .map(|zone| Stated {
+                    gain: Some(zone.gain),
+                    velocity: None,
+                })
                 .collect(),
             version: body.header.version,
         },
@@ -175,7 +185,10 @@ fn told(sample: &Sample) -> Result<Told, String> {
                 .zones()
                 .map_err(|e| e.to_string())?
                 .iter()
-                .map(|zone| (None, zone.velocity.map(|window| (window.low, window.high))))
+                .map(|zone| Stated {
+                    gain: None,
+                    velocity: zone.velocity.map(|window| (window.low, window.high)),
+                })
                 .collect(),
             version: body.header.version,
         },
@@ -660,9 +673,8 @@ pub fn key_map(
         .collect();
     // A band is not a row, so both the highlight going in and the pick coming out are
     // translated — see [`MapZone::row`].
-    let band_of = |row: Option<usize>| {
-        row.and_then(|row| zones.iter().position(|zone| zone.row == row))
-    };
+    let band_of =
+        |row: Option<usize>| row.and_then(|row| zones.iter().position(|zone| zone.row == row));
     match keys::bands(
         ui,
         span,
@@ -1467,7 +1479,10 @@ fn per_key(
             quiet,
         )),
     );
-    let baseline = state.baseline.as_ref().and_then(|saved| saved.table.as_ref());
+    let baseline = state
+        .baseline
+        .as_ref()
+        .and_then(|saved| saved.table.as_ref());
     for (label, field, scale) in [
         ("Gain", "gain", keys::Scale::Db(GAIN_FULL)),
         ("Detune", "detune", keys::Scale::Cents(DETUNE_FULL)),
@@ -2271,14 +2286,19 @@ mod tests {
         let bytes = v2_bytes();
         assert_eq!(v2_snapshot().zones.len(), 1);
         let refused = |path: &str| {
-            apply(&bytes, &[(path.into(), "C4".into())])
-                .expect_err(&format!("{path} was accepted"))
+            apply(&bytes, &[(path.into(), "C4".into())]).expect_err(&format!("{path} was accepted"))
         };
         assert_eq!(
             refused("zone2.root_key"),
             "there is no zone 2: this sample has 1"
         );
-        for path in ["zone0.root_key", "zone1.bogus", "zone1.", ".root_key", "zone1"] {
+        for path in [
+            "zone0.root_key",
+            "zone1.bogus",
+            "zone1.",
+            ".root_key",
+            "zone1",
+        ] {
             assert_eq!(refused(path), format!("unknown field {path:?}"));
         }
 
