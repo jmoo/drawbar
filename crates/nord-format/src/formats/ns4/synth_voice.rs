@@ -1,10 +1,6 @@
 //! One synth layer's voice half: oscillator, filter, envelopes and LFO.
-//!
-//! ⚠️ A layer's **enable and volume are not in here** — the file packs those with
-//! the other layers', a bit and 31 bits apart respectively, so they stay on the
-//! owning body. This block is the part that repeats at a whole-byte stride.
 
-use crate::components::{Interval, Level, Level6, MorphTarget, Rate, Selector, Time};
+use crate::components::{Frequency, Interval, Level, Level6, MorphTarget, Rate, Selector, Time};
 #[nord_bits_derive::bitbody(44)]
 pub struct SynthVoice {
     #[bits(2..=3)]
@@ -78,23 +74,25 @@ pub struct SynthVoice {
     #[bits(210..=212)]
     pub filter_type: Selector<3>,
     #[bits(213..=219)]
-    pub filter_freq: Level,
+    pub filter_freq: Frequency,
     #[bits(220..=227)]
     pub filter_freq_wheel: MorphTarget,
     #[bits(228..=235)]
     pub filter_freq_aftertouch: MorphTarget,
     #[bits(236..=243)]
     pub filter_freq_ctrl_pedal: MorphTarget,
-    /// ⚠️ The three morph slots below name a `filter_resonance` this body does not
-    /// declare, so they bind to nothing. Either this field is that parameter under a name
-    /// two of them ran together, or the parameter is missing from the offset table.
+    /// ⚠️ The offset table's name runs two parameters together; the resonance is the one
+    /// the three slots below move. Inferred from specimens; not confirmed on hardware.
     #[bits(244..=250)]
     pub filter_resonance_freq_hp: Level,
     #[bits(251..=258)]
+    #[morphs(filter_resonance_freq_hp)]
     pub filter_resonance_wheel: MorphTarget,
     #[bits(259..=266)]
+    #[morphs(filter_resonance_freq_hp)]
     pub filter_resonance_aftertouch: MorphTarget,
     #[bits(267..=274)]
+    #[morphs(filter_resonance_freq_hp)]
     pub filter_resonance_ctrl_pedal: MorphTarget,
     #[bits(275..=276)]
     pub filter_track: Selector<2>,

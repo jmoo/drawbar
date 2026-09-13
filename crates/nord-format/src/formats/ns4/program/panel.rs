@@ -399,9 +399,6 @@ macro_rules! synth_layer {
                                 "filter_type",
                                 "filter_freq",
                                 "filter_resonance_freq_hp",
-                                "filter_resonance_wheel",
-                                "filter_resonance_aftertouch",
-                                "filter_resonance_ctrl_pedal",
                                 "filter_track",
                                 "filter_drive",
                                 "filter_env_amount",
@@ -945,17 +942,14 @@ mod tests {
 
     /// A morph slot is named by no group and is nobody's leftover: it is drawn on the
     /// parameter its name binds it to, and that parameter is grouped.
-    ///
-    /// ⚠️ The exception is a slot whose parameter this body does not declare — the three
-    /// filter-resonance runs. Those have nothing to ride on, so they are named like any
-    /// other field.
     #[test]
     fn morph_slots_ride_on_the_parameters_they_move() {
         let specs = Program::field_specs();
         let named = PANEL.named(&specs);
         assert!(!named.contains(&"organ_a.drawbar_1_wheel"));
         assert!(named.contains(&"organ_a.drawbar_1"));
-        assert!(named.contains(&"synth_a_voice.filter_resonance_wheel"));
+        assert!(!named.contains(&"synth_a_voice.filter_resonance_wheel"));
+        assert!(named.contains(&"synth_a_voice.filter_resonance_freq_hp"));
         assert_eq!(PANEL.leftovers(&specs), ["version_echo"]);
     }
 
