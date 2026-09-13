@@ -605,48 +605,17 @@ pub fn bands(
         }
     }
 
-    let mut act = None;
-    let mut grabs = Vec::new();
-    for (index, band) in zones.iter().enumerate() {
-        let wanted = match edges {
-            Edges::Fixed => [None, None],
-            Edges::TopOnly => [Some(Edge::Top), None],
-            Edges::Both => [Some(Edge::Top), Some(Edge::Low)],
-        };
-        for edge in wanted.into_iter().flatten() {
-            let grab = handle_rect(rect, lane, span, band, edge);
-            grabs.push(grab);
-            let at = handle(
-                ui,
-                &painter,
-                grab,
-                (index, edge),
-                &drag_hint(band, edge, edges, index),
-                &visuals,
-            );
-            if let Some(at) = at {
-                let next = clamped(&bounds, span, index, edge, span.note_at(rect, at.x), edges);
-                let shown = match edge {
-                    Edge::Top => next[index].1,
-                    Edge::Low => next[index].0,
-                };
-                chip(
-                    &painter,
-                    egui::pos2(grab.center().x, rect.top() - 1.0),
-                    &note::name(shown),
-                    app::accent(&visuals),
-                    app::accent(&visuals),
-                );
-                if next != bounds {
-                    act = Some(BandAct::Drag {
-                        zone: index,
-                        edge,
-                        bounds: next,
-                    });
-                }
-            }
-        }
-    }
+    let (act, grabs) = drag_edges(
+        ui,
+        &painter,
+        rect,
+        lane,
+        span,
+        &bounds,
+        edges,
+        |index, edge| drag_hint(&zones[index], edge, edges, index),
+        |index, edge, note| clamped(&bounds, span, index, edge, note, edges),
+    );
 
     if let Some(hint) = hint {
         response.clone().on_hover_text(hint);
@@ -695,17 +664,79 @@ fn look(visuals: &egui::Visuals, selected: bool, lit: bool) -> Look {
     }
 }
 
+/// The movable ends of a lane: one pill per end, the chip that follows a drag, and the
+/// grab rects a click must not be read as a pick.
+///
+/// `moved` is where the lane puts its bounds when one end is dragged to a note, which
+/// is the one thing a zone lane and a root lane do differently.
+#[allow(clippy::too_many_arguments)]
+fn drag_edges(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    lane: egui::Rect,
+    span: Span,
+    bounds: &[(u8, u8)],
+    edges: Edges,
+    hint: impl Fn(usize, Edge) -> String,
+    moved: impl Fn(usize, Edge, u8) -> Vec<(u8, u8)>,
+) -> (Option<BandAct>, Vec<egui::Rect>) {
+    let visuals = ui.visuals().clone();
+    let wanted = match edges {
+        Edges::Fixed => [None, None],
+        Edges::TopOnly => [Some(Edge::Top), None],
+        Edges::Both => [Some(Edge::Top), Some(Edge::Low)],
+    };
+    let mut act = None;
+    let mut grabs = Vec::new();
+    for (index, ends) in bounds.iter().enumerate() {
+        for edge in wanted.into_iter().flatten() {
+            let grab = handle_rect(rect, lane, span, *ends, edge);
+            grabs.push(grab);
+            let at = handle(
+                ui,
+                painter,
+                grab,
+                (index, edge),
+                &hint(index, edge),
+                &visuals,
+            );
+            let Some(at) = at else { continue };
+            let next = moved(index, edge, span.note_at(rect, at.x));
+            let shown = match edge {
+                Edge::Top => next[index].1,
+                Edge::Low => next[index].0,
+            };
+            chip(
+                painter,
+                egui::pos2(grab.center().x, rect.top() - 1.0),
+                &note::name(shown),
+                app::accent(&visuals),
+                app::accent(&visuals),
+            );
+            if next != bounds {
+                act = Some(BandAct::Drag {
+                    zone: index,
+                    edge,
+                    bounds: next,
+                });
+            }
+        }
+    }
+    (act, grabs)
+}
+
 /// The grab zone for one end of a band, inside the band it belongs to.
 fn handle_rect(
     rect: egui::Rect,
     lane: egui::Rect,
     span: Span,
-    band: &Band,
+    (low, top): (u8, u8),
     edge: Edge,
 ) -> egui::Rect {
     let left = match edge {
-        Edge::Top => span.x_after(rect, band.top) - HANDLE_W - 1.0,
-        Edge::Low => span.x_of(rect, band.low) + 1.0,
+        Edge::Top => span.x_after(rect, top) - HANDLE_W - 1.0,
+        Edge::Low => span.x_of(rect, low) + 1.0,
     };
     egui::Rect::from_min_size(
         egui::pos2(left, lane.top()),
@@ -786,15 +817,86 @@ const MB_KEYS: usize = 4;
 /// How much is kept before the reading counts as trimmed.
 const TRIMMED: f32 = 0.05;
 
+/// Where a dragged root boundary lands.
+///
+/// The two roots either side of a boundary share it, so what one gives up the other
+/// takes and neither is left without a key; the outer end of the lowest or the highest
+/// has no root to share with, and covers or uncovers keys instead. `bounds` may be in
+/// any order — the neighbour is the cell next along the keyboard, not the next index.
+pub fn boundary(
+    bounds: &[(u8, u8)],
+    span: Span,
+    cell: usize,
+    edge: Edge,
+    note: u8,
+) -> Vec<(u8, u8)> {
+    let mut next = bounds.to_vec();
+    let (span_low, span_high) = span.ends();
+    let Some(&(low, top)) = next.get(cell) else {
+        return next;
+    };
+    match edge {
+        Edge::Top => {
+            let above = next
+                .iter()
+                .enumerate()
+                .filter(|(index, (their_low, _))| *index != cell && *their_low > low)
+                .min_by_key(|(_, (their_low, _))| *their_low)
+                .map(|(index, _)| index);
+            let ceiling = match above {
+                Some(above) => next[above].1.saturating_sub(1),
+                None => span_high,
+            };
+            let landed = note.clamp(low, ceiling.max(low));
+            next[cell].1 = landed;
+            if let Some(above) = above {
+                next[above].0 = landed.saturating_add(1);
+            }
+        }
+        Edge::Low => {
+            let below = next
+                .iter()
+                .enumerate()
+                .filter(|(index, (_, their_top))| *index != cell && *their_top < top)
+                .max_by_key(|(_, (_, their_top))| *their_top)
+                .map(|(index, _)| index);
+            let floor = match below {
+                Some(below) => next[below].0.saturating_add(1),
+                None => span_low,
+            };
+            let landed = note.clamp(floor.min(top), top);
+            next[cell].0 = landed;
+            if let Some(below) = below {
+                next[below].1 = landed.saturating_sub(1);
+            }
+        }
+    }
+    next
+}
+
+/// What a root boundary says it does.
+fn root_hint(cell: &SizeCell, edge: Edge) -> String {
+    let (what, note) = match edge {
+        Edge::Top => ("top", cell.top),
+        Edge::Low => ("low", cell.low),
+    };
+    format!(
+        "Drag to move root {}'s {what} key — now {}",
+        cell.name,
+        note::name(note)
+    )
+}
+
 /// The size lane: one cell per root, its kept megabytes as a bar inside the ghost of
-/// what it holds untrimmed. Returns the cell that was clicked.
+/// what it holds untrimmed, and a handle at each end of the keys it answers.
 pub fn size_cells(
     ui: &mut egui::Ui,
     span: Span,
     cells: &[SizeCell],
     selected: Option<usize>,
     lit: Option<usize>,
-) -> Option<usize> {
+    edges: Edges,
+) -> Option<BandAct> {
     let width = ui.available_width().max(1.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CELLS_H), egui::Sense::click());
     let visuals = ui.visuals().clone();
@@ -889,16 +991,36 @@ pub fn size_cells(
         }
     }
 
+    let bounds: Vec<(u8, u8)> = cells.iter().map(|cell| (cell.low, cell.top)).collect();
+    let (act, grabs) = drag_edges(
+        ui,
+        &painter,
+        rect,
+        egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + BAR_AREA)),
+        span,
+        &bounds,
+        edges,
+        |index, edge| root_hint(&cells[index], edge),
+        |index, edge, note| boundary(&bounds, span, index, edge, note),
+    );
+
     if let Some(hint) = hint {
         response.clone().on_hover_text(hint);
+    }
+    if act.is_some() {
+        return act;
     }
     let picked = response
         .clicked()
         .then(|| response.interact_pointer_pos())
-        .flatten()?;
-    cells.iter().position(|cell| {
-        picked.x >= span.x_of(rect, cell.low) && picked.x < span.x_after(rect, cell.top)
-    })
+        .flatten()
+        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
+    cells
+        .iter()
+        .position(|cell| {
+            picked.x >= span.x_of(rect, cell.low) && picked.x < span.x_after(rect, cell.top)
+        })
+        .map(BandAct::Pick)
 }
 
 /// How many keys a cell spans.
@@ -1900,7 +2022,7 @@ mod tests {
         for (keys, shown) in [(3u8, false), (4, true)] {
             let cells = [size_cell(60, 60 + keys - 1, 1.0, 1.0)];
             let (output, _, _) = frame(&ctx, Vec::new(), CELLS_H, |ui| {
-                size_cells(ui, span, &cells, None, None)
+                size_cells(ui, span, &cells, None, None, Edges::Fixed)
             });
             let said: Vec<String> = words(&output).into_iter().map(|(text, _)| text).collect();
             assert_eq!(
@@ -1921,7 +2043,7 @@ mod tests {
         let span = Span { low: 48, high: 95 };
         let cells = [size_cell(60, 71, 0.5, 2.0), size_cell(72, 83, 2.0, 2.0)];
         let (output, _, _) = frame(&ctx, Vec::new(), CELLS_H, |ui| {
-            size_cells(ui, span, &cells, None, None)
+            size_cells(ui, span, &cells, None, None, Edges::Fixed)
         });
         let said = words(&output);
         let ink = |text: &str| {
@@ -1939,14 +2061,39 @@ mod tests {
         let ctx = dressed();
         let span = Span { low: 48, high: 95 };
         let cells = [size_cell(48, 59, 1.0, 1.0), size_cell(60, 71, 1.0, 1.0)];
-        let lane = |ui: &mut egui::Ui| size_cells(ui, span, &cells, None, None);
+        let lane = |ui: &mut egui::Ui| size_cells(ui, span, &cells, None, None, Edges::Both);
         let (_, rect, _) = frame(&ctx, Vec::new(), CELLS_H, lane);
         let at = egui::pos2(
             (span.x_of(rect, 60) + span.x_after(rect, 71)) / 2.0,
             rect.center().y,
         );
         let (_, _, picked) = frame(&ctx, press(at), CELLS_H, lane);
-        assert_eq!(picked, Some(1));
+        assert_eq!(picked, Some(BandAct::Pick(1)));
+    }
+
+    /// Two roots share the boundary between them, so keys one gives up the other takes
+    /// and neither is left without a key; the outer end of the lowest or the highest
+    /// covers or uncovers keys instead.
+    #[test]
+    fn a_dragged_root_boundary_moves_keys_from_one_root_to_the_next() {
+        let span = Span { low: 48, high: 95 };
+        let bounds = [(48, 59), (60, 71), (72, 95)];
+
+        let up = boundary(&bounds, span, 1, Edge::Top, 77);
+        assert_eq!((up[1], up[2]), ((60, 77), (78, 95)));
+        assert_eq!(up[0], bounds[0], "and the root below is left alone");
+
+        let down = boundary(&bounds, span, 1, Edge::Low, 55);
+        assert_eq!((down[0], down[1]), ((48, 54), (55, 71)));
+
+        // Neither root may be left without a key to answer.
+        assert_eq!(boundary(&bounds, span, 1, Edge::Top, 127)[2], (95, 95));
+        assert_eq!(boundary(&bounds, span, 1, Edge::Low, 0)[0], (48, 48));
+        assert_eq!(boundary(&bounds, span, 1, Edge::Low, 127)[1], (71, 71));
+
+        // The outer ends have no root to share with: they cover and uncover keys.
+        assert_eq!(boundary(&bounds, span, 0, Edge::Low, 48), bounds);
+        assert_eq!(boundary(&bounds, span, 2, Edge::Top, 90)[2], (72, 90));
     }
 
     // ---- the velocity field ---------------------------------------------------------

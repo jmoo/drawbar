@@ -16,6 +16,7 @@ use std::io::Cursor;
 use std::ops::RangeInclusive;
 
 use eframe::egui;
+use nord_format::formats::npno::encode::{Kind, ALL_KEYS_DAMPED};
 use nord_format::formats::npno::{self, Bank, FINE_TUNE_CENTS_PER_UNIT};
 use nord_format::Entity;
 use nord_usb::ObjectClass;
@@ -23,6 +24,7 @@ use nord_usb::ObjectClass;
 use super::capability::{self, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys::{self, Audition, Scale, SizeCell, Span};
+use super::sample::note_picker;
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::device::DeviceState;
@@ -87,6 +89,17 @@ pub struct Plan {
     variant: Option<String>,
     /// Retuned keys, in the file's own units — see [`FINE_TUNE_CENTS_PER_UNIT`].
     fine_tune: BTreeMap<u8, i8>,
+    /// A gain over the whole library, in signed tenths of a decibel.
+    gain: Option<i8>,
+    /// The highest key damped at note-off; [`ALL_KEYS_DAMPED`] leaves none ringing.
+    damper_top: Option<u8>,
+    /// The kind of instrument the library files itself under.
+    kind: Option<Kind>,
+    /// Decibels a stroke is attenuated by, keyed by `(root, bank code, layer value)` —
+    /// the stroke's place in the directory, which a drop moves.
+    trims: BTreeMap<(u8, u8, u8), u16>,
+    /// The root a re-routed key plays, `None` where it plays nothing.
+    key_roots: BTreeMap<u8, Option<u8>>,
 }
 
 impl Plan {
@@ -107,18 +120,63 @@ impl Plan {
         }
     }
 
+    /// The keys the plan routes to the root at `index`, in no order: the ones the
+    /// baseline sends it that no re-route has taken, and the ones a re-route has given
+    /// it.
+    fn routed<'a>(&'a self, facts: &'a Facts, index: usize) -> impl Iterator<Item = u8> + 'a {
+        let note = facts.roots[index].note;
+        facts.roots[index]
+            .keys
+            .iter()
+            .copied()
+            .filter(|key| !self.key_roots.contains_key(key))
+            .chain(
+                self.key_roots
+                    .iter()
+                    .filter(move |(_, root)| **root == Some(note))
+                    .map(|(key, _)| *key),
+            )
+    }
+
+    /// The keys the plan routes to the root at `index`, ascending.
+    fn keys_of(&self, facts: &Facts, index: usize) -> Vec<u8> {
+        let mut keys: Vec<u8> = self.routed(facts, index).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The root the plan's map sends `key` to.
+    fn answers(&self, facts: &Facts, key: u8) -> Option<usize> {
+        match self.key_roots.get(&key) {
+            Some(root) => root.and_then(|note| facts.index_of(note)),
+            None => facts.answers(key),
+        }
+    }
+
     /// Whether a range cut still leaves this root a key to answer. A root keeping one
     /// key keeps every stroke it has.
-    fn in_range(&self, root: &Root) -> bool {
+    fn in_range(&self, facts: &Facts, index: usize) -> bool {
         match &self.range {
             None => true,
-            Some(range) => root.keys.iter().any(|key| range.contains(key)),
+            Some(range) => self.routed(facts, index).any(|key| range.contains(&key)),
         }
     }
 
     fn keeps(&self, facts: &Facts, cell: &Cell) -> bool {
         let root = &facts.roots[cell.root];
-        self.in_range(root) && self.keeps_bank(cell.bank) && self.keeps_layer(root.note, cell.layer)
+        self.in_range(facts, cell.root)
+            && self.keeps_bank(cell.bank)
+            && self.keeps_layer(root.note, cell.layer)
+    }
+
+    /// Route `key` to a root, or to nothing, dropping an entry the baseline already
+    /// says so that an empty plan stays empty.
+    fn route(&mut self, facts: &Facts, key: u8, root: Option<usize>) {
+        let note = root.map(|index| facts.roots[index].note);
+        match facts.answers(key).map(|index| facts.roots[index].note) == note {
+            true => self.key_roots.remove(&key),
+            false => self.key_roots.insert(key, note),
+        };
     }
 
     /// Throw one layer's switch for every root.
@@ -168,6 +226,22 @@ pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
             .set_fine_tune(*key, *units)
             .map_err(|e| e.to_string())?;
     }
+    if let Some(tenths) = plan.gain {
+        library.set_gain(tenths);
+    }
+    if let Some(key) = plan.damper_top {
+        library.set_damper_top(key).map_err(|e| e.to_string())?;
+    }
+    if let Some(kind) = plan.kind {
+        library.set_kind(kind);
+    }
+    // Before anything is dropped, so that a route to a root the directory no longer
+    // records is refused by the format rather than accepted against a shorter list.
+    for (key, root) in &plan.key_roots {
+        library
+            .set_key_root(*key, *root)
+            .map_err(|e| e.to_string())?;
+    }
     if let Some(range) = &plan.range {
         library
             .cut_range(range.clone())
@@ -184,6 +258,17 @@ pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
     if library.strokes().is_empty() {
         return Err("that would leave the library with no strokes at all".to_string());
     }
+    // After the drops: a trim names the stroke it belongs to, and the index that stroke
+    // sits at moves as strokes before it go. A trim on a stroke that has gone has no
+    // record left to write.
+    for ((root, bank, layer), decibels) in &plan.trims {
+        let at = library.strokes().iter().position(|stroke| {
+            (stroke.root, stroke.bank_code(), stroke.layer()) == (*root, *bank, *layer)
+        });
+        if let Some(at) = at {
+            library.set_trim(at, *decibels).map_err(|e| e.to_string())?;
+        }
+    }
     let edited = library.to_piano().map_err(|e| e.to_string())?;
     nord_format::to_bytes(&Entity::Piano(edited)).map_err(|e| e.to_string())
 }
@@ -196,22 +281,20 @@ struct Root {
     keys: Vec<u8>,
 }
 
-impl Root {
-    /// The keys it answers, as the stretches they run in.
-    ///
-    /// A root's keys are one run — inferred from specimens; not confirmed on hardware —
-    /// and the key map can hold anything, so a root whose keys are not contiguous gets
-    /// one cell per run rather than one cell over the keys between them.
-    fn runs(&self) -> Vec<(u8, u8)> {
-        let mut out: Vec<(u8, u8)> = Vec::new();
-        for key in &self.keys {
-            match out.last_mut() {
-                Some((_, top)) if *top + 1 == *key => *top = *key,
-                _ => out.push((*key, *key)),
-            }
+/// Ascending `keys` as the stretches they run in.
+///
+/// A root's keys are one run — inferred from specimens; not confirmed on hardware —
+/// and the key map can hold anything, so a root whose keys are not contiguous gets one
+/// cell per run rather than one cell over the keys between them.
+fn runs(keys: &[u8]) -> Vec<(u8, u8)> {
+    let mut out: Vec<(u8, u8)> = Vec::new();
+    for key in keys {
+        match out.last_mut() {
+            Some((_, top)) if *top + 1 == *key => *top = *key,
+            _ => out.push((*key, *key)),
         }
-        out
     }
+    out
 }
 
 /// The audio one root's layer of one bank owns. Every stroke lands in exactly one.
@@ -221,6 +304,32 @@ struct Cell {
     /// `None` for a bank code the format does not name.
     bank: Option<Bank>,
     bytes: u64,
+}
+
+/// One stroke as the open root's row lists it.
+struct Strike {
+    root: usize,
+    /// The record's own bank byte, which is the half of a trim's key [`Bank`] cannot
+    /// carry for a code the format does not name.
+    bank: u8,
+    layer: u8,
+    /// The `+0x34` attenuation, in decibels.
+    trim: u16,
+    /// What the applied-decay ladder at `+0x36` states, in decibels a second; `None`
+    /// where every entry of it applies nothing.
+    decay: Option<f32>,
+}
+
+/// What the applied-decay ladder is worth, in decibels a second, read off its first
+/// entry: a one-pole coefficient of `entry / 2^23` a frame at [`npno::codec::RATE`], so
+/// `20·log10(e)·rate·(1 − entry/2^23)`. `None` where every entry of it is
+/// [`npno::LADDER_UNITY`], which applies nothing.
+fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
+    let held = 1.0 - f64::from(ladder[0]) / f64::from(npno::LADDER_UNITY);
+    ladder
+        .iter()
+        .any(|entry| *entry != npno::LADDER_UNITY)
+        .then_some((8.686 * f64::from(npno::codec::RATE) * held) as f32)
 }
 
 /// Everything the piano editor draws from, read once out of the saved baseline.
@@ -241,10 +350,20 @@ struct Facts {
     /// The banks present, in [`Bank::ALL`] order.
     banks: Vec<Bank>,
     cells: Vec<Cell>,
+    /// Every stroke, in directory order.
+    strikes: Vec<Strike>,
     /// The per-key fine tune table, in file units.
     fine_tune: Vec<i8>,
+    /// The root the map sends each of the 128 keys to.
+    of_key: Vec<Option<usize>>,
     /// The keys the map routes somewhere, ascending.
     covered: Vec<u8>,
+    /// A gain over the whole library, in signed tenths of a decibel.
+    gain: i8,
+    /// The highest key damped at note-off.
+    damper_top: u8,
+    /// The instrument kind the library files itself under; [`kind_name`] spells it.
+    kind: u8,
 }
 
 impl Facts {
@@ -264,6 +383,7 @@ impl Facts {
             .collect();
 
         let mut grouped: BTreeMap<(usize, u8, Option<Bank>), u64> = BTreeMap::new();
+        let mut strikes: Vec<Strike> = Vec::with_capacity(library.strokes().len());
         for stroke in library.strokes() {
             let root = roots
                 .iter()
@@ -272,6 +392,13 @@ impl Facts {
             *grouped
                 .entry((root, stroke.layer(), stroke.bank()))
                 .or_default() += stroke.audio().len() as u64;
+            strikes.push(Strike {
+                root,
+                bank: stroke.bank_code(),
+                layer: stroke.layer(),
+                trim: stroke.trim(),
+                decay: decay_rate(&stroke.ladder()),
+            });
         }
         let cells: Vec<Cell> = grouped
             .into_iter()
@@ -284,6 +411,11 @@ impl Facts {
             .collect();
         let layers: BTreeSet<u8> = cells.iter().map(|cell| cell.layer).collect();
         let present: BTreeSet<Bank> = cells.iter().filter_map(|cell| cell.bank).collect();
+        let of_key: Vec<Option<usize>> = library
+            .key_map()
+            .iter()
+            .map(|note| roots.iter().position(|root| root.note == *note))
+            .collect();
 
         Ok(Facts {
             name,
@@ -299,16 +431,20 @@ impl Facts {
                 .filter(|bank| present.contains(bank))
                 .collect(),
             cells,
+            strikes,
             fine_tune: (0..npno::NOTES)
                 .map(|key| library.fine_tune(key as u8).unwrap_or(0))
                 .collect(),
-            covered: library
-                .key_map()
+            covered: of_key
                 .iter()
                 .enumerate()
-                .filter(|(_, root)| **root != npno::UNCOVERED)
+                .filter(|(_, root)| root.is_some())
                 .map(|(key, _)| key as u8)
                 .collect(),
+            of_key,
+            gain: library.gain(),
+            damper_top: library.damper_top(),
+            kind: library.kind_code(),
         })
     }
 
@@ -316,9 +452,13 @@ impl Facts {
         self.fine_tune.get(usize::from(key)).copied().unwrap_or(0)
     }
 
-    /// The root the map sends `key` to.
+    /// The root the baseline's map sends `key` to.
     fn answers(&self, key: u8) -> Option<usize> {
-        self.roots.iter().position(|root| root.keys.contains(&key))
+        self.of_key.get(usize::from(key)).copied().flatten()
+    }
+
+    fn index_of(&self, note: u8) -> Option<usize> {
+        self.roots.iter().position(|root| root.note == note)
     }
 
     /// The layers as the sections list them, softest first, each with its rank among
@@ -475,6 +615,34 @@ fn layer_name(rank: usize, count: usize) -> String {
     }
 }
 
+/// The velocities each of a root's layer values is the one that sounds, in the order
+/// the values are given.
+///
+/// A key sounds the largest value its root holds that is at most `(127 − v)·31/127`
+/// ([`npno::Stroke::layer`]), so between a louder value `a` and the next softer `b` the
+/// split is at `v = 127 − ⌈b·127/31⌉`: `b` plays up to there and `a` from the next
+/// velocity up. A value no velocity ever reaches gets an empty range.
+fn spans(values: &[u8]) -> Vec<(u8, RangeInclusive<u8>)> {
+    let mut out: Vec<(u8, RangeInclusive<u8>)> = Vec::with_capacity(values.len());
+    let mut below = 0u8;
+    for value in values.iter().rev() {
+        let over = (u32::from(*value) * 127).div_ceil(31).min(127) as u8;
+        let top = 127 - over;
+        out.push((*value, below.saturating_add(1)..=top));
+        below = below.max(top);
+    }
+    out.reverse();
+    out
+}
+
+/// A velocity span as the lanes print it.
+fn span_text(span: &RangeInclusive<u8>) -> String {
+    match span.start() > span.end() {
+        true => "no velocity".to_string(),
+        false => format!("v {}–{}", span.start(), span.end()),
+    }
+}
+
 /// The letter a layer wears on a root's row.
 fn layer_short(rank: usize, count: usize) -> String {
     match (count, rank) {
@@ -490,6 +658,38 @@ fn bank_name(bank: Bank) -> &'static str {
         Bank::Attack => "Attack samples",
         Bank::Resonance => "Pedal resonance",
         Bank::Release => "Release samples",
+    }
+}
+
+/// What a bank is called on a stroke's line, a code the format does not name included.
+fn bank_word(code: u8) -> String {
+    match Bank::from_code(code) {
+        Some(bank) => bank_name(bank).to_string(),
+        None => format!("bank {code}"),
+    }
+}
+
+fn kind_word(kind: Kind) -> &'static str {
+    match kind {
+        Kind::ElectricGrand => "Electric grand",
+        Kind::ElectricPiano => "Electric piano",
+        Kind::Wurlitzer => "Reed piano",
+        Kind::Clavinet => "Clavinet",
+        Kind::Grand => "Grand",
+        Kind::Upright => "Upright",
+        Kind::Harpsichord => "Harpsichord",
+        Kind::DigitalPiano => "Digital piano",
+        Kind::Hybrid => "Hybrid",
+        Kind::Mallet => "Mallet",
+    }
+}
+
+/// What the panel calls the kind a library files itself under, a code the format does
+/// not name included.
+fn kind_name(code: u8) -> String {
+    match Kind::from_code(code) {
+        Some(kind) => kind_word(kind).to_string(),
+        None => format!("kind {code}"),
     }
 }
 
@@ -980,14 +1180,11 @@ fn root_bytes(facts: &Facts, plan: Option<&Plan>, index: usize) -> u64 {
 
 /// The keys the plan leaves answering something.
 fn covered(facts: &Facts, plan: &Plan) -> Vec<u8> {
-    facts
-        .covered
-        .iter()
-        .copied()
+    (0..npno::NOTES as u8)
         .filter(|key| {
             plan.range.as_ref().is_none_or(|range| range.contains(key))
-                && facts
-                    .answers(*key)
+                && plan
+                    .answers(facts, *key)
                     .is_some_and(|root| root_bytes(facts, Some(plan), root) > 0)
         })
         .collect()
@@ -1035,9 +1232,9 @@ fn mb(bytes: u64) -> f32 {
 /// the sentence.
 fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
     let silent = |why: &str| (false, format!("{} — {why}", note::name(key)));
-    let answers = facts
-        .answers(key)
-        .filter(|index| plan.in_range(&facts.roots[*index]))
+    let answers = plan
+        .answers(facts, key)
+        .filter(|index| plan.in_range(facts, *index))
         .filter(|_| plan.range.as_ref().is_none_or(|range| range.contains(&key)));
     let Some(index) = answers else {
         return silent("no root answers this key; silence.");
@@ -1069,6 +1266,55 @@ fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
             format!("{said} — the loudest layer is dropped, so the next kept layer plays"),
         ),
         _ => (true, said),
+    }
+}
+
+/// The damper limit over the keyboard: a marker at the boundary above the highest
+/// damped key, and the keys past it drawn quieter — they ring on at note-off. Nothing
+/// where every key is damped.
+fn damper_mark(ui: &egui::Ui, rect: egui::Rect, top: u8) {
+    if top >= ALL_KEYS_DAMPED || top >= SPAN.high {
+        return;
+    }
+    let at = SPAN.x_after(rect, top);
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter();
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(at, rect.top() + 1.0),
+            rect.max - egui::vec2(0.0, 1.0),
+        ),
+        0.0,
+        visuals.window_fill.gamma_multiply(0.45),
+    );
+    painter.vline(
+        at,
+        rect.y_range(),
+        egui::Stroke::new(1.0_f32, app::caption(&visuals)),
+    );
+    painter.text(
+        egui::pos2(at + 3.0, rect.top() + 1.0),
+        egui::Align2::LEFT_TOP,
+        "damper",
+        egui::FontId::proportional(MICRO),
+        app::caption(&visuals),
+    );
+}
+
+/// Take a dragged lane of root boundaries into the plan's key map: each key the drag
+/// moved plays the root whose cell now covers it, or nothing where no cell does.
+fn reroute(facts: &Facts, plan: &mut Plan, of_root: &[usize], was: &[(u8, u8)], now: &[(u8, u8)]) {
+    let holder = |bounds: &[(u8, u8)], key: u8| {
+        bounds
+            .iter()
+            .position(|(low, top)| (*low..=*top).contains(&key))
+    };
+    for key in 0..npno::NOTES as u8 {
+        let after = holder(now, key);
+        if holder(was, key) == after {
+            continue;
+        }
+        plan.route(facts, key, after.map(|cell| of_root[cell]));
     }
 }
 
@@ -1115,14 +1361,14 @@ impl State {
         );
 
         let lit = view.audition.as_ref().map(|struck| struck.note);
-        let answering = lit.and_then(|note| facts.answers(note));
+        let answering = lit.and_then(|note| draft.answers(facts, note));
         let mut cells = Vec::new();
         let mut of_root = Vec::new();
         for (index, root) in facts.roots.iter().enumerate() {
             let kept = root_bytes(facts, Some(draft), index);
             let original = root_bytes(facts, None, index);
-            let in_range = draft.in_range(root);
-            for (low, top) in root.runs() {
+            let in_range = draft.in_range(facts, index);
+            for (low, top) in runs(&draft.keys_of(facts, index)) {
                 of_root.push(index);
                 cells.push(SizeCell {
                     low,
@@ -1163,8 +1409,24 @@ impl State {
             .picked
             .and_then(|root| of_root.iter().position(|held| *held == root));
         let cell_lit = answering.and_then(|root| of_root.iter().position(|held| *held == root));
-        let clicked_cell = keys::size_cells(&mut inner, SPAN, &cells, picked, cell_lit);
+        let acted = keys::size_cells(
+            &mut inner,
+            SPAN,
+            &cells,
+            picked,
+            cell_lit,
+            keys::Edges::Both,
+        );
+        let keyboard = egui::Rect::from_min_size(
+            inner.next_widget_position(),
+            egui::vec2(inner.available_width().max(1.0), keys::KEYBOARD_H),
+        );
         let struck = keys::keyboard(&mut inner, SPAN, lit, &marks);
+        damper_mark(
+            &inner,
+            keyboard,
+            draft.damper_top.unwrap_or(facts.damper_top),
+        );
         let room = inner.available_rect_before_wrap().width();
         let (line, _) = inner.allocate_exact_size(egui::vec2(room, LANE), egui::Sense::hover());
         if let Some(note) = lit {
@@ -1196,11 +1458,18 @@ impl State {
         ui.advance_cursor_after_rect(drawn);
         hairline(ui, drawn.expand2(egui::vec2(0.0, 4.0)));
 
-        if let Some(index) = clicked_cell {
-            let root = of_root[index];
-            view.picked = Some(root);
-            view.open_rows.insert(root);
-            view.reveal = Some(root);
+        match acted {
+            Some(keys::BandAct::Pick(index)) => {
+                let root = of_root[index];
+                view.picked = Some(root);
+                view.open_rows.insert(root);
+                view.reveal = Some(root);
+            }
+            Some(keys::BandAct::Drag { bounds, .. }) => {
+                let was: Vec<(u8, u8)> = cells.iter().map(|cell| (cell.low, cell.top)).collect();
+                reroute(facts, draft, &of_root, &was, &bounds);
+            }
+            None => {}
         }
         let note = struck?;
         view.audition = Some(Audition::new(note, ui.input(|input| input.time)));
@@ -1208,7 +1477,7 @@ impl State {
         // answer with the codec's refusal, and the line under the keyboard is where
         // silence is explained.
         let (sounds, _) = status(facts, draft, note);
-        let root = facts.answers(note).filter(|_| sounds)?;
+        let root = draft.answers(facts, note).filter(|_| sounds)?;
         let root = facts.roots[root].note;
         Some(Ask::Strike {
             root,
@@ -1248,6 +1517,7 @@ struct Switch {
 /// The switch rows of the trim section: what the plan keeps, against what it holds.
 fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
     let layers = facts.layers.len();
+    let whole = spans(&facts.layers);
     let mut rows: Vec<Switch> = Vec::new();
     for (rank, layer) in facts.shown_layers() {
         let on_roots = facts
@@ -1259,7 +1529,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
                     .cells
                     .iter()
                     .any(|cell| cell.root == *index && cell.layer == layer)
-                    && plan.in_range(root)
+                    && plan.in_range(facts, *index)
                     && plan.keeps_layer(root.note, layer)
             })
             .count();
@@ -1291,7 +1561,11 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
             loud: partial,
             size: room::measure(kept),
             was: (kept != held).then(|| room::measure(held)),
-            hint: format!("layer index {layer} in the file — 0 is the loudest"),
+            hint: format!(
+                "layer index {layer} in the file — 0 is the loudest; a root holding \
+                 every layer sounds it at {}",
+                span_text(&whole[rank].1)
+            ),
             what: Some(What::Layer(layer)),
         });
     }
@@ -1344,10 +1618,8 @@ fn range_switch(facts: &Facts, plan: &Plan) -> Switch {
         note: match &plan.range {
             None => "the library's whole range".to_string(),
             Some(range) => {
-                let dropped = facts
-                    .roots
-                    .iter()
-                    .filter(|root| !plan.in_range(root))
+                let dropped = (0..facts.roots.len())
+                    .filter(|index| !plan.in_range(facts, *index))
                     .count();
                 format!(
                     "trimmed to {} – {} · {dropped} roots dropped",
@@ -1586,6 +1858,87 @@ fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
     (format!("{head} {rest}"), true)
 }
 
+// ---- the playback fields ------------------------------------------------------------
+
+/// A control of the playback section: the caps label, and the control under it.
+fn field(ui: &mut egui::Ui, label: &str, hint: &str, body: impl FnOnce(&mut egui::Ui)) {
+    let response = ui
+        .vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(crate::panel::caps(label).color(app::caption(ui.visuals())));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                body(ui);
+            });
+        })
+        .response;
+    response.on_hover_text(hint);
+}
+
+/// What the instrument applies over every stroke: a gain over the whole library, the
+/// key the damper still reaches, and the kind of instrument the library is filed under.
+fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
+    ui.spacing_mut().item_spacing = egui::vec2(24.0, 10.0);
+    ui.horizontal_wrapped(|ui| {
+        field(ui, "Instrument gain", "0x40c, tenths of a decibel", |ui| {
+            let mut decibels = f64::from(plan.gain.unwrap_or(facts.gain)) / 10.0;
+            let moved = ui.add(
+                egui::Slider::new(&mut decibels, -12.7..=12.7)
+                    .step_by(0.1)
+                    .custom_formatter(|value, _| format!("{value:+.1} dB")),
+            );
+            if moved.changed() {
+                let tenths = (decibels * 10.0).round() as i8;
+                plan.gain = (tenths != facts.gain).then_some(tenths);
+            }
+        });
+        field(
+            ui,
+            "Damper reaches",
+            "0x40d: keys above ring on at note-off",
+            |ui| {
+                let held = plan.damper_top.unwrap_or(facts.damper_top);
+                if let Some(key) = note_picker(ui, ("piano_damper", 0), held) {
+                    plan.damper_top = (key != facts.damper_top).then_some(key);
+                }
+                let mut every = held >= ALL_KEYS_DAMPED;
+                if ui.checkbox(&mut every, "every key").changed() {
+                    let key = match every {
+                        true => ALL_KEYS_DAMPED,
+                        false => SPAN.high,
+                    };
+                    plan.damper_top = (key != facts.damper_top).then_some(key);
+                }
+            },
+        );
+        field(
+            ui,
+            "Kind",
+            "0x18; the instrument files the library under it — it changes nothing the \
+             library sounds like, and picking one only defaults the damper limit",
+            |ui| {
+                let held = plan.kind.map_or(facts.kind, |kind| kind.code());
+                let mut picked = Kind::from_code(held);
+                egui::ComboBox::from_id_salt("piano_kind")
+                    .selected_text(kind_name(held))
+                    .show_ui(ui, |ui| {
+                        for kind in Kind::ALL {
+                            ui.selectable_value(&mut picked, Some(kind), kind_name(kind.code()));
+                        }
+                    });
+                let Some(kind) = picked.filter(|kind| kind.code() != held) else {
+                    return;
+                };
+                if plan.damper_top.is_none() {
+                    let top = kind.damper_top();
+                    plan.damper_top = (top != facts.damper_top).then_some(top);
+                }
+                plan.kind = (kind.code() != facts.kind).then_some(kind);
+            },
+        );
+    });
+}
+
 // ---- the velocity layer lanes -------------------------------------------------------
 
 /// One lane per layer: the switch that speaks for every root, and one segment per root
@@ -1594,8 +1947,15 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
     const LEFT: f32 = 88.0;
     const RIGHT: f32 = 150.0;
     const SEG_H: f32 = 16.0;
+    /// How wide a segment must be before its velocities are worth printing in it.
+    const SPAN_W: f32 = 48.0;
 
     let layers = facts.layers.len();
+    // A root missing a layer the file holds answers over the gap it leaves, so the
+    // spans are the ones that root's own values give.
+    let held: Vec<Vec<(u8, RangeInclusive<u8>)>> = (0..facts.roots.len())
+        .map(|index| spans(&root_layers(facts, index)))
+        .collect();
     let mut thrown: Option<(u8, bool)> = None;
     let mut excepted: Option<(u8, u8, bool)> = None;
     for (rank, layer) in facts.shown_layers() {
@@ -1605,7 +1965,8 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
         let on: Vec<bool> = facts
             .roots
             .iter()
-            .map(|root| plan.in_range(root) && plan.keeps_layer(root.note, layer))
+            .enumerate()
+            .map(|(index, root)| plan.in_range(facts, index) && plan.keeps_layer(root.note, layer))
             .collect();
         let kept_roots = on.iter().filter(|kept| **kept).count();
         let all = kept_roots == facts.roots.len();
@@ -1681,8 +2042,43 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
                     egui::Stroke::new(1.0_f32, app::unlit(&visuals)),
                 ),
             }
+            let span = held[index]
+                .iter()
+                .find(|(value, _)| *value == layer)
+                .map(|(_, span)| span_text(span))
+                .unwrap_or_default();
+            if seg.width() >= SPAN_W && !span.is_empty() {
+                cell(
+                    &painter,
+                    seg.left() + 4.0,
+                    seg.center().y,
+                    seg.width() - 8.0,
+                    &span,
+                    egui::FontId::monospace(MICRO),
+                    match kept {
+                        true => visuals.weak_text_color(),
+                        false => app::unlit(&visuals),
+                    },
+                );
+            }
             if !pointer.is_some_and(|at| seg.contains(at)) {
                 continue;
+            }
+            let mut said = format!(
+                "{} on {} — {} · {}",
+                layer_name(rank, layers),
+                note::name(root.note),
+                match kept {
+                    true => "kept · click to drop",
+                    false => "dropped · click to keep",
+                },
+                room::measure(root_layer_bytes(facts, index, layer)),
+            );
+            if !span.is_empty() {
+                said.push_str(&format!(" · {span}"));
+            }
+            if let Some(decibels) = segment_trim(facts, plan, index, layer) {
+                said.push_str(&format!(" · trim {decibels} dB"));
             }
             let response = ui
                 .interact(
@@ -1690,16 +2086,7 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
                     ui.id().with(("segment", layer, root.note)),
                     egui::Sense::click(),
                 )
-                .on_hover_text(format!(
-                    "{} on {} — {} · {}",
-                    layer_name(rank, layers),
-                    note::name(root.note),
-                    match kept {
-                        true => "kept · click to drop",
-                        false => "dropped · click to keep",
-                    },
-                    room::measure(root_layer_bytes(facts, index, layer)),
-                ));
+                .on_hover_text(said);
             if response.clicked() {
                 excepted = Some((root.note, layer, !kept));
             }
@@ -1735,6 +2122,36 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
     if let Some((root, layer, keep)) = excepted {
         plan.roots.insert((root, layer), keep);
     }
+}
+
+/// The layer values one root holds, ascending.
+fn root_layers(facts: &Facts, root: usize) -> Vec<u8> {
+    let mut values: Vec<u8> = facts
+        .cells
+        .iter()
+        .filter(|cell| cell.root == root)
+        .map(|cell| cell.layer)
+        .collect();
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+/// What a stroke is attenuated by under this plan, in decibels.
+fn trim_of(facts: &Facts, plan: &Plan, strike: &Strike) -> u16 {
+    let key = (facts.roots[strike.root].note, strike.bank, strike.layer);
+    plan.trims.get(&key).copied().unwrap_or(strike.trim)
+}
+
+/// The trim a lane's segment reads: one segment covers a root's layer in every bank
+/// that records it, and the attack stroke is the one a key sounds.
+fn segment_trim(facts: &Facts, plan: &Plan, root: usize, layer: u8) -> Option<u16> {
+    facts
+        .strikes
+        .iter()
+        .filter(|strike| strike.root == root && strike.layer == layer)
+        .min_by_key(|strike| strike.bank)
+        .map(|strike| trim_of(facts, plan, strike))
 }
 
 /// What one root's layer holds, across every bank that records it.
@@ -1842,7 +2259,7 @@ fn roots(
     for (index, root) in facts.roots.iter().enumerate() {
         let picked = view.picked == Some(index);
         let open = picked && view.open_rows.contains(&index);
-        let in_range = plan.in_range(root);
+        let in_range = plan.in_range(facts, index);
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
         // ⚠️ Before the lamps drawn over it: egui gives a click to the last widget
@@ -1881,7 +2298,7 @@ fn roots(
             egui::FontId::new(NAME, app::bold()),
             ink.text,
         );
-        let runs = root.runs();
+        let runs = runs(&plan.keys_of(facts, index));
         let answers = match runs.as_slice() {
             [(low, top)] => format!("{} – {}", note::name(*low), note::name(*top)),
             runs => runs
@@ -1991,7 +2408,7 @@ fn roots(
         }
 
         if open {
-            if let Some(asked) = open_row(ui, facts, plan, root, sounding) {
+            if let Some(asked) = open_row(ui, facts, plan, index, &runs, sounding) {
                 match asked {
                     Opened::Audio(asked) => ask = Some(asked),
                     Opened::Drop => dropped = Some(index),
@@ -2033,12 +2450,13 @@ enum Opened {
 fn open_row(
     ui: &mut egui::Ui,
     facts: &Facts,
-    plan: &Plan,
-    root: &Root,
+    plan: &mut Plan,
+    index: usize,
+    runs: &[(u8, u8)],
     sounding: Option<u8>,
 ) -> Option<Opened> {
     let mut asked = None;
-    let runs = root.runs();
+    let root = &facts.roots[index];
     let (low, top) = (
         runs.first().map_or(root.note, |(low, _)| *low),
         runs.last().map_or(root.note, |(_, top)| *top),
@@ -2057,8 +2475,9 @@ fn open_row(
             ui.spacing_mut().item_spacing = egui::vec2(20.0, 10.0);
             ui.horizontal_wrapped(|ui| {
                 read_only(ui, "Root key", &note::name(root.note), "the recorded note");
-                read_only(ui, "Answers from", &note::name(low), "");
-                read_only(ui, "up to", &note::name(top), "");
+                let dragged = "drag the root's boundary on the key map to move it";
+                read_only(ui, "Answers from", &note::name(low), dragged);
+                read_only(ui, "up to", &note::name(top), dragged);
                 read_only(
                     ui,
                     "Channels",
@@ -2072,6 +2491,61 @@ fn open_row(
                     "the per-key lane below is what edits it",
                 );
             });
+            ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
+            let mut strikes: Vec<&Strike> = facts
+                .strikes
+                .iter()
+                .filter(|strike| strike.root == index)
+                .collect();
+            strikes.sort_by_key(|strike| (strike.bank, strike.layer));
+            for strike in strikes {
+                let rank = facts
+                    .layers
+                    .iter()
+                    .position(|value| *value == strike.layer)
+                    .unwrap_or(0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        egui::vec2(170.0, LANE),
+                        egui::Label::new(
+                            egui::RichText::new(format!(
+                                "{} · {}",
+                                bank_word(strike.bank),
+                                layer_name(rank, facts.layers.len())
+                            ))
+                            .size(NAME)
+                            .color(ui.visuals().weak_text_color()),
+                        )
+                        .halign(egui::Align::LEFT),
+                    );
+                    let mut decibels = f64::from(trim_of(facts, plan, strike));
+                    let set = ui
+                        .add(
+                            egui::DragValue::new(&mut decibels)
+                                .range(0.0..=48.0)
+                                .speed(0.1)
+                                .suffix(" dB"),
+                        )
+                        .on_hover_text("+0x34 in the stroke record, 1 dB a unit");
+                    if set.changed() {
+                        let key = (root.note, strike.bank, strike.layer);
+                        let picked = decibels.round() as u16;
+                        match picked == strike.trim {
+                            true => plan.trims.remove(&key),
+                            false => plan.trims.insert(key, picked),
+                        };
+                    }
+                    ui.label(
+                        egui::RichText::new(match strike.decay {
+                            Some(rate) => format!("decay {rate:.1} dB/s"),
+                            None => "decay none".to_string(),
+                        })
+                        .font(egui::FontId::monospace(MONO))
+                        .color(app::caption(ui.visuals())),
+                    )
+                    .on_hover_text("the fourteen coefficients at +0x36, carried as read");
+                });
+            }
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             ui.horizontal_wrapped(|ui| {
                 let playing = sounding == Some(root.note);
@@ -2321,6 +2795,18 @@ impl State {
 
         controls::heading(
             ui,
+            "Playback",
+            "what the instrument applies over every stroke",
+            None,
+        );
+        ui.horizontal_top(|ui| {
+            ui.add_space(PAD);
+            column(ui, width - PAD * 2.0, |ui| playback(ui, facts, draft));
+        });
+        ui.add_space(12.0);
+
+        controls::heading(
+            ui,
             "Velocity layers",
             "the switch speaks for every root; a segment is one root — click it to drop \
              that layer there only",
@@ -2394,6 +2880,12 @@ impl State {
                 "Keys answered",
                 format!("{} of 128", facts.covered.len()),
                 "the key map at 0x8c",
+            ),
+            ("Kind", kind_name(facts.kind), "0x18"),
+            (
+                "Gain",
+                format!("{:+.1} dB", f32::from(facts.gain) / 10.0),
+                "0x40c, tenths of a decibel",
             ),
         ];
         for (label, value, note) in rows {
@@ -2477,8 +2969,8 @@ const CAPABILITIES: &[Row] = &[
     },
     Row {
         name: "key zones: root / top / low",
-        state: Cap::ReadOnly,
-        note: "a root per key; the map is shown, not rewritten",
+        state: Cap::Editable,
+        note: "a root per key at 0x8c; the boundaries are dragged on the key map",
     },
     Row {
         name: "velocity layers",
@@ -2487,8 +2979,8 @@ const CAPABILITIES: &[Row] = &[
     },
     Row {
         name: "per-zone gain / detune",
-        state: Cap::Absent,
-        note: "no gain field — fine tune only",
+        state: Cap::Editable,
+        note: "trim per stroke at +0x34 (1 dB a unit); fine tune per key at 0x18c",
     },
     Row {
         name: "per-key table",
@@ -2497,8 +2989,8 @@ const CAPABILITIES: &[Row] = &[
     },
     Row {
         name: "instrument gain",
-        state: Cap::Absent,
-        note: "",
+        state: Cap::Editable,
+        note: "0x40c, signed tenths of a dB",
     },
     Row {
         name: "loop points / crossfade",
@@ -2507,8 +2999,8 @@ const CAPABILITIES: &[Row] = &[
     },
     Row {
         name: "loop decay / detune",
-        state: Cap::Absent,
-        note: "",
+        state: Cap::ReadOnly,
+        note: "the applied-decay ladder at +0x36, carried as read",
     },
     Row {
         name: "release samples",
@@ -2584,6 +3076,26 @@ fn offsets() -> Vec<Offset> {
             at: "body 0x18c".to_string(),
             holds: "128 × i8".to_string(),
             note: "fine tune, 0.7 cents a unit",
+        },
+        Offset {
+            at: "body 0x18".to_string(),
+            holds: "u8".to_string(),
+            note: "the kind of instrument the library is filed under",
+        },
+        Offset {
+            at: "body 0x40c".to_string(),
+            holds: "i8".to_string(),
+            note: "a gain over the whole library, in tenths of a decibel",
+        },
+        Offset {
+            at: "body 0x40d".to_string(),
+            holds: "u8".to_string(),
+            note: "the highest key damped at note-off; keys above it ring on",
+        },
+        Offset {
+            at: "record +0x34".to_string(),
+            holds: "u16".to_string(),
+            note: "trim per stroke in the directory at 0x732, 118 bytes a record",
         },
     ]
 }
@@ -2823,6 +3335,187 @@ mod tests {
         assert!(refused.is_err(), "a set list is not a piano library");
     }
 
+    // ---- the playback fields, the trims and the key map -----------------------------
+
+    // Where the piano document writes, as the Advanced face states the offsets.
+    const KIND_AT: usize = 0x18;
+    const KEY_MAP_AT: usize = 0x8c;
+    const GAIN_AT: usize = 0x40c;
+    const DAMPER_TOP_AT: usize = 0x40d;
+    const DIRECTORY_AT: usize = 0x732;
+    const REC_TRIM: usize = 0x34;
+
+    /// The body offsets a plan moves. Anything outside the body is the container's own
+    /// checksum, which every write moves.
+    fn moved(saved: &[u8], plan: &Plan) -> Vec<usize> {
+        let base = rebuild(saved, &Plan::default()).unwrap();
+        let made = rebuild(saved, plan).unwrap();
+        assert_eq!(made.len(), base.len(), "the plan re-laid the audio");
+        let body_at = saved
+            .windows(4)
+            .position(|word| word == b"CNSP")
+            .expect("a CNSP body");
+        let entity = nord_format::from_stream(&mut Cursor::new(&base)).unwrap();
+        let body_len = piano(&entity)
+            .unwrap()
+            .library()
+            .unwrap()
+            .body_len()
+            .unwrap();
+        (0..base.len())
+            .filter(|at| base[*at] != made[*at])
+            .filter_map(|at| at.checked_sub(body_at).filter(|at| *at < body_len))
+            .collect()
+    }
+
+    #[test]
+    fn each_playback_field_writes_only_the_byte_it_names() {
+        let saved = bytes();
+
+        let mut gained = plan();
+        gained.gain = Some(-20);
+        assert_eq!(moved(&saved, &gained), [GAIN_AT]);
+
+        let mut damped = plan();
+        damped.damper_top = Some(90);
+        assert_eq!(moved(&saved, &damped), [DAMPER_TOP_AT]);
+
+        let mut filed = plan();
+        filed.kind = Some(Kind::Wurlitzer);
+        assert_eq!(moved(&saved, &filed), [KIND_AT]);
+
+        let mut routed = plan();
+        routed.key_roots.insert(60, Some(ROOTS[0]));
+        assert_eq!(moved(&saved, &routed), [KEY_MAP_AT + 60]);
+
+        // The trim is a u16 in the record of the stroke it names — the first of them,
+        // which is the lowest root's loudest attack.
+        let mut trimmed = plan();
+        trimmed
+            .trims
+            .insert((ROOTS[0], Bank::Attack.code(), LAYERS[0]), 6);
+        assert_eq!(moved(&saved, &trimmed), [DIRECTORY_AT + REC_TRIM + 1]);
+    }
+
+    /// A trim names the stroke it belongs to, not the place in the directory that
+    /// stroke sat at: dropping a layer moves every record after it, and the trim has to
+    /// move with its own.
+    #[test]
+    fn a_trim_lands_on_its_own_stroke_after_another_layer_is_dropped() {
+        let saved = bytes();
+        let mut plan = plan();
+        let wanted = (ROOTS[1], Bank::Attack.code(), LAYERS[2]);
+        plan.trims.insert(wanted, 9);
+        plan.switch_layer(LAYERS[0], false);
+
+        let made = rebuild(&saved, &plan).unwrap();
+        let entity = nord_format::from_stream(&mut Cursor::new(&made)).unwrap();
+        let library = piano(&entity).unwrap().library().unwrap();
+        for stroke in library.strokes() {
+            let held = (stroke.root, stroke.bank_code(), stroke.layer());
+            assert_eq!(
+                stroke.trim(),
+                match held == wanted {
+                    true => 9,
+                    false => 0,
+                },
+                "{stroke:?}"
+            );
+        }
+    }
+
+    /// The map is written before anything is dropped, so a route the library cannot
+    /// play is the format's own refusal rather than a silently uncovered key.
+    #[test]
+    fn a_route_to_a_root_the_directory_does_not_record_is_refused_in_the_formats_words() {
+        let saved = bytes();
+        let mut plan = plan();
+        plan.key_roots.insert(60, Some(100));
+        let refused = rebuild(&saved, &plan).unwrap_err();
+        assert!(refused.contains("root 100"), "{refused}");
+
+        // A route to a root a later drop takes away is not refused: the drop uncovers
+        // the key, which is what dropping a root has always done.
+        let mut dropped = plan.clone();
+        dropped.key_roots.insert(60, Some(ROOTS[0]));
+        for layer in LAYERS {
+            dropped.roots.insert((ROOTS[0], layer), false);
+        }
+        let made = rebuild(&saved, &dropped).unwrap();
+        let entity = nord_format::from_stream(&mut Cursor::new(&made)).unwrap();
+        let library = piano(&entity).unwrap().library().unwrap();
+        assert_eq!(library.key_root(60).unwrap(), None);
+    }
+
+    /// Dragging the boundary between two roots moves the keys across it, and the map,
+    /// the coverage and what a struck key sounds all read the plan rather than the file.
+    #[test]
+    fn a_dragged_root_boundary_moves_the_keys_across_it() {
+        let facts = facts();
+        let spread = |plan: &Plan| -> Vec<(u8, u8)> {
+            (0..facts.roots.len())
+                .flat_map(|index| runs(&plan.keys_of(&facts, index)))
+                .collect()
+        };
+        let was = spread(&plan());
+        assert_eq!(was, [(SPAN.low, 54), (55, 66), (67, SPAN.high)]);
+
+        let mut moved = plan();
+        let now = keys::boundary(&was, SPAN, 0, keys::Edge::Top, 57);
+        reroute(&facts, &mut moved, &[0, 1, 2], &was, &now);
+        assert_eq!(spread(&moved), [(SPAN.low, 57), (58, 66), (67, SPAN.high)]);
+        assert!(
+            status(&facts, &moved, 56).1.contains("root C3"),
+            "the keys moved with the boundary"
+        );
+        assert!(silent(&facts, &moved).is_empty(), "and none fell silent");
+        assert_eq!(
+            rebuild(&bytes(), &moved).unwrap().len(),
+            bytes().len(),
+            "a remap moves no audio"
+        );
+
+        // The outer end has no root to share with, so it uncovers keys instead.
+        let mut cut = plan();
+        let now = keys::boundary(&was, SPAN, 2, keys::Edge::Top, 100);
+        reroute(&facts, &mut cut, &[0, 1, 2], &was, &now);
+        assert_eq!(silent(&facts, &cut), [(101, SPAN.high)]);
+        assert!(!status(&facts, &cut, 105).0);
+    }
+
+    /// A key sounds the largest layer value its root holds that is at most
+    /// `(127 − v)·31/127`, so each value answers from the split with the value below it
+    /// up to its own.
+    #[test]
+    fn a_layer_value_answers_the_velocities_no_softer_value_reaches() {
+        assert_eq!(spans(&[0]), [(0, 1..=127)]);
+        assert_eq!(
+            spans(&[0, 6, 12]),
+            [(0, 103..=127), (6, 78..=102), (12, 1..=77)]
+        );
+
+        // 31 is past the bound at every velocity a key can send, so nothing reaches it.
+        let reach = spans(&[0, 31]);
+        assert_eq!(reach[0], (0, 1..=127));
+        assert!(reach[1].1.is_empty(), "{:?}", reach[1]);
+        assert_eq!(span_text(&reach[1].1), "no velocity");
+        assert_eq!(span_text(&reach[0].1), "v 1–127");
+    }
+
+    /// The ladder holds a per-frame coefficient, and the stroke's line reads it as the
+    /// rate it decays at. Unity applies nothing at all.
+    #[test]
+    fn an_applied_decay_reads_as_the_rate_its_ladder_states() {
+        let unity = [npno::LADDER_UNITY; npno::DECAYS];
+        assert_eq!(decay_rate(&unity), None);
+
+        let mut ladder = unity;
+        ladder[0] = npno::LADDER_UNITY - 1000;
+        let rate = decay_rate(&ladder).expect("an entry below unity applies something");
+        // 8.686 × 35002 × 1000/2^23 = 36.2 dB a second.
+        assert!((rate - 36.2).abs() < 0.1, "{rate}");
+    }
+
     // ---- the arithmetic -------------------------------------------------------------
 
     /// Every figure the trim section prints comes off the strokes' own byte lengths,
@@ -2857,11 +3550,8 @@ mod tests {
         let facts = facts();
         let mut plan = plan();
         plan.range = Some(55..=108);
-        assert!(
-            !plan.in_range(&facts.roots[0]),
-            "root 48 answers nothing now"
-        );
-        assert!(plan.in_range(&facts.roots[1]));
+        assert!(!plan.in_range(&facts, 0), "root 48 answers nothing now");
+        assert!(plan.in_range(&facts, 1));
         assert_eq!(
             kept_bytes(&facts, &plan),
             facts.total - root_bytes(&facts, None, 0)
@@ -3149,22 +3839,9 @@ mod tests {
     /// cell per run rather than one cell over the keys between.
     #[test]
     fn a_roots_keys_read_as_the_stretches_they_run_in() {
-        let one = Root {
-            note: 60,
-            keys: vec![58, 59, 60, 61],
-        };
-        assert_eq!(one.runs(), [(58, 61)]);
-        let split = Root {
-            note: 60,
-            keys: vec![58, 59, 70, 71],
-        };
-        assert_eq!(split.runs(), [(58, 59), (70, 71)]);
-        assert!(Root {
-            note: 60,
-            keys: Vec::new()
-        }
-        .runs()
-        .is_empty());
+        assert_eq!(runs(&[58, 59, 60, 61]), [(58, 61)]);
+        assert_eq!(runs(&[58, 59, 70, 71]), [(58, 59), (70, 71)]);
+        assert!(runs(&[]).is_empty());
     }
 
     // ---- the capability table -------------------------------------------------------
@@ -3202,6 +3879,16 @@ mod tests {
     fn plan_for(name: &str) -> Option<fn(&mut Plan, &Facts)> {
         match name {
             "name" => Some(|plan, _| plan.name = Some("Wurly 200A".to_string())),
+            "key zones: root / top / low" => Some(|plan, facts| {
+                plan.route(facts, facts.roots[1].keys[0], Some(0));
+            }),
+            "per-zone gain / detune" => Some(|plan, facts| {
+                plan.trims.insert(
+                    (facts.roots[0].note, Bank::Attack.code(), facts.layers[0]),
+                    6,
+                );
+            }),
+            "instrument gain" => Some(|plan, facts| plan.gain = Some(facts.gain - 20)),
             "velocity layers" => Some(|plan, facts| plan.switch_layer(facts.layers[2], false)),
             "per-key table" => Some(|plan, _| {
                 plan.fine_tune.insert(60, -4);
@@ -3369,6 +4056,7 @@ mod tests {
         for heading in [
             "Key map",
             "Trim to fit",
+            "Playback",
             "Velocity layers",
             "Roots",
             "Per key",
@@ -3380,6 +4068,11 @@ mod tests {
         assert!(painted.said("Soft layer"), "{:?}", painted.words);
         assert!(painted.said("Release samples"));
         assert!(painted.said("fits ·"));
+        assert!(painted.said("INSTRUMENT GAIN"), "{:?}", painted.words);
+        assert!(
+            painted.said("v 78–102"),
+            "a layer lane names its velocities"
+        );
         assert_eq!(painted.whites.len(), 52, "a full piano's white keys");
     }
 
@@ -3445,6 +4138,20 @@ mod tests {
             editor.state.view.open_rows.is_empty(),
             "the row under the lamp did not open"
         );
+    }
+
+    /// The keyboard says where the damper stops reaching, and says nothing at all
+    /// where it reaches every key.
+    #[test]
+    fn the_key_map_marks_the_damper_limit_only_where_a_key_rings_on() {
+        let mut editor = Editor::new(facts().total * 2);
+        let every = editor.driven(Vec::new(), |plan| {
+            plan.damper_top = Some(ALL_KEYS_DAMPED);
+        });
+        assert!(!every.said("damper"), "{:?}", every.words);
+
+        let some = editor.driven(Vec::new(), |plan| plan.damper_top = Some(90));
+        assert!(some.said("damper"), "{:?}", some.words);
     }
 
     /// Throwing a switch trims the library: the bytes shrink, the header says
