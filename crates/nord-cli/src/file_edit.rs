@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use crate::edit::{editor_for, print_byte_diff, write_file, SetArgs};
+use crate::edit::{editor_for, print_byte_diff, write_edit, SetArgs};
 use crate::editors;
 use crate::ui::Ui;
 
@@ -55,24 +55,41 @@ pub fn run(ui: &Ui, args: FileEditArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    match args.common.out {
-        Some(out) => write_file(ui, &out, &edited),
-        None => {
-            ui.note(format!(
-                "about to {} {} in place",
-                ui.danger("overwrite"),
-                path.display()
-            ));
-            ui.confirm(args.common.yes)?;
-            write_file(ui, path, &edited)
-        }
-    }
+    write_edit(ui, path, args.common.out, args.common.yes, &edited)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::*;
     use nord_format::cbin::{Cbin, Header};
-    use nord_format::formats::ns3;
+    use nord_format::formats::{ne5, ns3};
+
+    /// The file verb writes over the same file the noun edits do, so `-o` naming its
+    /// input meets the same guard.
+    #[test]
+    fn an_output_that_is_the_input_takes_the_in_place_guard() {
+        let dir = crate::edit::tests::scratch("file-edit-in-place");
+        let path = dir.join("p.ne5p");
+        let original = nord_format::to_bytes(&nord_format::Entity::Program(
+            nord_format::Program::Electro5(ne5::program::new((0, 0).try_into().unwrap())),
+        ))
+        .unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let args = FileEditArgs {
+            file: path.clone(),
+            common: SetArgs {
+                set: vec!["center_panel.gain=64".into()],
+                dry_run: false,
+                fields: false,
+                out: Some(dir.join(".").join("p.ne5p")),
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains("--yes"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
 
     /// A zeroed Stage 3 program: every field's type decodes the whole of its
     /// slot, so a body of zeros is legal — the same construction drawbar's New

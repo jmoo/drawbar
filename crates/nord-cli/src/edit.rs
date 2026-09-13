@@ -72,17 +72,9 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
     }
 
     match (target, args.common.out) {
+        (Some(Target::File(path)), out) => write_edit(ui, &path, out, args.common.yes, &edited),
         // An explicit destination is the unambiguous case, whatever the source was.
         (_, Some(out)) => write_file(ui, &out, &edited),
-        (Some(Target::File(path)), None) => {
-            ui.note(format!(
-                "about to {} {} in place",
-                ui.danger("overwrite"),
-                path.display()
-            ));
-            ui.confirm(args.common.yes)?;
-            write_file(ui, &path, &edited)
-        }
         // The slot keeps whatever it is already called, so the write carries no name.
         (Some(Target::Slot(at)), None) => {
             crate::device::send(ui, &edited, at, class, args.common.yes, what, None, None)
@@ -251,6 +243,42 @@ impl Fields for Registered<'_> {
     }
 }
 
+/// Write an edit of `path`: to `out`, or over `path` itself.
+///
+/// ⚠️ `-o` naming the file being edited is an in-place overwrite however it is
+/// spelled, so it takes the in-place guard rather than the unguarded write.
+pub(crate) fn write_edit(
+    ui: &Ui,
+    path: &Path,
+    out: Option<PathBuf>,
+    yes: bool,
+    bytes: &[u8],
+) -> Result<(), String> {
+    match out {
+        Some(out) if !same_file(path, &out) => write_file(ui, &out, bytes),
+        _ => {
+            ui.note(format!(
+                "about to {} {} in place",
+                ui.danger("overwrite"),
+                path.display()
+            ));
+            ui.confirm(yes)?;
+            write_file(ui, path, bytes)
+        }
+    }
+}
+
+/// Whether two paths name one file on disk, with links and `..` resolved.
+///
+/// Only a path that exists canonicalizes, which is the answer wanted here: a
+/// destination that is not there yet cannot be the file being edited.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), String> {
     replace_file(path, bytes)?;
     ui.note(format!("wrote {} ({} bytes)", path.display(), bytes.len()));
@@ -384,7 +412,7 @@ fn control(kind: ControlKind) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A wrong-format target must steer to the noun whose `edit` reads it — and for a
@@ -462,7 +490,7 @@ mod tests {
         assert!(!editable(&mut stub));
     }
 
-    fn scratch(what: &str) -> std::path::PathBuf {
+    pub(crate) fn scratch(what: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -490,6 +518,31 @@ mod tests {
         replace_file(&path, b"edited").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"edited".to_vec());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    /// `-o` pointing back at the input is an overwrite of the file being edited, so
+    /// it has to meet the guard that spelling it with no `-o` meets.
+    #[test]
+    fn an_output_that_is_the_input_takes_the_in_place_guard() {
+        let dir = scratch("edit-in-place");
+        let path = dir.join("p.ne5p");
+        let original = fresh(ObjectClass::Program).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let spelled = dir.join(".").join("p.ne5p");
+
+        let args = EditArgs {
+            target: Some(path.display().to_string()),
+            common: SetArgs {
+                set: vec!["center_panel.gain=64".into()],
+                dry_run: false,
+                fields: false,
+                out: Some(spelled),
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args, ObjectClass::Program).unwrap_err();
+        assert!(err.contains("--yes"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     /// The smallest container-verified stub: enough bytes to decode, nothing to edit.

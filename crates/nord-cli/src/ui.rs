@@ -54,6 +54,18 @@ impl Ui {
         }
     }
 
+    /// What a redirected run gets: no color, no unicode, and no question anyone is
+    /// there to answer. A test asks for it by name rather than inheriting whatever
+    /// terminal it was started from.
+    #[cfg(test)]
+    pub(crate) fn piped() -> Ui {
+        Ui {
+            color: false,
+            unicode: false,
+            interactive: false,
+        }
+    }
+
     /// Data. Goes to stdout, and is the only thing that does.
     ///
     /// ⚠️ Not `println!`, which **panics** when the reader goes away: `nord program edit
