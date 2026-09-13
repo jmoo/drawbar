@@ -617,6 +617,9 @@ pub struct Resampled {
 /// The kernel's cutoff follows the rates: a source faster than [`codec::RATE`] is
 /// band-limited to the lattice's own Nyquist before it lands on it, and a slower one
 /// keeps its whole band.
+///
+/// The lattice count follows the rate the source declares, so a source that would
+/// stretch past the frame count a stroke states is refused rather than allocated.
 pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled, Error> {
     if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
         return Err(ParseError::OutOfBounds {
@@ -640,7 +643,14 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
     }
 
     let frames = samples.len() / channels;
-    let fields = (frames as u128 * u128::from(codec::RATE) / u128::from(rate)) as usize;
+    let stretched = frames as u128 * u128::from(codec::RATE) / u128::from(rate);
+    let fields = usize::try_from(stretched)
+        .ok()
+        .filter(|&fields| u32::try_from(fields).is_ok())
+        .ok_or_else(|| ParseError::OutOfBounds {
+            value: format!("{frames} frame(s) at {rate} Hz, which is {stretched} on the lattice"),
+            bound: "the u32 frame count a stroke record holds".into(),
+        })?;
     let kernel = kernel::Kernel::new(rate, codec::RATE);
     let mut clipped = 0;
     let mut lanes = Vec::with_capacity(channels);
@@ -651,16 +661,19 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
             .step_by(channels)
             .copied()
             .collect();
-        lanes.push(
-            (0..fields)
-                .map(|f| {
-                    let value = kernel.field(&lane, f);
-                    let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
-                    clipped += usize::from(i64::from(narrow) != value);
-                    narrow
-                })
-                .collect(),
-        );
+        let mut out = Vec::new();
+        out.try_reserve_exact(fields)
+            .map_err(|_| ParseError::OutOfBounds {
+                value: format!("{fields} frame(s)"),
+                bound: "an allocation that fits memory".into(),
+            })?;
+        out.extend((0..fields).map(|f| {
+            let value = kernel.field(&lane, f);
+            let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+            clipped += usize::from(i64::from(narrow) != value);
+            narrow
+        }));
+        lanes.push(out);
     }
     Ok(Resampled {
         channels: lanes,
@@ -1847,6 +1860,20 @@ mod tests {
 
         assert!(resample(&[1, 2, 3], 2, codec::RATE).is_err());
         assert!(resample(&[1, 2], 1, 0).is_err());
+    }
+
+    /// The lattice count is the source's length scaled by the rate the source itself
+    /// declares. A rate far below the lattice's stretches a modest source past every
+    /// frame count a stroke can state, which is a refusal rather than an allocation.
+    #[test]
+    fn a_rate_that_stretches_a_source_past_a_strokes_frame_count_is_refused() {
+        let frames = u32::MAX as usize / codec::RATE as usize + 1;
+        let error = match resample(&vec![0i16; frames], 1, 1) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a refusal"),
+        };
+        assert!(error.contains("at 1 Hz"), "{error}");
+        assert!(error.contains("u32 frame count"), "{error}");
     }
 
     /// A source faster than the lattice is band-limited to the lattice's own Nyquist
