@@ -51,7 +51,7 @@ again.
 
 A folder is **one flat list**, each row labelled the way the panel and the CLI
 label a slot — `7:4  Africa Split`. Empty slots are rows, not absences: they are
-places something can be dropped. Pianos are listed and nothing more — a piano
+places something can be dropped. Pianos are listed but not fetched — a piano
 library is hundreds of megabytes, and the folder offers no way to pull one down.
 
 Writing into the slot the instrument currently has loaded leaves the panel
@@ -188,6 +188,24 @@ root key and top note as note names (`C4` is middle C). Zone edits cover the dec
 Sample Library 2.0, `.nsmp3` and `.nsmp4` layouts; earlier `.nsmp` zone layouts remain
 read-only. Audio stays verbatim. A zone is decoded on request, drawn as a waveform and
 played; encoded audio can be large, so nothing is decoded until asked.
+
+Piano libraries are an edit **plan** over the bytes the file was last saved as rather
+than a field write: a library is hundreds of megabytes of recorded strokes, and a switch
+that cannot go back on is not a switch. A key map over a clickable keyboard says which
+recorded root answers each key and what each root costs; dragging the boundary between
+two roots moves keys from one to the other, and dragging the outer end of the lowest or
+the highest covers or uncovers keys. **Trim to fit** drops whole banks, whole velocity
+layers, one layer on one root, or the keys outside a range, measured against what the
+attached instrument has free — and names the cheapest cut left that would fit. The
+playback fields are written as fields: a gain over the whole library, the key the damper
+still reaches at note-off, and the kind of instrument the library is filed under. Each
+root's row retrims its own strokes, reads the applied decay they carry, and auditions or
+saves the recording; a lane per velocity layer says which velocities each one answers,
+and a per-key lane retunes. What is kept is re-laid byte for byte and sent like anything
+else. Dropping the release bank, keeping only some velocity layers, the gain, the damper
+limit and the per-stroke trim are confirmed on hardware; arbitrary subsets of strokes,
+uncovered keys falling silent, renames, retunes and remaps are inferred from specimens
+and have not been played.
 
 Set lists are their four program slots, each editable as the `BANK:SLOT` pair the
 instrument shows. Sample Editor projects (`.nsmpproj`) show the instrument's name,
