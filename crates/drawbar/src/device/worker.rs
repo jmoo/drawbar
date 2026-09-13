@@ -743,6 +743,10 @@ async fn occupied<T: Transport, C>(
 }
 
 /// Shape cursor hits to the declared capacity, or through an open bank's last item.
+///
+/// A hit outside a bounded bank is [`Error::Enumeration`]: the instrument answered about
+/// a slot it says it does not have, and widening the bank to fit would report slots no
+/// later read could reach.
 fn shape(
     found: &[(Location, ProgramInfo)],
     planned: &Planned,
@@ -751,8 +755,19 @@ fn shape(
     let bank = planned.bank.get() - 1;
     let mine: Vec<&(Location, ProgramInfo)> =
         found.iter().filter(|(at, _)| at.bank == bank).collect();
-    let past = mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0);
-    let len = planned.slots.unwrap_or(past).max(past);
+    let len = match planned.slots {
+        Some(slots) => {
+            if let Some((answered, _)) = mine.iter().find(|(at, _)| at.slot >= slots) {
+                return Err(Error::Enumeration {
+                    bank,
+                    answered: *answered,
+                    slots,
+                });
+            }
+            slots
+        }
+        None => mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0),
+    };
     if len > limit {
         return Err(Error::ScanLimit {
             bank,
@@ -1043,6 +1058,43 @@ mod tests {
     #[test]
     fn a_spaced_name_survives_to_the_write() {
         assert_eq!(slot_label("Big strings").as_deref(), Some("Big strings"));
+    }
+
+    /// A cursor hit outside a bounded bank is refused rather than widening it: the bank
+    /// would then report slots the instrument says it does not have. An unbounded bank
+    /// has no capacity to contradict, so it is shaped through its last item.
+    #[test]
+    fn a_cursor_hit_past_a_declared_capacity_is_refused() {
+        let at = Location { bank: 0, slot: 7 };
+        let found = [(
+            at,
+            ProgramInfo {
+                location: at,
+                body_len: 121,
+                format: "ne5p".into(),
+                version: 4,
+                crc32: None,
+                name: "Africa Split".into(),
+            },
+        )];
+        let planned = |slots| Planned {
+            bank: NonZeroU32::new(1).expect("bank 1"),
+            slots,
+        };
+
+        match shape(&found, &planned(Some(4)), MOST_OCCUPIED) {
+            Err(Error::Enumeration {
+                bank,
+                answered,
+                slots,
+            }) => assert_eq!((bank, answered, slots), (0, at, 4)),
+            other => panic!(
+                "a hit at 1:8 in a bank of four: {:?}",
+                other.map(|slots| slots.len())
+            ),
+        }
+        let open = shape(&found, &planned(None), MOST_OCCUPIED).expect("an open bank takes it");
+        assert_eq!(open.len(), 8, "through the last item and no further");
     }
 }
 
