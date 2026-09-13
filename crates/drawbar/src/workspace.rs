@@ -628,6 +628,15 @@ impl Fresh {
     }
 }
 
+/// What the decode made of a set of bytes arriving, for the one line the status bar
+/// carries about them. The detail is in the log either way.
+enum Arrival {
+    Read,
+    /// It decoded, but it does not re-encode to the bytes it came from.
+    Unverified,
+    Unreadable,
+}
+
 /// One asset as a store holds it.
 pub struct Saved {
     pub id: u64,
@@ -739,12 +748,11 @@ impl Workspace {
     /// What a double-click on a slot opens: a tab and a document over a working copy,
     /// which is edited and sent back like any other, and which goes when its tab does.
     pub fn view(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
-        let id = self.ingest(name, origin, bytes, log);
+        let (id, _) = self.add(name, origin, bytes, log);
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return id;
         };
         entity.kept = false;
-        // ⚠️ `ingest` logs a local copy; override that message because a view is transient.
         let where_ = match entity.origin.slot() {
             Some((class, at)) => crate::strings::place(class, at),
             None => "the instrument".to_string(),
@@ -842,19 +850,26 @@ impl Workspace {
         }
     }
 
-    /// Decode `bytes`, badge them, and add the row. Every way in — drop, picker,
-    /// fresh default, and later a device read — lands here.
-    pub fn ingest(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
+    /// Decode `bytes`, badge them, and add the row, with the detail of what arrived in
+    /// the log. Every way in — drop, picker, fresh default, device read — lands here.
+    ///
+    /// What the status line says is the caller's: [`Workspace::ingest`] announces
+    /// something on this computer and [`Workspace::view`] a slot being looked at, and
+    /// they are not the same arrival.
+    fn add(
+        &mut self,
+        name: String,
+        origin: Origin,
+        bytes: Vec<u8>,
+        log: &mut Log,
+    ) -> (u64, Arrival) {
         let id = self.next_id;
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
-        match (&entity.parse_error, &entity.verify) {
+        let arrival = match (&entity.parse_error, &entity.verify) {
             (Some(e), _) => {
                 log.error(format!("{}: {e}", entity.name));
-                log.trouble(format!(
-                    "“{}” is not a file this app understands.",
-                    entity.name
-                ));
+                Arrival::Unreadable
             }
             (None, VerifyState::Ok) => {
                 log.info(format!(
@@ -863,7 +878,7 @@ impl Workspace {
                     entity.tag(),
                     entity.bytes.len(),
                 ));
-                log.say(format!("“{}” is on this computer.", entity.name));
+                Arrival::Read
             }
             (None, state) => {
                 log.warn(format!(
@@ -873,14 +888,26 @@ impl Workspace {
                     state.badge(),
                     state.detail(),
                 ));
-                log.say(format!(
-                    "“{}” opened, but it does not re-save byte for byte.",
-                    entity.name
-                ));
+                Arrival::Unverified
             }
-        }
+        };
         self.entities.push(entity);
         self.selected = Some(id);
+        (id, arrival)
+    }
+
+    /// Take `bytes` onto this computer, and say so.
+    pub fn ingest(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
+        let (id, arrival) = self.add(name.clone(), origin, bytes, log);
+        match arrival {
+            Arrival::Unreadable => {
+                log.trouble(format!("“{name}” is not a file this app understands."))
+            }
+            Arrival::Read => log.say(format!("“{name}” is on this computer.")),
+            Arrival::Unverified => log.say(format!(
+                "“{name}” opened, but it does not re-save byte for byte."
+            )),
+        }
         id
     }
 
@@ -1435,6 +1462,33 @@ mod tests {
         workspace.keep(viewed, &mut log);
         assert!(!workspace.is_view(viewed));
         assert_eq!(workspace.listed().count(), 2);
+    }
+
+    /// ⚠️ A view is not on this computer, and the activity log is the record of where a
+    /// slot's bytes went. One line, and it says what actually happened.
+    #[test]
+    fn viewing_a_slot_says_that_and_not_that_it_was_kept() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = workspace.view(
+            "Africa-Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+            Fresh::Program.bytes().unwrap(),
+            &mut log,
+        );
+
+        assert!(workspace.is_view(id));
+        assert!(log.status().1.starts_with("Viewing "), "{}", log.status().1);
+        assert!(
+            !log.iter()
+                .any(|entry| entry.text.contains("is on this computer.")),
+            "a view was never taken onto this computer"
+        );
+        // The detail of what arrived is still recorded, view or not.
+        assert!(log.iter().any(|entry| entry.text.contains("verified")));
     }
 
     /// A view outlives nothing: once no tab holds it, it is gone. What was kept stays
