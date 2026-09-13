@@ -1,11 +1,5 @@
 # Community
 
-drawbar is one of several projects that read Nord files. Where it decodes a
-format it did not work out itself, that came from the people below, and their
-work was done the same way as ours: by comparing files, without decompiling
-anything. Their pages are the place to go for byte-level detail on the Stage
-formats.
-
 ## Chris55
 
 - [nord-documentation](https://github.com/Chris55/nord-documentation), rendered
