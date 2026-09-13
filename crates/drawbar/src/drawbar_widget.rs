@@ -43,11 +43,25 @@ pub fn bars(bits: u64) -> [u8; BARS] {
     })
 }
 
-/// The stored value nine positions spell. Positions above [`MAX`] are clamped: two bars
-/// share a byte, so a wider one would silently walk into its neighbour.
-pub fn bits(bars: [u8; BARS]) -> u64 {
-    bars.iter()
-        .fold(0u64, |bits, &bar| (bits << 4) | bar.min(MAX) as u64)
+/// `bits` with the bars that moved written back into their own nibbles, or `None` where
+/// one was moved past [`MAX`].
+///
+/// ⚠️ The nibbles that moved and no others. A stored nibble above [`MAX`] stands for no
+/// position this widget can spell, and rewriting it to one would edit a bar nobody
+/// pulled.
+pub fn written(bits: u64, moved: [u8; BARS]) -> Option<u64> {
+    let mut out = bits;
+    for (n, (was, now)) in bars(bits).into_iter().zip(moved).enumerate() {
+        if was == now {
+            continue;
+        }
+        if now > MAX {
+            return None;
+        }
+        let shift = 4 * (BARS - 1 - n) as u32;
+        out = (out & !(0xf << shift)) | (u64::from(now) << shift);
+    }
+    Some(out)
 }
 
 /// A stored register as `set_field` spells it back — the same form
@@ -71,13 +85,19 @@ const TRACK_H: f32 = 104.0;
 
 /// The positions as the panel groups them — `88 8000 000`: the two sub-octave bars,
 /// the four foundation ranks, then the three upper mutations.
+///
+/// A stored position above [`MAX`] is no drawbar position, so it reads as `?` rather
+/// than as a stop the panel could be pulled to.
 pub fn digits(positions: &[u8]) -> String {
     let mut out = String::with_capacity(BARS + 2);
-    for (n, position) in positions.iter().enumerate() {
+    for (n, &position) in positions.iter().enumerate() {
         if n == 2 || n == 6 {
             out.push(' ');
         }
-        out.push(char::from_digit((*position).min(9) as u32, 10).unwrap_or('?'));
+        out.push(match position {
+            0..=MAX => (b'0' + position) as char,
+            _ => '?',
+        });
     }
     out
 }
@@ -150,7 +170,9 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8, live: bool) -> bo
     };
     painter.rect_filled(track, 3.0, dim(egui::Color32::from_rgb(0x11, 0x11, 0x13)));
 
-    let centre = top + travel * (*value as f32 / MAX as f32);
+    // A stored position above MAX is painted at the bottom stop: the readout is where it
+    // is said to be out of range, and a stop drawn off the end of its track is not.
+    let centre = top + travel * (f32::from((*value).min(MAX)) / MAX as f32);
     let stop = egui::Rect::from_center_size(
         egui::pos2(track.center().x, centre),
         egui::vec2(BAR_W - 2.0, STOP_H),
@@ -195,20 +217,31 @@ mod tests {
     #[test]
     fn positions_and_stored_bits_are_inverses() {
         for value in [0u64, 0x0_8765_4321, 0x8_8880_0000, 0x8_8888_8888] {
-            assert_eq!(bits(bars(value)), value);
+            assert_eq!(written(value, bars(value)), Some(value));
         }
         let positions = [1, 2, 3, 4, 5, 6, 7, 8, 0];
-        assert_eq!(bars(bits(positions)), positions);
+        assert_eq!(bars(written(0, positions).expect("every bar is a stop")), positions);
     }
 
-    /// A bar pulled past the end would walk into its neighbour's nibble, since two
-    /// share a byte.
+    /// A bar pulled past the end would walk into its neighbour's nibble, since two share
+    /// a byte.
     #[test]
-    fn a_position_past_the_top_is_clamped_not_wrapped() {
-        assert_eq!(
-            bars(bits([9, 15, 0, 0, 0, 0, 0, 0, 0])),
-            [8, 8, 0, 0, 0, 0, 0, 0, 0]
-        );
+    fn a_position_past_the_top_is_no_register() {
+        assert_eq!(written(0, [9, 0, 0, 0, 0, 0, 0, 0, 0]), None);
+        assert_eq!(written(0, [0, 15, 0, 0, 0, 0, 0, 0, 0]), None);
+    }
+
+    /// ⚠️ A register can hold a nibble no drawbar position spells. Pulling one bar writes
+    /// that bar's nibble and leaves every other one exactly as it was stored, or a stop
+    /// nobody touched would be rewritten to 8 by the neighbour's move.
+    #[test]
+    fn pulling_one_bar_leaves_a_neighbour_out_of_range_alone() {
+        let stored = 0xf_0000_0000u64;
+        let mut moved = bars(stored);
+        assert_eq!(moved[0], 0xf);
+        moved[1] = 1;
+        assert_eq!(written(stored, moved), Some(0xf_1000_0000));
+        assert_eq!(digits(&bars(0xf_1000_0000)), "?1 0000 000");
     }
 
     /// The widget writes back the same spelling the field reads out, so parking a bar

@@ -368,8 +368,9 @@ mod tests {
             .find(|f| f.path == "organ_panel.vox_preset1_drawbars")
             .unwrap();
         let bits = drawbar_widget::parse(&register.value).unwrap();
-        let spelled = drawbar_widget::spell(drawbar_widget::bits(drawbar_widget::bars(bits)));
-        assert_eq!(spelled, register.value);
+        let parked = drawbar_widget::written(bits, drawbar_widget::bars(bits))
+            .expect("every bar is where it was stored");
+        assert_eq!(drawbar_widget::spell(parked), register.value);
 
         let (after, _) = apply(&bytes, &[(register.path.clone(), "0x888800000".into())]).unwrap();
         let edited = after.iter().find(|f| f.path == register.path).unwrap();

@@ -1575,7 +1575,7 @@ fn packed(ui: &mut egui::Ui, field: &Field, order: PackedOrder) -> Option<String
         PackedOrder::HighFirst => moved,
         PackedOrder::LowFirst => mirrored(moved),
     };
-    Some(drawbar_widget::spell(drawbar_widget::bits(back)))
+    Some(drawbar_widget::spell(drawbar_widget::written(bits, back)?))
 }
 
 fn mirrored(positions: [u8; drawbar_widget::BARS]) -> [u8; drawbar_widget::BARS] {
