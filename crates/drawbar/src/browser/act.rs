@@ -282,10 +282,14 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
             .iter()
             .filter_map(|item| match item {
                 Item::Local(id) => Some(Act::Remove(*id)),
-                Item::Slot { class, at } => Some(Act::DeleteSlot {
-                    class: *class,
-                    at: *at,
-                }),
+                // A slot the scan found vacant holds nothing to delete, and asking costs
+                // a round trip that can only end in an error.
+                Item::Slot { class, at } => {
+                    state.slot(*class, *at).flatten().map(|_| Act::DeleteSlot {
+                        class: *class,
+                        at: *at,
+                    })
+                }
                 Item::Folder(_) | Item::Tag(_) => None,
             })
             .collect(),
@@ -1075,6 +1079,10 @@ mod tests {
         assert!(
             bulk(Bulk::Copy, &vacant, state).is_empty(),
             "7:2 was read and found empty"
+        );
+        assert!(
+            bulk(Bulk::Delete, &vacant, state).is_empty(),
+            "and deleting what is not there deletes nothing"
         );
     }
 
