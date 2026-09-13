@@ -33,22 +33,26 @@ pub struct Queued {
     pub replaces: Occupancy,
     /// How what is waiting differs from what the slot holds.
     pub diff: Diff,
-    /// The occupant's own bytes, once a compare read has delivered them.
-    ///
-    /// Kept so that an edit made after this entry was queued is diffed against them
-    /// again rather than by reading the slot a second time.
-    there: Option<Vec<u8>>,
+    /// How far the compare read of [`Queued::at`] has got.
+    read: Read,
     /// The stamp of the asset's bytes [`Queued::diff`] was made from, so an edit under a
     /// waiting entry is noticed without comparing anything.
     stamp: u64,
-    /// Whether the read of [`Queued::at`] has been asked for.
-    ///
-    /// One read per entry per destination. A second queueing of the same asset for the
-    /// same slot, and an edit made under it while the answer is still on its way, both
-    /// want the answer already coming.
-    asked: bool,
-    /// Why the last attempt to write it stopped. Cleared when it is queued again.
+    /// Why the last attempt to write it stopped. Cleared when it is queued again, and
+    /// when [`refit`] finds the instrument attached now takes it.
     pub failure: Option<String>,
+}
+
+/// How far the compare read of the slot an entry is waiting for has got.
+enum Read {
+    /// Nothing to diff against and nothing on its way: nobody has asked, or the read
+    /// found the slot empty and there is nothing in it to compare.
+    Unasked,
+    /// Asked, and still out.
+    Asked,
+    /// The occupant's own bytes, kept so that an edit made after this entry was queued is
+    /// diffed against them again rather than by reading the slot a second time.
+    Answered(Vec<u8>),
 }
 
 /// How what is waiting differs from what the slot holds.
@@ -378,9 +382,9 @@ pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log
             continue;
         }
         held.stamp = entity.stamp;
-        held.diff = match &held.there {
-            Some(there) => compare(&entity.bytes, there),
-            None => verdict(entity, &held.replaces),
+        held.diff = match &held.read {
+            Read::Answered(there) => compare(&entity.bytes, there),
+            Read::Unasked | Read::Asked => verdict(entity, &held.replaces),
         };
         moved.push(held.id);
     }
@@ -455,9 +459,8 @@ impl Queue {
             at,
             diff: verdict(entity, &replaces),
             replaces,
-            there: None,
+            read: Read::Unasked,
             stamp: entity.stamp,
-            asked: false,
             failure: None,
         });
         self.picked = Some(entity.id);
@@ -475,11 +478,16 @@ impl Queue {
     /// instrument hears the question once.
     fn unread(&mut self, id: u64) -> Option<(ObjectClass, Location)> {
         let held = self.list.iter_mut().find(|held| held.id == id)?;
-        let owed = matches!(held.diff, Diff::Pending) && held.there.is_none() && !held.asked;
-        owed.then(|| {
-            held.asked = true;
-            (held.class, held.at)
-        })
+        if !matches!(held.diff, Diff::Pending) {
+            return None;
+        }
+        match held.read {
+            Read::Unasked => {
+                held.read = Read::Asked;
+                Some((held.class, held.at))
+            }
+            Read::Asked | Read::Answered(_) => None,
+        }
     }
 
     /// The occupant of a slot something is waiting for, read at last.
@@ -503,7 +511,7 @@ impl Queue {
         let Some(entity) = workspace.get(held.id) else {
             return;
         };
-        held.there = Some(there.to_vec());
+        held.read = Read::Answered(there.to_vec());
         held.stamp = entity.stamp;
         held.diff = compare(&entity.bytes, there);
     }
@@ -514,7 +522,7 @@ impl Queue {
             return;
         };
         held.replaces = Occupancy::Vacant;
-        held.there = None;
+        held.read = Read::Unasked;
         held.diff = Diff::Empty;
     }
 
