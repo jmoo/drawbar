@@ -99,11 +99,14 @@ pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Sect
     let mut sections = Vec::new();
     let mut pos: u64 = 0;
     loop {
-        let head = match read_head(r, pos)? {
-            Some(head) => head,
-            None if pos == 0 => return Err(missing_opener(CONTAINER)),
-            None => return Ok(sections),
-        };
+        let mut head = [0u8; HEADER_LEN];
+        if !read_exact_or_end(r, &mut head, pos)? {
+            return if pos == 0 {
+                Err(missing_opener(CONTAINER))
+            } else {
+                Ok(sections)
+            };
+        }
         if pos == 0 && &head[..3] != CONTAINER {
             return Err(wrong_opener(CONTAINER, &head[..3]));
         }
@@ -120,27 +123,6 @@ pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Sect
             payload,
         });
     }
-}
-
-/// The next 9-byte section header, `None` on a clean end of the chain. Bytes that
-/// run out mid-header are a truncation, not an end.
-fn read_head(r: &mut impl std::io::Read, at: u64) -> Result<Option<[u8; 9]>, ParseError> {
-    let mut head = [0u8; HEADER_LEN];
-    let mut got = 0;
-    while got < HEADER_LEN {
-        match r.read(&mut head[got..]) {
-            Ok(0) if got == 0 => return Ok(None),
-            Ok(0) => {
-                return Err(ParseError::AssertFail(format!(
-                    "truncated section header at {at}"
-                )))
-            }
-            Ok(n) => got += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(ParseError::AssertFail(format!("reading a section: {e}"))),
-        }
-    }
-    Ok(Some(head))
 }
 
 /// Bytes of a v3/v4 section header: 4-byte tag, `u32` version, `u32` length —
