@@ -931,12 +931,8 @@ mod tests {
         // No such parameter in this body, and no suffix at all.
         assert_eq!(morphed_parent("piano_a_volume_wheel", &registered), None);
         assert_eq!(morphed_parent("delay_tempo", &registered), None);
-        // ⚠️ A mangled name is not a morph slot: the Stage 2 has a
-        // `…_wheel_o_delay_on` whose suffix is `_on`.
-        assert_eq!(
-            morphed_parent("delay_tempo_wheel_o_delay_on", &registered),
-            None
-        );
+        // A morph suffix has to end the name, not merely appear in it.
+        assert_eq!(morphed_parent("delay_tempo_wheel_lsw", &registered), None);
     }
 
     #[test]
