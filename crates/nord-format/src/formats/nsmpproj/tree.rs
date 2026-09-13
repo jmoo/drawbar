@@ -308,7 +308,10 @@ mod tests {
         let err = parse(&nest(MAX_DEPTH + 1)).unwrap_err().to_string();
         assert_eq!(
             err,
-            format!("project line {}: blocks nested deeper than {MAX_DEPTH}", MAX_DEPTH + 1)
+            format!(
+                "project line {}: blocks nested deeper than {MAX_DEPTH}",
+                MAX_DEPTH + 1
+            )
         );
     }
 
