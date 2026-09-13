@@ -277,8 +277,8 @@ enum SampleAction {
     /// Change fields inside a sample instrument, in a file or in a slot.
     ///
     /// A sample is mostly encoded audio; what is settable is what the format can
-    /// patch in place — the name, and each zone's root key and top note. `--fields`
-    /// lists them.
+    /// patch in place — the name, each zone's root key and top note, and its low
+    /// note on the generations that store one. `--fields` lists them.
     Edit(sample::EditArgs),
 
     /// Decode an instrument's audio to WAV, one file per zone, from a file or a slot.
