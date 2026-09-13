@@ -46,8 +46,6 @@ pub struct Log {
     clock: f64,
     /// The one sentence the status strip shows when nothing is running.
     status: (Level, String),
-    /// Whether the strip is expanded into the full log.
-    pub open: bool,
 }
 
 impl Default for Log {
@@ -56,7 +54,6 @@ impl Default for Log {
             entries: VecDeque::new(),
             clock: 0.0,
             status: (Level::Info, "Ready.".to_string()),
-            open: false,
         }
     }
 }
@@ -122,6 +119,14 @@ impl Log {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// The whole log as plain lines, for the clipboard.
+    pub fn transcript(&self) -> String {
+        self.entries
+            .iter()
+            .map(|entry| format!("{:>8.1}s  {}\n", entry.at, entry.text))
+            .collect()
     }
 
     /// The newest entry, for the collapsed header's one-line summary.

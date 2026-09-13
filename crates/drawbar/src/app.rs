@@ -1,16 +1,20 @@
-//! The app shell: theme, the three regions, and the routing between them.
+//! The app: the theme both faces share, and the routing between the regions.
 //!
-//! The sidebar is the browser — this computer and the instrument. The centre is a tab
-//! per open document. The bottom is one line of plain words, which opens into the full
-//! activity log when there is a reason to read it.
+//! The regions themselves — the title bar, the toolbar, the three docks, the status
+//! bar — are [`crate::shell`]; [`DrawbarApp::update`] is the order they claim space in
+//! and nothing else.
 
 use eframe::egui;
 
 use crate::browser::{self, Browser};
 use crate::device::Device;
 use crate::document::Document;
+use crate::keyboard::Keyboard;
+use crate::library::Library;
 use crate::log::Log;
-use crate::tabs::Tabs;
+use crate::queue::Queue;
+use crate::shell::Shell;
+use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
 
 /// A theme-specific success color with enough contrast for small text.
@@ -43,6 +47,14 @@ pub fn accent(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
+/// The ink a MICRO-caps header wears: a step quieter than the body ink beneath it.
+pub fn caption(visuals: &egui::Visuals) -> egui::Color32 {
+    match visuals.dark_mode {
+        true => egui::Color32::from_gray(0xa0),
+        false => egui::Color32::from_gray(0x28),
+    }
+}
+
 /// The unlit half of a control, kept visible against either panel.
 pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
     match visuals.dark_mode {
@@ -62,7 +74,7 @@ pub enum ThemeChoice {
 
 impl ThemeChoice {
     /// Where the choice is kept between sessions.
-    const KEY: &'static str = "drawbar.theme";
+    pub(crate) const KEY: &'static str = "drawbar.theme";
 
     fn read(text: &str) -> ThemeChoice {
         match text {
@@ -72,7 +84,7 @@ impl ThemeChoice {
         }
     }
 
-    fn stored(self) -> &'static str {
+    pub(crate) fn stored(self) -> &'static str {
         match self {
             ThemeChoice::System => "system",
             ThemeChoice::Light => "light",
@@ -80,7 +92,7 @@ impl ThemeChoice {
         }
     }
 
-    fn next(self) -> ThemeChoice {
+    pub(crate) fn next(self) -> ThemeChoice {
         match self {
             ThemeChoice::System => ThemeChoice::Light,
             ThemeChoice::Light => ThemeChoice::Dark,
@@ -88,9 +100,8 @@ impl ThemeChoice {
         }
     }
 
-    /// ⚠️ A word, not a sun or a moon: the bundled fonts have no glyph for either, and a
-    /// missing one renders as an empty box.
-    fn label(self) -> &'static str {
+    /// The three words beside the sun or the moon.
+    pub(crate) fn label(self) -> &'static str {
         match self {
             ThemeChoice::System => "Theme: auto",
             ThemeChoice::Light => "Theme: light",
@@ -98,7 +109,7 @@ impl ThemeChoice {
         }
     }
 
-    fn hint(self) -> &'static str {
+    pub(crate) fn hint(self) -> &'static str {
         match self {
             ThemeChoice::System => "following the system — click for light",
             ThemeChoice::Light => "held light — click for dark",
@@ -106,7 +117,7 @@ impl ThemeChoice {
         }
     }
 
-    fn preference(self) -> egui::ThemePreference {
+    pub(crate) fn preference(self) -> egui::ThemePreference {
         match self {
             ThemeChoice::System => egui::ThemePreference::System,
             ThemeChoice::Light => egui::ThemePreference::Light,
@@ -126,13 +137,17 @@ pub fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
 }
 
 pub struct DrawbarApp {
-    workspace: Workspace,
-    device: Device,
-    browser: Browser,
-    tabs: Tabs,
-    document: Document,
-    log: Log,
-    theme: ThemeChoice,
+    pub(crate) workspace: Workspace,
+    pub(crate) device: Device,
+    pub(crate) browser: Browser,
+    pub(crate) library: Library,
+    pub(crate) keyboard: Keyboard,
+    pub(crate) queue: Queue,
+    pub(crate) shell: Shell,
+    pub(crate) tabs: Tabs,
+    pub(crate) document: Document,
+    pub(crate) log: Log,
+    pub(crate) theme: ThemeChoice,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last caught up, on egui's own clock.
@@ -141,13 +156,17 @@ pub struct DrawbarApp {
 
 impl DrawbarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
+        // Without this every `Glyph` draws as egui's broken-image warning.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+        cc.egui_ctx.set_fonts(fonts());
         // Both faces are dressed up front, so the system flipping from light to dark mid
         // session lands on this app's own colours rather than egui's defaults.
         cc.egui_ctx.set_visuals_of(egui::Theme::Dark, dark());
         cc.egui_ctx.set_visuals_of(egui::Theme::Light, light());
-        // Metrics live on the style, not on either face, so the theme swap moves
-        // colours and nothing else.
-        cc.egui_ctx.style_mut(metrics);
+        // ⚠️ Both faces, not the one showing: egui keeps a `Style` per theme, and a
+        // face that never learned the named text styles panics the frame that resolves
+        // one.
+        cc.egui_ctx.all_styles_mut(metrics);
         let theme = cc
             .storage
             .and_then(|storage| storage.get_string(ThemeChoice::KEY))
@@ -157,6 +176,10 @@ impl DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
             browser: Browser::default(),
+            library: Library::default(),
+            keyboard: Keyboard::default(),
+            queue: Queue::default(),
+            shell: Shell::default(),
             tabs: Tabs::default(),
             document: Document::default(),
             log: Log::default(),
@@ -167,6 +190,7 @@ impl DrawbarApp {
         if let Some(storage) = cc.storage {
             crate::store::load(storage, &mut app.workspace, &mut app.log);
             app.browser.restore(storage);
+            app.shell.restore(storage);
             // Both stores are read; only now does the grouping know what survived.
             app.browser.settle(&app.workspace);
         }
@@ -230,52 +254,9 @@ impl DrawbarApp {
         let Some(storage) = frame.storage_mut() else {
             return;
         };
-        crate::store::save(storage, &self.workspace, &mut self.log);
+        crate::store::save(storage, &self.workspace, &self.queue, &mut self.log);
         self.saved = self.workspace.revision();
         self.saved_at = now;
-    }
-
-    /// One line of plain words, and the whole log behind it.
-    fn status_strip(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status")
-            .resizable(self.log.open)
-            .default_height(if self.log.open { 200.0 } else { 28.0 })
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let line = match &self.device.state.in_flight {
-                        Some(words) => {
-                            ui.spinner();
-                            egui::RichText::new(&words.doing)
-                        }
-                        None => {
-                            let (level, text) = self.log.status();
-                            egui::RichText::new(text).color(level.color(ui.visuals()))
-                        }
-                    };
-                    if ui
-                        .add(egui::Label::new(line).sense(egui::Sense::click()))
-                        .clicked()
-                    {
-                        self.log.open = !self.log.open;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = match self.log.open {
-                            true => "Hide details",
-                            false => "Details",
-                        };
-                        if ui.small_button(label).clicked() {
-                            self.log.open = !self.log.open;
-                        }
-                        if self.log.open && ui.small_button("Clear").clicked() {
-                            self.log.clear();
-                        }
-                    });
-                });
-                if self.log.open {
-                    ui.separator();
-                    self.log.ui(ui);
-                }
-            });
     }
 }
 
@@ -288,109 +269,67 @@ impl eframe::App for DrawbarApp {
     /// eframe calls this on its own timer and on the way out, so an edit is kept
     /// without anyone asking for it to be.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        crate::store::save(storage, &self.workspace, &mut self.log);
+        crate::store::save(storage, &self.workspace, &self.queue, &mut self.log);
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
         // Not written from the frame that changed it, the way the theme is: a divider
         // moves on every frame of a drag, and the whole store is rewritten each time.
         self.browser.keep(storage);
+        self.shell.keep(storage);
         self.saved = self.workspace.revision();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.log.tick(ctx);
         self.workspace.poll(&mut self.log);
-        self.device
-            .poll(&mut self.log, &mut self.workspace, &mut self.tabs);
+        self.device.poll(
+            &mut self.log,
+            &mut self.workspace,
+            &mut self.tabs,
+            &mut self.queue,
+        );
+        // An edit under a waiting entry changes what that write would do, and the queue
+        // says so from the occupant it already read.
+        crate::queue::follow(
+            &self.workspace,
+            &mut self.device,
+            &mut self.queue,
+            &mut self.log,
+        );
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.
         self.workspace
-            .close_views(|id| self.tabs.holds(id), &mut self.log);
+            .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
         self.take_dropped_files(ctx);
         drop_hint(ctx);
-        // Raised by a New → Sample Editor project pick, and answered before anything
-        // else this frame draws: it is a modal over the whole window.
+        // Raised by a New pick of WAVs, and answered before anything else this frame
+        // draws: it is a modal over the whole window.
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
-            self.tabs.open(made, &self.workspace);
+            self.tabs.open(made);
         }
 
-        egui::TopBottomPanel::top("title").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("drawbar");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button(self.theme.label())
-                        .on_hover_text(self.theme.hint())
-                        .clicked()
-                    {
-                        self.theme = self.theme.next();
-                        ctx.set_theme(self.theme.preference());
-                        // Save immediately; eframe persistence otherwise waits for another frame.
-                        if let Some(storage) = frame.storage_mut() {
-                            storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
-                        }
-                    }
-                });
-            });
-        });
+        // Before the panels, so an editor open in this frame still has the focus Escape
+        // belongs to.
+        self.browser.let_go(ctx);
 
-        self.status_strip(ctx);
-
+        // Outside in. A panel claims its space from what the ones before it left.
         let mut acts = Vec::new();
-        egui::SidePanel::left("places")
-            .resizable(true)
-            .default_width(520.0)
-            .show(ctx, |ui| {
-                acts = self.browser.ui(ui, &self.workspace, &self.device);
-            });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.tabs.ui(ui, &self.workspace);
-            ui.separator();
-            let Some(id) = self.tabs.active() else {
-                self.document.leave();
-                ui.label(
-                    egui::RichText::new("Double-click something in the sidebar to open it.")
-                        .weak()
-                        .italics(),
-                );
-                return;
-            };
-            // ⚠️ A view's tab looks like a local document; the banner is the only visible
-            // indication that its bytes still belong to the instrument.
-            if self.workspace.is_view(id) {
-                if let Some(act) = viewing_banner(ui, id, &self.workspace) {
-                    acts.push(act);
-                }
-            }
-            // ⚠️ Never a file export. Cmd+S means "keep what I did", which for something
-            // read off the instrument is a promise to send it back.
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-                self.document.stage(id, &mut self.workspace, &mut self.log);
-            }
-            let sent = self.document.ui(
-                ui,
-                id,
-                self.tabs.opened(id),
-                &mut self.workspace,
-                &mut self.device,
-                &mut self.log,
-            );
-            if let Some(send) = sent {
-                acts.push(browser::Act::Send {
-                    id: send.id,
-                    class: send.class,
-                    at: send.at,
-                });
-            }
-        });
+        self.titlebar(ctx, frame, &mut acts);
+        self.toolbar(ctx, &mut acts);
+        self.status_bar(ctx, &mut acts);
+        self.bottom_dock(ctx, &mut acts);
+        self.browser_dock(ctx, &mut acts);
+        self.inspector_dock(ctx, &mut acts);
+        self.centre(ctx, &mut acts);
 
         browser::apply(
             &mut self.browser,
+            &mut self.shell,
             acts,
             &mut self.workspace,
             &mut self.device,
             &mut self.tabs,
+            &mut self.queue,
             &mut self.log,
         );
         // Last, so a command the user just asked for is ahead of the background read of
@@ -398,6 +337,73 @@ impl eframe::App for DrawbarApp {
         self.device.pump();
 
         self.keep_up(ctx, frame);
+    }
+}
+
+/// The room a document editor keeps inside the centre.
+const EDITOR_MARGIN: i8 = 8;
+
+impl DrawbarApp {
+    /// The tab strip, and whatever the tab in front is a view of.
+    fn centre(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
+        let fill = ctx.style().visuals.panel_fill;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(fill))
+            .show(ctx, |ui| {
+                self.tabs.ui(ui, &self.workspace, acts);
+                match self.tabs.showing() {
+                    // The library is what the centre shows when no tab claims it.
+                    None | Some(Spot::Library) => {
+                        self.document.leave();
+                        acts.extend(self.library.ui(
+                            ui,
+                            &mut self.browser,
+                            &self.workspace,
+                            &self.device,
+                            &self.queue,
+                            &self.shell,
+                        ));
+                    }
+                    Some(Spot::Keyboard) => {
+                        self.document.leave();
+                        acts.extend(self.keyboard.ui(
+                            ui,
+                            &mut self.browser,
+                            &self.workspace,
+                            &self.device,
+                            &self.queue,
+                            &self.tabs,
+                        ));
+                    }
+                    Some(Spot::Document(id)) => self.open_document(ui, id, acts),
+                }
+            });
+    }
+
+    /// A document is the one thing in the centre that is a page rather than a region, so
+    /// it is the one thing given a margin. Panels and headers stay full bleed.
+    fn open_document(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<browser::Act>) {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(EDITOR_MARGIN))
+            .show(ui, |ui| {
+                // ⚠️ A view's tab looks like a local document; the banner is the only
+                // visible indication that its bytes still belong to the instrument.
+                if self.workspace.is_view(id) {
+                    if let Some(act) = viewing_banner(ui, id, &self.workspace) {
+                        acts.push(act);
+                    }
+                }
+                let sent =
+                    self.document
+                        .ui(ui, id, &mut self.workspace, &mut self.device, &mut self.log);
+                if let Some(send) = sent {
+                    acts.push(browser::Act::Send {
+                        id: send.id,
+                        class: send.class,
+                        at: send.at,
+                    });
+                }
+            });
     }
 }
 
@@ -462,9 +468,11 @@ fn dark() -> egui::Visuals {
     // A group's border is the only thing between one section and the next, so it is
     // lifted clear of egui's own hairline.
     visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x4e);
-    // Body ink and caption ink, each a step up from egui's dark defaults.
+    // ⚠️ Both slots carry the body ink: `noninteractive` is what `Visuals::text_color`
+    // answers, so a painted row and a button would otherwise disagree. The quieter
+    // caption ink is `caption`.
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xa0);
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
     visuals.selection.bg_fill = egui::Color32::from_rgb(0x7a, 0x24, 0x24);
     // ⚠️ This also colors drop targets and focused knobs; inheriting egui's blue would
     // introduce a second accent.
@@ -483,7 +491,7 @@ fn light() -> egui::Visuals {
     visuals.faint_bg_color = egui::Color32::from_rgb(0xdc, 0xd8, 0xce);
     visuals.selection.bg_fill = egui::Color32::from_rgb(0xe9, 0xa9, 0x9f);
     visuals.selection.stroke.color = egui::Color32::from_rgb(0x3a, 0x14, 0x10);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x28);
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x1c);
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
     visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x8a);
     visuals.weak_text_alpha = 0.9;
@@ -491,18 +499,74 @@ fn light() -> egui::Visuals {
     visuals
 }
 
+/// The one family with weight in it, for the word-mark and nothing else.
+pub fn bold() -> egui::FontFamily {
+    egui::FontFamily::Name("bold".into())
+}
+
+/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces.
+///
+/// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
+/// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
+/// heavier weight to ask for and no 400 to set the body in.
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
+    for (family, face, ttf) in [
+        (
+            egui::FontFamily::Proportional,
+            "Ubuntu",
+            include_bytes!("../assets/fonts/Ubuntu-R.ttf").as_slice(),
+        ),
+        (
+            bold(),
+            "Ubuntu-Bold",
+            include_bytes!("../assets/fonts/Ubuntu-B.ttf").as_slice(),
+        ),
+    ] {
+        fonts.font_data.insert(
+            face.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(ttf)),
+        );
+        let mut faces = bundled.clone();
+        faces.insert(0, face.to_owned());
+        fonts.families.insert(family, faces);
+    }
+    fonts
+}
+
+/// The text of the shell itself: menus, tabs, rail rows and cells.
+///
+/// A function rather than a const because [`egui::TextStyle::Name`] holds an `Arc<str>`.
+pub fn ui() -> egui::TextStyle {
+    egui::TextStyle::Name("ui".into())
+}
+
+/// The smallest text: panel headers and column heads, which are also uppercased.
+pub fn micro() -> egui::TextStyle {
+    egui::TextStyle::Name("micro".into())
+}
+
 /// The metrics both faces share: the room a control is given, and the room around it.
 ///
 /// Theme-independent on purpose — flipping light to dark must not move anything.
-fn metrics(style: &mut egui::Style) {
+pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
-    // Fields sat 3px apart, which read as one block rather than a list of fields.
-    spacing.item_spacing = egui::vec2(8.0, 6.0);
+    spacing.item_spacing = egui::vec2(8.0, 4.0);
     // A button was 1px taller than its own text; a strip of them read as a solid bar.
     spacing.button_padding = egui::vec2(7.0, 3.0);
-    // The three regions get room to the window edge and to each other.
-    spacing.window_margin = egui::Margin::same(10);
-    spacing.menu_margin = egui::Margin::same(8);
+    // Panels own their inner padding, so the shared margin claims none of it.
+    spacing.window_margin = egui::Margin::same(0);
+    spacing.menu_margin = egui::Margin::same(4);
+    spacing.indent = 18.0;
+    spacing.interact_size.y = 18.0;
+    spacing.scroll.bar_width = 8.0;
+    style
+        .text_styles
+        .insert(ui(), egui::FontId::proportional(11.5));
+    style
+        .text_styles
+        .insert(micro(), egui::FontId::proportional(9.5));
 }
 
 #[cfg(test)]
@@ -597,6 +661,38 @@ mod tests {
         }
     }
 
+    /// The light face is read on paper, where a mid grey is a whisper. Its body ink is
+    /// `#1c1c1c` and its captions `#282828`, and neither is allowed to drift back up.
+    #[test]
+    fn the_light_face_writes_in_ink_rather_than_pencil() {
+        let light = light();
+        let panel = light.panel_fill;
+        assert_eq!(light.text_color(), egui::Color32::from_gray(0x1c));
+        assert_eq!(caption(&light), egui::Color32::from_gray(0x28));
+
+        let body = contrast(light.text_color(), panel);
+        assert!(body >= 12.0, "light body: {body:.2}:1");
+        let heading = contrast(caption(&light), panel);
+        assert!(heading >= 12.0, "light caption: {heading:.2}:1");
+        // Weak text carries a whole sentence in the inspector, so it holds body-text
+        // contrast rather than the 3.0 a large mark would get away with.
+        let weak = contrast(light.weak_text_color(), panel);
+        assert!(weak >= 4.5, "light weak: {weak:.2}:1");
+    }
+
+    /// A caption sits over the same panel as the body it heads, and is quieter than it
+    /// without becoming a grey nobody can read.
+    #[test]
+    fn a_caption_is_quieter_than_the_body_under_it_in_both_themes() {
+        for visuals in [dark(), light()] {
+            let (where_, panel) = (named(&visuals), visuals.panel_fill);
+            let heading = contrast(caption(&visuals), panel);
+            let body = contrast(visuals.text_color(), panel);
+            assert!(heading >= 4.5, "{where_} caption: {heading:.2}:1");
+            assert!(heading < body, "{where_}: {heading:.2}:1 vs {body:.2}:1");
+        }
+    }
+
     #[test]
     fn a_group_border_separates_it_from_the_panel_behind_it() {
         for visuals in [dark(), light()] {
@@ -608,11 +704,36 @@ mod tests {
     }
 
     #[test]
+    fn each_family_leads_with_its_ubuntu_face_over_the_same_fallbacks() {
+        let fonts = fonts();
+        assert!(fonts.font_data.contains_key("Ubuntu"));
+        assert!(fonts.font_data.contains_key("Ubuntu-Bold"));
+        let body = &fonts.families[&egui::FontFamily::Proportional];
+        let mark = &fonts.families[&bold()];
+        assert_eq!(body.first().map(String::as_str), Some("Ubuntu"));
+        assert_eq!(mark.first().map(String::as_str), Some("Ubuntu-Bold"));
+        assert_eq!(body[1..], mark[1..]);
+        assert!(
+            !body[1..].is_empty(),
+            "a glyph Ubuntu lacks would draw as tofu"
+        );
+    }
+
+    #[test]
     fn the_shared_metrics_do_not_depend_on_the_theme() {
         let mut style = egui::Style::default();
         metrics(&mut style);
         // Both faces read one style, so there is nothing here to disagree about.
-        assert_eq!(style.spacing.item_spacing, egui::vec2(8.0, 6.0));
-        assert_eq!(style.spacing.button_padding, egui::vec2(7.0, 3.0));
+        let spacing = &style.spacing;
+        assert_eq!(spacing.item_spacing, egui::vec2(8.0, 4.0));
+        assert_eq!(spacing.button_padding, egui::vec2(7.0, 3.0));
+        assert_eq!(spacing.window_margin, egui::Margin::same(0));
+        assert_eq!(spacing.menu_margin, egui::Margin::same(4));
+        assert_eq!(spacing.indent, 18.0);
+        assert_eq!(spacing.interact_size.y, 18.0);
+        assert_eq!(spacing.scroll.bar_width, 8.0);
+        // Both named styles must be registered, or resolving one panics mid-frame.
+        assert_eq!(style.text_styles[&ui()], egui::FontId::proportional(11.5));
+        assert_eq!(style.text_styles[&micro()], egui::FontId::proportional(9.5));
     }
 }

@@ -1,9 +1,9 @@
 //! The document: one view of one asset, which looking at and changing are the same act.
 //!
 //! An edit lands on the tab's working copy the moment it is made — set the field,
-//! re-encode, re-check the bytes — and the tab goes dirty. Nothing on the instrument
-//! moves until the header's Send does it. Revert goes back to the bytes the tab opened
-//! with, which is the only undo there is.
+//! re-encode, re-check the bytes — and the asset reads as unsaved. Nothing on the
+//! instrument moves until the header's Send does it. Revert goes back to the bytes the
+//! asset was last saved as, which is the only undo there is.
 
 use eframe::egui;
 use nord_format::fields::Field;
@@ -19,10 +19,10 @@ use crate::workspace::{LocalEntity, Workspace};
 
 mod advanced;
 mod controls;
-mod encode;
+pub(crate) mod encode;
 mod panel;
 mod project;
-mod sample;
+pub(crate) mod sample;
 mod setlist;
 
 use advanced::Advanced;
@@ -44,7 +44,7 @@ pub struct SendBack {
 #[derive(Default)]
 struct Header {
     revert: bool,
-    save: bool,
+    export: bool,
     send: Option<SendBack>,
 }
 
@@ -96,13 +96,11 @@ pub struct Document {
 }
 
 impl Document {
-    /// Draw the open tab's document. `opened` is what it looked like when the tab
-    /// opened — Revert's target, and what the byte diff is measured against.
+    /// Draw the open tab's document.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         id: u64,
-        opened: &[u8],
         workspace: &mut Workspace,
         device: &mut Device,
         log: &mut Log,
@@ -156,7 +154,7 @@ impl Document {
         let mut sets: Sets = Vec::new();
         let mut act = Header::default();
 
-        self.header(ui, entity, opened, &mut act);
+        self.header(ui, entity, &mut act);
         let mut want = view;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -194,7 +192,7 @@ impl Document {
                             typed = !sets.is_empty();
                         }
                     }
-                    View::Meta => details = self.advanced.meta(ui, entity, opened, device),
+                    View::Meta => details = self.advanced.meta(ui, entity, device),
                 });
             });
 
@@ -212,11 +210,11 @@ impl Document {
                 device.send(crate::device::DeviceCmd::Deps { class, at }, log);
             }
         }
-        if act.save {
+        if act.export {
             workspace.export(id);
         }
         if act.revert {
-            workspace.restore_bytes(id, opened.to_vec(), log);
+            workspace.revert(id, log);
             self.error = None;
             // Reread on the next frame: the name box is holding an edit that is gone.
             self.target = None;
@@ -256,36 +254,15 @@ impl Document {
         self.player.stop();
     }
 
-    /// Mark the open document as owed to the instrument, or say why it is not.
-    pub fn stage(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
-        let Some(entity) = workspace.get(id) else {
-            return;
-        };
-        let name = entity.name.clone();
-        match entity.origin.slot() {
-            Some((class, at)) if crate::device::sendable(class) => {
-                workspace.mark_pending(id, true);
-                log.say(format!(
-                    "“{name}” will be sent to {}.",
-                    strings::place(class, at)
-                ));
-            }
-            // ⚠️ Never a file export. Cmd+S means "keep what I did", and for something
-            // that lives here that has already happened.
-            _ => log.say(format!(
-                "“{name}” is on this computer, and changes to it are kept as you make them."
-            )),
-        }
-    }
-
     /// Where it came from, what has changed, and the three things to do about it.
-    fn header(&mut self, ui: &mut egui::Ui, entity: &LocalEntity, opened: &[u8], act: &mut Header) {
+    fn header(&mut self, ui: &mut egui::Ui, entity: &LocalEntity, act: &mut Header) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading(&entity.name);
-            if entity.dirty {
+            ui.heading(strings::display_name(&entity.name))
+                .on_hover_text(&entity.name);
+            if entity.is_unsaved() {
                 let warn = crate::app::warn(ui.visuals());
                 dot(ui, warn);
-                ui.label(egui::RichText::new("changed").small().color(warn));
+                ui.label(egui::RichText::new("unsaved").small().color(warn));
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -293,11 +270,11 @@ impl Document {
         });
         ui.horizontal_wrapped(|ui| {
             act.revert = ui
-                .add_enabled(entity.bytes != opened, egui::Button::new("Revert"))
-                .on_hover_text("back to how it was when this tab opened")
-                .on_disabled_hover_text("nothing has changed")
+                .add_enabled(entity.is_unsaved(), egui::Button::new("Revert"))
+                .on_hover_text("back to the bytes it was last saved as")
+                .on_disabled_hover_text("nothing has changed since it was saved")
                 .clicked();
-            act.save = ui.button("Export…").clicked();
+            act.export = ui.button("Export…").clicked();
             if let Some((class, at)) = entity.origin.slot() {
                 let label = format!("Send to {}", strings::place(class, at));
                 let button = ui
@@ -508,15 +485,6 @@ impl Document {
             Ok(out) => {
                 self.error = None;
                 workspace.replace_bytes(id, out, log);
-                // An edit to something read off the instrument is owed back to it. It
-                // goes nowhere until the operator sends it.
-                if workspace
-                    .get(id)
-                    .and_then(|e| e.origin.slot())
-                    .is_some_and(|(class, _)| crate::device::sendable(class))
-                {
-                    workspace.mark_pending(id, true);
-                }
                 Ok(())
             }
             Err(why) => {
@@ -660,7 +628,7 @@ fn current_model(fields: &[Field]) -> Option<u32> {
 
 /// A library id as the registry spells it — decimal from the field list, hex where a
 /// person typed it.
-fn library_id(value: &str) -> Option<u32> {
+pub(crate) fn library_id(value: &str) -> Option<u32> {
     let text = value.trim();
     match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
@@ -700,14 +668,13 @@ mod tests {
             let (_, edited) = fields::apply(&bytes, &sets).expect("the sets are legal");
             workspace.replace_bytes(id, edited, &mut log);
         }
-        let opened = workspace.get(id).unwrap().bytes.clone();
 
         // Twice: the second pass runs with the caches and the widget state the first
         // one left behind, which is where a stale index would show up.
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
+                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
                 });
             });
         }
@@ -844,59 +811,13 @@ mod tests {
         assert!(document.error.is_none());
     }
 
-    /// An edit to something read off the instrument is owed back to it; an edit to
-    /// something that only lives here is not.
-    #[test]
-    fn editing_a_device_document_marks_it_pending() {
-        use crate::workspace::Origin;
-        use nord_usb::{Location, ObjectClass};
-
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut log = Log::default();
-        let mut document = Document::default();
-
-        let local = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(local).unwrap().bytes.clone();
-        let from_device = workspace.ingest(
-            "Africa-Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: Location { bank: 6, slot: 3 },
-            },
-            bytes,
-            &mut log,
-        );
-
-        let set = vec![("center_panel.gain".to_string(), "96".to_string())];
-        document
-            .apply(local, set.clone(), &mut workspace, &mut log)
-            .unwrap();
-        document
-            .apply(from_device, set, &mut workspace, &mut log)
-            .unwrap();
-
-        assert!(!workspace.get(local).unwrap().pending, "stays here");
-        assert!(workspace.get(from_device).unwrap().pending, "owed back");
-        let owed: Vec<u64> = workspace.pending().iter().map(|e| e.id).collect();
-        assert_eq!(owed, vec![from_device]);
-
-        // Cmd+S on the local one says so rather than exporting anything.
-        document.stage(local, &mut workspace, &mut log);
-        assert!(
-            log.status().1.contains("kept as you make them"),
-            "{}",
-            log.status().1
-        );
-        assert!(!workspace.get(local).unwrap().pending);
-    }
-
     /// ⚠️ The strip and the body are two scroll regions in one `Ui`. While they shared
     /// egui's unsalted id they shared one state, and a wheel over the document moved the
     /// tab strip while the body stayed where it was.
     #[test]
     fn the_tab_strip_and_the_document_body_scroll_on_their_own() {
         let ctx = egui::Context::default();
+        ctx.style_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();
@@ -904,8 +825,7 @@ mod tests {
         let mut tabs = crate::tabs::Tabs::default();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        tabs.open(id, &workspace);
-        let opened = workspace.get(id).unwrap().bytes.clone();
+        tabs.open(id);
 
         let mut ids = None;
         for frame in 0..4 {
@@ -934,9 +854,9 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(crate::tabs::SCROLL)),
                         ui.make_persistent_id(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(ui, &workspace);
+                    tabs.ui(ui, &workspace, &mut Vec::new());
                     ui.separator();
-                    document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
+                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
                 });
             });
         }
@@ -1039,12 +959,11 @@ mod tests {
 
         let first = workspace.create(Fresh::Program, &mut log).unwrap();
         let second = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(first).unwrap().bytes.clone();
 
         let mut show = |document: &mut Document, id: u64| {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    document.ui(ui, id, &bytes, &mut workspace, &mut device, &mut log);
+                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
                 });
             });
         };
@@ -1081,12 +1000,11 @@ mod tests {
         let mut document = Document::default();
 
         let id = workspace.ingest(name.into(), Origin::File(name.into()), bytes, &mut log);
-        let opened = workspace.get(id).unwrap().bytes.clone();
         document.views.insert(id, view);
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
+                    document.ui(ui, id, &mut workspace, &mut device, &mut log);
                 });
             });
         }
@@ -1149,7 +1067,7 @@ mod tests {
         );
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                document.ui(ui, id, &[], &mut workspace, &mut device, &mut log);
+                document.ui(ui, id, &mut workspace, &mut device, &mut log);
             });
         });
     }
@@ -1187,7 +1105,7 @@ mod tests {
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                document.ui(ui, id, &bytes, &mut workspace, &mut device, &mut log);
+                document.ui(ui, id, &mut workspace, &mut device, &mut log);
             });
         });
         document.answer(id, Asked::Encode, &mut workspace, &mut log);
@@ -1243,10 +1161,9 @@ mod tests {
         assert!(!decoded.envelope.is_empty());
 
         // With a zone open the document paints its envelope, which nothing else does.
-        let opened = workspace.get(id).unwrap().bytes.clone();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                document.ui(ui, id, &opened, &mut workspace, &mut device, &mut log);
+                document.ui(ui, id, &mut workspace, &mut device, &mut log);
             });
         });
 

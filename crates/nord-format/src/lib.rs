@@ -27,6 +27,7 @@
 //! crate runs anywhere `std` does — wasm included. Device access lives in the
 //! companion `nord-usb` crate, in the same repository.
 
+pub mod accept;
 pub mod bank;
 pub mod bits;
 pub mod cbin;

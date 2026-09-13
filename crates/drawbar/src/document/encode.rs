@@ -53,7 +53,7 @@ impl Draft {
 /// The longest prefix of `label` the name field takes. The limit is in bytes and the
 /// cut is on a character boundary, so a name of accented letters loses a letter rather
 /// than becoming a name the encoder refuses.
-fn fits(label: &str) -> String {
+pub fn fits(label: &str) -> String {
     let mut out = String::new();
     for c in label.chars() {
         if out.len() + c.len_utf8() > MAX_NAME_LEN {

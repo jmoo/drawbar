@@ -29,6 +29,8 @@ pub struct Scan {
     queue: VecDeque<ObjectClass>,
     /// Keyed by the raw class number, because [`ObjectClass`] is not `Hash`.
     progress: HashMap<u32, Progress>,
+    /// When each class last said anything about itself, on egui's own clock.
+    read: HashMap<u32, f64>,
 }
 
 impl Scan {
@@ -74,9 +76,23 @@ impl Scan {
         self.progress.get(&class.to_raw()).copied()
     }
 
+    /// Note that the class has just answered, at `now` on egui's clock.
+    ///
+    /// ⚠️ Every bank a walk delivers, and the end of the walk itself: what is wanted is
+    /// how stale the names on screen are, not when a session happened to be opened.
+    pub fn heard(&mut self, class: ObjectClass, now: f64) {
+        self.read.insert(class.to_raw(), now);
+    }
+
+    /// When the class last answered, if it ever has.
+    pub fn read_at(&self, class: ObjectClass) -> Option<f64> {
+        self.read.get(&class.to_raw()).copied()
+    }
+
     pub fn clear(&mut self) {
         self.queue.clear();
         self.progress.clear();
+        self.read.clear();
     }
 }
 
@@ -128,6 +144,22 @@ mod tests {
         scan.start(ObjectClass::Program);
         assert_eq!(scan.progress(ObjectClass::Program).unwrap().done, 0);
         assert_eq!(scan.take(), Some(ObjectClass::Program));
+    }
+
+    /// When a class last answered is what says how stale its names are, and letting the
+    /// instrument go leaves nothing to be stale about.
+    #[test]
+    fn a_class_remembers_when_it_last_answered() {
+        let mut scan = Scan::default();
+        assert_eq!(scan.read_at(ObjectClass::Program), None);
+
+        scan.heard(ObjectClass::Program, 12.5);
+        scan.heard(ObjectClass::Program, 31.0);
+        assert_eq!(scan.read_at(ObjectClass::Program), Some(31.0));
+        assert_eq!(scan.read_at(ObjectClass::Sample), None, "another folder");
+
+        scan.clear();
+        assert_eq!(scan.read_at(ObjectClass::Program), None);
     }
 
     /// One class finishing leaves the others queued.

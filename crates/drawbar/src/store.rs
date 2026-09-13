@@ -2,16 +2,40 @@
 //!
 //! eframe hands over one string store — localStorage in a browser tab, a ron file on the
 //! desktop — so an asset is written as a line: its id, where it came from, what it is
-//! called, and its bytes in base64. It is read back through the same decode-and-verify
-//! any file gets, because bytes off a store deserve no more trust than bytes off a disk.
+//! called, the bytes it was last saved as in base64, and, where it holds something else,
+//! those bytes too. It is read back through the same decode-and-verify any file gets,
+//! because bytes off a store deserve no more trust than bytes off a disk.
 
 use crate::base64;
 use crate::log::Log;
+use crate::queue::Queue;
 use crate::workspace::{Origin, Saved, Workspace};
 use nord_usb::{Location, ObjectClass};
 
 const KEY: &str = "drawbar.this_computer";
-const VERSION: &str = "drawbar 1";
+const VERSION: &str = "drawbar 2";
+
+/// How many fields a line holds, which is the whole of what a version decides.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// `drawbar 1`: id, origin, name, bytes. The bytes are both what the asset holds
+    /// and what it was last saved as, because that version knew of no other.
+    Four,
+    /// `drawbar 2`: those, and — where an edit is unsaved — the bytes it holds instead.
+    Five,
+}
+
+impl Shape {
+    /// The shape a version line asks for. A version this build does not know has none,
+    /// and its store is left alone rather than half-read.
+    fn of(version: &str) -> Option<Shape> {
+        match version {
+            "drawbar 1" => Some(Shape::Four),
+            VERSION => Some(Shape::Five),
+            _ => None,
+        }
+    }
+}
 
 /// The largest asset worth keeping.
 ///
@@ -39,24 +63,35 @@ const BUDGET: usize = 3 * 1024 * 1024;
 /// must rate-limit writes because dragging mutates the list every frame.
 ///
 /// What is written comes back kept — see [`load`].
-pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, log: &mut Log) {
+pub fn save(
+    storage: &mut dyn eframe::Storage,
+    workspace: &Workspace,
+    queue: &Queue,
+    log: &mut Log,
+) {
     let mut out = format!("{VERSION}\n{}\n", workspace.next_id());
     let mut skipped = 0;
     let mut dropped = 0;
     for entity in workspace.entities() {
-        if !entity.kept && !crate::workspace::precious(entity) {
+        if !entity.kept && !crate::workspace::precious(entity, queue) {
             continue;
         }
-        if entity.bytes.len() > MAX_ENTITY {
+        if entity.bytes.len().max(entity.saved.bytes.len()) > MAX_ENTITY {
             skipped += 1;
             continue;
         }
+        // The baseline is what the asset is; the tail is what it holds instead, and only
+        // an unsaved asset has one.
+        let unsaved = match entity.is_unsaved() {
+            true => format!("\t{}", base64::encode(&entity.bytes)),
+            false => String::new(),
+        };
         let line = format!(
-            "{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}{unsaved}\n",
             entity.id,
             origin(&entity.origin),
             escape(&entity.name),
-            base64::encode(&entity.bytes),
+            base64::encode(&entity.saved.bytes),
         );
         if out.len() + line.len() > BUDGET {
             dropped += 1;
@@ -94,17 +129,17 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
         return;
     };
     let mut lines = text.lines();
-    if lines.next() != Some(VERSION) {
+    let Some(shape) = lines.next().and_then(Shape::of) else {
         // A store this build cannot read is left alone rather than half-read: the next
         // save replaces it.
         log.warn("the saved list is in a format this build does not read");
         return;
-    }
+    };
     let next_id = lines.next().and_then(|line| line.parse().ok());
     let mut restored = Vec::new();
     let mut unreadable = 0;
     for line in lines {
-        match entry(line) {
+        match entry(line, shape) {
             Some(saved) => restored.push(saved),
             None => unreadable += 1,
         }
@@ -122,17 +157,23 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
     }
 }
 
-fn entry(line: &str) -> Option<Saved> {
-    let mut parts = line.splitn(4, '\t');
+fn entry(line: &str, shape: Shape) -> Option<Saved> {
+    let mut parts = line.splitn(5, '\t');
     let id = parts.next()?.parse().ok()?;
     let origin = unorigin(parts.next()?)?;
     let name = unescape(parts.next()?);
-    let bytes = base64::decode(parts.next()?)?;
+    let saved = base64::decode(parts.next()?)?;
+    let unsaved = match (shape, parts.next()) {
+        (_, None) => None,
+        (Shape::Five, Some(text)) => Some(base64::decode(text)?),
+        (Shape::Four, Some(_)) => return None,
+    };
     Some(Saved {
         id,
         name,
         origin,
-        bytes,
+        saved,
+        unsaved,
     })
 }
 
@@ -208,6 +249,24 @@ pub(crate) fn unescape(text: &str) -> String {
     out
 }
 
+/// A store in a map, for the tests that need one to write into and read back.
+#[cfg(test)]
+#[derive(Default)]
+pub struct Fake(std::collections::HashMap<String, String>);
+
+#[cfg(test)]
+impl eframe::Storage for Fake {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+
+    fn flush(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,20 +299,6 @@ mod tests {
         }
     }
 
-    /// A store that holds nothing readable is a store, not a crash.
-    #[derive(Default)]
-    struct Fake(std::collections::HashMap<String, String>);
-
-    impl eframe::Storage for Fake {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-        fn set_string(&mut self, key: &str, value: String) {
-            self.0.insert(key.to_string(), value);
-        }
-        fn flush(&mut self) {}
-    }
-
     fn workspace() -> (Workspace, Log) {
         (
             Workspace::new(eframe::egui::Context::default()),
@@ -273,7 +318,7 @@ mod tests {
         before.create(Fresh::Settings, &mut log).unwrap();
 
         let mut store = Fake::default();
-        save(&mut store, &before, &mut log);
+        save(&mut store, &before, &Queue::default(), &mut log);
 
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
@@ -318,10 +363,19 @@ mod tests {
         let untouched = view(&mut before, 2, &mut log);
         let held = before.get(edited).unwrap().bytes.clone();
         before.replace_bytes(edited, [held, vec![0]].concat(), &mut log);
-        before.mark_pending(owed, true);
+        let mut queue = Queue::default();
+        crate::queue::enqueue(
+            &before,
+            &mut crate::device::Device::new(before.ctx().clone()),
+            &mut queue,
+            &mut log,
+            owed,
+            ObjectClass::Program,
+            at(1),
+        );
 
         let mut store = Fake::default();
-        save(&mut store, &before, &mut log);
+        save(&mut store, &before, &queue, &mut log);
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
 
@@ -338,6 +392,47 @@ mod tests {
         );
     }
 
+    /// An asset holding an edit nothing has saved comes back holding it, and still
+    /// knowing what it was saved as — so the revert offered in one session is the same
+    /// revert in the next.
+    #[test]
+    fn an_unsaved_edit_and_the_baseline_under_it_both_survive() {
+        use crate::workspace::Fresh;
+
+        let (mut before, mut log) = workspace();
+        let id = before.create(Fresh::Program, &mut log).unwrap();
+        let saved = before.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&saved, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        before.replace_bytes(id, edited.clone(), &mut log);
+
+        let mut store = Fake::default();
+        save(&mut store, &before, &Queue::default(), &mut log);
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        let restored = after.get(id).expect("kept its id");
+        assert_eq!(restored.bytes, edited, "it holds the edit");
+        assert_eq!(restored.saved.bytes, saved, "and what it was saved as");
+        assert!(restored.is_unsaved());
+        after.revert(id, &mut log);
+        assert_eq!(after.get(id).unwrap().bytes, saved);
+    }
+
+    /// A saved asset writes one set of bytes, not two.
+    #[test]
+    fn a_saved_asset_has_no_unsaved_tail() {
+        use crate::workspace::Fresh;
+
+        let (mut before, mut log) = workspace();
+        before.create(Fresh::Program, &mut log).unwrap();
+        let mut store = Fake::default();
+        save(&mut store, &before, &Queue::default(), &mut log);
+        let text = eframe::Storage::get_string(&store, KEY).expect("something was written");
+        let line = text.lines().nth(2).expect("the one asset's line");
+        assert_eq!(line.split('\t').count(), 4);
+    }
+
     /// Something too big to keep is left out and said out loud, rather than filling the
     /// store and taking everything else with it.
     #[test]
@@ -352,7 +447,7 @@ mod tests {
             &mut log,
         );
         let mut store = Fake::default();
-        save(&mut store, &before, &mut log);
+        save(&mut store, &before, &Queue::default(), &mut log);
         assert!(log.status().1.contains("too big"), "{}", log.status().1);
 
         let (mut after, mut log) = workspace();
@@ -373,11 +468,55 @@ mod tests {
     /// A line that is not a line is dropped, not guessed at.
     #[test]
     fn a_damaged_line_is_refused() {
-        assert!(entry("").is_none());
-        assert!(entry("7\tfresh\tname").is_none(), "no bytes");
-        assert!(entry("seven\tfresh\tname\tZm9v").is_none(), "no id");
-        assert!(entry("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
-        assert!(entry("7\tfresh\tname\t!!!").is_none(), "not base64");
-        assert!(entry("7\tfresh\tname\tZm9v").is_some());
+        let read = |line| entry(line, Shape::Five);
+        assert!(read("").is_none());
+        assert!(read("7\tfresh\tname").is_none(), "no bytes");
+        assert!(
+            read("7\tfresh\tname\tZm9v\t!!!").is_none(),
+            "the tail is not base64"
+        );
+        assert!(
+            read("7\tfresh\tname\tZm9v\tYmFy").is_some(),
+            "saved, and a tail"
+        );
+        assert!(read("seven\tfresh\tname\tZm9v").is_none(), "no id");
+        assert!(read("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
+        assert!(read("7\tfresh\tname\t!!!").is_none(), "not base64");
+        assert!(read("7\tfresh\tname\tZm9v").is_some());
+        // A version-1 line is four fields, and a fifth is a line this is not.
+        assert!(entry("7\tfresh\tname\tZm9v", Shape::Four).is_some());
+        assert!(entry("7\tfresh\tname\tZm9v\tYmFy", Shape::Four).is_none());
+    }
+
+    /// A list the version before this one wrote is read rather than thrown away: its
+    /// four fields are an asset holding exactly what it was last saved as.
+    #[test]
+    fn a_version_1_store_comes_back_kept_and_saved() {
+        use crate::workspace::Fresh;
+
+        let (mut before, mut log) = workspace();
+        let id = before.create(Fresh::Program, &mut log).unwrap();
+        let bytes = before.get(id).unwrap().bytes.clone();
+
+        let mut store = Fake::default();
+        eframe::Storage::set_string(
+            &mut store,
+            KEY,
+            format!(
+                "drawbar 1\n8\n7\tfile:Africa Split.ne5p\tAfrica Split.ne5p\t{}\n",
+                base64::encode(&bytes)
+            ),
+        );
+
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        let restored = after.get(7).expect("the line's own id");
+        assert_eq!(restored.name, "Africa Split.ne5p");
+        assert_eq!(restored.bytes, bytes);
+        assert_eq!(restored.saved.bytes, bytes, "there was no other copy");
+        assert!(!restored.is_unsaved());
+        assert!(restored.kept);
+        assert!(matches!(restored.verify, crate::workspace::VerifyState::Ok));
     }
 }

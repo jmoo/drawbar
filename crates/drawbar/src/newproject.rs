@@ -1,42 +1,113 @@
-//! New → Sample Editor project: some WAVs, the key each was recorded at, and the
-//! `.nsmpproj` that comes out of them.
+//! New → a Sample Editor project or a sample instrument: some WAVs, the key each was
+//! recorded at, and the `.nsmpproj` or `.nsmp` that comes out of them.
 //!
 //! The editor's own *Import Auto…* is what this imitates — one zone per file, ordered
-//! by root key, key ranges derived from the roots. Everything the format needs beyond
-//! the audio is the root key, and a filename is the only place a guess at one can come
-//! from, so the dialog exists to let that guess be corrected before anything is made.
+//! by root key, key ranges derived from the roots. Everything either format needs
+//! beyond the audio is the root key, and a filename is the only place a guess at one
+//! can come from, so the dialog exists to let that guess be corrected before anything
+//! is made.
 //!
 //! ⚠️ A project holds **paths, not audio**. What lands in the list references the WAVs
 //! by the names they were picked under, and the editor looks for them beside the
-//! project file.
+//! project file. An instrument holds the audio itself, which is why it takes the
+//! encoder's limits on what a WAV may be.
 
 use eframe::egui;
-use nord_format::formats::nsmp::codec::SOURCE_RATE;
+use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
+use nord_format::formats::nsmp::zone::derive_top_notes;
+use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
 use nord_format::formats::nsmpproj::{NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE};
+use nord_format::wav::Pcm16;
 use nord_format::Entity;
 
+use crate::document::encode::{fits, refusal as encodable, Source};
 use crate::document::note_picker;
 use crate::log::Log;
 use crate::note;
 use crate::workspace::{Origin, Workspace};
 
-/// Zones one project can hold: every key `Project::new` will lay a root on.
+/// Zones one draft can hold: every key the dialog lays a root on.
 const MOST_ZONES: usize = (HIGHEST_NOTE - LOWEST_NOTE) as usize + 1;
+
+/// What a pick of WAVs is turned into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Making {
+    /// A `.nsmpproj`: the file names, and where each sits on the keyboard.
+    Project,
+    /// A `.nsmp`: the audio itself, one zone per file, at the generation that has been
+    /// played on hardware. The document panel over a WAV is where a generation is
+    /// chosen; this makes the one that plays.
+    Instrument,
+}
+
+impl Making {
+    /// What it makes, as the dialog, the file picker and the log name it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Making::Project => "Sample Editor project",
+            Making::Instrument => "sample instrument",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Making::Project => nord_format::formats::nsmpproj::FORMAT,
+            Making::Instrument => Layout::V2.extension(),
+        }
+    }
+
+    fn caption(self) -> &'static str {
+        match self {
+            Making::Project => {
+                "One zone per file, ordered by root key. The project stores the file \
+                 names and the editor looks for them beside it, so keep them together."
+            }
+            Making::Instrument => {
+                "One zone per file, ordered by root key. The audio is encoded into the \
+                 instrument, so the WAVs are not needed afterwards."
+            }
+        }
+    }
+}
 
 /// One picked WAV, as the dialog shows it.
 pub struct Take {
-    /// The name the project will reference it by, resolved beside the project file.
+    /// The name a project would reference it by, resolved beside the project file.
     pub path: String,
-    pub rate: u32,
-    /// Frames as the project counts them — see [`at_source_rate`].
+    /// The file as it read, or the reader's own complaint.
+    pub source: Source,
+    /// Frames as a project counts them — see [`at_source_rate`]. Zero where the file
+    /// did not read, or holds no audio.
     pub frames: u64,
     pub root_key: u8,
-    /// Why this file cannot be a zone, where it cannot.
-    pub refusal: Option<String>,
+}
+
+impl Take {
+    fn pcm(&self) -> Option<&Pcm16> {
+        match &self.source {
+            Source::Read(pcm) => Some(pcm),
+            Source::Unreadable(_) => None,
+        }
+    }
+
+    /// Why this file cannot be part of what is being made.
+    ///
+    /// A project references audio it never reads, so anything that holds some will do.
+    /// An instrument carries it, and so takes the encoder's own limits.
+    pub fn refusal(&self, making: Making) -> Option<String> {
+        match making {
+            Making::Instrument => encodable(&self.source),
+            Making::Project => match &self.source {
+                Source::Unreadable(why) => Some(why.clone()),
+                Source::Read(_) => (self.frames == 0).then(|| "it holds no audio".to_string()),
+            },
+        }
+    }
 }
 
 /// The picked files, waiting on their root keys.
 pub struct Draft {
+    pub making: Making,
     pub name: String,
     pub takes: Vec<Take>,
 }
@@ -94,13 +165,18 @@ fn trailing_note(path: &str) -> Option<u8> {
         .filter(|note| (LOWEST_NOTE..=HIGHEST_NOTE).contains(note))
 }
 
-/// The name a project made from these files starts under.
-fn project_name(paths: &[String]) -> String {
+/// The name a draft over these files starts under: the first file's stem, cut to what
+/// an instrument's own name field holds.
+fn draft_name(making: Making, paths: &[String]) -> String {
     let first = paths.first().map(String::as_str).unwrap_or_default();
     let stem = first.rsplit_once('.').map_or(first, |(stem, _)| stem);
-    match stem.trim() {
-        "" => "Untitled".to_string(),
-        stem => stem.to_string(),
+    let stem = match stem.trim() {
+        "" => "Untitled",
+        stem => stem,
+    };
+    match making {
+        Making::Project => stem.to_string(),
+        Making::Instrument => fits(stem),
     }
 }
 
@@ -109,7 +185,7 @@ impl Draft {
     ///
     /// Nothing is refused whole here: a file that will not read is still listed, with
     /// the reason beside it, because the operator picked it on purpose.
-    pub fn plan(files: Vec<(String, Vec<u8>)>) -> Option<Draft> {
+    pub fn plan(making: Making, files: Vec<(String, Vec<u8>)>) -> Option<Draft> {
         if files.is_empty() {
             return None;
         }
@@ -119,41 +195,48 @@ impl Draft {
             .iter()
             .zip(roots)
             .map(|((path, bytes), root_key)| {
-                let (rate, frames, refusal) = match nord_format::wav::read_pcm16(bytes) {
-                    Ok(wav) => match at_source_rate(wav.frames() as u64, wav.rate) {
-                        Some(frames) if frames > 0 => (wav.rate, frames, None),
-                        _ => (wav.rate, 0, Some("it holds no audio".to_string())),
-                    },
-                    Err(e) => (0, 0, Some(e.to_string())),
+                let source = Source::read(bytes);
+                let frames = match &source {
+                    Source::Read(pcm) => {
+                        at_source_rate(pcm.frames() as u64, pcm.rate).unwrap_or_default()
+                    }
+                    Source::Unreadable(_) => 0,
                 };
                 Take {
                     path: path.clone(),
-                    rate,
+                    source,
                     frames,
                     root_key,
-                    refusal,
                 }
             })
             .collect();
         Some(Draft {
-            name: project_name(&paths),
+            making,
+            name: draft_name(making, &paths),
             takes,
         })
     }
 
-    /// Why this draft cannot be made into a project yet, in the operator's words.
+    /// Why this draft cannot be made into anything yet, in the operator's words.
     pub fn refusal(&self) -> Option<String> {
-        if let Some(bad) = self.takes.iter().find(|take| take.refusal.is_some()) {
+        if let Some((take, why)) = self
+            .takes
+            .iter()
+            .find_map(|take| Some((take, take.refusal(self.making)?)))
+        {
+            return Some(format!("{}: {why}", take.path));
+        }
+        if self.making == Making::Instrument && self.name.len() > MAX_NAME_LEN {
             return Some(format!(
-                "{}: {}",
-                bad.path,
-                bad.refusal.clone().unwrap_or_default()
+                "the name is {} bytes — an instrument's own name field holds \
+                 {MAX_NAME_LEN}",
+                self.name.len()
             ));
         }
         if self.takes.len() > MOST_ZONES {
             return Some(format!(
-                "{} files — a project maps {MOST_ZONES} keys, so it holds at most that \
-                 many zones",
+                "{} files — one zone per file, and the dialog lays roots on the \
+                 {MOST_ZONES} keys a project maps",
                 self.takes.len()
             ));
         }
@@ -163,7 +246,7 @@ impl Draft {
             .find(|take| !(LOWEST_NOTE..=HIGHEST_NOTE).contains(&take.root_key))
         {
             return Some(format!(
-                "{} is set to {} — a project maps {} to {}",
+                "{} is set to {} — the keys run {} to {}",
                 take.path,
                 note::name(take.root_key),
                 note::name(LOWEST_NOTE),
@@ -184,18 +267,72 @@ impl Draft {
     }
 
     fn bytes(&self) -> Result<Vec<u8>, String> {
+        match self.making {
+            Making::Project => self.project(),
+            Making::Instrument => self.instrument(),
+        }
+    }
+
+    fn project(&self) -> Result<Vec<u8>, String> {
         let zones: Vec<NewZone> = self
             .takes
             .iter()
             .map(|take| NewZone {
                 path: take.path.clone(),
-                sample_rate: take.rate,
+                sample_rate: take.pcm().map_or(0, |pcm| pcm.rate),
                 frames: take.frames,
                 root_key: take.root_key,
             })
             .collect();
         let project = Project::new(&self.name, &zones, now()).map_err(|e| e.to_string())?;
         nord_format::to_bytes(&Entity::SampleProject(project)).map_err(|e| e.to_string())
+    }
+
+    /// One `stk` per file, highest root first, each zone reaching up to where
+    /// [`derive_top_notes`] puts it — the layout `Project::new` writes, encoded rather
+    /// than referenced.
+    fn instrument(&self) -> Result<Vec<u8>, String> {
+        let mut order: Vec<&Take> = self.takes.iter().collect();
+        order.sort_by_key(|take| std::cmp::Reverse(take.root_key));
+        let roots: Vec<u8> = order.iter().map(|take| take.root_key).collect();
+        let tops = derive_top_notes(&roots);
+        let mut audio = Vec::with_capacity(order.len());
+        for take in &order {
+            audio.push(
+                take.pcm()
+                    .ok_or_else(|| format!("{}: it did not read as a WAV", take.path))?,
+            );
+        }
+        let zones: Vec<encode::NewZone> = order
+            .iter()
+            .zip(&audio)
+            .zip(&tops)
+            .enumerate()
+            .map(|(i, ((take, pcm), top_note))| encode::NewZone {
+                source: &pcm.samples,
+                channels: pcm.channels,
+                root_key: take.root_key,
+                top_note: *top_note,
+                global_id: i as u32 + 1,
+                loops: None,
+                secondary_start: encode::default_secondary_start(pcm.frames(), None),
+                shift: None,
+                gain: 1.0,
+                loop_decay: encode::DEFAULT_LOOP_DECAY,
+            })
+            .collect();
+        let instrument = encode::multi_zone(
+            encode::Instrument {
+                name: &self.name,
+                map_gain: 1.0,
+                predictor: encode::Predictor::Minimising,
+                layout: Layout::V2,
+                preset: encode::Preset::default(),
+            },
+            &zones,
+        )
+        .map_err(|e| e.to_string())?;
+        instrument.to_bytes().map_err(|e| e.to_string())
     }
 }
 
@@ -213,24 +350,18 @@ fn now() -> u32 {
     (js_sys::Date::now() / 1000.0) as u32
 }
 
-/// The dialog between picking WAVs and having a project, if one is waiting.
+/// The dialog between picking WAVs and having what they make, if a draft is waiting.
 ///
 /// Returns the new asset once it is made, for the caller to open a tab on.
 pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
     let mut make = false;
     let mut cancel = false;
     let draft = workspace.draft_mut()?;
+    let making = draft.making;
     egui::Modal::new(egui::Id::new("new_project")).show(ctx, |ui| {
         ui.set_width(520.0);
-        ui.heading("New Sample Editor project");
-        ui.label(
-            egui::RichText::new(
-                "One zone per file, ordered by root key. The project stores the file names \
-                 and the editor looks for them beside it, so keep them together.",
-            )
-            .small()
-            .weak(),
-        );
+        ui.heading(format!("New {}", making.label()));
+        ui.label(egui::RichText::new(making.caption()).small().weak());
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label("Name");
@@ -252,25 +383,26 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
                         if let Some(note) = note_picker(ui, ("draft_root", i), take.root_key) {
                             take.root_key = note;
                         }
-                        match &take.refusal {
-                            Some(why) => {
+                        match (take.refusal(making), take.pcm()) {
+                            (Some(why), _) => {
                                 ui.label(
                                     egui::RichText::new(why)
                                         .small()
                                         .color(crate::app::bad(ui.visuals())),
                                 );
                             }
-                            None => {
+                            (None, Some(pcm)) => {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "{} Hz, {:.2} s",
-                                        take.rate,
+                                        pcm.rate,
                                         take.frames as f64 / f64::from(SOURCE_RATE)
                                     ))
                                     .small()
                                     .weak(),
                                 );
                             }
+                            (None, None) => {}
                         }
                     });
                 }
@@ -303,14 +435,17 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
     let draft = workspace.take_draft()?;
     match draft.bytes() {
         Ok(bytes) => Some(workspace.ingest(
-            format!("{}.{}", draft.name, nord_format::formats::nsmpproj::FORMAT),
+            format!("{}.{}", draft.name, making.extension()),
             Origin::Fresh,
             bytes,
             log,
         )),
         Err(why) => {
-            log.error(format!("new project: {why}"));
-            log.trouble("Could not make a project out of those files.");
+            log.error(format!("new {}: {why}", making.label()));
+            log.trouble(format!(
+                "Could not make a {} out of those files.",
+                making.label()
+            ));
             None
         }
     }
@@ -372,10 +507,13 @@ mod tests {
 
     #[test]
     fn a_draft_becomes_a_project_over_the_picked_files() {
-        let draft = Draft::plan(vec![
-            ("Low-C3.wav".into(), wav(44_100, 4_410)),
-            ("High-C5.wav".into(), wav(22_050, 2_205)),
-        ])
+        let draft = Draft::plan(
+            Making::Project,
+            vec![
+                ("Low-C3.wav".into(), wav(44_100, 4_410)),
+                ("High-C5.wav".into(), wav(22_050, 2_205)),
+            ],
+        )
         .expect("two files were picked");
         assert_eq!(draft.name, "Low-C3");
         assert_eq!(
@@ -385,7 +523,11 @@ mod tests {
         // Both are a tenth of a second, so both count 4410 frames.
         assert_eq!(draft.takes[0].frames, 4_410);
         assert_eq!(draft.takes[1].frames, 4_410);
-        assert_eq!(draft.takes[1].rate, 22_050, "the file's own rate is kept");
+        assert_eq!(
+            draft.takes[1].pcm().unwrap().rate,
+            22_050,
+            "the file's own rate is kept"
+        );
         assert!(draft.refusal().is_none());
 
         let bytes = draft.bytes().expect("a project");
@@ -411,21 +553,100 @@ mod tests {
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), bytes);
     }
 
+    /// The same pick, made into the instrument instead: the audio itself, one zone per
+    /// file, and bytes that come back the way they went out.
+    #[test]
+    fn a_draft_becomes_an_instrument_over_the_same_files() {
+        use nord_format::formats::nsmp::encode::MIN_FRAMES;
+
+        let draft = Draft::plan(
+            Making::Instrument,
+            vec![
+                ("Marimba-C3.wav".into(), wav(SOURCE_RATE, MIN_FRAMES)),
+                ("Marimba-C5.wav".into(), wav(SOURCE_RATE, MIN_FRAMES * 2)),
+            ],
+        )
+        .expect("two files were picked");
+        assert_eq!(draft.name, "Marimba-C3");
+        assert!(draft.refusal().is_none());
+
+        let bytes = draft.bytes().expect("an instrument");
+        let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+        assert!(matches!(entity, Entity::Sample(_)), "{entity:?}");
+        assert_eq!(nord_format::to_bytes(&entity).unwrap(), bytes);
+
+        let snapshot = crate::document::sample::snapshot(&entity)
+            .expect("a sample instrument")
+            .expect("it reads");
+        assert_eq!(snapshot.name, "Marimba-C3");
+        assert_eq!(snapshot.generation, "v2");
+        let zones: Vec<(u8, u8)> = snapshot
+            .zones
+            .iter()
+            .map(|zone| (zone.root_key, zone.top_note))
+            .collect();
+        // High to low, and the top notes are the ones a project derives for these roots.
+        assert_eq!(zones, [(72, 96), (48, 59)]);
+    }
+
+    /// ⚠️ The instrument carries the audio, so the encoder's own limits are refusals in
+    /// the dialog rather than a failure after Create. A project references the file and
+    /// takes it as it is.
+    #[test]
+    fn a_wav_the_encoder_will_not_take_is_refused_before_create() {
+        let slow = vec![("Marimba-C3.wav".into(), wav(22_050, 4_410))];
+        let project = Draft::plan(Making::Project, slow.clone()).unwrap();
+        assert!(project.refusal().is_none(), "a project keeps the rate");
+
+        let instrument = Draft::plan(Making::Instrument, slow).unwrap();
+        let why = instrument.refusal().expect("22 050 Hz is not encodable");
+        assert!(why.contains("22050 Hz"), "{why}");
+        assert!(why.starts_with("Marimba-C3.wav: "), "{why}");
+    }
+
+    /// The name field an instrument carries is 31 bytes, and a filename is not.
+    #[test]
+    fn an_instrument_opens_on_a_name_its_own_field_holds() {
+        let long = ["an extremely long marimba sample name.wav".to_string()];
+        assert_eq!(draft_name(Making::Instrument, &long).len(), MAX_NAME_LEN);
+        assert!(draft_name(Making::Project, &long).len() > MAX_NAME_LEN);
+
+        let mut draft = Draft::plan(
+            Making::Instrument,
+            vec![(
+                "Marimba.wav".into(),
+                wav(SOURCE_RATE, nord_format::formats::nsmp::encode::MIN_FRAMES),
+            )],
+        )
+        .unwrap();
+        draft.name = "x".repeat(MAX_NAME_LEN + 1);
+        let why = draft.refusal().expect("a name the field cannot hold");
+        assert!(why.contains(&MAX_NAME_LEN.to_string()), "{why}");
+    }
+
     #[test]
     fn a_cancelled_pick_raises_no_dialog() {
-        assert!(Draft::plan(Vec::new()).is_none());
+        assert!(Draft::plan(Making::Project, Vec::new()).is_none());
+        assert!(Draft::plan(Making::Instrument, Vec::new()).is_none());
     }
 
     #[test]
     fn a_draft_says_why_it_cannot_be_made() {
-        let unreadable = Draft::plan(vec![("notes.txt".into(), b"not a wav".to_vec())]).unwrap();
+        let unreadable = Draft::plan(
+            Making::Project,
+            vec![("notes.txt".into(), b"not a wav".to_vec())],
+        )
+        .unwrap();
         let why = unreadable.refusal().expect("it will not read");
         assert!(why.starts_with("notes.txt: "), "{why}");
 
-        let mut clashing = Draft::plan(vec![
-            ("a.wav".into(), wav(44_100, 4_410)),
-            ("b.wav".into(), wav(44_100, 4_410)),
-        ])
+        let mut clashing = Draft::plan(
+            Making::Project,
+            vec![
+                ("a.wav".into(), wav(44_100, 4_410)),
+                ("b.wav".into(), wav(44_100, 4_410)),
+            ],
+        )
         .unwrap();
         assert!(clashing.refusal().is_none());
         clashing.takes[1].root_key = clashing.takes[0].root_key;

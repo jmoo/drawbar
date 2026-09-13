@@ -16,7 +16,8 @@ use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Son
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
-use crate::newproject::Draft;
+use crate::newproject::{Draft, Making};
+use crate::queue::Queue;
 
 /// Where an entity came from.
 #[derive(Clone)]
@@ -98,8 +99,9 @@ impl VerifyState {
 
 /// The container facts, read once at ingest.
 ///
-/// ⚠️ Reading them streams the whole file to check the checksum, so it happens on the
-/// way in and never per frame — a piano library is hundreds of megabytes.
+/// ⚠️ Reading them streams the whole file to check the checksum and hash its body, so
+/// it happens on the way in and never per frame — a piano library is hundreds of
+/// megabytes.
 #[derive(Clone)]
 pub struct Container {
     pub header: Header,
@@ -108,12 +110,22 @@ pub struct Container {
     /// `crc32:` or `crc16:` — the two generations keep it in different places.
     pub checksum_label: &'static str,
     pub checksum: String,
+    /// The CRC-32 of the wire body, which is what the device reports for a slot — so a
+    /// file and the slot it came off compare without either body being hashed again.
+    ///
+    /// Computed rather than read: a type-1 container carries the same number at `0x18`,
+    /// and a type-0 one carries no such word — only a CRC-16 over the whole file.
+    pub body_crc32: u32,
 }
 
 impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
-        // `Header` omits the generation-specific checksum field.
+        let start = usize::try_from(info.header.generation.body_start()).ok()?;
+        let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
+        let body_crc32 = nord_usb::envelope::crc32(bytes.get(start..end)?);
+        // `Header` omits the generation-specific checksum field. What the file stores is
+        // what is shown; it parts from the body's own hash exactly when the file is bad.
         let (checksum_label, checksum) = match info.header.generation {
             Generation::V0 => {
                 let tail = bytes.get(bytes.len().checked_sub(2)?..)?;
@@ -131,12 +143,54 @@ impl Container {
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
+            body_crc32,
         })
     }
 
     pub fn tag(&self) -> String {
         String::from_utf8_lossy(&self.header.tag).into_owned()
     }
+}
+
+/// What an asset was last saved as: the bytes, and the checksum a slot holding them
+/// would report.
+///
+/// ⚠️ The checksum is read when the baseline moves and never per frame. Reading one
+/// streams the whole body, and every listed row asks for it while the library is up.
+#[derive(Clone)]
+pub struct Baseline {
+    pub bytes: Vec<u8>,
+    /// The checksum a slot holding these bytes would report, which is what a link and
+    /// the sign beside it are both decided on — [`crate::device::link`] and
+    /// [`crate::library::agrees`].
+    ///
+    /// `None` for bytes that are no CBIN container at all — see
+    /// [`Container::body_crc32`].
+    pub crc32: Option<u32>,
+}
+
+impl Baseline {
+    /// The baseline of bytes nothing has inspected yet, which is what a store hands
+    /// back.
+    pub fn read(bytes: Vec<u8>) -> Baseline {
+        let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
+        Baseline { bytes, crc32 }
+    }
+}
+
+/// A write this app made: the slot it put bytes in, and the checksum of the bytes it
+/// put there.
+///
+/// The one thing this app knows about a slot without reading it back. It answers for a
+/// class whose slots report no checksum of their own — those bytes are in that slot
+/// because this app put them there — and only while the asset is still saved as them:
+/// `crc32` is compared with [`Baseline::crc32`], which moves the moment the asset is
+/// saved as anything else.
+#[derive(Clone, Copy)]
+pub struct Wrote {
+    pub class: ObjectClass,
+    pub at: Location,
+    pub crc32: u32,
 }
 
 /// One object held in memory: its bytes, what they decode to, and how they got here.
@@ -150,9 +204,9 @@ pub struct LocalEntity {
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     pub verify: VerifyState,
-    pub dirty: bool,
-    /// Owed back to the slot it came from, waiting on a Send.
-    pub pending: bool,
+    /// What this asset was last saved as. Unsaved is not a flag: it is bytes that are
+    /// not these — see [`LocalEntity::is_unsaved`].
+    pub saved: Baseline,
     /// Whether this is on this computer, as opposed to a view of a slot.
     ///
     /// A view is a working copy like any other — it is edited and sent back the same
@@ -165,6 +219,19 @@ pub struct LocalEntity {
     /// It is the list revision at the moment the bytes landed, so a rename or a send
     /// does not spend one.
     pub stamp: u64,
+    /// The slot on the attached instrument that holds these bytes, from
+    /// [`crate::device::link`].
+    ///
+    /// Derived from the scan cache and never stored: it is re-made whenever that cache
+    /// changes and goes when the instrument does. An edit leaves it alone, so an asset
+    /// that has been changed still points at the slot it was matched to.
+    pub link: Option<(ObjectClass, Location)>,
+    /// The last write this app made from this asset, which is the one thing it knows
+    /// about a slot without reading it back — see [`Wrote`] and
+    /// [`crate::library::agrees`].
+    ///
+    /// It goes with the instrument that took it: [`Workspace::forget_writes`].
+    pub wrote: Option<Wrote>,
 }
 
 impl LocalEntity {
@@ -179,7 +246,7 @@ impl LocalEntity {
             Some(entity) => verify(entity, &bytes),
             None => VerifyState::NotApplicable("the file did not decode"),
         };
-        LocalEntity {
+        let mut held = LocalEntity {
             id,
             name,
             origin,
@@ -188,11 +255,36 @@ impl LocalEntity {
             parse_error,
             container,
             verify,
-            dirty: false,
-            pending: false,
+            saved: Baseline {
+                bytes: Vec::new(),
+                crc32: None,
+            },
             kept: true,
             stamp,
+            link: None,
+            wrote: None,
+        };
+        held.saved = held.baseline();
+        held
+    }
+
+    /// Whether it holds something other than what it was last saved as.
+    pub fn is_unsaved(&self) -> bool {
+        self.bytes != self.saved.bytes
+    }
+
+    /// The bytes it holds now, as a baseline: what saving it settles on.
+    fn baseline(&self) -> Baseline {
+        Baseline {
+            bytes: self.bytes.clone(),
+            crc32: self.container.as_ref().map(|held| held.body_crc32),
         }
+    }
+
+    /// The slot this asset stands for: the one holding its bytes, and otherwise the one
+    /// it came off.
+    pub fn spot(&self) -> Option<(ObjectClass, Location)> {
+        self.link.or_else(|| self.origin.slot())
     }
 
     /// The format tag, from the decode where there is one and the container otherwise.
@@ -218,11 +310,11 @@ impl LocalEntity {
 /// Whether an asset holds something no other copy of it does.
 ///
 /// The one rule that decides what happens to a view when the last thing looking at it
-/// goes: **an edited or owed view is precious, an untouched one is disposable.** An
-/// untouched view is the slot's own bytes, which the instrument still has; an edited one
-/// is the only copy there is.
-pub fn precious(entity: &LocalEntity) -> bool {
-    entity.dirty || entity.pending
+/// goes: **an unsaved or owed view is precious, a saved one is disposable.** A saved
+/// view is the slot's own bytes, which the instrument still has; an unsaved one is the
+/// only copy there is.
+pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
+    entity.is_unsaved() || queue.holds(entity.id)
 }
 
 /// The filename an export suggests for a verbatim name: made path-safe, and given the
@@ -232,7 +324,7 @@ fn export_filename(name: &str, bytes: &[u8]) -> String {
         s if s.is_empty() => "unnamed".to_string(),
         s => s,
     };
-    match carries_tag(&stem) {
+    match crate::strings::carries_tag(&stem) {
         true => stem,
         false => format!("{stem}.{}", format_tag(bytes)),
     }
@@ -277,17 +369,6 @@ fn filename_stem(label: &str) -> String {
     // A leading dot hides the file and dots alone spell `.` and `..`; a leading dash is
     // an option to every tool that later reads it.
     out.trim_matches(['.', '-']).to_string()
-}
-
-/// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
-/// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it.
-fn carries_tag(name: &str) -> bool {
-    name.rsplit_once('.').is_some_and(|(stem, tag)| {
-        !stem.trim().is_empty()
-            && ((2..=5).contains(&tag.len()) || tag.eq_ignore_ascii_case(nsmpproj::FORMAT))
-            && tag.chars().all(|c| c.is_ascii_alphanumeric())
-            && tag.chars().any(|c| c.is_ascii_alphabetic())
-    })
 }
 
 /// The extension a nameless export gets: the CBIN tag the bytes themselves carry,
@@ -541,7 +622,10 @@ pub struct Saved {
     pub id: u64,
     pub name: String,
     pub origin: Origin,
-    pub bytes: Vec<u8>,
+    /// What it was last saved as.
+    pub saved: Vec<u8>,
+    /// What it holds now, where that is not what it was saved as.
+    pub unsaved: Option<Vec<u8>>,
 }
 
 /// What a background task hands back to the UI thread.
@@ -550,9 +634,12 @@ enum Incoming {
         name: String,
         bytes: Vec<u8>,
     },
-    /// Everything one *New → Sample Editor project* pick came back with, together:
-    /// the draft is one question about the whole set, not one per file.
-    Wavs(Vec<(String, Vec<u8>)>),
+    /// Everything one *New → WAVs* pick came back with, together: the draft is one
+    /// question about the whole set, not one per file.
+    Wavs {
+        making: Making,
+        files: Vec<(String, Vec<u8>)>,
+    },
     Note(String),
     Failed(String),
 }
@@ -567,8 +654,8 @@ pub struct Workspace {
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
-    /// The WAVs a New → Sample Editor project pick came back with, waiting on their
-    /// root keys. See [`crate::newproject`].
+    /// The WAVs a New pick came back with, waiting on their root keys. See
+    /// [`crate::newproject`].
     draft: Option<Draft>,
 }
 
@@ -599,6 +686,12 @@ impl Workspace {
     }
 
     /// Counts changes to the list, not to any one asset.
+    /// The context the app draws in, for the acts that ask the window itself for
+    /// something rather than the list.
+    pub fn ctx(&self) -> &egui::Context {
+        &self.ctx
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -612,6 +705,13 @@ impl Workspace {
     /// What "This computer" shows: everything except the views of a slot.
     pub fn listed(&self) -> impl Iterator<Item = &LocalEntity> {
         self.entities.iter().filter(|e| e.kept)
+    }
+
+    /// Every document in memory, the views of slots included — everything a tab can be
+    /// showing and an edit can have touched. [`Workspace::listed`] is the narrower set
+    /// this computer's own list holds.
+    pub fn documents(&self) -> impl Iterator<Item = &LocalEntity> {
+        self.entities.iter()
     }
 
     pub fn get(&self, id: u64) -> Option<&LocalEntity> {
@@ -677,14 +777,14 @@ impl Workspace {
     /// edit — and the × sits beside the badge saying the edit is owed back to a slot.
     /// So an edited or owed view is promoted into the list instead, and only an
     /// untouched one is dropped.
-    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, log: &mut Log) {
+    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
         let mut rescued = Vec::new();
         let before = self.entities.len();
         self.entities.retain_mut(|entity| {
             if entity.kept || open(entity.id) {
                 return true;
             }
-            if !precious(entity) {
+            if !precious(entity, queue) {
                 return false;
             }
             entity.kept = true;
@@ -706,19 +806,12 @@ impl Workspace {
         self.revision += 1;
     }
 
-    /// Mark an asset as owed back to the slot it came from, or paid.
-    pub fn mark_pending(&mut self, id: u64, pending: bool) {
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
-            if entity.pending != pending {
-                entity.pending = pending;
-                self.revision += 1;
-            }
+    /// Re-derive every asset's link. Call whenever the instrument's scan cache changes;
+    /// [`crate::device::link`] is what answers.
+    pub fn relink(&mut self, held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>) {
+        for entity in &mut self.entities {
+            entity.link = held_by(entity);
         }
-    }
-
-    /// Everything waiting to go back to the instrument, in the order it was opened.
-    pub fn pending(&self) -> Vec<&LocalEntity> {
-        self.entities.iter().filter(|e| e.pending).collect()
     }
 
     /// Rename an asset held here. Nothing leaves this computer.
@@ -784,7 +877,7 @@ impl Workspace {
                 Incoming::Opened { name, bytes } => {
                     self.ingest(name.clone(), Origin::File(name), bytes, log);
                 }
-                Incoming::Wavs(files) => self.draft = Draft::plan(files),
+                Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
             }
@@ -810,13 +903,13 @@ impl Workspace {
         });
     }
 
-    /// Pick the WAVs a new Sample Editor project is built out of.
-    pub fn pick_wavs(&self) {
+    /// Pick the WAVs a new project or instrument is laid out from.
+    pub fn pick_wavs(&self, making: Making) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Pick the WAVs for a Sample Editor project")
+                .set_title(format!("Pick the WAVs for a {}", making.label()))
                 .add_filter("WAV", &["wav"])
                 .pick_files()
                 .await;
@@ -825,7 +918,7 @@ impl Workspace {
                 let bytes = handle.read().await;
                 files.push((handle.file_name(), bytes));
             }
-            let _ = tx.send(Incoming::Wavs(files));
+            let _ = tx.send(Incoming::Wavs { making, files });
             ctx.request_repaint();
         });
     }
@@ -875,43 +968,74 @@ impl Workspace {
         });
     }
 
-    /// Put back the bytes a tab opened with. The asset is unchanged again, so the dirty
-    /// mark goes with them.
-    pub fn restore_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
+    /// Put back the bytes this asset was last saved as. What was saved is what it holds
+    /// again, so it is not unsaved any more.
+    pub fn revert(&mut self, id: u64, log: &mut Log) {
+        let Some(saved) = self.get(id).map(|entity| entity.saved.bytes.clone()) else {
+            return;
+        };
+        if self.respell(id, saved).is_none() {
             return;
         }
-        let stamp = self.stamp();
+        if let Some(entity) = self.get(id) {
+            log.say(format!("“{}” is back as it was last saved.", entity.name));
+        }
+    }
+
+    /// The bytes it holds are what it is saved as, from now on.
+    ///
+    /// ⚠️ Not a new set of bytes, so the stamp does not move: nothing cached over them
+    /// is looking at anything else. The list revision does, so the store is written
+    /// again without the unsaved tail.
+    pub fn mark_saved(&mut self, id: u64) {
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return;
         };
-        *entity = LocalEntity {
-            kept: entity.kept,
-            ..LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp)
-        };
-        log.say(format!("“{}” is back as it was opened.", entity.name));
+        if !entity.is_unsaved() {
+            return;
+        }
+        entity.saved = entity.baseline();
+        self.revision += 1;
     }
 
-    /// Swap in re-encoded bytes, keeping the entity's identity and marking it edited.
+    /// It reached a slot: the bytes the write carried are what it is saved as, and that
+    /// slot is where it stands.
+    ///
+    /// ⚠️ The bytes the send carried, never the bytes it holds now. A write takes as
+    /// long as the instrument takes, and an edit made while one was in flight is on this
+    /// computer alone — calling it saved would let it be discarded with the tab it is
+    /// open in.
+    ///
+    /// ⚠️ The one place a link is set rather than derived. A write is the only evidence
+    /// about a slot this app does not have to read back, and [`crate::device::link`]
+    /// keeps it until a walk of that slot says otherwise.
+    pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        entity.saved = Baseline::read(sent);
+        entity.link = Some((class, at));
+        entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
+        self.revision += 1;
+    }
+
+    /// Forget every write this app made.
+    ///
+    /// ⚠️ A write is evidence about the instrument that took it. With none attached, or
+    /// another one in its place, it says nothing about what is in any slot.
+    pub fn forget_writes(&mut self) {
+        for entity in &mut self.entities {
+            entity.wrote = None;
+        }
+    }
+
+    /// Swap in re-encoded bytes, keeping the entity's identity.
     ///
     /// The decode and the verify are re-run: an editor's output is bytes like any other,
     /// and it earns its badge the same way a file off disk does.
     pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        if self.get(id).is_none() {
+        let Some(verify) = self.respell(id, bytes) else {
             return;
-        }
-        let stamp = self.stamp();
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
-            return;
-        };
-        let replaced =
-            LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
-        let verify = replaced.verify.clone();
-        *entity = LocalEntity {
-            dirty: true,
-            pending: entity.pending,
-            kept: entity.kept,
-            ..replaced
         };
         if let VerifyState::Ok = verify {
             return;
@@ -921,6 +1045,37 @@ impl Workspace {
             verify.badge(),
             verify.detail()
         ));
+    }
+
+    /// Put a different set of bytes under one id, rebuilding everything derived from
+    /// them, and answer with what the re-encode check made of them.
+    ///
+    /// ⚠️ The saved baseline is not one of those things: it moves only when the asset is
+    /// saved, so an edit and the revert of it are measured against the same bytes.
+    fn respell(&mut self, id: u64, bytes: Vec<u8>) -> Option<VerifyState> {
+        if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
+            return None;
+        }
+        let stamp = self.stamp();
+        let entity = self.entities.iter_mut().find(|e| e.id == id)?;
+        let (kept, link) = (entity.kept, entity.link);
+        let saved = std::mem::replace(
+            &mut entity.saved,
+            Baseline {
+                bytes: Vec::new(),
+                crc32: None,
+            },
+        );
+        let replaced =
+            LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
+        let verify = replaced.verify.clone();
+        *entity = LocalEntity {
+            kept,
+            link,
+            saved,
+            ..replaced
+        };
+        Some(verify)
     }
 
     pub fn duplicate(&mut self, id: u64, log: &mut Log) -> Option<u64> {
@@ -960,11 +1115,17 @@ impl Workspace {
             id,
             name,
             origin,
-            bytes,
+            saved,
+            unsaved,
         } in saved
         {
             let stamp = self.stamp();
-            let entity = LocalEntity::new(id, name, origin, bytes, stamp);
+            let baseline = Baseline::read(saved);
+            let bytes = unsaved.unwrap_or_else(|| baseline.bytes.clone());
+            let entity = LocalEntity {
+                saved: baseline,
+                ..LocalEntity::new(id, name, origin, bytes, stamp)
+            };
             if let Some(e) = &entity.parse_error {
                 log.warn(format!("{}: {e}", entity.name));
             }
@@ -1050,6 +1211,17 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
     Ok(())
 }
 
+/// The same body under the shorter type-0 header the Electro 5's factory banks carry:
+/// no CRC-32 word, and a CRC-16 over the whole file in the last two bytes.
+#[cfg(test)]
+pub(crate) fn as_type_0(bytes: &[u8]) -> Vec<u8> {
+    let mut file = nord_usb::envelope::unwrap(bytes).expect("a CBIN file with a body");
+    file.header.generation = Generation::V0;
+    let mut out = std::io::Cursor::new(Vec::new());
+    file.write_to(&mut out).expect("a type-0 container writes");
+    out.into_inner()
+}
+
 /// Run a task that outlives the frame that started it.
 ///
 /// ⚠️ wasm has one thread and cannot block: the future has to go to the microtask
@@ -1088,6 +1260,44 @@ mod tests {
         assert_eq!(container.header.generation, Generation::V1);
         assert_eq!(container.body_len, ne5::program::BODY_LEN as u64);
         assert_eq!(container.checksum_label, "crc32:");
+    }
+
+    /// The number a file and a slot are compared on is the CRC-32 of the wire body, and
+    /// the word a type-1 header stores at `0x18` is that same number.
+    #[test]
+    fn the_body_checksum_is_the_word_a_type_1_header_stores() {
+        let bytes = Fresh::Program.bytes().unwrap();
+        let entity = ingest("untitled.ne5p", bytes.clone());
+        let container = entity.container.expect("a fresh program is a CBIN file");
+        assert_eq!(container.header.generation, Generation::V1);
+        let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
+        assert_eq!(
+            container.body_crc32,
+            nord_usb::envelope::crc32(&body.body.0)
+        );
+        assert_eq!(
+            container.body_crc32,
+            u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap()),
+        );
+    }
+
+    /// ⚠️ A type-0 container stores no body checksum — its own is a CRC-16 over the
+    /// whole file — so the number the instrument reports for a slot is hashed from the
+    /// body rather than read out of the header, which is the only way an Electro 5
+    /// factory program is comparable to the slot holding it at all.
+    #[test]
+    fn a_type_0_file_has_the_body_checksum_its_header_does_not_carry() {
+        let bytes = as_type_0(&Fresh::Program.bytes().unwrap());
+        let entity = ingest("Circling Bells.ne5p", bytes.clone());
+        let container = entity.container.as_ref().expect("still a CBIN file");
+        assert_eq!(container.header.generation, Generation::V0);
+        assert!(container.checksum_ok);
+        assert_eq!(container.checksum_label, "crc16:");
+
+        let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
+        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        assert_eq!(container.body_crc32, hashed);
+        assert_eq!(entity.saved.crc32, Some(hashed));
     }
 
     /// Each fresh default carries its own tag, and each one round-trips.
@@ -1206,10 +1416,11 @@ mod tests {
         );
         let local = workspace.create(Fresh::Program, &mut log).unwrap();
 
-        workspace.close_views(|id| id == viewed, &mut log);
+        let queue = Queue::default();
+        workspace.close_views(|id| id == viewed, &queue, &mut log);
         assert!(workspace.get(viewed).is_some(), "its tab is still open");
 
-        workspace.close_views(|_| false, &mut log);
+        workspace.close_views(|_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_none());
         assert!(workspace.get(local).is_some(), "kept is kept");
         assert_eq!(workspace.selected().map(|e| e.id), Some(local));
@@ -1243,20 +1454,29 @@ mod tests {
 
         let bytes = workspace.get(edited).unwrap().bytes.clone();
         workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
-        workspace.mark_pending(owed, true);
-        assert!(precious(workspace.get(edited).unwrap()));
-        assert!(precious(workspace.get(owed).unwrap()));
-        assert!(!precious(workspace.get(untouched).unwrap()));
+        let mut queue = Queue::default();
+        crate::queue::enqueue(
+            &workspace,
+            &mut crate::device::Device::new(workspace.ctx().clone()),
+            &mut queue,
+            &mut log,
+            owed,
+            ObjectClass::Program,
+            at(1),
+        );
+        assert!(precious(workspace.get(edited).unwrap(), &queue));
+        assert!(precious(workspace.get(owed).unwrap(), &queue));
+        assert!(!precious(workspace.get(untouched).unwrap(), &queue));
 
         // Every tab closes at once.
-        workspace.close_views(|_| false, &mut log);
+        workspace.close_views(|_| false, &queue, &mut log);
 
         assert!(workspace.get(untouched).is_none(), "the slot still has it");
         let listed: Vec<u64> = workspace.listed().map(|e| e.id).collect();
         assert_eq!(listed, vec![edited, owed], "and the changes survive");
         assert!(!workspace.is_view(edited) && !workspace.is_view(owed));
         // What was owed is still owed: promoting it must not pay a debt.
-        assert!(workspace.get(owed).unwrap().pending);
+        assert!(queue.holds(owed));
         assert!(log.status().1.contains("kept on this computer"));
     }
 
@@ -1344,7 +1564,6 @@ mod tests {
         let first = stamp(&workspace);
 
         workspace.rename(id, "Africa-Split".into());
-        workspace.mark_pending(id, true);
         assert_eq!(stamp(&workspace), first, "the bytes did not move");
 
         let (_, edited) =
@@ -1353,14 +1572,61 @@ mod tests {
         let second = stamp(&workspace);
         assert_ne!(second, first);
 
-        workspace.restore_bytes(id, opened.clone(), &mut log);
+        workspace.revert(id, &mut log);
         let third = stamp(&workspace);
         assert_ne!(third, second);
         assert_ne!(third, first, "back to the same bytes is still a new decode");
 
         // Putting back what is already there is not a change and spends nothing.
-        workspace.restore_bytes(id, opened, &mut log);
+        workspace.revert(id, &mut log);
         assert_eq!(stamp(&workspace), third);
+    }
+
+    /// Unsaved is not a flag anything sets: it is holding bytes other than the ones this
+    /// asset was last saved as. An edit makes it so, saving and reverting each end it.
+    #[test]
+    fn an_asset_is_unsaved_while_it_holds_something_its_baseline_does_not() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let opened = workspace.get(id).unwrap().bytes.clone();
+        let unsaved = |workspace: &Workspace| workspace.get(id).unwrap().is_unsaved();
+        assert!(!unsaved(&workspace), "a fresh asset starts saved");
+
+        let (_, edited) =
+            crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        assert!(unsaved(&workspace));
+        assert_eq!(workspace.get(id).unwrap().saved.bytes, opened);
+
+        // Saving moves the baseline onto what it holds; the bytes do not move.
+        workspace.mark_saved(id);
+        assert!(!unsaved(&workspace));
+        assert_eq!(workspace.get(id).unwrap().saved.bytes, edited);
+        assert_eq!(workspace.get(id).unwrap().bytes, edited);
+
+        // Reverting moves the bytes back onto the baseline, which stays where it is.
+        let (_, again) =
+            crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
+        workspace.replace_bytes(id, again, &mut log);
+        assert!(unsaved(&workspace));
+        workspace.revert(id, &mut log);
+        assert!(!unsaved(&workspace));
+        assert_eq!(workspace.get(id).unwrap().bytes, edited);
+    }
+
+    /// The baseline's checksum is the one a slot holding those bytes reports, so a saved
+    /// asset and its slot are compared without either body being hashed again.
+    #[test]
+    fn the_baseline_carries_the_checksum_a_slot_holding_it_reports() {
+        let entity = ingest("untitled.ne5p", Fresh::Program.bytes().unwrap());
+        let body = nord_usb::envelope::unwrap(&entity.bytes).expect("a file the wire takes");
+        assert_eq!(
+            entity.saved.crc32,
+            Some(nord_usb::envelope::crc32(&body.body.0))
+        );
     }
 
     /// A project is text, so nothing at the CBIN tag offset means anything —
@@ -1430,10 +1696,11 @@ mod tests {
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
-        assert!(workspace.get(id).unwrap().dirty);
+        assert!(workspace.get(id).unwrap().is_unsaved());
 
         // Reverting is not renaming either.
-        workspace.restore_bytes(id, bytes, &mut log);
+        workspace.revert(id, &mut log);
+        assert_eq!(workspace.get(id).unwrap().bytes, bytes);
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
 
         // And the filename an export offers is that same name, not one worked back out
@@ -1456,7 +1723,8 @@ mod tests {
                 id: 9,
                 name: "Africa-Split.ne5p".into(),
                 origin: Origin::Fresh,
-                bytes: Fresh::Program.bytes().unwrap(),
+                saved: Fresh::Program.bytes().unwrap(),
+                unsaved: None,
             }],
             Some(10),
             &mut log,
@@ -1464,7 +1732,7 @@ mod tests {
         let entity = workspace.get(9).expect("restored under its own id");
         assert_eq!(entity.name, "Africa-Split.ne5p");
         assert!(matches!(entity.verify, VerifyState::Ok));
-        assert!(!entity.dirty);
+        assert!(!entity.is_unsaved());
         // A new asset cannot land on an id something restored is already using.
         let fresh = workspace.create(Fresh::Live, &mut log).unwrap();
         assert!(fresh >= 10);

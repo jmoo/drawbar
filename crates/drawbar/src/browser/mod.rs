@@ -1,39 +1,51 @@
-//! The sidebar: the two places a sound can live, and the moving of sounds between them.
+//! The browser dock: one tree over the places a sound can live, the kinds there are,
+//! and the tags on the list.
 //!
 //! Nothing here touches the instrument. Rendering reads the caches and answers with a
 //! list of [`Act`]s, which [`apply`] then runs against the workspace, the device and the
 //! tabs — so a row can be drawn while the thing it stands for is about to change.
 //!
-//! This file holds the state the two columns share — the selection, the in-place rename,
-//! the one modal, the divider between them. The columns themselves are `computer` and
-//! `instrument`; the drag vocabulary is `drag`, the row they are both painted from is
-//! `row`, and the grouping of the local list lives outside the browser entirely, in
-//! [`crate::folders`].
+//! This file holds the state every row shares — what is picked, the in-place rename, the
+//! one modal, which branches are open. The tree itself is `tree`, the drag vocabulary is
+//! `drag`, the row it is painted from is `row`, and the grouping and labelling of the
+//! local list live outside the browser entirely, in [`crate::folders`] and
+//! [`crate::tags`].
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::Device;
+use crate::device::{read_only, Device, DeviceState};
+use crate::filter::Filter;
 use crate::folders::{self, Folders};
-use crate::strings::place;
+use crate::queue::Queue;
+use crate::tags::{self, Tags};
 use crate::workspace::Workspace;
 
 mod act;
 #[cfg(test)]
-mod bench;
-mod computer;
+pub(crate) mod bench;
 mod drag;
 mod instrument;
 mod row;
+mod selection;
+mod tree;
 
-pub use act::{apply, foreign_format, Act};
-pub use drag::{landing, Carried, Item, Kind, Landing, Onto};
-pub use row::{Cells, Drawn};
+pub use act::{apply, bulk, foreign_format, Act, Bulk};
+pub use drag::{
+    families_present, kinds_present, landing, qualified, Carried, Held, Item, Kind, Landing, Onto,
+};
+pub use instrument::about;
+pub use row::{cell_ink, starred, Cells, Drawn};
+pub use selection::Selection;
+pub use tree::new_menu;
 
-use act::{owed, write_warnings};
+use act::write_warnings;
 use drag::ghost;
+use selection::{gesture, Gesture};
+use tree::{Branch, Sections};
 
 /// An in-place rename, waiting on Enter or Esc.
 struct Rename {
@@ -43,20 +55,20 @@ struct Rename {
     fresh: bool,
 }
 
-/// A question that has to be answered before something is lost.
+/// A click on a row: which row, and the run a ⇧-click may fill.
+struct Click<'a> {
+    item: Item,
+    /// The rows of the list this one sits in, in the order they are drawn.
+    list: &'a [Item],
+}
+
+/// A question that has to be answered before something is lost, and everything the
+/// answer commits to. One question covers a whole checked set.
 struct Ask {
     title: String,
     note: Option<String>,
     verb: &'static str,
-    act: Act,
-}
-
-/// Whether a plain click starts a rename rather than moving the selection.
-///
-/// Both halves are needed. Selecting is the whole row's job, so a row that answers a
-/// click anywhere would otherwise arm the editor on every second click.
-pub fn arms_rename(selected: bool, on_name: bool) -> bool {
-    selected && on_name
+    acts: Vec<Act>,
 }
 
 /// What Enter does to an in-place rename: nothing, or a new name.
@@ -72,168 +84,128 @@ pub fn renamed(original: &str, typed: &str) -> Option<String> {
 }
 
 pub struct Browser {
-    selection: Option<Item>,
+    selection: Selection,
     rename: Option<Rename>,
     ask: Option<Ask>,
-    /// Where the divider sits between the two columns, as a share of the dock.
-    split: f32,
     folders: Folders,
-    /// A slot to scroll to and select, once the list holding it has been drawn.
+    tags: Tags,
+    /// Which of the three sections are showing.
+    sections: Sections,
+    /// The branches of the tree that are open. The two places are, so a panel that has
+    /// never been touched shows what is in them.
+    open: BTreeSet<Branch>,
+    /// A slot to scroll to and select, once the branches holding it have been drawn.
     jump: Option<(ObjectClass, Location)>,
 }
 
 impl Default for Browser {
     fn default() -> Browser {
         Browser {
-            selection: None,
+            selection: Selection::default(),
             rename: None,
             ask: None,
-            split: EVEN,
             folders: Folders::default(),
+            tags: Tags::default(),
+            sections: Sections::default(),
+            open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
         }
     }
 }
 
-/// The divider's home: half the dock each.
-const EVEN: f32 = 0.5;
-
-/// Neither column may be dragged out of existence.
-const LEAST: f32 = 0.15;
-
-/// The strip the divider answers on.
-const HANDLE: f32 = 7.0;
-
 impl Browser {
-    /// Where the divider is kept between sessions.
-    pub const SPLIT: &'static str = "drawbar.dock_split";
-
-    /// Put the divider and the folders back where they were left.
-    ///
-    /// Anything the store cannot account for is the even split: a fraction outside the
-    /// stops would be one column showing and the other a sliver.
+    /// Put the grouping and the labelling back where they were left.
     pub fn restore(&mut self, storage: &dyn eframe::Storage) {
-        self.split = storage
-            .get_string(Browser::SPLIT)
-            .and_then(|text| text.parse::<f32>().ok())
-            .filter(|share| (LEAST..=1.0 - LEAST).contains(share))
-            .unwrap_or(EVEN);
         self.folders = storage
             .get_string(folders::KEY)
             .map(|text| Folders::read(&text))
             .unwrap_or_default();
+        self.tags = storage
+            .get_string(tags::KEY)
+            .map(|text| Tags::read(&text))
+            .unwrap_or_default();
     }
 
-    /// Reconcile the folders with the list that came back beside them. Call once, after
-    /// both stores have been read.
+    /// Reconcile the grouping and the labelling with the list that came back beside
+    /// them. Call once, after every store has been read.
     pub fn settle(&mut self, workspace: &Workspace) {
         self.folders.forget_missing(workspace);
+        self.tags.forget_missing(workspace);
     }
 
     pub fn keep(&self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(Browser::SPLIT, self.split.to_string());
         storage.set_string(folders::KEY, self.folders.written());
+        storage.set_string(tags::KEY, self.tags.written());
     }
 
-    /// Draw the places a sound can live and collect what the user asked for.
-    /// The instrument gets a column once there is an instrument.
-    pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, device: &Device) -> Vec<Act> {
-        let mut acts = Vec::new();
-        self.dialog(ui.ctx(), &mut acts);
-        match device.state.connected() {
-            true => self.dock(ui, workspace, device, &mut acts),
-            false => self.computer(ui, workspace, device, &mut acts),
-        }
-        ghost(ui.ctx());
-        acts
-    }
-
-    /// The two columns and the divider between them.
-    ///
-    /// ⚠️ A share of the width rather than a number of points. The sidebar the two live
-    /// in is itself resizable, and a column pinned to points eats the other one as the
-    /// sidebar narrows — at which point the divider has nothing left to give back.
-    fn dock(
+    /// Draw the tree and collect what the user asked for.
+    pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
-        acts: &mut Vec<Act>,
-    ) {
-        let whole = ui.available_rect_before_wrap();
-        let usable = (whole.width() - HANDLE).max(1.0);
-        let left = usable * self.split;
-        let divider = egui::Rect::from_min_size(
-            egui::pos2(whole.left() + left, whole.top()),
-            egui::vec2(HANDLE, whole.height()),
-        );
-
-        let dragging = ui
-            .interact(
-                divider,
-                ui.id().with("dock_divider"),
-                egui::Sense::click_and_drag(),
-            )
-            .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
-        if dragging.dragged() {
-            self.split = ((left + dragging.drag_delta().x) / usable).clamp(LEAST, 1.0 - LEAST);
-        }
-        // Somewhere to put it back to, for a divider that has been dragged into a corner.
-        if dragging.double_clicked() {
-            self.split = EVEN;
-        }
-
-        let ends = |from: f32, to: f32| {
-            egui::Rect::from_min_max(
-                egui::pos2(from, whole.top()),
-                egui::pos2(to, whole.bottom()),
-            )
-        };
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(ends(whole.left(), divider.left())),
-            |ui| self.computer(ui, workspace, device, acts),
-        );
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(ends(divider.right(), whole.right())),
-            |ui| self.instrument(ui, workspace, device, acts),
-        );
-
-        let visuals = ui.visuals();
-        let stroke = match dragging.hovered() || dragging.dragged() {
-            true => egui::Stroke::new(2.0_f32, visuals.selection.stroke.color),
-            false => visuals.widgets.noninteractive.bg_stroke,
-        };
-        ui.painter()
-            .vline(divider.center().x, whole.y_range(), stroke);
-        ui.advance_cursor_after_rect(whole);
+        queue: &Queue,
+        filter: &Filter,
+    ) -> Vec<Act> {
+        let mut acts = Vec::new();
+        self.dialog(ui.ctx(), &mut acts);
+        self.tree(ui, workspace, device, queue, filter, &mut acts);
+        ghost(ui.ctx());
+        acts
     }
 
-    /// A column heading, and the strip of buttons beside it.
+    /// What is picked. One selection, so a row picked in the library table is the row
+    /// the tree shows picked.
+    pub fn picked(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// How the list on this computer is labelled, for the views that show a count of it.
+    pub fn tags(&self) -> &Tags {
+        &self.tags
+    }
+
+    /// A click on a row drawn somewhere other than the tree: the same three gestures
+    /// over the same set.
+    pub fn pick(&mut self, ui: &egui::Ui, item: Item, list: &[Item]) {
+        self.clicked(ui, Click { item, list });
+    }
+
+    /// Escape lets go of everything picked, wherever its rows were drawn.
     ///
-    /// Wrapped, because the strip is in a column the operator can drag to any width and
-    /// a button pushed off the right edge is a button that is gone.
-    fn heading(
-        &mut self,
-        ui: &mut egui::Ui,
-        title: &str,
-        buttons: impl FnOnce(&mut egui::Ui),
-    ) -> egui::Response {
-        let head = ui
-            .horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(title).strong());
-                buttons(ui);
-            })
-            .response;
-        ui.separator();
-        head
+    /// ⚠️ Called whether or not the browser dock is open: the library's table shows the
+    /// same selection, and a set nothing draws is one nothing can put down.
+    ///
+    /// An open rename keeps Escape for itself. That is how a name being typed is taken
+    /// back, and the row it is being typed on stays picked.
+    pub fn let_go(&mut self, ctx: &egui::Context) {
+        if self.rename.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.selection.clear();
+        }
+    }
+
+    /// Let go of everything picked, because a click landed past the last row.
+    pub fn unpick(&mut self) {
+        self.selection.clear();
+    }
+
+    /// A click on a row's own box: that row in or out of what is checked.
+    ///
+    /// ⚠️ A box is a checkbox, so a plain click on it is the ⌘ gesture. A click on the
+    /// row itself still means what [`gesture`] says it means.
+    pub fn check(&mut self, item: Item) {
+        self.rename = None;
+        self.selection.toggle(item);
     }
 
     fn select(&mut self, item: Item) {
-        let same = self.rename.as_ref().is_some_and(|r| r.what == item);
-        if !same {
-            self.rename = None;
-        }
-        self.selection = Some(item);
+        self.rename = None;
+        self.selection.only(item);
+    }
+
+    /// Whether this row is the only one picked, which is what F2 renames.
+    fn sole_is(&self, item: Item) -> bool {
+        self.selection.sole() == Some(item)
     }
 
     /// Take back an armed rename, because the row it belongs to is about to stop
@@ -242,32 +214,89 @@ impl Browser {
         if self.rename.as_ref().is_some_and(|r| r.what == what) {
             self.rename = None;
         }
-        if self.selection == Some(what) {
-            self.selection = None;
-        }
+        self.selection.forget(what);
     }
 
     fn start_rename(&mut self, what: Item, from: &str) {
-        self.selection = Some(what);
+        self.selection.only(what);
         self.rename = Some(Rename {
             what,
             text: from.to_string(),
             fresh: true,
         });
     }
-    /// What a plain click on a row does.
+
+    /// What a click on a row does, and the list it can be extended across.
     ///
-    /// ⚠️ Arming the rename editor needs the click to land on the **name**, not merely
-    /// on a row that was already selected. An editor armed by any second click sits
-    /// there with the whole name selected, so the next keystroke — one meant for the
-    /// document, or a stray one — replaces it, and the blur commits the replacement.
-    fn clicked(&mut self, item: Item, response: &egui::Response, name: egui::Rect, from: &str) {
-        let on_name = response
-            .interact_pointer_pos()
-            .is_some_and(|at| name.contains(at));
-        match arms_rename(self.selection == Some(item), on_name) {
-            true => self.start_rename(item, from),
-            false => self.select(item),
+    /// ⚠️ No click arms the rename editor. One armed by a second click on a picked row
+    /// sits there with the whole name selected, so the next keystroke — one meant for
+    /// the document, or a stray one — replaces it. Renaming is F2 and the row's menu.
+    fn clicked(&mut self, ui: &egui::Ui, click: Click) {
+        self.rename = None;
+        match gesture(&ui.input(|input| input.modifiers)) {
+            Gesture::Plain => self.selection.plain(click.item),
+            Gesture::Toggle => self.selection.toggle(click.item),
+            Gesture::Extend => self.selection.extend(click.item, click.list),
+        }
+    }
+
+    /// What one drag carries: the pressed row, and the rest of the selection when the
+    /// pressed row is in it.
+    pub(crate) fn carrying(
+        &self,
+        head: Held,
+        name: &str,
+        workspace: &Workspace,
+        device: &DeviceState,
+    ) -> Carried {
+        let rest: Vec<Held> = match self.selection.holds(head.what) {
+            false => Vec::new(),
+            true => self
+                .selection
+                .items()
+                .filter(|item| *item != head.what)
+                .filter_map(|item| self.held(item, workspace, device))
+                .collect(),
+        };
+        Carried {
+            head,
+            name: match rest.len() {
+                0 => name.to_string(),
+                more => format!("{name}  +{more}"),
+            },
+            rest,
+        }
+    }
+
+    /// What the drag rules need to know about a row, or nothing for a row that is never
+    /// dragged — wherever the row was drawn, the tree or the library's table.
+    ///
+    /// ⚠️ Pianos are libraries the instrument installs and indexes for itself, so a slot
+    /// in one is not something a drag can pick up and copy back.
+    pub(crate) fn held(
+        &self,
+        item: Item,
+        workspace: &Workspace,
+        device: &DeviceState,
+    ) -> Option<Held> {
+        match item {
+            Item::Local(id) => {
+                let entity = workspace.get(id)?;
+                Some(Held {
+                    what: item,
+                    kind: Kind::of(entity.entity.as_ref()),
+                    filed: self.folders.holding(id),
+                    fits: crate::device::fit(device, entity).allowed(),
+                })
+            }
+            Item::Folder(_) | Item::Tag(_) => None,
+            // What is already on the instrument fits it by having got there.
+            Item::Slot { class, .. } => (!read_only(class)).then_some(Held {
+                what: item,
+                kind: Kind::from_class(class),
+                filed: None,
+                fits: true,
+            }),
         }
     }
 
@@ -278,10 +307,11 @@ impl Browser {
     /// ⚠️ **Only Enter renames.** Clicking away cancels. An editor that commits on blur
     /// turns a stray keystroke into a rename nobody asked for, and the name is the only
     /// record of what an object is — files store no name of their own.
-    fn rename_row(&mut self, ui: &mut egui::Ui, original: &str) -> Option<String> {
+    fn rename_row(&mut self, ui: &mut egui::Ui, indent: f32, original: &str) -> Option<String> {
         let rename = self.rename.as_mut()?;
         let output = ui
             .horizontal(|ui| {
+                ui.add_space(indent);
                 egui::TextEdit::singleline(&mut rename.text)
                     .desired_width(ui.available_width())
                     .show(ui)
@@ -316,7 +346,7 @@ impl Browser {
     ///
     /// A target that would refuse does not light up; dropping on it anyway says why in
     /// the status strip rather than silently doing nothing.
-    fn drop_zone(
+    pub(crate) fn drop_zone(
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,
@@ -324,7 +354,7 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         if let Some(carried) = response.dnd_hover_payload::<Carried>() {
-            if landing(&carried, onto).allowed() {
+            if landing(&carried.head, onto).allowed() {
                 ui.painter().rect_stroke(
                     response.rect,
                     3.0,
@@ -339,8 +369,31 @@ impl Browser {
         self.land(&carried, onto, acts);
     }
 
+    /// Run the drop, for the pressed row and for everything it carried.
+    ///
+    /// ⚠️ The rest of the selection follows only where the verdict is one act repeated.
+    /// A send and a rearrange name **one** destination, and handing several rows to one
+    /// slot would write them over each other; those take the pressed row alone.
     fn land(&mut self, carried: &Arc<Carried>, onto: Onto, acts: &mut Vec<Act>) {
-        match (landing(carried, onto), carried.from, onto) {
+        let verdict = landing(&carried.head, onto);
+        match verdict {
+            Landing::No(why) => acts.push(Act::Refused(format!(
+                "“{}” cannot go there — {why}.",
+                carried.name
+            ))),
+            Landing::Send | Landing::Rearrange => self.one(carried.head, verdict, onto, acts),
+            Landing::Copy | Landing::File | Landing::Unfile => {
+                for held in carried.all() {
+                    if landing(&held, onto) == verdict {
+                        self.one(held, verdict, onto, acts);
+                    }
+                }
+            }
+        }
+    }
+
+    fn one(&mut self, held: Held, verdict: Landing, onto: Onto, acts: &mut Vec<Act>) {
+        match (verdict, held.what, onto) {
             (Landing::Copy, Item::Slot { class, at }, _) => acts.push(Act::Copy { class, at }),
             (Landing::Rearrange, Item::Slot { at: from, .. }, Onto::Slot { class, at }) => acts
                 .push(Act::Rearrange {
@@ -358,10 +411,6 @@ impl Browser {
             (Landing::Unfile, Item::Local(id), Onto::Computer) => {
                 acts.push(Act::File { id, folder: None })
             }
-            (Landing::No(why), ..) => acts.push(Act::Refused(format!(
-                "“{}” cannot go there — {why}.",
-                carried.name
-            ))),
             // Every allowed pairing is spelled out above; a shape that reaches here is a
             // verdict about a drag that did not come from where it says it did.
             _ => {}
@@ -398,7 +447,7 @@ impl Browser {
         match decision {
             Some(true) => {
                 if let Some(ask) = self.ask.take() {
-                    acts.push(ask.act);
+                    acts.extend(ask.acts);
                 }
             }
             Some(false) => self.ask = None,
@@ -406,54 +455,60 @@ impl Browser {
         }
     }
 
-    /// The one question a batch asks: everything it is about to write, and what it
-    /// would replace.
-    ///
-    /// One question for every batch there is — the whole queue, or one folder's worth —
-    /// so a folder cannot become a way of writing to the instrument without being asked.
+    /// The one question a write asks: everything the queue is about to write, and what
+    /// each of it would replace.
     fn ask_send(
         &mut self,
         workspace: &Workspace,
         device: &Device,
-        ids: &[u64],
+        queue: &Queue,
         title: String,
         act: Act,
     ) {
         let mut lines = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
-        for entity in ids.iter().filter_map(|id| workspace.get(*id)) {
-            let Some((class, at)) = owed(entity) else {
+        for held in queue.entries() {
+            let Some(entity) = workspace.get(held.id) else {
                 continue;
             };
-            let where_ = place(class, at);
-            for warning in write_warnings(class, &entity.tag(), &device.state.formats_in(class)) {
+            let (class, at) = (held.class, held.at);
+            for warning in write_warnings(&device.state, class, entity) {
                 if !warnings.contains(&warning) {
                     warnings.push(warning);
                 }
             }
-            lines.push(match device.state.slot(class, at).flatten() {
-                Some(info) => format!(
-                    "“{}” replaces “{}” in {where_}",
-                    entity.name,
-                    info.name.trim()
-                ),
-                None => format!("“{}” goes into {where_}, which is empty", entity.name),
-            });
+            // What is known about the slot, which for a bank nothing has read is that
+            // nothing has read it.
+            lines.push(format!(
+                "“{}” → {}",
+                entity.name,
+                held.replaces.said(class, at)
+            ));
         }
         if lines.is_empty() {
             return;
         }
-        // The warnings first: they are the reason to say no.
+        // The warnings first: they are the reason to say no. Then the header's own
+        // line, which sets what this send carries against what it walks past.
         let mut note = warnings;
-        if !note.is_empty() {
-            note.push(String::new());
-        }
+        note.push(crate::queue::Behind::of(workspace, &device.state, queue).said());
+        note.push(String::new());
         note.extend(lines);
         self.ask = Some(Ask {
             title,
             note: Some(note.join("\n")),
             verb: "Send",
-            act,
+            acts: vec![act],
+        });
+    }
+
+    /// Raise what a write back to one slot carries, where it carries anything.
+    fn ask_write(&mut self, name: &str, at: String, note: String, act: Act) {
+        self.ask = Some(Ask {
+            title: format!("Save “{name}” to {at}?"),
+            note: Some(note),
+            verb: "Save",
+            acts: vec![act],
         });
     }
 
@@ -475,7 +530,89 @@ impl Browser {
                 None => note,
             }),
             verb: "Replace",
-            act,
+            acts: vec![act],
+        });
+    }
+
+    /// One of the things that can be asked of everything checked, drawn the same in the
+    /// library's footer and in a checked row's own menu.
+    ///
+    /// A dead control is one the checked set gives nothing to do, and the hover over it
+    /// says which of the two reasons that is: nothing of the right sort is checked, or
+    /// the attached instrument refuses every one that is. Deleting asks first, once, for
+    /// the whole set.
+    pub(crate) fn bulk_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: Bulk,
+        checked: &[Item],
+        workspace: &Workspace,
+        state: &DeviceState,
+        acts: &mut Vec<Act>,
+    ) {
+        if action == Bulk::Tag {
+            let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
+            ui.add_enabled_ui(!locals.is_empty(), |ui| {
+                ui.menu_button(action.label(), |ui| self.tag_items(ui, &locals, acts))
+                    .response
+                    .on_disabled_hover_text(action.nothing());
+            });
+            return;
+        }
+        let wanted = bulk(action, checked);
+        // ⚠️ Only a queue asks the instrument's opinion. Everything else here happens on
+        // this computer, where a file that is another instrument's is still a file.
+        let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
+        let label = match &fits {
+            Some(fits) => fits.label(),
+            None => action.label().to_string(),
+        };
+        let live = !wanted.is_empty() && fits.as_ref().is_none_or(|fits| fits.takes > 0);
+        let dead = fits
+            .and_then(|fits| fits.why)
+            .unwrap_or_else(|| action.nothing().to_string());
+        let mut button = ui
+            .add_enabled(live, egui::Button::new(label))
+            .on_disabled_hover_text(dead);
+        if action == Bulk::Queue {
+            button = button
+                .on_hover_text("to the slot it is linked to, or the first free one in its folder");
+        }
+        if !button.clicked() {
+            return;
+        }
+        match action {
+            Bulk::Delete => self.ask_discard(checked, wanted),
+            _ => acts.extend(wanted),
+        }
+        ui.close();
+    }
+
+    /// Ask once before a whole checked set is deleted, naming what each half of it
+    /// costs: a slot is emptied on the instrument, a local only leaves the list.
+    fn ask_discard(&mut self, checked: &[Item], acts: Vec<Act>) {
+        let slots = checked
+            .iter()
+            .filter(|item| matches!(item, Item::Slot { .. }))
+            .count();
+        let locals = checked.iter().filter(|item| item.local().is_some()).count();
+        let mut note = Vec::new();
+        if slots > 0 {
+            note.push(format!(
+                "{slots} on the instrument are removed from it. There is no undo."
+            ));
+        }
+        if locals > 0 {
+            note.push(format!(
+                "{locals} leave the list on this computer; the files themselves stay where \
+                 they are."
+            ));
+        }
+        self.ask = Some(Ask {
+            title: format!("Delete {} checked items?", slots + locals),
+            note: Some(note.join("\n\n")),
+            verb: "Delete",
+            acts,
         });
     }
 }
@@ -483,21 +620,23 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::bench;
+    use crate::browser::bench::{bench, context};
+    use crate::shell::Shell;
     use crate::tabs::Tabs;
     use crate::workspace::Fresh;
 
-    /// Paint the two columns headlessly. What this catches is a layout that panics or
-    /// an id that collides, neither of which a unit test on the rules would see.
+    /// Paint the tree headlessly. What this catches is a layout that panics or an id
+    /// that collides, neither of which a unit test on the rules would see.
     fn paint(with_device: bool) {
         use crate::workspace::{Fresh, Origin};
 
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = crate::log::Log::default();
         let mut tabs = Tabs::default();
         let mut browser = Browser::default();
+        let mut queue = Queue::default();
 
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
             workspace.create(kind, &mut log).unwrap();
@@ -508,6 +647,10 @@ mod tests {
         browser.folders.make();
         let filed = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(filed, Some(full));
+        // A tag on something, and one on nothing: the two shapes the section holds.
+        let sunday = browser.tags.make("Sunday");
+        browser.tags.make("Loud");
+        browser.tags.set(filed, sunday, true);
         let bytes = workspace.get(filed).unwrap().bytes.clone();
         workspace.view(
             "Africa-Split.ne5p".into(),
@@ -528,120 +671,36 @@ mod tests {
             // Named banks, which is what a piano's categories arrive as.
             device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
             device.pretend_geometry(ObjectClass::Piano, &[("Grand", 1), ("Upright", 1)]);
+            device.pretend_partitions(&crate::device::ELECTRO5);
+            // Every branch of the instrument open, so every row shape is painted.
+            for class in device.state.classes() {
+                browser.open.insert(Branch::Class(class.to_raw()));
+                for bank in 0..=8 {
+                    browser.open.insert(Branch::Bank(class.to_raw(), bank));
+                }
+            }
         }
 
         // Twice: the second pass runs with the widget state the first left behind.
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::SidePanel::left("places").show(ctx, |ui| {
-                    let acts = browser.ui(ui, &workspace, &device);
-                    apply(
-                        &mut browser,
-                        acts,
-                        &mut workspace,
-                        &mut device,
-                        &mut tabs,
-                        &mut log,
-                    );
-                });
-            });
-        }
-    }
-
-    /// The divider does what dragging it says, and stops before either column is gone.
-    ///
-    /// ⚠️ The share is what is kept, not a width: the sidebar the two live in is itself
-    /// resizable, so the same fraction has to survive the dock changing size under it.
-    #[test]
-    fn the_divider_moves_and_stops_short_of_squeezing_a_column_out() {
-        use crate::workspace::Fresh;
-
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = crate::log::Log::default();
-        let mut browser = Browser::default();
-        workspace.create(Fresh::Program, &mut log).unwrap();
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
-
-        // Far enough left to ask for more than the stop allows.
-        let travel = -400.0;
-        let button = |pos, pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::default(),
-        };
-
-        let mut divider = egui::pos2(0.0, 0.0);
-        let mut frame = 0;
-        while frame < 5 {
-            let grip = divider;
-            let moved = grip + egui::vec2(travel, 0.0);
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 720.0),
-                )),
-                events: match frame {
-                    0 => Vec::new(),
-                    1 => vec![egui::Event::PointerMoved(grip)],
-                    2 => vec![button(grip, true)],
-                    3 => vec![egui::Event::PointerMoved(moved)],
-                    _ => vec![button(moved, false)],
-                },
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
                 egui::SidePanel::left("places")
-                    .exact_width(600.0)
+                    .exact_width(crate::shell::BROWSER)
                     .show(ctx, |ui| {
-                        // The same rect the dock lays itself out in, so the test grabs
-                        // the divider where the divider actually is.
-                        let whole = ui.available_rect_before_wrap();
-                        divider = egui::pos2(
-                            whole.left() + (whole.width() - HANDLE) * browser.split + HANDLE / 2.0,
-                            whole.center().y,
+                        let acts = browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                        apply(
+                            &mut browser,
+                            &mut Shell::default(),
+                            acts,
+                            &mut workspace,
+                            &mut device,
+                            &mut tabs,
+                            &mut queue,
+                            &mut log,
                         );
-                        let _ = browser.ui(ui, &workspace, &device);
                     });
             });
-            frame += 1;
         }
-
-        assert!(browser.split < EVEN, "it moved: {}", browser.split);
-        assert_eq!(browser.split, LEAST, "and stopped at the stop");
-    }
-
-    /// A share the store cannot account for is the even split, never one column and a
-    /// sliver of the other.
-    #[test]
-    fn a_divider_comes_back_where_it_was_left_or_not_at_all() {
-        let restored = |held: Option<&str>| {
-            let mut store = Fake::default();
-            if let Some(held) = held {
-                eframe::Storage::set_string(&mut store, Browser::SPLIT, held.to_string());
-            }
-            let mut browser = Browser::default();
-            browser.restore(&store);
-            browser.split
-        };
-        assert_eq!(restored(Some("0.3")), 0.3);
-        assert_eq!(restored(None), EVEN);
-        for nonsense in ["0.0", "1.0", "-3", "wide", "", "NaN"] {
-            assert_eq!(restored(Some(nonsense)), EVEN, "{nonsense:?}");
-        }
-
-        // And what is written comes back as itself.
-        let mut store = Fake::default();
-        let browser = Browser {
-            split: 0.42,
-            ..Browser::default()
-        };
-        browser.keep(&mut store);
-        let mut after = Browser::default();
-        after.restore(&store);
-        assert_eq!(after.split, 0.42);
     }
 
     /// A store that answers for one key at a time, which is what the two things the
@@ -660,31 +719,135 @@ mod tests {
     }
 
     #[test]
-    fn the_two_columns_paint_with_nothing_attached() {
+    fn the_tree_paints_with_nothing_attached() {
         paint(false);
     }
 
     #[test]
-    fn the_two_columns_paint_with_a_tree_to_show() {
+    fn the_tree_paints_with_an_instrument_to_show() {
         paint(true);
     }
 
-    /// ⚠️ The gesture that lost a program its name. An editor armed by any second click
-    /// on a selected row sits there with everything selected, so the next keystroke
-    /// replaces the name and the blur commits it.
+    /// A drag from a row inside the selection brings the rest of it, and one from a row
+    /// outside brings only itself — the pressed row is what a drag is about.
     #[test]
-    fn a_click_away_from_the_name_selects_rather_than_arming_a_rename() {
-        // The row is the click target, so most of it must be safe to click.
-        assert!(!arms_rename(true, false), "past the name on a selected row");
-        assert!(
-            !arms_rename(false, true),
-            "on the name of an unselected row"
-        );
-        assert!(!arms_rename(false, false));
-        assert!(arms_rename(true, true), "the one gesture that renames");
+    fn a_drag_from_a_picked_row_carries_the_whole_selection() {
+        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let ids: Vec<u64> = (0..3)
+            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .collect();
+        let apart = workspace.create(Fresh::Live, &mut log).unwrap();
+        for id in &ids {
+            browser.selection.toggle(Item::Local(*id));
+        }
+
+        let head = browser
+            .held(Item::Local(ids[0]), &workspace, &device.state)
+            .expect("a local is dragged");
+        let carried = browser.carrying(head, "Africa Split", &workspace, &device.state);
+        assert_eq!(carried.rest.len(), 2);
+        assert_eq!(carried.all().count(), 3);
+        assert!(carried.name.contains("+2"), "{}", carried.name);
+
+        let outside = browser
+            .held(Item::Local(apart), &workspace, &device.state)
+            .expect("a local is dragged");
+        let alone = browser.carrying(outside, "Squabble B", &workspace, &device.state);
+        assert!(alone.rest.is_empty(), "a row nobody picked carries itself");
+        assert_eq!(alone.name, "Squabble B", "and says only its own name");
     }
 
-    /// The gesture end to end: arm the editor, type, press Enter, and the new name comes
+    /// ⚠️ The rest of the selection follows only where the drop is one act repeated.
+    /// Filing three assets is three filings; sending three into one slot would write
+    /// them over each other, so a single destination takes the pressed row alone.
+    #[test]
+    fn a_drop_of_many_repeats_only_where_one_destination_does_not() {
+        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let ids: Vec<u64> = (0..3)
+            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .collect();
+        for id in &ids {
+            browser.selection.toggle(Item::Local(*id));
+        }
+        let folder = browser.folders.make();
+        let head = browser
+            .held(Item::Local(ids[0]), &workspace, &device.state)
+            .unwrap();
+        let carried = Arc::new(browser.carrying(head, "Africa Split", &workspace, &device.state));
+
+        let mut filed = Vec::new();
+        browser.land(&carried, Onto::Group(folder), &mut filed);
+        assert_eq!(filed.len(), 3, "every picked asset goes into the folder");
+        assert!(filed.iter().all(|act| matches!(
+            act,
+            Act::File {
+                folder: Some(_),
+                ..
+            }
+        )));
+
+        let mut sent = Vec::new();
+        browser.land(
+            &carried,
+            Onto::Slot {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 0 },
+            },
+            &mut sent,
+        );
+        assert_eq!(sent.len(), 1, "one slot takes one asset");
+        assert!(matches!(sent[0], Act::Send { id, .. } if id == ids[0]));
+    }
+
+    /// ⚠️ F2 renames the row that is the only one picked. A rename typed while several
+    /// are picked reads as a rename of all of them, and only one would take it.
+    #[test]
+    fn f2_renames_only_while_its_row_is_the_only_one_picked() {
+        let (mut browser, _workspace, _device, _tabs, _queue, _log) = bench();
+        let row = Item::Local(1);
+        browser.selection.only(row);
+        assert!(browser.sole_is(row));
+
+        browser.selection.toggle(Item::Local(2));
+        assert!(!browser.sole_is(row), "two rows picked");
+        // And a plain click on one of the two lets go of it, leaving the other sole.
+        browser.selection.plain(Item::Local(2));
+        assert!(browser.sole_is(row));
+    }
+
+    /// Escape lets go of everything, whether or not the browser dock is open to show it.
+    ///
+    /// ⚠️ Not while a name is being typed: Escape is how a rename is taken back, and a
+    /// half-typed name is not a reason to drop the selection with it.
+    #[test]
+    fn escape_lets_go_of_the_selection_unless_a_name_is_being_typed() {
+        let ctx = context();
+        let mut browser = Browser::default();
+        let escape = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+
+        browser.start_rename(Item::Local(1), "Africa Split");
+        let _ = ctx.run(escape.clone(), |ctx| browser.let_go(ctx));
+        assert_eq!(
+            browser.picked().items().count(),
+            1,
+            "the editor's Escape is not the selection's"
+        );
+
+        browser.rename = None;
+        let _ = ctx.run(escape, |ctx| browser.let_go(ctx));
+        assert_eq!(browser.picked().items().count(), 0);
+    }
+
+    /// The gesture end to end: open the editor, type, press Enter, and the new name comes
     /// back as an act.
     ///
     /// What this catches is a rename that has stopped committing at all — the unit tests
@@ -694,11 +857,12 @@ mod tests {
     fn typing_a_name_and_pressing_enter_renames_the_row() {
         use crate::workspace::Fresh;
 
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut workspace = Workspace::new(ctx.clone());
         let device = Device::new(ctx.clone());
         let mut log = crate::log::Log::default();
         let mut browser = Browser::default();
+        let queue = Queue::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
 
         let key = |key| egui::Event::Key {
@@ -725,7 +889,7 @@ mod tests {
             };
             let _ = ctx.run(input, |ctx| {
                 egui::SidePanel::left("places").show(ctx, |ui| {
-                    for act in browser.ui(ui, &workspace, &device) {
+                    for act in browser.ui(ui, &workspace, &device, &queue, &Filter::default()) {
                         if let Act::RenameLocal { name, .. } = act {
                             named = Some(name);
                         }
@@ -769,7 +933,7 @@ mod tests {
     /// membership behind to accumulate for as long as the app is installed.
     #[test]
     fn a_grouping_forgets_the_assets_the_list_came_back_without() {
-        let (mut browser, mut workspace, _device, _tabs, mut log) = bench();
+        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
         let here = workspace.create(Fresh::Program, &mut log).unwrap();
         let folder = browser.folders.make();
         browser.folders.file(here, Some(folder));
@@ -783,34 +947,121 @@ mod tests {
         assert_eq!(browser.folders.all().len(), 1, "the folder itself stays");
     }
 
+    /// Two assets picked and saved as a gig wear that tag next session, and the third
+    /// does not. An asset the list came back without leaves no membership behind.
+    #[test]
+    fn a_tag_put_on_a_multi_selection_comes_back_next_session() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let ids: Vec<u64> = (0..3)
+            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .collect();
+        browser.selection.toggle(Item::Local(ids[0]));
+        browser.selection.toggle(Item::Local(ids[1]));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SaveAsGig],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+        let Some(Item::Tag(tag)) = browser.rename.as_ref().map(|r| r.what) else {
+            panic!("a new gig opens its editor");
+        };
+        assert!(browser.tags.on_all(&ids[..2], tag));
+        assert!(!browser.tags.worn(ids[2]).contains(&tag));
+
+        let mut store = Fake::default();
+        browser.keep(&mut store);
+        let mut after = Browser::default();
+        after.restore(&store);
+        after.settle(&workspace);
+        assert_eq!(after.tags.name_of(tag), Some("New gig"));
+        assert!(after.tags.on_all(&ids[..2], tag));
+
+        workspace.remove(ids[0], &mut log);
+        after.settle(&workspace);
+        assert_eq!(after.tags.count(tag), 1, "the one still on the list");
+    }
+
+    /// ⚠️ A view is the only copy of what it holds and the store skips it, so a tag on
+    /// one would go with its tab. Tagging keeps it on this computer first, and the log
+    /// says that is what happened.
+    #[test]
+    fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
+        use crate::workspace::Origin;
+
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let bytes = {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            let bytes = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            bytes
+        };
+        let id = workspace.view(
+            "Africa-Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 0 },
+            },
+            bytes,
+            &mut log,
+        );
+        let tag = browser.tags.make("Sunday");
+        assert!(workspace.is_view(id));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::Tag { ids: vec![id], tag }],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+        assert!(!workspace.is_view(id), "it is on this computer now");
+        assert!(browser.tags.worn(id).contains(&tag));
+        let said = log.transcript();
+        assert!(said.contains("kept on this computer first"), "{said}");
+    }
+
     /// The warning reaches the modal a batch raises, once per format however many items
     /// carry it — and it goes above the list of destinations, which is what the eye
     /// slides past.
+    ///
+    /// The instrument names a model the acceptance table does not know, which is what
+    /// leaves the comparison against the folder's own formats as the only thing to go
+    /// on — a family it does know would refuse these outright.
     #[test]
     fn the_modal_says_when_a_batch_is_of_another_model() {
         use crate::workspace::Origin;
 
-        let (mut browser, mut workspace, mut device, _tabs, mut log) = bench();
+        let (mut browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        device.pretend_attached_as("unnamed device");
 
         let mut ids = Vec::new();
         for slot in 0..2 {
             let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
             let bytes = workspace.get(stage).unwrap().bytes.clone();
             workspace.remove(stage, &mut log);
-            ids.push(workspace.ingest(
+            let at = Location { bank: 6, slot };
+            let id = workspace.ingest(
                 format!("stage-{slot}.ns4p"),
-                Origin::Device {
-                    class,
-                    at: Location { bank: 6, slot },
-                },
+                Origin::Device { class, at },
                 bytes,
                 &mut log,
-            ));
+            );
+            crate::queue::enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
+            ids.push(id);
         }
 
-        browser.ask_send(&workspace, &device, &ids, "Send?".into(), Act::SendAll);
+        browser.ask_send(&workspace, &device, &queue, "Send?".into(), Act::SendAll);
         let note = browser.ask.as_ref().and_then(|ask| ask.note.clone());
         let note = note.expect("the modal has a note");
         assert_eq!(note.matches("This file is ns4p").count(), 1, "{note}");
