@@ -14,7 +14,7 @@
 //! open row — lives here rather than being written twice: an `.nsmpproj` is the same
 //! object seen from the source side.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io::Cursor;
 
 use eframe::egui;
@@ -465,7 +465,9 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
 #[derive(Default)]
 pub struct State {
     selected: Option<usize>,
-    open: BTreeSet<usize>,
+    /// Whether the selected row's own fields are unfolded. Only the selected row has a
+    /// body, so there is never a second one to remember.
+    open: bool,
     /// A row to bring up under the pinned map, once the body draws it.
     reveal: Option<usize>,
     /// Whether the 128-key table is unfolded.
@@ -505,12 +507,9 @@ impl State {
     /// Clicking the row that is already open and selected closes it; picking from the
     /// map always opens, and asks for the row to be brought into view.
     fn pick(&mut self, zone: usize, reveal: bool) {
-        let close = !reveal && self.selected == Some(zone) && self.open.contains(&zone);
+        let close = !reveal && self.selected == Some(zone) && self.open;
         self.selected = Some(zone);
-        match close {
-            true => self.open.remove(&zone),
-            false => self.open.insert(zone),
-        };
+        self.open = !close;
         if reveal {
             self.reveal = Some(zone);
         }
@@ -965,7 +964,7 @@ pub fn rows(
                 ink,
             );
         }
-        let glyph = match state.open.contains(&index) && picked {
+        let glyph = match state.open && picked {
             true => Glyph::ChevronDown,
             false => Glyph::ChevronRight,
         };
@@ -982,7 +981,7 @@ pub fn rows(
             response.on_hover_text(&spec.hint);
         }
 
-        if state.open.contains(&index) && picked {
+        if state.open && picked {
             let body = egui::Frame::new()
                 .fill(visuals.window_fill)
                 .inner_margin(egui::Margin {
@@ -1467,16 +1466,12 @@ fn per_key(
         )),
     );
     let baseline = state.baseline.as_ref().and_then(|saved| saved.table.as_ref());
-    for (label, scale) in [
-        ("Gain", keys::Scale::Db(GAIN_FULL)),
-        ("Detune", keys::Scale::Cents(DETUNE_FULL)),
+    for (label, field, scale) in [
+        ("Gain", "gain", keys::Scale::Db(GAIN_FULL)),
+        ("Detune", "detune", keys::Scale::Cents(DETUNE_FULL)),
     ] {
-        let field = match label {
-            "Gain" => "gain",
-            _ => "detune",
-        };
         let values: Vec<f32> = (span.low..=span.high)
-            .map(|note| held(table, note, field))
+            .map(|note| held(table, note, scale))
             .collect();
         let painted: Vec<bool> = (span.low..=span.high)
             .map(|note| match baseline {
@@ -1537,13 +1532,13 @@ fn per_key(
 }
 
 /// One key's stored value on the lane's own scale, clamped to what it can draw.
-fn held(table: &KeyTable, note: u8, field: &str) -> f32 {
+fn held(table: &KeyTable, note: u8, scale: keys::Scale) -> f32 {
     let Ok(level) = table.key(note) else {
         return 0.0;
     };
-    let value = match field {
-        "gain" => gain_db(level.gain(), keymap::GAIN_UNITY) / f64::from(GAIN_FULL),
-        _ => detune_cents(level.detune()) / f64::from(DETUNE_FULL),
+    let value = match scale {
+        keys::Scale::Db(full) => gain_db(level.gain(), keymap::GAIN_UNITY) / f64::from(full),
+        keys::Scale::Cents(full) => detune_cents(level.detune()) / f64::from(full),
     };
     match value.is_finite() {
         true => value.clamp(-1.0, 1.0) as f32,
@@ -2384,18 +2379,19 @@ mod tests {
         let mut state = State::default();
         state.pick(1, true);
         assert_eq!(state.selected, Some(1));
-        assert!(state.open.contains(&1));
+        assert!(state.open);
         assert_eq!(state.reveal, Some(1), "the map asked for it to be shown");
 
         state.reveal = None;
         state.pick(1, false);
-        assert!(!state.open.contains(&1), "the same row closes");
+        assert!(!state.open, "the same row closes");
         assert_eq!(state.reveal, None);
 
         // Another row opens rather than toggling the one that was open.
         state.pick(0, false);
+        assert_eq!((state.selected, state.open), (Some(0), true));
         state.pick(1, false);
-        assert!(state.open.contains(&1));
+        assert_eq!((state.selected, state.open), (Some(1), true));
     }
 
     /// What a struck key does: the zone that answers it, or why nothing does.
