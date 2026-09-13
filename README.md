@@ -37,8 +37,9 @@ file formats, the USB protocol and
 [how to build from source](docs/src/reference/building.md) in its Reference
 section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-drawbar's Stage support stands on other people's decoding work. See
-[Community](docs/src/community.md).
+## Commnity
+
+Check out other similar projects @ [Community](docs/src/community.md).
 
 ## Disclaimer
 
