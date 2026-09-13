@@ -494,10 +494,6 @@ impl Table {
         }))
     }
 
-    pub fn count(&self) -> usize {
-        self.count
-    }
-
     /// Read every record, checking each against the stroke it names.
     pub fn read(&self, map: &[u8], strokes: &[(u32, u8)]) -> Result<Vec<ZoneV3>, ParseError> {
         self.fits(map)?;

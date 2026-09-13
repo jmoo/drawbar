@@ -64,14 +64,6 @@ pub const V3_FROM_VERSION: u32 = 300;
 /// [`codec::Layout`] rather than to the reader.
 pub const V4_FROM_VERSION: u32 = 400;
 
-/// Content version of the first Sample Library laid out as [`Chain::Library2`].
-///
-/// The number tracks the *library release*, not the codec, so the versions below this
-/// are older libraries rather than older codecs — 8 above all, plus a 4/5/100/140/150
-/// tail. They are still `NWS`-chain files; only what sits inside the sections differs,
-/// and [`Chain`] is what a reader gates on.
-pub const LIBRARY_2_VERSION: u32 = 200;
-
 /// Which section chain a body's sections form, and the shapes that follow from it.
 ///
 /// The narrow chain has two schemas and the content version does not separate them —
