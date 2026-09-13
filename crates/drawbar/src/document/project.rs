@@ -527,10 +527,10 @@ fn fields(
         if let Some(file) = source(snapshot, stroke) {
             let held = paths.entry(file.id).or_insert_with(|| file.path.clone());
             sample::cell(ui, "Source file", 280.0, |ui| {
+                // ⚠️ Written when the box is left, which an Enter typed into it does:
+                // an Enter pressed anywhere else is not this box being finished with.
                 let response = ui.add(egui::TextEdit::singleline(held).desired_width(270.0));
-                let done = response.lost_focus()
-                    || response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                if done && *held != file.path {
+                if response.lost_focus() && *held != file.path {
                     sets.push((format!("file{}.path", file.id), held.clone()));
                 }
             });
@@ -1163,6 +1163,61 @@ mod tests {
         assert!(facts.contains(&file.path), "{facts}");
         assert!(facts.contains("vel 0–127"), "{facts}");
         assert_eq!(leaf("/Users/x/Nord/low.wav"), "low.wav");
+    }
+
+    /// One frame of one zone's open fields, with `paths` as the boxes hold them.
+    fn opened(
+        ctx: &egui::Context,
+        snapshot: &Snapshot,
+        paths: &mut HashMap<u32, String>,
+        events: Vec<egui::Event>,
+    ) -> Sets {
+        let mut sets = Sets::new();
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                fields(ui, snapshot, 0, paths, &mut sets);
+            });
+        });
+        sets
+    }
+
+    /// ⚠️ The source box writes what it holds when it is left, and an Enter pressed
+    /// somewhere else is not that: a key landing in another control must not commit a
+    /// path nobody has finished typing.
+    #[test]
+    fn a_half_typed_source_path_waits_for_the_box_to_be_left() {
+        let ctx = dressed();
+        let snapshot = read_back(&project_bytes());
+        let stroke = played(&snapshot, &snapshot.zones[0]).expect("a stroke");
+        let file = source(&snapshot, stroke).expect("it names a file").id;
+        let mut paths = HashMap::from([(file, "half typed".to_string())]);
+
+        assert!(opened(&ctx, &snapshot, &mut paths, Vec::new()).is_empty());
+        let sets = opened(
+            &ctx,
+            &snapshot,
+            &mut paths,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            sets.is_empty(),
+            "an Enter with the box unfocused wrote {sets:?}"
+        );
     }
 
     /// The same project with the one stroke of its first zone switched off, which the
