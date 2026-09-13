@@ -189,12 +189,15 @@ pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
         count(section, &doc.morphs);
     }
     doc.shown = doc.sections.iter().flat_map(paths).collect();
+    let lensed = lensed(&doc.morphs, &doc.shown);
+    doc.shown.extend(lensed);
     doc.picks = doc.sections.iter().flat_map(selectors).collect();
     doc
 }
 
 impl Doc<'_> {
-    /// Whether the Edit face draws this path at all.
+    /// Whether the Edit face draws this path at all, the morph slots a lens puts under a
+    /// parameter's own control included.
     pub fn shows(&self, path: &str) -> bool {
         self.shown.contains(path)
     }
@@ -497,6 +500,30 @@ fn selectors<'a>(section: &Sect<'a>) -> Vec<&'a str> {
         .collect();
     for nested in &section.nested {
         out.extend(selectors(nested));
+    }
+    out
+}
+
+/// The morph slots the drawn parameters carry.
+///
+/// ⚠️ A slot is no section's own field — the library's layout leaves it to the parameter
+/// it moves — so the face that drew the parameter is the face that draws the slot, under
+/// the lens.
+fn lensed<'a>(
+    morphs: &HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
+    shown: &HashSet<&'a str>,
+) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for (parent, slots) in morphs {
+        if shown.contains(parent) {
+            out.extend(
+                slots
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .map(|slot| slot.path.as_str()),
+            );
+        }
     }
     out
 }
