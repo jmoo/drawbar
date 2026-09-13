@@ -589,7 +589,8 @@ impl DrawbarApp {
         if hit(&key::QUEUE) && self.attached() {
             acts.push(Act::ShowPage(Page::Queue));
         }
-        if self.attached() && hit(&key::RESYNC) {
+        // ⚠️ Likewise: an unconsumed ⌘R reloads the browser tab this build runs in.
+        if hit(&key::RESYNC) && self.attached() {
             acts.push(Act::Resync);
         }
         if WINDOWED && hit(&key::CLOSE) {
@@ -1414,6 +1415,40 @@ mod tests {
             app.workspace.get(id).unwrap().is_unsaved(),
             "reviewing the queue is not saving"
         );
+    }
+
+    /// ⚠️ ⌘R is the browser tab's own reload. A frame that leaves it unconsumed reloads
+    /// the page out from under whatever is open, so the gesture is taken whether or not
+    /// there is an instrument to read again.
+    #[test]
+    fn the_read_everything_shortcut_is_taken_with_nothing_attached() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let pressed = || egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let left = |ctx: &egui::Context| {
+            ctx.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Key { key, .. } if *key == egui::Key::R))
+            })
+        };
+
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(!app.attached(), "nothing was attached");
+        assert!(!left(&ctx), "⌘R reached the tab with nothing attached");
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(!left(&ctx), "⌘R reached the tab with one attached");
     }
 
     /// What was collapsed comes back collapsed in the next session's window.
