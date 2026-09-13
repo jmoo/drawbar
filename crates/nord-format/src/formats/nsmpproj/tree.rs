@@ -14,6 +14,19 @@ use std::str::FromStr;
 /// Spaces per level of depth.
 const INDENT: usize = 2;
 
+/// Refuse a field value the writer cannot render as one line.
+///
+/// A value is emitted raw after ` = `, so a line end inside one renders a file
+/// [`parse`] refuses or reads as further lines of the block.
+pub fn check_value(value: &str) -> Result<(), ParseError> {
+    match value.find(['\n', '\r']) {
+        Some(at) => Err(ParseError::AssertFail(format!(
+            "a field value holds a line end at byte {at}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// One `name { … }` block: its fields and child blocks, in file order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
@@ -65,8 +78,11 @@ impl Node {
     }
 
     /// Overwrite the first field named `key`. Errs if there is none: a view
-    /// setter must not invent fields the editor never wrote.
+    /// setter must not invent fields the editor never wrote, and errs on a
+    /// value [`check_value`] refuses.
     pub fn set_field(&mut self, key: &str, value: impl Into<String>) -> Result<(), ParseError> {
+        let value = value.into();
+        check_value(&value)?;
         let slot = self
             .entries
             .iter_mut()
@@ -75,10 +91,13 @@ impl Node {
                 _ => None,
             })
             .ok_or_else(|| ParseError::AssertFail(format!("{} has no {key}", self.name)))?;
-        *slot = value.into();
+        *slot = value;
         Ok(())
     }
 
+    /// ⚠️ Unchecked: the value must already satisfy [`check_value`]. Callers
+    /// here pass literals and formatted numbers, and a caller-supplied string
+    /// is checked where it enters.
     pub fn push_field(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.entries.push(Entry::Field {
             key: key.into(),
@@ -232,6 +251,15 @@ mod tests {
         node.set_field("a", "9").unwrap();
         assert!(node.set_field("nope", "9").is_err());
         assert_eq!(rendered(&node), SAMPLE.replace("a = 1", "a = 9"));
+    }
+
+    #[test]
+    fn a_value_holding_a_line_end_is_refused_and_the_tree_is_unchanged() {
+        let mut node = parse(SAMPLE).unwrap();
+        for bad in ["a\nb", "a\r", "\n"] {
+            assert!(node.set_field("a", bad).is_err(), "{bad:?} was stored");
+        }
+        assert_eq!(rendered(&node), SAMPLE);
     }
 
     #[test]

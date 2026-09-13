@@ -709,6 +709,10 @@ impl Project {
                 "a project needs at least one zone".into(),
             ));
         }
+        tree::check_value(name)?;
+        for z in zones {
+            tree::check_value(&z.path)?;
+        }
         let mut by_root: Vec<&NewZone> = zones.iter().collect();
         by_root.sort_by_key(|z| z.root_key);
         if by_root.windows(2).any(|w| w[0].root_key == w[1].root_key) {
@@ -1416,6 +1420,24 @@ mod tests {
             .set_stroke_field(99, StrokeField::Gain(1.0))
             .is_err());
         assert_eq!(project.render(), before);
+    }
+
+    #[test]
+    fn a_value_holding_a_line_end_is_refused_by_every_boundary() {
+        let mut project = three_zones();
+        let before = project.render();
+        assert!(project.set_name("a\nb").is_err());
+        assert!(project.set_audio_path(2, "moved/c4\r.wav").is_err());
+        assert_eq!(project.render(), before);
+
+        let zone = |path: &str| NewZone {
+            path: path.into(),
+            sample_rate: 44100,
+            frames: 1,
+            root_key: 60,
+        };
+        assert!(Project::new("a\nb", &[zone("a.wav")], 0).is_err());
+        assert!(Project::new("x", &[zone("a\nb.wav")], 0).is_err());
     }
 
     #[test]
