@@ -1379,7 +1379,7 @@ fn facts_of(zone: &Zone, sound: Option<&Sound>) -> String {
 
 /// A gain reading, with the silence a zero field means spelled out rather than as an
 /// infinity.
-fn decibels(db: f64) -> String {
+pub(super) fn decibels(db: f64) -> String {
     match db.is_finite() {
         true => format!("{db:+.1} dB"),
         false => "silent".to_string(),

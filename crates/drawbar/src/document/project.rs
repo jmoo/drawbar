@@ -420,7 +420,7 @@ fn facts_of(snapshot: &Snapshot, zone: &Zone, stroke: Option<&Stroke>) -> String
     if let Some(file) = source(snapshot, stroke) {
         parts.push(leaf(&file.path).to_string());
     }
-    parts.push(format!("{:+.1} dB", 20.0 * stroke.gain.max(1e-6).log10()));
+    parts.push(sample::decibels(20.0 * stroke.gain.log10()));
     parts.push(format!("vel {}–{}", stroke.velocity.0, stroke.velocity.1));
     parts.join(" · ")
 }
@@ -718,7 +718,11 @@ pub fn capabilities() -> Vec<Row> {
             Cap::Editable,
             "the loop, its length and its crossfade, in frames",
         ),
-        row("loop decay / detune", Cap::Editable, "m_loopDecay"),
+        row(
+            "loop decay / detune",
+            Cap::ReadOnly,
+            "m_loopDecay, which no control on this face writes — nord-cli does",
+        ),
         row("release samples", Cap::Absent, "a piano library's bank 2"),
         row(
             "pedal resonance samples",
@@ -1280,6 +1284,27 @@ mod tests {
         assert_eq!(length(&snapshot, &inverted), "inverted trim");
     }
 
+    /// A gain is read in the one unit both documents read it in, and a stroke turned
+    /// all the way down says so rather than reading as the floor of a logarithm.
+    #[test]
+    fn a_stroke_with_no_gain_reads_as_silence() {
+        let snapshot = read_back(&project_bytes());
+        let zone = &snapshot.zones[0];
+        let stroke = played(&snapshot, zone).expect("a stroke");
+        assert_eq!(stroke.gain, 1.0);
+        assert!(
+            facts_of(&snapshot, zone, Some(stroke)).contains("+0.0 dB"),
+            "unity gain is no change at all"
+        );
+
+        let silent = Stroke {
+            gain: 0.0,
+            ..stroke.clone()
+        };
+        let facts = facts_of(&snapshot, zone, Some(&silent));
+        assert!(facts.contains("silent"), "{facts}");
+    }
+
     /// A moved band writes both ends of the zone it moved, under the id the file gives
     /// it — and a zone the project switched off is not a band at all.
     #[test]
@@ -1325,7 +1350,6 @@ mod tests {
             ("velocity layers", "stroke1.velocity_max", "90"),
             ("per-zone gain / detune", "stroke1.gain", "0.25"),
             ("loop points / crossfade", "stroke1.loop_crossfade", "240"),
-            ("loop decay / detune", "stroke1.loop_decay", "120"),
             ("sound parameters", "velocity.amplitude", "64"),
             ("replace / add a stroke", "file1.path", "other.wav"),
         ];
