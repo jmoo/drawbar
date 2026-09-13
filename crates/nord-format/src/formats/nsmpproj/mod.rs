@@ -25,9 +25,8 @@
 //! start at 129 and rise with the root key; stroke global ids and audio-file ids
 //! are the same numbers, rising from 1 in the same order.
 //!
-//! Frame positions are stored as `%f` decimals. Inferred from specimens: they
-//! count at 44 100 Hz whatever `m_sampleRate` says — a 0.1 s file stores
-//! `m_end = 4410` at 22 050 Hz and 96 000 Hz alike.
+//! Frame positions are stored as `%f` decimals, counted at [`PROJECT_RATE`]
+//! rather than at the file's own rate.
 
 pub mod tree;
 
@@ -57,6 +56,26 @@ pub const HIGHEST_NOTE: u8 = 108;
 
 /// The id of the lowest zone; ids rise with the root key.
 pub const FIRST_ZONE_ID: u32 = 129;
+
+/// The rate every frame position in a project counts at, whatever the file's own
+/// `m_sampleRate` says — a 0.1 s file stores `m_end = 4410` at 22 050 Hz and at
+/// 96 000 Hz alike. Inferred from specimens; not confirmed on hardware.
+pub const PROJECT_RATE: u64 = 44_100;
+
+/// A frame count restated at [`PROJECT_RATE`], to the nearest whole frame — the ratio
+/// does not divide for every rate, and the fields hold frames.
+///
+/// `None` where the file declares no rate, and where the rounding would overflow.
+pub fn project_frames(frames: u64, rate: u32) -> Option<u64> {
+    let rate = u64::from(rate);
+    if rate == 0 {
+        return None;
+    }
+    frames
+        .checked_mul(PROJECT_RATE)
+        .and_then(|scaled| scaled.checked_add(rate / 2))
+        .map(|rounded| rounded / rate)
+}
 
 /// Lowest secondary start the editor keeps, in frames. Below it a stroke's
 /// `m_startSecondary` is repaired on load, see [`repaired_secondary_start`].
@@ -229,6 +248,11 @@ pub struct VelocityDefaults {
 /// The highest velocity a window end may name.
 pub const MAX_VELOCITY: u8 = 127;
 
+/// The highest MIDI note a root key or key range may name. Wider than the keys
+/// [`LOWEST_NOTE`]..=[`HIGHEST_NOTE`] the editor lays `note_info` out for: a
+/// zone may reach past them.
+pub const MAX_NOTE: u8 = 127;
+
 /// One field of one stroke, with the value to give it.
 ///
 /// The trim and loop points sit in the `common_zone`'s `common_stroke`; gain
@@ -400,6 +424,16 @@ fn velocity(v: u8) -> Result<String, ParseError> {
         return Err(ParseError::OutOfBounds {
             value: v.to_string(),
             bound: format!("0..={MAX_VELOCITY}"),
+        });
+    }
+    Ok(v.to_string())
+}
+
+fn note(v: u8) -> Result<String, ParseError> {
+    if v > MAX_NOTE {
+        return Err(ParseError::OutOfBounds {
+            value: v.to_string(),
+            bound: format!("0..={MAX_NOTE}"),
         });
     }
     Ok(v.to_string())
@@ -597,8 +631,8 @@ impl Project {
     }
 
     pub fn set_root_key(&mut self, zone_id: u32, key: u8) -> Result<(), ParseError> {
-        self.map_zone_mut(zone_id)?
-            .set_field("m_rootKey", key.to_string())
+        let key = note(key)?;
+        self.map_zone_mut(zone_id)?.set_field("m_rootKey", key)
     }
 
     /// Set a zone's key range. Nothing checks it against the neighbours: the
@@ -610,9 +644,12 @@ impl Project {
                 bound: "a key range with its bottom at or below its top".into(),
             });
         }
+        // Both ends before either lands: a half-written range is a zone the
+        // editor plays over keys the caller never asked for.
+        let (bottom, top) = (note(bottom)?, note(top)?);
         let zone = self.map_zone_mut(zone_id)?;
-        zone.set_field("m_btmNote", bottom.to_string())?;
-        zone.set_field("m_topNote", top.to_string())
+        zone.set_field("m_btmNote", bottom)?;
+        zone.set_field("m_topNote", top)
     }
 
     /// The instrument's `samplib_attrs` block.
@@ -696,18 +733,23 @@ impl Project {
     ///
     /// `modified` is the Unix time stamped on every `m_modifyDate`.
     ///
-    /// Unexplained: `m_crc` and `m_crcProj` (the editor's checksum of the
-    /// generated instrument — algorithm unknown) are written as 0, and
-    /// `m_startSecondary` (an analysis result the editor stores, within a
-    /// percent of `end / 8` in every specimen) as exactly that. Confirmed in
-    /// Nord Sample Editor 3: it opens such a project (and asks for the audio
-    /// files if they are not where the paths say), repairing derived state on
-    /// load.
+    /// `m_crc` and `m_crcProj` carry the editor's checksum of the generated
+    /// instrument, whose algorithm is not derived, and are written as 0;
+    /// `m_startSecondary` is an analysis result within a percent of `end / 8`
+    /// on every specimen, and is written as exactly that.
+    /// Inferred from specimens; not confirmed on hardware.
+    ///
+    /// Nord Sample Editor 3 opens the result — asking for the audio files if
+    /// they are not where the paths say — and repairs derived state on load.
     pub fn new(name: &str, zones: &[NewZone], modified: u32) -> Result<Project, ParseError> {
         if zones.is_empty() {
             return Err(ParseError::AssertFail(
                 "a project needs at least one zone".into(),
             ));
+        }
+        tree::check_value(name)?;
+        for z in zones {
+            tree::check_value(&z.path)?;
         }
         let mut by_root: Vec<&NewZone> = zones.iter().collect();
         by_root.sort_by_key(|z| z.root_key);
@@ -891,15 +933,18 @@ fn active_eq_fields(node: &Node, scope: &str) -> Result<Vec<String>, ParseError>
         .collect()
 }
 
-/// A `common_stroke` over a whole file, with the loop points the editor
-/// derives for an untouched import: the loop starts halfway, runs to one frame
-/// short of the end, and cross-fades over 15% of its length.
+/// A `common_stroke` from frame 1 to the end of the file, with the loop points
+/// the editor derives for an untouched import: the loop starts halfway, runs to
+/// one frame short of the end, and cross-fades over 15% of its length.
 ///
 /// Inferred from specimens. A few hold a loop start half a frame above
 /// `end / 2` — an analysis result, like `m_startSecondary`, that nothing here
 /// reproduces.
 fn common_stroke(global_id: u32, frames: u64, date: &str) -> Node {
     let end = frames as f64;
+    // The editor writes `m_start = 1` for an untouched import; the encoded audio
+    // and `m_startSecondary` count from it, not from frame 0.
+    // Inferred from specimens; not confirmed on hardware.
     let start = 1.0;
     let loop_start = end / 2.0;
     let loop_length = loop_start - 1.0;
@@ -1063,6 +1108,18 @@ const MAP_STROKE_DEFAULTS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every position in a project counts at the project's own rate, so a file
+    /// recorded at another one is restated rather than stored as it counted.
+    #[test]
+    fn a_frame_count_is_restated_at_the_project_rate() {
+        assert_eq!(project_frames(4_410, 44_100), Some(4_410));
+        assert_eq!(project_frames(2_205, 22_050), Some(4_410));
+        assert_eq!(project_frames(9_600, 96_000), Some(4_410));
+        assert_eq!(project_frames(1, 48_000), Some(1), "rounded, not floored");
+        assert_eq!(project_frames(1, 0), None, "a rateless file has no basis");
+        assert_eq!(project_frames(u64::MAX, 44_100), None, "no wrapping");
+    }
 
     fn three_zones() -> Project {
         let zone = |path: &str, root_key| NewZone {
@@ -1416,6 +1473,37 @@ mod tests {
             .set_stroke_field(99, StrokeField::Gain(1.0))
             .is_err());
         assert_eq!(project.render(), before);
+    }
+
+    #[test]
+    fn a_key_past_the_midi_domain_is_refused() {
+        let mut project = three_zones();
+        let before = project.render();
+        assert!(project.set_root_key(130, 128).is_err());
+        assert!(project.set_key_range(131, 62, 128).is_err());
+        assert!(project.set_key_range(131, 128, 200).is_err());
+        assert_eq!(project.render(), before);
+
+        assert!(project.set_root_key(130, MAX_NOTE).is_ok());
+        assert!(project.set_key_range(131, 0, MAX_NOTE).is_ok());
+    }
+
+    #[test]
+    fn a_value_holding_a_line_end_is_refused_by_every_boundary() {
+        let mut project = three_zones();
+        let before = project.render();
+        assert!(project.set_name("a\nb").is_err());
+        assert!(project.set_audio_path(2, "moved/c4\r.wav").is_err());
+        assert_eq!(project.render(), before);
+
+        let zone = |path: &str| NewZone {
+            path: path.into(),
+            sample_rate: 44100,
+            frames: 1,
+            root_key: 60,
+        };
+        assert!(Project::new("a\nb", &[zone("a.wav")], 0).is_err());
+        assert!(Project::new("x", &[zone("a\nb.wav")], 0).is_err());
     }
 
     #[test]

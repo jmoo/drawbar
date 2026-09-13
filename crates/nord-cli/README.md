@@ -61,52 +61,63 @@ nord inspect --raw song.ne5t         # full Debug dump
 nord verify *.ne5p                   # round-trip check
 ```
 
-`inspect` exits non-zero if any file fails to parse. For an Electro 5 program:
+`inspect` exits non-zero if any file fails to parse. For an Electro 5 program —
+here one of the crate's own fixtures, so this is reproducible in any checkout:
 
 ```
-LA Grand.ne5p
+$ nord inspect crates/nord-format/tests/fixtures/ne5/center-gain-96.ne5p
+crates/nord-format/tests/fixtures/ne5/center-gain-96.ne5p
   type:      Electro 5 program (ne5p)
-  location:  bank 1 slot 5
-  lower:     Piano  octave +0  sustain yes  control no
-  upper:     Sample  octave +0  sustain yes  control no
-  split:     no
-  transpose: +1  (no)
-  part mix:  49.6/50.0 (lower/upper %)
-  gain:      119
-  piano:     category 0  model 2  clav 0  acoustics 1  touch 2  mono no
-  sample:    number 92  attack 14  decay/rel 87  dynamics 1  filter yes
-  depends:   piano 0x3d4b3e14  sample 0x65d8c5a1
-  fx:        stored value, with the panel's 0-10 reading where it applies
-    fx1   off
-    fx2   upper  chorus 1   rate 45  deep no
-    fx3   off
-    delay upper  feedback 2  tempo 24  wet 11 (0.9)  ping-pong no
-    reverb stage      wet 23 (1.8)
-    eq    lower        bass 74  freq 94  gain 70  treble 64
+  location:  bank 1 slot 1
+
+  Keyboard
+    lower:     Organ  octave +0  sustain no  control no
+    upper:     Organ  octave +0  sustain no  control no
+    split:     no
+    transpose: +0  (off)
+    part mix:  50.0/0.0 (lower/upper %)
+    gain:      96 (7.6)
+
+  Voices
+    piano:     grand  model 0  clav 0  acoustics 0  touch 0  mono no
+    sample:    number 0  attack 0 (0.0)  decay/rel 0 (0.0)  dynamics 0  filter no
+    depends:   piano none  sample none
+
+  Effects
+    stored value, with the panel's reading where the scale is known
+    fx1    off
+    fx2    off
+    fx3    off
+    delay  off
+    reverb off
+    eq     off
     rotary speed slow  stop off
-```
 
-`depends:` is the piano and sample the program references. Those ids are the same
-values the instrument reports for that program over USB, so `nord program deps` on
-the same slot will name them — which is the only way to resolve an id, since the
-file itself stores no names.
-
-For an organ program, both presets of all four models are shown, with the
-selected model marked `*` and its active preset `<`:
-
-```
-  organ:     b3+bass selected (*), drawbar positions 0-8
-   *b3    p1< 04.......  vib off  perc off
+  Organ
+    b3 selected (*), active preset (<), drawbar positions 0-8
+   *b3    p1< 000000000  vib off  perc off
    *b3    p2  000000000  vib off  perc off
-    vox   p1< 888800000  vib V3
-    vox   p2  888800000  vib V3
-   (* = selected model, < = its active preset)
+    vox   p1< 000000000  vib off
+    vox   p2  000000000  vib off
+    farf  p1< ......... (000000000)  vib off
+    farf  p2  ......... (000000000)  vib off
+    pipe  p1< 000000000
+    pipe  p2  000000000
 ```
 
-Both presets are shown because in **b3+bass** the two are different instruments:
-preset 1 is the bass manual, whose two drawbars live outside the nine-nibble
-block. It renders as `04.......` rather than nine positions, since the nine
-nibbles hold stale values in that mode.
+Where the scale is known, the panel's own reading follows the stored value:
+`gain: 96 (7.6)`. On a terminal the drawbar rows are drawn as blocks and the
+digits kept beside them; piped, as here, they are the digits alone.
+
+`depends:` is the piano and sample the program references — `none` on a program
+that references neither. Those ids are the same values the instrument reports
+for that program over USB, so `nord program deps` on the same slot will name
+them, which is the only way to resolve an id: the file itself stores no names.
+
+Both organ presets of all four models are always printed, because in **b3+bass**
+the two are different instruments: preset 1 is the bass manual, whose two
+drawbars live outside the nine-nibble block. It renders as `04.......` rather
+than nine positions, since the nine nibbles hold stale values in that mode.
 
 Songs list their four program slots; settings print the decoded System, MIDI and
 Sound menus plus the startup state the instrument restores at power-up; bundles
@@ -230,12 +241,13 @@ read back first and put back if the write fails.
 ## Editing an object
 
 `edit` is the only verb that changes what is *inside* an object, and it exists on
-five nouns: `nord program edit`, `nord live edit` (the live buffer is the
+six nouns: `nord program edit`, `nord live edit` (the live buffer is the
 program body under another tag, so the fields are identical), `nord settings
 edit` (the menu settings, plus the `startup_*` state the instrument restores at
-power-up), `nord setlist edit` (below), and `nord sample edit` (below). For the
-first three the field paths are `nord-format`'s own names, generated from the
-panel declarations, so `--fields` lists whatever the library currently knows:
+power-up), `nord setlist edit` (below), `nord sample edit` (below), and `nord
+piano edit`. For the first three the field paths are `nord-format`'s own names,
+generated from the panel declarations, so `--fields` lists whatever the library
+currently knows:
 
 ```sh
 nord program edit --fields                       # what is settable, and what it takes
@@ -309,10 +321,12 @@ nord setlist edit --set slot1=1:1 -o blank.ne5t     # a fresh set list
 ### `nord sample edit`
 
 A sample instrument is mostly encoded audio, so its settable fields are the ones
-the format can patch in place without touching a sample: the name, and each
-zone's root key and top note. Notes are spelled as names (`C4`, `F#3` — middle C
-is C4) or numbers 0–127, and zones are numbered from 1, top of the keyboard
-first, the way `inspect` lists them:
+the format can patch in place without touching a sample: the name, each zone's
+root key and top note, and `zoneN.low_note` on the generations that store a
+zone's bottom rather than tiling up to the zone below. Notes are spelled as
+names (`C4`, `F#3` — middle C is C4) or numbers 0–127, and zones are numbered
+from 1, top of the keyboard first, the way `inspect` lists them. `--fields`
+lists exactly what this instrument offers, and nothing it hides is settable:
 
 ```sh
 nord sample edit inst.nsmp --fields

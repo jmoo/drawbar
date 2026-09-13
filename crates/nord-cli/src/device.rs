@@ -77,8 +77,6 @@ pub fn info(ui: &Ui) -> Result<(), String> {
     if devices.is_empty() {
         return Err("no Clavia device found".into());
     }
-    // Remembered rather than returned on the spot: the descriptors below are worth
-    // printing for every device even when one of them will not answer.
     let mut unreachable = None;
     for (i, d) in devices.iter().enumerate() {
         if i > 0 {
@@ -147,8 +145,6 @@ fn print_table(ui: &Ui, report: &[Status]) {
     )));
     let mut any_dirty = false;
     for s in report {
-        // Fixed-size classes are far clearer as slots than as byte counts: programs
-        // report 400, which is exactly the instrument's 8 banks x 50.
         let (used, free, of) = match s.slots() {
             Some(slots) => (
                 format!("{} / {} slots", s.count, slots),
@@ -229,8 +225,8 @@ fn print_json(ui: &Ui, report: &[Status]) {
 
 /// Turn the device's bare status code into something actionable.
 ///
-/// All three confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address
-/// past the instrument's geometry, `0x4` from a write aimed at an occupied slot.
+/// Confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address past the
+/// instrument's geometry, `0x4` from a write aimed at an occupied slot.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
         nord_usb::Error::DeviceStatus(1) => {
@@ -288,6 +284,54 @@ pub fn set_recording(path: Option<PathBuf>) {
     let _ = RECORDING.set(path);
 }
 
+/// What a transaction needs from the transport it runs on beyond moving frames: the
+/// `--record` bracket, and the product string the acceptance table reads.
+///
+/// A [`UsbTransport`] carries both; a replayed exchange records nothing and names no
+/// product. Stating that here is what lets [`send`] — the one path that holds a slot's
+/// only copy — be driven by a script as well as by an instrument.
+trait Recorded {
+    fn mark_intent(&mut self, intent: &str);
+    fn mark_expect(&mut self, e: &nord_usb::Error);
+    fn finish_recording(&mut self) -> nord_usb::Result<()>;
+    fn product(&self) -> Option<&str>;
+}
+
+/// A replayed exchange records nothing and names no product: the script is the
+/// recording, and what the instrument would have called itself is not in it.
+#[cfg(test)]
+impl Recorded for nord_usb::ReplayTransport {
+    fn mark_intent(&mut self, _intent: &str) {}
+
+    fn mark_expect(&mut self, _e: &nord_usb::Error) {}
+
+    fn finish_recording(&mut self) -> nord_usb::Result<()> {
+        Ok(())
+    }
+
+    fn product(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl Recorded for UsbTransport {
+    fn mark_intent(&mut self, intent: &str) {
+        UsbTransport::mark_intent(self, intent);
+    }
+
+    fn mark_expect(&mut self, e: &nord_usb::Error) {
+        UsbTransport::mark_expect(self, e);
+    }
+
+    fn finish_recording(&mut self) -> nord_usb::Result<()> {
+        UsbTransport::finish_recording(self)
+    }
+
+    fn product(&self) -> Option<&str> {
+        UsbTransport::product(self)
+    }
+}
+
 /// Run one transaction on the instrument, recording what it was for and — if it failed —
 /// what it produced.
 ///
@@ -295,17 +339,22 @@ pub fn set_recording(path: Option<PathBuf>) {
 /// written at the same moment: the intent goes ahead of the frames, the outcome is only
 /// known once they are on disk. A success writes nothing, because a section that says
 /// nothing expects `ok`.
-fn transact<T>(
-    device: &mut Device<UsbTransport>,
+///
+/// A recording that lost frames is reported once the transaction has closed, so a script
+/// is never silently short. The transaction's own failure outranks it: that is what the
+/// operator asked about.
+fn transact<T: Transport + Recorded, R>(
+    device: &mut Device<T>,
     intent: impl std::fmt::Display,
-    run: impl FnOnce(&mut Device<UsbTransport>) -> nord_usb::Result<T>,
-) -> nord_usb::Result<T> {
+    run: impl FnOnce(&mut Device<T>) -> nord_usb::Result<R>,
+) -> nord_usb::Result<R> {
     device.transport().mark_intent(&intent.to_string());
     let outcome = run(device);
     if let Err(e) = &outcome {
         device.transport().mark_expect(e);
     }
-    outcome
+    let recorded = device.transport().finish_recording();
+    outcome.and_then(|value| recorded.map(|()| value))
 }
 
 fn open_usb() -> Result<Device<UsbTransport>, String> {
@@ -318,7 +367,7 @@ fn open_usb() -> Result<Device<UsbTransport>, String> {
 }
 
 /// Cache geometry in its own intent so later recordings contain only their own frames.
-fn read_geometry(device: &mut Device<UsbTransport>) -> Result<&Geometry, String> {
+fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geometry, String> {
     transact(device, "device geometry", |d| {
         nord_usb::block_on(d.geometry()).map(|_| ())
     })
@@ -387,7 +436,7 @@ pub fn get(
     let (info, file) = read_object(&mut device, at, class, body)?;
 
     if let Some(path) = out {
-        std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::edit::replace_file(&path, &file)?;
         ui.note(format!(
             "read {:?} ({} bytes) from {} -> {}",
             info.name,
@@ -398,8 +447,6 @@ pub fn get(
         return Ok(());
     }
 
-    // Parse the bytes just built rather than reporting the wire fields directly, so this
-    // runs the same decode path `nord inspect` does.
     let entity = nord_format::from_stream(&mut std::io::Cursor::new(&file)).map_err(|e| {
         format!(
             "{} decoded off the device but did not parse: {e}",
@@ -679,11 +726,41 @@ pub fn send(
     // `None` means now; the device can refuse a timestamp it considers future.
     stamp: Option<u32>,
 ) -> Result<(), String> {
-    let mut device = open_usb()?;
+    send_with(
+        ui,
+        &mut open_usb()?,
+        &std::env::current_dir().unwrap_or_default(),
+        file,
+        at,
+        class,
+        confirmed,
+        what,
+        name,
+        stamp,
+    )
+}
 
+/// [`send`] against an already-open device, spilling a rescue into `spill`.
+///
+/// The split is what the replay tests drive: every step between the first `INFO` and the
+/// write can fail, and what this does with the occupant it is holding is the difference
+/// between a failed write and a lost slot.
+#[allow(clippy::too_many_arguments)]
+fn send_with<T: Transport + Recorded>(
+    ui: &Ui,
+    device: &mut Device<T>,
+    spill_into: &Path,
+    file: &[u8],
+    at: Location,
+    class: ObjectClass,
+    confirmed: bool,
+    what: &str,
+    name: Option<&str>,
+    stamp: Option<u32>,
+) -> Result<(), String> {
     // Check geometry before the transfer starts.
     let bad = transact(
-        &mut device,
+        device,
         format!("{} check-address {}", noun(class), addr(at)),
         |d| nord_usb::block_on(d.read(class, async |s| usb_op::check_address(s, at).await)),
     )
@@ -694,22 +771,14 @@ pub fn send(
 
     let timestamp = match stamp {
         Some(stamp) => stamp,
-        None => {
-            let elapsed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| format!("system clock is before the Unix epoch: {e}"))?;
-            u32::try_from(elapsed.as_secs())
-                .map_err(|_| "system time does not fit the device protocol".to_string())?
-        }
+        None => crate::edit::unix_seconds_now()?,
     };
 
     // Name what is about to be destroyed before destroying it. An empty destination is
     // not a failure: status 1 means the slot is vacant, so there is nothing to report.
-    let existing = transact(
-        &mut device,
-        format!("{} info {}", noun(class), addr(at)),
-        |d| nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await)),
-    );
+    let existing = transact(device, format!("{} info {}", noun(class), addr(at)), |d| {
+        nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await))
+    });
 
     let existing = match existing {
         Ok(info) => Some(info),
@@ -784,11 +853,9 @@ pub fn send(
     // sit through it only to be asked whether they meant it.
     let backup = match &existing {
         Some(_) => Some(
-            transact(
-                &mut device,
-                format!("{} read {}", noun(class), addr(at)),
-                |d| nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await)),
-            )
+            transact(device, format!("{} read {}", noun(class), addr(at)), |d| {
+                nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await))
+            })
             // Nothing is deleted until the backup is in hand.
             .map_err(|e| {
                 format!(
@@ -802,16 +869,30 @@ pub fn send(
     };
 
     // Read before deletion so geometry failure leaves the occupant intact.
-    read_geometry(&mut device)?;
+    read_geometry(device)?;
 
-    if existing.is_some() && !in_place {
+    if let (Some(backup), false) = (&backup, in_place) {
         ui.note(format!("deleting {} to make room", shown(at)));
-        transact(
-            &mut device,
+        if let Err(e) = transact(
+            device,
             format!("{} delete {}", noun(class), addr(at)),
             |d| nord_usb::block_on(delete_for_replacement(d, class, at)),
-        )
-        .map_err(|e| format!("deleting {}: {}", shown(at), explain(e, at)))?;
+        ) {
+            // ⚠️ A status is the instrument declining before the DELETE landed, so the
+            // occupant is still there. Anything else — a close that would not answer, a read
+            // that timed out — can have landed, and this process is then holding the only
+            // copy of what the slot held.
+            if let nord_usb::Error::DeviceStatus(_) = e {
+                return Err(format!("deleting {}: {}", shown(at), explain(e, at)));
+            }
+            return Err(spill(
+                ui,
+                spill_into,
+                at,
+                backup,
+                format!("{} may have been deleted: {}", shown(at), explain(e, at)),
+            ));
+        }
     }
 
     // What the slot ends up called: the caller's choice, else the occupant's name.
@@ -828,7 +909,7 @@ pub fn send(
         ))
     } else {
         transact(
-            &mut device,
+            device,
             put_intent(class, what, at, &write_name, timestamp),
             |d| nord_usb::block_on(d.write(class, at, file, &write_name, timestamp)),
         )
@@ -839,7 +920,7 @@ pub fn send(
             ui.note(format!("wrote {what} -> {}", shown(at)));
             Ok(())
         }
-        (Err(e), None) => Err(e.to_string()),
+        (Err(e), None) => Err(explain(e, at)),
         // Getting the occupant back matters more than reporting the original error, which
         // is carried along and reported once the slot is whole again.
         (Err(e), Some(backup)) => {
@@ -854,7 +935,7 @@ pub fn send(
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| write_name.clone());
             let restore = transact(
-                &mut device,
+                device,
                 put_intent(
                     class,
                     &rescue_name(at, &backup),
@@ -868,18 +949,26 @@ pub fn send(
                 Ok(()) => {
                     ui.note(format!("restored {}", shown(at)));
                     Err(format!(
-                        "{e} ({} was restored, and is unchanged)",
+                        "{} ({} was restored, and is unchanged)",
+                        explain(e, at),
                         shown(at)
                     ))
                 }
-                Err(restore) => Err(rescue(
-                    ui,
-                    at,
-                    class,
-                    &backup,
-                    &e.to_string(),
-                    &restore.to_string(),
-                )),
+                Err(restore) => {
+                    ui.warn("restoring failed too");
+                    Err(spill(
+                        ui,
+                        spill_into,
+                        at,
+                        &backup,
+                        format!(
+                            "{} (restoring failed as well: {}) {}",
+                            explain(e, at),
+                            explain(restore, at),
+                            aftermath(class, at),
+                        ),
+                    ))
+                }
             }
         }
     }
@@ -900,36 +989,25 @@ fn fail_after_delete() -> bool {
     false
 }
 
-/// Last resort: the write failed, the restore failed, and the slot's former contents
-/// exist only in memory. Spill them next to the operator rather than exiting with them.
-fn rescue(
-    ui: &Ui,
-    at: Location,
-    class: ObjectClass,
-    backup: &[u8],
-    write: &str,
-    restore: &str,
-) -> String {
-    let path = std::env::current_dir()
-        .unwrap_or_default()
-        .join(rescue_name(at, backup));
-    match std::fs::write(&path, backup) {
+/// Last resort: the slot's former contents exist only in this process. Put them next to
+/// the operator rather than exiting with them, and say where they went.
+///
+/// Both paths that can leave a slot without them reach this — a delete that may have
+/// landed before its transaction failed, and a write whose restore failed too — so what
+/// the operator has to do next is worded once.
+fn spill(ui: &Ui, dir: &Path, at: Location, backup: &[u8], lost: String) -> String {
+    let path = dir.join(rescue_name(at, backup));
+    match crate::edit::replace_file(&path, backup) {
         Ok(()) => {
-            ui.warn(format!(
-                "restore failed too; wrote the original to {}",
-                path.display()
-            ));
+            ui.warn(format!("wrote the original to {}", path.display()));
             format!(
-                "{write} (restoring failed as well: {restore}) {}; \
-                 its former contents were saved to {} — put it back with `nord put`",
-                aftermath(class, at),
+                "{lost}; its former contents were saved to {} — put it back with `nord put`",
                 path.display(),
             )
         }
         Err(io) => format!(
-            "{write} (restoring failed as well: {restore}) {} and its former \
-             contents could not be saved either ({io}); {} bytes are lost",
-            aftermath(class, at),
+            "{lost}, and its former contents could not be saved either ({io}); {} bytes \
+             are lost",
             backup.len(),
         ),
     }
@@ -960,18 +1038,27 @@ fn aftermath(class: ObjectClass, at: Location) -> String {
     }
 }
 
-/// Read one slot's name in a throwaway read-only session — used to show what a mutation
-/// is about to affect before it happens.
-fn peek(
-    device: &mut Device<UsbTransport>,
+/// Read one slot's metadata in a throwaway read-only session — used to show what a
+/// mutation is about to affect before it happens.
+fn peek_info<T: Transport + Recorded>(
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-) -> Result<String, String> {
+) -> nord_usb::Result<ProgramInfo> {
     transact(device, format!("{} info {}", noun(class), addr(at)), |d| {
         nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await))
     })
-    .map(|info| info.name)
-    .map_err(|e| explain(e, at))
+}
+
+/// The same, reduced to the name and the refusal a caller prints.
+fn peek<T: Transport + Recorded>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+    at: Location,
+) -> Result<String, String> {
+    peek_info(device, class, at)
+        .map(|info| info.name)
+        .map_err(|e| explain(e, at))
 }
 
 /// What the operation does to whatever occupies the destination slot.
@@ -988,20 +1075,24 @@ enum DestFate {
 /// than saying nothing: it invites the reader to delete the destination first to protect
 /// it, which destroys the very thing the swap would have preserved.
 ///
-/// Unlike [`peek`] this never fails: `INFO` errors on an empty destination, which is the
-/// normal case here. A real transport fault surfaces on the operation itself a moment
-/// later.
-fn peek_dest(
+/// Unlike [`peek`] this never fails: `INFO` answers status 1 on an empty destination,
+/// which is the normal case here, and the operation itself is a moment away from
+/// reporting anything worse. ⚠️ Only that status says the slot is empty — a fault
+/// reported as emptiness would have the reader expect a write where a swap is coming.
+fn peek_dest<T: Transport + Recorded>(
     ui: &Ui,
-    device: &mut Device<UsbTransport>,
+    device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
     fate: DestFate,
 ) -> String {
-    match (peek(device, class, at), fate) {
-        (Ok(name), DestFate::Overwritten) => format!("{} {name:?}", ui.danger("OVERWRITING")),
-        (Ok(name), DestFate::Swapped) => format!("{} {name:?}", ui.bold("SWAPPING WITH")),
-        (Err(_), _) => "destination reads as empty".into(),
+    match (peek_info(device, class, at), fate) {
+        (Ok(info), DestFate::Overwritten) => {
+            format!("{} {:?}", ui.danger("OVERWRITING"), info.name)
+        }
+        (Ok(info), DestFate::Swapped) => format!("{} {:?}", ui.bold("SWAPPING WITH"), info.name),
+        (Err(nord_usb::Error::DeviceStatus(1)), _) => "destination reads as empty".into(),
+        (Err(e), _) => format!("destination could not be read: {}", explain(e, at)),
     }
 }
 
@@ -1299,9 +1390,9 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
                 None => String::new(),
             };
             ui.out(format!(
-                "{:<8} {:08x}   {}{loc}",
+                "{:<8} {:<10} {}{loc}",
                 d.class.label(),
-                d.id,
+                crate::summary::dep_id(d.id),
                 d.name.trim_end(),
             ));
         }
@@ -1329,7 +1420,11 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
             } else {
                 d.name.trim_end().to_string()
             };
-            ui.note(format!("  {} {:08x} {}", d.class.label(), d.id, named));
+            ui.note(format!(
+                "  {} {} {named}",
+                d.class.label(),
+                crate::summary::dep_id(d.id)
+            ));
         }
     }
     Ok(())
@@ -1429,12 +1524,13 @@ pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
 /// Read-only, and outside the bulk protocol: no session is opened, so nothing here can
 /// desync or wedge one. A request the device does not implement stalls the endpoint,
 /// which arrives as an error and is reported as a dash rather than as data.
-#[allow(clippy::too_many_arguments)]
+///
+/// `len` is the transfer's `wLength`, which the host controller states in 16 bits.
 pub fn controls(
     ui: &Ui,
     from: u8,
     to: u8,
-    len: usize,
+    len: u16,
     interface: bool,
     value: u16,
     index: u16,
@@ -1459,7 +1555,7 @@ pub fn controls(
             request,
             value,
             index,
-            len,
+            usize::from(len),
             std::time::Duration::from_millis(500),
         );
         match got {
@@ -1472,25 +1568,15 @@ pub fn controls(
             }
             Ok(data) => {
                 answered += 1;
-                let hex: Vec<String> = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
-                let text: String = data
-                    .iter()
-                    .map(|&b| {
-                        if (0x20..0x7f).contains(&b) {
-                            b as char
-                        } else {
-                            '.'
-                        }
-                    })
-                    .collect();
+                // A sweep asks which requests answer at all; the row states the whole
+                // length and shows as much of it as one line holds.
+                let (hex, text) = dump(&data[..data.len().min(24)]);
                 ui.out(format!(
-                    "{request:#04x} ({request:>3}) {:>5}  {}",
+                    "{request:#04x} ({request:>3}) {:>5}  {hex}",
                     data.len(),
-                    hex.join(" ")
                 ));
                 ui.out(format!("{:>16}  {}", "", ui.dim(text)));
             }
-            // The overwhelmingly common case while sweeping: not implemented.
             Err(_) => ui.out(ui.dim(format!("{request:#04x} ({request:>3})     -  —"))),
         }
     }
@@ -1648,12 +1734,18 @@ pub fn probe(
         let reply = nord_usb::block_on(async {
             let req = nord_usb::Message::new(svc, subsystem, op, words.clone());
             let t = device.transport();
-            t.write(&req.encode()).await?;
+            let limit = std::time::Duration::from_secs(wait);
+            // ⚠️ `--bare` is the path for an instrument that is already refusing
+            // commands, and a stalled bulk endpoint blocks a plain write forever: the
+            // read timeout below is never reached and the caller hangs with no reason.
+            if !t.write_timeout(&req.encode(), limit).await? {
+                return Err(nord_usb::Error::Transport(format!(
+                    "the device did not accept command {op:#04x} within {wait}s: its bulk \
+                     endpoints are stalled, and a power cycle is the only way out"
+                )));
+            }
             match t
-                .read_timeout(
-                    nord_usb::transport::READ_BUFFER,
-                    std::time::Duration::from_secs(wait),
-                )
+                .read_timeout(nord_usb::transport::READ_BUFFER, limit)
                 .await?
             {
                 Some(raw) => nord_usb::Message::decode_probe(&raw).map(Some),
@@ -1733,19 +1825,29 @@ fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
     let payload = reply.payload();
     ui.out(format!("payload {} bytes", payload.len()));
     for (i, chunk) in payload.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        let ascii: String = chunk
-            .iter()
-            .map(|&b| {
-                if (0x20..0x7f).contains(&b) {
-                    b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-        ui.out(format!("  {:04x}  {:<47}  {ascii}", i * 16, hex.join(" ")));
+        let (hex, text) = dump(chunk);
+        ui.out(format!("  {:04x}  {hex:<47}  {text}", i * 16));
     }
+}
+
+/// Bytes as hex pairs, and the same bytes as text with everything unprintable shown
+/// as `.`.
+///
+/// ⚠️ Both dumps read one run of bytes: a byte shown in one column and not the other
+/// would have the reader lining up different data.
+fn dump(bytes: &[u8]) -> (String, String) {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let text = bytes
+        .iter()
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect();
+    (hex.join(" "), text)
 }
 
 /// Report everything the instrument knows about one slot. Read-only.
@@ -1774,8 +1876,6 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
         format!(
             "{} bytes{}",
             grouped(info.body_len),
-            // A piano is nine digits of bytes; the rounded size is what tells you it is
-            // a 200MB object rather than a 20MB one.
             match human_size(info.body_len) {
                 Some(h) => format!("  {}", ui.dim(format!("({h})"))),
                 None => String::new(),
@@ -1840,6 +1940,7 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn replacement_refuses_unusable_geometry_before_deleting() {
@@ -1894,6 +1995,18 @@ mod tests {
                 "{class:?}: the geometry session must close"
             );
         }
+    }
+
+    /// A control transfer's `wLength` is 16 bits, and the sweep allocates the buffer
+    /// before the request goes out, so a wider count is refused at the flag.
+    #[test]
+    fn a_control_sweep_cannot_ask_for_more_bytes_than_a_transfer_carries() {
+        let sweep = |len: &str| {
+            crate::Cli::try_parse_from(["nord", "device", "controls", "--len", len]).is_ok()
+        };
+        assert!(sweep("65535"));
+        assert!(!sweep("65536"));
+        assert!(!sweep("4294967296"));
     }
 
     /// The rescue file is the last copy of a program that no longer exists on the
@@ -2058,6 +2171,160 @@ mod tests {
     fn unparseable_bytes_still_get_rescued() {
         let at = Location { bank: 0, slot: 0 };
         assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
+    }
+
+    /// The write path driven by the recorded `nord program put`, with one step of it
+    /// made to fail.
+    ///
+    /// Between the backup read and the write the slot is genuinely empty and this
+    /// process holds the only copy of what was in it, so what `send` does with that copy
+    /// is the whole difference between a failed write and a lost program.
+    mod losing_the_occupant {
+        use super::*;
+        use nord_usb::transport::{Direction, ReplayTransport, Script, Step};
+        use nord_usb::wire::Message;
+
+        const PUT: &str =
+            include_str!("../../nord-usb/tests/scripts/program/put_7-10_overwrite.script");
+        const FILE: &[u8] = include_bytes!("../../nord-usb/tests/scripts/program/prog_8-14.ne5p");
+        const GEOMETRY: &str = include_str!("../../nord-usb/tests/scripts/device/geometry.script");
+        const AT: Location = Location { bank: 6, slot: 9 };
+        const NAME: &str = "prog-8-14";
+        const STAMP: u32 = 0x6a89_f433;
+
+        /// The recorded transactions a put runs through: check-address, info, read,
+        /// geometry, delete, write.
+        ///
+        /// ⚠️ The geometry read is spliced in from its own recording. The put was
+        /// captured against a build that already held the partition table, so the
+        /// capture has no frames for the transaction this one opens before deleting.
+        fn recorded() -> Vec<Vec<Step>> {
+            let steps = |text| {
+                Script::parse(text)
+                    .expect("a recorded exchange parses")
+                    .sections
+                    .into_iter()
+                    .map(|section| section.steps)
+                    .filter(|steps: &Vec<Step>| !steps.is_empty())
+                    .collect::<Vec<_>>()
+            };
+            let mut out = steps(PUT);
+            out.splice(3..3, steps(GEOMETRY));
+            out
+        }
+
+        /// The write transaction with its `BEGIN_WRITE` answered by `status`, and the
+        /// data frames it would have carried dropped: a refusal leaves the session in
+        /// step, so the client closes it and sends nothing else.
+        fn refused_write(steps: &[Step], status: u32) -> Vec<Step> {
+            let mut refusal = Message::decode_response(&steps[6].bytes).expect("the reply");
+            refusal.args[..4].copy_from_slice(&status.to_be_bytes());
+            let mut out = steps[..6].to_vec();
+            out.push(Step {
+                direction: Direction::In,
+                bytes: refusal.encode(),
+            });
+            out.extend_from_slice(&steps[12..]);
+            out
+        }
+
+        fn send_over(steps: Vec<Step>, spill_into: &Path) -> Result<(), String> {
+            let mut device = Device::new(ReplayTransport::new(steps));
+            send_with(
+                &Ui::piped(),
+                &mut device,
+                spill_into,
+                FILE,
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+        }
+
+        fn rescued(dir: &Path) -> Vec<String> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        /// A refused write puts the occupant back, and the refusal reaches the operator
+        /// as what the status means rather than as its number.
+        #[test]
+        fn a_refused_write_restores_the_occupant() {
+            let dir = crate::edit::tests::scratch("send-restored");
+            let put = recorded();
+            let mut steps: Vec<Step> = put[..5].concat();
+            steps.extend(refused_write(&put[5], 4));
+            steps.extend(put[5].clone());
+
+            let err = send_over(steps, &dir).unwrap_err();
+            assert!(err.contains("is occupied"), "{err}");
+            assert!(err.contains("was restored, and is unchanged"), "{err}");
+            assert_eq!(rescued(&dir), Vec::<String>::new());
+        }
+
+        /// Nothing is left holding the program once the restore is refused too, so it
+        /// has to reach the disk before the process exits.
+        #[test]
+        fn a_refused_restore_leaves_the_occupant_on_disk() {
+            let dir = crate::edit::tests::scratch("send-rescued");
+            let put = recorded();
+            let refused = refused_write(&put[5], 4);
+            let mut steps: Vec<Step> = put[..5].concat();
+            steps.extend(refused.clone());
+            steps.extend(refused);
+
+            let err = send_over(steps, &dir).unwrap_err();
+            assert!(err.contains("restoring failed as well"), "{err}");
+            assert!(err.contains("were saved to"), "{err}");
+            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
+            // The error tells the operator to hand it back to `nord put`, which reads it
+            // exactly this way before touching the instrument.
+            let saved = std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap();
+            assert!(nord_usb::envelope::unwrap(&saved).is_ok());
+        }
+
+        /// ⚠️ A delete step that fails after the `DELETE` landed leaves the slot empty
+        /// just as surely as a failed write does, so the backup has to be spilled there
+        /// too — the restore path is never reached, because no write was attempted.
+        #[test]
+        fn a_delete_that_fails_after_it_landed_spills_the_occupant() {
+            let dir = crate::edit::tests::scratch("send-delete-fails");
+            let put = recorded();
+            // Through the DELETE's own reply, and nothing for the close to read.
+            let mut steps: Vec<Step> = put[..4].concat();
+            steps.extend_from_slice(&put[4][..7]);
+
+            let err = send_over(steps, &dir).unwrap_err();
+            assert!(err.contains("may have been deleted"), "{err}");
+            assert!(err.contains("were saved to"), "{err}");
+            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
+        }
+
+        /// A status from the delete step is the instrument declining before the `DELETE`
+        /// landed: the occupant is still in the slot, and spilling a copy beside the
+        /// operator would invite them to put back what never left.
+        #[test]
+        fn a_refused_delete_leaves_the_occupant_where_it_is() {
+            let dir = crate::edit::tests::scratch("send-delete-refused");
+            let put = recorded();
+            let mut delete = put[4][..7].to_vec();
+            let mut refusal = Message::decode_response(&delete[6].bytes).expect("the reply");
+            refusal.args[..4].copy_from_slice(&3u32.to_be_bytes());
+            delete[6].bytes = refusal.encode();
+            delete.extend_from_slice(&put[4][7..]);
+            let mut steps: Vec<Step> = put[..4].concat();
+            steps.extend(delete);
+
+            let err = send_over(steps, &dir).unwrap_err();
+            assert!(err.contains("out of range"), "{err}");
+            assert!(!err.contains("saved to"), "{err}");
+            assert_eq!(rescued(&dir), Vec::<String>::new());
+        }
     }
 
     /// The answer is the only description the corpus will ever have of these bytes, so it

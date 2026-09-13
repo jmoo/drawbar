@@ -16,7 +16,7 @@ use crate::device::occupancy;
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
-use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK};
+use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK, GAP, GLYPH, PAD};
 use crate::strings::folder;
 use crate::tabs::Spot;
 
@@ -44,12 +44,7 @@ const SIDE_LEAST: f32 = 180.0;
 const CENTRE_WIDE: f32 = 300.0;
 const CENTRE_TALL: f32 = 200.0;
 
-/// The room the bars keep at each end, and the gap between their parts.
-const PAD: f32 = 8.0;
-const GAP: f32 = 6.0;
-
-/// A glyph in a bar, the check beside a menu item, and the height of a control.
-const GLYPH: f32 = 13.0;
+/// The check beside a menu item, and the height of a control.
 const CHECK: f32 = 12.0;
 const BUTTON: f32 = 22.0;
 
@@ -431,6 +426,17 @@ fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, accented: bool) -> egui:
     .inner
 }
 
+/// The New menu behind a glyph. The tool bar's and the tab strip's are one button, so
+/// what New offers is one list reached two ways.
+pub(crate) fn new_button(ui: &mut egui::Ui, glyph: Glyph, ink: egui::Color32, acts: &mut Vec<Act>) {
+    ui.scope(|ui| {
+        flat(ui);
+        ui.menu_image_button(sized(glyph, GLYPH, ink), |ui| new_menu(ui, acts))
+            .response
+            .on_hover_text("something new on this computer");
+    });
+}
+
 /// A 24 × 22 button carrying one glyph. `on` is a toggle whose dock is open, which is
 /// the one state that fills without the pointer on it.
 fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, on: bool, hint: &str) -> egui::Response {
@@ -577,10 +583,14 @@ impl DrawbarApp {
         if hit(&key::DOCK) {
             acts.push(Act::ToggleDock(Dock::Bottom));
         }
-        if self.attached() && hit(&key::QUEUE) {
+        // ⚠️ Consumed whether or not one is attached, and before ⌘S below. egui matches a
+        // shortcut's modifiers logically, so an unconsumed ⌘⇧S goes on to match ⌘S — and
+        // saving is what asking for the queue would have done instead.
+        if hit(&key::QUEUE) && self.attached() {
             acts.push(Act::ShowPage(Page::Queue));
         }
-        if self.attached() && hit(&key::RESYNC) {
+        // ⚠️ Likewise: an unconsumed ⌘R reloads the browser tab this build runs in.
+        if hit(&key::RESYNC) && self.attached() {
             acts.push(Act::Resync);
         }
         if WINDOWED && hit(&key::CLOSE) {
@@ -761,15 +771,8 @@ impl DrawbarApp {
                     if glyph_button(ui, Glyph::FolderOpen, false, "open files…").clicked() {
                         acts.push(Act::OpenFiles);
                     }
-                    ui.scope(|ui| {
-                        flat(ui);
-                        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-                        ui.menu_image_button(sized(Glyph::FilePlus2, GLYPH, ink), |ui| {
-                            new_menu(ui, acts);
-                        })
-                        .response
-                        .on_hover_text("something new on this computer");
-                    });
+                    let ink = ui.visuals().widgets.inactive.fg_stroke.color;
+                    new_button(ui, Glyph::FilePlus2, ink, acts);
                     let open = self.tabs.active();
                     if glyph_button(ui, Glyph::Save, false, "save the open document").clicked() {
                         if let Some(id) = open {
@@ -946,7 +949,7 @@ impl DrawbarApp {
             }
             let ink = crate::app::caption(ui.visuals());
             for page in pages.iter().copied() {
-                let on = self.shell.dock_open && self.shell.page == page;
+                let on = self.shell.dock_open && self.page() == page;
                 if ui
                     .selectable_label(on, caps(page.title()).color(ink))
                     .clicked()
@@ -1205,14 +1208,6 @@ mod tests {
 
     /// One frame with something arriving in it.
     fn frame_of(ctx: &egui::Context, app: &mut DrawbarApp, events: Vec<egui::Event>) -> Painted {
-        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-                _ => {}
-            }
-        }
-
         let mut frame = eframe::Frame::_new_kittest();
         let input = egui::RawInput {
             events,
@@ -1225,10 +1220,6 @@ mod tests {
             // Panels shrink this as they are added; the central panel does not.
             centre = ctx.available_rect();
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            words(&clipped.shape, &mut said);
-        }
         let panels = REGIONS
             .iter()
             .filter_map(|id| {
@@ -1239,7 +1230,7 @@ mod tests {
         Painted {
             centre,
             panels,
-            words: said,
+            words: crate::tabs::words(&output),
         }
     }
 
@@ -1380,6 +1371,81 @@ mod tests {
         app.tabs.show(Spot::Document(id));
         let _ = drawn(&ctx, &mut app);
         assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
+    }
+
+    /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
+    /// a ⌘⇧S nothing consumed goes on to match ⌘S. The gesture that asks to review the
+    /// send queue would then mark the open document saved instead, taking the revert it
+    /// still had with it.
+    #[test]
+    fn the_send_queue_shortcut_never_falls_through_to_save() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.tabs.open(id);
+        assert!(app.workspace.get(id).unwrap().is_unsaved());
+
+        let pressed = || egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+        };
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(!app.attached(), "nothing was attached");
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "there is no queue to review, and there is no save either"
+        );
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(app.shell.dock_open && app.shell.page == Page::Queue);
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "reviewing the queue is not saving"
+        );
+    }
+
+    /// ⚠️ ⌘R is the browser tab's own reload. A frame that leaves it unconsumed reloads
+    /// the page out from under whatever is open, so the gesture is taken whether or not
+    /// there is an instrument to read again.
+    #[test]
+    fn the_read_everything_shortcut_is_taken_with_nothing_attached() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let pressed = || egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let reload = |event: &egui::Event| match event {
+            egui::Event::Key { key, .. } => *key == egui::Key::R,
+            _ => false,
+        };
+        let left = |ctx: &egui::Context| ctx.input(|input| input.events.iter().any(reload));
+
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(!app.attached(), "nothing was attached");
+        assert!(!left(&ctx), "⌘R reached the tab with nothing attached");
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(!left(&ctx), "⌘R reached the tab with one attached");
     }
 
     /// What was collapsed comes back collapsed in the next session's window.

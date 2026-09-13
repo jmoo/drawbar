@@ -250,9 +250,7 @@ const MORPH_SUFFIXES: [&str; 3] = ["_wheel", "_aftertouch", "_ctrl_pedal"];
 
 /// The parameter a slot named `x_wheel` morphs, when the body registers an `x`.
 ///
-/// The convention is the formats' own and it is systematic, so binding here costs one
-/// pass over the field list and saves every caller a table of names. A slot whose
-/// parameter is not beside it binds to nothing rather than to a guess.
+/// A slot whose parameter is not beside it binds to nothing rather than to a guess.
 fn morphed_parent<'a>(field: &str, registered: &[&'a str]) -> Option<&'a str> {
     let stem = MORPH_SUFFIXES
         .iter()
@@ -349,9 +347,23 @@ struct Placement {
     nested: bool,
 }
 
+const ONE_PLACEMENT: &str =
+    "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body";
+
+/// The one `#[name]` attribute on `field`; a second is refused rather than dropped
+/// unread, since the expansion reads the first alone.
+fn sole_attr<'a>(field: &'a syn::Field, name: &str) -> syn::Result<Option<&'a syn::Attribute>> {
+    let mut found = field.attrs.iter().filter(|attr| attr.path().is_ident(name));
+    let first = found.next();
+    match found.next() {
+        Some(second) => Err(syn::Error::new_spanned(second, ONE_PLACEMENT)),
+        None => Ok(first),
+    }
+}
+
 fn placement(field: &syn::Field) -> syn::Result<Placement> {
-    let bits = field.attrs.iter().find(|attr| attr.path().is_ident("bits"));
-    let at = field.attrs.iter().find(|attr| attr.path().is_ident("at"));
+    let bits = sole_attr(field, "bits")?;
+    let at = sole_attr(field, "at")?;
     match (bits, at) {
         (Some(attr), None) => {
             let Bits { lo, hi } = attr.parse_args()?;
@@ -378,10 +390,7 @@ fn placement(field: &syn::Field) -> syn::Result<Placement> {
                 nested: true,
             })
         }
-        (Some(_), Some(and)) => Err(syn::Error::new_spanned(
-            and,
-            "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body",
-        )),
+        (Some(_), Some(and)) => Err(syn::Error::new_spanned(and, ONE_PLACEMENT)),
         (None, None) => Err(syn::Error::new_spanned(
             field,
             "every field needs a placement: `#[bits(LO..=HI)]` for a leaf, \
@@ -640,13 +649,15 @@ fn generate_fields(
         let ty_str = quote!(#ty).to_string().replace(' ', "");
         common_field(&mut generated, field, placement, &ty_str);
         let refinement = refinement(field, &registered)?;
+        let registered_leaf = !placement.nested && matches!(field.vis, syn::Visibility::Public(_));
+        if !registered_leaf && (refinement.morphs.is_some() || refinement.rank.is_some()) {
+            return Err(syn::Error::new_spanned(
+                field,
+                "a refinement belongs on a registered (pub) leaf: a nested body registers a \
+                 prefix, and a private field registers nothing",
+            ));
+        }
         if placement.nested {
-            if refinement.morphs.is_some() || refinement.rank.is_some() {
-                return Err(syn::Error::new_spanned(
-                    field,
-                    "a refinement belongs on a leaf: a nested body registers a prefix, not a control",
-                ));
-            }
             nested_field(&mut generated, field, placement, &ty_str);
         } else {
             leaf_field(
@@ -920,12 +931,8 @@ mod tests {
         // No such parameter in this body, and no suffix at all.
         assert_eq!(morphed_parent("piano_a_volume_wheel", &registered), None);
         assert_eq!(morphed_parent("delay_tempo", &registered), None);
-        // ⚠️ A mangled name is not a morph slot: the Stage 2 has a
-        // `…_wheel_o_delay_on` whose suffix is `_on`.
-        assert_eq!(
-            morphed_parent("delay_tempo_wheel_o_delay_on", &registered),
-            None
-        );
+        // A morph suffix has to end the name, not merely appear in it.
+        assert_eq!(morphed_parent("delay_tempo_wheel_lsw", &registered), None);
     }
 
     #[test]
@@ -986,6 +993,122 @@ mod tests {
         assert_eq!(unclaimed(&[(0, 2), (5, 9)], 16), vec![(3, 4), (10, 15)]);
         assert_eq!(unclaimed(&[(0, 7)], 8), vec![]);
         assert_eq!(unclaimed(&[(4, 7)], 8), vec![(0, 3)]);
+    }
+
+    fn refused(len: TokenStream2, body: TokenStream2) -> String {
+        expand(len, body)
+            .expect_err("the body should not expand")
+            .to_string()
+    }
+
+    #[test]
+    fn two_fields_may_not_claim_the_same_bit() {
+        let leaves = quote! {
+            struct Leaves {
+                #[bits(0..=7)]
+                a: u8,
+                #[bits(7..=14)]
+                b: u16,
+            }
+        };
+        assert!(refused(quote!(2), leaves).contains("bits 7..=14 overlap `a`, at 0..=7"));
+
+        let mixed = quote! {
+            struct Mixed {
+                #[at(0x00..0x01)]
+                child: Child,
+                #[bits(7..=7)]
+                flag: bool,
+            }
+        };
+        assert!(refused(quote!(2), mixed).contains("bits 7..=7 overlap `child`, at 0..=7"));
+    }
+
+    #[test]
+    fn a_placement_may_not_run_past_the_end_of_the_body() {
+        let leaf = quote! {
+            struct Leaf {
+                #[bits(0..=16)]
+                wide: u32,
+            }
+        };
+        assert!(refused(quote!(2), leaf).contains("bit 16 is past the end of a 2-byte body"));
+
+        let nested = quote! {
+            struct Nested {
+                #[at(0..3)]
+                child: Child,
+            }
+        };
+        assert!(refused(quote!(2), nested).contains("bit 23 is past the end of a 2-byte body"));
+    }
+
+    /// A second placement is refused rather than silently dropped: the field would
+    /// otherwise be decoded from the first range alone.
+    #[test]
+    fn a_field_takes_exactly_one_placement() {
+        let both = quote! {
+            struct Both {
+                #[bits(0..=3)]
+                #[at(0x00..0x01)]
+                a: u8,
+            }
+        };
+        assert!(refused(quote!(1), both).contains("one placement per field"));
+
+        let twice = quote! {
+            struct TwiceBits {
+                #[bits(0..=3)]
+                #[bits(8..=11)]
+                a: u8,
+            }
+        };
+        assert!(refused(quote!(2), twice).contains("one placement per field"));
+
+        let twice_at = quote! {
+            struct TwiceAt {
+                #[at(0x00..0x01)]
+                #[at(0x01..0x02)]
+                child: Child,
+            }
+        };
+        assert!(refused(quote!(2), twice_at).contains("one placement per field"));
+    }
+
+    /// A refinement describes a control in the field registry, and only a `pub` leaf is
+    /// in it.
+    #[test]
+    fn a_refinement_outside_the_registry_is_refused() {
+        let private = quote! {
+            struct Private {
+                #[bits(0..=6)]
+                pub gain: u8,
+                #[bits(7..=7)]
+                #[rank(3)]
+                bar: Drawbar,
+            }
+        };
+        assert!(refused(quote!(1), private).contains("registered (pub) leaf"));
+
+        let private_morph = quote! {
+            struct PrivateMorph {
+                #[bits(0..=6)]
+                pub gain: u8,
+                #[bits(7..=7)]
+                #[morphs(gain)]
+                gain_wheel: MorphTarget,
+            }
+        };
+        assert!(refused(quote!(1), private_morph).contains("registered (pub) leaf"));
+
+        let nested = quote! {
+            struct NestedRank {
+                #[at(0x00..0x01)]
+                #[rank(3)]
+                pub child: Child,
+            }
+        };
+        assert!(refused(quote!(1), nested).contains("registered (pub) leaf"));
     }
 
     #[test]

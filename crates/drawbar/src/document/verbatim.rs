@@ -8,29 +8,15 @@
 use eframe::egui;
 use nord_format::accept::Family;
 use nord_format::cbin::Generation;
-use nord_format::Entity;
 
 use super::capability::{facts, Fact};
 use super::{controls, sample};
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
+use crate::room;
 use crate::strings::kind_word;
 use crate::workspace::LocalEntity;
-use crate::{fields, room};
-
-/// Whether this is a body the app can only keep as it found it.
-///
-/// ⚠️ Not a catch-all. A piano library is not one of these: its name and variant are
-/// edited on the header, so a page saying nothing is editable would be false. The
-/// instrument, the project and the set list have editors of their own.
-pub fn is_verbatim(entity: &Entity) -> bool {
-    !(fields::has_registry(entity)
-        || fields::is_set_list(entity)
-        || sample::is_sample(entity)
-        || super::project::is_project(entity)
-        || Kind::of(Some(entity)) == Kind::Piano)
-}
 
 /// How many bytes of the body the page shows, which is enough to recognise a header and
 /// no more. The whole of it is on the Advanced face.
@@ -50,15 +36,19 @@ const WHY: &str = "No registry declares this model's fields yet, so there is not
                    and nothing to write differently. The file can still be sent, copied, \
                    tagged and placed; every byte goes up exactly as it came down.";
 
-/// Where the body sits in the file: the container's own answer, so nothing is copied to
-/// show it.
+/// Where the body sits in the file: the range the container settled on the way in, so
+/// nothing is copied to show it and nothing works the range out a second time.
+///
+/// Bytes carrying no container the app could read have no body of their own to show, so
+/// the file is what it shows.
 fn body(entity: &LocalEntity) -> &[u8] {
     let Some(container) = &entity.container else {
         return &entity.bytes;
     };
-    let start = container.header.generation.body_start() as usize;
-    let end = start.saturating_add(container.body_len as usize);
-    entity.bytes.get(start..end).unwrap_or(&entity.bytes)
+    entity
+        .bytes
+        .get(container.body.clone())
+        .unwrap_or(&entity.bytes)
 }
 
 fn generation(generation: Generation) -> &'static str {
@@ -94,7 +84,7 @@ fn stated(entity: &LocalEntity) -> Vec<Fact> {
     });
     rows.push(Fact {
         key: "Body",
-        value: format!("{} · verbatim", room::measure(container.body_len)),
+        value: format!("{} · verbatim", room::measure(container.body_len())),
         note: "kept byte for byte — no registry for this model",
     });
     rows.push(Fact {
@@ -265,25 +255,43 @@ fn readable(byte: u8) -> char {
 mod tests {
     use super::*;
 
-    /// The kinds with an editor of their own are not swept up by the catch-all, and the
-    /// ones with nothing else are.
+    /// The body on the page is the container's own range, which is the same body the
+    /// wire carries.
+    ///
+    /// ⚠️ Bytes whose container could not be read have no body range at all, so the
+    /// page shows the file rather than a window worked out from a length it never
+    /// checked.
     #[test]
-    fn only_a_body_with_no_editor_of_its_own_is_verbatim() {
-        let decode = |bytes: Vec<u8>| {
-            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes")
+    fn the_body_shown_is_the_range_the_container_settled() {
+        let held = |name: &str, bytes: Vec<u8>| {
+            let ctx = egui::Context::default();
+            let mut workspace = crate::workspace::Workspace::new(ctx);
+            let mut log = crate::log::Log::default();
+            let id = workspace.ingest(
+                name.to_string(),
+                crate::workspace::Origin::File(name.to_string()),
+                bytes,
+                &mut log,
+            );
+            (workspace, id)
         };
-        assert!(
-            is_verbatim(&decode(fields::blank::stage3_song())),
-            "a song that decodes no further than its container"
+
+        let bytes = crate::fields::blank::stage3_song();
+        let (workspace, id) = held("blank.ns3s", bytes.clone());
+        let entity = workspace.get(id).expect("it is open");
+        assert_eq!(
+            body(entity),
+            entity.raw_body().expect("the wire takes it").as_slice(),
+            "the page and the wire read one body"
         );
+
+        let (workspace, id) = held("cut.ns3s", bytes[..12].to_vec());
+        let entity = workspace.get(id).expect("it is open");
         assert!(
-            !is_verbatim(&decode(fields::blank::electro5_song())),
-            "a set list has its own four rows"
+            entity.container.is_none(),
+            "a file shorter than its own container is not one"
         );
-        assert!(
-            !is_verbatim(&decode(fields::blank::stage4_program())),
-            "a registry body has its panel"
-        );
+        assert_eq!(body(entity), entity.bytes.as_slice());
     }
 
     /// ⚠️ The dump lays out only the rows it was asked for. A piano library is

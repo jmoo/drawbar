@@ -5,7 +5,7 @@ use super::Chain;
 use crate::error::ParseError;
 
 /// Within a stroke payload: the MIDI note the sample was recorded at.
-const ROOT_KEY: usize = 5;
+pub(super) const ROOT_KEY: usize = 5;
 
 /// Encoded audio is emitted in fixed-size packets; the count varies with how
 /// compressible the material is.
@@ -173,8 +173,7 @@ mod tests {
     /// The zone-count ladder, generated for exactly this question: identical audio in
     /// the first zone at 4, 6, 8, 12 and 16 zones. The header shrinks a record per zone
     /// and then, when the metadata would fill the preamble, the whole thing gains a
-    /// packet and the header starts over — which is why a plain linear term went
-    /// negative past twelve zones.
+    /// packet and the header starts over.
     #[test]
     fn the_preamble_grows_by_a_packet_rather_than_going_negative() {
         for (zones, header) in [(4, 120), (6, 90), (8, 60), (12, 381), (16, 321)] {

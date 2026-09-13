@@ -69,8 +69,9 @@ impl Generation {
 /// format spells all four bytes and nothing pads implicitly.
 pub type Tag = [u8; 4];
 
-/// `format` as its 4-byte tag. A format constant of any other length is a bug in
-/// the format module, not a file condition, hence the panic.
+/// `format` as its 4-byte tag. Every format module's constant is four bytes by a
+/// compile-time assertion; a caller-supplied string of any other length is a bug in
+/// the caller, not a file condition, hence the panic.
 #[track_caller]
 fn tag(format: &str) -> Tag {
     format
@@ -264,8 +265,9 @@ pub(crate) fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
         let mut rest = [0u8; 20];
         r.read_exact(&mut rest)?;
         stored_crc32 = le_u32(&rest, 0);
-        // Zero on every specimen. A file that used these bytes would round-trip
-        // wrong silently, so refuse it loudly instead.
+        // Zero on every specimen — inferred from specimens; not confirmed on
+        // hardware. A file that used these bytes would round-trip wrong silently,
+        // so refuse it loudly instead.
         if rest[4..] != [0u8; 16] {
             return Err(ParseError::AssertFail(
                 "nonzero bytes in the 0x1c..0x2c header pad".into(),
@@ -845,6 +847,52 @@ mod tests {
             let info = inspect(&mut Cursor::new(&corrupt)).unwrap();
             assert!(!info.checksum_ok, "inspect reports, it does not refuse");
         }
+    }
+
+    /// The header names its own layout, so a type this build has never laid out is
+    /// refused rather than read with one of the two it knows.
+    #[test]
+    fn a_header_type_that_is_neither_generation_is_refused() {
+        let mut bytes = v1_file(&[1, 2, 3, 4, 5]);
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        let err = read::<Five>(&mut Cursor::new(&bytes), "test").unwrap_err();
+        assert!(
+            matches!(err, Error::Parse(ParseError::UnknownFormat(ref what)) if what.contains("type 2")),
+            "refused for the wrong reason: {err}",
+        );
+    }
+
+    /// The sixteen bytes after the type-1 checksum are zero in every specimen. A file
+    /// using them would round-trip wrong silently, so it is refused loudly.
+    #[test]
+    fn a_nonzero_header_pad_is_refused() {
+        for at in 0x1c..0x2c {
+            let mut bytes = v1_file(&[1, 2, 3, 4, 5]);
+            bytes[at] = 0xff;
+            let err = read::<Five>(&mut Cursor::new(&bytes), "test")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("header pad"), "byte {at:#x}: {err}");
+        }
+    }
+
+    /// A file shorter than the header and checksum its own generation declares has no
+    /// body to speak of, and the length arithmetic must say so rather than wrap.
+    #[test]
+    fn a_file_shorter_than_its_container_is_refused() {
+        // A type-0 container is the 0x18 header plus its 2-byte trailer.
+        let short = &v0_file(&[1, 2, 3, 4, 5])[..HEAD_LEN + 1];
+        let err = read::<Five>(&mut Cursor::new(short), "test").unwrap_err();
+        assert!(
+            matches!(&err, Error::Parse(ParseError::AssertFail(why))
+                if why.contains("shorter than the 26-byte container")),
+            "refused for the wrong reason: {err}",
+        );
+        assert!(inspect(&mut Cursor::new(short)).is_err());
+
+        // A type-1 header is longer than this whole file, so it cannot even be read.
+        let truncated = &v1_file(&[1, 2, 3, 4, 5])[..0x2b];
+        assert!(read::<Five>(&mut Cursor::new(truncated), "test").is_err());
     }
 
     #[test]

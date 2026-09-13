@@ -5,7 +5,7 @@ use crate::components::PartMix;
 use crate::formats::ne5::{Instrument, Level, OctaveShift, SplitPoint, Transpose};
 use nord_bits_derive::bitbody;
 
-// 0x2e..=0x33 — the center panel.
+// 0x2e..=0x34 — the center panel.
 
 /// The center panel: part selection, split, transpose, gain, and the organ
 /// selector.
@@ -28,7 +28,7 @@ pub struct CenterPanel {
     pub lower_control: bool,
     #[bits(17..=17)]
     pub upper_control: bool,
-    /// Zero in every specimen; not confirmed on hardware.
+    /// Zero in every specimen. Inferred from specimens; not confirmed on hardware.
     #[bits(18..=18)]
     pub unknown_boolean1: bool,
     #[bits(19..=19)]
@@ -48,8 +48,8 @@ pub struct CenterPanel {
     /// Half-step transposition, `-6..=6`, stored biased by 6.
     ///
     /// Carries no meaning while [`transpose_enabled`](Self::transpose_enabled) is clear: an
-    /// untouched program stores `+1` there rather than `0`. Inferred from specimens; every
-    /// specimen with the enable clear holds `+1`.
+    /// untouched program stores `+1` there rather than `0`. Inferred from specimens; not
+    /// confirmed on hardware — every specimen with the enable clear holds `+1`.
     #[bits(24..=27)]
     pub transpose: Transpose,
     #[bits(28..=34)]

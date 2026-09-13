@@ -15,8 +15,8 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, families_present, qualified, Act, Browser, Bulk, Item, Kind};
-use crate::device::{fit, sendable, Device, DeviceState};
+use crate::browser::{cell_ink, families_present, qualifier, Act, Browser, Bulk, Item, Kind};
+use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::{chip, Track};
@@ -170,12 +170,12 @@ pub struct Row {
 }
 
 impl Row {
-    /// Where a send would write this row, which is [`crate::device::sendable`]'s rule
+    /// Where a send would write this row, which is [`crate::device::read_only`]'s rule
     /// over an asset that came off a slot. A row that is already on the instrument goes
     /// nowhere.
     fn destination(&self) -> Option<(ObjectClass, Location)> {
         let (class, at) = self.at?;
-        (matches!(self.item, Item::Local(_)) && sendable(class)).then_some((class, at))
+        (matches!(self.item, Item::Local(_)) && !read_only(class)).then_some((class, at))
     }
 }
 
@@ -310,13 +310,10 @@ fn local(
     kept: &[Family],
     instrument: Option<Family>,
 ) -> Row {
-    let family = Family::of_tag(&entity.tag());
     Row {
         item: Item::Local(entity.id),
         kind: Kind::of(entity.entity.as_ref()),
-        family: qualified(kept, family, instrument)
-            .then_some(family)
-            .flatten(),
+        family: qualifier(entity, kept, instrument),
         name: entity.name.clone(),
         tags,
         unsaved: entity.is_unsaved(),
@@ -449,9 +446,9 @@ pub fn mark_words(mark: Mark) -> &'static str {
 /// this asset stands.
 ///
 /// ⚠️ The one rule, and the only dot a local row wears. Nothing at all is an asset with
-/// no slot to stand on.
+/// no slot to stand on — its link, which is the slot [`whereabouts`] reads and no other.
 pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Option<Mark> {
-    let (class, at) = entity.spot()?;
+    let (class, at) = entity.link?;
     let info = device.slot(class, at).flatten()?;
     if queue.holds(entity.id) {
         return Some(Mark::Differs);
@@ -497,10 +494,9 @@ pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
 /// What the instrument said a slot plays, where that slot is the one it was last asked
 /// about.
 ///
-/// ⚠️ Programs only. The cached detail records an address and no class, so a set list at
-/// the same address would otherwise wear a program's piano.
+/// ⚠️ Programs only: the piano or sample a program plays is what this column stands for.
 fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
-    if class != ObjectClass::Program || device.detail.at != Some(at) {
+    if class != ObjectClass::Program || device.detail.at != Some((class, at)) {
         return Needs::Nothing;
     }
     let Some(deps) = device.detail.deps.as_ref() else {
@@ -516,8 +512,6 @@ fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
             name: dep.name.trim().to_string(),
         })
 }
-
-// ---- narrowing and ordering ------------------------------------------------------
 
 /// One column of the table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -673,8 +667,6 @@ fn address(row: &Row) -> (bool, u32, u32, u32) {
     }
 }
 
-// ---- the consequence of a selection -----------------------------------------------
-
 /// What sending the picked rows would do, in one sentence.
 pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String {
     let mut going: Vec<(ObjectClass, Location)> =
@@ -751,8 +743,6 @@ fn spans(going: &[(ObjectClass, Location)]) -> String {
     }
     runs.join(", ")
 }
-
-// ---- the view ----------------------------------------------------------------------
 
 /// The height of a row, of the head over them, and of the bar over that.
 const ROW: f32 = 24.0;
@@ -1257,7 +1247,7 @@ fn paint(
     } else if response.clicked() {
         browser.pick(ui, row.item, list);
     }
-    response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, acts));
+    response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, queue, acts));
 }
 
 /// The 11 px box that says whether a row is checked, and takes the click that changes
@@ -1660,7 +1650,7 @@ mod tests {
         );
         device.relink(&mut workspace);
         workspace.create(Fresh::Live, &mut log).unwrap();
-        let sunday = tags.make("Sunday");
+        let sunday = tags.make("Sunday").unwrap();
         tags.set(both, sunday, true);
 
         let names = |filter: &Filter| -> Vec<String> {
@@ -1760,6 +1750,47 @@ mod tests {
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
     }
 
+    /// ⚠️ One rule for the word, the dot and the count. An asset the attached instrument
+    /// refuses stands on nothing however well its origin names a slot, so reading it
+    /// against that slot would paint a difference and offer a send that
+    /// [`crate::queue::enqueue`] refuses on every click.
+    #[test]
+    fn a_foreign_asset_is_neither_marked_against_a_slot_nor_counted_as_changed() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let queue = Queue::default();
+        let class = ObjectClass::Program;
+        let held_at = at(6, 0);
+
+        let bytes = {
+            let id = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
+            let bytes = workspace.get(id).unwrap().bytes.clone();
+            workspace.remove(id, &mut log);
+            bytes
+        };
+        let id = workspace.ingest(
+            "Africa-Split.ns4p".into(),
+            Origin::Device { class, at: held_at },
+            bytes,
+            &mut log,
+        );
+        let crc = workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("every CBIN container has one");
+        // An Electro 5 whose Programs 7:1 holds something other than this.
+        device.pretend_bodies(class, 7, &[Some(("Squabble B", crc ^ 1))]);
+        device.relink(&mut workspace);
+
+        let entity = workspace.get(id).expect("it is on the list");
+        assert!(!fit(&device.state, entity).allowed(), "a Stage 4 program");
+        assert_eq!(whereabouts(entity, &device.state, &queue), Where::Foreign);
+        assert_eq!(keyboard_mark(entity, &device.state, &queue), None);
+        assert!(crate::queue::changed(&workspace, &device.state, &queue).is_empty());
+    }
+
     /// Equality is claimed only where something says so. A settings folder holds one
     /// slot and that slot reports no checksum, so an asset matched to it stands in both
     /// places with nothing said about the two bodies — until a read fetches the occupant,
@@ -1779,7 +1810,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.clone();
         let held = workspace.get(id).unwrap();
         let crc = held.saved.crc32.expect("a container");
-        let body_len = held.container.as_ref().expect("a container").body_len;
+        let body_len = held.container.as_ref().expect("a container").body_len();
 
         // The walk reports what such a slot reports: a name and a length, and no
         // checksum at all — the length being this asset's own.
@@ -2325,7 +2356,10 @@ mod tests {
         let same = off(&mut workspace, 0, &mut log);
         let other = off(&mut workspace, 1, &mut log);
         let waiting = off(&mut workspace, 2, &mut log);
-        let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        // Typed here, and no slot holds its body: there is nothing for it to stand on.
+        let (_, typed) = crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
+            .expect("the registry takes the set");
+        let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, typed, &mut log);
         let held = workspace.get(same).unwrap().saved.crc32.unwrap();
 
         let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
@@ -2343,6 +2377,7 @@ mod tests {
                 Some(("off-2", held)),
             ],
         );
+        device.relink(&mut workspace);
         assert_eq!(mark(&workspace, &device, &queue, same), Some(good));
         assert_eq!(mark(&workspace, &device, &queue, other), Some(warn));
         assert_eq!(

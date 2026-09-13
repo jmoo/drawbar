@@ -65,18 +65,24 @@ pub fn count(map: &[u8]) -> Result<usize, ParseError> {
     })
 }
 
-/// Every field this reads sits at the same offset in both narrow chains; `chain`
-/// supplies the record stride and nothing else.
-pub fn read(chain: Chain, map: &[u8]) -> Result<Vec<Zone>, ParseError> {
-    let width = chain.zone_record_len();
+/// The declared zone count, refused unless the section holds that many records.
+fn records_held(chain: Chain, map: &[u8]) -> Result<usize, ParseError> {
     let n = count(map)?;
-    let need = RECORDS_AT + n * width;
+    let need = RECORDS_AT + n * chain.zone_record_len();
     if map.len() < need {
         return Err(ParseError::AssertFail(format!(
             "map declares {n} zones, needing {need} bytes, but the section is {}",
             map.len()
         )));
     }
+    Ok(n)
+}
+
+/// Every field this reads sits at the same offset in both narrow chains; `chain`
+/// supplies the record stride and nothing else.
+pub fn read(chain: Chain, map: &[u8]) -> Result<Vec<Zone>, ParseError> {
+    let width = chain.zone_record_len();
+    let n = records_held(chain, map)?;
     Ok((0..n)
         .map(|i| {
             let r = &map[RECORDS_AT + i * width..][..width];
@@ -97,7 +103,7 @@ pub fn set_top_note(
     index: usize,
     note: u8,
 ) -> Result<(), ParseError> {
-    let n = count(map)?;
+    let n = records_held(chain, map)?;
     if index >= n {
         return Err(ParseError::AssertFail(format!(
             "zone {index} out of range, the instrument has {n}"
@@ -337,18 +343,17 @@ pub enum KeyMap {
     Populated,
 }
 
+fn no_low_note() -> ParseError {
+    ParseError::AssertFail("map v12 stores no low note".into())
+}
+
 /// Zones as `(root, low, top)` ascending by root, which is the order the
 /// partner law reads them in.
 fn ladder(zones: &[ZoneV3]) -> Result<Vec<(u8, u8, u8)>, ParseError> {
     let mut out = zones
         .iter()
         .map(|z| {
-            let low = z.low_note.ok_or_else(|| {
-                ParseError::AssertFail(
-                    "a per-key table needs each zone's low note, and this layout stores none"
-                        .into(),
-                )
-            })?;
+            let low = z.low_note.ok_or_else(no_low_note)?;
             Ok((z.root_key, low, z.top_note))
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -488,10 +493,6 @@ impl Table {
         }))
     }
 
-    pub fn count(&self) -> usize {
-        self.count
-    }
-
     /// Read every record, checking each against the stroke it names.
     pub fn read(&self, map: &[u8], strokes: &[(u32, u8)]) -> Result<Vec<ZoneV3>, ParseError> {
         self.fits(map)?;
@@ -571,13 +572,7 @@ impl Table {
                 self.count
             )));
         }
-        let at = self.wide.field_at(field).ok_or_else(|| {
-            ParseError::AssertFail(
-                "this map layout stores no low note: a zone reaches down to one above \
-                 the next-lower zone's top"
-                    .into(),
-            )
-        })?;
+        let at = self.wide.field_at(field).ok_or_else(no_low_note)?;
         map[self.at + index * self.wide.record_len() + at] = note;
         Ok(())
     }
@@ -758,6 +753,15 @@ mod tests {
     fn out_of_range_zone_is_rejected() {
         let mut m = table(&[96, 65]);
         assert!(set_top_note(Chain::Library2, &mut m, 2, 60).is_err());
+    }
+
+    #[test]
+    fn a_zone_the_map_does_not_hold_is_refused_before_the_write() {
+        let mut m = table(&[96, 65]);
+        m[COUNT_AT] = 9; // more zones than there are records
+        let before = m.clone();
+        assert!(set_top_note(Chain::Library2, &mut m, 5, 60).is_err());
+        assert_eq!(m, before);
     }
 
     #[test]

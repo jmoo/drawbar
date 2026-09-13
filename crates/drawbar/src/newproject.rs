@@ -16,24 +16,26 @@
 //! project file. An instrument and a library hold the audio itself, which is why they
 //! take the encoder's limits on what a WAV may be.
 
-use std::collections::BTreeMap;
-
 use eframe::egui;
 use nord_format::formats::npno::encode::{
-    build, layer_value, resample, Donor, Kind, Options, Recording, Rules,
+    build, parse_stroke_name, resample, Clash, Donor, Kind, LayerTag, Options, Recording, Rules,
+    Stem, HIGHEST_PLAYED_LAYER,
 };
 use nord_format::formats::npno::{Bank, Library};
-use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
+use nord_format::formats::nsmp::codec::Layout;
 use nord_format::formats::nsmp::zone::derive_top_notes;
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
-use nord_format::formats::nsmpproj::{NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE};
+use nord_format::formats::nsmpproj::{
+    project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
+};
+use nord_format::note;
 use nord_format::wav::Pcm16;
 use nord_format::Entity;
 
-use crate::document::encode::{fits, refusal as encodable, Source};
+use crate::document::controls::fits;
+use crate::document::encode::{refusal as encodable, Source};
 use crate::document::note_picker;
 use crate::log::Log;
-use crate::note;
 use crate::work::{self, Job, Progress};
 use crate::workspace::{Origin, Workspace};
 
@@ -42,13 +44,6 @@ const MOST_ZONES: usize = (HIGHEST_NOTE - LOWEST_NOTE) as usize + 1;
 
 /// The root a file that names none is taken to have been recorded at.
 const MIDDLE_C: u8 = 60;
-
-/// The top of the scale a layer value is selected on — see [`Stroke::layer`]. A value
-/// past [`nord_format::formats::npno::encode::HIGHEST_PLAYED_LAYER`] is one `build`
-/// refuses, in its own words.
-///
-/// [`Stroke::layer`]: nord_format::formats::npno::Stroke::layer
-const TOP_LAYER: u8 = 31;
 
 /// What a pick of WAVs is turned into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -125,45 +120,13 @@ impl Making {
     }
 }
 
-/// What a WAV's name says about the velocity layer its stroke sits at.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum LayerTag {
-    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
-    /// spread over that root's layers gives it.
-    Index(u8),
-    /// `v12`: the layer value itself, written to the record as it stands.
-    Value(u8),
-}
-
-impl LayerTag {
-    fn number(self) -> u8 {
-        match self {
-            LayerTag::Index(n) | LayerTag::Value(n) => n,
-        }
-    }
-
-    fn word(self) -> &'static str {
-        match self {
-            LayerTag::Index(_) => "index",
-            LayerTag::Value(_) => "value",
-        }
-    }
-
-    fn with(self, n: u8) -> LayerTag {
-        match self {
-            LayerTag::Index(_) => LayerTag::Index(n),
-            LayerTag::Value(_) => LayerTag::Value(n),
-        }
-    }
-}
-
 /// One picked WAV, as the dialog shows it.
 pub struct Take {
     /// The name a project would reference it by, resolved beside the project file.
     pub path: String,
     /// The file as it read, or the reader's own complaint.
     pub source: Source,
-    /// Frames as a project counts them — see [`at_source_rate`]. Zero where the file
+    /// Frames as a project counts them — see [`project_frames`]. Zero where the file
     /// did not read, or holds no audio.
     pub frames: u64,
     pub root_key: u8,
@@ -179,7 +142,7 @@ impl Take {
     fn new(path: String, bytes: &[u8], root_key: u8, bank: Bank, layer: LayerTag) -> Take {
         let source = Source::read(bytes);
         let frames = match &source {
-            Source::Read(pcm) => at_source_rate(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
+            Source::Read(pcm) => project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
             Source::Unreadable(_) => 0,
         };
         Take {
@@ -233,27 +196,12 @@ pub struct Draft {
     refused: Option<String>,
 }
 
-/// Frames at the 44 100 Hz basis a project counts in, whatever the file's own rate.
-///
-/// The editor stores positions against that rate for every file — a 0.1 s file stores
-/// 4410 at 22 050 Hz and at 96 000 Hz alike.
-pub fn at_source_rate(frames: u64, rate: u32) -> Option<u64> {
-    if rate == 0 {
-        return None;
-    }
-    let rate = u64::from(rate);
-    frames
-        .checked_mul(u64::from(SOURCE_RATE))
-        .and_then(|scaled| scaled.checked_add(rate / 2))
-        .map(|scaled| scaled / rate)
-}
-
 /// The key each file is taken to have been recorded at.
 ///
 /// A note name on the end of a filename, where **every** file carries a distinct one —
-/// that is the convention the corpus specimens are named by, and a run where one file
-/// disagrees is a guess worth not making. Otherwise a chromatic run from middle C,
-/// pulled down where it would not fit under the highest key a project maps.
+/// a run where one file disagrees is a guess worth not making. Otherwise a chromatic run
+/// from middle C, pulled down where it would not fit under the highest key a project
+/// maps.
 pub fn default_roots(paths: &[String]) -> Vec<u8> {
     let named: Option<Vec<u8>> = paths.iter().map(|path| trailing_note(path)).collect();
     if let Some(named) = named {
@@ -264,10 +212,16 @@ pub fn default_roots(paths: &[String]) -> Vec<u8> {
             return named;
         }
     }
-    let last = paths.len().saturating_sub(1) as u8;
-    let start = 60.min(HIGHEST_NOTE.saturating_sub(last)).max(LOWEST_NOTE);
-    (0..paths.len())
-        .map(|i| start.saturating_add(i as u8).min(HIGHEST_NOTE))
+    // ⚠️ Counted in usize: a pick holds as many files as were picked, which is more than
+    // a count of keys, and the run has to walk up from one end of the keyboard whatever
+    // that count is.
+    let after_first = paths.len().min(MOST_ZONES).saturating_sub(1);
+    let start = u8::try_from(usize::from(HIGHEST_NOTE).saturating_sub(after_first))
+        .unwrap_or(LOWEST_NOTE)
+        .clamp(LOWEST_NOTE, MIDDLE_C);
+    (start..=HIGHEST_NOTE)
+        .chain(std::iter::repeat(HIGHEST_NOTE))
+        .take(paths.len())
         .collect()
 }
 
@@ -288,20 +242,9 @@ fn trailing_note(path: &str) -> Option<u8> {
 
 /// The stroke a WAV's name states: `060-b0-l00`, as `nord piano build` reads it, and
 /// `<stem>-060-b0-l00` as [`crate::workspace::stroke_wav_name`] writes it.
-///
-/// The trailing group is the whole claim, so a name carrying anything of its own in
-/// front of it still names its stroke.
 fn stroke_name(path: &str) -> Option<(u8, Bank, LayerTag)> {
     let stem = path.rsplit_once('.').map_or(path, |(stem, _)| stem);
-    let mut parts = stem.rsplit('-');
-    let third = parts.next()?;
-    let layer = match (third.strip_prefix('l'), third.strip_prefix('v')) {
-        (Some(index), _) => LayerTag::Index(index.parse().ok()?),
-        (None, Some(value)) => LayerTag::Value(value.parse().ok()?),
-        (None, None) => return None,
-    };
-    let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
-    Some((parts.next()?.parse().ok()?, bank, layer))
+    parse_stroke_name(stem, Stem::Any)
 }
 
 /// Whether a dropped file is one an open draft takes rather than a document to open.
@@ -338,10 +281,12 @@ fn draft_name(making: Making, paths: &[String]) -> String {
         "" => "Untitled",
         stem => stem,
     };
+    let mut name = stem.to_string();
     match making {
-        Making::Project | Making::Piano => stem.to_string(),
-        Making::Instrument => fits(stem),
+        Making::Project | Making::Piano => {}
+        Making::Instrument => fits(&mut name, MAX_NAME_LEN),
     }
+    name
 }
 
 impl Draft {
@@ -473,16 +418,14 @@ impl Draft {
 
     /// The file the picked WAVs make, in the frame that asks for it.
     ///
-    /// ⚠️ Coding a library takes longer than a frame, so the dialog runs it off one —
-    /// [`Draft::begin`]. This is the same build with nothing to report progress to.
+    /// ⚠️ The two kinds a frame can make. Coding a library takes longer than one, so the
+    /// dialog starts that build instead — [`Draft::begin`] — and nothing here can hand
+    /// back a library.
     fn bytes(&self) -> Result<Vec<u8>, String> {
         match self.making {
             Making::Project => self.project(),
             Making::Instrument => self.instrument(),
-            Making::Piano => self
-                .coding(None)?
-                .run(&Progress::default())
-                .map(|built| built.bytes),
+            Making::Piano => Err("a piano library is coded off the frame".to_string()),
         }
     }
 
@@ -526,7 +469,11 @@ impl Draft {
     /// The answer the build has ready, taken once. A refusal stays behind as the line
     /// the dialog paints.
     fn settle(&mut self) -> Option<Result<Built, String>> {
-        let answer = self.job.as_ref()?.poll()?;
+        let answer = match self.job.as_ref()?.poll() {
+            work::Answer::Running => return None,
+            work::Answer::Answered(answer) => answer,
+            work::Answer::Died => Err("coding the library stopped without an answer".to_string()),
+        };
         self.job = None;
         if let Err(why) = &answer {
             self.refused = Some(why.clone());
@@ -662,45 +609,23 @@ impl Coding {
     }
 }
 
-/// The layer value each take's stroke states, in the order the takes are listed.
-///
-/// A [`LayerTag::Value`] is that value; a [`LayerTag::Index`] is spread across its root
-/// and bank's own layers, loudest first. The two forms would each mean something
-/// different about how many layers a spread is over, so one root's bank names its
-/// layers one way.
+/// The layer value each take's stroke states, in the order the takes are listed, as
+/// [`nord_format::formats::npno::encode::layer_values`] reads what their names claim.
 fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
-    let mut groups: BTreeMap<(u8, Bank), Vec<usize>> = BTreeMap::new();
-    for (index, take) in takes.iter().enumerate() {
-        groups
-            .entry((take.root_key, take.bank))
-            .or_default()
-            .push(index);
-    }
-
-    let mut values = vec![0u8; takes.len()];
-    for ((root, bank), mut members) in groups {
-        let stated = members
-            .iter()
-            .filter(|&&i| matches!(takes[i].layer, LayerTag::Value(_)))
-            .count();
-        if stated != 0 && stated != members.len() {
-            return Err(format!(
-                "root {} {} names some of its layers by index and some by value; one \
-                 root's bank names them one way",
-                note::name(root),
-                bank.name(),
-            ));
+    let named: Vec<(u8, Bank, LayerTag)> = takes
+        .iter()
+        .map(|take| (take.root_key, take.bank, take.layer))
+        .collect();
+    nord_format::formats::npno::encode::layer_values(&named).map_err(|clash| {
+        let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+        match clash.how {
+            Clash::BothForms => format!(
+                "{what} names some of its layers by index and some by value; one root's \
+                 bank names them one way"
+            ),
+            Clash::Twice => format!("{what} names one of its layers twice"),
         }
-        members.sort_by_key(|&i| takes[i].layer);
-        let layers = members.len();
-        for (rank, index) in members.into_iter().enumerate() {
-            values[index] = match takes[index].layer {
-                LayerTag::Value(value) => value,
-                LayerTag::Index(_) => layer_value(rank, layers),
-            };
-        }
-    }
-    Ok(values)
+    })
 }
 
 /// Unix seconds, for the `m_modifyDate` every block in a project carries.
@@ -786,7 +711,7 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
                                     egui::RichText::new(format!(
                                         "{} Hz, {:.2} s",
                                         pcm.rate,
-                                        take.frames as f64 / f64::from(SOURCE_RATE)
+                                        take.frames as f64 / PROJECT_RATE as f64
                                     ))
                                     .small()
                                     .weak(),
@@ -866,20 +791,29 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
                 ui.selectable_value(&mut take.bank, bank, bank.name());
             }
         });
-    let number = take.layer.number();
+    let (number, word) = match take.layer {
+        LayerTag::Index(n) => (n, "index"),
+        LayerTag::Value(n) => (n, "value"),
+    };
     egui::ComboBox::from_id_salt(("draft_layer", i))
         .width(64.0)
-        .selected_text(take.layer.word())
+        .selected_text(word)
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut take.layer, LayerTag::Index(number), "index");
             ui.selectable_value(&mut take.layer, LayerTag::Value(number), "value");
         });
     let mut set = number;
+    // The value scale is the format's: past HIGHEST_PLAYED_LAYER is a stroke no velocity
+    // selects, which `build` refuses. An index is a rank among the takes sharing a root
+    // and bank, and no root is played at more layers than that either.
     if ui
-        .add(egui::DragValue::new(&mut set).range(0..=TOP_LAYER))
+        .add(egui::DragValue::new(&mut set).range(0..=HIGHEST_PLAYED_LAYER))
         .changed()
     {
-        take.layer = take.layer.with(set);
+        take.layer = match take.layer {
+            LayerTag::Index(_) => LayerTag::Index(set),
+            LayerTag::Value(_) => LayerTag::Value(set),
+        };
     }
 }
 
@@ -973,23 +907,8 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn frames_are_counted_at_the_source_rate() {
-        assert_eq!(at_source_rate(44_100, 44_100), Some(44_100));
-        assert_eq!(at_source_rate(22_050, 22_050), Some(44_100));
-        assert_eq!(at_source_rate(96_000, 96_000), Some(44_100));
-        // The 0.1 s case the format module states outright.
-        assert_eq!(at_source_rate(2_205, 22_050), Some(4_410));
-        assert_eq!(at_source_rate(9_600, 96_000), Some(4_410));
-        assert_eq!(
-            at_source_rate(1, 48_000),
-            Some(1),
-            "rounded to nearest, the way `nord sample project new` counts"
-        );
-        assert_eq!(at_source_rate(1, 0), None, "a rateless file has no basis");
-        assert_eq!(at_source_rate(u64::MAX, 44_100), None, "no wrapping");
-    }
+    use nord_format::formats::npno::encode::SOFTEST_LAYER;
+    use nord_format::formats::nsmp::codec::SOURCE_RATE;
 
     #[test]
     fn root_keys_are_read_off_the_names_or_counted_from_middle_c() {
@@ -1018,6 +937,20 @@ mod tests {
         let mut unique = roots.clone();
         unique.dedup();
         assert_eq!(unique.len(), roots.len(), "one key each");
+    }
+
+    /// ⚠️ A pick this long is refused for its count, but the run laid under that refusal
+    /// still walks up from the lowest key, one file per key while there are keys.
+    #[test]
+    fn a_pick_longer_than_a_u8_counts_still_walks_up_from_the_lowest_key() {
+        let many: Vec<String> = (0..MOST_ZONES + 200).map(|i| format!("{i}.wav")).collect();
+        let roots = default_roots(&many);
+        assert_eq!(roots.len(), many.len(), "a key per file");
+        assert_eq!(roots.first(), Some(&LOWEST_NOTE));
+        assert_eq!(roots[MOST_ZONES - 1], HIGHEST_NOTE);
+        let mut laid = roots[..MOST_ZONES].to_vec();
+        laid.dedup();
+        assert_eq!(laid.len(), MOST_ZONES, "one key each, while there are keys");
     }
 
     fn wav(rate: u32, frames: usize) -> Vec<u8> {
@@ -1189,13 +1122,7 @@ mod tests {
             Some((60, Bank::Attack, LayerTag::Index(0))),
             "and the one a stroke exported from here is written under"
         );
-        assert_eq!(
-            stroke_name("101-b1-v12.wav"),
-            Some((101, Bank::Resonance, LayerTag::Value(12)))
-        );
-        assert_eq!(stroke_name("060-b3-l00.wav"), None, "no such bank");
-        assert_eq!(stroke_name("060-b0-x2.wav"), None, "no such layer form");
-        assert_eq!(stroke_name("060-b0.wav"), None);
+        assert_eq!(stroke_name("060-b0.wav"), None, "no stroke named at all");
 
         assert_eq!(
             stroke_defaults("Marimba-C3.wav"),
@@ -1216,12 +1143,7 @@ mod tests {
         let draft = piano_draft(&["060-b0-l02", "060-b0-l00", "060-b0-l01", "072-b0-l00"]);
         assert_eq!(
             layer_values(&draft.takes).unwrap(),
-            vec![
-                layer_value(2, 3),
-                layer_value(0, 3),
-                layer_value(1, 3),
-                layer_value(0, 1),
-            ],
+            vec![27, 0, 14, 0],
             "the list order is kept; the rank is the layer's own"
         );
     }
@@ -1237,6 +1159,22 @@ mod tests {
         assert!(
             apart.refusal().is_none(),
             "a bank of its own names its layers its own way"
+        );
+    }
+
+    /// Two takes claiming one layer of a root and bank would be spread to two different
+    /// values, which is neither of the things their names said.
+    #[test]
+    fn one_roots_bank_names_each_of_its_layers_once() {
+        let twice = piano_draft(&["a-060-b0-l00", "b-060-b0-l00"]);
+        let why = twice.refusal().expect("one layer named twice");
+        assert!(why.contains("C4"), "{why}");
+        assert!(why.contains("names one of its layers twice"), "{why}");
+
+        let apart = piano_draft(&["a-060-b0-l00", "b-060-b1-l00"]);
+        assert!(
+            apart.refusal().is_none(),
+            "a bank of its own numbers its own layers"
         );
     }
 
@@ -1266,10 +1204,11 @@ mod tests {
         assert_eq!(
             strokes,
             [
-                (60, Some(Bank::Attack), layer_value(0, 2)),
-                (60, Some(Bank::Attack), layer_value(1, 2)),
+                (60, Some(Bank::Attack), 0),
+                (60, Some(Bank::Attack), SOFTEST_LAYER),
                 (72, Some(Bank::Release), 0),
-            ]
+            ],
+            "the root's two layers spread from the loudest to the softest"
         );
     }
 
@@ -1296,19 +1235,19 @@ mod tests {
         assert_eq!(Library::borrow(&built.bytes).unwrap().damper_top(), 100);
     }
 
-    /// ⚠️ Everything a library states about its strokes beyond the one rule the dialog
-    /// holds is stated by the coder, in its own words, with the takes still there.
+    /// ⚠️ Everything a library states about its strokes beyond the rules the dialog holds
+    /// is stated by the coder, in its own words, with the takes still there.
     #[test]
     fn what_the_coder_refuses_comes_back_as_the_dialogs_own_line() {
-        let mut draft = piano_draft(&["a-060-b0-v03", "b-060-b0-v03"]);
+        let mut draft = piano_draft(&["a-060-b0-v31", "b-072-b0-v31"]);
         assert!(
             draft.refusal().is_none(),
             "the dialog states no rule about this"
         );
 
         draft.begin(&egui::Context::default(), None).unwrap();
-        let why = finish(&mut draft).expect_err("one stroke named twice");
-        assert!(why.contains("recorded twice"), "{why}");
+        let why = finish(&mut draft).expect_err("a layer no velocity selects");
+        assert!(why.contains("no velocity selects"), "{why}");
         assert_eq!(draft.refused.as_deref(), Some(why.as_str()));
         assert_eq!(draft.takes.len(), 2, "the takes stay, to be fixed");
     }

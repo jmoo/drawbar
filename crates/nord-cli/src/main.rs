@@ -23,12 +23,12 @@ mod edit;
 mod editors;
 mod file;
 mod file_edit;
-mod note;
 mod piano;
 mod sample;
 mod slot;
 mod summary;
 mod ui;
+mod wav;
 
 use clap::{Args, Parser, Subcommand};
 use nord_usb::ObjectClass;
@@ -142,8 +142,7 @@ enum Command {
     /// noun of its own, or to address a class by number.
     #[command(hide = true)]
     Raw {
-        /// Object class: 1 pianos, 3 samples, 4 programs, 5 set lists, 6 live.
-        #[arg(long, global = true, value_name = "N", default_value_t = 4)]
+        #[arg(long, global = true, value_name = "N", default_value_t = 4, help = class_help())]
         class: u32,
 
         #[command(subcommand)]
@@ -168,9 +167,9 @@ enum DeviceAction {
         #[arg(long, default_value_t = 15)]
         to: u8,
 
-        /// Bytes to ask each request for.
+        /// Bytes to ask each request for. A control transfer's wLength is 16 bits.
         #[arg(long, default_value_t = 64)]
-        len: usize,
+        len: u16,
 
         /// Address the interface rather than the device.
         #[arg(long)]
@@ -277,8 +276,8 @@ enum SampleAction {
     /// Change fields inside a sample instrument, in a file or in a slot.
     ///
     /// A sample is mostly encoded audio; what is settable is what the format can
-    /// patch in place — the name, and each zone's root key and top note. `--fields`
-    /// lists them.
+    /// patch in place — the name, each zone's root key and top note, and its low
+    /// note on the generations that store one. `--fields` lists them.
     Edit(sample::EditArgs),
 
     /// Decode an instrument's audio to WAV, one file per zone, from a file or a slot.
@@ -745,26 +744,8 @@ pub struct EditArgs {
     )]
     pub target: Option<String>,
 
-    /// `path=value`, repeatable. Paths are `nord-format`'s field names.
-    #[arg(long = "set", value_name = "PATH=VALUE")]
-    pub set: Vec<String>,
-
-    /// Report what would change — including which bytes — and write nothing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// List every settable field with its placement and current value, then exit. With
-    /// no target, lists the fields of a fresh default.
-    #[arg(long)]
-    pub fields: bool,
-
-    /// Write the edit here instead of over the input file.
-    #[arg(short, long, value_name = "FILE")]
-    pub out: Option<PathBuf>,
-
-    /// Confirm the write. Editing a slot, or a file in place, needs it.
-    #[arg(long)]
-    pub yes: bool,
+    #[command(flatten)]
+    pub common: edit::SetArgs,
 }
 
 fn main() -> ExitCode {
@@ -889,6 +870,17 @@ impl From<LiveSlotAction> for SlotAction {
     }
 }
 
+/// `nord raw --class` help, naming every class [`ObjectClass::from_raw`] recognises.
+fn class_help() -> String {
+    // Every class `from_raw` names has a one-byte code.
+    let named: Vec<String> = (0..=u8::MAX.into())
+        .map(ObjectClass::from_raw)
+        .filter(|class| !matches!(class, ObjectClass::Unknown(_)))
+        .map(|class| format!("{} {}", class.to_raw(), class.label()))
+        .collect();
+    format!("Object class: {}", named.join(", "))
+}
+
 /// Dispatch one verb against a fixed object class, whichever noun asked for it.
 ///
 /// The read-only verbs take a file as well as a slot ([`slot::Target`]); the rest name
@@ -975,49 +967,36 @@ fn inspect(ui: &Ui, files: &[PathBuf], raw: bool) -> Result<(), String> {
 /// Reports the offset of the first difference, which in a bit-packed format is usually
 /// enough to name the field on its own.
 fn verify(ui: &Ui, files: &[PathBuf]) -> Result<(), String> {
-    let mut failed = 0usize;
-    for path in files {
-        let original = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                ui.out(format!("error  {} ({e})", path.display()));
-                failed += 1;
-                continue;
-            }
-        };
-        let reencoded =
-            nord_format::from_path(path).and_then(|entity| nord_format::to_bytes(&entity));
-        match reencoded {
-            Ok(bytes) if bytes == original => {
-                ui.out(format!(
-                    "ok     {} ({} bytes)",
-                    path.display(),
-                    original.len()
-                ));
-            }
-            Ok(bytes) => {
-                failed += 1;
-                let at = bytes
-                    .iter()
-                    .zip(&original)
-                    .position(|(a, b)| a != b)
-                    .map(|i| format!("{i:#x}"))
-                    .unwrap_or_else(|| "the end (length differs)".to_string());
-                ui.out(format!(
-                    "DIFFER {} (in {} bytes, out {}; first difference at {at})",
-                    path.display(),
-                    original.len(),
-                    bytes.len(),
-                ));
-            }
-            Err(e) => {
-                failed += 1;
-                ui.out(format!("error  {} ({e})", path.display()));
-            }
+    file::check_each(ui, files, "file(s) did not round-trip", |path| {
+        let named = |e: &dyn std::fmt::Display| format!("error  {} ({e})", path.display());
+        let original = std::fs::read(path).map_err(|e| named(&e))?;
+        let reencoded = nord_format::from_path(path)
+            .and_then(|entity| nord_format::to_bytes(&entity))
+            .map_err(|e| named(&e))?;
+        if reencoded == original {
+            return Ok(format!(
+                "ok     {} ({} bytes)",
+                path.display(),
+                original.len()
+            ));
         }
-    }
-    match failed {
-        0 => Ok(()),
-        n => Err(format!("{n} of {} file(s) did not round-trip", files.len())),
+        Err(format!(
+            "DIFFER {} (in {} bytes, out {}; first difference at {})",
+            path.display(),
+            original.len(),
+            reencoded.len(),
+            file::first_difference(&reencoded, &original),
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_class_help_names_the_settings_singleton() {
+        let help = class_help();
+        assert!(help.contains("7 settings"), "{help}");
     }
 }

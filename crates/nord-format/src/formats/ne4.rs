@@ -4,7 +4,8 @@
 //! As with the Electro 3 pair, the 4 and 4D factory exports are byte-identical.
 //!
 //! The program body is **the same layout as the Electro 3's `nepg`** — see that
-//! module for the measurement. Decode either and both follow.
+//! module for the measurement. Decode either and both follow. Inferred from
+//! specimens; not confirmed on hardware.
 
 use super::raw::raw_format;
 

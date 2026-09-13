@@ -6,8 +6,9 @@
 //! stroke in directory order. Each span is filled with a byte naming its stroke, so a
 //! re-lay is visible in the bytes themselves.
 //!
-//! ⚠️ The audio is filler rather than encoded blocks, so [`codec::decode`](super::codec)
-//! refuses it. What this builds is a container to transform, not a sound to play.
+//! ⚠️ That filler is not encoded blocks, so [`codec::decode`](super::codec) refuses it.
+//! What this builds is a container to transform, not a sound to play — [`Take::silent`]
+//! is the take whose span a decode reads back.
 
 use super::*;
 
@@ -20,6 +21,17 @@ pub struct Take {
     pub layer: u8,
     /// Blocks of audio the stroke owns, each [`Library::block_bytes`] long.
     pub blocks: u16,
+    /// The length marks at `+0x1c`.
+    pub marks: [u32; MARKS],
+    /// The decay coefficient at `+0x2e`.
+    pub decay: u32,
+    /// The decay ladder at `+0x36`.
+    pub ladder: [u32; DECAYS],
+    /// The identifier at `+0x6e`, or the stroke's place in the directory where the
+    /// caller names none — which is what keeps a build's identifiers distinct.
+    pub id: Option<u32>,
+    /// Whether the span holds blocks a decode reads back rather than filler.
+    pub silent: bool,
 }
 
 pub fn take(root: u8, bank: Bank, layer: u8, blocks: u16) -> Take {
@@ -28,6 +40,40 @@ pub fn take(root: u8, bank: Bank, layer: u8, blocks: u16) -> Take {
         bank,
         layer,
         blocks,
+        marks: [0; MARKS],
+        decay: 0,
+        ladder: [0; DECAYS],
+        id: None,
+        silent: false,
+    }
+}
+
+impl Take {
+    pub fn marks(mut self, marks: [u32; MARKS]) -> Take {
+        self.marks = marks;
+        self
+    }
+
+    pub fn decay(mut self, decay: u32) -> Take {
+        self.decay = decay;
+        self
+    }
+
+    pub fn ladder(mut self, ladder: [u32; DECAYS]) -> Take {
+        self.ladder = ladder;
+        self
+    }
+
+    pub fn id(mut self, id: u32) -> Take {
+        self.id = Some(id);
+        self
+    }
+
+    /// Lay the span out as silence a decode reads back — every block order zero over
+    /// the widest field — and state the frames those blocks own.
+    pub fn silent(mut self) -> Take {
+        self.silent = true;
+        self
     }
 }
 
@@ -47,6 +93,10 @@ pub struct Build {
 
 /// The name every synthetic library carries in the field at [`TextField::COMBINED`].
 const NAME: &[u8] = b"Test Piano#Variant";
+
+/// The header a block of silence carries: the widest field at order zero, under the
+/// attenuation a block with no signal in it states.
+const SILENT_HEADER: u16 = (100 << 8) | codec::MAX_WIDTH as u16;
 
 impl Build {
     /// Two roots, one of them with a release stroke, over three routed keys.
@@ -106,9 +156,33 @@ impl Build {
             body[record + REC_LAYER] = take.layer;
             body[record + REC_BLOCKS..record + REC_BLOCKS + 2]
                 .copy_from_slice(&take.blocks.to_be_bytes());
-            body[record + REC_ID..record + REC_ID + 4].copy_from_slice(&(i as u32).to_be_bytes());
+            for (mark, value) in take.marks.iter().enumerate() {
+                let field = record + REC_MARKS + mark * 4;
+                body[field..field + 4].copy_from_slice(&value.to_be_bytes());
+            }
+            body[record + REC_DECAY..record + REC_DECAY + 4]
+                .copy_from_slice(&take.decay.to_be_bytes());
+            for (entry, value) in take.ladder.iter().enumerate() {
+                let field = record + REC_DECAYS + entry * 4;
+                body[field..field + 4].copy_from_slice(&value.to_be_bytes());
+            }
+            let id = take.id.unwrap_or(i as u32);
+            body[record + REC_ID..record + REC_ID + 4].copy_from_slice(&id.to_be_bytes());
+
             let span = usize::from(take.blocks) * block;
-            body[at..at + span].fill(0x40 + i as u8);
+            if take.silent {
+                let per_block =
+                    codec::block_frames(codec::MAX_WIDTH, block, usize::from(self.channels))
+                        - codec::OVERLAP;
+                let owned = (usize::from(take.blocks) * per_block) as u32;
+                body[record + REC_FRAMES..record + REC_FRAMES + 4]
+                    .copy_from_slice(&owned.to_be_bytes());
+                for block_at in (at..at + span).step_by(block) {
+                    body[block_at..block_at + 2].copy_from_slice(&SILENT_HEADER.to_be_bytes());
+                }
+            } else {
+                body[at..at + span].fill(0x40 + i as u8);
+            }
             at += span;
         }
         body

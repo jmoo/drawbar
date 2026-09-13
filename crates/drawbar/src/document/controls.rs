@@ -46,10 +46,24 @@ impl Ctx {
 /// Collected `path = value` sets, applied together once the frame is painted.
 pub type Sets = Vec<(String, String)>;
 
+/// Cut `text` back to what a format's name field can hold.
+///
+/// ⚠️ The limit is **bytes** — `StringField::write` refuses by byte length — so a box
+/// counting characters takes an accented name the format then turns down. The cut lands
+/// on a character boundary: a name loses a letter rather than half of one.
+pub fn fits(text: &mut String, limit: usize) {
+    let end = text
+        .char_indices()
+        .map(|(at, c)| at + c.len_utf8())
+        .take_while(|end| *end <= limit)
+        .last()
+        .unwrap_or(0);
+    text.truncate(end);
+}
+
 /// A titled panel.
 ///
-/// The instrument's front panel does not fold its sections away, and neither does this:
-/// a control you cannot see is a control you do not know you have.
+/// The instrument's front panel does not fold its sections away, and neither does this.
 pub fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -64,8 +78,7 @@ pub fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui))
 /// at the right.
 ///
 /// ⚠️ Not [`crate::panel::panel_header`], which is the shell's: MICRO caps on
-/// `faint_bg_color`, with a bar across the dock. A document's sections are part of the
-/// page they are on, and a row of grey bars down a page reads as a stack of panels.
+/// `faint_bg_color`, with a bar across the dock.
 pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, egui::Color32)>) {
     const ROW: f32 = 18.0;
     const PAD: f32 = 12.0;
@@ -150,6 +163,7 @@ pub fn named_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Fresh;
 
     /// ⚠️ A document's section heading is part of the page, not a bar across it: it says
     /// its three parts in sentence case and paints no ground of its own. The shell's
@@ -189,12 +203,28 @@ mod tests {
         );
     }
 
+    /// A name is cut by byte length, and on a character boundary.
+    #[test]
+    fn a_name_is_cut_to_the_bytes_the_field_holds() {
+        let cut = |text: &str, limit: usize| {
+            let mut held = text.to_string();
+            fits(&mut held, limit);
+            held
+        };
+        assert_eq!(cut("Marimba", 16), "Marimba");
+        assert_eq!(cut("Marimba", 4), "Mari");
+        assert_eq!(cut("Café", 5), "Café", "four letters in five bytes");
+        assert_eq!(cut("Café", 4), "Caf", "half of é is not a letter");
+        assert_eq!(cut("é", 1), "");
+        assert_eq!(cut("", 8), "");
+    }
+
     /// ⚠️ A field is asked for its values when something draws it and not before, and
     /// then never again. A Stage body declares hundreds of fields, and walking every one
     /// of them on open is a stall the operator spends watching an empty document.
     #[test]
     fn a_field_is_read_as_it_is_drawn_and_only_once() {
-        let bytes = crate::fields::blank::stage4_program();
+        let bytes = Fresh::Stage4Program.bytes().unwrap();
         let (fields, _) = crate::fields::apply(&bytes, &[]).unwrap();
         let ctx = Ctx::default();
         assert!(fields.len() > 800);

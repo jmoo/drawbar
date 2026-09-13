@@ -43,6 +43,7 @@
 //! constants are inferred from specimens; not confirmed on hardware — the Electro 5
 //! plays only v2.
 
+use crate::formats::predictor;
 use std::fmt;
 
 /// Stream units for one sample generation.
@@ -57,13 +58,20 @@ pub enum Layout {
     V4,
 }
 
+/// The content version at which the wide chain passes the generations this codec
+/// describes. A version at or above it has unknown stream units, so it is refused
+/// rather than decoded as [`Layout::V4`].
+pub const V5_FROM_VERSION: u32 = 500;
+
 impl Layout {
-    /// The layout implied by a `format × 100 + revision` content version.
-    pub fn from_version(version: u32) -> Layout {
+    /// The layout implied by a `format × 100 + revision` content version, or `None`
+    /// for a version at or above [`V5_FROM_VERSION`].
+    pub fn from_version(version: u32) -> Option<Layout> {
         match version {
-            v if v >= super::V4_FROM_VERSION => Layout::V4,
-            v if v >= super::V3_FROM_VERSION => Layout::V3,
-            _ => Layout::V2,
+            v if v >= V5_FROM_VERSION => None,
+            v if v >= super::V4_FROM_VERSION => Some(Layout::V4),
+            v if v >= super::V3_FROM_VERSION => Some(Layout::V3),
+            _ => Some(Layout::V2),
         }
     }
 
@@ -127,11 +135,14 @@ impl Layout {
     }
 }
 
+/// Statistic A's mantissa: a 24-bit big-endian value in front of its exponent byte.
+pub(super) const MANTISSA_AT: usize = 9;
+
 /// Statistic A's exponent byte; [`shift`] recovers the quantiser scale from it.
-const STAT_A_EXP_AT: usize = 12;
+pub(super) const STAT_A_EXP_AT: usize = 12;
 
 /// Statistic B: the content peak as a 24-bit big-endian value.
-const PEAK_AT: usize = 13;
+pub(super) const PEAK_AT: usize = 13;
 
 /// Where the wide stroke header's two float32s sit: the zone's playing gain in
 /// decibels, then the stroke's loop decay amount. Both big-endian.
@@ -146,8 +157,8 @@ const EXPONENT_BIAS: i32 = 22;
 pub(crate) const SHIFT_LIMIT: i32 = 32;
 
 /// Word directory: `u16` big-endian at this offset, on a 9-byte stride.
-const SEEK_AT: usize = 20;
-const SEEK_STRIDE: usize = 9;
+pub(super) const SEEK_AT: usize = 20;
+pub(super) const SEEK_STRIDE: usize = 9;
 
 /// Period of a 16-bit directory pointer, in words.
 /// Openings use the first alias; terminators use the last in-range alias.
@@ -173,22 +184,31 @@ const COUNT_MASK: u32 = 0x3fff;
 
 /// Field values the predictor keeps. The order field is three bits wide, but only
 /// 0 to 4 occur and a fourth-order difference reaches no further back than this.
-const MAX_ORDER: usize = 4;
+const MAX_ORDER: usize = predictor::MAX_ORDER;
 
 /// Why a stroke stream could not be walked or decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {
     /// Shorter than the fixed header, so there is no stream to walk.
     Short,
+    /// The directory's opening pointer names no word in the stroke. Where the chain
+    /// begins comes from the directory alone, because the slack in front of a stream
+    /// can hold stale words that look like records.
+    Directory {
+        /// The opening pointer, as the header states it.
+        pointer: u16,
+    },
     /// A word violates the record header or content-count grammar.
     Malformed {
-        /// Word index within the stream, counting from [`HEADER_LEN`].
+        /// Word index within the stream, counting from the end of the stroke header
+        /// ([`Layout::header_len`]).
         word: usize,
     },
     /// A record whose fields run past the end of the stroke — some earlier record
     /// was read at the wrong size.
     Desync {
-        /// Word index within the stream, counting from [`HEADER_LEN`].
+        /// Word index within the stream, counting from the end of the stroke header
+        /// ([`Layout::header_len`]).
         word: usize,
     },
     /// Bytes remain after the last complete stream word.
@@ -210,6 +230,7 @@ impl Unsupported {
     pub fn reason(self) -> &'static str {
         match self {
             Unsupported::Short => "short-stroke",
+            Unsupported::Directory { .. } => "bad-directory",
             Unsupported::Malformed { .. } => "malformed-record",
             Unsupported::Desync { .. } => "desync",
             Unsupported::PartialWord { .. } => "partial-word",
@@ -223,6 +244,10 @@ impl fmt::Display for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Unsupported::Short => write!(f, "the stroke is shorter than its own header"),
+            Unsupported::Directory { pointer } => write!(
+                f,
+                "the directory's opening pointer {pointer} names no word in the stroke"
+            ),
             Unsupported::Malformed { word } => {
                 write!(f, "word {word} is not a record header")
             }
@@ -248,7 +273,8 @@ impl std::error::Error for Unsupported {}
 /// One record, placed on the field lattice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    /// Word index within the stream, counting from [`HEADER_LEN`].
+    /// Word index within the stream, counting from the end of the stroke header
+    /// ([`Layout::header_len`]).
     pub at: usize,
     /// Lattice index of this record's first field.
     pub first_field: usize,
@@ -259,10 +285,9 @@ pub struct Record {
     pub width: u8,
     /// Difference order, 0..=4. Content stores the Nth backward difference.
     pub order: u8,
-    /// Unexplained vendor flag, usually on the directory's resync record.
+    /// Set on the record a loop starts at; the directory's third pointer names it.
     pub mark: bool,
     /// Channel-major signed values at order zero; signed differences otherwise.
-    /// Width two is ordinary draft data, not a skip marker.
     pub values: Vec<i32>,
 }
 
@@ -319,7 +344,8 @@ pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
 }
 
 /// Signed quantiser shift recovered from statistic A's exponent and [`peak`].
-/// Vendor statistic A is unresolved, so library amplitude may decode low.
+/// Dequantising applies the shift alone: statistic A's mantissa carries the zone's
+/// gain, which the instrument applies at playback rather than the decoder.
 pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
     let peak = peak(stroke, layout)?.unsigned_abs().max(1);
     let exponent = i32::from(*stroke.get(STAT_A_EXP_AT)?);
@@ -442,16 +468,21 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             .iter()
             .fold(0u32, |v, &b| (v << 8) | u32::from(b))
     };
-    let directory = Directory::read(stroke);
+    let directory = Directory::read(stroke).ok_or(Unsupported::Short)?;
 
-    // Prefer the directory: stale allocation slack can look like a record.
-    let first_record = directory
-        .map(|d| Directory::resolve(d.first_record, stroke_at, layout))
-        .filter(|&at| at < words)
-        .unwrap_or_else(|| (0..words).find(|&at| word(at) != 0).unwrap_or(words));
-    let last = directory
-        .map(|d| Directory::resolve_end(d.terminator, stroke_at, layout, words))
-        .filter(|&at| at < words);
+    let first_record = Directory::resolve(directory.first_record, stroke_at, layout);
+    if first_record >= words {
+        return Err(Unsupported::Directory {
+            pointer: directory.first_record,
+        });
+    }
+    let last = Some(Directory::resolve_end(
+        directory.terminator,
+        stroke_at,
+        layout,
+        words,
+    ))
+    .filter(|&at| at < words);
 
     // Stereo affects V4 record sizing, so read it from the directory's terminator
     // before walking the first record.
@@ -587,18 +618,7 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
             } else {
                 (0, k)
             };
-            let history = &mut history[channel];
-            let mut value = i64::from(residual);
-            for j in 1..=order {
-                let term = binomial(order, j).saturating_mul(history[j - 1]);
-                value = if j.is_multiple_of(2) {
-                    value.saturating_sub(term)
-                } else {
-                    value.saturating_add(term)
-                };
-            }
-            history.copy_within(0..MAX_ORDER - 1, 1);
-            history[0] = value;
+            let value = predictor::predict(&mut history[channel], order, i64::from(residual));
 
             let at = record.first_field + k * channels + channel;
             let Some(slot) = samples.get_mut(at) else {
@@ -621,15 +641,6 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
         clipped,
         differenced,
     })
-}
-
-/// `C(n, k)`, for the small orders a record header can express.
-fn binomial(n: usize, k: usize) -> i64 {
-    let mut c = 1i64;
-    for i in 0..k {
-        c = c * (n - i) as i64 / (i + 1) as i64;
-    }
-    c
 }
 
 /// One field, `width` bits big-endian from `bit`, sign-extended.
@@ -838,6 +849,20 @@ mod tests {
     }
 
     #[test]
+    fn an_opening_pointer_outside_the_stream_is_refused_rather_than_searched_for() {
+        for layout in BOTH {
+            let values = run(layout, 6);
+            let mut s = stroke(layout, 1, 22, 2, &[block(layout, false, 4, 0, &values)]);
+            s[SEEK_AT..SEEK_AT + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+            assert_eq!(
+                walk(&s, 0, layout),
+                Err(Unsupported::Directory { pointer: u16::MAX }),
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_stereo_stroke_predicts_each_channel_against_its_own_history() {
         // Opposing first-order ramps expose shared predictor history as runaway output.
         for layout in [Layout::V2, Layout::V3, Layout::V4] {
@@ -917,8 +942,6 @@ mod tests {
         let s = stroke(Layout::V3, -8191, exponent_for(8191, 2), 0, &[]);
         assert_eq!(peak(&s, Layout::V3), Some(-8191));
         assert_eq!(shift(&s, Layout::V3), Some(2));
-        // Silence: the wide accumulator starts at −1, so an empty stroke reads −1
-        // where a narrow one reads 0. Both scale against a magnitude of one.
         let silent = stroke(Layout::V3, -1, exponent_for(1, 0), 0, &[]);
         assert_eq!(peak(&silent, Layout::V3), Some(-1));
         assert_eq!(shift(&silent, Layout::V3), Some(0));
@@ -1093,6 +1116,37 @@ mod tests {
             .flat_map(|(&left, &right)| [left as i16, right as i16])
             .collect::<Vec<_>>();
         assert_eq!(audio.samples, interleaved);
+    }
+
+    /// A v4 stereo stroke of one split 1:1 record, whose header word states `count`
+    /// fields at `width` over a body packed for 66 of them.
+    fn v4_split_stroke(width: u8, count: usize) -> Vec<u8> {
+        let layout = Layout::V4;
+        let values: Vec<i32> = (0..66).map(|k| k % 31 - 15).collect();
+        let mut s = stroke(layout, 1, 22, 0, &[split_block(layout, width, &values)]);
+        let term = s.len() - layout.word();
+        s[term..].copy_from_slice(&((1u32 << 23) | (2 * layout.cell()) as u32).to_be_bytes());
+        let head = layout.header_len();
+        let raw = (1u32 << 23) | (u32::from(width - 1) << 19) | count as u32;
+        s[head..head + layout.word()].copy_from_slice(&raw.to_be_bytes());
+        s
+    }
+
+    #[test]
+    fn a_v4_stereo_opening_whose_channels_outrun_the_terminator_is_a_desync() {
+        assert!(walk(&v4_split_stroke(5, 66), 0, Layout::V4).is_ok());
+        assert_eq!(
+            walk(&v4_split_stroke(5, 80), 0, Layout::V4),
+            Err(Unsupported::Desync { word: 0 })
+        );
+    }
+
+    #[test]
+    fn a_v4_stereo_record_needs_whole_channel_pairs() {
+        assert_eq!(
+            walk(&v4_split_stroke(5, 33), 0, Layout::V4),
+            Err(Unsupported::Malformed { word: 0 })
+        );
     }
 
     #[test]
@@ -1306,12 +1360,25 @@ mod tests {
 
     #[test]
     fn the_layout_follows_the_content_version() {
-        assert_eq!(Layout::from_version(8), Layout::V2);
-        assert_eq!(Layout::from_version(200), Layout::V2);
-        assert_eq!(Layout::from_version(300), Layout::V3);
-        assert_eq!(Layout::from_version(310), Layout::V3);
-        assert_eq!(Layout::from_version(400), Layout::V4);
-        assert_eq!(Layout::from_version(420), Layout::V4);
+        assert_eq!(Layout::from_version(8), Some(Layout::V2));
+        assert_eq!(Layout::from_version(200), Some(Layout::V2));
+        assert_eq!(Layout::from_version(300), Some(Layout::V3));
+        assert_eq!(Layout::from_version(310), Some(Layout::V3));
+        assert_eq!(Layout::from_version(400), Some(Layout::V4));
+        assert_eq!(Layout::from_version(420), Some(Layout::V4));
+    }
+
+    /// A generation past the last one modelled has unknown stream units, so it is
+    /// refused rather than decoded as the newest one known.
+    #[test]
+    fn a_content_version_past_the_last_modelled_generation_is_refused() {
+        assert_eq!(
+            Layout::from_version(V5_FROM_VERSION - 1),
+            Some(Layout::V4),
+            "the ceiling is exclusive"
+        );
+        assert_eq!(Layout::from_version(V5_FROM_VERSION), None);
+        assert_eq!(Layout::from_version(u32::MAX), None);
     }
 
     #[test]

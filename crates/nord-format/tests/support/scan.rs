@@ -3,11 +3,15 @@
 //! out — a specimen joins by being readable, an oracle by existing.
 //!
 //! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy.
+//! includes it compiles its own copy, and each must also include
+//! `support/sidecar.rs` as `sidecar`, which [`sampled`] reads the oracle
+//! convention from.
 #![allow(dead_code)]
 
+use nord_format::formats::nsmp;
 use nord_format::util::{peek, FileType};
-use nord_format::Entity;
+use nord_format::{Entity, Sample};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -42,9 +46,11 @@ pub fn wanted(path: &Path) -> bool {
     )
 }
 
-/// A CBIN file's tag and header generation — the shape its registry reads
-/// through. `None` for anything else.
-pub fn shape(path: &Path) -> Option<(Vec<u8>, u8)> {
+/// A CBIN file's tag and header generation — the shape its registry reads through.
+pub type Shape = (Vec<u8>, u8);
+
+/// A CBIN file's [`Shape`]. `None` for anything else.
+pub fn shape(path: &Path) -> Option<Shape> {
     use std::io::Read;
     let mut head = [0u8; 12];
     fs::File::open(path)
@@ -54,27 +60,55 @@ pub fn shape(path: &Path) -> Option<(Vec<u8>, u8)> {
         .then(|| (head[8..12].to_vec(), head[4]))
 }
 
-/// Every wanted file under `root`, and every sidecar, each in a stable order.
-pub fn walk(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let mut specimens = Vec::new();
-    let mut sidecars = Vec::new();
+/// Is this specimen one of the sample the per-field mutation checks run on — every
+/// specimen with an oracle sidecar, plus the first of each container shape? `seen`
+/// carries the shapes already taken, so a caller sweeping a tree gets one of each.
+///
+/// The check is a property of the code path; what more specimens add is diverse
+/// baselines, which those already are.
+pub fn sampled(path: &Path, seen: &mut BTreeSet<Shape>) -> bool {
+    crate::sidecar::sidecar_of(path).exists() || shape(path).is_none_or(|s| seen.insert(s))
+}
+
+/// An all-ones body is an unwritten slot, whose fields may be outside every table.
+pub fn unwritten(body: &[u8]) -> bool {
+    !body.is_empty() && body.iter().all(|&byte| byte == 0xff)
+}
+
+/// Every file under `root` that is not a dotfile, in directory order.
+fn visit(root: &Path, each: &mut impl FnMut(PathBuf)) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
             let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy();
-            if name.starts_with('.') {
+            if path.file_name().unwrap().to_string_lossy().starts_with('.') {
                 continue;
             }
             if path.is_dir() {
                 stack.push(path);
-            } else if name.ends_with(".oracle.json") {
-                sidecars.push(path);
-            } else if wanted(&path) {
-                specimens.push(path);
+            } else {
+                each(path);
             }
         }
     }
+}
+
+/// Every wanted file under `root`, and every sidecar, each in a stable order.
+pub fn walk(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut specimens = Vec::new();
+    let mut sidecars = Vec::new();
+    visit(root, &mut |path| {
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".oracle.json")
+        {
+            sidecars.push(path);
+        } else if wanted(&path) {
+            specimens.push(path);
+        }
+    });
     specimens.sort();
     sidecars.sort();
     (specimens, sidecars)
@@ -89,16 +123,16 @@ pub struct Specimen {
 
 /// What one tree yielded: the specimens that parsed, and the files the reader
 /// recognized but could not parse, each with its error.
-struct Tree {
-    specimens: Vec<Specimen>,
-    unparsed: Vec<(PathBuf, String)>,
+pub struct Tree {
+    pub specimens: Vec<Specimen>,
+    pub unparsed: Vec<(PathBuf, String)>,
 }
 
 /// Every specimen under `root`, read and parsed. A file that fails to parse
 /// lands in `unparsed` rather than ending the run: the sweep in `tests/corpus`
 /// is where a parse failure is a failing trial, named. An empty tree is still
 /// fatal — that is a broken `root`, not a broken specimen.
-fn read_tree(root: &Path) -> Tree {
+pub fn read_tree(root: &Path) -> Tree {
     let (paths, _) = walk(root);
     assert!(!paths.is_empty(), "no specimen under {}", root.display());
     let mut tree = Tree {
@@ -170,57 +204,39 @@ pub fn named(name: &str) -> &'static Specimen {
     found
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+/// The one corpus file with this name that [`wanted`] leaves out — the `.skip.`
+/// marker. Found by name, so a test naming one pins no directory in the tree.
+pub fn named_skipped(name: &str) -> PathBuf {
+    let mut hits = Vec::new();
+    visit(&root(), &mut |path| {
+        if path.file_name().is_some_and(|found| found == name) {
+            hits.push(path);
+        }
+    });
+    assert_eq!(hits.len(), 1, "corpus files named {name}: {hits:?}");
+    hits.pop().unwrap()
+}
 
-    fn name(path: &Path) -> String {
-        path.file_name().unwrap().to_string_lossy().into_owned()
-    }
+/// Every v2 sample instrument in the corpus, with the specimen it came from.
+pub fn v2_samples() -> impl Iterator<
+    Item = (
+        &'static Specimen,
+        &'static nord_format::cbin::Cbin<nsmp::Sample>,
+    ),
+> {
+    corpus()
+        .iter()
+        .filter_map(|specimen| match &specimen.entity {
+            Entity::Sample(Sample::V2(sample)) => Some((specimen, sample)),
+            _ => None,
+        })
+}
 
-    fn scratch(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("nord-scan-{label}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn a_specimen_that_does_not_parse_is_collected_and_the_rest_are_read() {
-        let dir = scratch("unparsed");
-        let fixture =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cbin/npsy.g0.cbin");
-        fs::copy(&fixture, dir.join("readable.cbin")).unwrap();
-        // A CBIN container carrying a tag no reader claims: the sniffer takes
-        // the file, `from_stream` refuses it.
-        fs::write(dir.join("garbage.cbin"), b"CBIN\0\0\0\0zzzz\0\0\0\0").unwrap();
-
-        let tree = read_tree(&dir);
-        fs::remove_dir_all(&dir).unwrap();
-
-        assert_eq!(
-            tree.specimens
-                .iter()
-                .map(|s| name(&s.path))
-                .collect::<Vec<_>>(),
-            ["readable.cbin"]
-        );
-        assert_eq!(
-            tree.unparsed
-                .iter()
-                .map(|(p, _)| name(p))
-                .collect::<Vec<_>>(),
-            ["garbage.cbin"]
-        );
-        assert!(
-            tree.unparsed[0].1.contains("zzzz"),
-            "an unparsed file carries the reader's error, got {:?}",
-            tree.unparsed[0].1
-        );
+/// The v2 sample instrument with this file name, decoded afresh so a caller may
+/// edit it without disturbing the shared corpus.
+pub fn v2_named(name: &str) -> nord_format::cbin::Cbin<nsmp::Sample> {
+    match nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap() {
+        Entity::Sample(Sample::V2(sample)) => sample,
+        other => panic!("{name} decoded as {other:?}"),
     }
 }

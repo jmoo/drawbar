@@ -156,7 +156,7 @@ macro_rules! knob {
                 value.try_into()
             }
 
-            /// The stored value, 0..=127.
+            #[doc = concat!("The stored value, 0..=", stringify!($max), ".")]
             pub fn as_u8(&self) -> u8 {
                 self.inner
             }
@@ -238,20 +238,13 @@ knob!(
 );
 
 knob!(
-    /// An arpeggiator rate, read as quarter-note BPM.
-    ///
-    /// ⚠️ Under a live master clock this reads as a subdivision instead — see [`Rate`].
-    Tempo,
-    Unit::Bpm
-);
-
-knob!(
     /// A stereo position in a six-bit slot.
     ///
     /// ⚠️ The mapping is not established: over the Stage 4 factory programs the slot's
     /// mode is 0 rather than the mid-scale 32 a centre-encoded pan would show, so this
     /// makes no claim about where centre sits and prints the stored value. It carries
-    /// only that the control is a pan.
+    /// only that the control is a pan. Inferred from specimens; not confirmed on
+    /// hardware.
     Pan,
     63,
     6,
@@ -261,35 +254,42 @@ knob!(
 knob!(
     /// A pitch offset in semitones.
     ///
-    /// **Corpus:** the Stage 4's coarse oscillator pitch holds 0, 7, 12, 24 and 40 —
-    /// unison, a fifth, an octave, two octaves — which is what makes the unit readable.
-    /// The Stage 3 manual gives the same control as "semitone steps, ranging from 0 to
-    /// 48".
+    /// The Stage 4's coarse oscillator pitch holds 0, 7, 12, 24 and 40 — unison, a
+    /// fifth, an octave, two octaves — which is what makes the unit readable. Inferred
+    /// from specimens; not confirmed on hardware. The Stage 3 manual gives the same
+    /// control as "semitone steps, ranging from 0 to 48".
     Interval,
     63,
     6,
     ControlKind::Shift(Unit::Semitones)
 );
 
-/// A 0..=127 slot whose musical zero is its centre, reading `±LIMIT` of `UNIT` either
-/// side.
+/// A 0..=127 slot whose musical zero is its centre, reading `±LIMIT` of the unit
+/// `UNIT` codes either side.
 ///
 /// The Stage equalizer bands are the clearest case: the manuals give "the boost/cut range
 /// is +/- 15 dB" for all three models, and rendering those on [`Level`]'s `0..10` reads a
 /// cut as a small boost.
 ///
-/// ⚠️ The centre is taken as 64 — the midpoint of the slot. Inferred; the corpus does not
-/// distinguish 63 from 64, and no manual states it. A reading is therefore accurate at
-/// the endpoints and approximate in between.
+/// ⚠️ The unit is the declaration's, not the shape's: a `±10` modulation amount is not
+/// decibels because an equalizer band is. Name it through [`EqBand`] or [`Bipolar`]
+/// rather than writing the code out.
+///
+/// ⚠️ The centre is taken as 64 — the midpoint of the slot. Inferred from specimens; not
+/// confirmed on hardware — the corpus does not distinguish 63 from 64, and no manual
+/// states it. A reading is therefore accurate at the endpoints and approximate in
+/// between.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Bipolar<const LIMIT: i16> {
+pub struct BipolarOf<const LIMIT: i16, const UNIT: u8> {
     inner: u8,
 }
 
-impl<const LIMIT: i16> Bipolar<LIMIT> {
+impl<const LIMIT: i16, const UNIT: u8> BipolarOf<LIMIT, UNIT> {
     pub const MAX: u8 = 127;
     /// The stored value that reads as zero.
     pub const CENTER: u8 = 64;
+    /// What the reading is in.
+    pub const UNIT: Unit = Unit::expect_code(UNIT);
 
     pub fn new(value: u8) -> Result<Self, ParseError> {
         value.try_into()
@@ -312,7 +312,7 @@ impl<const LIMIT: i16> Bipolar<LIMIT> {
     }
 }
 
-impl<const LIMIT: i16> TryFrom<u8> for Bipolar<LIMIT> {
+impl<const LIMIT: i16, const UNIT: u8> TryFrom<u8> for BipolarOf<LIMIT, UNIT> {
     type Error = ParseError;
 
     fn try_from(value: u8) -> Result<Self, ParseError> {
@@ -322,14 +322,14 @@ impl<const LIMIT: i16> TryFrom<u8> for Bipolar<LIMIT> {
                 bound: format!("0..={}", Self::MAX),
             });
         }
-        Ok(Bipolar { inner: value })
+        Ok(BipolarOf { inner: value })
     }
 }
 
-impl<const LIMIT: i16> Packed for Bipolar<LIMIT> {
+impl<const LIMIT: i16, const UNIT: u8> Packed for BipolarOf<LIMIT, UNIT> {
     const MAX_BITS: u32 = 7;
     const DECODE_BITS: u32 = u8::BITS;
-    const CONTROL: ControlKind = ControlKind::Bipolar(Unit::Decibels);
+    const CONTROL: ControlKind = ControlKind::Bipolar(Unit::expect_code(UNIT));
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
@@ -342,27 +342,31 @@ impl<const LIMIT: i16> Packed for Bipolar<LIMIT> {
 }
 
 /// The stored byte, so a retype from a plain integer leaves the field dumps alone.
-impl<const LIMIT: i16> Debug for Bipolar<LIMIT> {
+impl<const LIMIT: i16, const UNIT: u8> Debug for BipolarOf<LIMIT, UNIT> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner)
     }
 }
 
-impl<const LIMIT: i16> Display for Bipolar<LIMIT> {
+impl<const LIMIT: i16, const UNIT: u8> Display for BipolarOf<LIMIT, UNIT> {
     /// Stored byte and signed reading: `96 (+7.5)`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({:+.1})", self.inner, self.reading())
     }
 }
 
-impl<const LIMIT: i16> PartialEq<u8> for Bipolar<LIMIT> {
+impl<const LIMIT: i16, const UNIT: u8> PartialEq<u8> for BipolarOf<LIMIT, UNIT> {
     fn eq(&self, other: &u8) -> bool {
         self.inner == *other
     }
 }
 
 /// An equalizer band, `±15 dB` — the range all three Stage manuals give.
-pub type EqBand = Bipolar<15>;
+pub type EqBand = BipolarOf<15, { Unit::Decibels.code() }>;
+
+/// A bipolar amount with no unit: a modulation depth the panel reads as a bare
+/// `±LIMIT`, such as the Stage 2's filter modulation.
+pub type Bipolar<const LIMIT: i16> = BipolarOf<LIMIT, { Unit::None.code() }>;
 
 /// The value a performance control morphs its parent parameter *to*.
 ///
@@ -779,19 +783,18 @@ impl PartMix {
             upper
         }
     }
+}
 
-    pub fn as_string(&self) -> String {
-        format!("{:.1}/{:.1}", self.lower(), self.upper())
-    }
-
-    pub fn as_tuple(&self) -> (f32, f32) {
-        (self.lower(), self.upper())
+impl Display for PartMix {
+    /// The two sides as the panel reads them: `50.0/12.6`.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:.1}/{:.1}", self.lower(), self.upper())
     }
 }
 
 impl Debug for PartMix {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_string())
+        write!(f, "{self}")
     }
 }
 
@@ -851,9 +854,9 @@ pub enum SplitPoint73 {
 }
 
 impl TryFrom<u8> for SplitPoint73 {
-    type Error = &'static str;
+    type Error = ParseError;
 
-    fn try_from(value: u8) -> Result<SplitPoint73, Self::Error> {
+    fn try_from(value: u8) -> Result<SplitPoint73, ParseError> {
         match value {
             0 => Ok(SplitPoint73::C3),
             1 => Ok(SplitPoint73::F3),
@@ -863,7 +866,10 @@ impl TryFrom<u8> for SplitPoint73 {
             5 => Ok(SplitPoint73::F5),
             6 => Ok(SplitPoint73::Upper),
             7 => Ok(SplitPoint73::Lower),
-            _ => Err("Value is out of range for split point"),
+            _ => Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: "0..=7 (SplitPoint73)".to_string(),
+            }),
         }
     }
 }
@@ -875,10 +881,7 @@ impl Packed for SplitPoint73 {
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
-        SplitPoint73::try_from(bits as u8).map_err(|_| ParseError::OutOfBounds {
-            value: format!("{bits}"),
-            bound: "0..=7 (SplitPoint73)".to_string(),
-        })
+        (bits as u8).try_into()
     }
 
     fn to_bits(&self) -> u64 {
@@ -927,9 +930,9 @@ impl Packed for StageTranspose {
     const MAX_BITS: u32 = 4;
     const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Shift(Unit::Semitones);
-    type Error = ParseError;
+    type Error = ::core::convert::Infallible;
 
-    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+    fn from_bits(bits: u64) -> Result<Self, Self::Error> {
         Ok(StageTranspose { raw: bits as u8 })
     }
 
@@ -949,7 +952,7 @@ impl Debug for StageTranspose {
 
 /// The master clock rate the Stage 2 and 3 store in a program: `stored + 30` BPM.
 ///
-/// Inferred from the Nord User Forum's ns3-program-viewer documentation
+/// Reported by the Nord User Forum's ns3-program-viewer documentation
 /// (github.com/Chris55/ns3-program-viewer); not confirmed on hardware.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MasterTempo {
@@ -972,9 +975,9 @@ impl Packed for MasterTempo {
     const MAX_BITS: u32 = 8;
     const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: ControlKind = ControlKind::Knob(Unit::Bpm);
-    type Error = ParseError;
+    type Error = ::core::convert::Infallible;
 
-    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+    fn from_bits(bits: u64) -> Result<Self, Self::Error> {
         Ok(MasterTempo { inner: bits as u8 })
     }
 
@@ -1340,9 +1343,9 @@ sparse_enum!(
     /// Which of the four keyboard zones a section occupies, as the Stage 3 and 4 store it.
     ///
     /// The Stage 3 byte-map docs give the table as an occupancy picture — `o---` is the
-    /// leftmost zone alone, `oooo` the whole keyboard. **Corpus:** the Stage 3's piano and
-    /// synth zone slots hold only values inside this table, with `oooo` dominating, so all
-    /// three sections share it.
+    /// leftmost zone alone, `oooo` the whole keyboard. The Stage 3's piano and synth
+    /// zone slots hold only values inside this table, with `oooo` dominating, so all
+    /// three sections share it. Inferred from specimens; not confirmed on hardware.
     ///
     /// Unexplained: Stage 4 specimens reach stored value 10. It decodes as `Unknown(10)`
     /// and survives verbatim.
@@ -1378,7 +1381,7 @@ sparse_enum!(
 sparse_enum!(
     /// A Stage split boundary, one of the ten notes the panel offers.
     ///
-    /// The Stage 2 and 3 store the same ten-note table. Inferred from the Nord User
+    /// The Stage 2 and 3 store the same ten-note table. Reported by the Nord User
     /// Forum's ns3-program-viewer documentation (github.com/Chris55/ns3-program-viewer);
     /// not confirmed on hardware.
     SplitNote, 4, {
@@ -1398,7 +1401,7 @@ sparse_enum!(
 sparse_enum!(
     /// A Stage 3 split crossfade width, in semitones.
     ///
-    /// Inferred from the ns3-program-viewer documentation; not confirmed on hardware.
+    /// Reported by the ns3-program-viewer documentation; not confirmed on hardware.
     SplitWidth, 2, {
         0 => One, "1";
         1 => Six, "6";
@@ -1409,7 +1412,7 @@ sparse_enum!(
 sparse_enum!(
     /// The program category byte the Stage 2 and 3 keep in the header's `aux` word.
     ///
-    /// Inferred from the ns3-program-viewer documentation; not confirmed on hardware.
+    /// Reported by the ns3-program-viewer documentation; not confirmed on hardware.
     /// The gaps are real: no name is known for the values between these.
     ProgramCategory, 8, {
         0x00 => Acoustic, "Acoustic";
@@ -1436,6 +1439,21 @@ sparse_enum!(
         0xff => Undefined, "Undefined";
     }
 );
+
+impl ProgramCategory {
+    /// The category a Stage 2 or 3 header names, or `None` where the `aux` word carries
+    /// no category id at all or one too wide for this byte-sized table.
+    ///
+    /// The whole id is examined: a value above `0xff` names no category here rather than
+    /// being truncated into one.
+    pub fn of(header: &crate::cbin::Header) -> Option<ProgramCategory> {
+        let id = u8::try_from(header.category()?).ok()?;
+        match Self::from_bits(id as u64) {
+            Ok(category) => Some(category),
+            Err(never) => match never {},
+        }
+    }
+}
 
 sparse_enum!(
     /// From the `ns2-effect-1-type` table in the Stage byte-map docs.
@@ -1611,6 +1629,42 @@ mod tests {
         assert_eq!(EqBand::new(127).unwrap().to_string(), "127 (+15.0)");
         // `Debug` is the stored byte, so retyping a plain integer leaves field dumps alone.
         assert_eq!(format!("{:?}", EqBand::new(96).unwrap()), "96");
+    }
+
+    /// The unit comes from the declaration, so a bipolar slot that is not a decibel
+    /// reading does not claim to be one.
+    #[test]
+    fn a_bipolar_slot_carries_the_unit_it_was_declared_with() {
+        assert_eq!(
+            <EqBand as Packed>::CONTROL,
+            ControlKind::Bipolar(Unit::Decibels)
+        );
+        assert_eq!(
+            <Bipolar<10> as Packed>::CONTROL,
+            ControlKind::Bipolar(Unit::None)
+        );
+        // ±10 of nothing is still ±10.
+        assert_eq!(Bipolar::<10>::new(127).unwrap().reading(), 10.0);
+    }
+
+    /// The code is only a way to carry a unit through a const generic, so it has to come
+    /// back as the unit it went in as.
+    #[test]
+    fn a_unit_survives_the_code_that_carries_it() {
+        for unit in [
+            Unit::Panel10,
+            Unit::Decibels,
+            Unit::Milliseconds,
+            Unit::Hertz,
+            Unit::Bpm,
+            Unit::ClockDivision,
+            Unit::Semitones,
+            Unit::Octaves,
+            Unit::Pan,
+            Unit::None,
+        ] {
+            assert_eq!(Unit::expect_code(unit.code()), unit, "{unit:?}");
+        }
     }
 
     /// A switch keeps its single bit and gives both states a word. `Debug` is the

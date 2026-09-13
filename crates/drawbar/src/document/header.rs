@@ -12,11 +12,11 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::controls::Sets;
-use super::{encode, piano, project, sample, setlist, SendBack};
+use super::controls::{self, Sets};
+use super::{encode, piano, project, sample, setlist, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
-use crate::device::{sendable, DeviceState};
+use crate::device::{read_only, DeviceState};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
@@ -247,6 +247,11 @@ pub(super) struct Facts<'a> {
     /// Whether this is a view of the instrument's own copy rather than an asset held
     /// here.
     pub view: bool,
+    /// What a piano library's plan will save its name and its variant as, from
+    /// [`piano::State::renaming`]: the box holds what a save writes.
+    pub renaming: (Option<String>, Option<String>),
+    /// What the document is, which is what decides where its name is kept.
+    pub shape: Shape,
     pub extras: Extras,
 }
 
@@ -357,7 +362,7 @@ fn left(
     let glyph = Kind::of(entity.entity.as_ref()).glyph();
     icon(ui, glyph, KIND, accent(&visuals));
 
-    let (held, stored) = named(entity, facts.view);
+    let (held, stored) = named(entity, facts.shape, facts.view, facts.renaming.clone());
     act.rename = name(ui, entity, &held, &stored, boxes, sets);
 
     let (badge, hint) = badge(entity);
@@ -794,40 +799,65 @@ enum Named {
     Device,
 }
 
+/// The name the file itself stores, where this shape keeps one, and how its box is
+/// dressed. `renaming` is what a piano library's plan will save each half as, where it
+/// renames it.
+fn stored_name(
+    entity: &LocalEntity,
+    shape: Shape,
+    renaming: (Option<String>, Option<String>),
+) -> Option<(Named, String)> {
+    let decoded = entity.entity.as_ref()?;
+    match shape {
+        Shape::Sample => {
+            let held = sample::snapshot(decoded)?.ok()?;
+            Some((
+                Named::Stored {
+                    limit: Some(held.max_name_len),
+                    variant: None,
+                    width: NAME,
+                },
+                held.name,
+            ))
+        }
+        Shape::Project => {
+            let held = project::snapshot(decoded)?.ok()?;
+            Some((
+                Named::Stored {
+                    limit: None,
+                    variant: None,
+                    width: NAME,
+                },
+                held.name,
+            ))
+        }
+        Shape::Piano => {
+            let held = piano::snapshot(decoded)?.ok()?;
+            let (name, variant) = renaming;
+            Some((
+                Named::Stored {
+                    limit: None,
+                    variant: Some(variant.unwrap_or(held.variant)),
+                    width: PIANO_NAME,
+                },
+                name.unwrap_or(held.name),
+            ))
+        }
+        Shape::Fields | Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+    }
+}
+
 /// What the name box holds, and what typing in it does.
-fn named(entity: &LocalEntity, view: bool) -> (Named, String) {
-    let decoded = entity.entity.as_ref();
-    if let Some(Ok(held)) = decoded.and_then(sample::snapshot) {
-        return (
-            Named::Stored {
-                limit: Some(held.max_name_len),
-                variant: None,
-                width: NAME,
-            },
-            held.name,
-        );
+fn named(
+    entity: &LocalEntity,
+    shape: Shape,
+    view: bool,
+    renaming: (Option<String>, Option<String>),
+) -> (Named, String) {
+    if let Some(held) = stored_name(entity, shape, renaming) {
+        return held;
     }
-    if let Some(Ok(held)) = decoded.and_then(project::snapshot) {
-        return (
-            Named::Stored {
-                limit: None,
-                variant: None,
-                width: NAME,
-            },
-            held.name,
-        );
-    }
-    if let Some(Ok(held)) = decoded.and_then(piano::snapshot) {
-        return (
-            Named::Stored {
-                limit: None,
-                variant: Some(held.variant),
-                width: PIANO_NAME,
-            },
-            held.name,
-        );
-    }
-    let settings = Kind::of(decoded) == Kind::Settings;
+    let settings = Kind::of(entity.entity.as_ref()) == Kind::Settings;
     match view && settings {
         true => (Named::Device, display_name(&entity.name).to_string()),
         false => (Named::Asset, display_name(&entity.name).to_string()),
@@ -835,8 +865,13 @@ fn named(entity: &LocalEntity, view: bool) -> (Named, String) {
 }
 
 /// What the name boxes hold when a document opens.
-pub(super) fn boxes(entity: &LocalEntity, view: bool) -> (String, String) {
-    let (held, stored) = named(entity, view);
+pub(super) fn boxes(
+    entity: &LocalEntity,
+    shape: Shape,
+    view: bool,
+    renaming: (Option<String>, Option<String>),
+) -> (String, String) {
+    let (held, stored) = named(entity, shape, view, renaming);
     let variant = match held {
         Named::Stored { variant, .. } => variant.unwrap_or_default(),
         Named::Asset | Named::Device => String::new(),
@@ -896,6 +931,10 @@ fn name(
 
 /// A single-line name box that commits when it is done rather than per keystroke: half a
 /// name is a name the format would take.
+///
+/// ⚠️ Done is this box giving up the focus, which a single-line `TextEdit` does on Enter.
+/// An Enter read from the window would settle every name box on screen, so a value the
+/// format had already refused went back to it on every Enter the operator pressed.
 fn settled(
     ui: &mut egui::Ui,
     text: &mut String,
@@ -906,14 +945,14 @@ fn settled(
     let mut edit = egui::TextEdit::singleline(text)
         .desired_width(width)
         .margin(egui::Margin::symmetric(4, 1));
-    if let Some(limit) = limit {
-        edit = edit.char_limit(limit);
-    }
     if mono {
         edit = edit.font(egui::FontId::monospace(MONO));
     }
     let response = ui.add(edit);
-    response.lost_focus() || response.ctx.input(|i| i.key_pressed(egui::Key::Enter))
+    if let Some(limit) = limit {
+        controls::fits(text, limit);
+    }
+    response.lost_focus()
 }
 
 /// What a typed name is stored as: the words that were typed, under the format tag the
@@ -1066,8 +1105,8 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
 /// The one claim the header makes about this document: what it holds that is not what it
 /// was saved as, or what the attached instrument holds where this document stands.
 ///
-/// ⚠️ Ordered. Unsaved comes first because an edit is what the reader just did, and a
-/// slot that agrees with the *saved* bytes says nothing about the ones in front of them.
+/// ⚠️ Ordered, unsaved first: a slot that agrees with the *saved* bytes says nothing
+/// about the ones in front of the reader.
 fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
@@ -1156,7 +1195,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let Some((class, at)) = entity.spot() else {
         return idle("this stands on no slot — there is nothing to replace".to_string());
     };
-    if !sendable(class) {
+    if read_only(class) {
         return idle(format!(
             "nothing here knows what {} holds, so nothing is written there",
             folder(class)
@@ -1242,6 +1281,57 @@ mod tests {
         (workspace, id)
     }
 
+    /// ⚠️ A name box settles on its own Enter. Read from the window, every box on
+    /// screen settled together, so a name the format had refused went back to it — and
+    /// into the log — on every Enter the operator pressed anywhere.
+    #[test]
+    fn a_name_box_settles_on_its_own_enter_rather_than_the_windows() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        let mut text = "Marimba".to_string();
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = |pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frame = |events: Vec<egui::Event>, text: &mut String| {
+            let mut done = false;
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 100.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    done = settled(ui, text, NAME, None, false);
+                });
+            });
+            done
+        };
+
+        assert!(!frame(Vec::new(), &mut text), "nothing has happened");
+        assert!(
+            !frame(vec![key(egui::Key::Enter)], &mut text),
+            "the box never had the focus"
+        );
+        let _ = frame(vec![at(egui::pos2(40.0, 20.0))], &mut text);
+        assert!(
+            frame(vec![key(egui::Key::Enter)], &mut text),
+            "an Enter typed in the box is the box being done with"
+        );
+    }
+
     /// The collapse order is decided on three widths, and a width exactly on one is
     /// still the wider stage.
     #[test]
@@ -1299,8 +1389,6 @@ mod tests {
     /// badge, the content or stream version in the hover.
     #[test]
     fn every_kind_says_what_format_it_is() {
-        use crate::fields::blank;
-
         let (mut workspace, mut log) = workspace();
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
         assert_eq!(
@@ -1320,7 +1408,7 @@ mod tests {
             )
         );
 
-        let (held, id) = opened("blank.ne5t", blank::electro5_song());
+        let (held, id) = opened("blank.ne5t", Fresh::SetList.bytes().unwrap());
         assert_eq!(
             badge(held.get(id).unwrap()),
             (
@@ -1358,7 +1446,7 @@ mod tests {
         let settings = workspace.create(Fresh::Settings, &mut log).unwrap();
         assert!(sized(workspace.get(settings).unwrap()).is_none());
 
-        let (held, id) = opened("blank.ne5t", crate::fields::blank::electro5_song());
+        let (held, id) = opened("blank.ne5t", Fresh::SetList.bytes().unwrap());
         assert_eq!(sized(held.get(id).unwrap()).unwrap().text, "4 entries");
 
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -1408,7 +1496,6 @@ mod tests {
         assert_eq!(phrase(Mark::Unknown, false).words, "on the keyboard");
     }
 
-    /// An editor's own word for an unsaved document stands in the strip, and it is warn
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
         Facts {
             faces: &[Face::Edit],
@@ -1417,10 +1504,13 @@ mod tests {
             queue,
             tags,
             view: false,
+            renaming: (None, None),
+            shape: Shape::Fields,
             extras: Extras::default(),
         }
     }
 
+    /// An editor's own word for an unsaved document stands in the strip, and it is warn
     /// ink whatever the editor called it — the header has no red to reach for.
     #[test]
     fn an_editors_own_state_phrase_keeps_the_strips_ink() {
@@ -1460,7 +1550,7 @@ mod tests {
 
         let (mut workspace, mut log) = workspace();
         let at = Location { bank: 6, slot: 3 };
-        let bytes = crate::fields::blank::electro5_song();
+        let bytes = Fresh::SetList.bytes().unwrap();
 
         let unattached = Device::new(egui::Context::default());
         let id = workspace.ingest(

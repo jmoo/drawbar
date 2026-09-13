@@ -9,12 +9,12 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::{Item, Kind};
 use super::Browser;
 use crate::device::{
-    fit, sendable, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
+    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
 };
 use crate::filter::Narrow;
 use crate::log::Log;
 use crate::newproject::Making;
-use crate::queue::{enqueue, retarget, Occupancy, Queue};
+use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
@@ -72,8 +72,8 @@ pub enum Act {
         class: ObjectClass,
         at: Location,
     },
-    /// Queue a local asset for a slot, asking first where the write itself has a
-    /// warning to carry.
+    /// Queue a local asset for a slot, asking first where the write both carries a
+    /// warning and replaces an occupant.
     Send {
         id: u64,
         class: ObjectClass,
@@ -249,7 +249,7 @@ pub fn fits(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Fit
 ///
 /// [`Bulk::Tag`] answers with the ids a tag would hang on rather than with acts: which
 /// tag is picked from a menu of its own, and only then is there an act.
-pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
+pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
     match action {
         Bulk::Queue => match checked
             .iter()
@@ -263,7 +263,8 @@ pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
         Bulk::Copy => checked
             .iter()
             .filter_map(|item| match item {
-                Item::Slot { class, at } => Some(Act::Copy {
+                // A slot the scan found vacant holds nothing to ask the instrument for.
+                Item::Slot { class, at } => state.slot(*class, *at).flatten().map(|_| Act::Copy {
                     class: *class,
                     at: *at,
                 }),
@@ -281,10 +282,14 @@ pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
             .iter()
             .filter_map(|item| match item {
                 Item::Local(id) => Some(Act::Remove(*id)),
-                Item::Slot { class, at } => Some(Act::DeleteSlot {
-                    class: *class,
-                    at: *at,
-                }),
+                // A slot the scan found vacant holds nothing to delete, and asking costs
+                // a round trip that can only end in an error.
+                Item::Slot { class, at } => {
+                    state.slot(*class, *at).flatten().map(|_| Act::DeleteSlot {
+                        class: *class,
+                        at: *at,
+                    })
+                }
                 Item::Folder(_) | Item::Tag(_) => None,
             })
             .collect(),
@@ -316,9 +321,6 @@ pub fn apply(
     log: &mut Log,
 ) {
     for act in acts {
-        // Taken here rather than by each caller: a drop, a menu and a footer all reach
-        // the queue through an act, and a plan made out of sight is a plan nobody
-        // reviews.
         if enqueues(&act) {
             shell.show_page(Page::Queue);
         }
@@ -338,12 +340,14 @@ pub fn apply(
             }
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
-            Act::NewFolder => {
-                let id = browser.folders.make();
+            Act::NewFolder => match browser.folders.make() {
                 // ⚠️ Edit the unique name chosen by `make`, not its generic seed.
-                let name = browser.folders.name_of(id).unwrap_or_default().to_string();
-                browser.start_rename(Item::Folder(id), &name);
-            }
+                Some(id) => {
+                    let name = browser.folders.name_of(id).unwrap_or_default().to_string();
+                    browser.start_rename(Item::Folder(id), &name);
+                }
+                None => log.trouble("The folder list is full, so there is no new folder."),
+            },
             Act::RemoveFolder(id) => {
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Folder(id));
@@ -356,13 +360,15 @@ pub fn apply(
                     browser.tags.set(id, tag, false);
                 }
             }
-            Act::NewTag(wanted) => {
-                let id = browser.tags.make(&wanted);
+            Act::NewTag(wanted) => match browser.tags.make(&wanted) {
                 // ⚠️ Edit the unique name chosen by `make`, not the generic seed it
                 // started from: two tags of one name are one row twice.
-                let name = browser.tags.name_of(id).unwrap_or_default().to_string();
-                browser.start_rename(Item::Tag(id), &name);
-            }
+                Some(id) => {
+                    let name = browser.tags.name_of(id).unwrap_or_default().to_string();
+                    browser.start_rename(Item::Tag(id), &name);
+                }
+                None => log.trouble("The tag list is full, so there is no new tag."),
+            },
             Act::RenameTag { id, name } => browser.tags.rename(id, name),
             Act::RemoveTag(id) => {
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
@@ -377,12 +383,15 @@ pub fn apply(
                     true => {
                         log.say("Nothing on this computer is picked, so there is no gig to save.")
                     }
-                    false => {
-                        let tag = browser.tags.make("New gig");
-                        tag_all(browser, workspace, log, &ids, tag);
-                        let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
-                        browser.start_rename(Item::Tag(tag), &name);
-                    }
+                    false => match browser.tags.make("New gig") {
+                        Some(tag) => {
+                            tag_all(browser, workspace, log, &ids, tag);
+                            let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
+                            browser.start_rename(Item::Tag(tag), &name);
+                        }
+                        None => log
+                            .trouble("The tag list is full, so there is no gig to save it under."),
+                    },
                 }
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
@@ -395,7 +404,6 @@ pub fn apply(
                     DeviceCmd::Get {
                         class,
                         at,
-                        body: false,
                         why: Purpose::View,
                     },
                     log,
@@ -405,7 +413,6 @@ pub fn apply(
                 DeviceCmd::Get {
                     class,
                     at,
-                    body: false,
                     why: Purpose::Copy,
                 },
                 log,
@@ -426,13 +433,19 @@ pub fn apply(
             Act::ClearQueue => queue.clear(),
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
-            Act::AskSendAll => {
-                let title = match queue.len() {
-                    1 => "Send 1 sound to the instrument?".to_string(),
-                    n => format!("Send {n} sounds to the instrument?"),
-                };
-                browser.ask_send(workspace, device, queue, title, Act::SendAll);
-            }
+            Act::AskSendAll => match will_write(queue).count() {
+                0 => log.say(
+                    "Nothing waiting can go to the instrument attached now, so there is \
+                     nothing to send.",
+                ),
+                waiting => {
+                    let title = match waiting {
+                        1 => "Send 1 sound to the instrument?".to_string(),
+                        n => format!("Send {n} sounds to the instrument?"),
+                    };
+                    browser.ask_send(workspace, device, queue, title, Act::SendAll);
+                }
+            },
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
@@ -454,6 +467,8 @@ pub fn apply(
             Act::Remove(id) => {
                 tabs.close(Spot::Document(id));
                 queue.forget(id);
+                // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
+                browser.forget_rename(Item::Local(id));
                 browser.folders.forget(id);
                 browser.tags.forget(id);
                 workspace.remove(id, log);
@@ -541,11 +556,10 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
 
 /// What is waiting, gathered per folder in the order the queue holds it.
 ///
-/// A session belongs to a folder, so a folder is the unit a batch is cut into. An entry
-/// carrying a refusal is left out of it and stays in the queue.
+/// A session belongs to a folder, so a folder is the unit a batch is cut into.
 fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
     let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
-    for held in queue.entries().iter().filter(|held| held.failure.is_none()) {
+    for held in will_write(queue) {
         let Some(entity) = workspace.get(held.id) else {
             continue;
         };
@@ -561,6 +575,13 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoi
         }
     }
     by_class
+}
+
+/// What a batch would write: everything waiting that the instrument attached now has not
+/// already refused. An entry carrying a refusal is left where it is, so nothing that
+/// counts or names a write may count or name one of those.
+pub(super) fn will_write(queue: &Queue) -> impl Iterator<Item = &Queued> {
+    queue.entries().iter().filter(|held| held.failure.is_none())
 }
 
 /// Warn when an outgoing tag differs from every scanned resident tag.
@@ -612,7 +633,7 @@ fn write_note(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> 
 /// then the slot it came off, and only where this app will write into that class at all.
 pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     let (class, at) = entity.spot()?;
-    crate::device::sendable(class).then_some((class, at))
+    (!read_only(class)).then_some((class, at))
 }
 
 /// Where queueing an asset for sending would put it.
@@ -641,7 +662,7 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
         return Bound::At(class, at);
     }
     let home = Kind::of(entity.entity.as_ref()).home();
-    let Some(class) = home.filter(|class| sendable(*class) && state.classes().contains(class))
+    let Some(class) = home.filter(|class| !read_only(*class) && state.classes().contains(class))
     else {
         return Bound::Nowhere;
     };
@@ -787,10 +808,9 @@ fn save_doc(
 /// `ask` is false once the question has been answered, which is what keeps the answer
 /// from raising it again.
 ///
-/// ⚠️ The question is now only about what a **write** carries — a foreign format, a
-/// settings write reloading the panel — and not about the slot being taken. Queueing is
-/// reversible and the queue shows the occupant, so an occupied slot no longer earns a
-/// modal; the one question before anything is actually written is [`Act::AskSendAll`].
+/// ⚠️ It asks only where the write both carries a warning — a foreign format, a settings
+/// write reloading the panel — and replaces an occupant. Every other warning is raised by
+/// [`Act::AskSendAll`], which is the one question before anything is written.
 #[allow(clippy::too_many_arguments)]
 fn send(
     browser: &mut Browser,
@@ -1003,30 +1023,34 @@ mod tests {
     /// instrument's, and deleting reaches all of it.
     #[test]
     fn each_action_over_a_checked_set_asks_only_about_the_rows_it_is_for() {
+        let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        device.pretend_scanned(ObjectClass::SetList, 7, &["", "", "", "Sunday"]);
+        let state = &device.state;
         let checked = checked();
 
-        let queued = bulk(Bulk::Queue, &checked);
+        let queued = bulk(Bulk::Queue, &checked, state);
         assert!(
             matches!(queued.as_slice(), [Act::SendChecked(ids)] if *ids == vec![1, 2]),
             "one queueing, over this computer's rows"
         );
-        assert_eq!(bulk(Bulk::Copy, &checked).len(), 2, "one per slot");
-        assert!(bulk(Bulk::Copy, &checked)
+        assert_eq!(bulk(Bulk::Copy, &checked, state).len(), 2, "one per slot");
+        assert!(bulk(Bulk::Copy, &checked, state)
             .iter()
             .all(|act| matches!(act, Act::Copy { .. })));
         assert!(
             matches!(
-                bulk(Bulk::Export, &checked).as_slice(),
+                bulk(Bulk::Export, &checked, state).as_slice(),
                 [Act::Export(1), Act::Export(2)]
             ),
             "one export per asset on this computer"
         );
         assert!(
-            bulk(Bulk::Tag, &checked).is_empty(),
+            bulk(Bulk::Tag, &checked, state).is_empty(),
             "a tag is picked first"
         );
         assert!(matches!(
-            bulk(Bulk::Delete, &checked).as_slice(),
+            bulk(Bulk::Delete, &checked, state).as_slice(),
             [
                 Act::Remove(1),
                 Act::Remove(2),
@@ -1038,17 +1062,35 @@ mod tests {
 
     /// A control the checked set gives nothing to do is a control that is offered dead,
     /// which is what an empty answer says.
+    ///
+    /// ⚠️ A slot the walk found vacant is one of those: asking the instrument for what is
+    /// not there costs a round trip that can only end in an error.
     #[test]
     fn an_action_with_nothing_to_act_on_asks_for_nothing() {
+        let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
+        let state = &device.state;
         let slots = vec![Item::Slot {
             class: ObjectClass::Program,
             at: at(0),
         }];
+        let vacant = vec![Item::Slot {
+            class: ObjectClass::Program,
+            at: at(1),
+        }];
         let locals = vec![Item::Local(1)];
-        assert!(bulk(Bulk::Queue, &slots).is_empty());
-        assert!(bulk(Bulk::Export, &slots).is_empty());
-        assert!(bulk(Bulk::Copy, &locals).is_empty());
-        assert!(bulk(Bulk::Delete, &[]).is_empty());
+        assert!(bulk(Bulk::Queue, &slots, state).is_empty());
+        assert!(bulk(Bulk::Export, &slots, state).is_empty());
+        assert!(bulk(Bulk::Copy, &locals, state).is_empty());
+        assert!(bulk(Bulk::Delete, &[], state).is_empty());
+        assert!(
+            bulk(Bulk::Copy, &vacant, state).is_empty(),
+            "7:2 was read and found empty"
+        );
+        assert!(
+            bulk(Bulk::Delete, &vacant, state).is_empty(),
+            "and deleting what is not there deletes nothing"
+        );
     }
 
     /// Queueing a checked set puts each of them where it is bound: the slot it is owed
@@ -1089,6 +1131,7 @@ mod tests {
             bulk(
                 Bulk::Queue,
                 &[Item::Local(owed), Item::Local(opened), Item::Local(nowhere)],
+                &device.state,
             ),
             &mut workspace,
             &mut device,
@@ -1154,6 +1197,7 @@ mod tests {
                     .copied()
                     .map(Item::Local)
                     .collect::<Vec<_>>(),
+                &device.state,
             ),
             &mut workspace,
             &mut device,
@@ -1201,7 +1245,11 @@ mod tests {
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &[Item::Local(mine), Item::Local(stage)]),
+            bulk(
+                Bulk::Queue,
+                &[Item::Local(mine), Item::Local(stage)],
+                &device.state,
+            ),
             &mut workspace,
             &mut device,
             &mut tabs,
@@ -1309,7 +1357,11 @@ mod tests {
         let onto = crate::browser::Onto::Slot { class, at: at(3) };
         assert_eq!(
             crate::browser::landing(&carried, onto),
-            crate::browser::Landing::Send
+            crate::browser::Landing::Send {
+                id,
+                class,
+                at: at(3)
+            }
         );
 
         send(
@@ -1345,6 +1397,11 @@ mod tests {
             })
             .collect();
 
+        let queueing = bulk(
+            Bulk::Queue,
+            &ids.iter().copied().map(Item::Local).collect::<Vec<_>>(),
+            &device.state,
+        );
         let mut run = |acts, queue: &mut Queue, workspace: &mut Workspace| {
             apply(
                 &mut browser,
@@ -1357,14 +1414,7 @@ mod tests {
                 &mut log,
             )
         };
-        run(
-            bulk(
-                Bulk::Queue,
-                &ids.iter().copied().map(Item::Local).collect::<Vec<_>>(),
-            ),
-            &mut queue,
-            &mut workspace,
-        );
+        run(queueing, &mut queue, &mut workspace);
         assert_eq!(queue.ids(), ids);
 
         run(vec![Act::Unqueue(ids[1])], &mut queue, &mut workspace);
@@ -1439,7 +1489,7 @@ mod tests {
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &[Item::Local(id)]),
+            bulk(Bulk::Queue, &[Item::Local(id)], &device.state),
             &mut workspace,
             &mut device,
             &mut tabs,
@@ -1528,8 +1578,6 @@ mod tests {
                 &mut log,
             )
         };
-        // The slot is empty in the scan and a program carries no write warning, so
-        // nothing is asked.
         act(
             vec![Act::Send {
                 id,
@@ -1540,7 +1588,10 @@ mod tests {
             &mut queue,
         );
         assert_eq!(queue.ids(), vec![id], "queued rather than written");
-        assert!(device.queued().is_empty(), "and nothing has been asked for");
+        assert!(
+            device.queued().is_empty(),
+            "an empty slot carrying no warning asks nothing"
+        );
 
         act(vec![Act::SendAll], &mut device, &mut queue);
         match device.queued().front().expect("a batch was queued") {
@@ -1606,6 +1657,73 @@ mod tests {
         ] {
             assert!(note.contains(said), "{note}");
         }
+    }
+
+    /// ⚠️ The question counts and names what the batch would write. An entry the
+    /// instrument attached now has already refused keeps its place in the queue and is
+    /// not written, so a question naming it promises a write nobody is about to make.
+    #[test]
+    fn the_send_question_leaves_out_what_the_batch_would_skip() {
+        use crate::device::DeviceEvent;
+
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        let theirs = program(&mut workspace, &mut log);
+        let electro = workspace.ingest("Africa-Split.ne5p".into(), Origin::Fresh, theirs, &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            electro,
+            class,
+            at(0),
+        );
+
+        // Another instrument in its place, which refuses the one already waiting.
+        device.pretend(DeviceEvent::Disconnected { lost: true });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        device.pretend_attached_as("Nord Stage 4");
+        let made = workspace
+            .create(Fresh::Stage4Program, &mut log)
+            .expect("a Stage 4 program");
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            made,
+            class,
+            at(1),
+        );
+        device.pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
+            class,
+            name: "Program".into(),
+            native: false,
+            unit: None,
+        }]));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(queue.ids(), vec![electro, made], "both are still waiting");
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::AskSendAll],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        let ask = browser.ask.as_ref().expect("a question was raised");
+        assert_eq!(ask.title, "Send 1 sound to the instrument?");
+        let note = ask.note.as_deref().expect("the modal has a note");
+        assert!(
+            !note.contains("Africa-Split"),
+            "the refused entry is not part of this write:\n{note}"
+        );
     }
 
     /// The queue outlives the instrument it was built against. What the one attached now
@@ -1746,7 +1864,6 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        // Three reads of what is there, and then the one batch that writes them.
         let batch = device
             .queued()
             .iter()
@@ -1769,9 +1886,8 @@ mod tests {
             1,
         );
 
-        // The reads of what is in those slots go out first; each one finishing lets the
-        // next command start, so the batch is what the instrument is doing when it
-        // refuses.
+        // ⚠️ One command runs at a time, so the reads of those slots have to finish
+        // before the batch is what the instrument is doing.
         let waiting = |device: &Device| {
             device
                 .queued()
@@ -1818,7 +1934,7 @@ mod tests {
     fn a_folder_queues_only_what_can_go_back_to_a_slot() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let bytes = program(&mut workspace, &mut log);
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),
@@ -1850,7 +1966,7 @@ mod tests {
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &members),
+            bulk(Bulk::Queue, &members, &device.state),
             &mut workspace,
             &mut device,
             &mut tabs,
@@ -1986,6 +2102,34 @@ mod tests {
         );
     }
 
+    /// An asset that leaves the list while its name is being typed takes the editor and
+    /// its place in the selection with it: no row will be drawn to close either, and the
+    /// next asset to take its id would inherit both.
+    #[test]
+    fn removing_an_asset_mid_rename_takes_the_editor_with_it() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.start_rename(Item::Local(id), "Africa Split");
+        assert!(browser.selection.holds(Item::Local(id)));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::Remove(id)],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(browser.rename.is_none(), "the editor went with it");
+        assert!(
+            !browser.selection.holds(Item::Local(id)),
+            "and nothing is picked that no row stands for"
+        );
+    }
+
     /// ⚠️ One view per slot. A second read of a slot already being viewed would be two
     /// working copies of one place — edited apart, both owed back to it, and both queued
     /// into one batch, where the last written wins.
@@ -2007,7 +2151,6 @@ mod tests {
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         let first = tabs.active().expect("a view opened");
 
-        // Another double-click on the same slot.
         tabs.close(Spot::Document(first));
         apply(
             &mut browser,
@@ -2023,7 +2166,6 @@ mod tests {
         assert_eq!(tabs.active(), Some(first), "its own tab came forward");
         assert_eq!(workspace.entities().len(), 1, "and there is one copy");
 
-        // A slot with no view open is read, as it must be.
         let elsewhere = Location { bank: 6, slot: 4 };
         apply(
             &mut browser,
@@ -2038,7 +2180,11 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        assert_eq!(device.queued().len(), 1);
+        assert_eq!(
+            device.queued().len(),
+            1,
+            "a slot with no view open is read, as it must be"
+        );
     }
 
     /// ⚠️ A file the instrument turns out not to want costs the occupant of the slot —

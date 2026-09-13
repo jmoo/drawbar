@@ -19,7 +19,7 @@
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{UsbDevice, UsbDirection, UsbEndpoint, UsbTransferStatus};
+use web_sys::{UsbDevice, UsbDirection, UsbTransferStatus};
 
 use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::error::{Error, Result};
@@ -91,10 +91,9 @@ fn out_packet(device: &UsbDevice) -> Option<usize> {
         .configuration()?
         .interfaces()
         .iter()
-        .map(|iface| web_sys::UsbInterface::from(iface).alternate())
+        .map(|iface| iface.alternate())
         .filter(|alt| alt.interface_class() == CLASS_VENDOR_SPECIFIC)
         .flat_map(|alt| alt.endpoints().iter().collect::<Vec<_>>())
-        .map(UsbEndpoint::from)
         .find(|ep| {
             ep.direction() == UsbDirection::Out && ep.endpoint_number() == endpoint_number(EP_OUT)
         })?;
@@ -136,7 +135,8 @@ impl WebUsbTransport {
             .await
             .map_err(map_err("opening the device"))?;
 
-        // Inferred, not confirmed on hardware: an unconfigured device uses configuration 1.
+        // An unconfigured device uses configuration 1.
+        // Inferred from specimens; not confirmed on hardware.
         if device.configuration().is_none() {
             JsFuture::from(device.select_configuration(1))
                 .await
@@ -179,11 +179,11 @@ impl WebUsbTransport {
     }
 
     /// End a frame the device would otherwise still be reading — see
-    /// [`needs_terminator`].
+    /// [`needs_terminator`], whose rule is confirmed on hardware through the desktop
+    /// backend.
     ///
-    /// The rule is confirmed on hardware through the desktop backend; that an empty
-    /// `transferOut` is the zero-length packet that satisfies it is inferred from the
-    /// WebUSB specification, not confirmed on hardware.
+    /// An empty `transferOut` is the zero-length packet that satisfies it. Per the
+    /// WebUSB specification.
     async fn terminate(&mut self, written: usize) -> Result<()> {
         if !needs_terminator(written, self.out_packet) {
             return Ok(());

@@ -19,7 +19,7 @@ mod sample;
 
 pub use center::{CenterPanel, OrganType};
 pub use effects::{EffectsPanel, EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Routing};
-pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, VoxVib};
+pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, Preset, VoxVib};
 pub use panel::PANEL;
 pub use piano::{PianoCategory, PianoPanel};
 pub use sample::SamplePanel;
@@ -37,11 +37,14 @@ pub const FORMAT: &str = "ne5p";
 /// Schema versions this build's field offsets have been validated against. Every corpus
 /// program reports 4. See [`crate::error::ParseError::UnsupportedVersion`].
 pub const KNOWN_VERSIONS: &[u32] = &[4];
+/// What a newly authored program or live slot is written as, in the header and in the
+/// body's echo of it; a file read from disk carries whatever version it held.
+pub const DEFAULT_VERSION: u32 = 4;
 /// The panel body after the container header.
 pub const BODY_LEN: usize = 121;
-/// Type-1 file length: 44-byte CBIN header + the body. Inferred from specimens, not
-/// confirmed on hardware: a type-0 file is 18 bytes shorter — 24-byte header, same
-/// body, 2-byte trailing checksum.
+/// Type-1 file length: 44-byte CBIN header + the body. A type-0 file is 18 bytes
+/// shorter — 24-byte header, same body, 2-byte trailing checksum. Inferred from
+/// specimens; not confirmed on hardware.
 pub const FILE_LEN: usize = 0x2c + BODY_LEN;
 pub const BANK_COUNT: u16 = 8;
 pub const SLOT_COUNT: u16 = 50;
@@ -82,7 +85,7 @@ impl Default for Program {
     fn default() -> Program {
         Program {
             raw: [0; BODY_LEN],
-            program_version: 4,
+            program_version: DEFAULT_VERSION as u16,
             center_panel: CenterPanel::default(),
             piano_panel: PianoPanel::default(),
             sample_panel: SamplePanel::default(),
@@ -132,7 +135,7 @@ pub fn location(file: &Cbin<Program>) -> Result<Location, Error> {
 /// A default program addressed to `location`.
 pub fn new(location: Location) -> Cbin<Program> {
     Cbin {
-        header: Header::new(FORMAT, location.inner(), 4),
+        header: Header::new(FORMAT, location.inner(), DEFAULT_VERSION),
         body: Program::default(),
     }
 }
@@ -229,6 +232,7 @@ mod tests {
         total::<_, [u8; 7]>(&program.center_panel);
         total::<_, [u8; 8]>(&program.piano_panel);
         total::<_, [u8; 8]>(&program.sample_panel);
+        total::<_, [u8; 69]>(&program.organ_panel);
         total::<_, [u8; 18]>(&program.effects_panel);
     }
 
@@ -341,7 +345,7 @@ mod tests {
             .set_field("organ_panel.b3_preset1_drawbars", "0x087654321")
             .unwrap();
         assert_eq!(
-            program.organ_panel.drawbars(OrganModel::B3, 1),
+            program.organ_panel.drawbars(OrganModel::B3, Preset::One),
             [0, 8, 7, 6, 5, 4, 3, 2, 1],
         );
 

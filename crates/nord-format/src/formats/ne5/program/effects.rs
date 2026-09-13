@@ -9,7 +9,7 @@ use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Display, Formatter};
 
-// 0x93..=0xa3 — the effects panel.
+// 0x93..=0xa4 — the effects panel.
 
 /// The effects panel: the four effect slots, the reverb, the rotary and the
 /// EQ.
@@ -110,16 +110,6 @@ pub enum Routing {
 }
 
 impl Routing {
-    /// The routing at a panel position: `0` off, `1` lower, `2` upper.
-    pub fn from_panel(position: u8) -> Option<Routing> {
-        match position {
-            0 => Some(Routing::Off),
-            1 => Some(Routing::Lower),
-            2 => Some(Routing::Upper),
-            _ => None,
-        }
-    }
-
     /// Which part the effect actually reaches, or `None` when it is not engaged.
     pub fn part(&self) -> Option<&'static str> {
         match self {
@@ -171,8 +161,8 @@ sparse_enum!(
     /// Effect 1's modulation type.
     ///
     /// Values are the ones **as stored**, which is rotated relative to the panel's own
-    /// ordering — stored 0 is trem 1, not pan 1. Inferred from the named specimens in
-    /// `nord-corpus/ne5/programs/fx/`; not confirmed on hardware.
+    /// ordering — stored 0 is trem 1, not pan 1. Inferred from specimens named for the
+    /// panel setting each was stored from; not confirmed on hardware.
     Fx1Type, 4, {
         0 => Trem1, "trem 1";
         1 => Trem2, "trem 2";
@@ -269,11 +259,7 @@ mod tests {
             assert_eq!(Routing::from_bits(bits).unwrap().to_bits(), bits);
         }
 
-        // Off agrees at 0, but the engaged positions land on 2 and 3.
-        assert_eq!(Routing::from_panel(0), Some(Routing::Off));
-        assert_eq!(Routing::from_panel(1), Some(Routing::Lower));
-        assert_eq!(Routing::from_panel(2), Some(Routing::Upper));
-        assert_eq!(Routing::from_panel(3), None);
+        // The panel's three positions are 0, 1 and 2; the engaged two store 2 and 3.
         assert_eq!(Routing::Lower.to_bits(), 2);
         assert_eq!(Routing::Upper.to_bits(), 3);
 

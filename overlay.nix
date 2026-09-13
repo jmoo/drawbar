@@ -60,9 +60,9 @@ let
   cargoArtifacts = crane.buildDepsOnly (
     commonArgs
     // {
+      cargoExtraArgs = "--locked --workspace --exclude drawbar";
       pname = "workspace";
       version = "0";
-      cargoExtraArgs = "--locked --workspace --exclude drawbar";
     }
   );
 
@@ -173,12 +173,12 @@ let
     };
 
     wasip1 = {
-      crossPkgs = final.pkgsCross.wasi32;
       cargoFlags = [
         "--no-default-features"
         "--features"
         "replay"
       ];
+      crossPkgs = final.pkgsCross.wasi32;
       testRunner = {
         # The suite reads its scripts off the source tree, which a wasm sandbox
         # sees only through a preopened directory.
@@ -254,8 +254,6 @@ let
       args =
         commonArgs
         // {
-          pname = "${crate}-${name}";
-          inherit (manifests.${crate}) version;
           CARGO_BUILD_TARGET = tripleOf spec;
           cargoExtraArgs = escapeShellArgs (
             [
@@ -270,6 +268,8 @@ let
           doCheck = spec ? testRunner;
           nativeBuildInputs =
             optional (needsLinker spec) spec.crossPkgs.stdenv.cc ++ spec.testRunner.packages or [ ];
+          pname = "${crate}-${name}";
+          inherit (manifests.${crate}) version;
         }
         // optionalAttrs (spec ? testRunner) {
           # wasmtime wants somewhere to cache compiled modules; the sandbox has no
@@ -288,12 +288,6 @@ let
 
           # Crane skips rlibs; install lib-only cross artifacts manually and require output.
           doNotPostBuildInstallCargoBinaries = true;
-
-          # ⚠️ Dependency artifacts include dummy workspace outputs at the target root.
-          # Clear them so installation cannot pass on a stand-in; dependencies stay in `deps/`.
-          preBuild = ''
-            find "target/${tripleOf spec}/release" -maxdepth 1 -type f -delete
-          '';
 
           installPhaseCommand = ''
             mkdir -p "$out"
@@ -322,6 +316,12 @@ let
           '';
 
           meta.description = "${crate} cross-compiled for ${tripleOf spec}";
+
+          # ⚠️ Dependency artifacts include dummy workspace outputs at the target root.
+          # Clear them so installation cannot pass on a stand-in; dependencies stay in `deps/`.
+          preBuild = ''
+            find "target/${tripleOf spec}/release" -maxdepth 1 -type f -delete
+          '';
         }
       );
     in
@@ -367,13 +367,6 @@ let
       args
       // {
         cargoArtifacts = crane.buildDepsOnly args;
-        nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
-
-        # ⚠️ Dependency artifacts contain a dummy `drawbar.wasm`; clear it before
-        # binding so only the real module can satisfy the install.
-        preBuild = ''
-          find "target/wasm32-unknown-unknown/web" -maxdepth 1 -type f -delete
-        '';
 
         installPhaseCommand = ''
           mkdir -p "$out"
@@ -390,6 +383,13 @@ let
         '';
 
         meta.description = "drawbar built for the browser";
+        nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+
+        # ⚠️ Dependency artifacts contain a dummy `drawbar.wasm`; clear it before
+        # binding so only the real module can satisfy the install.
+        preBuild = ''
+          find "target/wasm32-unknown-unknown/web" -maxdepth 1 -type f -delete
+        '';
       }
     );
 
@@ -420,7 +420,6 @@ let
     }:
     {
       doInstallCheck = true;
-      nativeInstallCheckInputs = optional (emulator != null) emulator.package;
       installCheckPhase = ''
         runHook preInstallCheck
         NORD_RUNNER=${optionalString (emulator != null) emulator.cmd} \
@@ -429,6 +428,7 @@ let
           bash ${./crates/nord-cli/checks}/check.sh "$out/${bin}"
         runHook postInstallCheck
       '';
+      nativeInstallCheckInputs = optional (emulator != null) emulator.package;
     };
 
   # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
@@ -488,6 +488,12 @@ in
       # cannot assume.
       all = final.linkFarm "all" (crates // crossed);
 
+      all-corpus = final.linkFarm "all-corpus" committed;
+
+      # ⚠️ R2 stays outside checks because it needs credentials or a store seeded
+      # by `corpus nix-add`.
+      all-corpus-full = final.linkFarm "all-corpus-full" full;
+
       # Clippy over every crate and target, with each crate's test features on so the
       # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
       clippy = crane.cargoClippy (
@@ -495,20 +501,14 @@ in
         // audioArgs
         // {
           inherit cargoArtifacts;
-          pname = "workspace-clippy";
-          version = "0";
+          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           cargoExtraArgs = "--locked --workspace ${
             featureArgs (concatMap (name: map (f: "${name}/${f}") (testFeaturesFor name)) (attrNames manifests))
           }";
-          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          pname = "workspace-clippy";
+          version = "0";
         }
       );
-
-      all-corpus = final.linkFarm "all-corpus" committed;
-
-      # ⚠️ R2 stays outside checks because it needs credentials or a store seeded
-      # by `corpus nix-add`.
-      all-corpus-full = final.linkFarm "all-corpus-full" full;
 
       # The corpus assemblies themselves.
       inherit corpus;
@@ -516,10 +516,6 @@ in
 
       # The workspace's own crates, keyed by the name cargo knows them by.
       inherit crates;
-
-      # Native drawbar's `dlopen`ed display/GL libraries, empty off Linux. Package
-      # wrapping and the dev shell give `cargo run` the same loader path.
-      inherit guiLibs;
 
       # The cross builds as a set, because their names are host-dependent and a
       # consumer enumerating them cannot write the list down.
@@ -562,6 +558,11 @@ in
       };
 
       inherit edition;
+
+      # Native drawbar's `dlopen`ed display/GL libraries, empty off Linux. Package
+      # wrapping and the dev shell give `cargo run` the same loader path.
+      inherit guiLibs;
+
       inherit (final) rustfmt;
     };
 }

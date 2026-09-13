@@ -203,16 +203,10 @@ const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
 ///
 /// ⚠️ Every 1:1 run counts, the loop's included — a marked record opens a run of its
 /// own past the resync, and a field landing in its last record buys the bit exactly
-/// as one in the opening or resync run does. Reading only the first two under-shoots
-/// looped strokes, which quantise one bit coarser than the editor's.
-///
-/// The loop's run is coverage rather than evidence about widths: no specimen carries
-/// the bit there and nowhere else, so [`dead_last_record`] is read off the other two.
+/// as one in the opening or resync run does.
 ///
 /// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
 /// one: both quantise at the peak term alone.
-///
-/// No saving threshold is modelled: no stroke measured refuses while the clause fires.
 ///
 /// Inferred from specimens; not confirmed on hardware, the Electro 5 playing v2 only.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
@@ -380,8 +374,6 @@ pub struct Options {
     secondary_start: Option<f64>,
     shift: Option<u8>,
     layout: Layout,
-    map_gain: f64,
-    loop_decay: f32,
 }
 
 impl Options {
@@ -398,23 +390,7 @@ impl Options {
             secondary_start: None,
             shift: None,
             layout: Layout::V2,
-            map_gain: 1.0,
-            loop_decay: DEFAULT_LOOP_DECAY,
         }
-    }
-
-    /// The stroke's loop decay amount, in the project's own units. Reaches the wide
-    /// stroke header alone; the narrow chain has no field for it.
-    pub fn loop_decay(mut self, amount: f32) -> Options {
-        self.loop_decay = amount;
-        self
-    }
-
-    /// The instrument's own playing gain, a linear ratio applied on top of every
-    /// zone's. Clamped at [`MAX_MAP_GAIN_DB`] as the editor clamps it.
-    pub fn map_gain(mut self, gain: f64) -> Options {
-        self.map_gain = gain;
-        self
     }
 
     /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`. The audio is the same
@@ -504,8 +480,6 @@ pub struct Looped {
 pub struct Plan {
     /// Which generation's units the stream is written in.
     pub layout: Layout,
-    /// Source frames the stroke covers — frames, not samples: a stereo frame is two.
-    pub frames: usize,
     /// Channels interleaved into the stream: 1 or 2.
     pub channels: usize,
     /// Fields in the stream — the source plus a ring-out past its end, or, when the
@@ -787,7 +761,6 @@ impl Plan {
         let resync = band(head - warmup);
         Ok(Plan {
             layout,
-            frames,
             channels,
             fields,
             resync_at,
@@ -855,8 +828,8 @@ fn band(r: usize, cell: usize, rmax: usize) -> usize {
     } else {
         residue + cell
     };
-    // The windows overlap from `j = 7` on, so this settles within a few steps; the bound
-    // is a guard, not a limit anything reaches.
+    // The windows overlap from `j = 3` at 24/32 and from `j = 2` at 32/48, so this
+    // settles within a few steps; the bound is a guard, not a limit anything reaches.
     while length <= 64 * cell {
         if (1..=8).any(|j| j * cell <= length && length <= j * rmax) {
             return length;
@@ -1101,11 +1074,12 @@ fn choose_order(widths: &[u8], extending: Option<(u8, u8)>) -> (u8, u8) {
     (order, narrowest)
 }
 
-/// Partition 1:1 values and like-coded content cells into records.
+/// Partition 1:1 values and like-coded content cells into records, with the index of
+/// the record the resync run opens at — what the header's second pointer names.
 ///
 /// A loop appends a third regime — its own 1:1 run, marked, and the content after it —
 /// grown to a whole number of packets by [`pad_to_packet`].
-fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec>, Error> {
+fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spec>, usize), Error> {
     let mut out = Vec::new();
     let mut at = 0usize;
     let (cell, chunk, stride) = (plan.cell(), plan.chunk(), plan.channels);
@@ -1182,30 +1156,17 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<Vec<Spec
         ))
         .into());
     }
-    if resync_record >= out.len() {
-        return Err(
-            ParseError::AssertFail("the record plan produced no resync record".into()).into(),
-        );
-    }
-    Ok(out)
+    Ok((out, resync_record))
 }
 
-/// Pad the loop region out to whole packets the way the editor does: sweep its content
-/// records front to back, halving each one that covers more than one cell — the smaller
-/// half first — and carrying on into the second half, pass after pass, until the words
-/// fit.
+/// Pad the loop region out to whole packets: sweep its content records front to back,
+/// halving each one that covers more than one cell — the smaller half first — and
+/// carrying on into the second half, pass after pass, until the words fit.
 ///
-/// A region with nothing left to split is widened instead, and that sweep also runs
-/// front to back, spending each **content** record up to [`widen_cap`] before moving on,
-/// so the last one widened takes only the words still owed. An alignment record is
-/// walked past whether or not it has room — including the marked one the region opens
-/// at, and any further alignment record its 1:1 run needs. A greedy sweep from the back
-/// finishes in fewer, wider records and is observably not what the editor writes.
-///
-/// ⚠️ A record's alignment flag and its predictor order are indistinguishable as the
-/// skip predicate on the specimens: every alignment record is order zero, and no content
-/// record of order zero is reached with words still owed. The flag is the record's class
-/// bit, which is why it is the one used here.
+/// A region with nothing left to split is widened instead, front to back, spending
+/// each content record up to [`widen_cap`] before moving on, so the last one widened
+/// takes only the words still owed. A 1:1 record is walked past by either sweep,
+/// whatever room it has, the marked one the region opens at included.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<(), Error> {
@@ -1257,7 +1218,7 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
             bound: format!(
                 "a loop with {pad} more word(s) of room in it — the encoded loop has to \
                  be whole packets long, and no record of this one may be widened past \
-                 {cap}; loop over more of the audio"
+                 {cap}"
             ),
         }
         .into());
@@ -1331,9 +1292,7 @@ fn pack(
             value: format!("a stream of {total} words"),
             bound: format!(
                 "{MAX_STREAM_WORDS} words, the reach of the stroke header's 16-bit word \
-                 directory; shorten the source or code it with {:?}, which is several \
-                 times denser on anything smooth",
-                Predictor::Minimising
+                 directory"
             ),
         }
         .into());
@@ -1391,12 +1350,7 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units:
     words[at * word..(at + 1) * word].copy_from_slice(&head.to_be_bytes()[4 - word..]);
 
     let stored = |k: usize| -> u64 {
-        let field = spec.first + k;
-        let value = if spec.order == 0 {
-            i64::from(values[field])
-        } else {
-            residual(values, field, spec.order, units.channels)
-        };
+        let value = residual(values, spec.first + k, spec.order, units.channels);
         (value as u64) & ((1u64 << spec.width) - 1)
     };
     let put = |words: &mut [u8], mut bit: usize, raw: u64| {
@@ -1478,7 +1432,7 @@ fn stroke_header(
     let (q, stream) = (&encoded.q, &encoded.stream);
     let mut head = vec![0u8; layout.header_len()];
     head[0..4].copy_from_slice(&zone.global_id.to_be_bytes());
-    head[5] = zone.root_key;
+    head[super::stroke::ROOT_KEY] = zone.root_key;
     // Unexplained: real programs hold this, and the panel cannot produce it.
     head[6..8].copy_from_slice(&[0x88, 0xba]);
     // The channel count, stated a second time — the terminator's cell size says it too,
@@ -1487,9 +1441,9 @@ fn stroke_header(
 
     let (mantissa, exponent) =
         statistic_a(file_peak, q.shift, gain_units(gain_decibels(zone.gain)));
-    head[9..12].copy_from_slice(&mantissa.to_be_bytes()[1..]);
-    head[12] = exponent;
-    head[13..16].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
+    head[codec::MANTISSA_AT..codec::MANTISSA_AT + 3].copy_from_slice(&mantissa.to_be_bytes()[1..]);
+    head[codec::STAT_A_EXP_AT] = exponent;
+    head[codec::PEAK_AT..codec::PEAK_AT + 3].copy_from_slice(&(q.peak as u32).to_be_bytes()[1..]);
 
     let base = (body_at + layout.header_len()) / layout.word() % WRAP;
     let pointer = |word: usize| ((base + word) % WRAP) as u16;
@@ -1502,7 +1456,7 @@ fn stroke_header(
         pointer(stream.terminator),
     ];
     for (i, p) in directory.iter().enumerate() {
-        let at = 20 + 9 * i;
+        let at = codec::SEEK_AT + codec::SEEK_STRIDE * i;
         head[at..at + 2].copy_from_slice(&p.to_be_bytes());
         // Unexplained: real programs hold this, and the panel cannot produce it.
         if i < 3 {
@@ -1567,16 +1521,7 @@ fn encode_stroke(
         }
         .into());
     }
-    let specs = records(&q.values, &plan, predictor)?;
-    let resync_record = specs
-        .iter()
-        .position(|s| s.first == plan.resync_at)
-        .ok_or_else(|| {
-            ParseError::AssertFail(format!(
-                "no record begins at the planned resync field {}",
-                plan.resync_at
-            ))
-        })?;
+    let (specs, resync_record) = records(&q.values, &plan, predictor)?;
     let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
     Ok(Encoded { q, stream })
 }
@@ -1755,15 +1700,14 @@ struct WideSchema {
     /// The preset a project that touches none renders as.
     /// Unexplained: real programs hold this, and the panel cannot produce it.
     sty_payload: &'static [u8],
+    /// Where the category's dynamics curve writes into that payload, and what.
+    sty_dynamics: &'static [(usize, u8)],
 }
 
-/// The `map`'s gain-and-detune unit: a u24 linear gain then an s24 detune. It opens
-/// the section as the instrument's own level and then repeats once per key.
-const LEVEL_LEN: usize = 6;
-
-/// One such unit at `gain`, with no detune.
-fn level(gain: u32) -> [u8; LEVEL_LEN] {
-    let mut out = [0u8; LEVEL_LEN];
+/// One gain-and-detune unit at `gain`, with no detune. It opens the `map` section as
+/// the instrument's own level and then repeats once per key.
+fn level(gain: u32) -> [u8; super::keymap::RECORD_LEN] {
+    let mut out = [0u8; super::keymap::RECORD_LEN];
     out[..3].copy_from_slice(&gain.to_be_bytes()[1..]);
     out
 }
@@ -1795,18 +1739,19 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             container_payload: [0x00, 0x02, 0x00, 0x0c],
             hdr: 10,
             map: 14,
-            key_stride: LEVEL_LEN,
+            key_stride: super::keymap::RECORD_LEN,
             map_gap: &[],
             map_tail: &[0x00],
             sty: super::sty::VERSION_V3,
             sty_payload: &STY_V3_PAYLOAD,
+            sty_dynamics: &STY_V3_DYNAMICS,
         }),
         Layout::V4 => Some(WideSchema {
             container: 40,
             container_payload: [0x00, 0x02, 0x00, 0x05],
             hdr: 11,
             map: 21,
-            key_stride: LEVEL_LEN + 4,
+            key_stride: super::keymap::RECORD_LEN + 4,
             map_gap: &[
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
                 0x02, 0x02, 0x02, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x00,
@@ -1815,12 +1760,10 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
             map_tail: &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
             sty: super::sty::VERSION_V4,
             sty_payload: &STY_V4_PAYLOAD,
+            sty_dynamics: &STY_V4_DYNAMICS,
         }),
     }
 }
-
-/// Keys the wide `map`'s per-key table describes.
-const KEYS: usize = 128;
 
 /// The wide `hdr` section: the same prefix at a wider name field, with the sub-name
 /// the vendor's filenames append left empty.
@@ -1856,17 +1799,20 @@ fn cat4() -> Section4 {
 /// own builder fills it in — so every quad names its own key.
 fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section4 {
     let mut payload = Vec::with_capacity(
-        LEVEL_LEN
-            + KEYS * schema.key_stride
+        super::keymap::RECORD_LEN
+            + super::keymap::KEYS * schema.key_stride
             + schema.map_gap.len()
             + 1
             + super::zone::WIDE_RECORD_LEN * zones.len()
             + schema.map_tail.len(),
     );
     payload.extend_from_slice(&level(map_gain));
-    for key in 0..KEYS as u8 {
-        payload.extend_from_slice(&level(super::keymap::GAIN_UNITY));
-        payload.extend(std::iter::repeat_n(key, schema.key_stride - LEVEL_LEN));
+    for key in 0..super::keymap::KEYS as u8 {
+        payload.extend_from_slice(&level(super::zone::GAIN_UNITY));
+        payload.extend(std::iter::repeat_n(
+            key,
+            schema.key_stride - super::keymap::RECORD_LEN,
+        ));
     }
     payload.extend_from_slice(schema.map_gap);
     payload.push(zones.len() as u8);
@@ -1882,15 +1828,10 @@ fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section
 }
 
 /// The wide `sty` preset, including the dynamics group a project controls.
-fn sty4(schema: &WideSchema, layout: Layout, preset: Preset) -> Section4 {
+fn sty4(schema: &WideSchema, preset: Preset) -> Section4 {
     let mut payload = schema.sty_payload.to_vec();
     if preset.dynamics_enabled {
-        let dynamics = match layout {
-            Layout::V2 => unreachable!("a narrow layout has no wide preset"),
-            Layout::V3 => &STY_V3_DYNAMICS[..],
-            Layout::V4 => &STY_V4_DYNAMICS[..],
-        };
-        for &(at, value) in dynamics {
+        for &(at, value) in schema.sty_dynamics {
             payload[at] = value;
         }
     }
@@ -1969,7 +1910,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
     multi_zone(
         Instrument {
             name: &options.name,
-            map_gain: options.map_gain,
+            map_gain: 1.0,
             predictor: options.predictor,
             layout: options.layout,
             preset: Preset::default(),
@@ -1984,7 +1925,7 @@ pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Er
             secondary_start,
             shift: options.shift,
             gain: 1.0,
-            loop_decay: options.loop_decay,
+            loop_decay: DEFAULT_LOOP_DECAY,
         }],
     )
 }
@@ -2144,7 +2085,7 @@ fn wide_chain(
             payload,
         });
     }
-    sections.push(sty4(schema, layout, instrument.preset));
+    sections.push(sty4(schema, instrument.preset));
     let chain_len: usize = sections.iter().map(Section4::encoded_len).sum();
     sections.push(meta4(chain_len));
 
@@ -2709,7 +2650,8 @@ mod tests {
         stroke.extend_from_slice(&[0x80, 0x00, 0x18]);
         let end = (HEADER_LEN / 3 + spec.span(MONO)) as u16;
         for (i, p) in [HEADER_LEN as u16 / 3, 0, end, end].iter().enumerate() {
-            stroke[20 + 9 * i..22 + 9 * i].copy_from_slice(&p.to_be_bytes());
+            let at = codec::SEEK_AT + codec::SEEK_STRIDE * i;
+            stroke[at..at + 2].copy_from_slice(&p.to_be_bytes());
         }
         let walked = codec::walk(&stroke, 0, codec::Layout::V2).unwrap();
         assert_eq!(walked.records[0].values, values);
@@ -2836,7 +2778,6 @@ mod tests {
         let warmup = if last == chunk { chunk } else { chunk + last };
         let plan = Plan {
             layout,
-            frames: 0,
             channels: 1,
             fields: warmup,
             resync_at: warmup,
@@ -2909,7 +2850,6 @@ mod tests {
         let fields = at + last;
         let plan = Plan {
             layout,
-            frames: 0,
             channels: 1,
             fields,
             resync_at: at,
@@ -2984,14 +2924,11 @@ mod tests {
             let source = sine(440.0, 32_000.0, 30_000);
             let plan = plan(source.len(), 1).unwrap();
             let q = quantise(&source, &plan, None);
-            for spec in records(&q.values, &plan, predictor).unwrap() {
+            let (specs, _) = records(&q.values, &plan, predictor).unwrap();
+            for spec in specs {
                 let limit = 1i64 << (spec.width - 1);
                 for k in 0..spec.count {
-                    let v = if spec.order == 0 {
-                        i64::from(q.values[spec.first + k])
-                    } else {
-                        residual(&q.values, spec.first + k, spec.order, 1)
-                    };
+                    let v = residual(&q.values, spec.first + k, spec.order, 1);
                     assert!((-limit..limit).contains(&v), "{spec:?} field {k} = {v}");
                 }
                 assert!(spec.width <= PEAK_WIDTH || spec.order > 0);
@@ -3004,7 +2941,7 @@ mod tests {
         let source = sine(440.0, 20_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
         let q = quantise(&source, &plan, None);
-        let specs = records(&q.values, &plan, Predictor::Plain).unwrap();
+        let (specs, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
 
         let mut at = 0;
         for spec in &specs {
@@ -3025,8 +2962,8 @@ mod tests {
         let source = sine(60.0, 30_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
         let q = quantise(&source, &plan, None);
-        let plain = records(&q.values, &plan, Predictor::Plain).unwrap();
-        let minimised = records(&q.values, &plan, Predictor::Minimising).unwrap();
+        let (plain, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
+        let (minimised, _) = records(&q.values, &plan, Predictor::Minimising).unwrap();
 
         let bits = |specs: &[Spec]| -> usize { specs.iter().map(|s| s.span(MONO)).sum() };
         assert!(
@@ -3060,8 +2997,9 @@ mod tests {
             for shift in 0..6 {
                 let (mantissa, exponent) = statistic_a(peak, shift, u64::from(GAIN_UNITY));
                 let mut stroke = vec![0u8; HEADER_LEN];
-                stroke[12] = exponent;
-                stroke[13..16].copy_from_slice(&peak.to_be_bytes()[1..]);
+                stroke[codec::STAT_A_EXP_AT] = exponent;
+                stroke[codec::PEAK_AT..codec::PEAK_AT + 3]
+                    .copy_from_slice(&peak.to_be_bytes()[1..]);
                 assert_eq!(
                     codec::shift(&stroke, codec::Layout::V2),
                     Some(shift),
@@ -3949,7 +3887,7 @@ mod tests {
                 panic!("{layout:?} did not read back as a sample");
             };
             assert_eq!(read.name().unwrap(), "Encoded", "{layout:?}");
-            assert_eq!(read.layout(), layout, "{layout:?}");
+            assert_eq!(read.layout().unwrap(), layout, "{layout:?}");
             assert_eq!(read.to_bytes().unwrap(), bytes, "{layout:?}");
             let crate::Sample::V3(read) = &read else {
                 panic!("{layout:?} did not read back on the wide chain");

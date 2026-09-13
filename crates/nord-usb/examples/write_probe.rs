@@ -37,14 +37,20 @@ fn report(step: &str, reply: Option<&Message>) -> Option<u32> {
     }
 }
 
+/// `BANK:SLOT` in the panel's one-indexed numbering, as every other entry point spells
+/// an address.
+fn address(text: &str) -> Location {
+    let (bank, slot) = text.split_once(':').expect("BANK:SLOT");
+    let bank = bank.parse::<u32>().expect("bank");
+    let slot = slot.parse::<u32>().expect("slot");
+    assert!(bank >= 1 && slot >= 1, "BANK:SLOT is one-indexed");
+    Location::from_user(bank, slot)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let class = ObjectClass::from_raw(args[1].parse::<u32>().expect("class number"));
-    let (bank, slot) = args[2].split_once(':').expect("BANK:SLOT");
-    let at = Location {
-        bank: bank.parse::<u32>().expect("bank") - 1,
-        slot: slot.parse::<u32>().expect("slot") - 1,
-    };
+    let at = address(&args[2]);
 
     let send: Option<Vec<u8>> = args
         .iter()
@@ -97,18 +103,17 @@ fn main() {
             .await
             .expect("open")
             .allow_destructive_writes();
-        let mut begin = Vec::new();
-        at.write_to(&mut begin);
-        begin.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        begin.extend_from_slice(info.format.as_bytes());
+        let tag: [u8; 4] = info
+            .format
+            .as_bytes()
+            .try_into()
+            .expect("a four-character format tag");
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as u32;
-        begin.extend_from_slice(&stamp.to_be_bytes());
-        begin.extend_from_slice(&u32::MAX.to_be_bytes());
-        begin.extend_from_slice(&(info.name.len() as u32).to_be_bytes());
-        begin.extend_from_slice(info.name.as_bytes());
+        let begin =
+            op::begin_write_args(at, payload.len(), &tag, stamp, &info.name).expect("begin args");
 
         let reply = s
             .probe(Service::Program, 10, cmd::BEGIN_WRITE, &begin, LIMIT)
@@ -117,11 +122,7 @@ fn main() {
         match report("BEGIN_WRITE", reply.as_ref()) {
             Some(0) => {
                 println!("FINDING: BEGIN_WRITE ACCEPTED — completing with identical bytes");
-                let mut data = Vec::new();
-                at.write_to(&mut data);
-                data.extend_from_slice(&0u32.to_be_bytes());
-                data.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-                data.extend_from_slice(payload);
+                let data = op::write_data_args(at, 0, payload).expect("write data args");
                 let reply = s
                     .probe(Service::Program, 10, cmd::WRITE_DATA, &data, LIMIT)
                     .await

@@ -5,10 +5,6 @@
 //! [`section`]s: an `hdr` carrying the name, a `cat` of category strings, a `map`
 //! ending in the [`zone`] table, one [`stroke`] per zone, and a trailing `sty`.
 //!
-//! Both container generations occur: across the corpus every v2 specimen is type 0 and
-//! every v4 is type 1, while v3 is split. The container handles the difference; the
-//! chain is the same.
-//!
 //! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
 //! and can retune, rename and remap them without touching a byte of audio, in either
 //! chain. The [`codec`] decodes that audio to samples in every generation — it is one
@@ -63,14 +59,6 @@ pub const V3_FROM_VERSION: u32 = 300;
 /// stream units as v3 — what changes is the codec, so the number matters to
 /// [`codec::Layout`] rather than to the reader.
 pub const V4_FROM_VERSION: u32 = 400;
-
-/// Content version of the first Sample Library laid out as [`Chain::Library2`].
-///
-/// The number tracks the *library release*, not the codec, so the versions below this
-/// are older libraries rather than older codecs — 8 above all, plus a 4/5/100/140/150
-/// tail. They are still `NWS`-chain files; only what sits inside the sections differs,
-/// and [`Chain`] is what a reader gates on.
-pub const LIBRARY_2_VERSION: u32 = 200;
 
 /// Which section chain a body's sections form, and the shapes that follow from it.
 ///
@@ -141,9 +129,10 @@ impl Chain {
 /// strokes verbatim.
 ///
 /// ⚠️ The v2 pool also holds versions that are not `2xx` — 8 (the original
-/// Sample Library) and 200 (Sample Library 2.0; independent interop projects
-/// report the number tracks the library release, not the codec) — so the gate
-/// is "at least 300", not "exactly 2xx".
+/// Sample Library) and 200 (Sample Library 2.0) — so the gate is "at least
+/// 300", not "exactly 2xx". Inferred from specimens; not confirmed on hardware.
+/// The number tracks the library release rather than the codec. Reported by
+/// public documentation; not confirmed on hardware.
 #[derive(Debug)]
 pub enum AnyBody {
     V2(Sample),
@@ -338,8 +327,8 @@ impl Cbin<SampleV3> {
             .sections
             .iter()
             .filter(|s| s.is(section::STK4))
-            .map(|s| match (s.payload.get(0..4), s.payload.get(5)) {
-                (Some(gid), Some(&root)) => Ok((u32::from_be_bytes(gid.try_into().unwrap()), root)),
+            .map(|s| match (stroke_gid(s), s.payload.get(5)) {
+                (Some(gid), Some(&root)) => Ok((gid, root)),
                 _ => Err(ParseError::AssertFail(format!(
                     "stroke payload is {} bytes, too short for its id fields",
                     s.payload.len()
@@ -482,13 +471,7 @@ impl Cbin<SampleV3> {
             .body
             .sections
             .iter()
-            .position(|s| {
-                s.is(section::STK4)
-                    && s.payload
-                        .get(0..4)
-                        .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                        == Some(gid)
-            })
+            .position(|s| s.is(section::STK4) && stroke_gid(s) == Some(gid))
             .ok_or_else(|| {
                 ParseError::AssertFail(format!(
                     "zone {index} names stroke {gid}, which the file does not contain"
@@ -530,13 +513,7 @@ impl Cbin<SampleV3> {
             .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
         let mut at = 0;
         for section in &self.body.sections {
-            if section.is(section::STK4)
-                && section
-                    .payload
-                    .get(0..4)
-                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                    == Some(zone.stroke_gid)
-            {
+            if section.is(section::STK4) && stroke_gid(section) == Some(zone.stroke_gid) {
                 return Ok((at + section::HEADER4_LEN, section.payload.as_slice()));
             }
             at += section.encoded_len();
@@ -555,6 +532,14 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
 
 /// The global id a `stk` payload leads with.
 fn stroke_id(section: &Section) -> Option<u32> {
+    let b = section.payload.get(0..4)?;
+    Some(u32::from_be_bytes(b.try_into().ok()?))
+}
+
+/// The global id a v3/v4 `stk` payload leads with. Unlike [`stroke_id`]'s
+/// narrow counterpart it is compared whole: a wide zone record stores the same
+/// u32.
+fn stroke_gid(section: &section::Section4) -> Option<u32> {
     let b = section.payload.get(0..4)?;
     Some(u32::from_be_bytes(b.try_into().ok()?))
 }

@@ -6,7 +6,6 @@
 
 pub mod app;
 pub mod audio;
-pub mod base64;
 pub mod browser;
 pub mod device;
 pub mod document;
@@ -21,8 +20,8 @@ pub mod knob;
 pub mod led;
 pub mod library;
 pub mod log;
+pub mod named;
 pub mod newproject;
-pub mod note;
 pub mod panel;
 pub mod queue;
 pub mod room;

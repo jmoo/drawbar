@@ -4,8 +4,7 @@
 //! bank and velocity layer — and what an editor of one is for is deciding which of them
 //! go on the instrument. So an edit here is not a field write: it is a **plan** over the
 //! bytes the asset was last saved as, and the working bytes are what [`rebuild`] makes
-//! of the two. Dropping strokes throws audio away, and a switch that cannot go back on
-//! is not a switch.
+//! of the two.
 //!
 //! ⚠️ An edit never makes those bytes. [`planned`] applies a plan over the borrowed
 //! baseline and is what a switch is checked against; [`materialise`] is the one whole-
@@ -21,6 +20,7 @@ use std::ops::RangeInclusive;
 use eframe::egui;
 use nord_format::formats::npno::encode::{Kind, ALL_KEYS_DAMPED};
 use nord_format::formats::npno::{self, Bank, FINE_TUNE_CENTS_PER_UNIT};
+use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -33,7 +33,6 @@ use crate::browser::Act;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
-use crate::note;
 use crate::room;
 use crate::work;
 use crate::workspace::{LocalEntity, Workspace};
@@ -70,11 +69,13 @@ fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
 /// The stretch of keyboard the map draws: a full piano, A0 to C8.
 const SPAN: Span = Span { low: 21, high: 108 };
 
-// ---- the plan -----------------------------------------------------------------------
-
 /// What the asset was last saved as, as far as anything here tells two baselines apart.
 /// A save moves both halves at once.
 type Mark = (usize, Option<u32>);
+
+fn mark(entity: &LocalEntity) -> Mark {
+    (entity.saved.bytes.len(), entity.saved.crc32)
+}
 
 /// Every edit a piano document holds, against the baseline it is an edit of.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -226,6 +227,18 @@ impl Plan {
         };
     }
 
+    /// Take one root's exception to a layer's switch.
+    ///
+    /// ⚠️ An exception that agrees with the switch is dropped rather than recorded: a
+    /// plan holding one reads as an edit, and every save and send would lay the library
+    /// out again for the bytes it already holds.
+    fn except(&mut self, root: u8, layer: u8, keep: bool) {
+        match keep == !self.layers.contains(&layer) {
+            true => self.roots.remove(&(root, layer)),
+            false => self.roots.insert((root, layer), keep),
+        };
+    }
+
     fn switch_bank(&mut self, bank: Bank, keep: bool) {
         match keep {
             true => self.banks.remove(&bank),
@@ -285,8 +298,7 @@ pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, St
     for bank in &plan.banks {
         library.drop_bank(*bank);
     }
-    // One predicate rather than a layer pass and a per-root pass: an exception keeps a
-    // layer its switch dropped, which `Layers::Only` cannot express.
+    // One predicate over both: an exception keeps a layer its switch dropped.
     if !plan.layers.is_empty() || !plan.roots.is_empty() {
         library.retain_strokes(|stroke| plan.keeps_layer(stroke.root, stroke.layer()));
     }
@@ -317,16 +329,12 @@ pub fn materialise(library: &npno::Library<'_>) -> Result<Vec<u8>, String> {
     nord_format::to_bytes(&Entity::Piano(edited)).map_err(|e| e.to_string())
 }
 
-/// The bytes a plan makes of the baseline: read it, edit it, re-lay it, write it.
-///
-/// All of it or none, the same rule every other editor's apply follows. The app itself
-/// keeps the two halves apart, so that it checks a plan without laying one out.
+/// The bytes a plan makes of the baseline: [`planned`] and then [`materialise`], which
+/// the app itself keeps apart so that it checks a plan without laying one out.
 #[cfg(test)]
 pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
     materialise(&planned(saved, plan)?)
 }
-
-// ---- what the baseline holds --------------------------------------------------------
 
 /// One root note: the recording, and the keys the map sends to it.
 struct Root {
@@ -336,9 +344,12 @@ struct Root {
 
 /// Ascending `keys` as the stretches they run in.
 ///
-/// A root's keys are one run — inferred from specimens; not confirmed on hardware —
-/// and the key map can hold anything, so a root whose keys are not contiguous gets one
-/// cell per run rather than one cell over the keys between them.
+/// A root's keys are one run.
+///
+/// Inferred from specimens; not confirmed on hardware.
+///
+/// The key map can hold anything, so a root whose keys are not contiguous gets one cell
+/// per run rather than one cell over the keys between them.
 fn runs(keys: &[u8]) -> Vec<(u8, u8)> {
     let mut out: Vec<(u8, u8)> = Vec::new();
     for key in keys {
@@ -375,8 +386,11 @@ struct Strike {
 
 /// What the applied-decay ladder is worth, in decibels a second, read off its first
 /// entry: a one-pole coefficient of `entry / 2^23` a frame at [`npno::codec::RATE`], so
-/// `20·log10(e)·rate·(1 − entry/2^23)`. `None` where every entry of it is
-/// [`npno::LADDER_UNITY`], which applies nothing.
+/// `20·log10(e)·rate·(1 − entry/2^23)`.
+///
+/// Inferred from specimens; not confirmed on hardware.
+///
+/// `None` where every entry of it is [`npno::LADDER_UNITY`], which applies nothing.
 fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
     let held = 1.0 - f64::from(ladder[0]) / f64::from(npno::LADDER_UNITY);
     ladder
@@ -398,6 +412,8 @@ struct Facts {
     total: u64,
     strokes: usize,
     roots: Vec<Root>,
+    /// Where each root note sits in `roots`.
+    of_note: BTreeMap<u8, usize>,
     /// The layer values the directory holds, ascending — 0 the loudest.
     layers: Vec<u8>,
     /// The banks present, in [`Bank::ALL`] order.
@@ -423,22 +439,22 @@ impl Facts {
     fn of(saved: &[u8]) -> Result<Facts, String> {
         let library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
         let (name, variant) = library.name();
-        let roots: Vec<Root> = library
-            .roots()
+        let notes = library.roots();
+        let roots: Vec<Root> = notes
             .iter()
             .map(|note| Root {
                 note: *note,
                 keys: library.keys_for(*note),
             })
             .collect();
+        // `Library::roots` is the set of the strokes' own root notes, so every stroke
+        // and every key the map covers names one of these.
+        let of_note: BTreeMap<u8, usize> = notes.iter().copied().zip(0..).collect();
 
         let mut grouped: BTreeMap<(usize, u8, Option<Bank>), u64> = BTreeMap::new();
         let mut strikes: Vec<Strike> = Vec::with_capacity(library.strokes().len());
         for stroke in library.strokes() {
-            let root = roots
-                .iter()
-                .position(|root| root.note == stroke.root)
-                .ok_or("a stroke names a root the directory does not record")?;
+            let root = of_note[&stroke.root];
             *grouped
                 .entry((root, stroke.layer(), stroke.bank()))
                 .or_default() += stroke.audio().len() as u64;
@@ -464,7 +480,7 @@ impl Facts {
         let of_key: Vec<Option<usize>> = library
             .key_map()
             .iter()
-            .map(|note| roots.iter().position(|root| root.note == *note))
+            .map(|note| of_note.get(note).copied())
             .collect();
 
         Ok(Facts {
@@ -475,6 +491,7 @@ impl Facts {
             total: saved.len() as u64,
             strokes: library.strokes().len(),
             roots,
+            of_note,
             layers: layers.into_iter().collect(),
             banks: Bank::ALL
                 .into_iter()
@@ -508,7 +525,7 @@ impl Facts {
     }
 
     fn index_of(&self, note: u8) -> Option<usize> {
-        self.roots.iter().position(|root| root.note == note)
+        self.of_note.get(&note).copied()
     }
 
     /// The layers as the sections list them, softest first, each with its rank among
@@ -529,12 +546,8 @@ impl Facts {
     }
 }
 
-// ---- what a plan costs --------------------------------------------------------------
-
-/// Bytes a plan keeps: the file, less the audio of every stroke it drops.
-///
-/// Against the file rather than a sum of its parts, so a plan that drops nothing reads
-/// as the whole file and nothing has to be weighted to make the figures agree.
+/// Bytes a plan keeps: the file, less the audio of every stroke it drops, so a plan
+/// that drops nothing reads as the whole file.
 fn kept_bytes(facts: &Facts, plan: &Plan) -> u64 {
     facts.total.saturating_sub(
         facts
@@ -598,7 +611,7 @@ fn cheapest_cut(facts: &Facts, plan: &Plan, over: u64) -> Option<Cut> {
             })
         };
         let shed = shed_bytes(facts, plan, selects);
-        // A cut that takes every stroke still kept is not a cut: nothing would play.
+        // A cut that sheds every stroke still kept would leave nothing to play.
         if shed < over || shed >= live {
             continue;
         }
@@ -760,8 +773,6 @@ fn default_range(facts: &Facts) -> RangeInclusive<u8> {
     (*MIDDLE.start()).max(low)..=(*MIDDLE.end()).min(high)
 }
 
-// ---- the decoded audio --------------------------------------------------------------
-
 /// One stroke, decoded.
 struct Played {
     /// Frames interleaved by channel at [`npno::codec::RATE`], which is what both the
@@ -891,8 +902,6 @@ pub struct Sound<'a> {
     pub name: String,
 }
 
-// ---- the document's state -----------------------------------------------------------
-
 /// The row the map and the rows agree on, and what the keyboard is sounding. A tab
 /// switch resets all of it — but never the plan, which is the edit.
 #[derive(Default)]
@@ -961,6 +970,8 @@ pub struct State {
     open: Option<Open>,
     /// The plan as this frame's controls have left it, to be tried before it is kept.
     draft: Plan,
+    /// What the sections read off that plan, worked out when it moves.
+    summary: Option<Summary>,
     view: View,
     audio: Cache,
     /// What the attached instrument has free for pianos, read where the device is in
@@ -979,7 +990,7 @@ impl State {
             self.open = None;
             return Extras::default();
         }
-        let baseline = (entity.saved.bytes.len(), entity.saved.crc32);
+        let baseline = mark(entity);
         let moved = self
             .open
             .as_ref()
@@ -991,6 +1002,8 @@ impl State {
                 facts: Facts::of(&entity.saved.bytes),
             });
             self.view = View::default();
+            // The figures go with the facts they were worked out from.
+            self.summary = None;
         }
         let plan = self.plans.entry(id).or_default();
         // A save makes what was dropped gone for good: the rows show the file as it now
@@ -1005,12 +1018,35 @@ impl State {
         self.draft = plan.clone();
         self.audio.follow(id, entity.stamp);
         self.free = room::free_bytes(ObjectClass::Piano, device);
+        self.summarise();
         let standing = self.standing(id);
 
-        let Some(facts) = self.facts() else {
+        let (Some(facts), Some(summary)) = (self.facts(), self.summary.as_ref()) else {
             return Extras::default();
         };
-        extras(facts, &self.draft, self.free, standing)
+        extras(facts, summary.kept, self.free, standing)
+    }
+
+    /// Work the figures out again where the plan or the room it has to fit in has moved.
+    /// A frame that changed neither reads what the last one left.
+    fn summarise(&mut self) {
+        let State {
+            open,
+            draft,
+            free,
+            summary,
+            ..
+        } = self;
+        let Some(facts) = open.as_ref().and_then(|open| open.facts.as_ref().ok()) else {
+            *summary = None;
+            return;
+        };
+        if summary
+            .as_ref()
+            .is_none_or(|held| held.of != *draft || held.free != *free)
+        {
+            *summary = Some(Summary::of(facts, draft, *free));
+        }
     }
 
     /// Where this document's plan stands.
@@ -1041,14 +1077,35 @@ impl State {
 
     /// Take one of the header's `path = value` sets into the plan.
     pub fn take(&mut self, sets: &Sets) -> Result<(), String> {
+        let State { open, draft, .. } = self;
+        let facts = open.as_ref().and_then(|open| open.facts.as_ref().ok());
         for (path, value) in sets {
             match path.as_str() {
-                "name" => self.draft.name = Some(value.clone()),
-                "variant" => self.draft.variant = Some(value.clone()),
+                "name" => draft.name = renamed(value, facts.map(|facts| facts.name.as_str())),
+                "variant" => {
+                    draft.variant = renamed(value, facts.map(|facts| facts.variant.as_str()));
+                }
                 _ => return Err(format!("unknown field {path:?}")),
             }
         }
         Ok(())
+    }
+
+    /// What this document's plan will save its name and its variant as, where it renames
+    /// them. The header's box holds what a save writes rather than what the bytes still
+    /// say, so that typing the stored name back clears the rename.
+    ///
+    /// ⚠️ Nothing over a plan standing against another baseline: a save makes what it
+    /// held gone, and [`State::begin`] is what starts the plan again.
+    pub fn renaming(&self, entity: &LocalEntity) -> (Option<String>, Option<String>) {
+        let plan = self
+            .plans
+            .get(&entity.id)
+            .filter(|plan| plan.against == mark(entity));
+        (
+            plan.and_then(|plan| plan.name.clone()),
+            plan.and_then(|plan| plan.variant.clone()),
+        )
     }
 
     /// The plan this frame left behind, where it is not the one in hand.
@@ -1075,7 +1132,11 @@ impl State {
     }
 
     /// Forget this document's plan, and anything waiting on it. Revert puts the saved
-    /// bytes back, and a plan over bytes nothing holds is not an edit of anything.
+    /// bytes back and a removal takes them away, and a plan over bytes nothing holds is
+    /// not an edit of anything.
+    ///
+    /// ⚠️ Only the document being drawn loses its draft and its facts: forgetting
+    /// another document's plan must not close the open one.
     pub fn forget(&mut self, id: u64) {
         self.plans.remove(&id);
         self.laid.remove(&id);
@@ -1083,14 +1144,18 @@ impl State {
         if self.job.as_ref().is_some_and(|job| job.id == id) {
             self.job = None;
         }
-        self.draft = Plan::default();
-        self.open = None;
+        if self.open.as_ref().is_some_and(|open| open.id == id) {
+            self.draft = Plan::default();
+            self.summary = None;
+            self.open = None;
+        }
     }
 
     /// Nothing is open any more: the selection, the open rows, the key table and the
     /// audition go. The plans stay, and so does an apply in flight.
     pub fn leave(&mut self) {
         self.view = View::default();
+        self.summary = None;
         self.open = None;
     }
 
@@ -1135,14 +1200,39 @@ impl State {
 
     /// The apply that has answered, where one has.
     ///
-    /// ⚠️ An answer over a plan that has since moved is dropped rather than written: the
-    /// bytes it made are of a library nobody asked for any more. Whatever was waiting on
-    /// that document waits on the apply of the plan in hand instead — unless the plan
-    /// has caught up with the bytes on its own, when there is nothing left to wait for.
+    /// ⚠️ An answer over a plan that has since moved, or over a document the workspace
+    /// no longer holds, is dropped rather than written: the bytes it made are of a
+    /// library nobody asked for any more. Whatever was waiting on that document waits on
+    /// the apply of the plan in hand instead — unless the plan has caught up with the
+    /// bytes on its own, or the document is gone, when there is nothing left to wait for.
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
-        let made = self.job.as_ref()?.job.poll()?;
+        let answer = self.job.as_ref()?.job.poll();
+        self.finished(answer, ctx, workspace)
+    }
+
+    /// [`Self::answered`], waiting for the apply in flight instead of polling it.
+    #[cfg(test)]
+    pub fn awaited(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
+        let answer = self.job.as_ref()?.job.wait();
+        self.finished(answer, ctx, workspace)
+    }
+
+    fn finished(
+        &mut self,
+        answer: work::Answer<Result<Vec<u8>, String>>,
+        ctx: &egui::Context,
+        workspace: &Workspace,
+    ) -> Option<Applied> {
+        let made = match answer {
+            work::Answer::Running => return None,
+            work::Answer::Answered(made) => made,
+            work::Answer::Died => {
+                Err("laying out the library stopped without an answer".to_string())
+            }
+        };
         let laying = self.job.take()?;
-        let fresh = self.plans.get(&laying.id) == Some(&laying.plan);
+        let fresh =
+            workspace.get(laying.id).is_some() && self.plans.get(&laying.id) == Some(&laying.plan);
         match (fresh, made.is_ok()) {
             (true, true) => {
                 self.laid.insert(laying.id, laying.plan);
@@ -1200,6 +1290,12 @@ impl State {
     }
 }
 
+/// A typed half of the name field as the plan holds it: nothing where it is what the
+/// baseline already states, and a plan that renames nothing is no edit.
+fn renamed(typed: &str, stored: Option<&str>) -> Option<String> {
+    (stored != Some(typed)).then(|| typed.to_string())
+}
+
 /// The document an act must wait for, where it is one that would carry a document's
 /// bytes out of this app.
 fn waits_on(act: &Act) -> Option<u64> {
@@ -1212,8 +1308,7 @@ fn waits_on(act: &Act) -> Option<u64> {
 /// What the header shows over a piano library: what it keeps of what it holds, the word
 /// for a library that has been trimmed, and its refusal to be queued when it will not
 /// fit.
-fn extras(facts: &Facts, plan: &Plan, free: Option<u64>, standing: Standing) -> Extras {
-    let kept = kept_bytes(facts, plan);
+fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Extras {
     let over = free
         .and_then(|free| kept.checked_sub(free))
         .filter(|over| *over > 0);
@@ -1279,8 +1374,6 @@ fn claim(trimmed: bool, standing: Standing) -> Option<StateLine> {
         }),
     }
 }
-
-// ---- the pieces the sections are painted out of -------------------------------------
 
 /// The corner every rectangle here is drawn with, and the page's own margin.
 const RADIUS: f32 = 2.0;
@@ -1452,24 +1545,23 @@ fn root_bytes(facts: &Facts, plan: Option<&Plan>, index: usize) -> u64 {
         .sum()
 }
 
-/// The keys the plan leaves answering something.
-fn covered(facts: &Facts, plan: &Plan) -> Vec<u8> {
+/// The keys the plan leaves answering something, given what each root keeps.
+fn covered(facts: &Facts, plan: &Plan, roots: &[RootLine]) -> Vec<u8> {
     (0..npno::NOTES as u8)
         .filter(|key| {
             plan.range.as_ref().is_none_or(|range| range.contains(key))
                 && plan
                     .answers(facts, *key)
-                    .is_some_and(|root| root_bytes(facts, Some(plan), root) > 0)
+                    .is_some_and(|root| roots[root].kept > 0)
         })
         .collect()
 }
 
-/// The stretches of the keyboard the plan leaves silent, low to high.
-fn silent(facts: &Facts, plan: &Plan) -> Vec<(u8, u8)> {
-    let answered = covered(facts, plan);
+/// The stretches of [`SPAN`] the covered keys leave out, low to high.
+fn gaps(covered: &[u8]) -> Vec<(u8, u8)> {
     let mut out: Vec<(u8, u8)> = Vec::new();
     for key in SPAN.low..=SPAN.high {
-        if answered.contains(&key) {
+        if covered.contains(&key) {
             continue;
         }
         match out.last_mut() {
@@ -1478,6 +1570,114 @@ fn silent(facts: &Facts, plan: &Plan) -> Vec<(u8, u8)> {
         }
     }
     out
+}
+
+/// What every section of a frame reads off the plan.
+///
+/// ⚠️ Worked out when the plan or the instrument's free memory moves, never per frame:
+/// the walks here are over every key, every cell and — while the library does not fit —
+/// every subset of the switches still on.
+struct Summary {
+    /// The plan and the free memory these figures are of, which is what
+    /// [`State::summarise`] checks before working any of them out again.
+    of: Plan,
+    free: Option<u64>,
+    /// Bytes the plan keeps of the file.
+    kept: u64,
+    /// The keys it leaves answering something, and the stretches it leaves silent.
+    covered: Vec<u8>,
+    silent: Vec<(u8, u8)>,
+    /// The cheapest cut left, where what is kept does not fit.
+    cut: Option<Cut>,
+    roots: Vec<RootLine>,
+    /// One cell per stretch of keys a root answers, and the root each belongs to.
+    cells: Vec<SizeCell>,
+    of_root: Vec<usize>,
+}
+
+/// What one root's cell on the map and its row in the list read.
+struct RootLine {
+    note: u8,
+    /// The stretches of keys the plan routes to it.
+    runs: Vec<(u8, u8)>,
+    /// What it keeps, against what the file holds for it.
+    kept: u64,
+    held: u64,
+    in_range: bool,
+    /// Those stretches as its row prints them.
+    answers: String,
+}
+
+impl Summary {
+    fn of(facts: &Facts, plan: &Plan, free: Option<u64>) -> Summary {
+        let roots: Vec<RootLine> = facts
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| {
+                let runs = runs(&plan.keys_of(facts, index));
+                RootLine {
+                    note: root.note,
+                    answers: answered(&runs),
+                    runs,
+                    kept: root_bytes(facts, Some(plan), index),
+                    held: root_bytes(facts, None, index),
+                    in_range: plan.in_range(facts, index),
+                }
+            })
+            .collect();
+        let mut cells: Vec<SizeCell> = Vec::new();
+        let mut of_root: Vec<usize> = Vec::new();
+        for (index, line) in roots.iter().enumerate() {
+            for (low, top) in &line.runs {
+                of_root.push(index);
+                cells.push(SizeCell {
+                    low: *low,
+                    top: *top,
+                    name: note::name(line.note),
+                    kept: mb(line.kept),
+                    original: mb(line.held),
+                    in_range: line.in_range,
+                    hint: format!(
+                        "root {} answers {}–{} · {} of {}",
+                        note::name(line.note),
+                        note::name(*low),
+                        note::name(*top),
+                        room::measure(line.kept),
+                        room::measure(line.held),
+                    ),
+                });
+            }
+        }
+        let covered = covered(facts, plan, &roots);
+        let kept = kept_bytes(facts, plan);
+        Summary {
+            of: plan.clone(),
+            free,
+            kept,
+            silent: gaps(&covered),
+            covered,
+            cut: free
+                .and_then(|free| kept.checked_sub(free))
+                .filter(|over| *over > 0)
+                .and_then(|over| cheapest_cut(facts, plan, over)),
+            roots,
+            cells,
+            of_root,
+        }
+    }
+}
+
+/// The stretches of keys a root answers, as its row prints them.
+fn answered(runs: &[(u8, u8)]) -> String {
+    match runs {
+        [(low, top)] => format!("{} – {}", note::name(*low), note::name(*top)),
+        runs => runs
+            .iter()
+            .map(|(low, top)| format!("{}–{}", note::name(*low), note::name(*top)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
 }
 
 /// A column `width` wide, laid out top down, claiming only the height its contents
@@ -1499,8 +1699,6 @@ fn column(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
 fn mb(bytes: u64) -> f32 {
     bytes as f32 / (1024.0 * 1024.0)
 }
-
-// ---- the key map --------------------------------------------------------------------
 
 /// What the keyboard last played, as the line under it reads: whether it sounded, and
 /// the sentence.
@@ -1605,8 +1803,13 @@ impl State {
     /// The key map, pinned above the body: one cell per root over a clickable keyboard,
     /// and a line saying what the last key played.
     pub fn map(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
+        self.summarise();
         let State {
-            open, draft, view, ..
+            open,
+            draft,
+            view,
+            summary,
+            ..
         } = self;
         let facts = match &open.as_ref()?.facts {
             Ok(facts) => facts,
@@ -1615,15 +1818,15 @@ impl State {
                 return None;
             }
         };
+        let summary = summary.as_ref()?;
 
-        let gaps = silent(facts, draft);
-        let ink = match gaps.is_empty() {
+        let ink = match summary.silent.is_empty() {
             true => app::good(ui.visuals()),
             false => app::warn(ui.visuals()),
         };
         let reading = format!(
             "{}  {}–{}",
-            coverage(&gaps),
+            coverage(&summary.silent),
             note::name(SPAN.low),
             note::name(SPAN.high)
         );
@@ -1636,32 +1839,7 @@ impl State {
 
         let lit = view.audition.as_ref().map(|struck| struck.note);
         let answering = lit.and_then(|note| draft.answers(facts, note));
-        let mut cells = Vec::new();
-        let mut of_root = Vec::new();
-        for (index, root) in facts.roots.iter().enumerate() {
-            let kept = root_bytes(facts, Some(draft), index);
-            let original = root_bytes(facts, None, index);
-            let in_range = draft.in_range(facts, index);
-            for (low, top) in runs(&draft.keys_of(facts, index)) {
-                of_root.push(index);
-                cells.push(SizeCell {
-                    low,
-                    top,
-                    name: note::name(root.note),
-                    kept: mb(kept),
-                    original: mb(original),
-                    in_range,
-                    hint: format!(
-                        "root {} answers {}–{} · {} of {}",
-                        note::name(root.note),
-                        note::name(low),
-                        note::name(top),
-                        room::measure(kept),
-                        room::measure(original),
-                    ),
-                });
-            }
-        }
+        let of_root = &summary.of_root;
         let marks: Vec<keys::Mark> = facts
             .roots
             .iter()
@@ -1686,7 +1864,7 @@ impl State {
         let acted = keys::size_cells(
             &mut inner,
             SPAN,
-            &cells,
+            &summary.cells,
             picked,
             cell_lit,
             keys::Edges::Both,
@@ -1740,8 +1918,12 @@ impl State {
                 view.reveal = Some(root);
             }
             Some(keys::BandAct::Drag { bounds, .. }) => {
-                let was: Vec<(u8, u8)> = cells.iter().map(|cell| (cell.low, cell.top)).collect();
-                reroute(facts, draft, &of_root, &was, &bounds);
+                let was: Vec<(u8, u8)> = summary
+                    .cells
+                    .iter()
+                    .map(|cell| (cell.low, cell.top))
+                    .collect();
+                reroute(facts, draft, of_root, &was, &bounds);
             }
             None => {}
         }
@@ -1772,7 +1954,14 @@ impl State {
     }
 }
 
-// ---- the trim section ---------------------------------------------------------------
+/// What throwing one switch row of the trim section does. The range is a switch of its
+/// own: no cut the constraint sentence names offers it.
+#[derive(Clone, Copy)]
+enum Throw {
+    Layer(u8),
+    Bank(Bank),
+    Range,
+}
 
 /// One switch of the trim section as its row draws it.
 struct Switch {
@@ -1785,11 +1974,11 @@ struct Switch {
     /// What the size was, where the plan has changed it.
     was: Option<String>,
     hint: String,
-    what: Option<What>,
+    throws: Throw,
 }
 
 /// The switch rows of the trim section: what the plan keeps, against what it holds.
-fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
+fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary) {
     let layers = facts.layers.len();
     let whole = spans(&facts.layers);
     let mut rows: Vec<Switch> = Vec::new();
@@ -1840,7 +2029,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
                  every layer sounds it at {}",
                 span_text(&whole[rank].1)
             ),
-            what: Some(What::Layer(layer)),
+            throws: Throw::Layer(layer),
         });
     }
     for bank in &facts.banks {
@@ -1857,35 +2046,33 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
             size: room::measure(kept),
             was: (kept != held).then(|| room::measure(held)),
             hint: format!("bank {} in the file", bank.code()),
-            what: Some(What::Bank(*bank)),
+            throws: Throw::Bank(*bank),
         });
     }
-    rows.push(range_switch(facts, plan));
+    rows.push(range_switch(facts, plan, summary.covered.len()));
 
     let mut thrown = None;
     for (index, row) in rows.iter().enumerate() {
         if let Some(keep) = switch_row(ui, index, row) {
-            thrown = Some((row.what, keep));
+            thrown = Some((row.throws, keep));
         }
     }
     match thrown {
-        Some((Some(What::Layer(layer)), keep)) => plan.switch_layer(layer, keep),
-        Some((Some(What::Bank(bank)), keep)) => plan.switch_bank(bank, keep),
-        Some((None, keep)) => {
-            plan.range = (!keep).then(|| default_range(facts));
-        }
+        Some((Throw::Layer(layer), keep)) => plan.switch_layer(layer, keep),
+        Some((Throw::Bank(bank), keep)) => plan.switch_bank(bank, keep),
+        Some((Throw::Range, keep)) => plan.range = (!keep).then(|| default_range(facts)),
         None => {}
     }
 }
 
-/// The Keys row: the whole range, or the middle of it.
-fn range_switch(facts: &Facts, plan: &Plan) -> Switch {
+/// The Keys row: the whole range, or the middle of it. `kept` is how many keys the plan
+/// leaves answering something.
+fn range_switch(facts: &Facts, plan: &Plan, kept: usize) -> Switch {
     let (low, high) = (
         facts.covered.first().copied().unwrap_or(SPAN.low),
         facts.covered.last().copied().unwrap_or(SPAN.high),
     );
     let held = facts.covered.len();
-    let kept = covered(facts, plan).len();
     Switch {
         on: plan.range.is_none(),
         name: format!("Keys {} – {}", note::name(low), note::name(high)),
@@ -1906,7 +2093,7 @@ fn range_switch(facts: &Facts, plan: &Plan) -> Switch {
         size: format!("{kept} keys"),
         was: (kept != held).then(|| format!("{held} keys")),
         hint: "switch it off to keep the middle of the keyboard".to_string(),
-        what: None,
+        throws: Throw::Range,
     }
 }
 
@@ -2009,11 +2196,12 @@ fn switch_row(ui: &mut egui::Ui, index: usize, row: &Switch) -> Option<bool> {
 
 /// The meter: what the file holds, what the plan keeps, what the instrument has free,
 /// and the sentence that names the cheapest cut left.
-fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, free: Option<u64>) {
+fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, summary: &Summary) {
     const TROUGH: f32 = 8.0;
     const LABEL: f32 = 14.0;
 
-    let kept = kept_bytes(facts, plan);
+    let free = summary.free;
+    let kept = summary.kept;
     let visuals = ui.visuals().clone();
     let width = ui.available_width();
     ui.horizontal(|ui| {
@@ -2082,7 +2270,7 @@ fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, free: Option<u64>) {
     }
 
     ui.add_space(10.0);
-    let (said, loud) = constraint(facts, plan, free);
+    let (said, loud) = constraint(plan, summary);
     ui.label(egui::RichText::new(said).size(11.0).color(match loud {
         true => app::warn(&visuals),
         false => app::caption(&visuals),
@@ -2090,9 +2278,9 @@ fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, free: Option<u64>) {
 }
 
 /// The sentence under the meter: whether it fits, and what to throw if it does not.
-fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
-    let kept = kept_bytes(facts, plan);
-    let Some(free) = free else {
+fn constraint(plan: &Plan, summary: &Summary) -> (String, bool) {
+    let kept = summary.kept;
+    let Some(free) = summary.free else {
         return (
             "The instrument has not reported its free piano memory, so nothing here can \
              say whether this fits."
@@ -2115,7 +2303,7 @@ fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
         room::measure(kept),
         room::measure(over)
     );
-    let rest = match cheapest_cut(facts, plan, over) {
+    let rest = match &summary.cut {
         Some(cut) => format!(
             "Dropping {} sheds {} — the cheapest cut left that fits.",
             listed(&cut.picked),
@@ -2131,8 +2319,6 @@ fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
     };
     (format!("{head} {rest}"), true)
 }
-
-// ---- the playback fields ------------------------------------------------------------
 
 /// A control of the playback section: the caps label, and the control under it.
 fn field(ui: &mut egui::Ui, label: &str, hint: &str, body: impl FnOnce(&mut egui::Ui)) {
@@ -2229,8 +2415,6 @@ fn damper_picker(ui: &mut egui::Ui, top: u8) -> Option<u8> {
     let picked = value.round() as u8;
     (response.inner.changed() && picked != top).then_some(picked)
 }
-
-// ---- the velocity layer lanes -------------------------------------------------------
 
 /// One lane per layer: the switch that speaks for every root, and one segment per root
 /// so a per-root exception shows where it is.
@@ -2411,7 +2595,7 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
         plan.switch_layer(layer, keep);
     }
     if let Some((root, layer, keep)) = excepted {
-        plan.roots.insert((root, layer), keep);
+        plan.except(root, layer, keep);
     }
 }
 
@@ -2426,6 +2610,16 @@ fn root_layers(facts: &Facts, root: usize) -> Vec<u8> {
     values.sort_unstable();
     values.dedup();
     values
+}
+
+/// Drop every layer one root still keeps: the ones it records whose switch is on. A
+/// layer the root has no stroke of has nothing to drop, and one its switch has already
+/// dropped needs no exception of its own.
+fn drop_root(facts: &Facts, plan: &mut Plan, index: usize) {
+    let note = facts.roots[index].note;
+    for layer in root_layers(facts, index) {
+        plan.except(note, layer, false);
+    }
 }
 
 /// What a stroke is attenuated by under this plan, in decibels.
@@ -2454,8 +2648,6 @@ fn root_layer_bytes(facts: &Facts, root: usize, layer: u8) -> u64 {
         .map(|cell| cell.bytes)
         .sum()
 }
-
-// ---- the roots rows -----------------------------------------------------------------
 
 /// The ink every cell of a row wears.
 ///
@@ -2491,12 +2683,17 @@ fn row_ink(visuals: &egui::Visuals, picked: bool, in_range: bool) -> RowInk {
 /// above it.
 const ROW_LAMPS: usize = 6;
 
+/// How far the trim control reaches, in decibels. A stroke recording more than this is
+/// shown as the file states it.
+const TRIM_REACH: u16 = 48;
+
 /// One row per root: what it answers, which of its layers it keeps, what it costs, and
 /// the facts and actions under it when it is open.
 fn roots(
     ui: &mut egui::Ui,
     facts: &Facts,
     plan: &mut Plan,
+    summary: &Summary,
     view: &mut View,
     sounding: Option<u8>,
 ) -> Option<Ask> {
@@ -2548,14 +2745,13 @@ fn roots(
     let mut dropped: Option<usize> = None;
     let layers = facts.shown_layers();
     for (index, root) in facts.roots.iter().enumerate() {
+        let line = &summary.roots[index];
         let picked = view.picked == Some(index);
         let open = picked && view.open_rows.contains(&index);
-        let in_range = plan.in_range(facts, index);
+        let in_range = line.in_range;
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
-        // ⚠️ Before the lamps drawn over it: egui gives a click to the last widget
-        // registered over the point, and a row-wide target added afterwards would
-        // swallow every one of them.
+        // ⚠️ Before the lamps drawn over it, for the reason [`switch_row`] states.
         let response = ui
             .interact(
                 rect,
@@ -2589,21 +2785,12 @@ fn roots(
             egui::FontId::new(NAME, app::bold()),
             ink.text,
         );
-        let runs = runs(&plan.keys_of(facts, index));
-        let answers = match runs.as_slice() {
-            [(low, top)] => format!("{} – {}", note::name(*low), note::name(*top)),
-            runs => runs
-                .iter()
-                .map(|(low, top)| format!("{}–{}", note::name(*low), note::name(*top)))
-                .collect::<Vec<_>>()
-                .join(", "),
-        };
         cell(
             &painter,
             left + COL_A + GAP,
             middle,
             answers_w,
-            &answers,
+            &line.answers,
             egui::FontId::monospace(11.0),
             ink.text,
         );
@@ -2655,8 +2842,7 @@ fn roots(
             },
         );
 
-        let kept = root_bytes(facts, Some(plan), index);
-        let held = root_bytes(facts, None, index);
+        let (kept, held) = (line.kept, line.held);
         let right = rect.right() - PAD - CHEVRON - GAP;
         let mono = egui::FontId::monospace(MONO);
         let back = figure(
@@ -2699,7 +2885,7 @@ fn roots(
         }
 
         if open {
-            if let Some(asked) = open_row(ui, facts, plan, index, &runs, sounding) {
+            if let Some(asked) = open_row(ui, facts, plan, index, &line.runs, sounding) {
                 match asked {
                     Opened::Audio(asked) => ask = Some(asked),
                     Opened::Drop => dropped = Some(index),
@@ -2720,12 +2906,10 @@ fn roots(
         view.picked = Some(index);
     }
     if let Some((root, layer, keep)) = excepted {
-        plan.roots.insert((root, layer), keep);
+        plan.except(root, layer, keep);
     }
     if let Some(index) = dropped {
-        for (_, layer) in &layers {
-            plan.roots.insert((facts.roots[index].note, *layer), false);
-        }
+        drop_root(facts, plan, index);
     }
     ask
 }
@@ -2809,15 +2993,25 @@ fn open_row(
                         )
                         .halign(egui::Align::LEFT),
                     );
-                    let mut decibels = f64::from(trim_of(facts, plan, strike));
-                    let set = ui
-                        .add(
-                            egui::DragValue::new(&mut decibels)
-                                .range(0.0..=48.0)
-                                .speed(0.1)
-                                .suffix(" dB"),
-                        )
-                        .on_hover_text("+0x34 in the stroke record, 1 dB a unit");
+                    let held = trim_of(facts, plan, strike);
+                    let mut decibels = f64::from(held);
+                    // ⚠️ `clamp_existing_to_range`: egui otherwise pulls a stored trim
+                    // past the bound back to it and reports the change, which would
+                    // plan a retrim of a stroke nobody touched.
+                    let set = ui.add(
+                        egui::DragValue::new(&mut decibels)
+                            .range(0.0..=f64::from(TRIM_REACH))
+                            .clamp_existing_to_range(false)
+                            .speed(0.1)
+                            .suffix(" dB"),
+                    );
+                    let set = match held > TRIM_REACH {
+                        true => set.on_hover_text(format!(
+                            "+0x34 in the stroke record, 1 dB a unit — it holds {held} dB, \
+                             past the {TRIM_REACH} dB this control sets"
+                        )),
+                        false => set.on_hover_text("+0x34 in the stroke record, 1 dB a unit"),
+                    };
                     if set.changed() {
                         let key = (root.note, strike.bank, strike.layer);
                         let picked = decibels.round() as u16;
@@ -2857,8 +3051,6 @@ fn open_row(
         });
     asked
 }
-
-// ---- the per-key lane ---------------------------------------------------------------
 
 /// What the lane draws a key's tune at, where full deflection is [`TUNE_CENTS`].
 const TUNE_CENTS: i32 = 25;
@@ -3013,12 +3205,11 @@ fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
         });
 }
 
-// ---- the faces ----------------------------------------------------------------------
-
 impl State {
     /// The Edit face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
+        self.summarise();
         let id = self.open.as_ref()?.id;
         let saying =
             self.job
@@ -3031,6 +3222,7 @@ impl State {
         let State {
             open,
             draft,
+            summary,
             view,
             free,
             ..
@@ -3042,9 +3234,10 @@ impl State {
                 return None;
             }
         };
+        let summary = summary.as_ref()?;
         let free = *free;
 
-        let kept = kept_bytes(facts, draft);
+        let kept = summary.kept;
         let (badge, ink) = match (&saying, free) {
             (Some(saying), _) => (saying.clone(), app::caption(ui.visuals())),
             (None, Some(free)) if kept > free => (
@@ -3076,18 +3269,18 @@ impl State {
             true => {
                 ui.horizontal_top(|ui| {
                     ui.add_space(PAD);
-                    column(ui, wide_column, |ui| switches(ui, facts, draft));
+                    column(ui, wide_column, |ui| switches(ui, facts, draft, summary));
                     ui.add_space(24.0);
-                    column(ui, wide_column, |ui| meter(ui, facts, draft, free));
+                    column(ui, wide_column, |ui| meter(ui, facts, draft, summary));
                 });
             }
             false => {
                 ui.horizontal_top(|ui| {
                     ui.add_space(PAD);
                     column(ui, wide_column, |ui| {
-                        switches(ui, facts, draft);
+                        switches(ui, facts, draft, summary);
                         ui.add_space(10.0);
-                        meter(ui, facts, draft, free);
+                        meter(ui, facts, draft, summary);
                     });
                 });
             }
@@ -3130,7 +3323,7 @@ impl State {
                 app::caption(ui.visuals()),
             )),
         );
-        let ask = roots(ui, facts, draft, view, sounding);
+        let ask = roots(ui, facts, draft, summary, view, sounding);
         ui.add_space(12.0);
 
         controls::heading(
@@ -3411,7 +3604,7 @@ mod tests {
     use super::*;
     use crate::device::{pretend_allocation_unit, Device};
     use crate::log::Log;
-    use crate::workspace::{Origin, Workspace};
+    use crate::workspace::{Fresh, Origin, Workspace};
 
     /// The roots the test library records, and the layer values it spreads them over.
     const ROOTS: [u8; 3] = [48, 60, 72];
@@ -3468,8 +3661,6 @@ mod tests {
     fn plan() -> Plan {
         Plan::default()
     }
-
-    // ---- the plan -------------------------------------------------------------------
 
     #[test]
     fn a_plan_that_drops_nothing_rebuilds_the_bytes_it_was_saved_as() {
@@ -3617,6 +3808,56 @@ mod tests {
         );
     }
 
+    /// A segment clicked off and back on is no edit: an exception that agrees with its
+    /// switch is dropped, so nothing is left for a save to lay the library out for.
+    #[test]
+    fn a_per_root_exception_put_back_leaves_the_plan_empty() {
+        let mut plan = plan();
+        plan.except(ROOTS[1], LAYERS[0], false);
+        assert!(!plan.keeps_layer(ROOTS[1], LAYERS[0]));
+        assert!(!plan.is_empty());
+
+        plan.except(ROOTS[1], LAYERS[0], true);
+        assert!(plan.is_empty(), "{plan:?}");
+
+        // Under a switch that is off it is the other way about: keeping the layer is
+        // the exception, and dropping it again says only what the switch says.
+        plan.switch_layer(LAYERS[0], false);
+        plan.except(ROOTS[1], LAYERS[0], false);
+        assert!(plan.roots.is_empty(), "the switch already drops it");
+        plan.except(ROOTS[1], LAYERS[0], true);
+        assert_eq!(plan.roots.get(&(ROOTS[1], LAYERS[0])), Some(&true));
+    }
+
+    /// Dropping a root takes the layers it records whose switch is still on, and the
+    /// master switches speak over every exception it left.
+    #[test]
+    fn dropping_a_root_excepts_only_the_layers_its_switch_still_keeps() {
+        let facts = facts();
+        let mut plan = plan();
+        plan.switch_layer(LAYERS[0], false);
+        drop_root(&facts, &mut plan, 1);
+
+        let excepted: Vec<(u8, u8)> = plan.roots.keys().copied().collect();
+        assert_eq!(
+            excepted,
+            [(ROOTS[1], LAYERS[1]), (ROOTS[1], LAYERS[2])],
+            "the layer its switch already dropped needs no exception",
+        );
+        assert!(
+            plan.keeps_layer(ROOTS[0], LAYERS[1]),
+            "and no other root moved"
+        );
+
+        for layer in LAYERS {
+            plan.switch_layer(layer, false);
+        }
+        for layer in LAYERS {
+            plan.switch_layer(layer, true);
+        }
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
     /// A plan that would leave the library with nothing to play is refused, and the
     /// rebuild says so rather than writing an empty directory.
     #[test]
@@ -3634,11 +3875,9 @@ mod tests {
     fn a_body_that_is_no_piano_library_is_refused_before_anything_is_written() {
         let mut plan = plan();
         plan.name = Some("Wurly 200A".to_string());
-        let refused = rebuild(&crate::fields::blank::electro5_song(), &plan);
+        let refused = rebuild(&Fresh::SetList.bytes().unwrap(), &plan);
         assert!(refused.is_err(), "a set list is not a piano library");
     }
-
-    // ---- the playback fields, the trims and the key map -----------------------------
 
     // Where the piano document writes, as the Advanced face states the offsets.
     const KIND_AT: usize = 0x18;
@@ -3648,12 +3887,11 @@ mod tests {
     const DIRECTORY_AT: usize = 0x732;
     const REC_TRIM: usize = 0x34;
 
-    /// The body offsets a plan moves. Anything outside the body is the container's own
-    /// checksum, which every write moves.
-    fn moved(saved: &[u8], plan: &Plan) -> Vec<usize> {
+    /// How long the file a plan makes comes out, and the body offsets it moves. Anything
+    /// outside the body is the container's own checksum, which every write moves.
+    fn moved(saved: &[u8], plan: &Plan) -> (usize, Vec<usize>) {
         let base = rebuild(saved, &Plan::default()).unwrap();
         let made = rebuild(saved, plan).unwrap();
-        assert_eq!(made.len(), base.len(), "the plan re-laid the audio");
         let body_at = saved
             .windows(4)
             .position(|word| word == b"CNSP")
@@ -3665,31 +3903,35 @@ mod tests {
             .unwrap()
             .body_len()
             .unwrap();
-        (0..base.len())
+        let offsets = (0..base.len())
             .filter(|at| base[*at] != made[*at])
             .filter_map(|at| at.checked_sub(body_at).filter(|at| *at < body_len))
-            .collect()
+            .collect();
+        (made.len(), offsets)
     }
 
+    /// Each of these is one field of the prefix or of a stroke's record: it writes the
+    /// bytes it names, and it re-lays no audio.
     #[test]
     fn each_playback_field_writes_only_the_byte_it_names() {
         let saved = bytes();
+        let whole = saved.len();
 
         let mut gained = plan();
         gained.gain = Some(-20);
-        assert_eq!(moved(&saved, &gained), [GAIN_AT]);
+        assert_eq!(moved(&saved, &gained), (whole, vec![GAIN_AT]));
 
         let mut damped = plan();
         damped.damper_top = Some(90);
-        assert_eq!(moved(&saved, &damped), [DAMPER_TOP_AT]);
+        assert_eq!(moved(&saved, &damped), (whole, vec![DAMPER_TOP_AT]));
 
         let mut filed = plan();
         filed.kind = Some(Kind::Wurlitzer);
-        assert_eq!(moved(&saved, &filed), [KIND_AT]);
+        assert_eq!(moved(&saved, &filed), (whole, vec![KIND_AT]));
 
         let mut routed = plan();
         routed.key_roots.insert(60, Some(ROOTS[0]));
-        assert_eq!(moved(&saved, &routed), [KEY_MAP_AT + 60]);
+        assert_eq!(moved(&saved, &routed), (whole, vec![KEY_MAP_AT + 60]));
 
         // The trim is a u16 in the record of the stroke it names — the first of them,
         // which is the lowest root's loudest attack.
@@ -3697,7 +3939,10 @@ mod tests {
         trimmed
             .trims
             .insert((ROOTS[0], Bank::Attack.code(), LAYERS[0]), 6);
-        assert_eq!(moved(&saved, &trimmed), [DIRECTORY_AT + REC_TRIM + 1]);
+        assert_eq!(
+            moved(&saved, &trimmed),
+            (whole, vec![DIRECTORY_AT + REC_TRIM + 1])
+        );
     }
 
     /// A trim names the stroke it belongs to, not the place in the directory that
@@ -3771,7 +4016,10 @@ mod tests {
             status(&facts, &moved, 56).1.contains("root C3"),
             "the keys moved with the boundary"
         );
-        assert!(silent(&facts, &moved).is_empty(), "and none fell silent");
+        assert!(
+            Summary::of(&facts, &moved, None).silent.is_empty(),
+            "and none fell silent"
+        );
         assert_eq!(
             rebuild(&bytes(), &moved).unwrap().len(),
             bytes().len(),
@@ -3782,7 +4030,7 @@ mod tests {
         let mut cut = plan();
         let now = keys::boundary(&was, SPAN, 2, keys::Edge::Top, 100);
         reroute(&facts, &mut cut, &[0, 1, 2], &was, &now);
-        assert_eq!(silent(&facts, &cut), [(101, SPAN.high)]);
+        assert_eq!(Summary::of(&facts, &cut, None).silent, [(101, SPAN.high)]);
         assert!(!status(&facts, &cut, 105).0);
     }
 
@@ -3818,8 +4066,6 @@ mod tests {
         // 8.686 × 35002 × 1000/2^23 = 36.2 dB a second.
         assert!((rate - 36.2).abs() < 0.1, "{rate}");
     }
-
-    // ---- the arithmetic -------------------------------------------------------------
 
     /// Every figure the trim section prints comes off the strokes' own byte lengths,
     /// and the file is the scale: a plan that drops nothing keeps all of it.
@@ -3859,7 +4105,10 @@ mod tests {
             kept_bytes(&facts, &plan),
             facts.total - root_bytes(&facts, None, 0)
         );
-        assert!(covered(&facts, &plan).iter().all(|key| *key >= 55));
+        assert!(Summary::of(&facts, &plan, None)
+            .covered
+            .iter()
+            .all(|key| *key >= 55));
     }
 
     /// The sentence names the smallest set of switches still on that clears the
@@ -3938,8 +4187,6 @@ mod tests {
         assert_eq!(layer_short(2, 3), "S");
     }
 
-    // ---- the fine tune lane ---------------------------------------------------------
-
     /// The file stores units and the lane shows cents, so the conversion has to come
     /// back to the unit it started at — including at the ends of an `i8`.
     #[test]
@@ -3972,8 +4219,6 @@ mod tests {
         assert_eq!(library.fine_tune(61).unwrap(), 0);
     }
 
-    // ---- the header's extras --------------------------------------------------------
-
     /// A partition with about `free` bytes left for pianos, and nothing else attached.
     ///
     /// The pretend allocation unit is small, so a test can name a free size the
@@ -4002,7 +4247,7 @@ mod tests {
         let plenty = attached(facts.total * 2);
         let untouched = extras(
             &facts,
-            &plan(),
+            kept_bytes(&facts, &plan()),
             room::free_bytes(ObjectClass::Piano, &plenty.state),
             Standing::Laid,
         );
@@ -4018,7 +4263,7 @@ mod tests {
         let kept = kept_bytes(&facts, &plan);
         let trimmed = extras(
             &facts,
-            &plan,
+            kept,
             room::free_bytes(ObjectClass::Piano, &plenty.state),
             Standing::Laid,
         );
@@ -4036,7 +4281,7 @@ mod tests {
         // A partition with room for half of it: the loud action carries the overage.
         let cramped = attached(kept / 2);
         let free = room::free_bytes(ObjectClass::Piano, &cramped.state).expect("a unit arrived");
-        let held = extras(&facts, &plan, Some(free), Standing::Laid);
+        let held = extras(&facts, kept, Some(free), Standing::Laid);
         let loud = held.loud.expect("it will not fit");
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.send, None, "a blocked action asks for nothing");
@@ -4050,7 +4295,7 @@ mod tests {
         let alone = Device::new(egui::Context::default());
         let quiet = extras(
             &facts,
-            &plan,
+            kept,
             room::free_bytes(ObjectClass::Piano, &alone.state),
             Standing::Laid,
         );
@@ -4074,7 +4319,12 @@ mod tests {
             name: Some("Wurly 200A".to_string()),
             ..plan()
         };
-        let pending = extras(&facts, &renamed, free, Standing::Pending);
+        let pending = extras(
+            &facts,
+            kept_bytes(&facts, &renamed),
+            free,
+            Standing::Pending,
+        );
         let claim = pending.state.expect("the bytes are the saved ones");
         assert_eq!(claim.words, "edited");
         assert_eq!(claim.ink, Ink::Warn);
@@ -4086,14 +4336,15 @@ mod tests {
 
         let mut dropped = plan();
         dropped.switch_bank(Bank::Release, false);
-        let trimming = extras(&facts, &dropped, free, Standing::Pending);
+        let dropping = kept_bytes(&facts, &dropped);
+        let trimming = extras(&facts, dropping, free, Standing::Pending);
         assert_eq!(
             trimming.state.map(|line| line.words),
             Some("trimmed".to_string()),
             "a plan that drops strokes keeps its own word",
         );
 
-        let applying = extras(&facts, &dropped, free, Standing::Applying);
+        let applying = extras(&facts, dropping, free, Standing::Applying);
         assert_eq!(
             applying.state.as_ref().map(|line| line.words.as_str()),
             Some("applying…")
@@ -4111,23 +4362,21 @@ mod tests {
     fn the_constraint_sentence_names_the_cut_or_says_it_cannot_tell() {
         let facts = facts();
         let plan = plan();
-        let (said, loud) = constraint(&facts, &plan, Some(facts.total * 2));
+        let (said, loud) = constraint(&plan, &Summary::of(&facts, &plan, Some(facts.total * 2)));
         assert!(
             said.starts_with("At ") && said.contains("to spare"),
             "{said}"
         );
         assert!(!loud);
 
-        let (said, loud) = constraint(&facts, &plan, Some(facts.total / 2));
+        let (said, loud) = constraint(&plan, &Summary::of(&facts, &plan, Some(facts.total / 2)));
         assert!(said.contains("over."), "{said}");
         assert!(said.contains("the cheapest cut left that fits"), "{said}");
         assert!(loud);
 
-        let (said, _) = constraint(&facts, &plan, None);
+        let (said, _) = constraint(&plan, &Summary::of(&facts, &plan, None));
         assert!(said.contains("has not reported"), "{said}");
     }
-
-    // ---- the status line ------------------------------------------------------------
 
     /// What a struck key says: which root answered it, how far it was shifted, and why
     /// it was silent where it was.
@@ -4174,11 +4423,14 @@ mod tests {
     fn the_coverage_reading_counts_the_silent_stretches() {
         let facts = facts();
         let mut plan = plan();
-        assert!(silent(&facts, &plan).is_empty());
-        assert_eq!(coverage(&silent(&facts, &plan)), "every key answered");
+        assert!(Summary::of(&facts, &plan, None).silent.is_empty());
+        assert_eq!(
+            coverage(&Summary::of(&facts, &plan, None).silent),
+            "every key answered"
+        );
 
         plan.range = Some(36..=96);
-        let gaps = silent(&facts, &plan);
+        let gaps = Summary::of(&facts, &plan, None).silent;
         assert_eq!(gaps, [(21, 35), (97, 108)]);
         assert_eq!(coverage(&gaps), "2 silent ranges");
         assert_eq!(coverage(&gaps[..1]), "1 silent range");
@@ -4192,8 +4444,6 @@ mod tests {
         assert_eq!(runs(&[58, 59, 70, 71]), [(58, 59), (70, 71)]);
         assert!(runs(&[]).is_empty());
     }
-
-    // ---- the capability table -------------------------------------------------------
 
     /// Every capability the Advanced face calls editable is something this editor
     /// actually does: a plan change that lands in the rebuilt bytes, a stroke it decodes
@@ -4209,7 +4459,7 @@ mod tests {
                     "replace / add a stroke" => assert!(crate::newproject::Making::FROM_WAVS
                         .contains(&crate::newproject::Making::Piano)),
                     "write to the instrument" => {
-                        assert!(crate::device::sendable(ObjectClass::Piano))
+                        assert!(!crate::device::read_only(ObjectClass::Piano))
                     }
                     other => panic!("{other} claims editable with no plan behind it"),
                 }
@@ -4255,8 +4505,6 @@ mod tests {
         }
     }
 
-    // ---- the painted editor ---------------------------------------------------------
-
     /// The piano editor over the test library, in a headless window.
     struct Editor {
         ctx: egui::Context,
@@ -4292,6 +4540,10 @@ mod tests {
 
     impl Editor {
         fn new(free: u64) -> Editor {
+            Editor::of(bytes(), free)
+        }
+
+        fn of(saved: Vec<u8>, free: u64) -> Editor {
             let ctx = egui::Context::default();
             // Dressed the way the app dresses it: without the bold face bound, laying
             // out a root's name panics mid-frame.
@@ -4302,7 +4554,7 @@ mod tests {
             let id = workspace.ingest(
                 "Test Piano.npno".into(),
                 Origin::File("Test Piano.npno".into()),
-                bytes(),
+                saved,
                 &mut log,
             );
             Editor {
@@ -4319,15 +4571,27 @@ mod tests {
             self.driven(events, |_| {})
         }
 
-        /// Wait for the apply in flight to answer, the way a frame polls it.
-        fn awaited(&mut self) -> Applied {
-            for _ in 0..100_000 {
-                if let Some(applied) = self.state.answered(&self.ctx, &self.workspace) {
-                    return applied;
-                }
-                std::thread::yield_now();
+        /// What a settled name box does: the set into the plan, and the plan kept where
+        /// the library takes it.
+        fn typed(&mut self, path: &str, value: &str) {
+            self.state
+                .take(&vec![(path.to_string(), value.to_string())])
+                .expect("the piano knows the field");
+            if let Some(plan) = self.state.drafted() {
+                self.state.commit(plan);
             }
-            panic!("the apply never answered");
+        }
+
+        /// What the header's box holds over this document.
+        fn boxes(&self) -> (Option<String>, Option<String>) {
+            self.state
+                .renaming(self.workspace.get(self.id).expect("it is open"))
+        }
+
+        fn awaited(&mut self) -> Applied {
+            self.state
+                .awaited(&self.ctx, &self.workspace)
+                .expect("an apply is in flight")
         }
 
         /// Lay the plan in hand out and put the bytes under the document, which is what
@@ -4579,6 +4843,66 @@ mod tests {
         assert!(!editor.state.pending(editor.id));
     }
 
+    /// The name box holds what a save will write, so typing the stored name back into
+    /// it clears the rename rather than leaving one standing over bytes that hold it.
+    #[test]
+    fn a_name_typed_back_to_the_stored_one_clears_the_rename() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.frame(Vec::new());
+        let stored = facts().name;
+
+        editor.typed("name", "Wurly 200A");
+        assert_eq!(
+            editor.boxes(),
+            (Some("Wurly 200A".to_string()), None),
+            "the box shows what a save would write",
+        );
+        assert!(editor.state.pending(editor.id));
+
+        editor.typed("name", &stored);
+        assert_eq!(editor.boxes(), (None, None), "the box is back on the bytes");
+        assert!(
+            editor.state.plans[&editor.id].is_empty(),
+            "and the plan edits nothing at all: {:?}",
+            editor.state.plans[&editor.id],
+        );
+        assert!(
+            !editor.state.pending(editor.id),
+            "so nothing is left to apply"
+        );
+    }
+
+    /// A stored trim past what this editor's control reaches is shown as the file holds
+    /// it. Pulling it back to the bound would retrim a stroke nobody touched.
+    #[test]
+    fn a_stored_trim_above_the_controls_reach_is_shown_rather_than_re_planned() {
+        let mut held = plan();
+        let stroke = (ROOTS[2], Bank::Attack.code(), LAYERS[0]);
+        held.trims.insert(stroke, TRIM_REACH + 12);
+        let saved = rebuild(&bytes(), &held).expect("the library takes the trim");
+
+        let mut editor = Editor::of(saved, facts().total * 2);
+        editor.frame(Vec::new());
+        editor.state.view.picked = Some(2);
+        editor.state.view.open_rows.insert(2);
+        let opened = editor.frame(Vec::new());
+
+        assert!(opened.said("ANSWERS FROM"), "the row is open");
+        assert!(
+            opened
+                .words
+                .iter()
+                .any(|word| word.starts_with("60") && word.ends_with(" dB")),
+            "{:?}",
+            opened.words,
+        );
+        assert!(
+            editor.state.plans[&editor.id].trims.is_empty(),
+            "opening the row planned a retrim: {:?}",
+            editor.state.plans[&editor.id].trims,
+        );
+    }
+
     /// A save lays the plan out first: the act waits, the bytes it makes are the ones a
     /// rebuild from the baseline makes, and only then is the document saved.
     #[test]
@@ -4683,6 +5007,86 @@ mod tests {
         assert!(applied.made.is_none(), "the bytes it made are of nothing");
         assert_eq!(applied.acts.len(), 1, "and the save is let go regardless");
         assert!(editor.state.job.is_none(), "with nothing left to lay out");
+    }
+
+    /// ⚠️ The figures the sections read are of the library they were worked out from.
+    /// Two documents can stand on the same plan — the empty one — and the second must
+    /// not be drawn from the first's.
+    #[test]
+    fn opening_another_document_reads_the_figures_of_its_own_library() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.frame(Vec::new());
+        assert_eq!(
+            editor.state.summary.as_ref().map(|held| held.kept),
+            Some(facts().total)
+        );
+
+        let mut dropped = plan();
+        dropped.switch_bank(Bank::Release, false);
+        let smaller = rebuild(&bytes(), &dropped).expect("the library lays out");
+        let other = editor.workspace.ingest(
+            "Other Piano.npno".into(),
+            Origin::File("Other Piano.npno".into()),
+            smaller.clone(),
+            &mut editor.log,
+        );
+        editor.state.begin(
+            other,
+            editor.workspace.get(other).expect("it is open"),
+            &editor.device.state,
+        );
+        assert_eq!(
+            editor.state.summary.as_ref().map(|held| held.kept),
+            Some(smaller.len() as u64),
+            "the second document's figures are its own",
+        );
+    }
+
+    /// A document that is removed takes its plan with it: nothing is left pending over
+    /// bytes the workspace no longer holds, nothing is waiting on them, and no apply is
+    /// still laying them out.
+    #[test]
+    fn a_removed_document_takes_its_plan_and_its_apply_with_it() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        assert!(editor
+            .state
+            .hold(&editor.ctx, Act::SaveDoc(editor.id), &editor.workspace)
+            .is_none());
+        assert!(editor.state.applying());
+
+        let another = editor.workspace.ingest(
+            "Other Piano.npno".into(),
+            Origin::File("Other Piano.npno".into()),
+            bytes(),
+            &mut editor.log,
+        );
+        editor.state.forget(another);
+        assert!(
+            editor.state.open.is_some(),
+            "another document's removal closed the open one",
+        );
+
+        editor.state.forget(editor.id);
+        assert!(!editor.state.applying(), "nothing is still being laid out");
+        assert!(!editor.state.pending(editor.id), "no plan is left standing");
+        assert!(editor.state.held.is_empty(), "nor anything waiting on one");
+    }
+
+    /// ⚠️ An apply that answers over a document the workspace no longer holds made the
+    /// bytes of a library nothing can carry. They are dropped rather than written back.
+    #[test]
+    fn an_apply_that_answers_for_a_removed_document_is_dropped() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        editor
+            .state
+            .start(&editor.ctx, editor.id, &editor.workspace);
+        editor.workspace.remove(editor.id, &mut editor.log);
+
+        let applied = editor.awaited();
+        assert!(applied.made.is_none(), "nothing holds the bytes it made");
+        assert!(applied.acts.is_empty(), "and nothing was waiting on them");
     }
 
     /// A save is the end of the plan: what was dropped is gone, and the rows show the

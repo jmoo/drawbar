@@ -10,9 +10,11 @@ use std::io::Cursor;
 mod format_table;
 #[path = "support/scan.rs"]
 mod scan;
+#[path = "support/sidecar.rs"]
+mod sidecar;
 
 use format_table::formats;
-use scan::{corpus, named, Specimen};
+use scan::{corpus, named, v2_named, v2_samples, Specimen};
 
 fn cbins() -> impl Iterator<Item = &'static Specimen> {
     corpus().iter().filter(|s| s.bytes.starts_with(b"CBIN"))
@@ -40,25 +42,6 @@ fn ne5_lives() -> impl Iterator<
         Entity::Live(Live::Electro5(p)) => Some((s, p)),
         _ => None,
     })
-}
-
-fn v2_samples() -> impl Iterator<
-    Item = (
-        &'static Specimen,
-        &'static nord_format::cbin::Cbin<nsmp::Sample>,
-    ),
-> {
-    corpus().iter().filter_map(|s| match &s.entity {
-        Entity::Sample(Sample::V2(v)) => Some((s, v)),
-        _ => None,
-    })
-}
-
-fn v2_named(name: &str) -> nord_format::cbin::Cbin<nsmp::Sample> {
-    match nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap() {
-        Entity::Sample(Sample::V2(sample)) => sample,
-        other => panic!("{name} decoded as {other:?}"),
-    }
 }
 
 #[test]
@@ -89,7 +72,7 @@ fn cbin_aux_words_have_documented_shapes() {
 fn cbin_body_lengths_match_format_constants() {
     let expected: BTreeMap<&str, u64> = formats()
         .into_iter()
-        .map(|(tag, len, _)| (tag, len))
+        .map(|(tag, len, _)| (tag, len as u64))
         .collect();
     let mut checked = 0;
     for specimen in cbins() {
@@ -157,15 +140,18 @@ fn ns4_octave_shifts_stay_in_panel_range() {
                 seen.insert("program");
             }
             Entity::OrganPreset(OrganPreset::Stage4(p)) => {
-                assert!(in_range(p.organ_a_octave_shift.octaves()), "{where_}");
+                assert!(in_range(p.organ_a.octave_shift.octaves()), "{where_}");
                 seen.insert("organ preset");
             }
             Entity::PianoPreset(PianoPreset::Stage4(p)) => {
-                assert!(in_range(p.piano_a_octave_shift.octaves()), "{where_}");
+                assert!(in_range(p.piano_a.octave_shift.octaves()), "{where_}");
                 seen.insert("piano preset");
             }
             Entity::Synth(Synth::Stage4(p)) => {
-                assert!(in_range(p.synth_a_octave_shift.octaves()), "{where_}");
+                assert!(
+                    in_range(p.synth_a_performance.octave_shift.octaves()),
+                    "{where_}"
+                );
                 seen.insert("synth preset");
             }
             _ => {}
@@ -177,42 +163,111 @@ fn ns4_octave_shifts_stay_in_panel_range() {
     );
 }
 
+/// Every selection the Stage 4 panel offers, and the highest stored value it reaches.
+/// A specimen past one holds a selection the panel cannot make.
+fn in_panel_range(specimen: &Specimen, field: &str, value: u8, top: u8) {
+    assert!(
+        value <= top,
+        "{}: {field} = {value}, and the panel stops at {top}",
+        specimen.path.display()
+    );
+}
+
 #[test]
 fn ns4_selectors_stay_in_panel_range() {
     use nord_format::{OrganPreset, PianoPreset, Synth};
     let mut seen = BTreeSet::new();
     for specimen in corpus() {
-        let where_ = specimen.path.display();
         match &specimen.entity {
             Entity::Program(Program::Stage4(p)) | Entity::Live(Live::Stage4(p)) => {
-                assert!(p.organ_a.model.raw() <= 5, "{where_}");
-                assert!(p.organ_b.model.raw() <= 5, "{where_}");
-                assert!(p.piano_a.piano_type.raw() <= 5, "{where_}");
-                assert!(p.piano_b.piano_type.raw() <= 5, "{where_}");
-                assert!(p.synth_a_voice.filter_type.raw() <= 5, "{where_}");
-                assert!(p.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
-                assert!(p.synth_a_performance.voice_priority.raw() <= 2, "{where_}");
-                assert!(p.organ_fx.reverb_type.raw() <= 11, "{where_}");
+                in_panel_range(specimen, "organ_a.model", p.organ_a.model.raw(), 5);
+                in_panel_range(specimen, "organ_b.model", p.organ_b.model.raw(), 5);
+                in_panel_range(
+                    specimen,
+                    "piano_a.piano_type",
+                    p.piano_a.piano_type.raw(),
+                    5,
+                );
+                in_panel_range(
+                    specimen,
+                    "piano_b.piano_type",
+                    p.piano_b.piano_type.raw(),
+                    5,
+                );
+                let voice = &p.synth_a_voice;
+                in_panel_range(
+                    specimen,
+                    "synth_a_voice.filter_type",
+                    voice.filter_type.raw(),
+                    5,
+                );
+                in_panel_range(
+                    specimen,
+                    "synth_a_voice.lfo_shape",
+                    voice.lfo_shape.raw(),
+                    4,
+                );
+                let priority = p.synth_a_performance.voice_priority.raw();
+                in_panel_range(specimen, "synth_a_performance.voice_priority", priority, 2);
+                in_panel_range(
+                    specimen,
+                    "organ_fx.reverb_type",
+                    p.organ_fx.reverb_type.raw(),
+                    11,
+                );
                 seen.insert("program");
             }
             Entity::OrganPreset(OrganPreset::Stage4(p)) => {
-                assert!(p.organ_a_model.raw() <= 5, "{where_}");
-                assert!(p.organ_b_model.raw() <= 5, "{where_}");
-                assert!(p.organ_fx.reverb_type.raw() <= 11, "{where_}");
+                in_panel_range(specimen, "organ_a.model", p.organ_a.model.raw(), 5);
+                in_panel_range(specimen, "organ_b.model", p.organ_b.model.raw(), 5);
+                in_panel_range(
+                    specimen,
+                    "organ_fx.reverb_type",
+                    p.organ_fx.reverb_type.raw(),
+                    11,
+                );
                 seen.insert("organ preset");
             }
             Entity::PianoPreset(PianoPreset::Stage4(p)) => {
-                assert!(p.piano_a_type.raw() <= 5, "{where_}");
-                assert!(p.piano_b_type.raw() <= 5, "{where_}");
-                assert!(p.piano_a_fx.reverb_type.raw() <= 11, "{where_}");
+                in_panel_range(
+                    specimen,
+                    "piano_a.piano_type",
+                    p.piano_a.piano_type.raw(),
+                    5,
+                );
+                in_panel_range(
+                    specimen,
+                    "piano_b.piano_type",
+                    p.piano_b.piano_type.raw(),
+                    5,
+                );
+                let reverb = p.piano_a_fx.reverb_type.raw();
+                in_panel_range(specimen, "piano_a_fx.reverb_type", reverb, 11);
                 seen.insert("piano preset");
             }
             Entity::Synth(Synth::Stage4(p)) => {
-                assert!(p.synth_a_voice.filter_type.raw() <= 5, "{where_}");
-                assert!(p.synth_b_voice.filter_type.raw() <= 5, "{where_}");
-                assert!(p.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
-                assert!(p.synth_a_voice_priority.raw() <= 2, "{where_}");
-                assert!(p.synth_a_fx.reverb_type.raw() <= 11, "{where_}");
+                let (a, b) = (&p.synth_a_voice, &p.synth_b_voice);
+                in_panel_range(
+                    specimen,
+                    "synth_a_voice.filter_type",
+                    a.filter_type.raw(),
+                    5,
+                );
+                in_panel_range(
+                    specimen,
+                    "synth_b_voice.filter_type",
+                    b.filter_type.raw(),
+                    5,
+                );
+                in_panel_range(specimen, "synth_a_voice.lfo_shape", a.lfo_shape.raw(), 4);
+                let priority = p.synth_a_performance.voice_priority.raw();
+                in_panel_range(specimen, "synth_a_performance.voice_priority", priority, 2);
+                in_panel_range(
+                    specimen,
+                    "synth_a_fx.reverb_type",
+                    p.synth_a_fx.reverb_type.raw(),
+                    11,
+                );
                 seen.insert("synth preset");
             }
             _ => {}
@@ -276,11 +331,10 @@ fn v3_samples_decode_names_and_strokes() {
     assert!(paired > 0, "no v3 zone map paired with its strokes");
 }
 
-/// The velocity window has existed since `map` v14 and no shipped instrument
-/// narrows it, so a reader that ignored the field would still play the whole
-/// vendor library correctly. It is nonetheless live: the LY ladder's v4 pass
-/// asked for narrower windows in a project and got them, byte for byte, which
-/// is exactly why the field has to be read rather than assumed.
+/// A `map` v14 zone stores the velocity window its project asked for, so the field
+/// has to be read rather than assumed full.
+///
+/// Inferred from specimens; not confirmed on hardware.
 #[test]
 fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
     let asked: BTreeMap<&str, (u8, u8)> = BTreeMap::from([
@@ -292,7 +346,20 @@ fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
         ("LY-52four-en.nsmp4", (0, 31)),
         ("LY-54bracket.nsmp4", (0, 63)),
     ]);
-    let mut narrowed = BTreeMap::new();
+    for (file, window) in &asked {
+        let Entity::Sample(Sample::V3(sample)) = &named(file).entity else {
+            panic!("{file} is not a wide sample");
+        };
+        let zones = sample.zones().unwrap_or_else(|e| panic!("{file}: {e}"));
+        let narrowed = zones
+            .iter()
+            .filter_map(|zone| zone.velocity)
+            .find(|held| *held != nsmp::zone::VelocityWindow::FULL)
+            .unwrap_or_else(|| panic!("{file}: every zone still spans the full velocity range"));
+        assert_eq!((narrowed.low, narrowed.high), *window, "{file}");
+    }
+
+    let mut narrowed = BTreeSet::new();
     let mut with_window = 0;
     let mut without = 0;
     for specimen in corpus() {
@@ -306,23 +373,29 @@ fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
                 Some(window) => {
                     with_window += 1;
                     if window != nsmp::zone::VelocityWindow::FULL {
-                        narrowed.insert(name.to_string(), (window.low, window.high));
+                        narrowed.insert(name.to_string());
                     }
                 }
                 None => without += 1,
             }
         }
     }
-    let expected: BTreeMap<String, (u8, u8)> =
-        asked.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
-    assert_eq!(narrowed, expected);
+    let unasked = narrowed
+        .iter()
+        .filter(|name| !asked.contains_key(name.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        unasked.is_empty(),
+        "narrowed velocity windows in files whose project asked for none: {unasked:?}"
+    );
     assert!(with_window > 0, "no zone record carrying a velocity window");
     assert!(without > 0, "no v12 zone record, whose layout stores none");
 }
 
-/// The wide zone record carries the same relative strength the v2 record does,
-/// four bytes later. The ladder pinned its width past a byte: 300 is the first
-/// weight the campaign ever rendered over 255.
+/// The wide zone record carries the same relative strength the v2 record does, four
+/// bytes later, and it is wider than a byte: `LY-21rs300` holds 300.
+///
+/// Inferred from specimens; not confirmed on hardware.
 #[test]
 fn a_wide_zone_records_its_strokes_relative_strength() {
     for (file, weight) in [
@@ -476,9 +549,9 @@ fn the_instrument_eq_never_reaches_the_wide_preset() {
     assert!(seen > 0, "no SP EQ specimen");
 }
 
-/// A `sty` triple sits at its 127 ceiling exactly while the control behind it
-/// is switched off — which is what makes the block's near-constant columns
-/// legible rather than mysterious.
+/// A `sty` dynamics-response triple holds 127 exactly while no curve is selected.
+///
+/// Inferred from specimens; not confirmed on hardware.
 #[test]
 fn a_v4_dynamics_response_is_pinned_while_no_curve_is_selected() {
     let mut seen = 0;
@@ -618,6 +691,7 @@ fn ne5_live_slots_occupy_one_three_slot_bank() {
 #[test]
 fn ne5_drawbars_survive_a_rewrite() {
     use nord_format::formats::ne5::OrganModel::{Farfisa, Pipe, Vox, B3};
+    use nord_format::formats::ne5::Preset;
 
     let mut seen = 0;
     for (specimen, _) in ne5_programs() {
@@ -627,7 +701,7 @@ fn ne5_drawbars_survive_a_rewrite() {
             unreachable!()
         };
         for model in [B3, Vox, Farfisa, Pipe] {
-            for preset in [1, 2] {
+            for preset in [Preset::One, Preset::Two] {
                 let bars = program.organ_panel.drawbars(model, preset);
                 if bars.iter().all(|&bar| bar <= 8) {
                     program
@@ -775,6 +849,8 @@ fn nsmp_edits_reproduce_editor_output() {
 fn nsmp_retune_is_surgical() {
     let before = &named("D1-one-zone.nsmp").bytes;
     let mut sample = v2_named("D1-one-zone.nsmp");
+    let was = sample.strokes().unwrap()[0].root_key;
+    assert_ne!(was, 48, "the retune has to move the byte to say anything");
     sample.set_root_key(0, 48).unwrap();
     let after = sample.to_bytes().unwrap();
 
@@ -782,7 +858,20 @@ fn nsmp_retune_is_surgical() {
         .filter(|&index| before[index] != after[index])
         .collect::<Vec<_>>();
     assert_eq!(changed.len(), 5, "changed bytes: {changed:?}");
-    assert!(changed[..4].iter().eq([0x18, 0x19, 0x1a, 0x1b].iter()));
+    assert!(
+        changed[..4].iter().eq([0x18, 0x19, 0x1a, 0x1b].iter()),
+        "the container's body crc32 is not the first four: {changed:?}"
+    );
+
+    let (stroke_at, stroke) = sample.stroke_streams()[0];
+    let payload = sample.header.generation.body_start() as usize + stroke_at;
+    assert!(
+        (payload..payload + stroke.len()).contains(&changed[4]),
+        "the fifth changed byte {:#x} is outside stroke 0's payload",
+        changed[4]
+    );
+    assert_eq!(before[changed[4]], was, "the root key the specimen held");
+    assert_eq!(after[changed[4]], 48, "the root key the edit asked for");
     assert_eq!(sample.strokes().unwrap()[0].root_key, 48);
 }
 
@@ -803,17 +892,20 @@ fn nsmp_bad_checksum_is_refused() {
 
 /// A device read whose leading body bytes arrived as foreign buffer content, so the
 /// `NWS` container and the sections after it are gone. Named `.skip.`, which keeps the
-/// sweep off it, so it is opened by path rather than through [`named`].
+/// sweep off it, so it is reached through [`scan::named_skipped`] rather than [`named`].
 #[test]
 fn nsmp_body_without_its_container_section_says_which_tag_was_expected() {
-    let path = scan::root().join("ne5/audio-oracle/2026-08-30/stereo77.skip.nsmp");
+    let path = scan::named_skipped("stereo77.skip.nsmp");
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let err = nord_format::from_stream(&mut Cursor::new(&bytes))
-        .expect_err("a body missing its container section must not parse")
-        .to_string();
-    assert_eq!(
-        err,
-        "the body does not open with the NWS container section; found \\x00\\x00\\x00"
+    let error = nord_format::from_stream(&mut Cursor::new(&bytes))
+        .expect_err("a body missing its container section must not parse");
+    let nord_format::error::Error::Parse(nord_format::error::ParseError::AssertFail(said)) = &error
+    else {
+        panic!("refused as {error:?}, not as a violated body assertion");
+    };
+    assert!(
+        said.contains("NWS"),
+        "the refusal does not name the container tag it wanted: {said}"
     );
 }
 
@@ -863,7 +955,7 @@ fn audio(bytes: &[u8]) -> Vec<Vec<i16>> {
     let Entity::Sample(sample) = &entity else {
         panic!("not a sample instrument");
     };
-    let layout = sample.layout();
+    let layout = sample.layout().unwrap();
     sample
         .zones()
         .unwrap()
@@ -1197,6 +1289,7 @@ fn nsmpproj_stroke_fields_move_alone() {
 
 #[test]
 fn nsmpproj_velocity_defaults_move_alone() {
+    let mut seen = 0;
     for (specimen, project) in projects() {
         let before = project.render();
         let was = project.velocity_defaults().unwrap();
@@ -1223,7 +1316,9 @@ fn nsmpproj_velocity_defaults_move_alone() {
         .filter(|moved| *moved)
         .count();
         assert_eq!(changed, asked, "{}", specimen.path.display());
+        seen += 1;
     }
+    assert!(seen > 0, "no sample-editor project in the corpus");
 }
 
 fn project_named(name: &str) -> &'static nsmpproj::Project {
@@ -1422,7 +1517,7 @@ fn wide_twin(path: &std::path::Path) -> Option<&'static nord_format::cbin::Cbin<
 
 /// The gain the stroke `id` names was built from, read off a wide render's decibel.
 fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
-    let layout = nsmp::codec::Layout::from_version(wide.header.version);
+    let layout = nsmp::codec::Layout::from_version(wide.header.version)?;
     let (_, stroke) = wide
         .stroke_streams()
         .into_iter()
@@ -1430,12 +1525,11 @@ fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: 
     Some(gain_units(nsmp::codec::zone_gain_db(stroke, layout)?))
 }
 
-/// The wide half of the law the test below states for v2: the same reciprocal of the
-/// same file peak, scaled by the gain the stroke's own decibel field round-trips to.
+/// A wide stroke's statistic A is the reciprocal of the file peak scaled by the gain
+/// the stroke's own decibel field round-trips to, not by the project's float. The two
+/// agree below `2^24` and part above it, where the file follows the decibel.
 ///
-/// The round trip is the point. Below `2^24` it equals the project's own float and
-/// nothing distinguishes them; above it the two part by tens of steps, and the file
-/// follows the decibel.
+/// Inferred from specimens; not confirmed on hardware.
 #[test]
 fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
     let mut seen = 0;
@@ -1452,7 +1546,8 @@ fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
         {
             continue;
         }
-        let layout = nsmp::codec::Layout::from_version(sample.header.version);
+        let layout = nsmp::codec::Layout::from_version(sample.header.version)
+            .expect("a corpus specimen states a content version the codec models");
         let streams = sample.stroke_streams();
         let peak = streams
             .iter()
@@ -1742,11 +1837,10 @@ fn nsmp_the_kernel_matches_the_corpus_f32_tap_table() {
     );
 }
 
-/// Renaming an instrument to the name it already holds must move no byte, in any
-/// generation. That is the whole of the name field's contract as a reader and a
-/// writer: the read stops at the terminator inside the generation's own span, and the
-/// write covers exactly that span. A writer sized to a shorter field passes this only
-/// for names short enough to fit it, and shipped libraries carry names that are not.
+/// Renaming an instrument to the name it already holds moves no byte, in any
+/// generation: the read stops at the terminator inside the generation's own span, and
+/// the write covers exactly that span. Shipped libraries carry names longer than the
+/// narrowest field, so a writer sized to that field fails here.
 #[test]
 fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
     let mut seen = 0;
@@ -1967,14 +2061,12 @@ fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
     assert!(seen > 0, "no piano library");
 }
 
-/// A library written from recordings alone, no template donating a byte of it, is the
-/// library that was played from those rules.
+/// A library built from recordings alone, with no template donating a byte, reproduces
+/// `from-scratch.npno`. The recordings are `full.npno`'s own strokes decoded; the
+/// expected bytes were written by a script outside this crate, so they are an oracle
+/// for the rules rather than a snapshot of this code.
 ///
-/// The recordings are `full.npno`'s own strokes decoded — the frames its sources coded
-/// to, which the codec gives back sample for sample — and the expected bytes are
-/// `from-scratch.npno`, which holds that audio and states every other byte by rule.
-/// That file was written by a script outside this crate and played on the instrument,
-/// so it is an oracle for the rules rather than a snapshot of this code.
+/// Confirmed on hardware.
 #[test]
 fn a_piano_written_from_rules_alone_is_the_library_that_was_played() {
     let specimen = named("from-scratch.npno");
@@ -1992,7 +2084,7 @@ fn a_piano_written_from_rules_alone_is_the_library_that_was_played() {
                 root: stroke.root,
                 bank: stroke.bank().expect("a named bank"),
                 layer: stroke.layer(),
-                channels: audio.channels,
+                channels: audio.lanes,
             }
         })
         .collect();

@@ -9,14 +9,18 @@ use nord_format::formats::ne5::{Instrument, OrganModel};
 use nord_format::formats::nsmp::zone::VelocityWindow;
 use nord_format::formats::nsmp::{codec, stroke, Chain, Sample};
 use nord_format::formats::nsmpproj;
+use nord_format::note;
 use nord_format::{Entity, Live, Program, Settings, Song};
 
-use crate::note;
+use crate::slot::shown_at;
 use crate::ui::Ui;
 
-/// One-indexed `bank N slot M` — matches how the hardware labels locations.
-fn location(x: u16, y: u16) -> String {
-    format!("bank {} slot {}", x + 1, y + 1)
+/// The Stage 2/3 program category, or the `aux` word that names none.
+fn category(header: &nord_format::cbin::Header) -> String {
+    match nord_format::components::ProgramCategory::of(header) {
+        Some(category) => format!("{category:?}"),
+        None => format!("none ({:#010x})", header.aux),
+    }
 }
 
 fn yn(b: bool) -> &'static str {
@@ -27,9 +31,9 @@ fn yn(b: bool) -> &'static str {
     }
 }
 
-/// Format a library dependency id the way it is worth reading: hex, matching what
-/// `nord program deps` reports for the same program.
-fn dep_id(id: u32) -> String {
+/// A library dependency id as hex: the one spelling every verb that prints an id
+/// uses, so an id read here can be matched against one `deps` reports.
+pub(crate) fn dep_id(id: u32) -> String {
     match id {
         0 => "none".to_string(),
         id => format!("{id:#010x}"),
@@ -43,13 +47,13 @@ const FX_WIDTH: usize = 7;
 /// Same, for a setting's name, whose longest entry is `rotary rotor acceleration`.
 const SETTING_WIDTH: usize = 27;
 
-/// `label:     value`, label dimmed so the eye runs down the values. `indent` is 2 for
-/// the file's own identity and 4 for anything sitting under a section heading.
 /// A version stored ×100, as the instrument prints it: `530` is `5.30`.
 pub(crate) fn version_label(v: u32) -> String {
     format!("{}.{:02}", v / 100, v % 100)
 }
 
+/// `label:     value`, label dimmed so the eye runs down the values. `indent` is 2 for
+/// the file's own identity and 4 for anything sitting under a section heading.
 fn field(ui: &Ui, indent: usize, label: &str, value: impl std::fmt::Display) -> String {
     let label = format!("{label}:");
     format!(
@@ -98,7 +102,7 @@ fn drawbars(ui: &Ui, positions: &[u8]) -> String {
 /// header's own `(bank, slot)`, whichever space the caller reads it in.
 fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
     ui.out(field(ui, 2, "type", kind));
-    ui.out(field(ui, 2, "location", location(at.0, at.1)));
+    ui.out(field(ui, 2, "location", shown_at(at.0, at.1)));
     keyboard(ui, p);
     voices(ui, p);
     effects(ui, p);
@@ -161,11 +165,7 @@ fn keyboard(ui: &Ui, p: &ne5::Program) {
         ui,
         4,
         "part mix",
-        format!(
-            "{} {}",
-            p.center_panel.part_mix.as_string(),
-            ui.dim("(lower/upper %)")
-        ),
+        format!("{} {}", p.center_panel.part_mix, ui.dim("(lower/upper %)")),
     ));
     ui.out(field(ui, 4, "gain", p.center_panel.gain));
 }
@@ -219,9 +219,9 @@ fn voices(ui: &Ui, p: &ne5::Program) {
         format!(
             "{} {}  {} {}",
             ui.dim("piano"),
-            dep_id(piano.id),
+            dep_id(piano.id.id()),
             ui.dim("sample"),
-            dep_id(sample.id),
+            dep_id(sample.id.id()),
         ),
     ));
 }
@@ -233,7 +233,6 @@ fn effects(ui: &Ui, p: &ne5::Program) {
         "    {}",
         ui.dim("stored value, with the panel's reading where the scale is known")
     ));
-    // An off effect is printed dimmed rather than skipped.
     let off = |name: &str, value: &dyn std::fmt::Display| {
         ui.out(ui.dim(format!("    {name:<FX_WIDTH$}{value}")))
     };
@@ -298,8 +297,8 @@ fn effects(ui: &Ui, p: &ne5::Program) {
     } else {
         off("reverb", &"off");
     }
-    // `0` for the EQ routing means *lower*, not off, so the enable has to be
-    // checked first.
+    // `equalizer_part` says which part, never whether: `0` is lower, and the enable
+    // is the separate bit `equalizer_on`.
     if fx.equalizer_on {
         let part = fx.equalizer_part;
         ui.out(format!(
@@ -350,12 +349,16 @@ fn organ(ui: &Ui, p: &ne5::Program) {
             (OrganModel::Farfisa, "farf"),
             (OrganModel::Pipe, "pipe"),
         ] {
-            for preset in 1..=2u8 {
+            for preset in [ne5::Preset::One, ne5::Preset::Two] {
                 let mark = if Some(model) == sel_model { "*" } else { " " };
                 let live = if o.preset(model) == preset { "<" } else { " " };
 
-                // B3+bass preset 1 uses two bass drawbars; its nine-nibble block is stale.
-                let bars = if selected.is_b3_bass() && model == OrganModel::B3 && preset == 1 {
+                // The bass manual's two bars live outside the block, and the nine
+                // nibbles are stale there: `OrganPanel::b3_bass_drawbars`.
+                let bars = if selected.is_b3_bass()
+                    && model == OrganModel::B3
+                    && preset == ne5::Preset::One
+                {
                     // Dots align the two-bar bass manual without inventing seven bars.
                     let b = o.b3_bass_drawbars();
                     let plain = format!("{}{}.......", b[0], b[1]);
@@ -365,7 +368,8 @@ fn organ(ui: &Ui, p: &ne5::Program) {
                         plain
                     }
                 } else if model == OrganModel::Farfisa {
-                    // Farfisa tabs are on/off, but their stored positions retain extra bits.
+                    // On/off tabs rather than positions, with the stored nibble kept
+                    // beside them: `OrganPanel::farfisa_tabs`.
                     let (on, off) = if ui.unicode() {
                         ('█', '·')
                     } else {
@@ -561,7 +565,8 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
         ui.dim("high to low; the last zone reaches the bottom of the keyboard")
     ));
     for (i, (zone, stroke)) in zones.iter().zip(&strokes).enumerate() {
-        // A zone's bottom is one above the next record's top note.
+        // Zones tile, so a zone's bottom is one above the next record's top note:
+        // `Sample::set_zone_low_note`.
         let range = match zones.get(i + 1) {
             Some(below) => format!(
                 "{}..{}",
@@ -640,15 +645,15 @@ pub fn print(ui: &Ui, entity: &Entity) {
         Entity::Song(Song::Electro5(s)) => {
             let (bank, slot) = s.header.slot();
             ui.out(field(ui, 2, "type", "Electro 5 song / set (ne5t)"));
-            ui.out(field(ui, 2, "location", location(bank, slot)));
+            ui.out(field(ui, 2, "location", shown_at(bank, slot)));
             section(ui, "Programs");
-            for slot in 0..4u16 {
+            for (n, slot) in ne5::song::Slot::ALL.into_iter().enumerate() {
                 let p = s.get(slot);
                 ui.out(field(
                     ui,
                     4,
-                    &format!("slot {}", slot + 1),
-                    location(p.x(), p.y()),
+                    &format!("slot {}", n + 1),
+                    shown_at(p.x(), p.y()),
                 ));
             }
         }
@@ -661,12 +666,13 @@ pub fn print(ui: &Ui, entity: &Entity) {
             for (name, value) in [
                 (
                     "program",
-                    location(boot.startup_program.x(), boot.startup_program.y()),
+                    shown_at(boot.startup_program.x(), boot.startup_program.y()),
                 ),
                 ("live mode", yn(boot.startup_live_mode).to_string()),
                 ("live slot", boot.startup_live_slot.to_string()),
                 ("set list mode", yn(boot.startup_set_list_mode).to_string()),
-                // The hardware numbers set lists, not banks.
+                // A `song::Location`: a set list and a song inside it, not a bank
+                // and a slot.
                 (
                     "set list song",
                     format!(
@@ -703,15 +709,12 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 Ok((name, variant)) => ui.out(field(ui, 2, "name", format!("{name} ({variant})"))),
                 Err(e) => ui.warn(format!("name unreadable: {e}")),
             }
-            // The vendor's filenames write tenths without the trailing zero:
-            // 530 is "5.3", not "5.30".
-            let v = p.file.header.version;
-            let minor = if v % 10 == 0 {
-                format!("{}", v % 100 / 10)
-            } else {
-                format!("{:02}", v % 100)
-            };
-            ui.out(field(ui, 2, "version", format!("{}.{minor}", v / 100)));
+            ui.out(field(
+                ui,
+                2,
+                "version",
+                version_label(p.file.header.version),
+            ));
             if let Ok(map) = p.key_map() {
                 let covered = map.iter().filter(|&&b| b != 0xFF).count();
                 ui.out(field(ui, 2, "notes", format!("{covered} covered")));
@@ -746,7 +749,6 @@ pub fn print(ui: &Ui, entity: &Entity) {
             for (name, why) in b.skipped() {
                 ui.warn(format!("bundle entry skipped: {name}: {why}"));
             }
-            let _ = (b.programs(), b.songs()); // decoded; shown via --raw
         }
         Entity::Program(Program::Stage2(p)) => ns2_globals(ui, "Stage 2 program (ns2p)", p),
         Entity::Live(Live::Stage2(p)) => ns2_globals(ui, "Stage 2 live slot (ns2l)", p),
@@ -807,7 +809,6 @@ pub fn print(ui: &Ui, entity: &Entity) {
         }
         Entity::Bundle(nord_format::Bundle::Members(members)) => {
             ui.out(field(ui, 2, "type", "bundle (zip)"));
-            // Count members per tag so "384 ns4p, 8 ns4l" reads at a glance.
             let mut by_tag: std::collections::BTreeMap<String, usize> = Default::default();
             for (_, m) in members {
                 *by_tag
@@ -827,17 +828,10 @@ pub fn print(ui: &Ui, entity: &Entity) {
 
 /// The Stage 2 program-wide globals — the decoded slice of a mostly-raw body.
 fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>) {
-    use nord_format::formats::ns2::program;
-
     ui.out(field(ui, 2, "type", kind));
     let (bank, slot) = p.header.slot();
-    ui.out(field(ui, 2, "location", location(bank, slot)));
-    ui.out(field(
-        ui,
-        2,
-        "category",
-        format!("{:?}", program::category(&p.header)),
-    ));
+    ui.out(field(ui, 2, "location", shown_at(bank, slot)));
+    ui.out(field(ui, 2, "category", category(&p.header)));
     ui.out(field(ui, 2, "version", p.header.version.to_string()));
 
     section(ui, "Globals");
@@ -867,17 +861,10 @@ fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>
 
 /// The Stage 3 program-wide globals.
 fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>) {
-    use nord_format::formats::ns3::program;
-
     ui.out(field(ui, 2, "type", kind));
     let (bank, slot) = p.header.slot();
-    ui.out(field(ui, 2, "location", location(bank, slot)));
-    ui.out(field(
-        ui,
-        2,
-        "category",
-        format!("{:?}", program::category(&p.header)),
-    ));
+    ui.out(field(ui, 2, "location", shown_at(bank, slot)));
+    ui.out(field(ui, 2, "category", category(&p.header)));
     ui.out(field(ui, 2, "version", version_label(p.header.version)));
 
     section(ui, "Globals");
@@ -936,7 +923,7 @@ fn layers(on: &[(&str, bool)]) -> String {
 fn ns4_head(ui: &Ui, kind: &str, header: &nord_format::cbin::Header) {
     ui.out(field(ui, 2, "type", kind));
     let (bank, slot) = header.slot();
-    ui.out(field(ui, 2, "location", location(bank, slot)));
+    ui.out(field(ui, 2, "location", shown_at(bank, slot)));
     if let Some(id) = header.category() {
         ui.out(field(ui, 2, "category", format!("id {id}")));
     }
@@ -1052,7 +1039,7 @@ fn raw_summary(ui: &Ui, entity: &Entity) {
         // the way a hex dump would rather than as an absurd bank number.
         if header.location & 0xff00_ff00 == 0 {
             let (bank, slot) = header.slot();
-            ui.out(field(ui, 2, "location", location(bank, slot)));
+            ui.out(field(ui, 2, "location", shown_at(bank, slot)));
         } else {
             ui.out(field(
                 ui,

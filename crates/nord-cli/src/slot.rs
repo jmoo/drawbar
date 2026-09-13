@@ -50,7 +50,13 @@ pub fn parse_all(slots: &[String]) -> Result<Vec<Location>, String> {
 
 /// One-indexed `bank N slot M`, matching the instrument's own labels.
 pub fn shown(at: Location) -> String {
-    format!("bank {} slot {}", at.user_bank(), at.user_slot())
+    shown_at(at.bank, at.slot)
+}
+
+/// The same labels for a zero-indexed pair read straight out of a file's header, which
+/// carries no [`Location`] to speak through.
+pub fn shown_at(bank: impl Into<u64>, slot: impl Into<u64>) -> String {
+    format!("bank {} slot {}", bank.into() + 1, slot.into() + 1)
 }
 
 /// The CLI's own noun for an object class — the word a recorded script's intent uses,

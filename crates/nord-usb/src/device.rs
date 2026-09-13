@@ -229,8 +229,6 @@ async fn bracket<T: Transport, C, R>(
     match (result, closed) {
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(close)) => Err(close),
-        // A refusal is a reply, so the pipe failing afterwards is the newer finding —
-        // and the one a caller watching for detachment must not miss.
         (Err(Error::DeviceStatus(_)), Err(close @ Error::Transport(_))) => Err(close),
         (Err(chain), _) => Err(chain),
     }

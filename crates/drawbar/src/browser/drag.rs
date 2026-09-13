@@ -11,7 +11,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::{read_only, DeviceState};
 use crate::icon::Glyph;
 use crate::strings::folder;
-use crate::workspace::Workspace;
+use crate::workspace::{LocalEntity, Workspace};
 
 /// What an asset is, which is what decides the folder it belongs in.
 ///
@@ -204,12 +204,27 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect()
 }
 
+/// The family to put in front of an asset's kind word, or nothing where the word alone
+/// says what the asset is.
+///
+/// One answer for the tree and for the library's table, which draw the same word.
+pub fn qualifier(
+    entity: &LocalEntity,
+    kept: &[Family],
+    instrument: Option<Family>,
+) -> Option<Family> {
+    let family = Family::of_tag(&entity.tag());
+    qualified(kept, family, instrument)
+        .then_some(family)
+        .flatten()
+}
+
 /// Whether a kind's word needs the family in front of it to say what it is.
 ///
 /// True where the word alone would not settle it: the kept assets are from more than one
 /// family, or the asset is not the attached instrument's own. With one family on this
 /// computer and that instrument attached, `program` can only mean one thing.
-pub fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>) -> bool {
+fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>) -> bool {
     if kept.len() > 1 {
         return true;
     }
@@ -296,8 +311,8 @@ pub struct Held {
 /// What is under the pointer while a drag is in progress.
 ///
 /// ⚠️ `head` is the row the pointer went down on and `rest` is the selection it brought
-/// with it. The verdict is [`landing`] on the head alone; `rest` follows only where the
-/// verdict is one act repeated, which [`crate::browser::Browser::land`] decides.
+/// with it. The verdict is [`landing`] on the head alone; `rest` follows only where that
+/// verdict [`Landing::repeats`].
 #[derive(Clone)]
 pub struct Carried {
     pub head: Held,
@@ -325,25 +340,61 @@ pub enum Onto {
     },
 }
 
-/// What a drop would do, or the plain reason it would do nothing.
+/// What a drop would do and everything running it names, or the plain reason it would do
+/// nothing.
+///
+/// The verdict carries the whole of what it decided, so nothing downstream re-derives it
+/// from the drag it came from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Landing {
     /// Device to this computer: a copy comes back.
-    Copy,
+    Copy {
+        class: ObjectClass,
+        at: Location,
+    },
     /// This computer to a slot.
-    Send,
+    Send {
+        id: u64,
+        class: ObjectClass,
+        at: Location,
+    },
     /// Slot to slot inside one folder. The instrument swaps them.
-    Rearrange,
+    Rearrange {
+        class: ObjectClass,
+        from: Location,
+        to: Location,
+    },
     /// Into one of this computer's folders. Nothing leaves this computer.
-    File,
+    File {
+        id: u64,
+        folder: u64,
+    },
     /// Out of the folder it is in, back to the loose part of the list.
-    Unfile,
+    Unfile {
+        id: u64,
+    },
     No(&'static str),
 }
 
 impl Landing {
     pub fn allowed(self) -> bool {
         !matches!(self, Landing::No(_))
+    }
+
+    /// Whether everything else the drag carries follows the pressed row.
+    ///
+    /// ⚠️ A send and a rearrange name **one** destination, and handing several rows to one
+    /// slot would write them over each other; those take the pressed row alone.
+    pub(super) fn repeats(self) -> bool {
+        matches!(
+            self,
+            Landing::Copy { .. } | Landing::File { .. } | Landing::Unfile { .. }
+        )
+    }
+
+    /// Whether two verdicts are the same kind of thing, whatever each of them names.
+    pub(super) fn same(self, other: Landing) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
     }
 }
 
@@ -354,13 +405,13 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
         (Item::Folder(_) | Item::Tag(_), _) => Landing::No("that is a list, not a sound"),
         // The loose part of the list is a target only for something that is in a folder,
         // which is how one comes back out of one.
-        (Item::Local(_), Onto::Computer) => match carried.filed {
-            Some(_) => Landing::Unfile,
+        (Item::Local(id), Onto::Computer) => match carried.filed {
+            Some(_) => Landing::Unfile { id },
             None => Landing::No("it is already on this computer"),
         },
-        (Item::Local(_), Onto::Group(id)) => match carried.filed == Some(id) {
+        (Item::Local(id), Onto::Group(folder)) => match carried.filed == Some(folder) {
             true => Landing::No("it is already in that folder"),
-            false => Landing::File,
+            false => Landing::File { id, folder },
         },
         // The copy would have to land somewhere before it could be filed, and it lands
         // when the instrument answers rather than when the pointer is let go.
@@ -369,16 +420,16 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
         }
         // A folder this app cannot name is the home of no kind, so the kind check is
         // also what keeps a drop out of one.
-        (Item::Local(_), Onto::Slot { class, .. }) => {
+        (Item::Local(id), Onto::Slot { class, at }) => {
             if carried.kind.home() != Some(class) {
                 Landing::No("that folder holds a different kind of thing")
             } else if !carried.fits {
                 Landing::No("the instrument does not take files of that format")
             } else {
-                Landing::Send
+                Landing::Send { id, class, at }
             }
         }
-        (Item::Slot { .. }, Onto::Computer) => Landing::Copy,
+        (Item::Slot { class, at }, Onto::Computer) => Landing::Copy { class, at },
         (
             Item::Slot {
                 class: from,
@@ -393,7 +444,11 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
             } else if was == at {
                 Landing::No("it is already there")
             } else {
-                Landing::Rearrange
+                Landing::Rearrange {
+                    class,
+                    from: was,
+                    to: at,
+                }
             }
         }
     }
@@ -428,7 +483,7 @@ pub(super) fn ghost(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::{local, onto, slot};
+    use crate::browser::bench::{local, onto, slot, CARRIED};
     use crate::strings::folder;
 
     /// The two crossings the browser exists for.
@@ -436,11 +491,18 @@ mod tests {
     fn a_drag_between_the_two_places_copies_one_way_and_sends_the_other() {
         assert_eq!(
             landing(&slot(ObjectClass::Program, 6, 3), Onto::Computer),
-            Landing::Copy
+            Landing::Copy {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            }
         );
         assert_eq!(
             landing(&local(Kind::Program), onto(ObjectClass::Program, 6, 3)),
-            Landing::Send
+            Landing::Send {
+                id: CARRIED,
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            }
         );
     }
 
@@ -449,7 +511,11 @@ mod tests {
     fn an_empty_slot_is_a_target() {
         assert_eq!(
             landing(&local(Kind::SetList), onto(ObjectClass::SetList, 0, 12)),
-            Landing::Send
+            Landing::Send {
+                id: CARRIED,
+                class: ObjectClass::SetList,
+                at: Location { bank: 0, slot: 12 },
+            }
         );
     }
 
@@ -466,7 +532,13 @@ mod tests {
             other => panic!("{other:?} should have been refused"),
         }
         // It is still a row of this computer's list, so filing it is untouched.
-        assert_eq!(landing(&refused, Onto::Group(1)), Landing::File);
+        assert_eq!(
+            landing(&refused, Onto::Group(1)),
+            Landing::File {
+                id: CARRIED,
+                folder: 1
+            }
+        );
     }
 
     /// A kind's word carries the family only where the word alone would not settle whose
@@ -536,7 +608,11 @@ mod tests {
                 &slot(ObjectClass::Program, 6, 3),
                 onto(ObjectClass::Program, 7, 12)
             ),
-            Landing::Rearrange
+            Landing::Rearrange {
+                class: ObjectClass::Program,
+                from: Location { bank: 6, slot: 3 },
+                to: Location { bank: 7, slot: 12 },
+            }
         );
         assert!(!landing(
             &slot(ObjectClass::Program, 6, 3),
@@ -589,9 +665,16 @@ mod tests {
             filed: folder,
             ..local(Kind::Program)
         };
-        assert_eq!(landing(&filed(None), Onto::Group(1)), Landing::File);
-        assert_eq!(landing(&filed(Some(2)), Onto::Group(1)), Landing::File);
-        assert_eq!(landing(&filed(Some(1)), Onto::Computer), Landing::Unfile);
+        let into = Landing::File {
+            id: CARRIED,
+            folder: 1,
+        };
+        assert_eq!(landing(&filed(None), Onto::Group(1)), into);
+        assert_eq!(landing(&filed(Some(2)), Onto::Group(1)), into);
+        assert_eq!(
+            landing(&filed(Some(1)), Onto::Computer),
+            Landing::Unfile { id: CARRIED }
+        );
 
         for refused in [
             landing(&filed(Some(1)), Onto::Group(1)),

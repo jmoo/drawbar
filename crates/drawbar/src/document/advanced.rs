@@ -57,12 +57,19 @@ pub struct Advanced {
     /// Narrows the table by path or label. A body has ninety fields.
     filter: String,
     cell: Cell,
-    /// The entity the cached dump belongs to.
+    /// The id and the [`LocalEntity::stamp`] the cached dump was laid out from.
     ///
     /// ⚠️ `{:#?}` over an undecoded body prints every byte, and a piano library is
-    /// hundreds of megabytes — it is rendered once and kept, never per frame.
-    dump_for: Option<u64>,
+    /// hundreds of megabytes — it is rendered once per set of bytes, never per frame.
+    dump_for: Option<(u64, u64)>,
     dump: String,
+    /// The asset and the two sets of bytes the cached diff is a comparison of.
+    ///
+    /// ⚠️ `byte_diff` walks both bodies. The Metadata face asks for it on every frame
+    /// it is up, and a piano library is hundreds of megabytes — it is walked once per
+    /// pair of bodies.
+    diff_for: Option<(u64, u64, u64)>,
+    diff: Vec<DiffRow>,
 }
 
 impl Advanced {
@@ -168,8 +175,7 @@ impl Advanced {
         });
         ui.separator();
 
-        // Declaration order: it is the order the body is laid out in, which is what an
-        // engineer reading a dump alongside this is following.
+        // Declaration order, which is the order the body is laid out in.
         for field in rows {
             self.row(ui, field, table, sets);
         }
@@ -242,8 +248,8 @@ impl Advanced {
         ));
     }
 
-    /// The one editable column. A box opens where the value is clicked, commits on Enter
-    /// or on losing focus, and stays open holding what was typed while the library is
+    /// The one editable column. A box opens where the value is clicked, commits when it
+    /// gives up the focus, and stays open holding what was typed while the library is
     /// refusing it.
     fn writes(&mut self, ui: &mut egui::Ui, field: &Field, sets: &mut Sets) {
         let width = COLUMNS[4].1;
@@ -291,8 +297,6 @@ impl Advanced {
                 state.store(ui.ctx(), response.id);
             }
         }
-        // The refusal sits beside the cell it is about: a message at the foot of eight
-        // hundred rows is a message about nothing in particular.
         if let Some(why) = &self.cell.error {
             ui.label(
                 egui::RichText::new(why)
@@ -300,15 +304,26 @@ impl Advanced {
                     .color(crate::app::bad(ui.visuals())),
             );
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // ⚠️ The cell's own keys, which a `TextEdit` gives up the focus on. Read from
+        // the window, an Enter pressed anywhere submitted every cell left open on
+        // screen — including one the library had already refused, which went back to
+        // it and into the log on every press.
+        if !response.lost_focus() {
+            return;
+        }
+        let (escaped, entered) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Enter),
+            )
+        });
+        if escaped {
             self.cell = Cell::default();
             return;
         }
-        let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
         // Losing focus while a refusal is showing keeps the cell open: the typed value
-        // is the only copy of what the operator meant.
-        let settled = entered || (response.lost_focus() && self.cell.error.is_none());
-        if !settled {
+        // is the only copy of what the operator meant, and Enter is what tries again.
+        if self.cell.error.is_some() && !entered {
             return;
         }
         let typed = self.cell.text.trim().to_string();
@@ -384,13 +399,12 @@ impl Advanced {
             verify(ui, entity);
             container(ui, entity);
         });
-        let saved = &entity.saved.bytes;
-        let rows = byte_diff(saved, &entity.bytes);
+        let rows = self.changes(entity);
         let title = match rows.len() {
             0 => "Changes".to_string(),
             n => format!("Changes ({n} bytes)"),
         };
-        controls::section(ui, &title, |ui| diff(ui, entity, saved, rows));
+        controls::section(ui, &title, |ui| diff(ui, entity, rows));
         if entity.origin.slot().is_some() {
             controls::section(ui, "On the instrument", |ui| {
                 asked = slot(ui, entity, device);
@@ -402,25 +416,46 @@ impl Advanced {
         asked
     }
 
+    /// The bytes that moved since the asset was last saved.
+    fn changes(&mut self, entity: &LocalEntity) -> &[DiffRow] {
+        let against = (entity.id, entity.stamp, entity.saved.stamp);
+        if self.diff_for != Some(against) {
+            self.diff = byte_diff(&entity.saved.bytes, &entity.bytes);
+            self.diff_for = Some(against);
+        }
+        &self.diff
+    }
+
     fn dump(&mut self, ui: &mut egui::Ui, entity: &LocalEntity) {
-        let Some(decoded) = &entity.entity else {
+        if entity.entity.is_none() {
             return;
-        };
+        }
         // ⚠️ Formatting is synchronous; keep large library bodies folded until requested.
         egui::CollapsingHeader::new("Show the decode")
             .id_salt("raw_debug")
             .show(ui, |ui| {
-                if self.dump_for != Some(entity.id) {
-                    self.dump = format!("{decoded:#?}");
-                    self.dump_for = Some(entity.id);
-                }
+                let dump = self.decoded(entity);
                 egui::ScrollArea::both()
                     .max_height(360.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new(&self.dump).monospace().small());
+                        ui.label(egui::RichText::new(dump).monospace().small());
                     });
             });
+    }
+
+    /// The decode as text, laid out once per set of bytes: an edit is a new set of
+    /// bytes and a dump of the old ones is a dump of something nothing holds.
+    fn decoded(&mut self, entity: &LocalEntity) -> &str {
+        let laid = (entity.id, entity.stamp);
+        if self.dump_for != Some(laid) {
+            self.dump = match &entity.entity {
+                Some(decoded) => format!("{decoded:#?}"),
+                None => String::new(),
+            };
+            self.dump_for = Some(laid);
+        }
+        &self.dump
     }
 }
 
@@ -519,8 +554,8 @@ fn container(ui: &mut egui::Ui, entity: &LocalEntity) {
         );
         row(ui, "format", container.tag());
         row(ui, "version", container.header.version.to_string());
-        row(ui, "slot", stored_slot(&container.header));
-        row(ui, "body", format!("{} bytes", container.body_len));
+        row(ui, "slot", stored_slot(container.header.slot()));
+        row(ui, "body", format!("{} bytes", container.body_len()));
         row(ui, "file", format!("{} bytes", entity.bytes.len()));
         row(
             ui,
@@ -533,21 +568,33 @@ fn container(ui: &mut egui::Ui, entity: &LocalEntity) {
     });
 }
 
+/// What a stored half carries where it names no position.
+const NO_SLOT: u16 = 0xffff;
+
 /// The stored slot, one-indexed as `BANK:SLOT`.
 ///
 /// Library files carry `0xffff:0xffff` where slot files keep a bank/slot pair — a
 /// library object has no slot until an instrument gives it one.
-fn stored_slot(header: &nord_format::cbin::Header) -> String {
-    match header.slot() {
-        (0xffff, 0xffff) => "none (a library file, not a slot save)".into(),
-        (bank, slot) => format!("{}:{}", bank + 1, slot + 1),
+fn stored_slot(slot: (u16, u16)) -> String {
+    match slot {
+        (NO_SLOT, NO_SLOT) => "none (a library file, not a slot save)".into(),
+        (bank, slot) => format!("{}:{}", counted(bank), counted(slot)),
     }
 }
 
-fn diff(ui: &mut egui::Ui, entity: &LocalEntity, saved: &[u8], rows: Vec<DiffRow>) {
+/// One half of a stored slot, counted from one. A half holding the none marker names no
+/// position, so there is nothing to count from — and `0xffff + 1` does not fit a `u16`.
+fn counted(half: u16) -> String {
+    match half {
+        NO_SLOT => "none".to_string(),
+        half => (u32::from(half) + 1).to_string(),
+    }
+}
+
+fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
     if rows.is_empty() {
         ui.label(
-            egui::RichText::new(match saved.len() == entity.bytes.len() {
+            egui::RichText::new(match entity.saved.bytes.len() == entity.bytes.len() {
                 true => "nothing moved",
                 // Nothing here can pair the bytes up across a length change.
                 false => "the length changed, so there is nothing to line up",
@@ -596,11 +643,11 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
     {
         asked = Some(SlotDetails { class, at });
     }
-    if device.state.detail.at != Some(at) {
+    if device.state.detail.at != Some((class, at)) {
         return asked;
     }
-    match (&device.state.detail.info, device.state.detail.asked) {
-        (Some(info), _) => {
+    match &device.state.detail.info {
+        Some(Some(info)) => {
             egui::Grid::new("slot_detail")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -620,10 +667,10 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
                     );
                 });
         }
-        (None, true) => {
+        Some(None) => {
             ui.label(egui::RichText::new("the slot is empty").weak());
         }
-        (None, false) => {}
+        None => {}
     }
     if let Some(deps) = &device.state.detail.deps {
         ui.separator();
@@ -650,4 +697,99 @@ pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
         DeviceCmd::SlotInfo { class, at },
         DeviceCmd::Deps { class, at },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::{Fresh, Workspace};
+
+    /// The Raw section shows the decode of the bytes the document holds. An edit is a
+    /// new set of bytes, and a dump kept by id alone would go on describing the old
+    /// ones for as long as the tab stayed open.
+    #[test]
+    fn the_raw_decode_follows_an_edit_to_the_bytes() {
+        let ctx = eframe::egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = crate::log::Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
+        let mut advanced = Advanced::default();
+
+        let before = advanced
+            .decoded(workspace.get(id).expect("it is open"))
+            .to_string();
+        assert!(
+            before.contains("organ_type"),
+            "it is the decode: {before:.200}"
+        );
+
+        let bytes = workspace.get(id).expect("it is open").bytes.clone();
+        let (_, edited) = crate::fields::apply(
+            &bytes,
+            &[("center_panel.organ_type".to_string(), "Vox".to_string())],
+        )
+        .expect("the set is legal");
+        workspace.replace_bytes(id, edited, &mut log);
+
+        let after = advanced.decoded(workspace.get(id).expect("it is open"));
+        assert_ne!(
+            before, after,
+            "the dump is of the bytes in front of the reader"
+        );
+    }
+
+    /// The Changes section is what the asset holds against what it was last saved as,
+    /// and it follows both ends of that: an edit moves the bytes, and saving moves the
+    /// baseline onto them.
+    #[test]
+    fn the_changes_rows_follow_the_bytes_and_the_baseline() {
+        let ctx = eframe::egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = crate::log::Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
+        let mut advanced = Advanced::default();
+        assert!(
+            advanced
+                .changes(workspace.get(id).expect("it is open"))
+                .is_empty(),
+            "nothing has moved yet"
+        );
+
+        let bytes = workspace.get(id).expect("it is open").bytes.clone();
+        let (_, edited) = crate::fields::apply(
+            &bytes,
+            &[("center_panel.gain".to_string(), "96".to_string())],
+        )
+        .expect("the set is legal");
+        workspace.replace_bytes(id, edited, &mut log);
+        assert!(
+            !advanced
+                .changes(workspace.get(id).expect("it is open"))
+                .is_empty(),
+            "the edit is in the section"
+        );
+
+        workspace.mark_saved(id);
+        assert!(
+            advanced
+                .changes(workspace.get(id).expect("it is open"))
+                .is_empty(),
+            "the baseline moved onto the bytes"
+        );
+    }
+
+    /// A pair is counted from one, and a half holding the none marker is spelled as one
+    /// rather than counted from: `0xffff + 1` is not a slot and does not fit a `u16`.
+    #[test]
+    fn a_stored_slot_counts_from_one_and_names_a_half_that_holds_no_position() {
+        assert_eq!(stored_slot((0, 0)), "1:1");
+        assert_eq!(stored_slot((6, 3)), "7:4");
+        assert_eq!(
+            stored_slot((NO_SLOT, NO_SLOT)),
+            "none (a library file, not a slot save)"
+        );
+        assert_eq!(stored_slot((NO_SLOT, 5)), "none:6");
+        assert_eq!(stored_slot((5, NO_SLOT)), "6:none");
+        assert_eq!(stored_slot((0xfffe, 0xfffe)), "65535:65535");
+    }
 }

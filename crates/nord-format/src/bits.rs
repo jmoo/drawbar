@@ -155,13 +155,6 @@ impl<T: Packed, const LO: u32, const HI: u32> Field<T, LO, HI> {
         HI - LO + 1
     };
 
-    /// The field's mask, shifted down to bit 0.
-    pub const MASK: u64 = if Self::WIDTH == 64 {
-        u64::MAX
-    } else {
-        (1u64 << Self::WIDTH) - 1
-    };
-
     /// Compile-time check that every value of `T` fits. Forced by [`Self::set`].
     const FITS: () = assert!(
         T::MAX_BITS <= Self::WIDTH,
@@ -281,11 +274,10 @@ mod tests {
     }
 
     #[test]
-    fn widths_and_masks_come_from_the_range_alone() {
+    fn widths_come_from_the_range_alone() {
         assert_eq!(Flag::WIDTH, 1);
         assert_eq!(Nibble::WIDTH, 4);
-        assert_eq!(Nibble::MASK, 0xf);
-        assert_eq!(Field::<u64, 0, 63>::MASK, u64::MAX);
+        assert_eq!(Field::<u64, 0, 63>::WIDTH, 64);
     }
 
     #[test]

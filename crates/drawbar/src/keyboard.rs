@@ -890,9 +890,9 @@ fn gestures(
         browser.pick(ui, item, view.list);
     }
     if name.is_some() {
-        response
-            .clone()
-            .context_menu(|ui| browser.menu(ui, item, view.workspace, view.device, acts));
+        response.clone().context_menu(|ui| {
+            browser.menu(ui, item, view.workspace, view.device, view.queue, acts)
+        });
     }
 }
 

@@ -12,25 +12,6 @@
 //! from a directory of WAVs, the other codes a library's own strokes again and reports
 //! how each one came back.
 //!
-//! A library written here loads on the instrument and plays: confirmed on hardware
-//! for `trim`, both for a dropped bank and for dropped velocity layers, and for what
-//! `build` and `rebuild` code — mono and stereo, every key of a full-keyboard library
-//! including its lowest and highest root, each of three attack layers, the release
-//! stroke at note-off, a long stroke to its end, the keys between roots transposed,
-//! and a vendor library coded again playing indistinguishably from the original in
-//! level and in spectrum. What `edit` changes — a name, a key's tuning, the root a
-//! key plays — and the narrowed key range `trim --range` and `split` leave behind are
-//! inferred from specimens; not confirmed on hardware.
-//!
-//! The fields a build cannot derive from audio — the length marks, the decay
-//! coefficients, the per-note tables, the playback parameters, the word at the body's
-//! start — go in as `--template` donated them: the instrument accepts them, and what
-//! it makes of them beyond accepting is not known. Given no template, `build` states
-//! them by rule instead, and they are then neutral playback parameters: no decay
-//! applied over the recordings, the layer trims taken from the layer values, and the
-//! damper limit the kind of instrument implies. Confirmed on hardware: a library
-//! written that way plays, and sounds like the same audio built against a template.
-//!
 //! These verbs take a file. A library is tens of megabytes, so moving one to or
 //! from the instrument is `nord piano get` and `nord piano put`.
 
@@ -38,11 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
+use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem};
 use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Library, UNCOVERED};
+use nord_format::note;
 use nord_format::Entity;
 
-use crate::edit::write_file;
-use crate::note;
+use crate::edit::{write_edit, write_file};
 use crate::ui::Ui;
 
 /// The banks a trim can drop by name. The attack bank is every library's reason to
@@ -332,21 +314,11 @@ fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
     match entity {
         Entity::Piano(piano) => Ok((bytes, piano)),
         other => Err(format!(
-            "{}: this is a {}, not a piano library (.npno)",
+            "{}: a {} file, not a piano library ({})",
             path.display(),
-            entity_kind(&other)
+            crate::file::entity_tag(&other),
+            npno::FORMAT,
         )),
-    }
-}
-
-fn entity_kind(entity: &Entity) -> &'static str {
-    match entity {
-        Entity::Sample(_) => "sample instrument",
-        Entity::SampleProject(_) => "Sample Editor project",
-        Entity::Program(_) => "program",
-        Entity::Live(_) => "live slot",
-        Entity::Settings(_) => "settings file",
-        _ => "file of another format",
     }
 }
 
@@ -638,13 +610,10 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
     let audio = codec::decode(stroke, library.channels()).map_err(|e| e.to_string())?;
     let wav = nord_format::wav::pcm16(&audio.interleaved(), codec::RATE, library.channels())
         .map_err(|e| e.to_string())?;
-    if let Some(parent) = args.out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
     write_file(ui, &args.out, &wav)?;
 
     let peak = audio
-        .channels
+        .lanes
         .iter()
         .flatten()
         .map(|s| i32::from(*s).abs())
@@ -729,28 +698,21 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
     }
 
     let edited = to_bytes(&library, &args.file)?;
-    match args.out {
-        Some(out) => write_file(ui, &out, &edited),
-        None => {
-            ui.note(format!(
-                "about to {} {} in place",
-                ui.danger("overwrite"),
-                args.file.display()
-            ));
-            ui.confirm(args.yes)?;
-            write_file(ui, &args.file, &edited)?;
-            ui.note(format!("{} bytes in, {} out", original.len(), edited.len()));
-            Ok(())
-        }
-    }
+    write_edit(ui, &args.file, args.out, args.yes, &edited)?;
+    ui.note(format!("{} bytes in, {} out", original.len(), edited.len()));
+    Ok(())
 }
 
 /// `-4` is fine-tune units; `+2.1c` is cents, rounded to the nearest unit.
 fn parse_tune(value: &str) -> Result<i8, String> {
     if let Some(cents) = value.strip_suffix(['c', 'C']) {
+        // `nan` and `inf` parse; rounding either one lands on 0, which is a tuning
+        // nobody asked for rather than the refusal the value deserves.
         let cents: f32 = cents
             .parse()
-            .map_err(|_| format!("{value:?} is not a number of cents"))?;
+            .ok()
+            .filter(|c: &f32| c.is_finite())
+            .ok_or_else(|| format!("{value:?} is not a number of cents"))?;
         let units = (cents / npno::FINE_TUNE_CENTS_PER_UNIT).round();
         return i8::try_from(units as i32)
             .map_err(|_| format!("{cents} c is more than the per-key fine tune reaches"));
@@ -903,45 +865,34 @@ fn parse_range(spec: &str) -> Result<(u8, u8), String> {
 /// Rebuild each library from its model and compare, and with `--deep` decode every
 /// stroke it holds.
 pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
-    let mut failed = 0usize;
-    let mut strokes = 0usize;
-    let mut frames = 0usize;
-    let mut overlap = 0usize;
-    for path in &args.files {
+    let mut total = Counted::default();
+    let checked = crate::file::check_each(ui, &args.files, "file(s) did not check out", |path| {
         match verify_one(path, args.deep) {
             Ok(counted) => {
-                strokes += counted.strokes;
-                frames += counted.frames;
-                overlap += counted.overlap;
-                ui.out(format!(
+                total.strokes += counted.strokes;
+                total.frames += counted.frames;
+                total.overlap += counted.overlap;
+                Ok(format!(
                     "ok     {} ({})",
                     path.display(),
                     counted.line(args.deep)
-                ));
+                ))
             }
-            Err(line) => {
-                failed += 1;
-                ui.out(format!(
-                    "{} {} ({line})",
-                    ui.danger("FAILED"),
-                    path.display()
-                ));
-            }
+            Err(line) => Err(format!(
+                "{} {} ({line})",
+                ui.danger("FAILED"),
+                path.display()
+            )),
         }
-    }
+    });
     if args.deep {
         ui.note(format!(
-            "{strokes} stroke(s), {frames} frame(s) decoded, {overlap} repeated sample(s) \
-             matched the block before"
+            "{} stroke(s), {} frame(s) decoded, {} repeated sample(s) matched the block \
+             before",
+            total.strokes, total.frames, total.overlap
         ));
     }
-    match failed {
-        0 => Ok(()),
-        n => Err(format!(
-            "{n} of {} file(s) did not check out",
-            args.files.len()
-        )),
-    }
+    checked
 }
 
 #[derive(Default)]
@@ -970,14 +921,9 @@ fn verify_one(path: &Path, deep: bool) -> Result<Counted, String> {
     let library = piano.library().map_err(|e| e.to_string())?;
     let rebuilt = to_bytes(&library, path)?;
     if rebuilt != original {
-        let at = rebuilt
-            .iter()
-            .zip(&original)
-            .position(|(a, b)| a != b)
-            .map(|i| format!("{i:#x}"))
-            .unwrap_or_else(|| "the length".to_string());
         return Err(format!(
-            "the rebuild differs at {at}; in {} bytes, out {}",
+            "the rebuild differs at {}; in {} bytes, out {}",
+            crate::file::first_difference(&rebuilt, &original),
             original.len(),
             rebuilt.len()
         ));
@@ -1044,36 +990,12 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// What a WAV's third name component says about its velocity layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum LayerName {
-    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
-    /// spread over that root's layers gives it.
-    Index(u8),
-    /// `v12`: the layer value itself, written to the record as it stands.
-    Value(u8),
-}
-
 /// One WAV a build reads, and what its name says the stroke is.
 struct StrokeFile {
     path: PathBuf,
     root: u8,
     bank: Bank,
-    layer: LayerName,
-}
-
-/// `<root>-b<bank>-l<layer>` or `<root>-b<bank>-v<value>`, as in `060-b0-l00`.
-fn parse_stroke_name(stem: &str) -> Option<(u8, Bank, LayerName)> {
-    let mut parts = stem.split('-');
-    let root = parts.next()?.parse().ok()?;
-    let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
-    let third = parts.next()?;
-    let layer = if let Some(index) = third.strip_prefix('l') {
-        LayerName::Index(index.parse().ok()?)
-    } else {
-        LayerName::Value(third.strip_prefix('v')?.parse().ok()?)
-    };
-    parts.next().is_none().then_some((root, bank, layer))
+    layer: LayerTag,
 }
 
 /// The WAVs in a directory, with what their names say each one is, in stroke order.
@@ -1089,7 +1011,7 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
             continue;
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let (root, bank, layer) = parse_stroke_name(&stem).ok_or_else(|| {
+        let (root, bank, layer) = parse_stroke_name(&stem, Stem::None).ok_or_else(|| {
             format!(
                 "{}: a WAV here is named <root>-b<bank>-l<layer>.wav, as in \
                  060-b0-l00.wav — MIDI note 60, bank 0 (attack), layer 0; \
@@ -1113,58 +1035,35 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
     Ok(out)
 }
 
-/// The layer value each file's stroke states, in the order the files came in.
-///
-/// A `v` name is that value; an `l` name is spread across its root and bank's own
-/// layers, loudest first. The two forms would each mean something different about how
-/// many layers a spread is over, so one root's bank names its layers one way.
+/// The layer value each file's stroke states, in the order the files came in, as
+/// [`encode::layer_values`] reads their names.
 ///
 /// A `v` name past [`encode::HIGHEST_PLAYED_LAYER`] is a stroke no velocity would
 /// reach, and is refused by the file that names it.
 fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
-    let mut groups: BTreeMap<(u8, u8), Vec<usize>> = BTreeMap::new();
-    for (index, file) in files.iter().enumerate() {
-        groups
-            .entry((file.root, file.bank.code()))
-            .or_default()
-            .push(index);
-    }
-
-    let mut values = vec![0u8; files.len()];
-    for ((root, bank), members) in groups {
-        let states = members
-            .iter()
-            .filter(|&&i| matches!(files[i].layer, LayerName::Value(_)))
-            .count();
-        let what = format!("root {} {}", note::name(root), bank_label(bank));
-        if states != 0 && states != members.len() {
-            return Err(format!(
+    let named: Vec<(u8, Bank, LayerTag)> = files
+        .iter()
+        .map(|file| (file.root, file.bank, file.layer))
+        .collect();
+    let values = encode::layer_values(&named).map_err(|clash| {
+        let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+        match clash.how {
+            Clash::BothForms => format!(
                 "{what} names some of its layers by index (l..) and some by value \
                  (v..); one root's bank names them one way"
+            ),
+            Clash::Twice => format!("{what} names one of its layers twice"),
+        }
+    })?;
+    for (file, &value) in files.iter().zip(&values) {
+        if value > encode::HIGHEST_PLAYED_LAYER {
+            return Err(format!(
+                "{}: no velocity selects layer value {}; {} is the largest a key ever \
+                 sounds",
+                file.path.display(),
+                value,
+                encode::HIGHEST_PLAYED_LAYER
             ));
-        }
-        if members
-            .iter()
-            .map(|&i| files[i].layer)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != members.len()
-        {
-            return Err(format!("{what} names one of its layers twice"));
-        }
-        for (rank, &index) in members.iter().enumerate() {
-            values[index] = match files[index].layer {
-                LayerName::Value(value) => value,
-                LayerName::Index(_) => encode::layer_value(rank, members.len()),
-            };
-            if values[index] > encode::HIGHEST_PLAYED_LAYER {
-                return Err(format!(
-                    "{}: no velocity selects layer value {}; {} is the largest a key ever                      sounds",
-                    files[index].path.display(),
-                    values[index],
-                    encode::HIGHEST_PLAYED_LAYER
-                ));
-            }
         }
     }
     Ok(values)
@@ -1223,9 +1122,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     let mut resampled = 0usize;
     for (file, layer) in files.iter().zip(values) {
         let path = &file.path;
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let pcm =
-            nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let pcm = crate::wav::pcm16(path)?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         clipped += audio.clipped;
@@ -1371,35 +1268,54 @@ pub fn rebuild(ui: &Ui, args: RebuildArgs) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_stroke_wav_names_its_root_bank_and_layer() {
-        use LayerName::{Index, Value};
-        assert_eq!(
-            parse_stroke_name("060-b0-l00"),
-            Some((60, Bank::Attack, Index(0)))
-        );
-        assert_eq!(
-            parse_stroke_name("36-b2-l7"),
-            Some((36, Bank::Release, Index(7)))
-        );
-        assert_eq!(
-            parse_stroke_name("101-b1-v12"),
-            Some((101, Bank::Resonance, Value(12)))
-        );
-        assert_eq!(parse_stroke_name("060-b3-l00"), None, "no such bank");
-        assert_eq!(parse_stroke_name("300-b0-l00"), None, "no such note");
-        assert_eq!(parse_stroke_name("060-0-l00"), None);
-        assert_eq!(parse_stroke_name("060-b0-x2"), None, "no such layer form");
-        assert_eq!(parse_stroke_name("060-b0"), None);
-        assert_eq!(parse_stroke_name("060-b0-l00-take2"), None);
-        assert_eq!(
-            parse_stroke_name("C4-b0-l00"),
-            None,
-            "notes are numbers here"
-        );
+    /// The smallest library this crate can write: one silent attack stroke at C4.
+    fn library() -> Vec<u8> {
+        let rules = encode::Rules {
+            kind: encode::Kind::Grand,
+            gain: 50,
+            damper_top: 96,
+        };
+        let recordings = [encode::Recording {
+            root: 60,
+            bank: Bank::Attack,
+            layer: 0,
+            channels: vec![vec![0i16; 4096]],
+        }];
+        let built = encode::build(
+            &encode::Donor::Rules(rules),
+            &encode::Options::new("Kit"),
+            &recordings,
+        )
+        .unwrap();
+        to_bytes(&built, Path::new("kit.npno")).unwrap()
     }
 
-    fn wav(root: u8, bank: Bank, layer: LayerName) -> StrokeFile {
+    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
+    /// meets the guard that spelling it with no `-o` meets.
+    #[test]
+    fn an_output_that_is_the_input_takes_the_in_place_guard() {
+        let dir = crate::edit::tests::scratch("piano-edit-in-place");
+        let path = dir.join("kit.npno");
+        let original = library();
+        std::fs::write(&path, &original).unwrap();
+
+        let args = EditArgs {
+            file: path.clone(),
+            name: Some("Vibes".into()),
+            variant: None,
+            voicing: None,
+            tune: Vec::new(),
+            map: Vec::new(),
+            out: Some(dir.join(".").join("kit.npno")),
+            yes: false,
+        };
+        let err = edit(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains("--yes"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile {
         StrokeFile {
             path: PathBuf::new(),
             root,
@@ -1408,41 +1324,16 @@ mod tests {
         }
     }
 
-    /// The velocity a layer answers to is its value, so the directory of WAVs decides
-    /// which part of the range each recording plays over.
-    #[test]
-    fn indexed_layers_spread_over_their_own_root_and_bank() {
-        let files = [
-            wav(60, Bank::Attack, LayerName::Index(0)),
-            wav(60, Bank::Attack, LayerName::Index(1)),
-            wav(60, Bank::Attack, LayerName::Index(2)),
-            wav(60, Bank::Release, LayerName::Index(0)),
-            wav(72, Bank::Attack, LayerName::Index(0)),
-            wav(72, Bank::Attack, LayerName::Index(1)),
-        ];
-        assert_eq!(layer_values(&files).unwrap(), [0, 14, 27, 0, 0, 27]);
-    }
-
-    #[test]
-    fn a_named_layer_value_is_written_as_it_stands() {
-        let files = [
-            wav(60, Bank::Attack, LayerName::Value(0)),
-            wav(60, Bank::Attack, LayerName::Value(6)),
-            wav(60, Bank::Attack, LayerName::Value(12)),
-        ];
-        assert_eq!(layer_values(&files).unwrap(), [0, 6, 12]);
-    }
-
     /// `v255` parses and is a layer no key would ever sound, so the name is refused
     /// rather than built into a library as a stroke nothing plays.
     #[test]
     fn a_named_layer_value_no_velocity_selects_is_refused() {
         let highest = encode::HIGHEST_PLAYED_LAYER;
         assert_eq!(
-            layer_values(&[wav(60, Bank::Attack, LayerName::Value(highest))]).unwrap(),
+            layer_values(&[wav(60, Bank::Attack, LayerTag::Value(highest))]).unwrap(),
             [highest]
         );
-        let refused = layer_values(&[wav(60, Bank::Attack, LayerName::Value(255))]).unwrap_err();
+        let refused = layer_values(&[wav(60, Bank::Attack, LayerTag::Value(255))]).unwrap_err();
         assert!(refused.contains("no velocity selects"), "{refused}");
         assert!(refused.contains(&highest.to_string()), "{refused}");
     }
@@ -1450,15 +1341,15 @@ mod tests {
     #[test]
     fn one_root_and_bank_names_its_layers_one_way() {
         let mixed = [
-            wav(60, Bank::Attack, LayerName::Index(0)),
-            wav(60, Bank::Attack, LayerName::Value(12)),
+            wav(60, Bank::Attack, LayerTag::Index(0)),
+            wav(60, Bank::Attack, LayerTag::Value(12)),
         ];
         let refused = layer_values(&mixed).unwrap_err();
         assert!(refused.contains("C4 attack"), "{refused}");
 
         let twice = [
-            wav(60, Bank::Attack, LayerName::Index(0)),
-            wav(60, Bank::Attack, LayerName::Index(0)),
+            wav(60, Bank::Attack, LayerTag::Index(0)),
+            wav(60, Bank::Attack, LayerTag::Index(0)),
         ];
         assert!(layer_values(&twice).is_err(), "a layer named twice");
     }
@@ -1494,6 +1385,15 @@ mod tests {
         assert_eq!(parse_tune("2.1c").unwrap(), 3);
         assert!(parse_tune("400c").is_err());
         assert!(parse_tune("loud").is_err());
+    }
+
+    /// A cent count that is not a number cannot round to one: `nan` and `inf` parse as
+    /// floats, and rounding them would silently tune the key to 0.
+    #[test]
+    fn a_cent_count_that_is_not_finite_is_refused_rather_than_rounded() {
+        for bad in ["nanc", "NaNc", "infc", "-infc"] {
+            assert!(parse_tune(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

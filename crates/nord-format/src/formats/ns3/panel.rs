@@ -16,7 +16,7 @@ use crate::components::{
 };
 use crate::types::{RangedU16, RangedU8};
 
-/// The panel's 281 parameters. Bits are MSB-first from panel byte 0,
+/// The panel's parameters. Bits are MSB-first from panel byte 0,
 /// which is body byte 0x16 for A and 0x11d for B.
 #[nord_bits_derive::bitbody(263)]
 pub struct Panel {
@@ -43,12 +43,9 @@ pub struct Panel {
     #[bits(53..=57)]
     pub piano_model: Selector<5>,
     #[bits(58..=59)]
-    pub clavinet_model: ClavinetModel,
+    pub piano_clavinet_model: ClavinetModel,
+    /// The piano model's library id.
     #[bits(60..=91)]
-    /// The piano model's library id. ⚠️ Renamed from `piano_sample_name`, which it
-    /// never was — the Stage 4 calls the same 32-bit reference `model_id`. The preset
-    /// *name* is ASCII elsewhere in the body, read by
-    /// [`super::program::synth_preset_name`].
     pub piano_model_id: PianoRef,
     #[bits(92..=92)]
     pub piano_soft_release: bool,
@@ -199,7 +196,7 @@ pub struct Panel {
     #[bits(928..=928)]
     pub organ_on: bool,
     #[bits(929..=932)]
-    pub organ_kb_zone: OrganKbZone,
+    pub organ_kb_zone: KbZone4,
     #[bits(933..=939)]
     pub organ_volume: Level,
     #[bits(940..=947)]
@@ -407,20 +404,14 @@ pub struct Panel {
     #[bits(1446..=1447)]
     pub extern_midi_control: Selector<2>,
     #[bits(1448..=1454)]
-    pub extern_midi_cc_number: Level,
+    pub extern_midi_cc_number: RangedU8<127>,
     #[bits(1455..=1461)]
-    pub extern_midi_cc_value: Level,
-    /// The three morph slots below are named for an `extern_midi_cc` this body does not
-    /// declare; `extern_midi_cc_value` is the parameter beside them and the one they move.
-    /// Inferred from specimens; not confirmed on hardware.
+    pub extern_midi_cc: Level,
     #[bits(1462..=1469)]
-    #[morphs(extern_midi_cc_value)]
     pub extern_midi_cc_wheel: MorphTarget,
     #[bits(1470..=1477)]
-    #[morphs(extern_midi_cc_value)]
     pub extern_midi_cc_aftertouch: MorphTarget,
     #[bits(1478..=1485)]
-    #[morphs(extern_midi_cc_value)]
     pub extern_midi_cc_ctrl_pedal: MorphTarget,
     #[bits(1486..=1486)]
     pub extern_midi_send_user_cc_on_load: bool,
@@ -429,7 +420,7 @@ pub struct Panel {
     #[bits(1495..=1502)]
     pub extern_midi_bank_select_cc00: u8,
     #[bits(1503..=1509)]
-    pub extern_midi_program: Level,
+    pub extern_midi_program: RangedU8<127>,
     #[bits(1510..=1517)]
     pub extern_midi_program_wheel: MorphTarget,
     #[bits(1518..=1525)]
@@ -503,19 +494,19 @@ pub struct Panel {
     #[bits(1728..=1734)]
     pub delay_tempo: Time,
     #[bits(1735..=1741)]
-    pub delay_tempo_lsw: Time,
+    pub delay_tempo_lsw: RangedU8<127>,
     #[bits(1742..=1749)]
     pub delay_tempo_wheel: MorphTarget,
     #[bits(1750..=1756)]
-    pub delay_tempo_wheel_lsw: Level,
+    pub delay_tempo_wheel_lsw: RangedU8<127>,
     #[bits(1757..=1764)]
     pub delay_tempo_aftertouch: MorphTarget,
     #[bits(1765..=1771)]
-    pub delay_tempo_aftertouch_lsw: Level,
+    pub delay_tempo_aftertouch_lsw: RangedU8<127>,
     #[bits(1772..=1779)]
     pub delay_tempo_ctrl_pedal: MorphTarget,
     #[bits(1780..=1786)]
-    pub delay_tempo_ctrl_pedal_lsw: Level,
+    pub delay_tempo_ctrl_pedal_lsw: RangedU8<127>,
     #[bits(1787..=1793)]
     pub delay_mix: Level,
     #[bits(1794..=1801)]

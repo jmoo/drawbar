@@ -10,9 +10,9 @@
 //! paints what it was handed, and answers with what the pointer asked for.
 
 use eframe::egui;
+use nord_format::note;
 
 use crate::app;
-use crate::note;
 
 /// The velocity a click on the keyboard plays at.
 pub const AUDITION_VELOCITY: u8 = 90;
@@ -163,8 +163,6 @@ impl Audition {
     }
 }
 
-// ---- shared paint -------------------------------------------------------------------
-
 /// The dashes of an outline. egui draws dashes along a line, so a shape is its corners
 /// in order.
 fn dashed(painter: &egui::Painter, corners: &[egui::Pos2], stroke: egui::Stroke) {
@@ -248,13 +246,11 @@ fn chip(
     rect
 }
 
-/// The corner every rectangle here is drawn with.
-const RADIUS: f32 = 2.0;
+/// The corner every rectangle in a document is drawn with.
+pub(crate) const RADIUS: f32 = 2.0;
 
 const CHIP_TEXT: f32 = 9.5;
 const CHIP_PAD: f32 = 3.0;
-
-// ---- the keyboard -------------------------------------------------------------------
 
 /// A key worth pointing at: a zone's root, or a library's.
 pub struct Mark {
@@ -391,8 +387,8 @@ fn root_mark(
 
 /// What is sounding, over the key sounding it.
 ///
-/// ⚠️ Painted on a foreground layer above the keyboard, where the design puts it: the
-/// key map's own rect ends at the keys, and a chip inside it would cover the root marks.
+/// ⚠️ Painted on a foreground layer above the keyboard: the key map's own rect ends at
+/// the keys, and a chip inside it would cover the root marks.
 fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -407,8 +403,6 @@ fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
         ui.visuals().text_color(),
     );
 }
-
-// ---- the zone lane ------------------------------------------------------------------
 
 /// One zone as the lane draws it: the keys it answers, and what it is called.
 pub struct Band {
@@ -479,12 +473,97 @@ pub fn gaps(bounds: &[(u8, u8)], span: Span) -> Vec<(u8, u8)> {
     out
 }
 
-/// Where a dragged handle lands, and what follows it.
+/// How far a lane's rows may be dragged into each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Room {
+    /// Whether the row next along the keyboard gives up the keys this one takes. Where it
+    /// does not, an edge stops a key short of it and the rows may gap but never overlap.
+    shared: bool,
+    /// The fewest keys a row may be left answering, its neighbour included.
+    fewest: u8,
+}
+
+/// The fewest keys a band may be left answering. A band whose ends met would have its two
+/// handles on top of each other, and no way back off the one underneath.
+const BAND_KEYS: u8 = 2;
+
+/// Where a dragged edge lands, and what follows it.
 ///
-/// A top stops one key short of the band above's low and never reaches its own low; a
-/// low stops one key above the band below's top and never reaches its own top. With
-/// [`Edges::TopOnly`] the band above's low follows the top it is derived from, so bands
-/// may gap but never overlap.
+/// ⚠️ The neighbour is the row next along the keyboard, not the next index: a lane draws
+/// its rows in the file's order, which is not the keyboard's.
+///
+/// An edge with nowhere left to land — the row is already down to [`Room::fewest`] keys,
+/// or its neighbour is — leaves every bound where it was rather than stepping onto the
+/// row beside it.
+fn dragged(
+    bounds: &[(u8, u8)],
+    span: Span,
+    row: usize,
+    edge: Edge,
+    note: u8,
+    room: Room,
+) -> Vec<(u8, u8)> {
+    let mut next = bounds.to_vec();
+    let (span_low, span_high) = span.ends();
+    let Some(&(low, top)) = next.get(row) else {
+        return next;
+    };
+    // How far the row's own two ends stay apart, so that it keeps `fewest` keys.
+    let apart = room.fewest.saturating_sub(1);
+    match edge {
+        Edge::Top => {
+            let above = next
+                .iter()
+                .enumerate()
+                .filter(|(index, (their_low, _))| *index != row && *their_low > low)
+                .min_by_key(|(_, (their_low, _))| *their_low)
+                .map(|(index, _)| index);
+            let ceiling = match (above, room.shared) {
+                (Some(above), true) => next[above].1.saturating_sub(room.fewest),
+                (Some(above), false) => next[above].0.saturating_sub(1),
+                (None, _) => span_high,
+            };
+            let floor = low.saturating_add(apart);
+            if floor > ceiling {
+                return next;
+            }
+            let landed = note.clamp(floor, ceiling);
+            next[row].1 = landed;
+            if let (Some(above), true) = (above, room.shared) {
+                next[above].0 = landed.saturating_add(1);
+            }
+        }
+        Edge::Low => {
+            let below = next
+                .iter()
+                .enumerate()
+                .filter(|(index, (_, their_top))| *index != row && *their_top < top)
+                .max_by_key(|(_, (_, their_top))| *their_top)
+                .map(|(index, _)| index);
+            let floor = match (below, room.shared) {
+                (Some(below), true) => next[below].0.saturating_add(room.fewest),
+                (Some(below), false) => next[below].1.saturating_add(1),
+                (None, _) => span_low,
+            };
+            let ceiling = top.saturating_sub(apart);
+            if floor > ceiling {
+                return next;
+            }
+            let landed = note.clamp(floor, ceiling);
+            next[row].0 = landed;
+            if let (Some(below), true) = (below, room.shared) {
+                next[below].1 = landed.saturating_sub(1);
+            }
+        }
+    }
+    next
+}
+
+/// Where a dragged band edge lands, and what follows it.
+///
+/// A band keeps [`BAND_KEYS`] keys of its own and stops a key short of the band beside
+/// it. With [`Edges::TopOnly`] — the only shape that offers one handle rather than two —
+/// the band above's low follows the top it is derived from.
 fn clamped(
     bounds: &[(u8, u8)],
     span: Span,
@@ -493,32 +572,11 @@ fn clamped(
     note: u8,
     edges: Edges,
 ) -> Vec<(u8, u8)> {
-    let mut next = bounds.to_vec();
-    let (span_low, span_high) = span.ends();
-    let Some(&(low, top)) = next.get(zone) else {
-        return next;
+    let room = Room {
+        shared: edges == Edges::TopOnly,
+        fewest: BAND_KEYS,
     };
-    match edge {
-        Edge::Top => {
-            let ceiling = match zone.checked_sub(1).map(|above| next[above].0) {
-                Some(above_low) => above_low.saturating_sub(1),
-                None => span_high,
-            };
-            let shown = note.min(ceiling).max(low.saturating_add(1)).min(span_high);
-            next[zone].1 = shown;
-            if let (Edges::TopOnly, Some(above)) = (edges, zone.checked_sub(1)) {
-                next[above].0 = shown.saturating_add(1);
-            }
-        }
-        Edge::Low => {
-            let floor = match next.get(zone + 1) {
-                Some(&(_, below_top)) => below_top.saturating_add(1),
-                None => span_low,
-            };
-            next[zone].0 = note.max(floor).min(top.saturating_sub(1)).max(span_low);
-        }
-    }
-    next
+    dragged(bounds, span, zone, edge, note, room)
 }
 
 /// The zone lane: one band per zone, the keys between them hatched.
@@ -623,18 +681,27 @@ pub fn bands(
     if act.is_some() {
         return act;
     }
-    // A handle sits over the band it belongs to, and is the thing the click was for.
-    let picked = response
+    let picked = picked_at(&response, &grabs)?;
+    row_at(rect, span, &bounds, picked.x).map(BandAct::Pick)
+}
+
+/// Where a click on a lane landed.
+///
+/// ⚠️ A handle sits over the row it belongs to and is the thing the click was for, so a
+/// click inside one is never a pick.
+fn picked_at(response: &egui::Response, grabs: &[egui::Rect]) -> Option<egui::Pos2> {
+    response
         .clicked()
         .then(|| response.interact_pointer_pos())
         .flatten()
-        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
-    zones
+        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))
+}
+
+/// The row whose keys `x` falls in.
+fn row_at(rect: egui::Rect, span: Span, bounds: &[(u8, u8)], x: f32) -> Option<usize> {
+    bounds
         .iter()
-        .position(|band| {
-            picked.x >= span.x_of(rect, band.low) && picked.x < span.x_after(rect, band.top)
-        })
-        .map(BandAct::Pick)
+        .position(|(low, top)| x >= span.x_of(rect, *low) && x < span.x_after(rect, *top))
 }
 
 /// The three states a band wears.
@@ -791,8 +858,6 @@ fn handle(
     }
 }
 
-// ---- the size lane ------------------------------------------------------------------
-
 /// One root as the size lane draws it: the keys it answers, and what it costs.
 pub struct SizeCell {
     pub low: u8,
@@ -821,8 +886,8 @@ const TRIMMED: f32 = 0.05;
 ///
 /// The two roots either side of a boundary share it, so what one gives up the other
 /// takes and neither is left without a key; the outer end of the lowest or the highest
-/// has no root to share with, and covers or uncovers keys instead. `bounds` may be in
-/// any order — the neighbour is the cell next along the keyboard, not the next index.
+/// has no root to share with, and covers or uncovers keys instead. `bounds` may be in any
+/// order — the neighbour is the cell next along the keyboard, not the next index.
 pub fn boundary(
     bounds: &[(u8, u8)],
     span: Span,
@@ -830,48 +895,11 @@ pub fn boundary(
     edge: Edge,
     note: u8,
 ) -> Vec<(u8, u8)> {
-    let mut next = bounds.to_vec();
-    let (span_low, span_high) = span.ends();
-    let Some(&(low, top)) = next.get(cell) else {
-        return next;
+    let room = Room {
+        shared: true,
+        fewest: 1,
     };
-    match edge {
-        Edge::Top => {
-            let above = next
-                .iter()
-                .enumerate()
-                .filter(|(index, (their_low, _))| *index != cell && *their_low > low)
-                .min_by_key(|(_, (their_low, _))| *their_low)
-                .map(|(index, _)| index);
-            let ceiling = match above {
-                Some(above) => next[above].1.saturating_sub(1),
-                None => span_high,
-            };
-            let landed = note.clamp(low, ceiling.max(low));
-            next[cell].1 = landed;
-            if let Some(above) = above {
-                next[above].0 = landed.saturating_add(1);
-            }
-        }
-        Edge::Low => {
-            let below = next
-                .iter()
-                .enumerate()
-                .filter(|(index, (_, their_top))| *index != cell && *their_top < top)
-                .max_by_key(|(_, (_, their_top))| *their_top)
-                .map(|(index, _)| index);
-            let floor = match below {
-                Some(below) => next[below].0.saturating_add(1),
-                None => span_low,
-            };
-            let landed = note.clamp(floor.min(top), top);
-            next[cell].0 = landed;
-            if let Some(below) = below {
-                next[below].1 = landed.saturating_sub(1);
-            }
-        }
-    }
-    next
+    dragged(bounds, span, cell, edge, note, room)
 }
 
 /// What a root boundary says it does.
@@ -1010,25 +1038,14 @@ pub fn size_cells(
     if act.is_some() {
         return act;
     }
-    let picked = response
-        .clicked()
-        .then(|| response.interact_pointer_pos())
-        .flatten()
-        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
-    cells
-        .iter()
-        .position(|cell| {
-            picked.x >= span.x_of(rect, cell.low) && picked.x < span.x_after(rect, cell.top)
-        })
-        .map(BandAct::Pick)
+    let picked = picked_at(&response, &grabs)?;
+    row_at(rect, span, &bounds, picked.x).map(BandAct::Pick)
 }
 
 /// How many keys a cell spans.
 fn cell_keys(cell: &SizeCell) -> usize {
     (cell.top.max(cell.low) - cell.low) as usize + 1
 }
-
-// ---- the velocity field -------------------------------------------------------------
 
 /// One zone as the velocity field draws it: the keys it answers, the velocities it
 /// answers them at, and what it is called.
@@ -1292,11 +1309,7 @@ pub fn velocity(
     if act.is_some() {
         return act;
     }
-    let picked = response
-        .clicked()
-        .then(|| response.interact_pointer_pos())
-        .flatten()
-        .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))?;
+    let picked = picked_at(&response, &grabs)?;
     blocks
         .iter()
         .position(|block| cell(rect, span, block, block.window).contains(picked))
@@ -1413,8 +1426,6 @@ fn vel_handle(
     }
 }
 
-// ---- the per-key lane ---------------------------------------------------------------
-
 /// What a per-key value means, and how it reads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scale {
@@ -1529,7 +1540,9 @@ pub fn lane(
         ));
     }
 
-    match response.is_pointer_button_down_on() {
+    let painting =
+        response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
+    match painting {
         true => strokes(ui, rect, span),
         false => Vec::new(),
     }
@@ -1544,11 +1557,23 @@ fn snap(value: f32) -> f32 {
 }
 
 /// Every key this frame's pointer positions painted, in the order they arrived. A drag
-/// off the end of the lane keeps painting the key it left by, as the design has it.
+/// off the end of the lane keeps painting the key it left by.
 fn strokes(ui: &egui::Ui, rect: egui::Rect, span: Span) -> Vec<(u8, f32)> {
     let mut out: Vec<(u8, f32)> = Vec::new();
     ui.input(|input| {
-        for event in &input.events {
+        // ⚠️ A move from before this frame's press is the pointer on its way to the lane,
+        // not a stroke. A frame that presses nothing carries on the drag it is already in.
+        let opened = input.events.iter().rposition(|event| {
+            matches!(
+                event,
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                }
+            )
+        });
+        for event in &input.events[opened.unwrap_or(0)..] {
             let at = match event {
                 egui::Event::PointerMoved(at) => *at,
                 egui::Event::PointerButton {
@@ -1679,8 +1704,6 @@ mod tests {
         ]
     }
 
-    // ---- geometry -------------------------------------------------------------------
-
     /// The white keys share the width and the blacks hang between them, and the key
     /// under a point is the key whose cell holds it — which is what every hit test in
     /// the map rests on.
@@ -1801,8 +1824,6 @@ mod tests {
         assert!(!struck.live(11.0 + Audition::HOLD));
     }
 
-    // ---- the keyboard ---------------------------------------------------------------
-
     /// The two spans the editors draw are a six-octave sample map and a full piano, and
     /// both are laid out by their white keys.
     #[test]
@@ -1895,8 +1916,6 @@ mod tests {
         );
     }
 
-    // ---- the zone lane --------------------------------------------------------------
-
     fn bands_of(bounds: &[(u8, u8)]) -> Vec<Band> {
         bounds
             .iter()
@@ -1933,9 +1952,46 @@ mod tests {
         assert_eq!(moved[0], (56, 96), "the zone above starts a key higher");
         assert_eq!(moved[2], bounds[2], "and nothing else moves");
 
+        // Upwards as well: the zone above gives up the keys this one takes, down to the
+        // last it can answer with.
+        let up = clamped(&bounds, NSMP, 1, Edge::Top, 70, Edges::TopOnly);
+        assert_eq!((up[1], up[0]), ((41, 70), (71, 96)));
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Top, 127, Edges::TopOnly)[0],
+            (95, 96),
+            "the band above keeps the keys it needs to stay grabbable",
+        );
+
         // With both edges stored, the neighbour is left where it was and a gap opens.
         let apart = clamped(&bounds, NSMP, 1, Edge::Top, 55, Edges::Both);
         assert_eq!((apart[1], apart[0]), ((41, 55), (61, 96)));
+    }
+
+    /// A band the drag would leave overlapping its neighbour does not move at all: the
+    /// keys either side of a band edge belong to one band or the other, never to both.
+    #[test]
+    fn a_band_with_no_room_left_refuses_the_drag() {
+        let bounds = [(61, 96), (60, 60)];
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Top, 55, Edges::Both),
+            bounds
+        );
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Top, 90, Edges::Both),
+            bounds
+        );
+        // It is the room that is gone, not the handle: the low still has keys below it.
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Low, 30, Edges::Both)[1],
+            (30, 60),
+        );
+
+        // The neighbour is the band next along the keyboard, not the one before it in
+        // the file: a top dragged into it stops a key short either way.
+        let jumbled = [(41, 55), (61, 96), (24, 40)];
+        let moved = clamped(&jumbled, NSMP, 0, Edge::Top, 70, Edges::Both);
+        assert_eq!(moved[0], (41, 60), "a key short of the band above's low");
+        assert_eq!(moved[1], jumbled[1], "and the band above stays where it is");
     }
 
     /// The clamps are what keeps zones from overlapping or turning inside out.
@@ -1998,8 +2054,6 @@ mod tests {
         let (_, _, act) = frame(&ctx, press(over_gap), BANDS_H, lane);
         assert_eq!(act, None);
     }
-
-    // ---- the size lane --------------------------------------------------------------
 
     fn size_cell(low: u8, top: u8, kept: f32, original: f32) -> SizeCell {
         SizeCell {
@@ -2096,8 +2150,6 @@ mod tests {
         assert_eq!(boundary(&bounds, span, 2, Edge::Top, 90)[2], (72, 90));
     }
 
-    // ---- the velocity field ---------------------------------------------------------
-
     fn vel_blocks(of: &[(u8, u8, (u8, u8))]) -> Vec<VelBlock> {
         of.iter()
             .enumerate()
@@ -2186,8 +2238,6 @@ mod tests {
         assert_eq!(velocity_at(rect, y_of(rect, 64.0)), 64);
     }
 
-    // ---- the per-key lane -----------------------------------------------------------
-
     #[test]
     fn a_painted_value_snaps_to_a_twentieth_and_to_zero_near_the_middle() {
         assert_eq!(snap(0.03), 0.0);
@@ -2245,9 +2295,49 @@ mod tests {
         ];
         let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
         assert_eq!(drawn, vec![(60, 0.0), (61, 0.5), (62, -0.5)]);
-    }
 
-    // ---- the hatch ------------------------------------------------------------------
+        let release = |button| {
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
+
+        // The pointer crossing the lane on its way to the key it presses paints nothing:
+        // a stroke starts where the button goes down.
+        let events = vec![
+            egui::Event::PointerMoved(at(62, rect.top() + 28.5)),
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerMoved(at(61, rect.top() + 9.5)),
+        ];
+        let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
+        assert_eq!(drawn, vec![(60, 0.0), (61, 0.5)]);
+        frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
+
+        // Only the drawing button draws. A right-hand drag is somebody reaching for a
+        // menu, not an edit to every key it passes over.
+        let events = vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerMoved(at(61, rect.top() + 9.5)),
+        ];
+        let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
+        assert!(drawn.is_empty(), "a secondary drag painted {drawn:?}");
+    }
 
     /// A hatch is the only thing in the map drawn out of lines, and the lines that reach
     /// past a corner must stop at the edge rather than crossing the band beside it.

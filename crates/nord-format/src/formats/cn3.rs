@@ -1,6 +1,6 @@
 //! Electro 2 sample libraries (`.cn3`) — magic `CNE3`, not CBIN.
 //!
-//! All fourteen known files open `CNE3` (never `CNE2`); why the 3 is unexplained.
+//! Every specimen opens `CNE3` (never `CNE2`); why the 3 is unexplained.
 //! It is not a version field — the four bytes after it read `2c 01`, i.e. 300,
 //! which is where a version *would* sit. Nothing about the CBIN core generalises
 //! here, so the whole file is kept verbatim.

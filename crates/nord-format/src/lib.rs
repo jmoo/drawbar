@@ -37,6 +37,7 @@ pub mod error;
 pub mod fields;
 pub mod formats;
 pub mod layout;
+pub mod note;
 pub mod panel;
 pub mod types;
 pub mod util;
@@ -62,9 +63,9 @@ pub enum Bundle {
     Drum3KitBank(nd3::kit_bank::KitBank),
     Electro5(ne5::Bundle),
     /// A ZIP of CBIN files under any mix of tags — every model's bundle/backup
-    /// shape, verified against real factory restores (`.no3b`, `.nc2b`,
-    /// `.nl4b`). Members are kept container-verified and raw, under their
-    /// archive paths — which encode the slot, uninterpreted here.
+    /// shape. Reported by public documentation; not confirmed on hardware.
+    /// Members are kept container-verified and raw, under their archive paths —
+    /// which encode the slot, uninterpreted here.
     Members(Vec<(String, Cbin<RawBody>)>),
 }
 
@@ -251,16 +252,20 @@ impl Sample {
         }
     }
 
-    /// Move a zone's lowest note, on the generations that store one — the rest
-    /// tile, and refuse.
+    /// Whether this generation stores a zone's lowest note.
+    ///
+    /// False where zones tile — a zone reaches down to one above the next-lower zone's
+    /// top, so only the top note is stored — which is what makes
+    /// [`Self::set_zone_low_note`] refuse there.
+    pub fn has_low_note(&self) -> bool {
+        matches!(self, Sample::V3(_))
+    }
+
+    /// Move a zone's lowest note, on the generations that store one — see
+    /// [`Self::has_low_note`].
     pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
         match self {
-            Sample::V2(_) => Err(ParseError::AssertFail(
-                "v2 zones tile: a zone reaches down to one above the next-lower zone's \
-                 top, so only the top note is stored"
-                    .into(),
-            )
-            .into()),
+            Sample::V2(_) => Err(ParseError::AssertFail("v2 stores no low note".into()).into()),
             Sample::V3(s) => s.set_zone_low_note(index, note),
         }
     }
@@ -287,11 +292,21 @@ impl Sample {
         }
     }
 
-    /// Which generation's units this body's stroke streams are in.
-    pub fn layout(&self) -> nsmp::codec::Layout {
+    /// Which generation's units this body's stroke streams are in. A content version
+    /// past the generations the codec describes is refused rather than guessed at.
+    pub fn layout(&self) -> Result<nsmp::codec::Layout, Error> {
         match self {
-            Sample::V2(_) => nsmp::codec::Layout::V2,
-            Sample::V3(s) => nsmp::codec::Layout::from_version(s.header.version),
+            Sample::V2(_) => Ok(nsmp::codec::Layout::V2),
+            Sample::V3(s) => nsmp::codec::Layout::from_version(s.header.version).ok_or_else(|| {
+                ParseError::OutOfBounds {
+                    value: format!("content version {}", s.header.version),
+                    bound: format!(
+                        "the generations this codec describes, below {}",
+                        nsmp::codec::V5_FROM_VERSION
+                    ),
+                }
+                .into()
+            }),
         }
     }
 
@@ -300,7 +315,7 @@ impl Sample {
     pub fn generation(&self) -> &'static str {
         match self {
             Sample::V2(_) => "v2",
-            Sample::V3(s) if s.header.version >= 400 => "v4",
+            Sample::V3(s) if s.header.version >= nsmp::V4_FROM_VERSION => "v4",
             Sample::V3(_) => "v3",
         }
     }
@@ -433,7 +448,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
     use Entity as E;
 
     Ok(match tag {
-        // The shared library formats.
         nsmp::FORMAT => {
             let file: Cbin<nsmp::AnyBody> = cbin::read(reader, nsmp::FORMAT)?;
             let header = file.header;
@@ -448,7 +462,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
             E::PianoLibrary(nsclassic::piano_library::read_from(reader)?)
         }
 
-        // Electro.
         ne3::program::FORMAT => E::Program(Program::Electro3(ne3::program::read_from(reader)?)),
         ne3::organ_preset::FORMAT => {
             E::OrganPreset(OrganPreset::Electro3(ne3::organ_preset::read_from(reader)?))
@@ -467,7 +480,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         ne7::live::FORMAT => E::Live(Live::Electro7(ne7::live::read_from(reader)?)),
         ne7::settings::FORMAT => E::Settings(Settings::Electro7(ne7::settings::read_from(reader)?)),
 
-        // Stage.
         nsclassic::program::FORMAT => E::Program(Program::StageClassic(
             nsclassic::program::read_from(reader)?,
         )),
@@ -494,7 +506,6 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         }
         ns4::settings::FORMAT => E::Settings(Settings::Stage4(ns4::settings::read_from(reader)?)),
 
-        // Piano and Grand.
         np::program::FORMAT => E::Program(Program::Piano1(np::program::read_from(reader)?)),
         np::live::FORMAT => E::Live(Live::Piano1(np::live::read_from(reader)?)),
         np::settings::FORMAT => E::Settings(Settings::Piano1(np::settings::read_from(reader)?)),
@@ -514,14 +525,12 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         ng2::live::FORMAT => E::Live(Live::Grand(ng2::live::read_from(reader)?)),
         ng2::settings::FORMAT => E::Settings(Settings::Grand(ng2::settings::read_from(reader)?)),
 
-        // Wave.
         nw::program::FORMAT => E::Program(Program::Wave(nw::program::read_from(reader)?)),
         nw::settings::FORMAT => E::Settings(Settings::Wave(nw::settings::read_from(reader)?)),
         nw2::program::FORMAT => E::Program(Program::Wave2(nw2::program::read_from(reader)?)),
         nw2::live::FORMAT => E::Live(Live::Wave2(nw2::live::read_from(reader)?)),
         nw2::settings::FORMAT => E::Settings(Settings::Wave2(nw2::settings::read_from(reader)?)),
 
-        // Organs.
         nc2::program::FORMAT => E::Program(Program::C2(nc2::program::read_from(reader)?)),
         nc2::settings::FORMAT => E::Settings(Settings::C2(nc2::settings::read_from(reader)?)),
         nc2d::program::FORMAT => E::Program(Program::C2D(nc2d::program::read_from(reader)?)),
@@ -541,12 +550,20 @@ fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error
         }
         nla1::settings::FORMAT => E::Settings(Settings::LeadA1(nla1::settings::read_from(reader)?)),
 
-        // Drums.
         nd2::program::FORMAT => E::Program(Program::Drum2(nd2::program::read_from(reader)?)),
         nd3::kit::FORMAT => E::Program(Program::Drum3(nd3::kit::read_from(reader)?)),
 
         e => return Err(ParseError::UnknownFormat(e.to_string()).into()),
     })
+}
+
+/// Which archive a ZIP is, from the members the walks below will see.
+#[cfg(feature = "bundle")]
+enum ZipKind {
+    Electro5,
+    Drum2,
+    Drum3,
+    Members,
 }
 
 /// One ZIP file: an Electro 5 bundle or backup (it carries a `meta.xml`
@@ -556,7 +573,14 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     let start = reader.stream_position()?;
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
-        let names: Vec<&str> = zip.file_names().collect();
+        // The entries the walks skip are not members: a directory holds no file, and a
+        // backup manifest describes the archive. Classifying on them would call an
+        // archive of directories a bundle of none, and a `kits/` entry would stop a drum
+        // bank being one.
+        let names: Vec<&str> = zip
+            .file_names()
+            .filter(|name| !is_dir_entry(name) && !name.ends_with("meta.xml"))
+            .collect();
         // An archive with nothing in it would satisfy the all-members checks below
         // vacuously and read as a drum bank holding no programs.
         if names.is_empty() {
@@ -569,25 +593,32 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
                 .extension()
                 .is_some_and(|e| e.to_string_lossy().starts_with("ne5"))
         }) {
-            "bundle"
+            ZipKind::Electro5
         } else if names.iter().all(|n| n.ends_with(".nd2p")) {
-            "nd2"
+            ZipKind::Drum2
         } else if names.iter().all(|n| n.ends_with(".nd3k")) {
-            "nd3"
+            ZipKind::Drum3
         } else {
             // Anything else — a bundle only if every member is a CBIN file,
             // which `zip_raw_members` decides below.
-            "members"
+            ZipKind::Members
         }
     };
     reader.seek(std::io::SeekFrom::Start(start))?;
 
     Ok(Entity::Bundle(match kind {
-        "nd2" => Bundle::Drum2Bank(nd2::bank::read_from(reader)?),
-        "nd3" => Bundle::Drum3KitBank(nd3::kit_bank::read_from(reader)?),
-        "members" => Bundle::Members(formats::zip_raw_members(reader)?),
-        _ => Bundle::Electro5(ne5::Bundle::read_from(reader)?),
+        ZipKind::Drum2 => Bundle::Drum2Bank(nd2::bank::read_from(reader)?),
+        ZipKind::Drum3 => Bundle::Drum3KitBank(nd3::kit_bank::read_from(reader)?),
+        ZipKind::Members => Bundle::Members(formats::zip_raw_members(reader)?),
+        ZipKind::Electro5 => Bundle::Electro5(ne5::Bundle::read_from(reader)?),
     }))
+}
+
+/// A directory entry, spelled as `zip`'s own `is_dir` spells it — the name alone, since
+/// classification reads the archive's names rather than its entries.
+#[cfg(feature = "bundle")]
+fn is_dir_entry(name: &str) -> bool {
+    name.ends_with('/') || name.ends_with('\\')
 }
 
 /// [`from_stream`] over a buffered read of the file at `path`.
@@ -644,7 +675,8 @@ mod registry_tests {
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
-        );
+        )
+        .unwrap();
         assert!(Entity::Song(Song::Electro5(song)).registry().is_none());
     }
 }
@@ -665,13 +697,19 @@ mod bundle_tests {
         out.into_inner()
     }
 
+    /// A stored archive of `members`; a name ending in `/` becomes a directory entry.
     fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let stored = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
         for (name, bytes) in members {
-            zip.start_file(name.to_string(), stored).unwrap();
-            zip.write_all(bytes).unwrap();
+            match name.strip_suffix('/') {
+                Some(directory) => zip.add_directory(directory, stored).unwrap(),
+                None => {
+                    zip.start_file(name.to_string(), stored).unwrap();
+                    zip.write_all(bytes).unwrap();
+                }
+            }
         }
         zip.finish().unwrap().into_inner()
     }
@@ -700,6 +738,33 @@ mod bundle_tests {
     fn an_empty_zip_is_refused() {
         let bytes = archive(&[]);
         assert!(from_stream(&mut Cursor::new(bytes)).is_err());
+    }
+
+    /// A directory entry holds no file and a manifest describes the archive, so an
+    /// archive of nothing else holds no members — the same refusal as an empty one,
+    /// rather than a bundle of none.
+    #[test]
+    fn a_zip_of_directories_and_a_manifest_is_refused() {
+        let bytes = archive(&[("kits/", b""), ("meta.xml", b"<meta/>")]);
+        let err = from_stream(&mut Cursor::new(bytes)).unwrap_err();
+        assert!(
+            err.to_string().contains("no members"),
+            "refused for the wrong reason: {err}"
+        );
+    }
+
+    /// A backup's directory entries are not members, so they do not stop a bank whose
+    /// files are all one CBIN format being read as that bank.
+    #[test]
+    fn a_directory_entry_does_not_hide_a_drum_bank() {
+        let program = member("nd2p");
+        let bytes = archive(&[("kits/", b""), ("kits/One.nd2p", &program)]);
+        let entity = from_stream(&mut Cursor::new(bytes)).unwrap();
+        assert!(
+            matches!(entity, Entity::Bundle(Bundle::Drum2Bank(_))),
+            "a `kits/` entry left it classified as {}",
+            entity.identity().kind,
+        );
     }
 
     /// A ZIP holding anything that is not a CBIN file is not a bundle.

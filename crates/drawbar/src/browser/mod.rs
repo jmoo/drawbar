@@ -35,14 +35,14 @@ mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk};
 pub use drag::{
-    families_present, kinds_present, landing, qualified, Carried, Held, Item, Kind, Landing, Onto,
+    families_present, kinds_present, landing, qualifier, Carried, Held, Item, Kind, Landing, Onto,
 };
 pub use instrument::about;
-pub use row::{cell_ink, starred, Cells, Drawn};
+pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
 pub use tree::new_menu;
 
-use act::write_warnings;
+use act::{will_write, write_warnings};
 use drag::ghost;
 use selection::{gesture, Gesture};
 use tree::{Branch, Sections};
@@ -81,6 +81,22 @@ pub fn renamed(original: &str, typed: &str) -> Option<String> {
         true => None,
         false => Some(typed.to_string()),
     }
+}
+
+/// What a verdict runs, or nothing at all for a refusal — which [`Browser::land`] reports
+/// rather than runs.
+fn act_of(verdict: Landing) -> Option<Act> {
+    Some(match verdict {
+        Landing::Copy { class, at } => Act::Copy { class, at },
+        Landing::Send { id, class, at } => Act::Send { id, class, at },
+        Landing::Rearrange { class, from, to } => Act::Rearrange { class, from, to },
+        Landing::File { id, folder } => Act::File {
+            id,
+            folder: Some(folder),
+        },
+        Landing::Unfile { id } => Act::File { id, folder: None },
+        Landing::No(_) => return None,
+    })
 }
 
 pub struct Browser {
@@ -271,8 +287,9 @@ impl Browser {
     /// What the drag rules need to know about a row, or nothing for a row that is never
     /// dragged — wherever the row was drawn, the tree or the library's table.
     ///
-    /// ⚠️ A slot of a partition this app cannot name is not something a drag can pick up
-    /// and copy back: nothing here knows what it holds.
+    /// ⚠️ Neither a slot of a partition this app cannot name nor one the scan found
+    /// vacant is something a drag can pick up and copy back: neither holds anything this
+    /// app could ask the instrument for.
     pub(crate) fn held(
         &self,
         item: Item,
@@ -291,16 +308,16 @@ impl Browser {
             }
             Item::Folder(_) | Item::Tag(_) => None,
             // What is already on the instrument fits it by having got there.
-            Item::Slot { class, .. } => (!read_only(class)).then_some(Held {
-                what: item,
-                kind: Kind::from_class(class),
-                filed: None,
-                fits: true,
-            }),
+            Item::Slot { class, at } => {
+                (!read_only(class) && device.slot(class, at).flatten().is_some()).then_some(Held {
+                    what: item,
+                    kind: Kind::from_class(class),
+                    filed: None,
+                    fits: true,
+                })
+            }
         }
     }
-
-    // ---- shared pieces ----------------------------------------------------------
 
     /// The in-place editor, prefilled and selected.
     ///
@@ -369,55 +386,28 @@ impl Browser {
         self.land(&carried, onto, acts);
     }
 
-    /// Run the drop, for the pressed row and for everything it carried.
-    ///
-    /// ⚠️ The rest of the selection follows only where the verdict is one act repeated.
-    /// A send and a rearrange name **one** destination, and handing several rows to one
-    /// slot would write them over each other; those take the pressed row alone.
+    /// Run the drop, for the pressed row and for everything it carried, which follows it
+    /// only where the verdict [`Landing::repeats`].
     fn land(&mut self, carried: &Arc<Carried>, onto: Onto, acts: &mut Vec<Act>) {
         let verdict = landing(&carried.head, onto);
-        match verdict {
-            Landing::No(why) => acts.push(Act::Refused(format!(
+        if let Landing::No(why) = verdict {
+            return acts.push(Act::Refused(format!(
                 "“{}” cannot go there — {why}.",
                 carried.name
-            ))),
-            Landing::Send | Landing::Rearrange => self.one(carried.head, verdict, onto, acts),
-            Landing::Copy | Landing::File | Landing::Unfile => {
-                for held in carried.all() {
-                    if landing(&held, onto) == verdict {
-                        self.one(held, verdict, onto, acts);
-                    }
-                }
+            )));
+        }
+        if !verdict.repeats() {
+            return acts.extend(act_of(verdict));
+        }
+        for held in carried.all() {
+            let each = landing(&held, onto);
+            if each.same(verdict) {
+                acts.extend(act_of(each));
             }
         }
     }
 
-    fn one(&mut self, held: Held, verdict: Landing, onto: Onto, acts: &mut Vec<Act>) {
-        match (verdict, held.what, onto) {
-            (Landing::Copy, Item::Slot { class, at }, _) => acts.push(Act::Copy { class, at }),
-            (Landing::Rearrange, Item::Slot { at: from, .. }, Onto::Slot { class, at }) => acts
-                .push(Act::Rearrange {
-                    class,
-                    from,
-                    to: at,
-                }),
-            (Landing::Send, Item::Local(id), Onto::Slot { class, at }) => {
-                acts.push(Act::Send { id, class, at })
-            }
-            (Landing::File, Item::Local(id), Onto::Group(folder)) => acts.push(Act::File {
-                id,
-                folder: Some(folder),
-            }),
-            (Landing::Unfile, Item::Local(id), Onto::Computer) => {
-                acts.push(Act::File { id, folder: None })
-            }
-            // Every allowed pairing is spelled out above; a shape that reaches here is a
-            // verdict about a drag that did not come from where it says it did.
-            _ => {}
-        }
-    }
-
-    /// Ask before a slot is replaced or emptied. The only dialogs left in the app.
+    /// Ask before a slot is replaced or emptied.
     fn dialog(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let Some(ask) = &self.ask else {
             return;
@@ -455,8 +445,8 @@ impl Browser {
         }
     }
 
-    /// The one question a write asks: everything the queue is about to write, and what
-    /// each of it would replace.
+    /// The one question a write asks: everything the batch would write, and what each of
+    /// it would replace. An entry the instrument has already refused is not one of them.
     fn ask_send(
         &mut self,
         workspace: &Workspace,
@@ -467,7 +457,7 @@ impl Browser {
     ) {
         let mut lines = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
-        for held in queue.entries() {
+        for held in will_write(queue) {
             let Some(entity) = workspace.get(held.id) else {
                 continue;
             };
@@ -559,7 +549,7 @@ impl Browser {
             });
             return;
         }
-        let wanted = bulk(action, checked);
+        let wanted = bulk(action, checked, state);
         // ⚠️ Only a queue asks the instrument's opinion. Everything else here happens on
         // this computer, where a file that is another instrument's is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
@@ -643,13 +633,13 @@ mod tests {
         }
         // A folder with something in it, one with nothing, and a view of a slot: three
         // row shapes the list has no other way of reaching.
-        let full = browser.folders.make();
-        browser.folders.make();
+        let full = browser.folders.make().unwrap();
+        browser.folders.make().unwrap();
         let filed = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(filed, Some(full));
         // A tag on something, and one on nothing: the two shapes the section holds.
-        let sunday = browser.tags.make("Sunday");
-        browser.tags.make("Loud");
+        let sunday = browser.tags.make("Sunday").unwrap();
+        browser.tags.make("Loud").unwrap();
         browser.tags.set(filed, sunday, true);
         let bytes = workspace.get(filed).unwrap().bytes.clone();
         workspace.view(
@@ -676,7 +666,7 @@ mod tests {
             for class in device.state.classes() {
                 browser.open.insert(Branch::Class(class.to_raw()));
                 for bank in 0..=8 {
-                    browser.open.insert(Branch::Bank(class.to_raw(), bank));
+                    browser.open.insert(tree::bank_branch(class, bank));
                 }
             }
         }
@@ -757,6 +747,33 @@ mod tests {
         assert_eq!(alone.name, "Squabble B", "and says only its own name");
     }
 
+    /// ⚠️ A slot the walk found vacant holds nothing to pick up. Carried with the rest of
+    /// a selection it would become a copy the instrument is asked for, and a read of what
+    /// is not there costs a round trip that can only end in an error.
+    #[test]
+    fn an_empty_slot_is_not_something_a_drag_carries() {
+        let (mut browser, workspace, mut device, _tabs, _queue, _log) = bench();
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
+        let slot = |slot| Item::Slot {
+            class: ObjectClass::Program,
+            at: Location { bank: 6, slot },
+        };
+
+        let held = browser
+            .held(slot(0), &workspace, &device.state)
+            .expect("7:1 holds something");
+        assert!(
+            browser.held(slot(1), &workspace, &device.state).is_none(),
+            "7:2 was read and found empty"
+        );
+
+        browser.selection.toggle(slot(0));
+        browser.selection.toggle(slot(1));
+        let carried = browser.carrying(held, "Africa Split", &workspace, &device.state);
+        assert!(carried.rest.is_empty(), "the empty slot stays where it is");
+        assert_eq!(carried.name, "Africa Split", "and the ghost counts nothing");
+    }
+
     /// ⚠️ The rest of the selection follows only where the drop is one act repeated.
     /// Filing three assets is three filings; sending three into one slot would write
     /// them over each other, so a single destination takes the pressed row alone.
@@ -769,7 +786,7 @@ mod tests {
         for id in &ids {
             browser.selection.toggle(Item::Local(*id));
         }
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         let head = browser
             .held(Item::Local(ids[0]), &workspace, &device.state)
             .unwrap();
@@ -799,6 +816,37 @@ mod tests {
         assert!(matches!(sent[0], Act::Send { id, .. } if id == ids[0]));
     }
 
+    /// ⚠️ A row drawn inside a folder is that folder's drop target, not the loose list's.
+    /// Otherwise letting a filed asset go where it was pressed, or on one of its own
+    /// siblings, would take it out of the folder it is in.
+    #[test]
+    fn a_drop_onto_a_row_inside_a_folder_never_unfiles_it() {
+        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let folder = browser.folders.make().unwrap();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.folders.file(id, Some(folder));
+        let head = browser
+            .held(Item::Local(id), &workspace, &device.state)
+            .expect("a local is dragged");
+        let carried = Arc::new(browser.carrying(head, "Africa Split", &workspace, &device.state));
+
+        let mut onto_sibling = Vec::new();
+        browser.land(&carried, tree::onto_list(Some(folder)), &mut onto_sibling);
+        assert!(
+            !onto_sibling
+                .iter()
+                .any(|act| matches!(act, Act::File { folder: None, .. })),
+            "a member row stands for its folder, so a drop on it is no way out of one"
+        );
+
+        let mut onto_loose = Vec::new();
+        browser.land(&carried, tree::onto_list(None), &mut onto_loose);
+        assert!(
+            matches!(onto_loose.as_slice(), [Act::File { folder: None, .. }]),
+            "and the loose rows beside the folder are the way out"
+        );
+    }
+
     /// ⚠️ F2 renames the row that is the only one picked. A rename typed while several
     /// are picked reads as a rename of all of them, and only one would take it.
     #[test]
@@ -810,9 +858,11 @@ mod tests {
 
         browser.selection.toggle(Item::Local(2));
         assert!(!browser.sole_is(row), "two rows picked");
-        // And a plain click on one of the two lets go of it, leaving the other sole.
         browser.selection.plain(Item::Local(2));
-        assert!(browser.sole_is(row));
+        assert!(
+            browser.sole_is(row),
+            "a plain click on one of the two leaves the other sole"
+        );
     }
 
     /// Escape lets go of everything, whether or not the browser dock is open to show it.
@@ -901,15 +951,6 @@ mod tests {
         assert!(browser.rename.is_none(), "and the editor is done with");
     }
 
-    /// Only Enter renames: an armed editor that commits on blur turns a stray keystroke
-    /// into a rename nobody asked for.
-    #[test]
-    fn a_rename_needs_enter_and_a_real_change() {
-        assert_eq!(renamed("Africa Split", "LA Grand"), Some("LA Grand".into()));
-        // What blur hands back is nothing at all — see `rename_row`.
-        assert_eq!(renamed("Africa Split", "Africa Split"), None);
-    }
-
     /// Enter on an untouched field, or on an empty one, leaves the asset alone.
     #[test]
     fn a_rename_that_changes_nothing_is_not_a_rename() {
@@ -922,6 +963,7 @@ mod tests {
     /// What is typed is what the asset is called, with the spaces around it dropped.
     #[test]
     fn a_rename_takes_the_typed_name_trimmed() {
+        assert_eq!(renamed("Africa Split", "LA Grand"), Some("LA Grand".into()));
         assert_eq!(
             renamed("Africa Split", "  LA Grand  "),
             Some("LA Grand".into())
@@ -935,7 +977,7 @@ mod tests {
     fn a_grouping_forgets_the_assets_the_list_came_back_without() {
         let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
         let here = workspace.create(Fresh::Program, &mut log).unwrap();
-        let folder = browser.folders.make();
+        let folder = browser.folders.make().unwrap();
         browser.folders.file(here, Some(folder));
         // As a store that could not keep everything reads back: a membership for an
         // asset the list does not hold.
@@ -1010,7 +1052,7 @@ mod tests {
             bytes,
             &mut log,
         );
-        let tag = browser.tags.make("Sunday");
+        let tag = browser.tags.make("Sunday").unwrap();
         assert!(workspace.is_view(id));
 
         apply(

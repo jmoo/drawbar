@@ -5,101 +5,19 @@
 
 #![cfg(feature = "replay")]
 
+#[path = "support/frames.rs"]
+mod frames;
 #[path = "support/scripts.rs"]
 mod scripts;
 
+use frames::{
+    changed, notify, refusal, request, response, session_close, session_open, slot_args,
+    ui_request, ui_response, words,
+};
 use nord_usb::device::Device;
-use nord_usb::transport::{Direction, ReplayTransport, Step};
+use nord_usb::transport::{ReplayTransport, Step};
 use nord_usb::wire::{cmd, ui, Bank, Message, Partition, Service};
 use nord_usb::{envelope, op, Error, Location, ObjectClass, Session};
-
-fn out(bytes: Vec<u8>) -> Step {
-    Step {
-        direction: Direction::Out,
-        bytes,
-    }
-}
-
-fn r#in(bytes: Vec<u8>) -> Step {
-    Step {
-        direction: Direction::In,
-        bytes,
-    }
-}
-
-fn request(command: u32, args: &[u8]) -> Step {
-    out(Message::new(Service::Program, 10, command, args.to_vec()).encode())
-}
-
-fn response(command: u32, payload: &[u8]) -> Step {
-    r#in(
-        Message::new(
-            Service::Program,
-            10,
-            command + 1,
-            [&0u32.to_be_bytes()[..], payload].concat(),
-        )
-        .encode(),
-    )
-}
-
-fn refusal(command: u32, status: u32) -> Step {
-    r#in(
-        Message::new(
-            Service::Program,
-            10,
-            command + 1,
-            status.to_be_bytes().to_vec(),
-        )
-        .encode(),
-    )
-}
-
-fn changed() -> Step {
-    r#in(Message::new(Service::Program, 10, cmd::CHANGED, Vec::new()).encode())
-}
-
-fn notify(msg: Message) -> Step {
-    out(msg.encode())
-}
-
-fn session_open(class: ObjectClass) -> Vec<Step> {
-    vec![
-        notify(Message::new(
-            Service::Ui,
-            ui::SUBSYSTEM,
-            ui::HELLO,
-            Vec::new(),
-        )),
-        r#in(Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO + 1, vec![0; 4]).encode()),
-        request(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()),
-        response(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()),
-    ]
-}
-
-fn session_close() -> Vec<Step> {
-    vec![
-        request(cmd::SESSION_CLOSE, &[]),
-        response(cmd::SESSION_CLOSE, &[]),
-        notify(Message::new(
-            Service::Ui,
-            ui::SUBSYSTEM,
-            ui::GOODBYE,
-            Vec::new(),
-        )),
-        r#in(Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE + 1, vec![0; 4]).encode()),
-    ]
-}
-
-fn words(values: &[u32]) -> Vec<u8> {
-    values.iter().flat_map(|w| w.to_be_bytes()).collect()
-}
-
-fn slot_args(at: Location) -> Vec<u8> {
-    let mut v = Vec::new();
-    at.write_to(&mut v);
-    v
-}
 
 #[test]
 fn a_read_bracket_closes_its_transaction() {
@@ -721,18 +639,11 @@ fn a_change_notification_during_close_reaches_the_caller() {
             steps.push(changed());
         }
         steps.push(response(cmd::SESSION_CLOSE, &[]));
-        steps.push(notify(Message::new(
-            Service::Ui,
-            ui::SUBSYSTEM,
-            ui::GOODBYE,
-            Vec::new(),
-        )));
+        steps.push(ui_request(ui::GOODBYE));
         if during == ui::GOODBYE {
             steps.push(changed());
         }
-        steps.push(r#in(
-            Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE + 1, vec![0; 4]).encode(),
-        ));
+        steps.push(ui_response(ui::GOODBYE, 0));
 
         let mut device = Device::new(ReplayTransport::new(steps));
         pollster::block_on(device.read(ObjectClass::Program, async |_| Ok(()))).unwrap();

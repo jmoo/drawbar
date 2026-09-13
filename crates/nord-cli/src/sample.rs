@@ -17,18 +17,20 @@
 //! `project new` writes the Sample Editor's own `.nsmpproj` save file from a
 //! set of WAVs, one zone per file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{self, codec, encode};
-use nord_format::formats::nsmpproj::{self, NewZone, Project, Stroke, Zone, LOWEST_NOTE};
+use nord_format::formats::nsmpproj::{
+    self, NewZone, Project, Stroke, Zone, LOWEST_NOTE, PROJECT_RATE,
+};
+use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
-use crate::edit::{print_byte_diff, write_file};
-use crate::editors::{self, SampleEditor};
-use crate::note;
+use crate::edit::{print_byte_diff, write_edit, write_file};
+use crate::editors;
 use crate::slot::Target;
 use crate::ui::Ui;
 
@@ -39,26 +41,8 @@ pub struct EditArgs {
     #[arg(value_name = "FILE|BANK:SLOT")]
     pub target: String,
 
-    /// `path=value`, repeatable: `name=NAME`, `zone1.root_key=NOTE`,
-    /// `zone1.top_note=NOTE`. Notes are names (`C4`, `F#3`) or numbers (0-127).
-    #[arg(long = "set", value_name = "PATH=VALUE")]
-    pub set: Vec<String>,
-
-    /// Report what would change — including which bytes — and write nothing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// List every settable field with its current value, then exit.
-    #[arg(long)]
-    pub fields: bool,
-
-    /// Write the edited sample here instead of over the input file.
-    #[arg(short, long, value_name = "FILE")]
-    pub out: Option<PathBuf>,
-
-    /// Confirm the write. Editing a slot, or a file in place, needs it.
-    #[arg(long)]
-    pub yes: bool,
+    #[command(flatten)]
+    pub common: crate::edit::SetArgs,
 }
 
 pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
@@ -73,19 +57,17 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
 
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| e.to_string())?;
-    let sample = match &mut entity {
-        Entity::Sample(sample) => sample,
-        Entity::SampleProject(_) => {
-            return Err(
-                "this is a Sample Editor project, not a sample instrument — try `nord edit`".into(),
-            )
-        }
-        _ => return Err("sample edit only understands sample instruments (.nsmp)".into()),
-    };
+    if !matches!(entity, Entity::Sample(_)) {
+        return Err(crate::edit::mismatch(&mut entity, ObjectClass::Sample));
+    }
 
-    let Some(changed) = editors::stage(ui, args.fields, &args.set, &mut SampleEditor(sample))?
-    else {
-        // `--fields` has listed them and is done.
+    let staged = editors::stage(
+        ui,
+        args.common.fields,
+        &args.common.set,
+        crate::edit::editor_for(&mut entity)?.as_mut(),
+    )?;
+    let Some(changed) = staged else {
         return Ok(());
     };
     if changed == 0 {
@@ -96,29 +78,21 @@ pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
     let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
     print_byte_diff(ui, &original, &edited);
 
-    if args.dry_run {
+    if args.common.dry_run {
         ui.note("--dry-run: nothing written");
         return Ok(());
     }
 
-    match (target, args.out) {
+    match (target, args.common.out) {
+        (Target::File(path), out) => write_edit(ui, &path, out, args.common.yes, &edited),
         // An explicit destination is the unambiguous case, whatever the source was.
         (_, Some(out)) => write_file(ui, &out, &edited),
-        (Target::File(path), None) => {
-            ui.note(format!(
-                "about to {} {} in place",
-                ui.danger("overwrite"),
-                path.display()
-            ));
-            ui.confirm(args.yes)?;
-            write_file(ui, &path, &edited)
-        }
         (Target::Slot(at), None) => crate::device::send(
             ui,
             &edited,
             at,
             ObjectClass::Sample,
-            args.yes,
+            args.common.yes,
             "the edited sample",
             None,
             None,
@@ -315,7 +289,7 @@ fn body(bytes: &[u8]) -> Result<nord_format::Sample, String> {
         Entity::Sample(sample) => Ok(sample),
         other => Err(format!(
             "a {} file, not a sample instrument",
-            other.identity().format
+            crate::file::entity_tag(&other)
         )),
     }
 }
@@ -361,43 +335,75 @@ fn stem(origin: &Target, body: &nord_format::Sample) -> String {
     }
 }
 
+/// Where a decode puts its WAVs, and the ones it has already put there.
+///
+/// ⚠️ Targets are named after their own stem, and two of them can share one — the same
+/// instrument in two directories, or a file and a slot of the same name. Without this
+/// the second target's audio replaces the first's under the same filename.
+struct Wavs<'a> {
+    dir: &'a Path,
+    written: BTreeSet<PathBuf>,
+}
+
+impl Wavs<'_> {
+    /// The path one zone's WAV takes, or a refusal where this run already wrote it.
+    fn claim(&mut self, name: &str) -> Result<PathBuf, String> {
+        let path = self.dir.join(name);
+        if !self.written.insert(path.clone()) {
+            return Err(format!(
+                "{}: an earlier target already wrote this file; decode targets that share \
+                 a name into separate directories",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+}
+
 /// `nord sample decode`: the encoded audio back to WAV, and what did not decode.
 pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
     if let Some(dir) = &args.out {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+    let mut wavs = args.out.as_deref().map(|dir| Wavs {
+        dir,
+        written: BTreeSet::new(),
+    });
     let mut coverage = Coverage::default();
     let mut failed = 0usize;
     for spec in &args.targets {
         ui.out(ui.bold(spec));
-        match decode_target(ui, spec, args.out.as_deref(), &mut coverage) {
+        match decode_target(ui, spec, wavs.as_mut(), &mut coverage) {
             Ok(()) => coverage.files += 1,
             Err(e) => {
                 failed += 1;
                 // A whole file that will not open is not a codec gap, so it is
                 // reported rather than counted against coverage.
-                ui.out(format!("  {} {e}", ui.danger("error")));
+                ui.note(format!("  {} {e}", ui.danger("error")));
             }
         }
     }
     ui.note(coverage.line());
-    if failed == args.targets.len() {
-        return Err("nothing decoded".into());
+    match failed {
+        0 => Ok(()),
+        n => Err(format!(
+            "{n} of {} target(s) did not decode",
+            args.targets.len()
+        )),
     }
-    Ok(())
 }
 
 fn decode_target(
     ui: &Ui,
     spec: &str,
-    out: Option<&Path>,
+    mut out: Option<&mut Wavs<'_>>,
     coverage: &mut Coverage,
 ) -> Result<(), String> {
     let origin = crate::slot::target(spec)?;
     let bytes = read(&origin).map_err(|e| format!("{spec}: {e}"))?;
     let body = body(&bytes).map_err(|e| format!("{spec}: {e}"))?;
     let stem = stem(&origin, &body);
-    let layout = body.layout();
+    let layout = body.layout().map_err(|e| e.to_string())?;
 
     for (index, zone) in body.zones().map_err(|e| e.to_string())?.iter().enumerate() {
         coverage.zones += 1;
@@ -428,12 +434,12 @@ fn decode_target(
                     audio.seconds(),
                     ui.dim(notes.join(", ")),
                 );
-                if let Some(dir) = out {
-                    let file = dir.join(format!("{stem}-zone{n}.wav"));
+                if let Some(wavs) = out.as_mut() {
+                    let file = wavs.claim(&format!("{stem}-zone{n}.wav"))?;
                     let wav =
                         nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels)
                             .map_err(|e| format!("{}: {e}", file.display()))?;
-                    std::fs::write(&file, wav).map_err(|e| format!("{}: {e}", file.display()))?;
+                    crate::edit::replace_file(&file, &wav)?;
                     row.push_str(&format!("  -> {}", file.display()));
                 }
                 ui.out(row);
@@ -451,8 +457,10 @@ fn decode_target(
     Ok(())
 }
 
-/// The gate the wide generations sit behind. v2 has no gate: mono, stereo and looped
-/// v2 encodes play on an Electro 5.
+/// The gate the wide generations sit behind.
+///
+/// v2 has no gate. Confirmed on hardware: mono, stereo and looped v2 encodes play on an
+/// Electro 5.
 fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), String> {
     if generation == 2 || acknowledged {
         return Ok(());
@@ -464,12 +472,12 @@ fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), Strin
     ))
 }
 
-/// One WAV as the encoder needs it: 16-bit at [`codec::SOURCE_RATE`], mono or stereo.
-/// A stereo file becomes a stereo stroke — both channels under one header.
+/// One WAV as this encoder needs it: [`crate::wav::pcm16`] at [`codec::SOURCE_RATE`].
+///
+/// Unlike a piano build, nothing here resamples: the field lattice is defined against
+/// that rate.
 fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let source =
-        nord_format::wav::read_pcm16(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let source = crate::wav::pcm16(path)?;
     if source.rate != codec::SOURCE_RATE {
         return Err(format!(
             "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
@@ -477,14 +485,6 @@ fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
             path.display(),
             source.rate,
             codec::SOURCE_RATE,
-        ));
-    }
-    if source.channels != 1 && source.channels != 2 {
-        return Err(format!(
-            "{}: {} channels — a stroke's terminator states one cell size, so it can \
-             carry one channel or two and nothing else",
-            path.display(),
-            source.channels,
         ));
     }
     Ok(source)
@@ -632,7 +632,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             return Err(format!(
                 "{}: a {} file, not a Sample Editor project",
                 args.project.display(),
-                other.identity().format
+                crate::file::entity_tag(&other)
             ))
         }
     };
@@ -1029,23 +1029,9 @@ fn exact_frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<f64
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
 pub fn verify(ui: &Ui, args: VerifyArgs) -> Result<(), String> {
-    let mut failed = 0usize;
-    for spec in &args.targets {
-        match verify_target(spec, args.deep) {
-            Ok(line) => ui.out(line),
-            Err(line) => {
-                failed += 1;
-                ui.out(line);
-            }
-        }
-    }
-    if failed > 0 {
-        return Err(format!(
-            "{failed} of {} did not check out",
-            args.targets.len()
-        ));
-    }
-    Ok(())
+    crate::file::check_each(ui, &args.targets, "target(s) did not check out", |spec| {
+        verify_target(spec, args.deep)
+    })
 }
 
 /// One target's verdict line, `Ok` when it checked out and `Err` when it did not.
@@ -1056,7 +1042,10 @@ fn verify_target(spec: &str, walk: bool) -> Result<String, String> {
         .and_then(|entity| nord_format::to_bytes(&entity))
         .map_err(|e| format!("error  {spec} ({e})"))?;
     if round_trip != original {
-        return Err(format!("DIFFER {spec} (re-encode is not byte-identical)"));
+        return Err(format!(
+            "DIFFER {spec} (re-encode is not byte-identical; first difference at {})",
+            crate::file::first_difference(&round_trip, &original),
+        ));
     }
     if !walk {
         return Ok(format!("ok     {spec} ({} bytes)", original.len()));
@@ -1074,7 +1063,7 @@ fn deep(bytes: &[u8]) -> Result<String, String> {
 }
 
 fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
-    let layout = body.layout();
+    let layout = body.layout().map_err(|e| e.to_string())?;
     let chain = body.chain().map_err(|e| e.to_string())?;
     let streams = body.stroke_streams();
     let mut records = 0usize;
@@ -1165,10 +1154,6 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
     Ok(note)
 }
 
-/// The rate every frame position in a project counts at, whatever the file's
-/// own `m_sampleRate` says. See the `nsmpproj` module doc.
-const PROJECT_RATE: u64 = 44_100;
-
 /// One `--zone WAV=NOTE`, before the file behind it has been read.
 #[derive(Debug)]
 struct ZoneSpec {
@@ -1190,18 +1175,14 @@ fn zone_spec(spec: &str) -> Result<ZoneSpec, String> {
     })
 }
 
-/// A frame count restated at [`PROJECT_RATE`], to the nearest whole frame — the
-/// ratio does not divide for every rate, and the field holds frames.
+/// A WAV's frame count as the project states it, named where it cannot be stated.
 fn project_frames(frames: usize, rate: u32) -> Result<u64, String> {
-    let rate = u64::from(rate);
     if rate == 0 {
         return Err("the WAV declares 0 Hz".into());
     }
     u64::try_from(frames)
         .ok()
-        .and_then(|f| f.checked_mul(PROJECT_RATE))
-        .and_then(|scaled| scaled.checked_add(rate / 2))
-        .map(|rounded| rounded / rate)
+        .and_then(|frames| nsmpproj::project_frames(frames, rate))
         .ok_or_else(|| format!("{frames} frames at {rate} Hz overflows a frame count"))
 }
 
@@ -1257,14 +1238,6 @@ fn destination(name: Option<String>, out: Option<PathBuf>) -> Result<(String, Pa
     }
 }
 
-/// The Unix time [`Project::new`] stamps on every `m_modifyDate`.
-fn modified() -> Result<u32, String> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| format!("system clock is before the Unix epoch: {e}"))?;
-    u32::try_from(elapsed.as_secs()).map_err(|_| "system time does not fit m_modifyDate".into())
-}
-
 /// `nord sample project new`: a Sample Editor project from one WAV per zone.
 pub fn project_new(ui: &Ui, args: ProjectNewArgs) -> Result<(), String> {
     let specs: Vec<ZoneSpec> = args
@@ -1280,7 +1253,8 @@ pub fn project_new(ui: &Ui, args: ProjectNewArgs) -> Result<(), String> {
         zones.push(zone(spec, &wav, &out)?);
     }
 
-    let project = Project::new(&name, &zones, modified()?).map_err(|e| e.to_string())?;
+    let project =
+        Project::new(&name, &zones, crate::edit::unix_seconds_now()?).map_err(|e| e.to_string())?;
 
     for z in &zones {
         ui.out(format!(
@@ -1314,12 +1288,16 @@ mod tests {
         nord_format::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
     }
 
-    fn instrument(name: &str) -> nord_format::Sample {
+    fn encoded(name: &str) -> Vec<u8> {
         let options = encode::Options::new(name).root_key(60);
-        let bytes = encode::instrument(&vec![0i16; 4096], &options)
+        encode::instrument(&vec![0i16; 4096], &options)
             .unwrap()
             .to_bytes()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn instrument(name: &str) -> nord_format::Sample {
+        let bytes = encoded(name);
         match nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap() {
             Entity::Sample(sample) => sample,
             other => panic!("encoded a {}", other.identity().format),
@@ -1377,24 +1355,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn a_frame_count_is_stated_at_the_project_rate_whatever_the_wav_says() {
-        assert_eq!(project_frames(4410, 44_100).unwrap(), 4410);
-        assert_eq!(project_frames(2205, 22_050).unwrap(), 4410);
-        assert_eq!(project_frames(9600, 96_000).unwrap(), 4410);
-        assert_eq!(
-            project_frames(1, 48_000).unwrap(),
-            1,
-            "rounded, not floored"
-        );
-        assert!(project_frames(1, 0).is_err());
-    }
-
+    /// A count the project cannot state stops the zone being written, naming which
+    /// of the two ways the WAV cannot be counted.
     #[test]
     #[cfg(target_pointer_width = "64")]
-    fn a_frame_count_refuses_rounding_that_would_overflow() {
+    fn a_frame_count_a_project_cannot_state_is_refused_by_name() {
+        assert_eq!(project_frames(2205, 22_050).unwrap(), 4410);
+        let rateless = project_frames(1, 0).unwrap_err();
+        assert!(rateless.contains("0 Hz"), "{rateless}");
         let frames = (u64::MAX / PROJECT_RATE) as usize;
-        assert!(project_frames(frames, u32::MAX).is_err());
+        let over = project_frames(frames, u32::MAX).unwrap_err();
+        assert!(over.contains("overflows"), "{over}");
     }
 
     #[test]
@@ -1491,6 +1462,113 @@ mod tests {
             stem(&Target::File("kit/Bass.nsmp".into()), &instrument("Vibes")),
             "Bass",
         );
+    }
+
+    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
+    /// meets the guard that spelling it with no `-o` meets.
+    #[test]
+    fn an_output_that_is_the_input_takes_the_in_place_guard() {
+        let dir = scratch();
+        let path = dir.join("kit.nsmp");
+        let original = encoded("Kit");
+        std::fs::write(&path, &original).unwrap();
+
+        let args = EditArgs {
+            target: path.display().to_string(),
+            common: crate::edit::SetArgs {
+                set: vec!["name=Vibes".into()],
+                dry_run: false,
+                fields: false,
+                out: Some(dir.join(".").join("kit.nsmp")),
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains("--yes"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file the verb does not take is named by its format and steered to the command
+    /// that does read it.
+    #[test]
+    fn a_project_under_sample_edit_is_steered_to_the_file_verb() {
+        let dir = scratch();
+        let path = dir.join("kit.nsmpproj");
+        let project = Project::new(
+            "Kit",
+            &[NewZone {
+                path: "kit.wav".into(),
+                sample_rate: 44_100,
+                frames: 44_100,
+                root_key: 60,
+            }],
+            0,
+        )
+        .unwrap();
+        std::fs::write(&path, project.render()).unwrap();
+
+        let args = EditArgs {
+            target: path.display().to_string(),
+            common: crate::edit::SetArgs {
+                set: vec!["name=Vibes".into()],
+                dry_run: false,
+                fields: false,
+                out: None,
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args).unwrap_err();
+        assert!(err.contains(nsmpproj::FORMAT), "{err}");
+        assert!(err.contains("nord edit"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A target that will not open is a failure of the run, not a gap in the codec's
+    /// coverage, so the exit status says so even where other targets decoded.
+    #[test]
+    fn a_decode_that_loses_one_target_of_several_fails() {
+        let dir = scratch();
+        let kit = dir.join("kit.nsmp");
+        std::fs::write(&kit, encoded("Kit")).unwrap();
+        let ui = Ui::new(crate::ui::ColorChoice::Never);
+        let targets = |specs: &[&Path]| DecodeArgs {
+            targets: specs.iter().map(|p| p.display().to_string()).collect(),
+            out: None,
+        };
+
+        decode(&ui, targets(&[&kit])).expect("a target that decodes");
+        let err = decode(&ui, targets(&[&kit, &dir.join("absent.nsmp")])).unwrap_err();
+        assert!(err.contains("1 of 2"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two targets can be named the same thing in different directories, and the
+    /// second one's zones must not land on top of the first one's WAVs.
+    #[test]
+    fn a_second_target_of_the_same_name_does_not_overwrite_the_first_targets_wavs() {
+        let dir = scratch();
+        let out = dir.join("wavs");
+        let mut kits = Vec::new();
+        for side in ["a", "b"] {
+            let held = dir.join(side);
+            std::fs::create_dir_all(&held).unwrap();
+            let kit = held.join("kit.nsmp");
+            std::fs::write(&kit, encoded("Kit")).unwrap();
+            kits.push(kit.display().to_string());
+        }
+
+        let err = decode(
+            &Ui::new(crate::ui::ColorChoice::Never),
+            DecodeArgs {
+                targets: kits,
+                out: Some(out.clone()),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("1 of 2"), "{err}");
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1665,11 +1743,21 @@ mod tests {
             nord_format::formats::nsmp::section::STK,
         )
         .unwrap();
-        let first = stroke.payload[20..22].to_vec();
-        stroke.payload[38..40].copy_from_slice(&first);
+        let first = stroke.payload[FIRST_RECORD..][..POINTER].to_vec();
+        stroke.payload[MARK..][..POINTER].copy_from_slice(&first);
+        // The offsets below are restated, so the poke is only the intended one if the
+        // directory the codec reads back now names the first record as its loop.
+        let directory = codec::Directory::read(&stroke.payload).expect("a directory");
+        assert_eq!(directory.mark, directory.first_record);
 
         assert!(deep_body(&sample)
             .unwrap_err()
             .contains("does not carry the mark bit"));
     }
+
+    /// The stroke header's directory: four big-endian pointers, at `codec::SEEK_AT` and
+    /// every `codec::SEEK_STRIDE` after it, which `nsmp` keeps to itself.
+    const POINTER: usize = 2;
+    const FIRST_RECORD: usize = 20;
+    const MARK: usize = FIRST_RECORD + 9 * 2;
 }

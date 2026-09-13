@@ -21,8 +21,9 @@ pub(super) const VERSION: u8 = 10;
 /// same layout, filler included.
 pub(super) const VERSION_EARLY: u8 = 9;
 
-/// `1.0` in every gain field of the map, a u24 linear ratio.
-pub const GAIN_UNITY: u32 = 0x10_0000;
+/// `1.0` in every gain field of the map, a u24 linear ratio — the same unit and the
+/// same value the zone record's own gain field uses.
+pub const GAIN_UNITY: u32 = zone::GAIN_UNITY;
 
 /// Largest value a gain field holds.
 pub const GAIN_MAX: u32 = 0xFF_FFFF;

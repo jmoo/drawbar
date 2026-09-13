@@ -55,18 +55,18 @@ pub async fn drive(
     args: &[String],
     dir: &Path,
 ) -> Result<Option<Produced>> {
-    match verb {
-        "status" if class.is_none() => op::inventory(t).await.map(|_| None),
-        "recover" => op::recover(t).await.map(|_| None),
-        "geometry" => {
+    match (verb, class) {
+        ("status", None) => op::inventory(t).await.map(|_| None),
+        ("recover", None) => op::recover(t).await.map(|_| None),
+        ("geometry", None) => {
             let read = session!(t, ObjectClass::Program, |s| Geometry::read(&mut s))?;
             *geometry = Some(read);
             Ok(None)
         }
-        "get" | "read" | "get-body" | "read-body" => {
+        ("get" | "read" | "get-body" | "read-body", _) => {
             drive_read(t, need_class(class)?, verb, args, dir).await
         }
-        "put" | "move" | "duplicate" | "rename" | "delete" => {
+        ("put" | "move" | "duplicate" | "rename" | "delete", _) => {
             drive_write(t, geometry, need_class(class)?, verb, args, dir).await
         }
         _ => drive_query(t, geometry, class, verb, args).await,
@@ -77,7 +77,7 @@ pub async fn drive(
 async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Result<Vec<Bank>> {
     match geometry {
         Some(read) => read.banks(class).map(<[Bank]>::to_vec),
-        None => committed_geometry()
+        None => crate::geometry::committed()
             .await?
             .banks(class)
             .map(<[Bank]>::to_vec),
@@ -87,14 +87,8 @@ async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Resu
 async fn declared_unit(geometry: &Option<Geometry>, class: ObjectClass) -> Result<AllocationUnit> {
     match geometry {
         Some(read) => read.allocation_unit(class),
-        None => committed_geometry().await?.allocation_unit(class),
+        None => crate::geometry::committed().await?.allocation_unit(class),
     }
-}
-
-/// The committed recording of `device geometry`, replayed on a transport of its own.
-async fn committed_geometry() -> Result<Geometry> {
-    let mut t = ReplayTransport::new(crate::scripts::fixture("device/geometry.script").steps());
-    session!(&mut t, ObjectClass::Program, |s| Geometry::read(&mut s))
 }
 
 async fn drive_query(
@@ -140,11 +134,7 @@ async fn drive_query(
             let banks = declared_banks(geometry, class).await?;
             session!(t, class, |s| async {
                 for at in op::occupied_slots(&mut s, &banks).await? {
-                    // The cursor's starting address may be empty; status 1 remains in step.
-                    match op::info(&mut s, at).await {
-                        Ok(_) | Err(Error::DeviceStatus(1)) => {}
-                        Err(e) => return Err(e),
-                    }
+                    op::info(&mut s, at).await?;
                 }
                 Ok(())
             })

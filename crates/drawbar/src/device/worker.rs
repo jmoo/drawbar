@@ -99,7 +99,10 @@ fn spoil(gone: &mut bool, at: Option<Location>) -> impl FnOnce(Error) -> String 
 /// Run one command to completion.
 ///
 /// Emits exactly one [`DeviceEvent::Started`] and one [`DeviceEvent::Finished`], so the
-/// UI's in-flight marker cannot be left set by an operation that failed halfway.
+/// UI's in-flight marker cannot be left set by an operation that failed halfway, and at
+/// most one [`DeviceEvent::OpOk`] or [`DeviceEvent::OpFailed`]: each is one outcome of
+/// one command, and a second would be put against a second entry of the send queue.
+/// Steps within a command speak through [`DeviceEvent::Note`].
 pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Emit) -> Flow {
     if matches!(cmd, DeviceCmd::Disconnect) {
         return Flow::Released;
@@ -184,13 +187,8 @@ async fn execute<T: Transport>(
             Ok(Some(note))
         }
 
-        DeviceCmd::Get {
-            class,
-            at,
-            body,
-            why,
-        } => {
-            let (info, bytes) = match read_object(device, class, at, body).await {
+        DeviceCmd::Get { class, at, why } => {
+            let (info, bytes) = match read_object(device, class, at).await {
                 Ok(read) => read,
                 // Status 1 is a vacant slot, not a failure.
                 Err(Error::DeviceStatus(1)) => {
@@ -206,7 +204,7 @@ async fn execute<T: Transport>(
                 bytes.len()
             );
             emit.send(DeviceEvent::Got {
-                name: entity_name(&info, body),
+                name: entity_name(&info),
                 origin: Origin::Device { class, at },
                 bytes,
                 why,
@@ -336,7 +334,7 @@ async fn put<T: Transport>(
         (Err(e), None) => Err(spoil(gone, Some(at))(e)),
         // Restore the occupant before reporting the original error.
         (Err(e), Some(backup)) => {
-            emit.send(DeviceEvent::OpFailed(format!(
+            emit.send(DeviceEvent::Note(format!(
                 "the write failed and {}; putting the original back",
                 aftermath(class, at)
             )));
@@ -487,7 +485,7 @@ async fn batch<T: Transport>(
                 match put(s, unit, item.at, &item.name, item.bytes.clone(), emit, gone).await? {
                     Ok(note) => {
                         *done += 1;
-                        emit.send(DeviceEvent::OpOk(note));
+                        emit.send(DeviceEvent::Note(note));
                         emit.send(DeviceEvent::Sent {
                             id: item.id,
                             class,
@@ -548,7 +546,7 @@ async fn scan_bank<T: Transport>(
         .await?
         .banks(class)?
         .iter()
-        .find(|held| held.index + 1 == bank)
+        .find(|held| super::user_bank(held.index) == Some(bank))
         .ok_or_else(|| {
             Error::InvalidArgument(format!(
                 "the instrument declares no bank {bank} in {}",
@@ -740,6 +738,10 @@ async fn occupied<T: Transport, C>(
 }
 
 /// Shape cursor hits to the declared capacity, or through an open bank's last item.
+///
+/// A hit outside a bounded bank is [`Error::Enumeration`]: the instrument answered about
+/// a slot it says it does not have, and widening the bank to fit would report slots no
+/// later read could reach.
 fn shape(
     found: &[(Location, ProgramInfo)],
     planned: &Planned,
@@ -748,8 +750,19 @@ fn shape(
     let bank = planned.bank.get() - 1;
     let mine: Vec<&(Location, ProgramInfo)> =
         found.iter().filter(|(at, _)| at.bank == bank).collect();
-    let past = mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0);
-    let len = planned.slots.unwrap_or(past).max(past);
+    let len = match planned.slots {
+        Some(slots) => {
+            if let Some((answered, _)) = mine.iter().find(|(at, _)| at.slot >= slots) {
+                return Err(Error::Enumeration {
+                    bank,
+                    answered: *answered,
+                    slots,
+                });
+            }
+            slots
+        }
+        None => mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0),
+    };
     if len > limit {
         return Err(Error::ScanLimit {
             bank,
@@ -823,20 +836,16 @@ async fn walk_open_bank<T: Transport, C>(
     })
 }
 
-/// Read metadata plus either the wire body or a complete CBIN file.
+/// Read a slot's metadata and a complete CBIN file of what it holds.
 async fn read_object<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
-    body: bool,
 ) -> Result<(ProgramInfo, Vec<u8>), Error> {
     device
         .read(class, async |s| {
             let info = op::info(s, at).await?;
-            let file = match body {
-                true => op::read_body(s, at).await?,
-                false => op::read_program(s, at).await?,
-            };
+            let file = op::read_program(s, at).await?;
             Ok((info, file))
         })
         .await
@@ -929,17 +938,11 @@ fn unix_now() -> Result<u32, Error> {
     Ok(seconds as u32)
 }
 
-/// Name a fetched entity after its slot; raw body dumps receive a `.body` suffix.
-fn entity_name(info: &ProgramInfo, body: bool) -> String {
+/// Name a fetched entity after its slot.
+fn entity_name(info: &ProgramInfo) -> String {
     let name = info.name.trim();
-    let name = match name.is_empty() {
-        true => "unnamed",
-        false => name,
-    };
-    // A `--body` dump is a fragment of a file, not one; the suffix keeps it from being
-    // handed back in as a whole object.
-    match body {
-        true => format!("{name}.body"),
+    match name.is_empty() {
+        true => "unnamed".to_string(),
         false => name.to_string(),
     }
 }
@@ -988,8 +991,7 @@ mod tests {
             crc32: Some(0),
             name: "Africa Split".into(),
         };
-        assert_eq!(entity_name(&info, false), "Africa Split");
-        assert_eq!(entity_name(&info, true), "Africa Split.body");
+        assert_eq!(entity_name(&info), "Africa Split");
     }
 
     #[test]
@@ -1034,12 +1036,49 @@ mod tests {
             crc32: None,
             name: "  ".into(),
         };
-        assert_eq!(entity_name(&info, false), "unnamed");
+        assert_eq!(entity_name(&info), "unnamed");
     }
 
     #[test]
     fn a_spaced_name_survives_to_the_write() {
         assert_eq!(slot_label("Big strings").as_deref(), Some("Big strings"));
+    }
+
+    /// A cursor hit outside a bounded bank is refused rather than widening it: the bank
+    /// would then report slots the instrument says it does not have. An unbounded bank
+    /// has no capacity to contradict, so it is shaped through its last item.
+    #[test]
+    fn a_cursor_hit_past_a_declared_capacity_is_refused() {
+        let at = Location { bank: 0, slot: 7 };
+        let found = [(
+            at,
+            ProgramInfo {
+                location: at,
+                body_len: 121,
+                format: "ne5p".into(),
+                version: 4,
+                crc32: None,
+                name: "Africa Split".into(),
+            },
+        )];
+        let planned = |slots| Planned {
+            bank: NonZeroU32::new(1).expect("bank 1"),
+            slots,
+        };
+
+        match shape(&found, &planned(Some(4)), MOST_OCCUPIED) {
+            Err(Error::Enumeration {
+                bank,
+                answered,
+                slots,
+            }) => assert_eq!((bank, answered, slots), (0, at, 4)),
+            other => panic!(
+                "a hit at 1:8 in a bank of four: {:?}",
+                other.map(|slots| slots.len())
+            ),
+        }
+        let open = shape(&found, &planned(None), MOST_OCCUPIED).expect("an open bank takes it");
+        assert_eq!(open.len(), 8, "through the last item and no further");
     }
 }
 
@@ -1067,6 +1106,7 @@ mod wire_tests {
         enumerates: bool,
         focus: Option<Location>,
         refuses_first_write: bool,
+        refuses_every_write: bool,
     }
 
     /// The Electro 5's own division, which is what an unremarkable Puppet stands for.
@@ -1095,6 +1135,7 @@ mod wire_tests {
                 enumerates: true,
                 focus: None,
                 refuses_first_write: false,
+                refuses_every_write: false,
             }
         }
 
@@ -1138,6 +1179,13 @@ mod wire_tests {
             self
         }
 
+        /// Refuses the restore as well, which is what leaves an occupant with nowhere
+        /// to go but the local list.
+        fn refusing_every_write(mut self) -> Puppet {
+            self.refuses_every_write = true;
+            self
+        }
+
         fn holds(&self, at: Location) -> Option<&'static str> {
             self.filled
                 .as_ref()?
@@ -1156,6 +1204,7 @@ mod wire_tests {
                 slot: u32::from_be_bytes(msg.args[4..8].try_into().unwrap()),
             };
             match msg.command {
+                cmd::BEGIN_WRITE if self.refuses_every_write => Some((4, Vec::new())),
                 cmd::BEGIN_WRITE
                     if self.refuses_first_write
                         && !self.heard.iter().any(|m| m.command == cmd::BEGIN_WRITE) =>
@@ -1163,8 +1212,9 @@ mod wire_tests {
                     Some((4, Vec::new()))
                 }
                 cmd::PARTITIONS => Some((0, partition_table())),
-                // Five words, as the Electro 5 answers: `count, free, used, dirty,
-                // spare`. A slot class parks nothing, so the last two are zero.
+                // Five words in the order `nord_usb::wire::Status` decodes them, whose
+                // doc carries both this shape and the zero `dirty`/`spare` a class
+                // outside the libraries reports.
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
                     let total: u32 = self.banks.iter().map(|(_, slots)| slots).sum();
@@ -1191,8 +1241,9 @@ mod wire_tests {
                 cmd::NEXT_SLOT if !self.enumerates => Some((op::ENUMERATION_DISABLED, Vec::new())),
                 cmd::NEXT_SLOT => {
                     let from = at();
-                    // Third word is the direction; the hardware refuses its absence
-                    // (`0x11`) after a write, so the puppet insists on it too.
+                    // Third word is the direction, which `op::next_occupied` always
+                    // sends because the instrument answers its absence with
+                    // `op::ENUMERATION_DISABLED`.
                     let Some(dir) = msg.args.get(8..12) else {
                         return Some((op::ENUMERATION_DISABLED, Vec::new()));
                     };
@@ -1229,6 +1280,7 @@ mod wire_tests {
                 }
                 cmd::INFO => {
                     let at = at();
+                    // Confirmed on hardware.
                     // Status 3 marks the address-space boundary for geometry-free walks.
                     let capacity = self.banks.get(at.bank as usize).map(|(_, slots)| *slots);
                     if capacity.is_none_or(|slots| at.slot >= slots) {
@@ -1378,7 +1430,6 @@ mod wire_tests {
             DeviceCmd::Get {
                 class: ObjectClass::Program,
                 at,
-                body: false,
                 why: Purpose::Compare,
             },
         );
@@ -1435,7 +1486,7 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 3 };
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_the_first_write();
-        drive(
+        let (_, events) = drive(
             &mut device,
             DeviceCmd::Put {
                 id: 1,
@@ -1447,6 +1498,87 @@ mod wire_tests {
         );
 
         assert_eq!(written_names(&device), ["Africa-Split", "Squabble B"]);
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert_eq!(
+            failures(&said).len(),
+            1,
+            "one refusal is one failure: {:?}",
+            failures(&said)
+        );
+    }
+
+    /// A write that fails and cannot be put back is still one failure, and the occupant
+    /// it displaced reaches the local list once, under the name its bytes are filed as.
+    #[test]
+    fn an_occupant_that_cannot_be_restored_is_rescued_once() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device =
+            Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_every_write();
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                bytes: a_program(),
+            },
+        );
+        assert!(flow == Flow::Continue, "it said no, it did not go away");
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let rescued: Vec<&str> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Rescued { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rescued, ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(
+            failures(&said).len(),
+            1,
+            "one refusal is one failure: {:?}",
+            failures(&said)
+        );
+    }
+
+    /// A batch lands once. Every item reports its own line to the log, but the sentence
+    /// that says the send is done belongs to the whole of it.
+    #[test]
+    fn a_batch_succeeds_once_however_many_items_it_carries() {
+        let bytes = a_program();
+        let item = |slot, name: &str| Outgoing {
+            id: slot as u64,
+            at: Location { bank: 6, slot },
+            name: name.into(),
+            bytes: bytes.clone(),
+        };
+        let mut device = Puppet::new(1);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::SendAll {
+                class: ObjectClass::Program,
+                items: vec![item(3, "Africa-Split.ne5p"), item(4, "Squabble-B.ne5p")],
+            },
+        );
+        assert!(flow == Flow::Continue);
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let landed: Vec<&str> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::OpOk(note) => Some(note.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert!(landed[0].contains("wrote 2 of 2"), "{}", landed[0]);
+        let sent = said
+            .iter()
+            .filter(|event| matches!(event, DeviceEvent::Sent { .. }))
+            .count();
+        assert_eq!(sent, 2, "each item is owed no longer");
     }
 
     #[test]
@@ -1616,15 +1748,21 @@ mod wire_tests {
             .collect()
     }
 
-    fn refused(events: Receiver<DeviceEvent>) -> String {
-        events
-            .try_iter()
+    /// The failures reported for one command. `run` emits one; a second means a step
+    /// inside the command reported its own, which the send queue would put against the
+    /// next entry waiting.
+    fn failures(said: &[DeviceEvent]) -> Vec<&str> {
+        said.iter()
             .filter_map(|event| match event {
-                DeviceEvent::OpFailed(why) => Some(why),
+                DeviceEvent::OpFailed(why) => Some(why.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join(" | ")
+            .collect()
+    }
+
+    fn refused(events: Receiver<DeviceEvent>) -> String {
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        failures(&said).join(" | ")
     }
 
     fn counted(device: &Puppet, command: u32) -> usize {

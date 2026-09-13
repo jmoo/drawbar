@@ -1,9 +1,11 @@
-//! The read-only verbs (`get`, `info`, `deps`) pointed at a file instead of a slot.
+//! The read-only verbs (`get`, `info`, `deps`) pointed at a file instead of a slot,
+//! and what every verb that checks a list of them shares.
 //!
 //! Same verbs, no instrument: the object is the file's bytes. What a file does not
 //! carry — the slot name, the names behind dependency ids — is reported as living on
 //! the instrument rather than guessed at.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use nord_format::cbin::{Generation, Header};
@@ -27,15 +29,25 @@ pub(crate) fn tag(class: ObjectClass) -> Option<&'static str> {
     }
 }
 
+/// Every class a noun addresses, so a tag reads back to the command that takes it.
+const NAMED: [ObjectClass; 6] = [
+    ObjectClass::Piano,
+    ObjectClass::Sample,
+    ObjectClass::Program,
+    ObjectClass::SetList,
+    ObjectClass::Live,
+    ObjectClass::Settings,
+];
+
 /// The noun that reads a tag's files, for steering a mismatch to the right command.
-fn noun(format: &str) -> Option<&'static str> {
-    match format {
-        "ne5p" => Some("nord program"),
-        "ne5t" => Some("nord setlist"),
-        "ne5l" => Some("nord live"),
-        "nsmp" => Some("nord sample"),
-        _ => None,
-    }
+///
+/// [`tag`] read backwards: a class that names its files steers to its own noun, so a
+/// format cannot be claimed by a command that does not read it.
+pub(crate) fn noun(format: &str) -> Option<String> {
+    NAMED
+        .into_iter()
+        .find(|&class| tag(class) == Some(format))
+        .map(crate::slot::noun)
 }
 
 /// Refuse a file whose format tag belongs to another class's noun: summarizing a set
@@ -44,7 +56,7 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     match tag(class) {
         Some(want) if want != format => {
             let steer = match noun(format) {
-                Some(n) => format!(" — try `{n}`"),
+                Some(n) => format!(" — try `nord {n}`"),
                 None => String::new(),
             };
             Err(format!(
@@ -57,22 +69,38 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     }
 }
 
+/// Where a CBIN file of this generation keeps its checksum.
+///
+/// ⚠️ A type-0 file holds body data at `0x18`, where a type-1 file holds its crc32, so
+/// the range follows the generation: read at the wrong one, a program's panel bytes
+/// report as a checksum and a real edit annotates as bookkeeping.
+///
+/// This belongs in `cbin::Generation`, beside the rest of the layout it describes.
+pub(crate) fn checksum_range(generation: Generation, len: usize) -> Option<Range<usize>> {
+    match generation {
+        Generation::V0 => len.checked_sub(2).map(|at| at..len),
+        Generation::V1 => (len >= 0x1c).then_some(0x18..0x1c),
+    }
+}
+
 /// The stored checksum, with the label its generation spells it under.
 ///
-/// The one header fact the parsed [`Header`] does not carry: a type-1 file holds a
-/// crc32 over the body at 0x18, a type-0 file a crc16 over the whole file in its last
-/// two bytes, so the value is read from the bytes either way. `unwrap` verified it, so
-/// this reports what it checked.
+/// The one header fact the parsed [`Header`] does not carry: the value lives in the
+/// bytes, at [`checksum_range`]. `unwrap` verified it, so this reports what it checked.
 fn crc(header: &Header, bytes: &[u8]) -> (&'static str, String) {
-    match header.generation {
-        Generation::V0 => {
-            let crc = u16::from_le_bytes(bytes[bytes.len() - 2..].try_into().unwrap());
-            ("crc16:", format!("{crc:#06x}"))
-        }
-        Generation::V1 => {
-            let crc = u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap());
-            ("crc32:", format!("{crc:#010x}"))
-        }
+    let stored = checksum_range(header.generation, bytes.len()).and_then(|at| bytes.get(at));
+    match (header.generation, stored) {
+        (Generation::V0, Some(b)) => (
+            "crc16:",
+            format!("{:#06x}", u16::from_le_bytes(b.try_into().unwrap())),
+        ),
+        (Generation::V1, Some(b)) => (
+            "crc32:",
+            format!("{:#010x}", u32::from_le_bytes(b.try_into().unwrap())),
+        ),
+        // The header parsed, so the file is longer than either range; a file too short
+        // to hold one says so rather than reporting a number it did not read.
+        _ => ("crc:", "not in these bytes".to_string()),
     }
 }
 
@@ -92,7 +120,7 @@ pub fn get(
     match (body, out) {
         (true, Some(out)) => {
             let wire_body = &read.body.0;
-            std::fs::write(&out, wire_body).map_err(|e| format!("{}: {e}", out.display()))?;
+            crate::edit::replace_file(&out, wire_body)?;
             ui.note(format!(
                 "unwrapped the {format} body of {} -> {} ({} bytes)",
                 path.display(),
@@ -186,8 +214,8 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     // The two bodies are byte-identical but sit in different slot spaces, so the ids
     // are pulled out per variant rather than through one reference to the body.
     let (piano, sample) = match &entity {
-        Entity::Program(Program::Electro5(p)) => (p.piano_panel.id, p.sample_panel.id),
-        Entity::Live(Live::Electro5(l)) => (l.piano_panel.id, l.sample_panel.id),
+        Entity::Program(Program::Electro5(p)) => (p.piano_panel.id.id(), p.sample_panel.id.id()),
+        Entity::Live(Live::Electro5(l)) => (l.piano_panel.id.id(), l.sample_panel.id.id()),
         Entity::Song(_) => {
             return Err("a set list names program slots, not library objects; \
                  `nord setlist deps BANK:SLOT` asks the instrument, which resolves them"
@@ -213,7 +241,11 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     }
     ui.out(ui.dim(format!("{:<8} id", "class")));
     for (class, id) in &refs {
-        ui.out(format!("{:<8} {id:08x}", class.label()));
+        ui.out(format!(
+            "{:<8} {}",
+            class.label(),
+            crate::summary::dep_id(*id)
+        ));
     }
     ui.note(ui.dim("(ids only — the names live on the instrument; `deps BANK:SLOT` shows them)"));
     Ok(())
@@ -222,6 +254,47 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
 /// The format tag a decoded entity would carry on disk.
 pub(crate) fn entity_tag(entity: &Entity) -> &'static str {
     entity.identity().format
+}
+
+/// Where two renderings of one object first disagree.
+///
+/// A round trip that comes back different is a field the model does not account for,
+/// and in a bit-packed body the offset usually names that field on its own.
+///
+/// ⚠️ Only reached for two byte strings that differ, so one that is a prefix of the
+/// other differs in its length and nowhere else.
+pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> String {
+    match a.iter().zip(b).position(|(x, y)| x != y) {
+        Some(at) => format!("{at:#x}"),
+        None => "the end (the lengths differ)".to_string(),
+    }
+}
+
+/// Check each target, print its verdict line, and fail with how many did not pass.
+///
+/// The three `verify` verbs differ in what they check and in how a verdict reads; that
+/// a run which lost a target says so, and says how many of how many, is one contract —
+/// and the exit status is what a script reads.
+pub(crate) fn check_each<T>(
+    ui: &Ui,
+    targets: &[T],
+    what: &str,
+    mut check: impl FnMut(&T) -> Result<String, String>,
+) -> Result<(), String> {
+    let mut failed = 0usize;
+    for target in targets {
+        match check(target) {
+            Ok(line) => ui.out(line),
+            Err(line) => {
+                failed += 1;
+                ui.out(line);
+            }
+        }
+    }
+    match failed {
+        0 => Ok(()),
+        n => Err(format!("{n} of {} {what}", targets.len())),
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +336,34 @@ mod tests {
         assert_eq!(value, format!("{stored:#06x}"));
         // 0x18 is the body's first byte here — the version echo, not a checksum.
         assert_eq!(u16::from_be_bytes([bytes[0x18], bytes[0x19]]), 4);
+    }
+
+    /// The offset is what names the field a round trip lost, so it has to be the first
+    /// byte that moved; bytes that only ran out have no offset to give.
+    #[test]
+    fn a_round_trip_that_differs_says_where_it_first_did() {
+        assert_eq!(first_difference(b"abcd", b"abed"), "0x2");
+        assert_eq!(first_difference(b"Xbcd", b"abcd"), "0x0");
+        let ran_out = "the end (the lengths differ)";
+        assert_eq!(first_difference(b"abcd", b"abcde"), ran_out);
+        assert_eq!(first_difference(b"", b"a"), ran_out);
+    }
+
+    /// A run that lost some of its targets exits with that count, so a script can tell
+    /// it from one that checked out.
+    #[test]
+    fn a_check_of_many_targets_counts_what_failed() {
+        let ui = Ui::piped();
+        let verdict = |target: &&str| match *target {
+            "bad" => Err("DIFFER bad".to_string()),
+            ok => Ok(format!("ok {ok}")),
+        };
+        let what = "file(s) did not round-trip";
+        assert!(check_each(&ui, &["a", "b"], what, verdict).is_ok());
+        assert_eq!(
+            check_each(&ui, &["a", "bad", "bad"], what, verdict).unwrap_err(),
+            "2 of 3 file(s) did not round-trip"
+        );
     }
 
     /// The mismatch error must steer to the noun that does read the file.

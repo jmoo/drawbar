@@ -33,22 +33,26 @@ pub struct Queued {
     pub replaces: Occupancy,
     /// How what is waiting differs from what the slot holds.
     pub diff: Diff,
-    /// The occupant's own bytes, once a compare read has delivered them.
-    ///
-    /// Kept so that an edit made after this entry was queued is diffed against them
-    /// again rather than by reading the slot a second time.
-    there: Option<Vec<u8>>,
+    /// How far the compare read of [`Queued::at`] has got.
+    read: Read,
     /// The stamp of the asset's bytes [`Queued::diff`] was made from, so an edit under a
     /// waiting entry is noticed without comparing anything.
     stamp: u64,
-    /// Whether the read of [`Queued::at`] has been asked for.
-    ///
-    /// One read per entry per destination. A second queueing of the same asset for the
-    /// same slot, and an edit made under it while the answer is still on its way, both
-    /// want the answer already coming.
-    asked: bool,
-    /// Why the last attempt to write it stopped. Cleared when it is queued again.
+    /// Why the last attempt to write it stopped. Cleared when it is queued again, and
+    /// when [`refit`] finds the instrument attached now takes it.
     pub failure: Option<String>,
+}
+
+/// How far the compare read of the slot an entry is waiting for has got.
+enum Read {
+    /// Nothing to diff against and nothing on its way: nobody has asked, or the read
+    /// found the slot empty and there is nothing in it to compare.
+    Unasked,
+    /// Asked, and still out.
+    Asked,
+    /// The occupant's own bytes, kept so that an edit made after this entry was queued is
+    /// diffed against them again rather than by reading the slot a second time.
+    Answered(Vec<u8>),
 }
 
 /// How what is waiting differs from what the slot holds.
@@ -183,7 +187,6 @@ fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Loc
         DeviceCmd::Get {
             class,
             at,
-            body: false,
             why: Purpose::Compare,
         },
         log,
@@ -245,6 +248,10 @@ pub fn enqueue(
 /// An edit queues nothing; saving one that stands for a slot does. This is the gap
 /// between the two — what a send would walk straight past — and it is the same
 /// comparison [`crate::library::Where::Both`] shows in the table.
+///
+/// ⚠️ Over an asset's link, which is the one slot it stands on. An asset the attached
+/// instrument refuses has none however well its origin matches, and counting one would
+/// offer a send that [`enqueue`] refuses on every click.
 pub fn changed(
     workspace: &Workspace,
     device: &DeviceState,
@@ -254,7 +261,7 @@ pub fn changed(
         .listed()
         .filter(|entity| !queue.holds(entity.id))
         .filter_map(|entity| {
-            let (class, at) = entity.spot()?;
+            let (class, at) = entity.link?;
             let info = device.slot(class, at).flatten()?;
             (crate::library::agrees(entity, class, info, queue) == Some(false))
                 .then_some((entity.id, class, at))
@@ -277,7 +284,8 @@ impl Behind {
             queued: queue.len(),
             changed: changed(workspace, device, queue).len(),
             unsaved: workspace
-                .documents()
+                .entities()
+                .iter()
                 .filter(|entity| entity.is_unsaved())
                 .count(),
         }
@@ -339,6 +347,28 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
     }
 }
 
+/// Take back everything the instrument that went away said about the slots being waited
+/// for, and ask the one attached now.
+///
+/// ⚠️ A queue outlives a disconnection and the reads out over it do not. An entry left
+/// holding the answer it was still waiting for reads its slot for the rest of the
+/// session, and what the last instrument held in a slot is no claim about this one.
+pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+    for held in &mut queue.list {
+        let Some(entity) = workspace.get(held.id) else {
+            continue;
+        };
+        held.replaces = Occupancy::of(&device.state, held.class, held.at);
+        held.read = Read::Unasked;
+        held.diff = verdict(entity, &held.replaces);
+    }
+    for id in queue.ids() {
+        if let Some((class, at)) = queue.unread(id) {
+            read_occupant(device, log, class, at);
+        }
+    }
+}
+
 /// Queue every asset the instrument no longer agrees with, each for its own slot.
 pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for (id, class, at) in changed(workspace, &device.state, queue) {
@@ -378,9 +408,9 @@ pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log
             continue;
         }
         held.stamp = entity.stamp;
-        held.diff = match &held.there {
-            Some(there) => compare(&entity.bytes, there),
-            None => verdict(entity, &held.replaces),
+        held.diff = match &held.read {
+            Read::Answered(there) => compare(&entity.bytes, there),
+            Read::Unasked | Read::Asked => verdict(entity, &held.replaces),
         };
         moved.push(held.id);
     }
@@ -455,9 +485,8 @@ impl Queue {
             at,
             diff: verdict(entity, &replaces),
             replaces,
-            there: None,
+            read: Read::Unasked,
             stamp: entity.stamp,
-            asked: false,
             failure: None,
         });
         self.picked = Some(entity.id);
@@ -475,11 +504,16 @@ impl Queue {
     /// instrument hears the question once.
     fn unread(&mut self, id: u64) -> Option<(ObjectClass, Location)> {
         let held = self.list.iter_mut().find(|held| held.id == id)?;
-        let owed = matches!(held.diff, Diff::Pending) && held.there.is_none() && !held.asked;
-        owed.then(|| {
-            held.asked = true;
-            (held.class, held.at)
-        })
+        if !matches!(held.diff, Diff::Pending) {
+            return None;
+        }
+        match held.read {
+            Read::Unasked => {
+                held.read = Read::Asked;
+                Some((held.class, held.at))
+            }
+            Read::Asked | Read::Answered(_) => None,
+        }
     }
 
     /// The occupant of a slot something is waiting for, read at last.
@@ -503,7 +537,7 @@ impl Queue {
         let Some(entity) = workspace.get(held.id) else {
             return;
         };
-        held.there = Some(there.to_vec());
+        held.read = Read::Answered(there.to_vec());
         held.stamp = entity.stamp;
         held.diff = compare(&entity.bytes, there);
     }
@@ -514,7 +548,7 @@ impl Queue {
             return;
         };
         held.replaces = Occupancy::Vacant;
-        held.there = None;
+        held.read = Read::Unasked;
         held.diff = Diff::Empty;
     }
 
@@ -1441,6 +1475,7 @@ mod tests {
         }
         // Edited and not saved: the slot still holds what this was saved as.
         edit(&mut workspace, unsaved, &mut log);
+        device.relink(&mut workspace);
 
         assert_eq!(
             counts(&workspace, &queue),
@@ -1499,6 +1534,7 @@ mod tests {
             edit(&mut workspace, id, &mut log);
             workspace.mark_saved(id);
         }
+        device.relink(&mut workspace);
 
         queue_changed(&workspace, &mut device, &mut queue, &mut log);
 
@@ -1987,6 +2023,53 @@ mod tests {
 
         assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
         assert_eq!(device.queued().len(), 1, "the answer was already coming");
+    }
+
+    /// ⚠️ The queue outlives an instrument and the reads out over it do not. An entry
+    /// still holding the answer it was waiting for would read its slot for the rest of
+    /// the session, and one holding what the last instrument's slot held would say this
+    /// instrument holds it.
+    #[test]
+    fn an_entry_waiting_on_a_read_when_the_instrument_went_away_is_asked_again() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, mut tabs) = attached(&workspace);
+        let class = ObjectClass::Program;
+        let mut queue = Queue::default();
+        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
+        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
+
+        device.pretend(DeviceEvent::Disconnected { lost: true });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert!(
+            device.queued().is_empty(),
+            "the read went with the connection"
+        );
+
+        device.pretend_attached();
+        device.pretend(DeviceEvent::Partitions(Vec::new()));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+        let held = queue.entry(id).expect("it is still waiting");
+        assert!(matches!(held.diff, Diff::Pending));
+        assert!(
+            held.replaces.occupant().is_none(),
+            "the last instrument's occupant is no claim about this one"
+        );
+        assert_eq!(
+            asked(&device),
+            (class, at(0), Purpose::Compare),
+            "the answer that never came is asked for again"
+        );
     }
 
     /// A bank no walk has reached says nothing about its slots, so an entry onto one is

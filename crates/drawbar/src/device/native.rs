@@ -5,19 +5,26 @@
 //! command to completion and then waits is the whole scheduler.
 
 use std::sync::mpsc::{self, Sender};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use nord_usb::device::Device;
-use nord_usb::transport::{usb, UsbTransport};
+use nord_usb::transport::{usb, UsbTransport, CLASS_VENDOR_SPECIFIC};
 
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
+
+/// How often [`Link::join`] looks at a worker it is waiting for.
+const SETTLE: Duration = Duration::from_millis(10);
 
 pub struct Link {
     ctx: egui::Context,
     events: Sender<DeviceEvent>,
     /// `None` while disconnected. Dropping it is what ends the worker thread.
     commands: Option<Sender<DeviceCmd>>,
+    /// The running worker, kept so the way out can wait for the session it is inside.
+    worker: Option<JoinHandle<()>>,
 }
 
 impl Link {
@@ -26,6 +33,7 @@ impl Link {
             ctx,
             events,
             commands: None,
+            worker: None,
         }
     }
 
@@ -34,7 +42,7 @@ impl Link {
         self.commands = Some(tx);
         let emit = Emit::new(self.events.clone(), self.ctx.clone());
 
-        std::thread::spawn(move || {
+        self.worker = Some(std::thread::spawn(move || {
             let mut device = match open() {
                 Ok((card, device)) => {
                     emit.send(DeviceEvent::Connected(card));
@@ -45,8 +53,6 @@ impl Link {
                     return;
                 }
             };
-            // Which classes the instrument has is the first thing read: nothing above
-            // asks for one before the answer arrives.
             let mut flow = nord_usb::block_on(worker::announce(&mut device, &emit));
             // `recv` ends when the UI drops its sender, so a disconnect that races the
             // thread still stops it.
@@ -65,7 +71,7 @@ impl Link {
             emit.send(DeviceEvent::Disconnected {
                 lost: flow == Flow::Lost,
             });
-        });
+        }));
     }
 
     pub fn disconnect(&mut self) {
@@ -73,6 +79,24 @@ impl Link {
         // closed channel ends the loop even if it does not.
         if let Some(tx) = self.commands.take() {
             let _ = tx.send(DeviceCmd::Disconnect);
+        }
+    }
+
+    /// Wait for the worker to finish what it is doing, up to `wait`.
+    ///
+    /// ⚠️ Bounded, and the handle is dropped either way: an instrument that has stopped
+    /// answering must not hold the window open. The session is closed by the worker
+    /// itself, so this waits for it rather than doing anything to the transport.
+    pub fn join(&mut self, wait: Duration) {
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        let since = Instant::now();
+        while !worker.is_finished() && since.elapsed() < wait {
+            std::thread::sleep(SETTLE);
+        }
+        if worker.is_finished() {
+            let _ = worker.join();
         }
     }
 
@@ -85,9 +109,8 @@ impl Link {
 
 /// The first attached Clavia, with the descriptor facts the card shows.
 ///
-/// The vendor-interface check happens here rather than inside the first transaction:
-/// a Clavia this tool cannot drive should say so at connect time, not fail somewhere
-/// inside a session.
+/// The vendor-interface search is [`UsbTransport::open`]'s own, run again here for the
+/// interface number the card reports; the transport is what claims it.
 fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     let devices = usb::list().map_err(|e| e.to_string())?;
     let info = devices
@@ -95,7 +118,10 @@ fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
         .next()
         .ok_or("no Clavia device found — is the instrument awake and on a data cable?")?;
 
-    let Some(interface) = info.interfaces().find(|i| i.class() == 0xff) else {
+    let Some(interface) = info
+        .interfaces()
+        .find(|i| i.class() == CLASS_VENDOR_SPECIFIC)
+    else {
         return Err(format!(
             "{} exposes no vendor interface; this tool cannot drive it",
             info.product_string().unwrap_or("the attached device"),
@@ -125,4 +151,27 @@ fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     };
     let device = Device::new(transport);
     Ok((card, device))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⚠️ The exit waits for the worker to close its session, but only so long: an
+    /// instrument that has stopped answering must not hold the window open.
+    #[test]
+    fn waiting_for_the_worker_is_bounded() {
+        let mut link = Link::new(egui::Context::default(), mpsc::channel().0);
+        let (stop, held) = mpsc::channel::<()>();
+        link.worker = Some(std::thread::spawn(move || {
+            let _ = held.recv();
+        }));
+
+        let wait = Duration::from_millis(50);
+        let started = Instant::now();
+        link.join(wait);
+        assert!(started.elapsed() < wait * 10, "{:?}", started.elapsed());
+        assert!(link.worker.is_none(), "and the handle is let go either way");
+        drop(stop);
+    }
 }

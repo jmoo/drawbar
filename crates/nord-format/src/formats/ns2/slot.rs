@@ -10,9 +10,9 @@ use crate::components::{
     Bipolar, ClockDivision, Drawbar, DrawbarMorph, Effect1Type, Effect2Type, EqBand, Frequency,
     KbZone3, Level, MorphOf, MorphTarget, PianoRef, Rate, SampleRef, Selector, Time, WideSelector,
 };
-use crate::types::RangedU16;
+use crate::types::{RangedU16, RangedU8};
 
-/// The slot's 403 parameters. Bits are MSB-first from slot byte 0,
+/// The slot's parameters. Bits are MSB-first from slot byte 0,
 /// which is body byte 0x17 for A and 0x110 for B.
 #[nord_bits_derive::bitbody(249)]
 pub struct Slot {
@@ -43,7 +43,7 @@ pub struct Slot {
     #[bits(65..=71)]
     pub piano_volume: Level,
     #[bits(72..=74)]
-    pub piano_split_zones: KbZone3,
+    pub piano_kb_zone: KbZone3,
     #[bits(75..=78)]
     pub piano_octave_shift: OctaveShift,
     #[bits(79..=79)]
@@ -575,7 +575,7 @@ pub struct Slot {
     #[bits(1225..=1225)]
     pub synth_lfo_master_clock: bool,
     #[bits(1226..=1229)]
-    pub synth_lfo_rate_clock_divisor: Selector<4>,
+    pub synth_lfo_rate_clock_divisor: ClockDivision,
     #[bits(1230..=1230)]
     pub synth_kb_hold: bool,
     #[bits(1248..=1254)]
@@ -609,11 +609,11 @@ pub struct Slot {
     #[bits(1345..=1351)]
     pub synth_shape_detune: Level,
     #[bits(1352..=1353)]
-    pub synth_skip_sample_attack_wheel: Selector<2>,
+    pub synth_skip_sample_attack_wheel: MorphOf<2>,
     #[bits(1354..=1355)]
-    pub synth_skip_sample_attack_aftertouch: Selector<2>,
+    pub synth_skip_sample_attack_aftertouch: MorphOf<2>,
     #[bits(1356..=1357)]
-    pub synth_skip_sample_attack_ctrl_pedal: Selector<2>,
+    pub synth_skip_sample_attack_ctrl_pedal: MorphOf<2>,
     #[bits(1358..=1358)]
     pub synth_skip_sample_attack: bool,
     #[bits(1359..=1366)]
@@ -659,7 +659,7 @@ pub struct Slot {
     #[bits(1504..=1505)]
     pub extern_midi_control: Selector<2>,
     #[bits(1506..=1512)]
-    pub extern_midi_cc_number: Level,
+    pub extern_midi_cc_number: RangedU8<127>,
     #[bits(1513..=1520)]
     pub extern_midi_cc_wheel: MorphTarget,
     #[bits(1521..=1528)]
@@ -671,15 +671,15 @@ pub struct Slot {
     #[bits(1544..=1544)]
     pub extern_midi_cc_on: bool,
     #[bits(1545..=1551)]
-    pub extern_midi_bank_select_cc32: Level,
+    pub extern_midi_bank_select_cc32: RangedU8<127>,
     #[bits(1552..=1552)]
     pub extern_midi_bank_select_cc32_enabled: bool,
     #[bits(1553..=1559)]
-    pub extern_midi_bank_select_cc00: Level,
+    pub extern_midi_bank_select_cc00: RangedU8<127>,
     #[bits(1560..=1560)]
     pub extern_midi_bank_select_cc00_enabled: bool,
     #[bits(1561..=1567)]
-    pub extern_midi_program: Level,
+    pub extern_midi_program: RangedU8<127>,
     #[bits(1568..=1568)]
     pub extern_midi_program_on: bool,
     #[bits(1569..=1572)]
@@ -717,13 +717,13 @@ pub struct Slot {
     #[bits(1640..=1640)]
     pub effect_1_master_clock: bool,
     #[bits(1641..=1645)]
-    pub effect_1_rate_mst_clock_divisor_wheel: MorphOf<5>,
+    pub effect_1_rate_master_clock_divisor_wheel: MorphOf<5>,
     #[bits(1646..=1650)]
-    pub effect_1_rate_mst_clock_divisor_aftertouch: MorphOf<5>,
+    pub effect_1_rate_master_clock_divisor_aftertouch: MorphOf<5>,
     #[bits(1651..=1655)]
-    pub effect_1_rate_mst_clock_divisor_ctrl_pedal: MorphOf<5>,
+    pub effect_1_rate_master_clock_divisor_ctrl_pedal: MorphOf<5>,
     #[bits(1656..=1659)]
-    pub effect_1_rate_mst_clock_divisor: ClockDivision,
+    pub effect_1_rate_master_clock_divisor: ClockDivision,
     #[bits(1660..=1667)]
     pub effect_1_rate_wheel: MorphTarget,
     #[bits(1668..=1675)]
@@ -749,13 +749,13 @@ pub struct Slot {
     #[bits(1728..=1728)]
     pub effect_2_master_clock: bool,
     #[bits(1729..=1733)]
-    pub effect_2_rate_mst_clock_divisor_wheel: MorphOf<5>,
+    pub effect_2_rate_master_clock_divisor_wheel: MorphOf<5>,
     #[bits(1734..=1738)]
-    pub effect_2_rate_mst_clock_divisor_aftertouch: MorphOf<5>,
+    pub effect_2_rate_master_clock_divisor_aftertouch: MorphOf<5>,
     #[bits(1739..=1743)]
-    pub effect_2_rate_mst_clock_divisor_ctrl_pedal: MorphOf<5>,
+    pub effect_2_rate_master_clock_divisor_ctrl_pedal: MorphOf<5>,
     #[bits(1744..=1747)]
-    pub effect_2_rate_mst_clock_divisor: ClockDivision,
+    pub effect_2_rate_master_clock_divisor: ClockDivision,
     #[bits(1748..=1755)]
     pub effect_2_rate_wheel: MorphTarget,
     #[bits(1756..=1763)]
@@ -782,13 +782,11 @@ pub struct Slot {
     pub delay_master_clock: bool,
     /// ⚠️ **This run does not read like the rest of the model and is worth re-deriving
     /// against the byte map before anything is built on it.** Three of its morph slots are
-    /// thirteen bits where every other morph slot in the Stage 2 is five or eight; the
-    /// value below is declared twelve bits but the factory banks only ever put 8..=122 in
-    /// it, leaving five bits dead; and the first field's name is a mangled artefact of
-    /// however it was transcribed. The manual gives the control as a 20–750 ms delay time,
-    /// which a twelve-bit slot would hold directly and this one does not.
+    /// thirteen bits where every other morph slot in the Stage 2 is five or eight. The
+    /// manual gives the control as a 20–750 ms delay time; a twelve-bit slot would hold
+    /// that directly, and what the value below stores does not read as milliseconds.
     #[bits(1815..=1819)]
-    pub delay_tempo_master_clock_divisor_wheel_o_delay_on: MorphOf<5>,
+    pub delay_tempo_master_clock_divisor_wheel: MorphOf<5>,
     #[bits(1820..=1824)]
     pub delay_tempo_master_clock_divisor_aftertouch: MorphOf<5>,
     #[bits(1825..=1829)]
@@ -796,7 +794,7 @@ pub struct Slot {
     #[bits(1830..=1833)]
     pub delay_tempo_master_clock_divisor: ClockDivision,
     #[bits(1834..=1846)]
-    pub delay_tempo_master_clock_divisor_wheel: RangedU16<8191>,
+    pub delay_tempo_wheel: RangedU16<8191>,
     #[bits(1847..=1859)]
     pub delay_tempo_aftertouch: RangedU16<8191>,
     #[bits(1860..=1872)]
@@ -804,7 +802,7 @@ pub struct Slot {
     #[bits(1873..=1884)]
     pub delay_tempo: RangedU16<4095>,
     #[bits(1885..=1892)]
-    pub delay_tempo_wheel: MorphTarget,
+    pub delay_amount_wheel: MorphTarget,
     #[bits(1893..=1900)]
     pub delay_amount_aftertouch: MorphTarget,
     #[bits(1901..=1908)]

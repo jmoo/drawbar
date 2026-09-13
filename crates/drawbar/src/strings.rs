@@ -52,6 +52,10 @@ impl Section {
     }
 }
 
+/// What a run of fields sharing no path prefix is called, where the registry's own paths
+/// are the only division there is.
+pub const UNPREFIXED: &str = "General";
+
 /// The sections a settings document shows, in menu order.
 pub const SETTINGS_SECTIONS: [Section; 5] = [
     Section::System,
@@ -64,9 +68,9 @@ pub const SETTINGS_SECTIONS: [Section; 5] = [
 /// Registry path, the section it belongs in, and its label.
 ///
 /// Grouped by section and alphabetical by path inside each group; a test holds it that
-/// way. Display order is not this order — see `panel::reading_order`.
+/// way. Display order is not this order: a document is laid out by the
+/// `nord_format::panel::Panel` its format declares, resolved in `document::field`.
 const FIELDS: &[(&str, Section, &str)] = &[
-    // ── Keyboard & split ───────────────────────────────────────────────────────
     ("center_panel.gain", Section::Keyboard, "Program level"),
     (
         "center_panel.lower_control",
@@ -132,7 +136,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Keyboard,
         "Upper sustain pedal",
     ),
-    // ── Organ ──────────────────────────────────────────────────────────────────
     ("center_panel.drawbar_live", Section::Organ, "Drawbars live"),
     ("center_panel.organ_type", Section::Organ, "Organ model"),
     ("organ_panel.b3_bass_bar1", Section::Organ, "Bass drawbar 1"),
@@ -152,27 +155,47 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "B3 preset 1 drawbars",
     ),
-    ("organ_panel.b3_preset1_perc", Section::Organ, "Percussion"),
-    ("organ_panel.b3_preset1_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.b3_preset1_perc",
+        Section::Organ,
+        "B3 preset 1 percussion",
+    ),
+    (
+        "organ_panel.b3_preset1_vib",
+        Section::Organ,
+        "B3 preset 1 vibrato",
+    ),
     (
         "organ_panel.b3_preset2_drawbars",
         Section::Organ,
         "B3 preset 2 drawbars",
     ),
-    ("organ_panel.b3_preset2_perc", Section::Organ, "Percussion"),
+    (
+        "organ_panel.b3_preset2_perc",
+        Section::Organ,
+        "B3 preset 2 percussion",
+    ),
     (
         "organ_panel.b3_preset2_selected",
         Section::Organ,
         "B3 preset",
     ),
-    ("organ_panel.b3_preset2_vib", Section::Organ, "Vibrato"),
-    ("organ_panel.b3_vib", Section::Organ, "Vibrato / chorus"),
+    (
+        "organ_panel.b3_preset2_vib",
+        Section::Organ,
+        "B3 preset 2 vibrato",
+    ),
+    ("organ_panel.b3_vib", Section::Organ, "B3 vibrato / chorus"),
     (
         "organ_panel.farfisa_preset1_drawbars",
         Section::Organ,
         "Farfisa preset 1 registers",
     ),
-    ("organ_panel.farfisa_preset1_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.farfisa_preset1_vib",
+        Section::Organ,
+        "Farfisa preset 1 vibrato",
+    ),
     (
         "organ_panel.farfisa_preset2_drawbars",
         Section::Organ,
@@ -183,11 +206,15 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "Farfisa preset",
     ),
-    ("organ_panel.farfisa_preset2_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.farfisa_preset2_vib",
+        Section::Organ,
+        "Farfisa preset 2 vibrato",
+    ),
     (
         "organ_panel.farfisa_vib",
         Section::Organ,
-        "Vibrato / chorus",
+        "Farfisa vibrato / chorus",
     ),
     (
         "organ_panel.pipe_preset1_drawbars",
@@ -209,7 +236,11 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "Vox preset 1 drawbars",
     ),
-    ("organ_panel.vox_preset1_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.vox_preset1_vib",
+        Section::Organ,
+        "Vox preset 1 vibrato",
+    ),
     (
         "organ_panel.vox_preset2_drawbars",
         Section::Organ,
@@ -220,9 +251,12 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "Vox preset",
     ),
-    ("organ_panel.vox_preset2_vib", Section::Organ, "Vibrato"),
-    ("organ_panel.vox_vib", Section::Organ, "Vibrato"),
-    // ── Piano ──────────────────────────────────────────────────────────────────
+    (
+        "organ_panel.vox_preset2_vib",
+        Section::Organ,
+        "Vox preset 2 vibrato",
+    ),
+    ("organ_panel.vox_vib", Section::Organ, "Vox vibrato"),
     ("piano_panel.acoustics", Section::Piano, "Acoustics"),
     ("piano_panel.category", Section::Piano, "Type"),
     ("piano_panel.clav_model", Section::Piano, "Clavinet model"),
@@ -230,7 +264,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ("piano_panel.mono", Section::Piano, "Mono"),
     ("piano_panel.piano_model", Section::Piano, "Model"),
     ("piano_panel.touch", Section::Piano, "Touch"),
-    // ── Sample ─────────────────────────────────────────────────────────────────
     ("sample_panel.attack", Section::Sample, "Attack"),
     (
         "sample_panel.decay_release",
@@ -241,7 +274,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ("sample_panel.filter", Section::Sample, "Filter"),
     ("sample_panel.id", Section::Sample, "Sample library id"),
     ("sample_panel.number", Section::Sample, "Sample number"),
-    // ── Effects ────────────────────────────────────────────────────────────────
     ("effects_panel.fx1", Section::Effects, "Effect 1"),
     (
         "effects_panel.fx1_control",
@@ -249,11 +281,11 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Effect 1 on the control pedal",
     ),
     ("effects_panel.fx1_rate", Section::Effects, "Effect 1 rate"),
-    ("effects_panel.fx1_type", Section::Effects, "Effect 1"),
+    ("effects_panel.fx1_type", Section::Effects, "Effect 1 type"),
     ("effects_panel.fx2", Section::Effects, "Effect 2"),
     ("effects_panel.fx2_deep", Section::Effects, "Effect 2 deep"),
     ("effects_panel.fx2_rate", Section::Effects, "Effect 2 rate"),
-    ("effects_panel.fx2_type", Section::Effects, "Effect 2"),
+    ("effects_panel.fx2_type", Section::Effects, "Effect 2 type"),
     ("effects_panel.fx3", Section::Effects, "Amp / compressor"),
     (
         "effects_panel.fx3_compression",
@@ -276,21 +308,19 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ("effects_panel.fx4_tempo", Section::Effects, "Delay time"),
     ("effects_panel.fx5", Section::Effects, "Reverb"),
     ("effects_panel.fx5_moisture", Section::Effects, "Reverb mix"),
-    ("effects_panel.fx5_type", Section::Effects, "Reverb"),
+    ("effects_panel.fx5_type", Section::Effects, "Reverb type"),
     (
         "effects_panel.rotary_speed",
         Section::Effects,
         "Rotary fast",
     ),
     ("effects_panel.rotary_stop", Section::Effects, "Rotary stop"),
-    // ── EQ ─────────────────────────────────────────────────────────────────────
     ("effects_panel.equalizer_bass", Section::Eq, "Bass"),
     ("effects_panel.equalizer_freq", Section::Eq, "Mid frequency"),
     ("effects_panel.equalizer_freq_gain", Section::Eq, "Mid gain"),
     ("effects_panel.equalizer_on", Section::Eq, "Equalizer"),
     ("effects_panel.equalizer_part", Section::Eq, "Applies to"),
     ("effects_panel.equalizer_treble", Section::Eq, "Treble"),
-    // ── Settings: System ───────────────────────────────────────────────────────
     ("b3_trig_mode", Section::System, "Organ key trigger"),
     ("ctrl_pedal_gain", Section::System, "Control pedal gain"),
     ("ctrl_pedal_type", Section::System, "Control pedal type"),
@@ -305,7 +335,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Sustain pedal function",
     ),
     ("sustain_pedal_type", Section::System, "Sustain pedal type"),
-    // ── Settings: MIDI ─────────────────────────────────────────────────────────
     ("control_change_mode", Section::Midi, "Control change"),
     ("global_channel", Section::Midi, "Global channel"),
     (
@@ -321,7 +350,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Upper receive channel",
     ),
     ("upper_split_channel", Section::Midi, "Upper split channel"),
-    // ── Settings: Sound ────────────────────────────────────────────────────────
     ("b3_key_bounce", Section::Sound, "Key bounce"),
     ("b3_key_click_level", Section::Sound, "Key click level"),
     (
@@ -369,7 +397,6 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ),
     ("rotary_rotor_speed", Section::Sound, "Rotor speed"),
     ("rotary_speaker_type", Section::Sound, "Rotary speaker"),
-    // ── Settings: at power-on ──────────────────────────────────────────────────
     ("startup_live_mode", Section::Startup, "Start in Live mode"),
     ("startup_live_slot", Section::Startup, "Live slot"),
     ("startup_program", Section::Startup, "Program"),
@@ -615,8 +642,6 @@ fn slot_pair(raw: &str) -> Option<String> {
     Some(format!("{}:{}", bank + 1, slot + 1))
 }
 
-// ── what a thing is called ───────────────────────────────────────────────────────
-
 /// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
 /// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it and a
 /// reader need not be shown it.
@@ -642,8 +667,6 @@ pub fn display_name(name: &str) -> &str {
     }
 }
 
-// ── where things are ─────────────────────────────────────────────────────────────
-
 /// What the browser calls a class's folder.
 pub fn folder(class: ObjectClass) -> &'static str {
     match class {
@@ -667,8 +690,6 @@ pub fn shown(at: Location) -> String {
 pub fn place(class: ObjectClass, at: Location) -> String {
     format!("{} {}", folder(class), shown(at))
 }
-
-// ── what the attached instrument takes ───────────────────────────────────────────
 
 /// How much of a set the attached instrument takes: `6 of 9 fit the Nord Electro 5D 73`.
 ///
@@ -721,6 +742,25 @@ mod tests {
         let mut seen = HashSet::new();
         for (path, _, _) in FIELDS {
             assert!(seen.insert(*path), "{path} is in the table twice");
+        }
+    }
+
+    /// ⚠️ A queue diff names a field by its label and nothing else, so two fields a
+    /// reader can see side by side must not answer to one word. A program's fields and a
+    /// settings document's are never in one list, so each document is its own list.
+    #[test]
+    fn no_two_fields_of_one_document_answer_to_one_label() {
+        for settings in [false, true] {
+            let mut seen = HashSet::new();
+            for (path, section, label) in FIELDS {
+                if SETTINGS_SECTIONS.contains(section) != settings {
+                    continue;
+                }
+                assert!(
+                    seen.insert(*label),
+                    "{path} and another field are both “{label}”"
+                );
+            }
         }
     }
 

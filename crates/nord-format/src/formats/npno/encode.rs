@@ -44,15 +44,13 @@
 //! library coded again from its own audio plays indistinguishably from the original,
 //! in level and in spectrum.
 //!
-//! That the width and order it *chooses* are the vendor's own choice is inferred from
-//! specimens: given each block's width, order and attenuation, this reproduces the
-//! blocks of every specimen read, byte for byte, and the width and order it derives
-//! are the ones those files declare, apart from a handful of libraries whose headers
-//! were decided on a signal that is not the one they store. The attenuation is the
-//! same kind of thing one step smaller: it is a statistic the vendor's encoder
-//! recorded rather than a function of the frames it went on to store, so a block
-//! coded again from its own audio can declare a neighbouring value. Nothing in
-//! [`codec`] reads it.
+//! Given a block's width, order and attenuation, this reproduces its bytes, and the
+//! width and order it derives are the ones the file declares — except where a library's
+//! headers were decided on a signal the file does not store. The attenuation is the same
+//! kind of thing one step smaller: it is a statistic the vendor's encoder recorded
+//! rather than a function of the frames it went on to store, so a block coded again from
+//! its own audio can declare a neighbouring value. Nothing in [`codec`] reads it.
+//! Inferred from specimens; not confirmed on hardware.
 //!
 //! # What the audio does not say
 //!
@@ -85,8 +83,9 @@ use super::{
 use crate::cbin::Header;
 use crate::error::{Error, ParseError};
 use crate::formats::nsmp::kernel;
+use crate::formats::predictor;
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Full scale the header's attenuation statistic is measured against.
 const FULL_SCALE: f64 = 8192.0;
@@ -301,6 +300,103 @@ pub fn layer_value(index: usize, layers: usize) -> u8 {
     ((index * scale * 2 + last) / (last * 2)) as u8
 }
 
+/// What a WAV's name says about the velocity layer its stroke sits at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LayerTag {
+    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
+    /// spread over that root's layers gives it.
+    Index(u8),
+    /// `v12`: the layer value itself, written to the record as it stands.
+    Value(u8),
+}
+
+/// Whether a stroke name may carry a stem of the caller's own in front of the stroke
+/// it states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stem {
+    /// `060-b0-l00`, and nothing else.
+    None,
+    /// `Grand-060-b0-l00` as well: the trailing group is the whole claim.
+    Any,
+}
+
+/// The stroke a name states — `<root>-b<bank>-l<layer>`, or `<root>-b<bank>-v<value>`
+/// naming the layer value itself — read off a file name without its extension.
+///
+/// A root past [`NOTES`] is no note a library can hold.
+pub fn parse_stroke_name(name: &str, stem: Stem) -> Option<(u8, Bank, LayerTag)> {
+    let mut parts = name.rsplit('-');
+    let third = parts.next()?;
+    let layer = match (third.strip_prefix('l'), third.strip_prefix('v')) {
+        (Some(index), _) => LayerTag::Index(index.parse().ok()?),
+        (None, Some(value)) => LayerTag::Value(value.parse().ok()?),
+        (None, None) => return None,
+    };
+    let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
+    let root: u8 = parts.next()?.parse().ok()?;
+    if stem == Stem::None && parts.next().is_some() {
+        return None;
+    }
+    (usize::from(root) < NOTES).then_some((root, bank, layer))
+}
+
+/// Why one root and bank's names state no layer values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerClash {
+    pub root: u8,
+    pub bank: Bank,
+    pub how: Clash,
+}
+
+/// The two ways one root and bank's names fail to state a layer each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clash {
+    /// Some layers named by index and some by value. The two forms mean different
+    /// things about how many layers a spread is over, so one root's bank names its
+    /// layers one way.
+    BothForms,
+    /// One layer named twice, which the spread would hand two different values.
+    Twice,
+}
+
+/// The layer value each stroke states, in the order they were given.
+///
+/// A [`LayerTag::Value`] is that value; a [`LayerTag::Index`] is spread across its root
+/// and bank's own layers, loudest first, by [`layer_value`].
+pub fn layer_values(strokes: &[(u8, Bank, LayerTag)]) -> Result<Vec<u8>, LayerClash> {
+    let mut groups: BTreeMap<(u8, Bank), Vec<usize>> = BTreeMap::new();
+    for (index, &(root, bank, _)) in strokes.iter().enumerate() {
+        groups.entry((root, bank)).or_default().push(index);
+    }
+
+    let mut values = vec![0u8; strokes.len()];
+    for ((root, bank), mut members) in groups {
+        let clash = |how| LayerClash { root, bank, how };
+        let stated = members
+            .iter()
+            .filter(|&&i| matches!(strokes[i].2, LayerTag::Value(_)))
+            .count();
+        if stated != 0 && stated != members.len() {
+            return Err(clash(Clash::BothForms));
+        }
+        members.sort_by_key(|&i| strokes[i].2);
+        if members
+            .windows(2)
+            .any(|pair| strokes[pair[0]].2 == strokes[pair[1]].2)
+        {
+            return Err(clash(Clash::Twice));
+        }
+        let layers = members.len();
+        for (rank, index) in members.into_iter().enumerate() {
+            values[index] = match strokes[index].2 {
+                LayerTag::Value(value) => value,
+                LayerTag::Index(_) => layer_value(rank, layers),
+            };
+        }
+    }
+    Ok(values)
+}
+
 /// A library rebuilt from its own audio, and how each stroke's blocks compare with
 /// the ones they were coded from.
 pub struct Rebuilt {
@@ -359,8 +455,7 @@ pub fn build(
         channels,
         strokes: Vec::new(),
     };
-    library.set_name(&options.name)?;
-    library.set_variant(&options.variant)?;
+    library.set_name_and_variant(&options.name, &options.variant)?;
 
     let mut order: Vec<&Recording> = recordings.iter().collect();
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
@@ -488,7 +583,7 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
 /// a held key down within tens of milliseconds, where a flat table of any level takes
 /// about half a second. What axis the instrument reads the table on is open.
 fn damper_cut(note: usize) -> u8 {
-    /// The last note of the plateau, and the note the fall ends on.
+    /// The last note of the plateau, where the fall begins; it ends on `TOP`.
     const FLAT_TO: usize = 24;
     const TOP: usize = 108;
     const PLATEAU: f64 = 79.0;
@@ -562,12 +657,13 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
         let audio = codec::decode(stroke, library.channels())?;
         if audio.clipped > 0 {
             return Err(refuse(format!(
-                "{stroke:?}: {} sample(s) left int16 in the decode; coding a stroke this                  codec does not describe would write the saturated frames as new audio",
+                "{stroke:?}: {} sample(s) left int16 in the decode; coding a stroke this \
+                 codec does not describe would write the saturated frames as new audio",
                 audio.clipped
             )));
         }
         let target = audio.frames();
-        let mut source = audio.channels;
+        let mut source = audio.lanes;
         for (channel, tail) in source.iter_mut().zip(&audio.tail) {
             channel.extend_from_slice(tail);
         }
@@ -616,6 +712,9 @@ pub struct Resampled {
 /// The kernel's cutoff follows the rates: a source faster than [`codec::RATE`] is
 /// band-limited to the lattice's own Nyquist before it lands on it, and a slower one
 /// keeps its whole band.
+///
+/// The lattice count follows the rate the source declares, so a source that would
+/// stretch past the frame count a stroke states is refused rather than allocated.
 pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled, Error> {
     if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
         return Err(ParseError::OutOfBounds {
@@ -639,7 +738,14 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
     }
 
     let frames = samples.len() / channels;
-    let fields = (frames as u128 * u128::from(codec::RATE) / u128::from(rate)) as usize;
+    let stretched = frames as u128 * u128::from(codec::RATE) / u128::from(rate);
+    let fields = usize::try_from(stretched)
+        .ok()
+        .filter(|&fields| u32::try_from(fields).is_ok())
+        .ok_or_else(|| ParseError::OutOfBounds {
+            value: format!("{frames} frame(s) at {rate} Hz, which is {stretched} on the lattice"),
+            bound: "the u32 frame count a stroke record holds".into(),
+        })?;
     let kernel = kernel::Kernel::new(rate, codec::RATE);
     let mut clipped = 0;
     let mut lanes = Vec::with_capacity(channels);
@@ -650,16 +756,19 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
             .step_by(channels)
             .copied()
             .collect();
-        lanes.push(
-            (0..fields)
-                .map(|f| {
-                    let value = kernel.field(&lane, f);
-                    let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
-                    clipped += usize::from(i64::from(narrow) != value);
-                    narrow
-                })
-                .collect(),
-        );
+        let mut out = Vec::new();
+        out.try_reserve_exact(fields)
+            .map_err(|_| ParseError::OutOfBounds {
+                value: format!("{fields} frame(s)"),
+                bound: "an allocation that fits memory".into(),
+            })?;
+        out.extend((0..fields).map(|f| {
+            let value = kernel.field(&lane, f);
+            let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+            clipped += usize::from(i64::from(narrow) != value);
+            narrow
+        }));
+        lanes.push(out);
     }
     Ok(Resampled {
         channels: lanes,
@@ -706,7 +815,8 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
         }
         if recording.layer > HIGHEST_PLAYED_LAYER {
             return Err(refuse(format!(
-                "{what} states a layer value no velocity selects; {HIGHEST_PLAYED_LAYER} is                  the largest a key ever sounds"
+                "{what} states a layer value no velocity selects; {HIGHEST_PLAYED_LAYER} is \
+                 the largest a key ever sounds"
             )));
         }
         if !seen.insert((recording.root, recording.bank.code(), recording.layer)) {
@@ -732,9 +842,7 @@ fn refuse(what: impl Into<String>) -> Error {
 /// The root each key plays: the lowest root the key sits no more than a semitone
 /// above. A key more than a semitone above the highest root is left uncovered.
 ///
-/// Inferred from the key maps of vendor libraries; not confirmed on hardware. Those
-/// also stop short of the lowest keys, which is the acoustic instrument's range
-/// rather than anything the map derives.
+/// Inferred from specimens; not confirmed on hardware.
 fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
     let mut map = [UNCOVERED; NOTES];
     for (key, slot) in map.iter_mut().enumerate() {
@@ -958,7 +1066,8 @@ fn planes(
             for channel in 0..channels {
                 let mut acc = 0i64;
                 for j in 0..=order {
-                    let term = codec::binomial(order, j) * sample(channel, n as isize - j as isize);
+                    let term =
+                        predictor::binomial(order, j) * sample(channel, n as isize - j as isize);
                     acc += if j.is_multiple_of(2) { term } else { -term };
                 }
                 plane[n * channels + channel] = acc as i32;
@@ -1066,9 +1175,9 @@ fn attenuation(peak: i64) -> u8 {
 /// The four seeds a new recording declares, oldest first: a zero, then the recording's
 /// own first three frames.
 ///
-/// Vendor strokes carry the four frames before the recording, the oldest of them zero
-/// on every stroke of every specimen read. A recording that starts in silence has no
-/// such frames to carry and this states zeros, which is the same thing.
+/// Vendor strokes carry the four frames before the recording, the oldest of them zero.
+/// A recording that starts in silence has no such frames to carry and this states zeros,
+/// which is the same thing. Inferred from specimens; not confirmed on hardware.
 fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
     let mut out = [[0i16; SEEDS]; 2];
     for (channel, group) in source.iter().zip(out.iter_mut()) {
@@ -1170,56 +1279,24 @@ fn compare(before: &[u8], coded: &[u8], block: usize) -> Recoded {
 
 #[cfg(test)]
 mod tests {
+    use super::super::synthetic::{take, Build};
     use super::*;
-    use crate::cbin::{Cbin, Header, RawBody};
-    use crate::formats::npno::{be16, Piano, CNSP_MAGIC, DECAYS, FORMAT, REC_DECAYS};
+    use crate::formats::npno::{be16, Piano, DECAYS};
 
     /// A one-stroke library the encoder can donate from: a real prefix and one real
     /// record, holding marks and a full ladder of decay coefficients a new stroke
-    /// inherits.
+    /// inherits, over a block of silence a decode reads back.
     fn template(channels: u16) -> Piano {
-        let block = block_bytes(channels);
-        let directory_end = super::super::DIRECTORY_AT + RECORD;
-        let first = super::super::first_audio_offset(directory_end, block).unwrap();
-        let mut body = vec![0u8; first + block];
-        body[..4].copy_from_slice(CNSP_MAGIC);
-        body[0x04..0x06].copy_from_slice(&0x450u16.to_be_bytes());
-        body[0x61c..0x61e].copy_from_slice(&0x450u16.to_be_bytes());
-        body[0x61e..0x620].copy_from_slice(&channels.to_be_bytes());
-        body[0x1c..0x1c + 9].copy_from_slice(b"Donor#Med");
-        body[KEY_MAP_AT..KEY_MAP_AT + NOTES].fill(UNCOVERED);
-        body[KEY_MAP_AT + 60] = 60;
-        body[0x620..0x622].copy_from_slice(&1u16.to_be_bytes());
-        body[0x622 + 60 * 2..0x622 + 60 * 2 + 2].copy_from_slice(&1u16.to_be_bytes());
-
-        let rec = super::super::DIRECTORY_AT;
-        body[rec..rec + 4].copy_from_slice(&(first as u32).to_be_bytes());
-        body[rec + REC_FRAMES..rec + REC_FRAMES + 4].copy_from_slice(&1000u32.to_be_bytes());
-        body[rec + REC_BLOCKS..rec + REC_BLOCKS + 2].copy_from_slice(&1u16.to_be_bytes());
-        for mark in 0..MARKS {
-            let at = rec + REC_MARKS + mark * 4;
-            body[at..at + 4].copy_from_slice(&((mark as u32 + 6) * 100).to_be_bytes());
-        }
-        body[rec + REC_DECAY..rec + REC_DECAY + 4].copy_from_slice(&0x0000_2000u32.to_be_bytes());
-        for coefficient in 0..DECAYS {
-            let at = rec + REC_DECAYS + coefficient * 4;
-            let value = 0x0000_1000u32 + coefficient as u32;
-            body[at..at + 4].copy_from_slice(&value.to_be_bytes());
-        }
-        body[rec + REC_ID..rec + REC_ID + 4].copy_from_slice(&77u32.to_be_bytes());
-        // One block of order-0 width-16 silence, so the stroke reads back.
-        let audio = first;
-        body[audio..audio + 2].copy_from_slice(&0x6410u16.to_be_bytes());
-        let frames = codec::block_frames(16, block, usize::from(channels));
-        let owned = (frames - OVERLAP) as u32;
-        body[rec + REC_FRAMES..rec + REC_FRAMES + 4].copy_from_slice(&owned.to_be_bytes());
-
-        Piano {
-            file: Cbin {
-                header: Header::new(FORMAT, (0, 0), 530),
-                body: RawBody(body),
-            },
-        }
+        let mut build = Build::new();
+        build.channels = channels;
+        build.map = vec![(60, 60)];
+        build.takes = vec![take(60, Bank::Attack, 0, 1)
+            .marks(std::array::from_fn(|mark| (mark as u32 + 6) * 100))
+            .decay(0x0000_2000)
+            .ladder(std::array::from_fn(|entry| 0x0000_1000 + entry as u32))
+            .id(77)
+            .silent()];
+        build.piano()
     }
 
     /// A decaying tone, which is the shape the coder's width search is built for.
@@ -1295,7 +1372,7 @@ mod tests {
             padding < longest,
             "the stroke states {padding} frames of silence, a whole block or more"
         );
-        for (channel, given) in audio.channels.iter().zip(&source) {
+        for (channel, given) in audio.lanes.iter().zip(&source) {
             assert_eq!(&channel[..given.len()], &given[..]);
             assert!(channel[given.len()..].iter().all(|&s| s == 0));
         }
@@ -1334,7 +1411,7 @@ mod tests {
                 "{what}: the stroke states {} of {frames} frames",
                 audio.frames()
             );
-            for (channel, given) in audio.channels.iter().zip(&source) {
+            for (channel, given) in audio.lanes.iter().zip(&source) {
                 assert_eq!(
                     &channel[..frames],
                     &given[..],
@@ -1381,7 +1458,7 @@ mod tests {
                     "{what}: the stroke states {}",
                     audio.frames()
                 );
-                for (channel, given) in audio.channels.iter().zip(&source) {
+                for (channel, given) in audio.lanes.iter().zip(&source) {
                     assert_eq!(&channel[..frames], &given[..], "{what}: frames changed");
                     assert!(
                         channel[frames..].iter().all(|&s| s == 0),
@@ -1420,6 +1497,10 @@ mod tests {
             Ok(_) => panic!("expected a refusal"),
         };
         assert!(error.contains("left int16"), "{error}");
+        assert!(
+            error.contains("coding a stroke this codec does not describe"),
+            "the refusal does not read as the sentence it states: {error}"
+        );
     }
 
     #[test]
@@ -1429,8 +1510,8 @@ mod tests {
         let library = piano.library().unwrap();
         assert_eq!(library.channels(), 1);
         let audio = codec::decode(&library.strokes()[0], 1).unwrap();
-        assert_eq!(audio.channels[0][..source[0].len()], source[0][..]);
-        assert!(audio.channels[0][source[0].len()..].iter().all(|&s| s == 0));
+        assert_eq!(audio.lanes[0][..source[0].len()], source[0][..]);
+        assert!(audio.lanes[0][source[0].len()..].iter().all(|&s| s == 0));
     }
 
     #[test]
@@ -1653,6 +1734,126 @@ mod tests {
     }
 
     #[test]
+    fn a_wav_name_states_its_root_bank_and_layer() {
+        use LayerTag::{Index, Value};
+        assert_eq!(
+            parse_stroke_name("060-b0-l00", Stem::None),
+            Some((60, Bank::Attack, Index(0)))
+        );
+        assert_eq!(
+            parse_stroke_name("36-b2-l7", Stem::None),
+            Some((36, Bank::Release, Index(7)))
+        );
+        assert_eq!(
+            parse_stroke_name("101-b1-v12", Stem::None),
+            Some((101, Bank::Resonance, Value(12)))
+        );
+        assert_eq!(
+            parse_stroke_name("127-b0-l00", Stem::None),
+            Some((127, Bank::Attack, Index(0)))
+        );
+        for bad in [
+            "060-b3-l00",
+            "300-b0-l00",
+            "128-b0-l00",
+            "060-0-l00",
+            "060-b0-x2",
+            "060-b0",
+            "060-b0-l00-take2",
+            "C4-b0-l00",
+        ] {
+            assert_eq!(parse_stroke_name(bad, Stem::None), None, "{bad}");
+        }
+    }
+
+    /// A name carrying something of its own in front of the stroke it states still
+    /// states it, where the caller asks for that form: the trailing group is the whole
+    /// claim.
+    #[test]
+    fn a_stem_before_the_stroke_is_taken_only_where_the_caller_takes_one() {
+        assert_eq!(
+            parse_stroke_name("Grand-060-b0-l00", Stem::Any),
+            Some((60, Bank::Attack, LayerTag::Index(0)))
+        );
+        assert_eq!(parse_stroke_name("Grand-060-b0-l00", Stem::None), None);
+        assert_eq!(
+            parse_stroke_name("060-b0-l00", Stem::Any),
+            Some((60, Bank::Attack, LayerTag::Index(0))),
+            "a name with no stem states the same stroke either way"
+        );
+        assert_eq!(parse_stroke_name("Grand-060-b0-take2", Stem::Any), None);
+    }
+
+    /// The velocity a layer answers to is its value, so the names decide which part of
+    /// the range each recording plays over.
+    #[test]
+    fn indexed_layers_spread_over_their_own_root_and_bank() {
+        let named = [
+            (60, Bank::Attack, LayerTag::Index(2)),
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Attack, LayerTag::Index(1)),
+            (60, Bank::Release, LayerTag::Index(0)),
+            (72, Bank::Attack, LayerTag::Index(0)),
+            (72, Bank::Attack, LayerTag::Index(1)),
+        ];
+        assert_eq!(
+            layer_values(&named).unwrap(),
+            [27, 0, 14, 0, 0, 27],
+            "the order given is kept; the rank is the layer's own"
+        );
+    }
+
+    #[test]
+    fn a_named_layer_value_is_written_as_it_stands() {
+        let named = [
+            (60, Bank::Attack, LayerTag::Value(0)),
+            (60, Bank::Attack, LayerTag::Value(6)),
+            (60, Bank::Attack, LayerTag::Value(12)),
+        ];
+        assert_eq!(layer_values(&named).unwrap(), [0, 6, 12]);
+    }
+
+    /// A spread over indices and a stated value mean different things about how many
+    /// layers a root has, and two names claiming one layer would be spread to two
+    /// different values — neither of which is what either name said.
+    #[test]
+    fn one_roots_bank_names_its_layers_one_way_and_each_of_them_once() {
+        let mixed = [
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Attack, LayerTag::Value(12)),
+        ];
+        assert_eq!(
+            layer_values(&mixed),
+            Err(LayerClash {
+                root: 60,
+                bank: Bank::Attack,
+                how: Clash::BothForms,
+            })
+        );
+        let twice = [
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Attack, LayerTag::Index(0)),
+        ];
+        assert_eq!(
+            layer_values(&twice),
+            Err(LayerClash {
+                root: 60,
+                bank: Bank::Attack,
+                how: Clash::Twice,
+            })
+        );
+        let apart = [
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Release, LayerTag::Value(12)),
+        ];
+        assert_eq!(
+            layer_values(&apart).unwrap(),
+            [0, 12],
+            "a bank of its own names its layers its own way"
+        );
+    }
+
+    #[test]
     fn every_key_up_to_the_highest_roots_own_plays_the_root_above_it() {
         let roots: BTreeSet<u8> = [25, 30, 60].into_iter().collect();
         let map = key_map(&roots);
@@ -1711,7 +1912,10 @@ mod tests {
             short.clone(),
         )]);
         assert!(unplayable.contains("no velocity selects"), "{unplayable}");
-        assert!(unplayable.contains("30"), "{unplayable}");
+        assert!(
+            unplayable.contains("30 is the largest a key ever sounds"),
+            "{unplayable}"
+        );
         assert!(error(&[
             one(60, Bank::Attack, 0, short.clone()),
             one(
@@ -1741,6 +1945,29 @@ mod tests {
         let whole = build(&Donor::Template(&library), &options, &recordings).unwrap();
         let stripped = build(&Donor::Template(&skeleton), &options, &recordings).unwrap();
         assert_eq!(stripped.to_body().unwrap(), whole.to_body().unwrap());
+    }
+
+    /// A built library states the name and the variant the caller gives, so the name is
+    /// measured against that variant rather than against the one the template carries.
+    #[test]
+    fn a_name_that_fits_beside_the_variant_it_is_given_is_built() {
+        let name = "Studio Nine";
+        let donated = "Concert Grand Sml XL";
+        let donor = template(1);
+        let mut library = donor.library().unwrap();
+        library.set_variant(donated).unwrap();
+        assert!(
+            library.clone().set_name(name).is_err(),
+            "the name fits beside the template's variant, so the case states nothing"
+        );
+
+        let built = build(
+            &Donor::Template(&library),
+            &Options::new(name),
+            &[one(60, Bank::Attack, 0, tone(6_000, 300.0, 1))],
+        )
+        .expect("a name and an empty variant that fit the field they share");
+        assert_eq!(built.name(), (name.to_string(), String::new()));
     }
 
     #[test]
@@ -1838,6 +2065,20 @@ mod tests {
 
         assert!(resample(&[1, 2, 3], 2, codec::RATE).is_err());
         assert!(resample(&[1, 2], 1, 0).is_err());
+    }
+
+    /// The lattice count is the source's length scaled by the rate the source itself
+    /// declares. A rate far below the lattice's stretches a modest source past every
+    /// frame count a stroke can state, which is a refusal rather than an allocation.
+    #[test]
+    fn a_rate_that_stretches_a_source_past_a_strokes_frame_count_is_refused() {
+        let frames = u32::MAX as usize / codec::RATE as usize + 1;
+        let error = match resample(&vec![0i16; frames], 1, 1) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a refusal"),
+        };
+        assert!(error.contains("at 1 Hz"), "{error}");
+        assert!(error.contains("u32 frame count"), "{error}");
     }
 
     /// A source faster than the lattice is band-limited to the lattice's own Nyquist

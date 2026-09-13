@@ -10,9 +10,12 @@ use crate::queue::Queue;
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
+/// The asset on this computer every drag fixture carries.
+pub(in crate::browser) const CARRIED: u64 = 1;
+
 pub(in crate::browser) fn local(kind: Kind) -> Held {
     Held {
-        what: Item::Local(1),
+        what: Item::Local(CARRIED),
         kind,
         filed: None,
         fits: true,

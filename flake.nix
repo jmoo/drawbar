@@ -48,19 +48,6 @@
               type = "app";
             };
 
-            devShells.default = pkgs.lib.crane.devShell {
-              inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/*.bash (see their `nix-deps` lines)
-              packages = with pkgs; [
-                curl
-                gh
-                jq
-                rust-analyzer
-              ];
-              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
-              RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-            };
-
             # Rust tests run in the package builds: `nix build .#nord.all`.
             checks = {
               bump =
@@ -77,6 +64,19 @@
                     touch "$out"
                   '';
               clippy = pkgs.nord.clippy;
+            };
+
+            devShells.default = pkgs.lib.crane.devShell {
+              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
+              RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+              inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
+              # scripts/*.bash (see their `nix-deps` lines)
+              packages = with pkgs; [
+                curl
+                gh
+                jq
+                rust-analyzer
+              ];
             };
 
             legacyPackages = pkgs;

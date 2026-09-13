@@ -9,7 +9,7 @@ use nord_format::cbin::{Cbin, RawBody};
 use crate::envelope;
 use crate::error::{Error, Result};
 use crate::session::ReadWrite;
-use crate::session::Session;
+use crate::session::{Session, WRITE_LIMIT};
 use crate::transport::Transport;
 use crate::wire::{
     cmd, read_u32, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
@@ -119,10 +119,11 @@ pub async fn read_body<T: Transport, C>(
 /// Body bytes to ask for in one `READ`. A body larger than this arrives across several
 /// requests with the offset advancing by exactly this much and a short final chunk.
 ///
-/// Confirmed from captures: NSM asks for `32720`. Some objects are instead read at
-/// `32726` throughout — a fixed 6-byte difference that is per object, not per chunk, and
-/// unexplained. Both fit inside one `READ_BUFFER`, and the host chooses the number, so
-/// the smaller is used uniformly.
+/// NSM asks for `32720`. Inferred from specimens; not confirmed on hardware.
+///
+/// Unexplained: some objects are read at `32726` throughout — a fixed 6-byte difference
+/// that is per object, not per chunk. Both fit inside one `READ_BUFFER`, and the host
+/// chooses the number, so the smaller is used uniformly.
 const READ_CHUNK: u32 = 32720;
 
 /// Body bytes per `WRITE_DATA` frame. The whole frame must stay under the device's
@@ -360,6 +361,47 @@ pub async fn write<T: Transport>(
     transfer_in(session, at, &file, name, timestamp).await
 }
 
+/// A [`cmd::BEGIN_WRITE`] argument block: the address, the body's length, the format
+/// tag, the timestamp, the `0xffffffff` word, and the slot's name, length-prefixed.
+///
+/// `BEGIN_WRITE` is the only frame of a write that carries a name; it becomes the slot's.
+pub fn begin_write_args(
+    at: Location,
+    body_len: usize,
+    tag: &[u8; 4],
+    timestamp: u32,
+    name: &str,
+) -> Result<Vec<u8>> {
+    let body_len = u32::try_from(body_len)
+        .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
+    let name_len = u32::try_from(name.len())
+        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
+    let mut args = Vec::new();
+    at.write_to(&mut args);
+    args.extend_from_slice(&body_len.to_be_bytes());
+    args.extend_from_slice(tag);
+    args.extend_from_slice(&timestamp.to_be_bytes());
+    args.extend_from_slice(&u32::MAX.to_be_bytes());
+    args.extend_from_slice(&name_len.to_be_bytes());
+    args.extend_from_slice(name.as_bytes());
+    Ok(args)
+}
+
+/// A [`cmd::WRITE_DATA`] argument block: the address, the chunk's offset and length,
+/// then the chunk.
+pub fn write_data_args(at: Location, offset: usize, chunk: &[u8]) -> Result<Vec<u8>> {
+    let offset = u32::try_from(offset)
+        .map_err(|_| Error::InvalidArgument("the offset is larger than the wire format".into()))?;
+    let len = u32::try_from(chunk.len())
+        .map_err(|_| Error::InvalidArgument("the chunk is larger than the wire format".into()))?;
+    let mut args = Vec::new();
+    at.write_to(&mut args);
+    args.extend_from_slice(&offset.to_be_bytes());
+    args.extend_from_slice(&len.to_be_bytes());
+    args.extend_from_slice(chunk);
+    Ok(args)
+}
+
 /// The write transfer itself, identical for every class.
 async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
@@ -370,21 +412,10 @@ async fn transfer_in<T: Transport>(
 ) -> Result<()> {
     let body = &file.body.0;
     let chunk_size = write_chunk()?;
-    let body_len = u32::try_from(body.len())
-        .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
-    let name_len = u32::try_from(name.len())
-        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
 
     session.notify(&ui::label("Downloading...")?).await?;
 
-    let mut begin = Vec::new();
-    at.write_to(&mut begin);
-    begin.extend_from_slice(&body_len.to_be_bytes());
-    begin.extend_from_slice(&file.header.tag);
-    begin.extend_from_slice(&timestamp.to_be_bytes());
-    begin.extend_from_slice(&u32::MAX.to_be_bytes());
-    begin.extend_from_slice(&name_len.to_be_bytes());
-    begin.extend_from_slice(name.as_bytes());
+    let begin = begin_write_args(at, body.len(), &file.header.tag, timestamp, name)?;
     session
         .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
         .await?;
@@ -393,12 +424,7 @@ async fn transfer_in<T: Transport>(
     let mut painted = None;
     while offset < body.len() {
         let end = offset.saturating_add(chunk_size).min(body.len());
-        let chunk = &body[offset..end];
-        let mut data = Vec::new();
-        at.write_to(&mut data);
-        data.extend_from_slice(&(offset as u32).to_be_bytes());
-        data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
-        data.extend_from_slice(chunk);
+        let data = write_data_args(at, offset, &body[offset..end])?;
         if end == body.len() {
             // Only the final chunk is acknowledged.
             session
@@ -445,9 +471,9 @@ pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Locati
 
 /// Drain queued replies until the transport stays quiet.
 async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
-    for _ in 0..DRAIN_CAP {
+    for _ in 0..RECOVER_DRAIN_CAP {
         match transport
-            .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+            .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
             .await?
         {
             Some(_) => continue,
@@ -458,10 +484,26 @@ async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
 }
 
 /// How long to wait for a straggler before deciding the stream is quiet.
-const DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
+const RECOVER_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Upper bound on stragglers, so a device that will not stop talking cannot hang this.
-const DRAIN_CAP: usize = 16;
+const RECOVER_DRAIN_CAP: usize = 16;
+
+/// Send one frame of the recovery sequence, naming the endpoint when it is not accepted.
+///
+/// ⚠️ An unbounded write here blocks forever on the very instrument this exists for: a
+/// stalled bulk OUT endpoint never accepts the frame and never fails either.
+async fn send_recovery<T: Transport>(transport: &mut T, msg: &Message, what: &str) -> Result<()> {
+    if transport.write_timeout(&msg.encode(), WRITE_LIMIT).await? {
+        return Ok(());
+    }
+    Err(Error::Transport(format!(
+        "the device did not accept {what} within {}s: bulk OUT endpoint {:#04x} is \
+         stalled, and only a power cycle clears it",
+        WRITE_LIMIT.as_secs(),
+        crate::transport::EP_OUT
+    )))
+}
 
 /// Release UI and class state left by an abandoned session.
 ///
@@ -474,15 +516,15 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
     // ⚠️ Bounded reads: the instrument this is for is the one that has stopped
     // answering, and no reply to either frame is the expected outcome, not a failure.
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
-    transport.write(&goodbye.encode()).await?;
+    send_recovery(transport, &goodbye, "GOODBYE").await?;
     let _ = transport
-        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
         .await?;
 
     let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
-    transport.write(&close.encode()).await?;
+    send_recovery(transport, &close, "SESSION_CLOSE").await?;
     let _ = transport
-        .read_timeout(crate::transport::READ_BUFFER, DRAIN_LIMIT)
+        .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
         .await?;
     Ok(())
 }
@@ -700,22 +742,6 @@ pub async fn occupied_slots<T: Transport, C>(
         }
     }
     Ok(found)
-}
-
-/// The library objects an entity actually needs. **Read-only.**
-///
-/// [`dependencies`] returns what the device reports, which includes rows that are not
-/// dependencies at all — see [`Dependency::is_required`]. This is the one to build on;
-/// reach for the unfiltered list only when the extra rows are themselves the subject.
-pub async fn required_dependencies<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-    at: Location,
-) -> Result<Vec<Dependency>> {
-    Ok(dependencies(session, at)
-        .await?
-        .into_iter()
-        .filter(Dependency::is_required)
-        .collect())
 }
 
 /// List the piano/sample library objects an entity depends on, as the device reports
@@ -941,5 +967,43 @@ mod tests {
     fn cleaning_progress_requires_all_three_words() {
         let err = cleaning_progress(&[0; 11]).expect_err("a partial cleaning reply");
         assert!(matches!(err, Error::Truncated { got: 11, need: 12 }));
+    }
+
+    /// A transport that never accepts a frame and never says so, which is the state a
+    /// stalled bulk OUT endpoint leaves the instrument in.
+    struct Stalled;
+
+    impl Transport for Stalled {
+        async fn write(&mut self, _buf: &[u8]) -> Result<()> {
+            panic!("recovery frames must carry a deadline");
+        }
+
+        async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
+            panic!("recovery reads must carry a deadline");
+        }
+
+        async fn write_timeout(
+            &mut self,
+            _buf: &[u8],
+            _limit: std::time::Duration,
+        ) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn read_timeout(
+            &mut self,
+            _max: usize,
+            _limit: std::time::Duration,
+        ) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn recover_names_the_stalled_endpoint_instead_of_waiting_forever() {
+        let err = pollster::block_on(recover(&mut Stalled)).expect_err("the write is refused");
+        let message = err.to_string();
+        assert!(message.contains("GOODBYE"), "{message}");
+        assert!(message.contains("0x03"), "{message}");
     }
 }

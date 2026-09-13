@@ -11,11 +11,14 @@
 
 #![cfg(feature = "replay")]
 
+#[path = "support/frames.rs"]
+mod frames;
 #[path = "support/scripts.rs"]
 mod scripts;
 
+use frames::{notify, request, response, session_close, session_open, slot_args};
 use nord_usb::op;
-use nord_usb::transport::{Direction, ReplayTransport, Step};
+use nord_usb::transport::ReplayTransport;
 use nord_usb::wire::ObjectClass;
 use nord_usb::Session;
 
@@ -119,9 +122,7 @@ fn a_status_reply_truncated_inside_an_optional_word_is_refused() {
 }
 
 #[test]
-fn wrong_bytes_are_caught() {
-    // Opening the wrong class must not silently "work": the bytes differ from the
-    // script, so the exact-match transport rejects them.
+fn an_exact_replay_rejects_a_frame_that_differs_from_the_script() {
     let mut t = program_status();
     let err = pollster::block_on(async {
         match Session::open(&mut t, ObjectClass::Piano).await {
@@ -133,8 +134,14 @@ fn wrong_bytes_are_caught() {
         }
     });
     assert!(
-        err.is_some(),
-        "opening the wrong object class should have been rejected"
+        matches!(err, Some(nord_usb::Error::Replay(_))),
+        "opening the wrong object class was not rejected: {err:?}"
+    );
+    assert_eq!(
+        t.position(),
+        2,
+        "the HELLO exchange is in the script and the class it opens is not, so exactly \
+         the first two frames may be consumed"
     );
 }
 
@@ -295,8 +302,7 @@ fn a_rebuilt_file_is_a_container_the_envelope_reads_back() {
 /// final chunk all fail it.
 #[test]
 fn a_large_body_is_read_in_chunks() {
-    use nord_usb::wire::{cmd, ui, Message, Service};
-    use Direction::{In, Out};
+    use nord_usb::wire::{cmd, ui};
 
     const CHUNK: u32 = 32720;
     const TAIL: u32 = 777;
@@ -307,31 +313,7 @@ fn a_large_body_is_read_in_chunks() {
 
     // bank 8 slot 14 -> 7, 13 on the wire.
     let at = nord_usb::Location::from_user(8, 14);
-    let mut slot = Vec::new();
-    at.write_to(&mut slot);
-
-    let request = |command: u32, args: &[u8]| Step {
-        direction: Out,
-        bytes: Message::new(Service::Program, 10, command, args.to_vec()).encode(),
-    };
-    let response = |command: u32, rest: &[u8]| Step {
-        direction: In,
-        bytes: Message::new(
-            Service::Program,
-            10,
-            command,
-            [&0u32.to_be_bytes()[..], rest].concat(),
-        )
-        .encode(),
-    };
-    let notify = |msg: Message| Step {
-        direction: Out,
-        bytes: msg.encode(),
-    };
-    let ui_frame = |command: u32, args: &[u8]| Step {
-        direction: Out,
-        bytes: Message::new(Service::Ui, ui::SUBSYSTEM, command, args.to_vec()).encode(),
-    };
+    let slot = slot_args(at);
 
     let mut info_args = slot.clone();
     info_args.extend_from_slice(&body_len.to_be_bytes());
@@ -343,26 +325,14 @@ fn a_large_body_is_read_in_chunks() {
     info_args.extend_from_slice(b"chunked ");
     info_args.extend_from_slice(&0u32.to_be_bytes()); // crc32: none
 
-    let mut script = vec![
-        ui_frame(ui::HELLO, &[]),
-        Step {
-            direction: In,
-            bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::HELLO + 1, vec![0; 4]).encode(),
-        },
-        request(
-            cmd::SESSION_OPEN,
-            &ObjectClass::Program.to_raw().to_be_bytes(),
-        ),
-        response(
-            cmd::SESSION_OPEN + 1,
-            &ObjectClass::Program.to_raw().to_be_bytes(),
-        ),
+    let mut script = session_open(ObjectClass::Program);
+    script.extend([
         request(cmd::INFO, &slot),
-        response(cmd::INFO + 1, &info_args),
+        response(cmd::INFO, &info_args),
         notify(ui::label("Uploading...").unwrap()),
         request(cmd::BEGIN_READ, &slot),
-        response(cmd::BEGIN_READ + 1, &slot),
-    ];
+        response(cmd::BEGIN_READ, &slot),
+    ]);
 
     // Expected progress is independent of the production calculation.
     for (offset, want, pct) in [
@@ -377,21 +347,13 @@ fn a_large_body_is_read_in_chunks() {
 
         let mut resp = req.clone();
         resp.extend_from_slice(&body[offset as usize..(offset + want) as usize]);
-        script.push(response(cmd::READ + 1, &resp));
+        script.push(response(cmd::READ, &resp));
         script.push(notify(ui::percent(pct)));
     }
 
-    script.extend([
-        request(cmd::END_TRANSFER, &slot),
-        response(cmd::END_TRANSFER + 1, &slot),
-        request(cmd::SESSION_CLOSE, &[]),
-        response(cmd::SESSION_CLOSE + 1, &[]),
-        ui_frame(ui::GOODBYE, &[]),
-        Step {
-            direction: In,
-            bytes: Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE + 1, vec![0; 4]).encode(),
-        },
-    ]);
+    script.push(request(cmd::END_TRANSFER, &slot));
+    script.push(response(cmd::END_TRANSFER, &slot));
+    script.extend(session_close());
 
     let mut t = ReplayTransport::new(script);
     let got = pollster::block_on(async {
@@ -416,5 +378,97 @@ fn a_large_body_is_read_in_chunks() {
         got, body,
         "reassembled body differs from what the device sent"
     );
+    assert!(t.is_exhausted(), "did not consume the whole exchange");
+}
+
+/// The partition of a byte-granular class, so a write reserves nothing and is the
+/// transfer alone.
+fn byte_granular_unit(class: ObjectClass) -> nord_usb::wire::AllocationUnit {
+    let mut fields = 1u32.to_be_bytes().to_vec();
+    fields.resize(29, 0);
+    nord_usb::wire::Partition {
+        index: class.to_raw(),
+        name: "Prog".into(),
+        native: false,
+        fields,
+    }
+    .allocation_unit()
+    .unwrap()
+}
+
+/// A body larger than one `WRITE_DATA` leaves in several frames, of which only the last
+/// is acknowledged — the intermediate chunks are fire-and-forget, so a reply scripted for
+/// one would be read as the answer to a later request.
+///
+/// The framing is built rather than captured. The test checks three chunks at offsets
+/// 0 / 32720 / 65440 with lengths 32720 / 32720 / 777, in that order, under an
+/// exact-match transport. A whole-body single frame, a wrong offset, an acknowledged
+/// intermediate chunk, or a dropped tail all fail it.
+#[test]
+fn a_large_body_is_written_in_chunks() {
+    use nord_usb::wire::{cmd, ui, Message, Service};
+
+    const CHUNK: usize = 32720;
+    const TAIL: usize = 777;
+
+    let at = nord_usb::Location::from_user(8, 14);
+    // Position-dependent, so a chunk sent from the wrong offset is caught.
+    let body: Vec<u8> = (0..CHUNK * 2 + TAIL).map(|i| (i % 251) as u8).collect();
+    let file = nord_usb::envelope::wrap("ne5p", at, 4, &body).unwrap();
+    let (name, timestamp) = ("chunked", 1_787_428_287);
+
+    let mut script = session_open(ObjectClass::Program);
+    script.push(notify(ui::label("Downloading...").unwrap()));
+    script.push(request(
+        cmd::BEGIN_WRITE,
+        &op::begin_write_args(at, body.len(), b"ne5p", timestamp, name).unwrap(),
+    ));
+    script.push(response(cmd::BEGIN_WRITE, &slot_args(at)));
+
+    // Expected progress is independent of the production calculation.
+    for (offset, len, pct, acknowledged) in [
+        (0, CHUNK, 49u16, false),
+        (CHUNK, CHUNK, 98, false),
+        (CHUNK * 2, TAIL, 100, true),
+    ] {
+        let args = op::write_data_args(at, offset, &body[offset..offset + len]).unwrap();
+        match acknowledged {
+            true => {
+                script.push(request(cmd::WRITE_DATA, &args));
+                script.push(response(cmd::WRITE_DATA, &slot_args(at)));
+            }
+            false => script.push(notify(Message::new(
+                Service::Program,
+                frames::SUBSYSTEM,
+                cmd::WRITE_DATA,
+                args,
+            ))),
+        }
+        script.push(notify(ui::percent(pct)));
+    }
+
+    script.push(request(cmd::END_TRANSFER, &slot_args(at)));
+    script.push(response(cmd::END_TRANSFER, &slot_args(at)));
+    script.extend(session_close());
+
+    let mut t = ReplayTransport::new(script);
+    pollster::block_on(async {
+        let mut s = Session::open(&mut t, ObjectClass::Program)
+            .await
+            .unwrap()
+            .allow_destructive_writes();
+        let written = op::write(
+            &mut s,
+            byte_granular_unit(ObjectClass::Program),
+            at,
+            &file,
+            name,
+            timestamp,
+        )
+        .await;
+        let closed = s.commit().await;
+        written.expect("the chunked write");
+        closed.expect("the transaction closed");
+    });
     assert!(t.is_exhausted(), "did not consume the whole exchange");
 }

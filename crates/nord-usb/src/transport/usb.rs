@@ -63,8 +63,8 @@ pub struct UsbTransport {
     product: Option<String>,
     /// Set to mirror every frame into a replay script. `None` is the normal case.
     record: Option<Recorder>,
-    // A persistent IN queue: submitting a fresh buffer per read is simpler to reason
-    // about than juggling completions, and the protocol is strictly turn-taking.
+    /// A persistent IN queue, one buffer submitted per read: the protocol is strictly
+    /// turn-taking, so at most one transfer is ever outstanding.
     read_queue: Queue<RequestBuffer>,
 }
 
@@ -134,6 +134,14 @@ impl UsbTransport {
     async fn write_frame(&mut self, buf: &[u8]) -> Result<()> {
         let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
         completion.status.map_err(map_err("bulk write"))?;
+        // A short write truncates a frame and desynchronizes the next response.
+        let written = completion.data.actual_length();
+        if written != buf.len() {
+            return Err(Error::Transport(format!(
+                "bulk write sent {written} of {} bytes",
+                buf.len()
+            )));
+        }
         self.terminate(buf.len()).await
     }
 
@@ -177,13 +185,6 @@ impl UsbTransport {
         }
     }
 
-    /// Label the frames that follow in the script. No-op when not recording.
-    pub fn mark(&mut self, what: &str) {
-        if let Some(r) = self.record.as_mut() {
-            r.comment(what);
-        }
-    }
-
     /// Record that the transaction just performed failed. No-op when not recording.
     pub fn mark_expect(&mut self, e: &Error) {
         if let Some(r) = self.record.as_mut() {
@@ -191,10 +192,14 @@ impl UsbTransport {
         }
     }
 
-    /// Surface the first error the recorder hit, if it is recording. Call after the
-    /// operation completes: a failed write is deliberately not allowed to abort a live
-    /// session part-way.
-    pub fn recording_result(&mut self) -> Result<()> {
+    /// Surface the first error the recorder hit, if it is recording, and resume
+    /// recording.
+    ///
+    /// ⚠️ Call once the transaction has closed, never inside one: a failed write is
+    /// deliberately not allowed to abort a live session part-way, and the script being
+    /// short is worth less than the instrument being left mid-transaction. Never calling
+    /// it loses the frames silently.
+    pub fn finish_recording(&mut self) -> Result<()> {
         match self.record.as_mut() {
             Some(r) => r.check(),
             None => Ok(()),
@@ -214,9 +219,7 @@ pub struct Identity {
     pub firmware: u16,
     /// Largest transfer the device will accept or produce, in bytes, framing included.
     ///
-    /// [`crate::op`]'s read chunk is this minus the frame header and CRC — a bound
-    /// derived from captures long before the device was asked for it, and the two agree
-    /// exactly.
+    /// [`crate::op`]'s read chunk is this minus the frame header and CRC.
     pub max_transfer: u32,
     /// Reported at request `0x00`. Reads as a small constant; its meaning is not pinned
     /// down, so it is carried verbatim rather than named something it might not be.
@@ -257,24 +260,6 @@ impl UsbTransport {
             build: word(0x05)?,
             max_transfer: u32::from_le_bytes([max[0], max[1], max[2], max[3]]),
         })
-    }
-
-    /// One read on the interrupt endpoint (`0x81`), or `None` on timeout. Nothing is
-    /// known to arrive here outside the firmware-update handshake.
-    pub async fn interrupt_read(
-        &mut self,
-        len: usize,
-        timeout: Duration,
-    ) -> Result<Option<Vec<u8>>> {
-        use crate::deadline::with_timeout;
-        let buf = nusb::transfer::RequestBuffer::new(len);
-        match with_timeout(self.interface.interrupt_in(0x81, buf), timeout).await {
-            Some(completion) => {
-                completion.status.map_err(map_err("interrupt read"))?;
-                Ok(Some(completion.data))
-            }
-            None => Ok(None),
-        }
     }
 
     /// One vendor control read on endpoint 0, outside the bulk protocol entirely.

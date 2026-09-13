@@ -169,6 +169,8 @@ pub struct DrawbarApp {
     saved: u64,
     /// When the store was last caught up, on egui's own clock.
     saved_at: f64,
+    /// What the last write left out, as it was last said out loud.
+    left: crate::store::Left,
 }
 
 impl DrawbarApp {
@@ -203,6 +205,7 @@ impl DrawbarApp {
             theme,
             saved: 0,
             saved_at: 0.0,
+            left: crate::store::Left::default(),
         };
         if let Some(storage) = cc.storage {
             crate::store::load(storage, &mut app.workspace, &mut app.log);
@@ -281,9 +284,23 @@ impl DrawbarApp {
         let Some(storage) = frame.storage_mut() else {
             return;
         };
-        crate::store::save(storage, &self.workspace, &self.queue, &mut self.log);
+        let left = crate::store::save(storage, &self.workspace, &self.queue);
+        self.report(left);
         self.saved = self.workspace.revision();
         self.saved_at = now;
+    }
+
+    /// Say what a write could not keep, the once.
+    ///
+    /// ⚠️ Every few seconds one of the two callers writes the list again. Announcing the
+    /// same losses each time would hold the status line against everything else that has
+    /// something to say, and fill the log inside an hour.
+    fn report(&mut self, left: crate::store::Left) {
+        if left == self.left {
+            return;
+        }
+        self.left = left;
+        left.report(&mut self.log);
     }
 }
 
@@ -296,13 +313,20 @@ impl eframe::App for DrawbarApp {
     /// eframe calls this on its own timer and on the way out, so an edit is kept
     /// without anyone asking for it to be.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        crate::store::save(storage, &self.workspace, &self.queue, &mut self.log);
+        let left = crate::store::save(storage, &self.workspace, &self.queue);
+        self.report(left);
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
         // Not written from the frame that changed it, the way the theme is: a divider
         // moves on every frame of a drag, and the whole store is rewritten each time.
         self.browser.keep(storage);
         self.shell.keep(storage);
         self.saved = self.workspace.revision();
+    }
+
+    /// eframe calls this once on the way out, after [`Self::save`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.device.release();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -561,7 +585,6 @@ pub fn micro() -> egui::TextStyle {
 pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(8.0, 4.0);
-    // A button was 1px taller than its own text; a strip of them read as a solid bar.
     spacing.button_padding = egui::vec2(7.0, 3.0);
     // Panels own their inner padding, so the shared margin claims none of it.
     spacing.window_margin = egui::Margin::same(0);
@@ -580,6 +603,45 @@ pub(crate) fn metrics(style: &mut egui::Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::MAX_ENTITY;
+
+    /// ⚠️ eframe writes the list every five seconds and [`DrawbarApp::keep_up`] every
+    /// two. A save that announced its own losses each time would hold the status line
+    /// against everything else with something to say, and fill the log inside an hour.
+    #[test]
+    fn what_a_save_cannot_keep_is_said_once_however_often_the_list_is_written() {
+        use eframe::App as _;
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = DrawbarApp::new(&cc);
+        let mut store = crate::store::Fake::default();
+        let huge = |app: &mut DrawbarApp, name: &str| {
+            app.workspace.ingest(
+                name.into(),
+                Origin::Fresh,
+                vec![0; MAX_ENTITY + 1],
+                &mut app.log,
+            );
+        };
+        let said = |app: &DrawbarApp| {
+            app.log
+                .iter()
+                .filter(|entry| entry.text.contains("too big"))
+                .count()
+        };
+
+        huge(&mut app, "huge.nsmp");
+        app.save(&mut store);
+        assert_eq!(said(&app), 1);
+        app.save(&mut store);
+        assert_eq!(said(&app), 1, "the same asset is not announced again");
+
+        // What is left out has changed, so it is worth saying again.
+        huge(&mut app, "also-huge.nsmp");
+        app.save(&mut store);
+        assert_eq!(said(&app), 2);
+    }
 
     #[test]
     fn the_theme_choice_round_trips_and_cycles_home() {

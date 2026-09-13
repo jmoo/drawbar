@@ -41,12 +41,16 @@ pub fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// One script, read and parsed.
+pub fn read(path: &Path) -> Script {
+    let text =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    Script::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
 /// One committed script, by its path under `tests/scripts`.
 pub fn fixture(rel: &str) -> Script {
-    let path = fixtures().join(rel);
-    let text =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    Script::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    read(&fixtures().join(rel))
 }
 
 /// The path under its root, `/`-joined on every platform so the documented filters and

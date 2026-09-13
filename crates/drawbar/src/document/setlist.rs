@@ -15,6 +15,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::capability::{facts, Fact};
 use super::controls::{self, Sets};
+use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
 use crate::browser::{Item, Kind};
 use crate::device::DeviceState;
@@ -50,8 +51,8 @@ pub fn entries(entity: &Entity) -> Option<usize> {
 fn set(file: &mut Cbin<Song>, path: &str, value: &str) -> Result<(), String> {
     let slot = path
         .strip_prefix("slot")
-        .and_then(|n| n.parse::<u16>().ok())
-        .filter(|&n| (1..=song::PROGRAM_COUNT as u16).contains(&n))
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|n| song::Slot::at(n.checked_sub(1)?))
         .ok_or_else(|| format!("unknown field {path:?}"))?;
     let (bank, at) = value
         .split_once(':')
@@ -67,7 +68,7 @@ fn set(file: &mut Cbin<Song>, path: &str, value: &str) -> Result<(), String> {
     let target: program::Location = (bank - 1, at - 1)
         .try_into()
         .map_err(|e| format!("{path}: {e}"))?;
-    file.set(slot - 1, target);
+    file.set(slot, target);
     Ok(())
 }
 
@@ -134,9 +135,12 @@ impl Stands {
         }
     }
 
-    fn ink(&self, visuals: &egui::Visuals) -> egui::Color32 {
+    /// The colour this state wears. `resolved` is what an entry that resolves takes:
+    /// the good ink where the state is spelled out, the accent on the disc that stands
+    /// for the program itself.
+    fn ink(&self, visuals: &egui::Visuals, resolved: egui::Color32) -> egui::Color32 {
         match self {
-            Stands::Resolves => app::good(visuals),
+            Stands::Resolves => resolved,
             Stands::Vacant | Stands::Needs { .. } => app::warn(visuals),
             Stands::Unread => app::caption(visuals),
         }
@@ -201,9 +205,10 @@ impl Row {
         saved: Option<&Cbin<Song>>,
         seen: &Catalogue<'_>,
     ) -> Row {
-        let at = panel(file.get(index as u16));
+        let slot = song::Slot::at(index).expect("a set list entry");
+        let at = panel(file.get(slot));
         let was = saved
-            .map(|saved| panel(saved.get(index as u16)))
+            .map(|saved| panel(saved.get(slot)))
             .filter(|held| *held != at);
         let (name, open, stands) = resolve(at, seen);
         Row {
@@ -303,7 +308,9 @@ pub fn claim(entity: &Entity, seen: &Catalogue<'_>) -> Option<super::StateLine> 
     (ink == super::Ink::Warn).then(|| super::StateLine {
         words,
         ink,
-        hint: "an entry names a program the instrument does not have where it says".to_string(),
+        hint: "an entry points at a slot with no program, or at a program playing a \
+               library the instrument has not named"
+            .to_string(),
     })
 }
 
@@ -350,47 +357,29 @@ fn reorder(addresses: &[Location], from: usize, to: usize) -> Sets {
 #[derive(Clone, Copy)]
 struct Carried(usize);
 
-const PAD: f32 = 12.0;
-const HEAD_H: f32 = 20.0;
 const ROW_H: f32 = 30.0;
-const GAP: f32 = 10.0;
-const GRIP_W: f32 = 22.0;
-const INDEX_W: f32 = 34.0;
-const KIND_W: f32 = 22.0;
-const ADDRESS_W: f32 = 118.0;
-const OPEN_W: f32 = 22.0;
 const BOX_W: f32 = 34.0;
 const BOX_H: f32 = 20.0;
 const DOT: f32 = 6.0;
-const HEAD_TEXT: f32 = 9.0;
-const NAME_TEXT: f32 = 11.5;
 const SUB_TEXT: f32 = 10.0;
 const STATE_TEXT: f32 = 10.5;
 const MONO: f32 = 11.0;
 const GLYPH: f32 = 13.0;
 const MARK: f32 = 11.0;
 
-/// The seven columns: each one's left edge and width.
-fn columns(rect: egui::Rect) -> [(f32, f32); 7] {
-    let fixed = GRIP_W + INDEX_W + KIND_W + ADDRESS_W + OPEN_W + GAP * 6.0 + PAD * 2.0;
-    let free = (rect.width() - fixed).max(0.0);
-    let name = free * 1.6 / 2.6;
-    let mut left = rect.left() + PAD;
-    let mut out = [(0.0, 0.0); 7];
-    for (cell, width) in out.iter_mut().zip([
-        GRIP_W,
-        INDEX_W,
-        KIND_W,
-        name,
-        ADDRESS_W,
-        free - name,
-        OPEN_W,
-    ]) {
-        *cell = (left, width);
-        left += width + GAP;
-    }
-    out
-}
+/// The seven columns: the drag handle, the place in the set, the kind, the name, the
+/// address, what stands there, and the way out.
+const COLUMNS: [Width; 7] = [
+    Width::Fixed(22.0),
+    Width::Fixed(34.0),
+    Width::Fixed(22.0),
+    Width::Share(1.6),
+    Width::Fixed(118.0),
+    Width::Share(1.0),
+    Width::Fixed(22.0),
+];
+
+const HEADS: [&str; 7] = ["", "#", "", "Plays", "Bank : slot", "State", ""];
 
 /// The four programs the set list plays, in the order it plays them.
 ///
@@ -413,7 +402,7 @@ pub fn ui(
         "drag to reorder · type a bank and slot as the panel shows them, numbered from 1",
         Some((&reading, tint)),
     );
-    heads(ui);
+    table::heads(ui, COLUMNS, HEADS, &[]);
 
     let mut opened = None;
     let mut moved = None;
@@ -434,34 +423,6 @@ pub fn ui(
     opened
 }
 
-fn heads(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), HEAD_H),
-        egui::Sense::hover(),
-    );
-    let quiet = app::caption(ui.visuals());
-    let hairline = egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
-    let painter = ui.painter();
-    painter.hline(rect.x_range(), rect.top() + 0.5, hairline);
-    painter.hline(rect.x_range(), rect.bottom() - 0.5, hairline);
-    let heads = ["", "#", "", "Plays", "Bank : slot", "State", ""];
-    for ((left, _), text) in columns(rect).into_iter().zip(heads) {
-        if text.is_empty() {
-            continue;
-        }
-        let galley = painter.layout_no_wrap(
-            text.to_uppercase(),
-            egui::FontId::proportional(HEAD_TEXT),
-            quiet,
-        );
-        painter.galley(
-            egui::pos2(left, rect.center().y - galley.size().y / 2.0),
-            galley,
-            quiet,
-        );
-    }
-}
-
 /// One entry. Returns the move a drop asked for and the item an arrow asked to open.
 fn entry(
     ui: &mut egui::Ui,
@@ -477,7 +438,7 @@ fn entry(
         egui::vec2(ui.available_width(), ROW_H),
         egui::Sense::hover(),
     );
-    let cells = columns(rect);
+    let cells = table::columns(rect, COLUMNS);
     let quiet = app::caption(&visuals);
     let hairline = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
     let carried = response.dnd_hover_payload::<Carried>();
@@ -527,11 +488,7 @@ fn entry(
         ui,
         Glyph::Disc3,
         cell_rect(cells[2], rect, GLYPH),
-        match row.stands {
-            Stands::Resolves => app::accent(&visuals),
-            Stands::Vacant | Stands::Needs { .. } => app::warn(&visuals),
-            Stands::Unread => quiet,
-        },
+        row.stands.ink(&visuals, app::accent(&visuals)),
     );
     plays_cell(ui, cells[3], rect, row);
     address(ui, state, index, row, cells[4], rect, sets);
@@ -719,7 +676,7 @@ fn state_cell(
     rect: egui::Rect,
     row: &Row,
 ) {
-    let ink = row.stands.ink(ui.visuals());
+    let ink = row.stands.ink(ui.visuals(), app::good(ui.visuals()));
     painted(
         ui,
         row.stands.glyph(),
@@ -815,7 +772,7 @@ pub fn stored(ui: &mut egui::Ui, entity: &Entity) {
         .iter()
         .enumerate()
         .map(|(index, path)| {
-            let at = file.get(index as u16);
+            let at = file.get(song::Slot::at(index).expect("a set list entry"));
             Fact {
                 key: path,
                 value: format!("{} · {:#05x}", shown(panel(at)), at.as_u16()),
@@ -841,7 +798,8 @@ mod tests {
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
-        );
+        )
+        .unwrap();
         nord_format::to_bytes(&nord_format::Entity::Song(nord_format::Song::Electro5(
             song,
         )))
@@ -860,7 +818,7 @@ mod tests {
         let out = apply(&bytes, &[("slot2".into(), "3:14".into())]).unwrap();
         let entity = nord_format::from_stream(&mut std::io::Cursor::new(&out)).unwrap();
         let file = song(&entity).unwrap();
-        assert_eq!(file.get(1).inner(), (2, 13));
+        assert_eq!(file.get(song::Slot::B).inner(), (2, 13));
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), out);
     }
 
@@ -964,7 +922,7 @@ mod tests {
             let id = workspace.ingest(
                 "Blue Room.ne5t".into(),
                 Origin::File("Blue Room.ne5t".into()),
-                crate::fields::blank::electro5_song(),
+                Fresh::SetList.bytes().unwrap(),
                 &mut log,
             );
             Shown {
@@ -1174,7 +1132,7 @@ mod tests {
         }]);
         assert_eq!(sets, [("slot1".to_string(), "3:1".to_string())]);
         assert!(
-            apply(&crate::fields::blank::electro5_song(), &sets).is_ok(),
+            apply(&Fresh::SetList.bytes().unwrap(), &sets).is_ok(),
             "and the format takes what was typed"
         );
     }
@@ -1225,6 +1183,36 @@ mod tests {
                 .iter()
                 .any(|word| word.ends_with("Reordering rewrites every slot below the move.")),
             "the sentence says what the drag did"
+        );
+    }
+
+    /// ⚠️ The reading counts two states, and the claim on the header stands for both of
+    /// them: a slot the instrument has read and found empty, and a program here playing
+    /// a library nothing has named.
+    #[test]
+    fn the_header_claim_speaks_for_both_of_the_states_it_counts() {
+        let mut shown = Shown::new();
+        shown
+            .device
+            .pretend_scanned(ObjectClass::Program, 1, &["Africa Split", ""]);
+        let entity = shown.workspace.get(shown.id).expect("it is still open");
+        let seen = Catalogue {
+            device: &shown.device.state,
+            workspace: &shown.workspace,
+        };
+        let claim = claim(entity.entity.as_ref().expect("a set list decodes"), &seen)
+            .expect("a vacant slot is trouble");
+
+        assert_eq!(claim.words, "1 entry needs attention");
+        assert!(
+            claim.hint.contains("no program"),
+            "the vacant slot: {}",
+            claim.hint
+        );
+        assert!(
+            claim.hint.contains("has not named"),
+            "the unnamed library: {}",
+            claim.hint
         );
     }
 

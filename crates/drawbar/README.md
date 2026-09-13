@@ -11,7 +11,7 @@ The window is a file browser over the places your sounds live:
 
 | region | what it holds |
 |---|---|
-| **Storage** (left) | **This computer** — dropped or opened files, copies pulled off the instrument, fresh defaults. **Connect instrument** sits beside Open… and New; until an instrument answers, this is the whole sidebar. Attached, the **instrument** takes a column of its own alongside — folders (Programs, Set lists, Samples, Pianos, Live, Settings) filling in by themselves — so moving a sound between the two is a short drag. Each column scrolls on its own, and the divider between them is dragged to give one more room than the other; double-click it for an even split, and where it was left is kept between sessions |
+| **Browser** (left) | **This computer** — dropped or opened files, copies pulled off the instrument, fresh defaults. The tree's **Connect an instrument…** row, or **Instrument → Connect…**, attaches one; until an instrument answers, this is the whole sidebar. Attached, the **instrument** takes a column of its own alongside — folders (Programs, Set lists, Samples, Pianos, Live, Settings) filling in by themselves — so moving a sound between the two is a short drag. Each column scrolls on its own, and the divider between them is dragged to give one more room than the other; double-click it for an even split, and where it was left is kept between sessions |
 | **Tabs** (centre) | one document per thing you opened. Double-click anything in the sidebar to open it; something on the instrument is copied here first. Each has a **Basic** and an **Advanced** face |
 | **Status strip** (bottom) | one line about what just happened, and a spinner while something is running. Click it for the full activity log, protocol detail and all |
 
@@ -38,8 +38,9 @@ a row removes it from the store.
 
 ### The instrument
 
-**Connect instrument**, beside Open… and New, opens the device (a chooser in the
-browser, the first attached Clavia natively) and reads what it holds; the instrument's
+The tree's **Connect an instrument…** row, or **Instrument → Connect…** in the menu
+bar, opens the device (a chooser in the browser, the first attached Clavia natively)
+and reads what it holds; the instrument's
 own column appears with it, and goes away again when it is released. Each folder is read in **one session**,
 the way Nord Sound Manager does it — the session is opened once and every slot
 read inside it — so connecting no longer walks the instrument's display through

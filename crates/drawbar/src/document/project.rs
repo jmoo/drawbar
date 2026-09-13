@@ -12,23 +12,21 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::ops::RangeInclusive;
 
 use eframe::egui;
 use nord_format::formats::nsmpproj::{
     Project, StrokeField, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
 };
+use nord_format::note;
 use nord_format::Entity;
 
 use super::capability::{Fact, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys;
-use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State};
+use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
+use super::table::PAD;
 use crate::app;
-use crate::note;
-
-pub fn is_project(entity: &Entity) -> bool {
-    matches!(entity, Entity::SampleProject(_))
-}
 
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {
@@ -52,10 +50,12 @@ pub struct Zone {
     pub bottom_note: u8,
     pub top_note: u8,
     pub enabled: bool,
-    /// The stroke this zone plays — the enabled one, where it has several.
+    /// The stroke this zone plays, where one of them is switched on.
     ///
     /// ⚠️ A zone plays one stroke: a project may hold more, but only the enabled one is
-    /// written into an instrument.
+    /// written into an instrument, and a zone with none switched on plays nothing.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
     pub played: Option<u32>,
 }
 
@@ -145,12 +145,7 @@ fn read(project: &Project) -> Result<Snapshot, String> {
                 bottom_note: z.bottom_note,
                 top_note: z.top_note,
                 enabled: z.enabled,
-                played: z
-                    .strokes
-                    .iter()
-                    .find(|s| s.enabled)
-                    .or_else(|| z.strokes.first())
-                    .map(|s| s.global_id),
+                played: z.strokes.iter().find(|s| s.enabled).map(|s| s.global_id),
             })
             .collect(),
         files: project
@@ -223,24 +218,53 @@ fn indexed(part: &str, label: &str) -> Option<u32> {
 }
 
 /// A drag over one number, spelling the new value only once it has moved.
+///
+/// `decimals` caps what the drag can land on: egui aims at the roundest value within a
+/// pointer's width of where the drag reached, and at a fractional display scale that is
+/// a half — which a field holding a whole number refuses.
 fn drag<H: std::hash::Hash>(
     ui: &mut egui::Ui,
     id: (&str, H),
     value: f64,
-    range: std::ops::RangeInclusive<f64>,
+    range: RangeInclusive<f64>,
     speed: f64,
+    decimals: Option<usize>,
 ) -> Option<String> {
     let mut moved = value;
     let response = ui.push_id(id, |ui| {
-        ui.add(egui::DragValue::new(&mut moved).range(range).speed(speed))
+        ui.add(
+            egui::DragValue::new(&mut moved)
+                .range(range)
+                .speed(speed)
+                .max_decimals_opt(decimals),
+        )
     });
     (response.inner.changed() && moved != value).then(|| moved.to_string())
 }
 
 /// A frame position. Nothing in the format caps one: the editor repairs a
 /// position past the file's end on load.
+///
+/// Inferred from specimens; not confirmed on hardware.
 fn frames(ui: &mut egui::Ui, id: (&str, u32), value: f64) -> Option<String> {
-    drag(ui, id, value, 0.0..=f64::MAX, 1.0)
+    drag(ui, id, value, 0.0..=f64::MAX, 1.0, None)
+}
+
+/// A velocity end, which the `map_stroke` holds as a `u8`.
+fn whole(ui: &mut egui::Ui, id: (&str, u32), value: f64, top: f64) -> Option<String> {
+    drag(ui, id, value, 0.0..=top, 0.5, Some(0))
+}
+
+/// How far each end of the trim may be dragged: never past the other, because a zone
+/// whose trim-in is at or past its trim-out plays nothing and is refused at build.
+///
+/// A trim a file already states inverted is still inside its own control, so it can be
+/// dragged back rather than left where nothing can reach it.
+fn trim_ends(start: f64, stop: f64) -> (RangeInclusive<f64>, RangeInclusive<f64>) {
+    (
+        0.0..=(stop - 1.0).max(start),
+        (start + 1.0).min(stop)..=f64::MAX,
+    )
 }
 
 /// Apply every set to a fresh decode and re-encode, the same all-or-nothing rule
@@ -304,8 +328,10 @@ fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
     snapshot
         .zones
         .iter()
-        .filter(|zone| zone.enabled)
-        .map(|zone| MapZone {
+        .enumerate()
+        .filter(|(_, zone)| zone.enabled)
+        .map(|(row, zone)| MapZone {
+            row,
             low: zone.bottom_note,
             top: zone.top_note,
             root: zone.root_key,
@@ -388,7 +414,7 @@ fn facts_of(snapshot: &Snapshot, zone: &Zone, stroke: Option<&Stroke>) -> String
     if let Some(file) = source(snapshot, stroke) {
         parts.push(leaf(&file.path).to_string());
     }
-    parts.push(format!("{:+.1} dB", 20.0 * stroke.gain.max(1e-6).log10()));
+    parts.push(sample::decibels(20.0 * stroke.gain.log10()));
     parts.push(format!("vel {}–{}", stroke.velocity.0, stroke.velocity.1));
     parts.join(" · ")
 }
@@ -403,7 +429,10 @@ fn leaf(path: &str) -> &str {
 /// A project's audio is on disk rather than in the file, so there are no bytes to
 /// measure — the trim is what a zone costs.
 fn length(snapshot: &Snapshot, stroke: &Stroke) -> String {
-    let frames = (stroke.stop - stroke.start).max(0.0);
+    let frames = stroke.stop - stroke.start;
+    if frames < 0.0 {
+        return "inverted trim".to_string();
+    }
     match source(snapshot, stroke).map(|file| file.rate) {
         Some(rate) if rate > 0 => format!("{:.3} s", frames / f64::from(rate)),
         _ => format!("{frames:.0} fr"),
@@ -443,37 +472,26 @@ fn fields(
         let top = f64::from(MAX_VELOCITY);
         sample::cell(ui, "Velocity window", 112.0, |ui| {
             ui.horizontal(|ui| {
-                if let Some(v) = drag(
-                    ui,
-                    ("proj_vmin", gid),
-                    stroke.velocity.0 as f64,
-                    0.0..=top,
-                    0.5,
-                ) {
+                if let Some(v) = whole(ui, ("proj_vmin", gid), stroke.velocity.0 as f64, top) {
                     sets.push((format!("stroke{gid}.velocity_min"), v));
                 }
-                if let Some(v) = drag(
-                    ui,
-                    ("proj_vmax", gid),
-                    stroke.velocity.1 as f64,
-                    0.0..=top,
-                    0.5,
-                ) {
+                if let Some(v) = whole(ui, ("proj_vmax", gid), stroke.velocity.1 as f64, top) {
                     sets.push((format!("stroke{gid}.velocity_max"), v));
                 }
             });
         });
         sample::cell(ui, "Gain", 80.0, |ui| {
-            if let Some(v) = drag(ui, ("proj_gain", gid), stroke.gain, 0.0..=16.0, 0.01) {
+            if let Some(v) = drag(ui, ("proj_gain", gid), stroke.gain, 0.0..=16.0, 0.01, None) {
                 sets.push((format!("stroke{gid}.gain"), v));
             }
         });
+        let (into, out) = trim_ends(stroke.start, stroke.stop);
         sample::cell(ui, "Trim in → out", 150.0, |ui| {
             ui.horizontal(|ui| {
-                if let Some(v) = frames(ui, ("proj_start", gid), stroke.start) {
+                if let Some(v) = drag(ui, ("proj_start", gid), stroke.start, into, 1.0, None) {
                     sets.push((format!("stroke{gid}.start"), v));
                 }
-                if let Some(v) = frames(ui, ("proj_stop", gid), stroke.stop) {
+                if let Some(v) = drag(ui, ("proj_stop", gid), stroke.stop, out, 1.0, None) {
                     sets.push((format!("stroke{gid}.stop"), v));
                 }
             });
@@ -503,10 +521,10 @@ fn fields(
         if let Some(file) = source(snapshot, stroke) {
             let held = paths.entry(file.id).or_insert_with(|| file.path.clone());
             sample::cell(ui, "Source file", 280.0, |ui| {
+                // ⚠️ Written when the box is left, which an Enter typed into it does:
+                // an Enter pressed anywhere else is not this box being finished with.
                 let response = ui.add(egui::TextEdit::singleline(held).desired_width(270.0));
-                let done = response.lost_focus()
-                    || response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                if done && *held != file.path {
+                if response.lost_focus() && *held != file.path {
                     sets.push((format!("file{}.path", file.id), held.clone()));
                 }
             });
@@ -517,18 +535,19 @@ fn fields(
 /// The key × velocity field: one window per zone, and every edge draggable, because a
 /// project is where a window is stated.
 fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mut Sets) {
-    let playing: Vec<(&Zone, &Stroke)> = snapshot
+    let playing: Vec<(usize, &Zone, &Stroke)> = snapshot
         .zones
         .iter()
-        .filter(|zone| zone.enabled)
-        .filter_map(|zone| played(snapshot, zone).map(|stroke| (zone, stroke)))
+        .enumerate()
+        .filter(|(_, zone)| zone.enabled)
+        .filter_map(|(row, zone)| played(snapshot, zone).map(|stroke| (row, zone, stroke)))
         .collect();
     if playing.is_empty() {
         return;
     }
     let blocks: Vec<keys::VelBlock> = playing
         .iter()
-        .map(|(zone, stroke)| keys::VelBlock {
+        .map(|(_, zone, stroke)| keys::VelBlock {
             low: zone.bottom_note,
             top: zone.top_note,
             window: stroke.velocity,
@@ -543,45 +562,20 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
             ),
         })
         .collect();
-    let holes = keys::velocity_holes(&blocks);
-    let visuals = ui.visuals().clone();
-    let (cover, ink) = match holes.len() {
-        0 => ("fully covered".to_string(), app::good(&visuals)),
-        1 => ("1 hole".to_string(), app::warn(&visuals)),
-        n => (format!("{n} holes"), app::warn(&visuals)),
-    };
-    controls::heading(
+    let rows: Vec<usize> = playing.iter().map(|(row, _, _)| *row).collect();
+    let asked = sample::velocity_field(
         ui,
-        "Velocity",
         "one window per zone — drag the top or bottom edge",
-        Some((&cover, ink)),
+        SPAN,
+        &blocks,
+        &rows,
+        keys::Handles::Draggable,
+        sample::selected(state),
     );
-    // The field draws only the zones that answer, so its indices are not the rows'.
-    let block_of = |row: usize| {
-        let id = snapshot.zones.get(row)?.id;
-        playing.iter().position(|(zone, _)| zone.id == id)
-    };
-    let picked = sample::selected(state).and_then(block_of);
-    let acted = ui
-        .horizontal(|ui| {
-            ui.add_space(PAD);
-            let room = (ui.available_width() - PAD).max(64.0);
-            ui.allocate_ui(egui::vec2(room, 0.0), |ui| {
-                keys::velocity(ui, SPAN, &blocks, picked, keys::Handles::Draggable)
-            })
-            .inner
-        })
-        .inner;
-    ui.add_space(8.0);
-    match acted {
-        Some(keys::VelocityAct::Pick(index)) => {
-            let id = playing[index].0.id;
-            if let Some(row) = snapshot.zones.iter().position(|zone| zone.id == id) {
-                sample::pick_row(state, row);
-            }
-        }
-        Some(keys::VelocityAct::Drag { zone, window, .. }) => {
-            let (_, stroke) = playing[zone];
+    match asked {
+        Some(VelocityAsk::Open(row)) => sample::pick_row(state, row),
+        Some(VelocityAsk::Window { block, window }) => {
+            let stroke = playing[block].2;
             if window.0 != stroke.velocity.0 {
                 sets.push((
                     format!("stroke{}.velocity_min", stroke.id),
@@ -598,9 +592,6 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
         None => {}
     }
 }
-
-/// The page's own side margin, the same one the rows keep.
-const PAD: f32 = 12.0;
 
 /// The instrument's own parameters. A project is the source, so these are the only
 /// sound parameters the editors can write.
@@ -625,7 +616,7 @@ fn parameters(ui: &mut egui::Ui, snapshot: &Snapshot, sets: &mut Sets) {
             ] {
                 sample::cell(ui, label, 132.0, |ui| {
                     if let Some(moved) = crate::knob::ui(ui, field, i64::from(value), 0, 255) {
-                        sets.push((format!("velocity.{field}"), moved.to_string()));
+                        sets.push((format!("velocity.{field}"), moved));
                     }
                 });
             }
@@ -721,7 +712,11 @@ pub fn capabilities() -> Vec<Row> {
             Cap::Editable,
             "the loop, its length and its crossfade, in frames",
         ),
-        row("loop decay / detune", Cap::Editable, "m_loopDecay"),
+        row(
+            "loop decay / detune",
+            Cap::ReadOnly,
+            "m_loopDecay, which no control on this face writes — nord-cli does",
+        ),
         row("release samples", Cap::Absent, "a piano library's bank 2"),
         row(
             "pedal resonance samples",
@@ -806,25 +801,22 @@ mod tests {
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project_bytes() -> Vec<u8> {
-        let project = Project::new(
-            "Marimba",
-            &[
-                NewZone {
-                    path: "low.wav".into(),
-                    sample_rate: 44100,
-                    frames: 44100,
-                    root_key: 48,
-                },
-                NewZone {
-                    path: "high.wav".into(),
-                    sample_rate: 44100,
-                    frames: 44100,
-                    root_key: 72,
-                },
-            ],
-            0,
-        )
-        .unwrap();
+        project_of(&[48, 72])
+    }
+
+    /// A project of one zone per root key, each playing a WAV of its own — what the
+    /// editor writes for a new instrument.
+    fn project_of(roots: &[u8]) -> Vec<u8> {
+        let zones: Vec<NewZone> = roots
+            .iter()
+            .map(|root| NewZone {
+                path: format!("root{root}.wav"),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key: *root,
+            })
+            .collect();
+        let project = Project::new("Marimba", &zones, 0).unwrap();
         nord_format::to_bytes(&Entity::SampleProject(project)).unwrap()
     }
 
@@ -930,6 +922,232 @@ mod tests {
         assert_eq!(SPAN.high, HIGHEST_NOTE);
     }
 
+    /// A context dressed as the app dresses it: the semibold family a band is set in is
+    /// not bound by default, and laying one out without it panics.
+    fn dressed() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        ctx.set_visuals(egui::Visuals::dark());
+        ctx
+    }
+
+    /// One frame of the pinned map over `snapshot`: what it painted and where, and what
+    /// it wrote.
+    fn mapped(
+        ctx: &egui::Context,
+        state: &mut State,
+        snapshot: &Snapshot,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, Sets) {
+        let mut sets = Sets::new();
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                map(ui, state, snapshot, &mut sets);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, sets)
+    }
+
+    fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => into.push((
+                text.galley.text().to_string(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+            _ => {}
+        }
+    }
+
+    fn press(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// One frame of the body over `snapshot`: what it painted and where, and what it
+    /// wrote.
+    fn bodied(
+        ctx: &egui::Context,
+        state: &mut State,
+        snapshot: &Snapshot,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, Sets) {
+        let mut sets = Sets::new();
+        let mut paths = HashMap::new();
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |page| {
+                ui(page, state, snapshot, &mut paths, &mut sets);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, sets)
+    }
+
+    /// The highest place a word was painted: the velocity field stands above the rows,
+    /// and both name a zone the same way.
+    fn highest(said: &[(String, egui::Rect)], word: &str) -> egui::Rect {
+        said.iter()
+            .filter(|(text, _)| text == word)
+            .map(|(_, at)| *at)
+            .reduce(|a, b| match a.center().y < b.center().y {
+                true => a,
+                false => b,
+            })
+            .unwrap_or_else(|| panic!("{word} was never painted: {said:?}"))
+    }
+
+    /// One frame of the velocity-min control on its own, and what it spelled.
+    fn velocity_box(ctx: &egui::Context, events: Vec<egui::Event>) -> Option<String> {
+        let mut spelled = None;
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(200.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                spelled = whole(ui, ("proj_vmin", 1), 0.0, f64::from(MAX_VELOCITY));
+            });
+        });
+        spelled
+    }
+
+    /// ⚠️ A velocity end is a `u8`: egui aims at the roundest value within a pointer's
+    /// width of where a drag reached, and at a fractional display scale that is a half
+    /// the field refuses. Every value the control spells has to be one the format takes.
+    #[test]
+    fn a_dragged_velocity_end_is_spelled_as_a_whole_number() {
+        let ctx = dressed();
+        ctx.set_pixels_per_point(1.5);
+        let at = egui::pos2(30.0, 20.0);
+        velocity_box(&ctx, Vec::new());
+        velocity_box(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let mut spelled = None;
+        for step in [10.0, 3.0, 3.0] {
+            let to = egui::pos2(at.x + step, at.y);
+            spelled = velocity_box(&ctx, vec![egui::Event::PointerMoved(to)]).or(spelled);
+        }
+
+        let spelled = spelled.expect("the drag moved the control");
+        assert!(
+            spelled.parse::<u8>().is_ok(),
+            "the control spelled {spelled:?}, which is not a velocity"
+        );
+        assert!(
+            apply(
+                &project_bytes(),
+                &[("stroke1.velocity_min".into(), spelled.clone())]
+            )
+            .is_ok(),
+            "and the format takes {spelled:?}"
+        );
+    }
+
+    /// ⚠️ A block is not a row either: the velocity field draws one block per zone that
+    /// answers, so a click on the last block must open the last row.
+    #[test]
+    fn clicking_a_velocity_block_opens_the_row_it_stands_for() {
+        let ctx = dressed();
+        let mut snapshot = read_back(&project_of(&[48, 60, 72]));
+        snapshot.zones[1].enabled = false;
+        let bottom = snapshot.zones[2].id;
+
+        let mut state = State::default();
+        let (said, _) = bodied(&ctx, &mut state, &snapshot, Vec::new());
+        let block = highest(&said, &format!("Zone {bottom}"));
+        // Below the block's name, which sits over the handle at the window's top edge.
+        let at = egui::pos2(block.center().x, block.center().y + 20.0);
+
+        let (_, sets) = bodied(&ctx, &mut state, &snapshot, press(at));
+        assert_eq!(
+            sample::selected(&state),
+            Some(2),
+            "the second block stands on the third zone"
+        );
+        assert!(sets.is_empty(), "a pick is not an edit");
+    }
+
+    /// ⚠️ A band is not a row: the map draws only the zones that answer a key, so a
+    /// click on the last band must open the last row even with a zone switched off
+    /// between them.
+    #[test]
+    fn clicking_a_band_opens_the_row_it_stands_for() {
+        let ctx = dressed();
+        let mut snapshot = read_back(&project_of(&[48, 60, 72]));
+        snapshot.zones[1].enabled = false;
+        let bottom = snapshot.zones[2].id;
+
+        let mut state = State::default();
+        let (said, _) = mapped(&ctx, &mut state, &snapshot, Vec::new());
+        assert_eq!(sample::selected(&state), None);
+        let band = said
+            .iter()
+            .find(|(text, _)| *text == format!("Zone {bottom}"))
+            .unwrap_or_else(|| panic!("the bottom zone's band was never painted: {said:?}"))
+            .1;
+
+        let (_, sets) = mapped(&ctx, &mut state, &snapshot, press(band.center()));
+        assert_eq!(
+            sample::selected(&state),
+            Some(2),
+            "the second band stands on the third zone"
+        );
+        assert!(sets.is_empty(), "a pick is not an edit");
+    }
+
     /// A zone's row reads the file it plays and how long the trim leaves it.
     #[test]
     fn a_row_reads_the_source_it_plays() {
@@ -943,6 +1161,142 @@ mod tests {
         assert!(facts.contains(&file.path), "{facts}");
         assert!(facts.contains("vel 0–127"), "{facts}");
         assert_eq!(leaf("/Users/x/Nord/low.wav"), "low.wav");
+    }
+
+    /// One frame of one zone's open fields, with `paths` as the boxes hold them.
+    fn opened(
+        ctx: &egui::Context,
+        snapshot: &Snapshot,
+        paths: &mut HashMap<u32, String>,
+        events: Vec<egui::Event>,
+    ) -> Sets {
+        let mut sets = Sets::new();
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                fields(ui, snapshot, 0, paths, &mut sets);
+            });
+        });
+        sets
+    }
+
+    /// ⚠️ The source box writes what it holds when it is left, and an Enter pressed
+    /// somewhere else is not that: a key landing in another control must not commit a
+    /// path nobody has finished typing.
+    #[test]
+    fn a_half_typed_source_path_waits_for_the_box_to_be_left() {
+        let ctx = dressed();
+        let snapshot = read_back(&project_bytes());
+        let stroke = played(&snapshot, &snapshot.zones[0]).expect("a stroke");
+        let file = source(&snapshot, stroke).expect("it names a file").id;
+        let mut paths = HashMap::from([(file, "half typed".to_string())]);
+
+        assert!(opened(&ctx, &snapshot, &mut paths, Vec::new()).is_empty());
+        let sets = opened(
+            &ctx,
+            &snapshot,
+            &mut paths,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            sets.is_empty(),
+            "an Enter with the box unfocused wrote {sets:?}"
+        );
+    }
+
+    /// The same project with the one stroke of its first zone switched off, which the
+    /// format allows and nothing here writes.
+    fn stroke_switched_off(bytes: &[u8]) -> Vec<u8> {
+        const FLAG: &str = "m_isEnabled = 1";
+        let text = String::from_utf8(bytes.to_vec()).expect("a project is text");
+        let stroke = text.find("map_stroke {").expect("a map_stroke block");
+        let flag = text[stroke..].find(FLAG).expect("its own flag") + stroke;
+        let mut out = text;
+        out.replace_range(flag..flag + FLAG.len(), "m_isEnabled = 0");
+        out.into_bytes()
+    }
+
+    /// ⚠️ Only the enabled stroke is written into an instrument, so a zone with none
+    /// switched on plays nothing: the row says so rather than reading a stroke that
+    /// would never be built.
+    #[test]
+    fn a_zone_whose_stroke_is_switched_off_plays_nothing() {
+        let snapshot = read_back(&stroke_switched_off(&project_bytes()));
+        let zone = &snapshot.zones[0];
+        assert_eq!(zone.played, None);
+        assert!(played(&snapshot, zone).is_none());
+        assert!(
+            facts_of(&snapshot, zone, None).contains("no stroke"),
+            "{}",
+            facts_of(&snapshot, zone, None)
+        );
+        assert!(
+            snapshot.zones[1].played.is_some(),
+            "the other zone still plays its own"
+        );
+        // A band with no stroke states no velocity window, so it is not in the field.
+        assert!(map_zones(&snapshot)[0].velocity.is_none());
+    }
+
+    /// ⚠️ A zone whose trim-in is at or past its trim-out plays nothing, and the build
+    /// refuses it: neither end can be dragged onto the other, and a trim a file already
+    /// states inverted is named rather than read as a zone of no length.
+    #[test]
+    fn an_inverted_trim_cannot_be_dragged_and_is_named_where_it_is_stated() {
+        let (into, out) = trim_ends(0.0, 44100.0);
+        assert_eq!(*into.end(), 44099.0, "the trim-in stops short of the out");
+        assert_eq!(*out.start(), 1.0, "and the out stops short of the in");
+
+        let (into, out) = trim_ends(900.0, 100.0);
+        assert!(
+            into.contains(&900.0) && out.contains(&100.0),
+            "an inverted trim is still inside its own control, so it can be dragged back"
+        );
+
+        let snapshot = read_back(&project_bytes());
+        let stroke = snapshot.strokes.first().expect("a stroke");
+        assert_eq!(length(&snapshot, stroke), "1.000 s");
+        let inverted = Stroke {
+            start: stroke.stop,
+            stop: stroke.start,
+            ..stroke.clone()
+        };
+        assert_eq!(length(&snapshot, &inverted), "inverted trim");
+    }
+
+    /// A gain is read in the one unit both documents read it in, and a stroke turned
+    /// all the way down says so rather than reading as the floor of a logarithm.
+    #[test]
+    fn a_stroke_with_no_gain_reads_as_silence() {
+        let snapshot = read_back(&project_bytes());
+        let zone = &snapshot.zones[0];
+        let stroke = played(&snapshot, zone).expect("a stroke");
+        assert_eq!(stroke.gain, 1.0);
+        assert!(
+            facts_of(&snapshot, zone, Some(stroke)).contains("+0.0 dB"),
+            "unity gain is no change at all"
+        );
+
+        let silent = Stroke {
+            gain: 0.0,
+            ..stroke.clone()
+        };
+        let facts = facts_of(&snapshot, zone, Some(&silent));
+        assert!(facts.contains("silent"), "{facts}");
     }
 
     /// A moved band writes both ends of the zone it moved, under the id the file gives
@@ -990,7 +1344,6 @@ mod tests {
             ("velocity layers", "stroke1.velocity_max", "90"),
             ("per-zone gain / detune", "stroke1.gain", "0.25"),
             ("loop points / crossfade", "stroke1.loop_crossfade", "240"),
-            ("loop decay / detune", "stroke1.loop_decay", "120"),
             ("sound parameters", "velocity.amplitude", "64"),
             ("replace / add a stroke", "file1.path", "other.wav"),
         ];

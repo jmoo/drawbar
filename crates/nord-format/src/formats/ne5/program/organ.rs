@@ -28,11 +28,47 @@ pub enum OrganModel {
     Pipe,
 }
 
+/// Which of a model's two stored registrations the instrument plays.
+///
+/// The panel numbers them 1 and 2; the file spells the choice as each model's
+/// `…_preset2_selected` flag, which is what the conversions here are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    One,
+    Two,
+}
+
+impl From<bool> for Preset {
+    fn from(preset2_selected: bool) -> Preset {
+        match preset2_selected {
+            true => Preset::Two,
+            false => Preset::One,
+        }
+    }
+}
+
+impl From<Preset> for bool {
+    /// The `…_preset2_selected` flag as the file stores it.
+    fn from(preset: Preset) -> bool {
+        matches!(preset, Preset::Two)
+    }
+}
+
+impl Display for Preset {
+    /// The panel's own number.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Preset::One => "1",
+            Preset::Two => "2",
+        })
+    }
+}
+
 /// The organ panel: drawbar and vib/perc registration for every model and
 /// both presets, stored in full so switching either is lossless.
 #[bitbody(69)]
 pub struct OrganPanel {
-    // ── B3, 0x4e..=0x64 ────────────────────────────────────────────────────────
+    // ── B3 ─────────────────────────────────────────────────────────────────────
     /// Shared across presets.
     #[bits(24..=26)]
     pub b3_vib: B3Vib,
@@ -64,10 +100,10 @@ pub struct OrganPanel {
     pub b3_preset2_vib: bool,
     #[bits(149..=149)]
     pub b3_preset2_perc: bool,
-    // Bits 150..=157 survive panel stores but do not affect preset-2 bass.
-    // Confirmed on hardware; left unclaimed for verbatim round-trip.
+    // Bits 150..=157 survive panel stores but do not affect preset-2 bass, and are
+    // left unclaimed so they round-trip verbatim. Confirmed on hardware.
 
-    // ── Vox, 0x65..=0x74 ───────────────────────────────────────────────────────
+    // ── Vox ────────────────────────────────────────────────────────────────────
     /// Shared across presets.
     #[bits(168..=170)]
     pub vox_vib: VoxVib,
@@ -82,7 +118,7 @@ pub struct OrganPanel {
     #[bits(284..=284)]
     pub vox_preset2_vib: bool,
 
-    // ── Farfisa, 0x75..=0x84 ───────────────────────────────────────────────────
+    // ── Farfisa ────────────────────────────────────────────────────────────────
     /// Shared across presets.
     #[bits(296..=298)]
     pub farfisa_vib: FarfisaVib,
@@ -100,7 +136,7 @@ pub struct OrganPanel {
     pub farfisa_preset2_vib: bool,
 
     // Pipe has no vibrato or percussion. Bit 492 survives panel stores but is
-    // unreachable while Pipe is selected; confirmed on hardware and left unclaimed.
+    // unreachable while Pipe is selected, and is left unclaimed. Confirmed on hardware.
     #[bits(441..=441)]
     pub pipe_preset2_selected: bool,
     #[bits(456..=491)]
@@ -118,19 +154,15 @@ impl Default for OrganPanel {
 }
 
 impl OrganPanel {
-    /// The selected preset (1 or 2) for `model`.
-    pub fn preset(&self, model: OrganModel) -> u8 {
-        if *self.preset_selected(model) {
-            2
-        } else {
-            1
-        }
+    /// The registration `model` is playing.
+    pub fn preset(&self, model: OrganModel) -> Preset {
+        (*self.preset_selected(model)).into()
     }
 
     /// The nine drawbar positions (physical, 0..=8) stored for `model`'s `preset`. This
     /// is the on-disk value; per-model display transforms (Farfisa on/off, Vox's ignored
     /// 8th bar, B3-bass bass-bar remap) are not applied.
-    pub fn drawbars(&self, model: OrganModel, preset: u8) -> [u8; 9] {
+    pub fn drawbars(&self, model: OrganModel, preset: Preset) -> [u8; 9] {
         self.drawbar_block(model, preset).positions()
     }
 
@@ -155,13 +187,13 @@ impl OrganPanel {
     /// A stored nibble of **≥5 reads as on**, anything lower as off. Use this rather
     /// than [`Self::drawbars`] for Farfisa — the raw 0..=8 value is stored faithfully
     /// but has no meaning beyond which side of the threshold it falls.
-    pub fn farfisa_tabs(&self, preset: u8) -> [bool; 9] {
+    pub fn farfisa_tabs(&self, preset: Preset) -> [bool; 9] {
         self.drawbars(OrganModel::Farfisa, preset)
             .map(|bar| bar >= 5)
     }
 
     /// Whether vibrato/chorus is on for `model`'s `preset`. Pipe has none.
-    pub fn vib_on(&self, model: OrganModel, preset: u8) -> bool {
+    pub fn vib_on(&self, model: OrganModel, preset: Preset) -> bool {
         self.vib_flag(model, preset).is_some_and(|on| *on)
     }
 
@@ -179,11 +211,10 @@ impl OrganPanel {
     }
 
     /// Whether B3 percussion is on for `preset` (B3 only).
-    pub fn b3_perc_on(&self, preset: u8) -> bool {
-        if preset == 2 {
-            self.b3_preset2_perc
-        } else {
-            self.b3_preset1_perc
+    pub fn b3_perc_on(&self, preset: Preset) -> bool {
+        match preset {
+            Preset::One => self.b3_preset1_perc,
+            Preset::Two => self.b3_preset2_perc,
         }
     }
 
@@ -202,9 +233,9 @@ impl OrganPanel {
 
     // ── writes ──────────────────────────────────────────────────────────────────
 
-    /// Select `preset` (1 or 2) for `model`.
-    pub fn set_preset(&mut self, model: OrganModel, preset: u8) {
-        *self.preset_selected_mut(model) = preset == 2;
+    /// Play `preset` on `model`.
+    pub fn set_preset(&mut self, model: OrganModel, preset: Preset) {
+        *self.preset_selected_mut(model) = preset.into();
     }
 
     /// Store nine drawbar positions, `0..=8`. A higher one is refused rather than
@@ -212,7 +243,7 @@ impl OrganPanel {
     pub fn set_drawbars(
         &mut self,
         model: OrganModel,
-        preset: u8,
+        preset: Preset,
         bars: [u8; 9],
     ) -> Result<(), ParseError> {
         *self.drawbar_block_mut(model, preset) = Drawbars::new(bars)?;
@@ -223,7 +254,7 @@ impl OrganPanel {
     /// lost — the instrument only reads which side of the ≥5 threshold it falls on, but
     /// the byte does change, so this will not round-trip a program you only meant to
     /// read.
-    pub fn set_farfisa_tabs(&mut self, preset: u8, tabs: [bool; 9]) {
+    pub fn set_farfisa_tabs(&mut self, preset: Preset, tabs: [bool; 9]) {
         let bars = tabs.map(|on| if on { Drawbars::MAX } else { 0 });
         self.set_drawbars(OrganModel::Farfisa, preset, bars)
             .expect("0 and 8 are both in range");
@@ -231,7 +262,7 @@ impl OrganPanel {
 
     /// Turn vibrato/chorus on or off for `model`'s `preset`. No-op for Pipe, which has
     /// none.
-    pub fn set_vib_on(&mut self, model: OrganModel, preset: u8, on: bool) {
+    pub fn set_vib_on(&mut self, model: OrganModel, preset: Preset, on: bool) {
         if let Some(flag) = self.vib_flag_mut(model, preset) {
             *flag = on;
         }
@@ -261,12 +292,11 @@ impl OrganPanel {
     }
 
     /// Turn B3 percussion on or off for `preset`.
-    pub fn set_b3_perc_on(&mut self, preset: u8, on: bool) {
-        if preset == 2 {
-            self.b3_preset2_perc = on;
-        } else {
-            self.b3_preset1_perc = on;
-        }
+    pub fn set_b3_perc_on(&mut self, preset: Preset, on: bool) {
+        *match preset {
+            Preset::One => &mut self.b3_preset1_perc,
+            Preset::Two => &mut self.b3_preset2_perc,
+        } = on;
     }
 
     /// Percussion third harmonic (shared across presets).
@@ -290,29 +320,29 @@ impl OrganPanel {
 
     // ── which field a model and preset name ─────────────────────────────────────
 
-    fn drawbar_block(&self, model: OrganModel, preset: u8) -> &Drawbars {
-        match (model, preset == 2) {
-            (OrganModel::B3, false) => &self.b3_preset1_drawbars,
-            (OrganModel::B3, true) => &self.b3_preset2_drawbars,
-            (OrganModel::Vox, false) => &self.vox_preset1_drawbars,
-            (OrganModel::Vox, true) => &self.vox_preset2_drawbars,
-            (OrganModel::Farfisa, false) => &self.farfisa_preset1_drawbars,
-            (OrganModel::Farfisa, true) => &self.farfisa_preset2_drawbars,
-            (OrganModel::Pipe, false) => &self.pipe_preset1_drawbars,
-            (OrganModel::Pipe, true) => &self.pipe_preset2_drawbars,
+    fn drawbar_block(&self, model: OrganModel, preset: Preset) -> &Drawbars {
+        match (model, preset) {
+            (OrganModel::B3, Preset::One) => &self.b3_preset1_drawbars,
+            (OrganModel::B3, Preset::Two) => &self.b3_preset2_drawbars,
+            (OrganModel::Vox, Preset::One) => &self.vox_preset1_drawbars,
+            (OrganModel::Vox, Preset::Two) => &self.vox_preset2_drawbars,
+            (OrganModel::Farfisa, Preset::One) => &self.farfisa_preset1_drawbars,
+            (OrganModel::Farfisa, Preset::Two) => &self.farfisa_preset2_drawbars,
+            (OrganModel::Pipe, Preset::One) => &self.pipe_preset1_drawbars,
+            (OrganModel::Pipe, Preset::Two) => &self.pipe_preset2_drawbars,
         }
     }
 
-    fn drawbar_block_mut(&mut self, model: OrganModel, preset: u8) -> &mut Drawbars {
-        match (model, preset == 2) {
-            (OrganModel::B3, false) => &mut self.b3_preset1_drawbars,
-            (OrganModel::B3, true) => &mut self.b3_preset2_drawbars,
-            (OrganModel::Vox, false) => &mut self.vox_preset1_drawbars,
-            (OrganModel::Vox, true) => &mut self.vox_preset2_drawbars,
-            (OrganModel::Farfisa, false) => &mut self.farfisa_preset1_drawbars,
-            (OrganModel::Farfisa, true) => &mut self.farfisa_preset2_drawbars,
-            (OrganModel::Pipe, false) => &mut self.pipe_preset1_drawbars,
-            (OrganModel::Pipe, true) => &mut self.pipe_preset2_drawbars,
+    fn drawbar_block_mut(&mut self, model: OrganModel, preset: Preset) -> &mut Drawbars {
+        match (model, preset) {
+            (OrganModel::B3, Preset::One) => &mut self.b3_preset1_drawbars,
+            (OrganModel::B3, Preset::Two) => &mut self.b3_preset2_drawbars,
+            (OrganModel::Vox, Preset::One) => &mut self.vox_preset1_drawbars,
+            (OrganModel::Vox, Preset::Two) => &mut self.vox_preset2_drawbars,
+            (OrganModel::Farfisa, Preset::One) => &mut self.farfisa_preset1_drawbars,
+            (OrganModel::Farfisa, Preset::Two) => &mut self.farfisa_preset2_drawbars,
+            (OrganModel::Pipe, Preset::One) => &mut self.pipe_preset1_drawbars,
+            (OrganModel::Pipe, Preset::Two) => &mut self.pipe_preset2_drawbars,
         }
     }
 
@@ -334,26 +364,26 @@ impl OrganPanel {
         }
     }
 
-    fn vib_flag(&self, model: OrganModel, preset: u8) -> Option<&bool> {
-        Some(match (model, preset == 2) {
-            (OrganModel::B3, false) => &self.b3_preset1_vib,
-            (OrganModel::B3, true) => &self.b3_preset2_vib,
-            (OrganModel::Vox, false) => &self.vox_preset1_vib,
-            (OrganModel::Vox, true) => &self.vox_preset2_vib,
-            (OrganModel::Farfisa, false) => &self.farfisa_preset1_vib,
-            (OrganModel::Farfisa, true) => &self.farfisa_preset2_vib,
+    fn vib_flag(&self, model: OrganModel, preset: Preset) -> Option<&bool> {
+        Some(match (model, preset) {
+            (OrganModel::B3, Preset::One) => &self.b3_preset1_vib,
+            (OrganModel::B3, Preset::Two) => &self.b3_preset2_vib,
+            (OrganModel::Vox, Preset::One) => &self.vox_preset1_vib,
+            (OrganModel::Vox, Preset::Two) => &self.vox_preset2_vib,
+            (OrganModel::Farfisa, Preset::One) => &self.farfisa_preset1_vib,
+            (OrganModel::Farfisa, Preset::Two) => &self.farfisa_preset2_vib,
             (OrganModel::Pipe, _) => return None,
         })
     }
 
-    fn vib_flag_mut(&mut self, model: OrganModel, preset: u8) -> Option<&mut bool> {
-        Some(match (model, preset == 2) {
-            (OrganModel::B3, false) => &mut self.b3_preset1_vib,
-            (OrganModel::B3, true) => &mut self.b3_preset2_vib,
-            (OrganModel::Vox, false) => &mut self.vox_preset1_vib,
-            (OrganModel::Vox, true) => &mut self.vox_preset2_vib,
-            (OrganModel::Farfisa, false) => &mut self.farfisa_preset1_vib,
-            (OrganModel::Farfisa, true) => &mut self.farfisa_preset2_vib,
+    fn vib_flag_mut(&mut self, model: OrganModel, preset: Preset) -> Option<&mut bool> {
+        Some(match (model, preset) {
+            (OrganModel::B3, Preset::One) => &mut self.b3_preset1_vib,
+            (OrganModel::B3, Preset::Two) => &mut self.b3_preset2_vib,
+            (OrganModel::Vox, Preset::One) => &mut self.vox_preset1_vib,
+            (OrganModel::Vox, Preset::Two) => &mut self.vox_preset2_vib,
+            (OrganModel::Farfisa, Preset::One) => &mut self.farfisa_preset1_vib,
+            (OrganModel::Farfisa, Preset::Two) => &mut self.farfisa_preset2_vib,
             (OrganModel::Pipe, _) => return None,
         })
     }
@@ -603,11 +633,11 @@ mod tests {
             (0x7b, 0x00),
         ]);
         assert_eq!(
-            p.drawbars(OrganModel::Farfisa, 1),
+            p.drawbars(OrganModel::Farfisa, Preset::One),
             [8, 7, 6, 5, 4, 3, 2, 1, 0]
         );
         assert_eq!(
-            p.farfisa_tabs(1),
+            p.farfisa_tabs(Preset::One),
             [true, true, true, true, false, false, false, false, false]
         );
         // The threshold sits between 4 and 5.
@@ -618,18 +648,18 @@ mod tests {
             (0x7a, 0x00),
             (0x7b, 0x00),
         ]);
-        assert!(edge.farfisa_tabs(1)[0], "5 should read as on");
-        assert!(!edge.farfisa_tabs(1)[1], "4 should read as off");
+        assert!(edge.farfisa_tabs(Preset::One)[0], "5 should read as on");
+        assert!(!edge.farfisa_tabs(Preset::One)[1], "4 should read as off");
     }
 
     /// Preset 2 reads from its own block, so the two presets never alias.
     #[test]
     fn farfisa_presets_are_independent() {
         let p = panel(&[(0x77, 0x80), (0x7d, 0x08)]);
-        assert!(p.farfisa_tabs(1)[0]);
-        assert!(!p.farfisa_tabs(1)[1]);
-        assert!(!p.farfisa_tabs(2)[0]);
-        assert!(p.farfisa_tabs(2)[1]);
+        assert!(p.farfisa_tabs(Preset::One)[0]);
+        assert!(!p.farfisa_tabs(Preset::One)[1]);
+        assert!(!p.farfisa_tabs(Preset::Two)[0]);
+        assert!(p.farfisa_tabs(Preset::Two)[1]);
     }
 
     /// Every model and preset reads its own nine nibbles and writes them back where it
@@ -643,7 +673,7 @@ mod tests {
             OrganModel::Pipe,
         ]
         .into_iter()
-        .flat_map(|m| [(m, 1u8), (m, 2)])
+        .flat_map(|m| [(m, Preset::One), (m, Preset::Two)])
         .enumerate()
         {
             let bars = [(n as u8) % 9; 9];
@@ -665,7 +695,7 @@ mod tests {
                 OrganModel::Pipe,
             ]
             .into_iter()
-            .flat_map(|m| [(m, 1u8), (m, 2)])
+            .flat_map(|m| [(m, Preset::One), (m, Preset::Two)])
             .filter(|&(m, p)| !(m == model && p == preset))
             .filter(|&(m, p)| back.drawbars(m, p) != [0; 9])
             .collect();

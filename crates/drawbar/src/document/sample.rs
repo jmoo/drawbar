@@ -14,26 +14,24 @@
 //! open row — lives here rather than being written twice: an `.nsmpproj` is the same
 //! object seen from the source side.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io::Cursor;
 
 use eframe::egui;
 use nord_format::formats::nsmp::codec::{self, Audio};
 use nord_format::formats::nsmp::{keymap, zone, KeyTable, Level, Sty};
+use nord_format::note;
 use nord_format::{Entity, Sample};
 
 use super::capability::{Fact, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::header::{Body, Cell};
 use super::keys;
+use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
 use crate::icon::{icon, Glyph};
-use crate::note;
 use crate::room;
-
-pub fn is_sample(entity: &Entity) -> bool {
-    matches!(entity, Entity::Sample(_))
-}
+use crate::workspace::Baseline;
 
 fn sample(entity: &Entity) -> Option<&Sample> {
     match entity {
@@ -97,71 +95,98 @@ pub fn snapshot(entity: &Entity) -> Option<Result<Snapshot, String>> {
 }
 
 fn read(sample: &Sample) -> Result<Snapshot, String> {
-    // Only the wide chain carries a second name, and the `cat` section this reader
-    // decodes is the narrow one's.
-    let (sub_name, categories) = match sample {
-        Sample::V2(body) => (String::new(), body.categories()),
-        Sample::V3(body) => (body.sub_name().map_err(|e| e.to_string())?, Vec::new()),
-    };
-    let records = match sample {
-        // A `map` version with no zone layout is a body whose zones did not read at
-        // all, and the error the zone read gives is the one worth showing.
-        Sample::V2(body) => body
-            .chain()
-            .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
-        Sample::V3(body) => body
-            .zone_table()
-            .map_or(zone::RECORD_LEN, |table| table.wide.record_len()),
-    };
-    let gains: Vec<Option<u32>> = match sample {
-        Sample::V2(body) => body
-            .zones()
-            .map(|zones| zones.iter().map(|zone| Some(zone.gain)).collect())
-            .unwrap_or_default(),
-        Sample::V3(_) => Vec::new(),
-    };
-    let windows: Vec<Option<(u8, u8)>> = match sample {
-        Sample::V2(_) => Vec::new(),
-        Sample::V3(body) => body
-            .zones()
-            .map(|zones| {
-                zones
-                    .iter()
-                    .map(|zone| zone.velocity.map(|window| (window.low, window.high)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
+    let told = told(sample)?;
     Ok(Snapshot {
         name: sample.name().map_err(|e| e.to_string())?,
         max_name_len: sample.max_name_len(),
-        sub_name,
+        sub_name: told.sub_name,
         generation: sample.generation(),
-        categories,
+        categories: told.categories,
         zones: sample
             .zones()
             .map_err(|e| e.to_string())?
             .iter()
             .enumerate()
-            .map(|(index, zone)| Zone {
-                root_key: zone.root_key,
-                top_note: zone.top_note,
-                low_note: zone.low_note,
-                gain: gains.get(index).copied().flatten(),
-                velocity: windows.get(index).copied().flatten(),
-                bytes: zone.stream.len(),
+            .map(|(index, zone)| {
+                let stated = told.records.get(index).copied().unwrap_or_default();
+                Zone {
+                    root_key: zone.root_key,
+                    top_note: zone.top_note,
+                    low_note: zone.low_note,
+                    gain: stated.gain,
+                    velocity: stated.velocity,
+                    bytes: zone.stream.len(),
+                }
             })
             .collect(),
         zones_editable: sample.zones_are_editable(),
-        key_table: match sample {
-            Sample::V2(body) => body.key_table().ok(),
-            Sample::V3(_) => None,
-        },
-        record_len: records,
+        key_table: told.key_table,
+        record_len: told.record_len,
         sound: sound(sample),
-        version: match sample {
-            Sample::V2(body) => body.header.version,
-            Sample::V3(body) => body.header.version,
+        version: told.version,
+    })
+}
+
+/// What one generation's own sections state, in one read of them.
+struct Told {
+    /// Empty on the narrow chain, which has one name.
+    sub_name: String,
+    /// The `cat` section, which only the narrow chain carries.
+    categories: Vec<String>,
+    key_table: Option<KeyTable>,
+    record_len: usize,
+    /// One per zone, in stored order.
+    records: Vec<Stated>,
+    version: u32,
+}
+
+/// What a zone record states beyond its notes, where its generation holds it: the
+/// record's own gain on the narrow chain, the velocity window it answers on the wide one.
+#[derive(Clone, Copy, Default)]
+struct Stated {
+    gain: Option<u32>,
+    velocity: Option<(u8, u8)>,
+}
+
+fn told(sample: &Sample) -> Result<Told, String> {
+    Ok(match sample {
+        Sample::V2(body) => Told {
+            sub_name: String::new(),
+            categories: body.categories(),
+            key_table: body.key_table().ok(),
+            // A `map` version with no zone layout is a body whose zones did not read at
+            // all, and the error the zone read gives is the one worth showing.
+            record_len: body
+                .chain()
+                .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
+            records: body
+                .zones()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|zone| Stated {
+                    gain: Some(zone.gain),
+                    velocity: None,
+                })
+                .collect(),
+            version: body.header.version,
+        },
+        Sample::V3(body) => Told {
+            sub_name: body.sub_name().map_err(|e| e.to_string())?,
+            categories: Vec::new(),
+            key_table: None,
+            record_len: body
+                .zone_table()
+                .map_or(zone::RECORD_LEN, |table| table.wide.record_len()),
+            records: body
+                .zones()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|zone| Stated {
+                    gain: None,
+                    velocity: zone.velocity.map(|window| (window.low, window.high)),
+                })
+                .collect(),
+            version: body.header.version,
         },
     })
 }
@@ -414,7 +439,7 @@ impl Cache {
 
 fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
     let sample = sample(entity).ok_or("this is not a sample instrument")?;
-    let layout = sample.layout();
+    let layout = sample.layout().map_err(|e| e.to_string())?;
     let zones = sample.zones().map_err(|e| e.to_string())?;
     let zone = zones
         .get(index)
@@ -452,18 +477,18 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
         .collect()
 }
 
-// ---- what the editor keeps between frames -------------------------------------------
-
 /// Which zone is open, what was last struck, and the map the paints are measured
 /// against. Nothing here is an edit: an edit is on the working copy the moment it is
 /// made.
 ///
-/// ⚠️ Reset when the document changes, which the mock-up's tab strip does too: a row
-/// index belongs to the instrument it was opened on.
+/// ⚠️ Reset when the document changes: a row index belongs to the instrument it was
+/// opened on.
 #[derive(Default)]
 pub struct State {
     selected: Option<usize>,
-    open: BTreeSet<usize>,
+    /// Whether the selected row's own fields are unfolded. Only the selected row has a
+    /// body, so there is never a second one to remember.
+    open: bool,
     /// A row to bring up under the pinned map, once the body draws it.
     reveal: Option<usize>,
     /// Whether the 128-key table is unfolded.
@@ -471,15 +496,28 @@ pub struct State {
     audition: Option<keys::Audition>,
     /// What the struck key did, so the sentence outlives the click that made it.
     answer: Option<Answer>,
-    /// The saved bytes' own keyboard map, read once, so a painted key can be told from
-    /// a stored one. `None` inside is a body that carries no map.
-    baseline: Option<(u64, Option<KeyTable>)>,
+    /// The saved bytes a paint mark is measured against.
+    baseline: Option<Saved>,
+}
+
+/// The saved bytes a painted key is told apart from, and the keyboard map they hold.
+///
+/// ⚠️ Keyed by what was saved as well as by which asset: saving moves the baseline
+/// without giving the asset new bytes, and a map read before that is one every stored
+/// value now reads as painted against.
+struct Saved {
+    of: (u64, Option<u32>, usize),
+    /// `None` is a body that carries no map.
+    table: Option<KeyTable>,
 }
 
 /// What a struck key found.
 struct Answer {
-    /// The zone that answered it, where one did.
+    /// The row of the zone that answered it, where one did.
     zone: Option<usize>,
+    /// How far the key is from that zone's root, which is what resamples the stroke.
+    /// Zero where no zone answers.
+    semitones: i16,
     words: String,
     sounded: bool,
 }
@@ -490,12 +528,9 @@ impl State {
     /// Clicking the row that is already open and selected closes it; picking from the
     /// map always opens, and asks for the row to be brought into view.
     fn pick(&mut self, zone: usize, reveal: bool) {
-        let close = !reveal && self.selected == Some(zone) && self.open.contains(&zone);
+        let close = !reveal && self.selected == Some(zone) && self.open;
         self.selected = Some(zone);
-        match close {
-            true => self.open.remove(&zone),
-            false => self.open.insert(zone),
-        };
+        self.open = !close;
         if reveal {
             self.reveal = Some(zone);
         }
@@ -518,10 +553,13 @@ pub fn pick_row(state: &mut State, row: usize) {
     state.pick(row, true);
 }
 
-// ---- the key map --------------------------------------------------------------------
-
 /// One zone as the key map draws it, whichever format states it.
 pub struct MapZone {
+    /// The row of the zone list this band stands for.
+    ///
+    /// ⚠️ Not the band's own index: a project draws only the zones that answer a key, so
+    /// the third band there may be the fourth row.
+    pub row: usize,
     pub low: u8,
     pub top: u8,
     pub root: u8,
@@ -543,9 +581,10 @@ pub enum Sounds {
 
 /// What the key map was asked for this frame.
 pub enum MapAct {
-    /// A handle moved: every zone's `(low, top)` after the clamp, in the order given.
+    /// A handle moved: every band's `(low, top)` after the clamp, in the order given.
     Bounds(Vec<(u8, u8)>),
-    /// A key was struck and a zone answers it, `semitones` from its root.
+    /// A key was struck and a zone answers it, `semitones` from its root. `zone` is the
+    /// row it stands on — see [`MapZone::row`].
     Struck { zone: usize, semitones: i16 },
 }
 
@@ -628,8 +667,19 @@ pub fn key_map(
             ),
         })
         .collect();
-    match keys::bands(ui, span, &lane, state.selected, state.lit(), edges) {
-        Some(keys::BandAct::Pick(zone)) => state.pick(zone, true),
+    // A band is not a row, so both the highlight going in and the pick coming out are
+    // translated — see [`MapZone::row`].
+    let band_of =
+        |row: Option<usize>| row.and_then(|row| zones.iter().position(|zone| zone.row == row));
+    match keys::bands(
+        ui,
+        span,
+        &lane,
+        band_of(state.selected),
+        band_of(state.lit()),
+        edges,
+    ) {
+        Some(keys::BandAct::Pick(band)) => state.pick(zones[band].row, true),
         Some(keys::BandAct::Drag { bounds, .. }) => act = Some(MapAct::Bounds(bounds)),
         None => {}
     }
@@ -650,13 +700,11 @@ pub fn key_map(
     if let Some(note) = struck {
         state.audition = Some(keys::Audition::new(note, now));
         let answer = answered(zones, note, sounds);
-        if answer.sounded {
-            if let Some(zone) = answer.zone {
-                act = Some(MapAct::Struck {
-                    zone,
-                    semitones: i16::from(note) - i16::from(zones[zone].root),
-                });
-            }
+        if let (true, Some(row)) = (answer.sounded, answer.zone) {
+            act = Some(MapAct::Struck {
+                zone: row,
+                semitones: answer.semitones,
+            });
         }
         state.answer = Some(answer);
     }
@@ -679,17 +727,17 @@ pub fn key_map(
 /// window the struck velocity is outside.
 fn answered(zones: &[MapZone], note: u8, sounds: Sounds) -> Answer {
     let velocity = keys::AUDITION_VELOCITY;
-    let Some(index) = zones
+    let Some(zone) = zones
         .iter()
-        .position(|zone| note >= zone.low && note <= zone.top)
+        .find(|zone| note >= zone.low && note <= zone.top)
     else {
         return Answer {
             zone: None,
+            semitones: 0,
             words: format!("{} — no zone answers this key; silence.", note::name(note)),
             sounded: false,
         };
     };
-    let zone = &zones[index];
     let found = format!(
         "{} at vel {velocity} → {} · root {} · {}",
         note::name(note),
@@ -697,22 +745,22 @@ fn answered(zones: &[MapZone], note: u8, sounds: Sounds) -> Answer {
         note::name(zone.root),
         keys::shifted(note, zone.root)
     );
-    match (zone.velocity, sounds) {
-        (Some((low, high)), _) if !(low..=high).contains(&velocity) => Answer {
-            zone: Some(index),
-            words: format!("{found} — outside its velocity window {low}–{high}; silence"),
-            sounded: false,
-        },
-        (_, Sounds::NotUntilBuilt) => Answer {
-            zone: Some(index),
-            words: format!("{found} — a project is built into an instrument before it plays"),
-            sounded: false,
-        },
-        (_, Sounds::Now) => Answer {
-            zone: Some(index),
-            words: found,
-            sounded: true,
-        },
+    let (words, sounded) = match (zone.velocity, sounds) {
+        (Some((low, high)), _) if !(low..=high).contains(&velocity) => (
+            format!("{found} — outside its velocity window {low}–{high}; silence"),
+            false,
+        ),
+        (_, Sounds::NotUntilBuilt) => (
+            format!("{found} — a project is built into an instrument before it plays"),
+            false,
+        ),
+        (_, Sounds::Now) => (found, true),
+    };
+    Answer {
+        zone: Some(zone.row),
+        semitones: i16::from(note) - i16::from(zone.root),
+        words,
+        sounded,
     }
 }
 
@@ -787,6 +835,7 @@ fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
         .iter()
         .enumerate()
         .map(|(index, zone)| MapZone {
+            row: index,
             low: bottom(&snapshot.zones, index).unwrap_or(NSMP_SPAN.low),
             top: zone.top_note,
             root: zone.root_key,
@@ -795,8 +844,6 @@ fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
         })
         .collect()
 }
-
-// ---- the rows -----------------------------------------------------------------------
 
 /// One row of the zone list, in the words it prints.
 pub struct RowSpec {
@@ -808,44 +855,26 @@ pub struct RowSpec {
     pub hint: String,
 }
 
-/// The page's own side margin, which every row and heading keeps.
-const PAD: f32 = 12.0;
-const HEAD_H: f32 = 20.0;
 const ROW_H: f32 = 26.0;
-const GAP: f32 = 10.0;
 const MARK: f32 = 6.0;
-/// The first column, the size column, and the chevron's own.
-const NAME_W: f32 = 56.0;
-const SIZE_W: f32 = 74.0;
-const CHEVRON_W: f32 = 20.0;
 /// How far an open row's body is indented, measured from the page's edge.
 const INDENT: f32 = 68.0;
 /// Which of the five columns holds the size, which is the one set right to left.
 const SIZE_COLUMN: usize = 3;
-const HEAD_TEXT: f32 = 9.0;
-const NAME_TEXT: f32 = 11.5;
 const ROW_MONO: f32 = 11.0;
 const FACTS_TEXT: f32 = 11.0;
 const SIZE_TEXT: f32 = 10.5;
 const CHEVRON: f32 = 12.0;
 
-/// The five columns of the row grid: each one's left edge and width.
-fn columns(rect: egui::Rect) -> [(f32, f32); 5] {
-    let fixed = NAME_W + SIZE_W + CHEVRON_W + GAP * 4.0 + PAD * 2.0;
-    let free = (rect.width() - fixed).max(0.0);
-    let answers = free * 1.1 / 2.6;
-    let facts = free - answers;
-    let mut left = rect.left() + PAD;
-    let mut out = [(0.0, 0.0); 5];
-    for (cell, width) in out
-        .iter_mut()
-        .zip([NAME_W, answers, facts, SIZE_W, CHEVRON_W])
-    {
-        *cell = (left, width);
-        left += width + GAP;
-    }
-    out
-}
+/// The five columns of the row grid: the name, what the zone answers, what it is made
+/// of, its size, and the chevron's own.
+const GRID: [Width; 5] = [
+    Width::Fixed(56.0),
+    Width::Share(1.1),
+    Width::Share(1.5),
+    Width::Fixed(74.0),
+    Width::Fixed(20.0),
+];
 
 /// The zone list: the column heads, one row per zone, and the body of each open row
 /// drawn by `open`.
@@ -861,36 +890,12 @@ pub fn rows(
 ) {
     let visuals = ui.visuals().clone();
     let hairline = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
-    let (head, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), HEAD_H),
-        egui::Sense::hover(),
+    table::heads(
+        ui,
+        GRID,
+        [heads.0, "Answers", heads.1, "Size", ""],
+        &[SIZE_COLUMN],
     );
-    {
-        let painter = ui.painter();
-        painter.hline(head.x_range(), head.top() + 0.5, hairline);
-        painter.hline(head.x_range(), head.bottom() - 0.5, hairline);
-        let heads = [heads.0, "Answers", heads.1, "Size", ""];
-        for (column, ((left, width), text)) in columns(head).into_iter().zip(heads).enumerate() {
-            if text.is_empty() {
-                continue;
-            }
-            let galley = painter.layout_no_wrap(
-                text.to_uppercase(),
-                egui::FontId::proportional(HEAD_TEXT),
-                app::caption(&visuals),
-            );
-            // The size column reads right to left, so its head stands over its figures.
-            let left = match column == SIZE_COLUMN {
-                true => left + width - galley.size().x,
-                false => left,
-            };
-            painter.galley(
-                egui::pos2(left, head.center().y - galley.size().y / 2.0),
-                galley,
-                app::caption(&visuals),
-            );
-        }
-    }
 
     let lit = state.lit();
     for (index, spec) in specs.iter().enumerate() {
@@ -919,7 +924,7 @@ pub fn rows(
             true => visuals.selection.stroke.color,
             false => visuals.weak_text_color(),
         };
-        let cells = columns(rect);
+        let cells = table::columns(rect, GRID);
         let dot = match (picked, lit == Some(index)) {
             (_, true) => app::good(&visuals),
             (true, false) => app::accent(&visuals),
@@ -975,7 +980,7 @@ pub fn rows(
                 ink,
             );
         }
-        let glyph = match state.open.contains(&index) && picked {
+        let glyph = match state.open && picked {
             true => Glyph::ChevronDown,
             false => Glyph::ChevronRight,
         };
@@ -992,7 +997,7 @@ pub fn rows(
             response.on_hover_text(&spec.hint);
         }
 
-        if state.open.contains(&index) && picked {
+        if state.open && picked {
             let body = egui::Frame::new()
                 .fill(visuals.window_fill)
                 .inner_margin(egui::Margin {
@@ -1010,8 +1015,6 @@ pub fn rows(
         }
     }
 }
-
-// ---- the cells of an open row -------------------------------------------------------
 
 const LABEL_TEXT: f32 = 9.5;
 const VALUE_TEXT: f32 = 11.5;
@@ -1128,8 +1131,6 @@ pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, accent: bool) -> boo
     );
     response.clicked()
 }
-
-// ---- the Edit face ------------------------------------------------------------------
 
 /// What the document knows about one zone's audio while it draws the zone.
 pub struct Sound<'a> {
@@ -1299,36 +1300,71 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
             }
         })
         .collect();
+    let rows: Vec<usize> = stated.iter().map(|(row, _)| *row).collect();
+    let asked = velocity_field(
+        ui,
+        "every stroke answers the full window",
+        span(&map_zones(snapshot), NSMP_SPAN),
+        &blocks,
+        &rows,
+        keys::Handles::Fixed,
+        state.selected,
+    );
+    match asked {
+        Some(VelocityAsk::Open(row)) => state.pick(row, true),
+        // Fixed handles never move: nothing here writes a wide zone's window.
+        Some(VelocityAsk::Window { .. }) | None => {}
+    }
+}
+
+/// What the velocity field was asked for, in the rows the caller knows.
+pub(super) enum VelocityAsk {
+    /// Open this row.
+    Open(usize),
+    /// A handle moved: which block, and the window the drag left it with.
+    Window { block: usize, window: (u8, u8) },
+}
+
+/// The key × velocity field both documents draw: the heading with what the windows
+/// cover, and the field itself.
+///
+/// `rows` names the row each block stands for, one per block, and `selected` is the row
+/// to highlight — the blocks are the zones that state a window, which on neither
+/// document is every row.
+pub(super) fn velocity_field(
+    ui: &mut egui::Ui,
+    note: &str,
+    span: keys::Span,
+    blocks: &[keys::VelBlock],
+    rows: &[usize],
+    handles: keys::Handles,
+    selected: Option<usize>,
+) -> Option<VelocityAsk> {
     let visuals = ui.visuals().clone();
-    let holes = keys::velocity_holes(&blocks);
-    let (cover, ink) = match holes.len() {
+    let (cover, ink) = match keys::velocity_holes(blocks).len() {
         0 => ("fully covered".to_string(), app::good(&visuals)),
         1 => ("1 hole".to_string(), app::warn(&visuals)),
         n => (format!("{n} holes"), app::warn(&visuals)),
     };
-    controls::heading(
-        ui,
-        "Velocity",
-        "every stroke answers the full window",
-        Some((&cover, ink)),
-    );
-    let span = span(&map_zones(snapshot), NSMP_SPAN);
+    controls::heading(ui, "Velocity", note, Some((&cover, ink)));
+    let picked = selected.and_then(|row| rows.iter().position(|held| *held == row));
     let acted = ui
         .horizontal(|ui| {
             ui.add_space(PAD);
             let room = (ui.available_width() - PAD).max(64.0);
             ui.allocate_ui(egui::vec2(room, 0.0), |ui| {
-                let picked = stated
-                    .iter()
-                    .position(|(row, _)| Some(*row) == state.selected);
-                keys::velocity(ui, span, &blocks, picked, keys::Handles::Fixed)
+                keys::velocity(ui, span, blocks, picked, handles)
             })
             .inner
         })
         .inner;
     ui.add_space(8.0);
-    if let Some(keys::VelocityAct::Pick(block)) = acted {
-        state.pick(stated[block].0, true);
+    match acted? {
+        keys::VelocityAct::Pick(block) => Some(VelocityAsk::Open(rows[block])),
+        keys::VelocityAct::Drag { zone, window, .. } => Some(VelocityAsk::Window {
+            block: zone,
+            window,
+        }),
     }
 }
 
@@ -1354,7 +1390,7 @@ fn facts_of(zone: &Zone, sound: Option<&Sound>) -> String {
 
 /// A gain reading, with the silence a zero field means spelled out rather than as an
 /// infinity.
-fn decibels(db: f64) -> String {
+pub(super) fn decibels(db: f64) -> String {
     match db.is_finite() {
         true => format!("{db:+.1} dB"),
         false => "silent".to_string(),
@@ -1366,35 +1402,34 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     let mut ask = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        match sound.decoded {
-            None => {
+        match (sound.playing, sound.decoded) {
+            // ⚠️ Stopping cannot wait on a decode: an edit drops the audio of a zone
+            // that goes on sounding, and this is the only control that stops it.
+            (true, _) => {
+                if action(ui, "Stop", Glyph::X, true) {
+                    ask = Some(Ask::Play(index));
+                }
+            }
+            (false, None) => {
                 if action(ui, "Show audio", Glyph::AudioLines, true) {
                     ask = Some(Ask::Decode(index));
                 }
             }
-            Some(Err(why)) => {
+            (false, Some(Err(why))) => {
                 ui.label(
                     egui::RichText::new(format!("not decoded: {why}"))
                         .size(FACTS_TEXT)
                         .color(crate::app::bad(ui.visuals())),
                 );
             }
-            Some(Ok(_)) => {
-                let label = match sound.playing {
-                    true => "Stop",
-                    false => "Play",
-                };
-                let glyph = match sound.playing {
-                    true => Glyph::X,
-                    false => Glyph::AudioLines,
-                };
-                if action(ui, label, glyph, true) {
+            (false, Some(Ok(_))) => {
+                if action(ui, "Play", Glyph::AudioLines, true) {
                     ask = Some(Ask::Play(index));
                 }
-                if action(ui, "Save WAV…", Glyph::Waves, false) {
-                    ask = Some(Ask::Save(index));
-                }
             }
+        }
+        if matches!(sound.decoded, Some(Ok(_))) && action(ui, "Save WAV…", Glyph::Waves, false) {
+            ask = Some(Ask::Save(index));
         }
     });
     if let Some(Ok(decoded)) = sound.decoded {
@@ -1403,8 +1438,6 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     }
     ask
 }
-
-// ---- the per-key lanes --------------------------------------------------------------
 
 const LANE_LABEL_W: f32 = 80.0;
 const LANE_AXIS_W: f32 = 34.0;
@@ -1442,17 +1475,16 @@ fn per_key(
             quiet,
         )),
     );
-    let baseline = state.baseline.as_ref().and_then(|(_, held)| held.as_ref());
-    for (label, scale) in [
-        ("Gain", keys::Scale::Db(GAIN_FULL)),
-        ("Detune", keys::Scale::Cents(DETUNE_FULL)),
+    let baseline = state
+        .baseline
+        .as_ref()
+        .and_then(|saved| saved.table.as_ref());
+    for (label, field, scale) in [
+        ("Gain", "gain", keys::Scale::Db(GAIN_FULL)),
+        ("Detune", "detune", keys::Scale::Cents(DETUNE_FULL)),
     ] {
-        let field = match label {
-            "Gain" => "gain",
-            _ => "detune",
-        };
         let values: Vec<f32> = (span.low..=span.high)
-            .map(|note| held(table, note, field))
+            .map(|note| held(table, note, scale))
             .collect();
         let painted: Vec<bool> = (span.low..=span.high)
             .map(|note| match baseline {
@@ -1513,13 +1545,13 @@ fn per_key(
 }
 
 /// One key's stored value on the lane's own scale, clamped to what it can draw.
-fn held(table: &KeyTable, note: u8, field: &str) -> f32 {
+fn held(table: &KeyTable, note: u8, scale: keys::Scale) -> f32 {
     let Ok(level) = table.key(note) else {
         return 0.0;
     };
-    let value = match field {
-        "gain" => gain_db(level.gain(), keymap::GAIN_UNITY) / f64::from(GAIN_FULL),
-        _ => detune_cents(level.detune()) / f64::from(DETUNE_FULL),
+    let value = match scale {
+        keys::Scale::Db(full) => gain_db(level.gain(), keymap::GAIN_UNITY) / f64::from(full),
+        keys::Scale::Cents(full) => detune_cents(level.detune()) / f64::from(full),
     };
     match value.is_finite() {
         true => value.clamp(-1.0, 1.0) as f32,
@@ -1648,16 +1680,17 @@ fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
     }
 }
 
-/// Read the map the asset was last saved with, once per document.
+/// Read the map the asset was last saved with, once per set of saved bytes.
 ///
 /// ⚠️ Paint marks are the difference between what is held and what was saved, so the
 /// baseline has to be the saved bytes rather than the working copy: measured against
 /// itself, nothing is ever painted.
-pub fn follow(state: &mut State, id: u64, saved: &[u8]) {
-    if state.baseline.as_ref().is_some_and(|(held, _)| *held == id) {
+pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
+    let of = (id, saved.crc32, saved.bytes.len());
+    if state.baseline.as_ref().is_some_and(|held| held.of == of) {
         return;
     }
-    let table = nord_format::from_stream(&mut Cursor::new(saved))
+    let table = nord_format::from_stream(&mut Cursor::new(&saved.bytes))
         .ok()
         .as_ref()
         .and_then(sample)
@@ -1665,10 +1698,8 @@ pub fn follow(state: &mut State, id: u64, saved: &[u8]) {
             Sample::V2(body) => body.key_table().ok(),
             Sample::V3(_) => None,
         });
-    state.baseline = Some((id, table));
+    state.baseline = Some(Saved { of, table });
 }
-
-// ---- the other two faces ------------------------------------------------------------
 
 /// The identity cell an instrument puts on the header: what the file states about
 /// itself that the strip cannot carry.
@@ -1938,8 +1969,6 @@ pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
     rows
 }
 
-// ---- paint -------------------------------------------------------------------------
-
 /// Height of the drawn envelope.
 const WAVE_HEIGHT: f32 = 44.0;
 
@@ -2020,13 +2049,6 @@ mod tests {
         }
     }
 
-    /// A note is spelled the way the document shows it, and the round trip is exact.
-    #[test]
-    fn zone_notes_are_spelled_as_names() {
-        assert_eq!(note::name(60), "C4");
-        assert_eq!(note::parse("C4").unwrap(), 60);
-    }
-
     /// A zone reads as the stretch of keyboard it covers, and the last one runs to the
     /// bottom.
     #[test]
@@ -2068,7 +2090,6 @@ mod tests {
     #[test]
     fn a_later_generation_reads_and_edits() {
         let entity = Entity::Sample(Sample::V3(v3_sample(300)));
-        assert!(is_sample(&entity));
 
         let snapshot = snapshot(&entity).expect("a sample").expect("it reads");
         assert_eq!(snapshot.name, "Bass Clarinet");
@@ -2086,6 +2107,27 @@ mod tests {
             snapshot.key_table.is_none(),
             "the wide layouts expose no keyboard map"
         );
+    }
+
+    /// Each generation's zone record states its own thing, and one read of the body
+    /// brings back whichever it is: the narrow record's gain, the wide record's
+    /// velocity window.
+    #[test]
+    fn a_zone_carries_what_its_own_generation_states() {
+        let narrow = v2_snapshot();
+        assert!(!narrow.zones.is_empty());
+        assert!(narrow
+            .zones
+            .iter()
+            .all(|zone| zone.gain.is_some() && zone.velocity.is_none()));
+
+        let entity = Entity::Sample(Sample::V3(v3_sample(300)));
+        let wide = snapshot(&entity).unwrap().unwrap();
+        assert!(!wide.zones.is_empty());
+        assert!(wide
+            .zones
+            .iter()
+            .all(|zone| zone.gain.is_none() && zone.velocity.is_some()));
     }
 
     #[test]
@@ -2231,6 +2273,38 @@ mod tests {
         assert_eq!(key.detune(), detune_units(50.0));
     }
 
+    /// ⚠️ Zones are numbered from 1, the way the panel numbers them: a path outside
+    /// what the file holds is refused, and the refusal speaks that numbering rather
+    /// than the format crate's own.
+    #[test]
+    fn unknown_zone_paths_are_refused() {
+        let bytes = v2_bytes();
+        assert_eq!(v2_snapshot().zones.len(), 1);
+        let refused = |path: &str| {
+            apply(&bytes, &[(path.into(), "C4".into())]).expect_err(&format!("{path} was accepted"))
+        };
+        assert_eq!(
+            refused("zone2.root_key"),
+            "there is no zone 2: this sample has 1"
+        );
+        for path in [
+            "zone0.root_key",
+            "zone1.bogus",
+            "zone1.",
+            ".root_key",
+            "zone1",
+        ] {
+            assert_eq!(refused(path), format!("unknown field {path:?}"));
+        }
+
+        // Bytes that decode as something else are refused before any path is read.
+        let song = crate::workspace::Fresh::SetList.bytes().unwrap();
+        assert_eq!(
+            apply(&song, &[("name".into(), "Vibes".into())]).unwrap_err(),
+            "not a sample instrument"
+        );
+    }
+
     /// A path that names no field is refused before anything is written.
     #[test]
     fn unknown_key_paths_are_refused() {
@@ -2359,18 +2433,19 @@ mod tests {
         let mut state = State::default();
         state.pick(1, true);
         assert_eq!(state.selected, Some(1));
-        assert!(state.open.contains(&1));
+        assert!(state.open);
         assert_eq!(state.reveal, Some(1), "the map asked for it to be shown");
 
         state.reveal = None;
         state.pick(1, false);
-        assert!(!state.open.contains(&1), "the same row closes");
+        assert!(!state.open, "the same row closes");
         assert_eq!(state.reveal, None);
 
         // Another row opens rather than toggling the one that was open.
         state.pick(0, false);
+        assert_eq!((state.selected, state.open), (Some(0), true));
         state.pick(1, false);
-        assert!(state.open.contains(&1));
+        assert_eq!((state.selected, state.open), (Some(1), true));
     }
 
     /// What a struck key does: the zone that answers it, or why nothing does.
@@ -2378,6 +2453,7 @@ mod tests {
     fn a_struck_key_says_which_zone_answers_it() {
         let zones = [
             MapZone {
+                row: 0,
                 low: 61,
                 top: 96,
                 root: 72,
@@ -2385,6 +2461,7 @@ mod tests {
                 velocity: None,
             },
             MapZone {
+                row: 1,
                 low: 24,
                 top: 40,
                 root: 48,
@@ -2424,6 +2501,7 @@ mod tests {
     #[test]
     fn the_span_widens_to_hold_every_zone() {
         let inside = [MapZone {
+            row: 0,
             low: 36,
             top: 84,
             root: 60,
@@ -2433,6 +2511,7 @@ mod tests {
         assert_eq!(span(&inside, NSMP_SPAN), NSMP_SPAN);
 
         let past = [MapZone {
+            row: 0,
             low: 17,
             top: 108,
             root: 60,
@@ -2441,8 +2520,6 @@ mod tests {
         }];
         assert_eq!(span(&past, NSMP_SPAN), keys::Span { low: 17, high: 108 });
     }
-
-    // ---- the pinned map ------------------------------------------------------------
 
     /// A context dressed as the app dresses it: the semibold family a band and a row
     /// are set in is not bound by default, and laying one out without it panics.
@@ -2582,6 +2659,94 @@ mod tests {
             "the v2 keyboard map is drawn instead: {said:?}"
         );
         assert!(sets.is_empty());
+    }
+
+    /// One frame of the actions of an open zone: what they painted and where, and what
+    /// a click asked the document for.
+    fn actions(
+        ctx: &egui::Context,
+        sound: &Sound,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, Option<Ask>) {
+        let mut ask = None;
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ask = zone_audio(ui, 0, sound);
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, ask)
+    }
+
+    /// ⚠️ Every edit drops the decoded audio and the zone that was sounding goes on
+    /// sounding: the control that stops it has to stand with nothing decoded, or the
+    /// sound has nothing on screen to stop it.
+    #[test]
+    fn a_sounding_zone_is_stopped_from_the_row_with_nothing_decoded() {
+        let ctx = dressed();
+        let sounding = Sound {
+            decoded: None,
+            playing: true,
+        };
+        let (said, ask) = actions(&ctx, &sounding, Vec::new());
+        assert!(ask.is_none(), "nothing was clicked");
+        let stop = said
+            .iter()
+            .find(|(text, _)| text == "Stop")
+            .unwrap_or_else(|| panic!("a sounding zone offers no Stop: {said:?}"))
+            .1;
+        let (_, ask) = actions(&ctx, &sounding, press(stop.center()));
+        assert_eq!(ask, Some(Ask::Play(0)));
+
+        // Silent and undecoded, the row offers the decode instead.
+        let quiet = Sound {
+            decoded: None,
+            playing: false,
+        };
+        let (said, _) = actions(&ctx, &quiet, Vec::new());
+        assert!(
+            said.iter().any(|(text, _)| text == "Show audio"),
+            "{said:?}"
+        );
+    }
+
+    /// ⚠️ A paint mark is the difference between what is held and what was saved, and
+    /// saving moves the baseline without giving the asset new bytes: measured against
+    /// the bytes before the save, an edit that is now stored goes on reading as painted.
+    #[test]
+    fn saving_an_edit_clears_the_paint_marks() {
+        let ctx = dressed();
+        let bytes = v2_bytes();
+        let edited = apply(&bytes, &[("key60.gain".into(), "+1.5 dB".into())]).unwrap();
+        let entity = nord_format::from_stream(&mut Cursor::new(&edited)).unwrap();
+        let snapshot = snapshot(&entity).unwrap().unwrap();
+
+        let mut state = State::default();
+        follow(&mut state, 7, &Baseline::read(bytes, 1));
+        let (said, _) = bodied(&ctx, &mut state, &snapshot);
+        assert!(
+            said.iter().any(|text| text.ends_with("· 1 edited")),
+            "the key is painted against the bytes it was saved as: {said:?}"
+        );
+
+        follow(&mut state, 7, &Baseline::read(edited, 2));
+        let (said, _) = bodied(&ctx, &mut state, &snapshot);
+        assert!(
+            !said.iter().any(|text| text.contains("edited")),
+            "saved, and nothing is painted any more: {said:?}"
+        );
     }
 
     /// Clicking a key a zone answers sounds it and says so; clicking one past every

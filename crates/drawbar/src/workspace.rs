@@ -105,7 +105,10 @@ impl VerifyState {
 #[derive(Clone)]
 pub struct Container {
     pub header: Header,
-    pub body_len: u64,
+    /// Where the body sits in the file, checked against the file's own length when it
+    /// was read. The one derivation of it: anything wanting the body reads this rather
+    /// than adding a declared length to a start of its own.
+    pub body: std::ops::Range<usize>,
     pub checksum_ok: bool,
     /// `crc32:` or `crc16:` — the two generations keep it in different places.
     pub checksum_label: &'static str,
@@ -123,7 +126,8 @@ impl Container {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
         let start = usize::try_from(info.header.generation.body_start()).ok()?;
         let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
-        let body_crc32 = nord_usb::envelope::crc32(bytes.get(start..end)?);
+        let body = start..end;
+        let body_crc32 = nord_usb::envelope::crc32(bytes.get(body.clone())?);
         // `Header` omits the generation-specific checksum field. What the file stores is
         // what is shown; it parts from the body's own hash exactly when the file is bad.
         let (checksum_label, checksum) = match info.header.generation {
@@ -139,7 +143,7 @@ impl Container {
         };
         Some(Container {
             header: info.header,
-            body_len: info.body_len,
+            body,
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
@@ -150,6 +154,11 @@ impl Container {
     pub fn tag(&self) -> String {
         String::from_utf8_lossy(&self.header.tag).into_owned()
     }
+
+    /// How long the body is, which is the length of the range it sits in.
+    pub fn body_len(&self) -> u64 {
+        self.body.len() as u64
+    }
 }
 
 /// What an asset was last saved as: the bytes, and the checksum a slot holding them
@@ -157,7 +166,7 @@ impl Container {
 ///
 /// ⚠️ The checksum is read when the baseline moves and never per frame. Reading one
 /// streams the whole body, and every listed row asks for it while the library is up.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Baseline {
     pub bytes: Vec<u8>,
     /// The checksum a slot holding these bytes would report, which is what a link and
@@ -167,14 +176,24 @@ pub struct Baseline {
     /// `None` for bytes that are no CBIN container at all — see
     /// [`Container::body_crc32`].
     pub crc32: Option<u32>,
+    /// Which [`LocalEntity::stamp`] these bytes are: the asset's own where it still
+    /// holds them, and one of its own where it does not.
+    ///
+    /// ⚠️ This is what unsaved is read from. Comparing two bodies is O(the library),
+    /// and the header alone asks twice a frame — see [`LocalEntity::is_unsaved`].
+    pub stamp: u64,
 }
 
 impl Baseline {
-    /// The baseline of bytes nothing has inspected yet, which is what a store hands
-    /// back.
-    pub fn read(bytes: Vec<u8>) -> Baseline {
+    /// The baseline of bytes nothing has inspected yet, stamped as `stamp` — which is
+    /// [`Workspace::stamp_for`]'s to decide.
+    pub(crate) fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
-        Baseline { bytes, crc32 }
+        Baseline {
+            bytes,
+            crc32,
+            stamp,
+        }
     }
 }
 
@@ -255,10 +274,7 @@ impl LocalEntity {
             parse_error,
             container,
             verify,
-            saved: Baseline {
-                bytes: Vec::new(),
-                crc32: None,
-            },
+            saved: Baseline::default(),
             kept: true,
             stamp,
             link: None,
@@ -269,8 +285,12 @@ impl LocalEntity {
     }
 
     /// Whether it holds something other than what it was last saved as.
+    ///
+    /// ⚠️ Two stamps, not two bodies: every listed row and every frame of the header
+    /// ask this, and a piano library is hundreds of megabytes. The stamps are settled
+    /// wherever a baseline moves — see [`Baseline::stamp`].
     pub fn is_unsaved(&self) -> bool {
-        self.bytes != self.saved.bytes
+        self.stamp != self.saved.stamp
     }
 
     /// The bytes it holds now, as a baseline: what saving it settles on.
@@ -278,6 +298,7 @@ impl LocalEntity {
         Baseline {
             bytes: self.bytes.clone(),
             crc32: self.container.as_ref().map(|held| held.body_crc32),
+            stamp: self.stamp,
         }
     }
 
@@ -557,7 +578,8 @@ impl Fresh {
         )
     }
 
-    fn bytes(self) -> Result<Vec<u8>, String> {
+    /// The file this makes, byte for byte what [`Workspace::create`] puts on the list.
+    pub(crate) fn bytes(self) -> Result<Vec<u8>, String> {
         let at = |slot: u16| -> Result<ne5::program::Location, String> {
             (0, slot).try_into().map_err(|e| format!("{e}"))
         };
@@ -568,11 +590,14 @@ impl Fresh {
             ))),
             // A set list is four pointers and nothing else, so the only starting point
             // there is one is the first four programs.
-            Fresh::SetList => Entity::Song(Song::Electro5(ne5::song::new(
-                (0, 0).try_into().map_err(|e| format!("{e}"))?,
-                ne5::song::DEFAULT_VERSION,
-                [at(0)?, at(1)?, at(2)?, at(3)?],
-            ))),
+            Fresh::SetList => Entity::Song(Song::Electro5(
+                ne5::song::new(
+                    (0, 0).try_into().map_err(|e| format!("{e}"))?,
+                    ne5::song::DEFAULT_VERSION,
+                    [at(0)?, at(1)?, at(2)?, at(3)?],
+                )
+                .map_err(|e| format!("{e}"))?,
+            )),
             Fresh::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
             Fresh::Stage2Program => zeroed!(
                 ns2::Program,
@@ -628,6 +653,15 @@ impl Fresh {
     }
 }
 
+/// What the decode made of a set of bytes arriving, for the one line the status bar
+/// carries about them. The detail is in the log either way.
+enum Arrival {
+    Read,
+    /// It decoded, but it does not re-encode to the bytes it came from.
+    Unverified,
+    Unreadable,
+}
+
 /// One asset as a store holds it.
 pub struct Saved {
     pub id: u64,
@@ -657,7 +691,6 @@ enum Incoming {
 
 pub struct Workspace {
     entities: Vec<LocalEntity>,
-    selected: Option<u64>,
     next_id: u64,
     /// Bumped by every change to the list, so the shell can tell when the store is
     /// behind without comparing every asset's bytes.
@@ -675,7 +708,6 @@ impl Workspace {
         let (tx, rx) = std::sync::mpsc::channel();
         Workspace {
             entities: Vec::new(),
-            selected: None,
             next_id: 1,
             revision: 0,
             ctx,
@@ -685,24 +717,13 @@ impl Workspace {
         }
     }
 
-    pub fn selected(&self) -> Option<&LocalEntity> {
-        let id = self.selected?;
-        self.entities.iter().find(|e| e.id == id)
-    }
-
-    /// Point the document view at one entity. The browser's own selection is separate:
-    /// clicking a row in the sidebar does not change what the open tab is showing.
-    pub fn select(&mut self, id: Option<u64>) {
-        self.selected = id;
-    }
-
-    /// Counts changes to the list, not to any one asset.
     /// The context the app draws in, for the acts that ask the window itself for
     /// something rather than the list.
     pub fn ctx(&self) -> &egui::Context {
         &self.ctx
     }
 
+    /// Counts changes to the list, not to any one asset.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -716,13 +737,6 @@ impl Workspace {
     /// What "This computer" shows: everything except the views of a slot.
     pub fn listed(&self) -> impl Iterator<Item = &LocalEntity> {
         self.entities.iter().filter(|e| e.kept)
-    }
-
-    /// Every document in memory, the views of slots included — everything a tab can be
-    /// showing and an edit can have touched. [`Workspace::listed`] is the narrower set
-    /// this computer's own list holds.
-    pub fn documents(&self) -> impl Iterator<Item = &LocalEntity> {
-        self.entities.iter()
     }
 
     pub fn get(&self, id: u64) -> Option<&LocalEntity> {
@@ -739,12 +753,11 @@ impl Workspace {
     /// What a double-click on a slot opens: a tab and a document over a working copy,
     /// which is edited and sent back like any other, and which goes when its tab does.
     pub fn view(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
-        let id = self.ingest(name, origin, bytes, log);
+        let (id, _) = self.add(name, origin, bytes, log);
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return id;
         };
         entity.kept = false;
-        // ⚠️ `ingest` logs a local copy; override that message because a view is transient.
         let where_ = match entity.origin.slot() {
             Some((class, at)) => crate::strings::place(class, at),
             None => "the instrument".to_string(),
@@ -820,9 +833,6 @@ impl Workspace {
         if self.entities.len() == before && rescued.is_empty() {
             return;
         }
-        if self.selected.is_some_and(|id| self.get(id).is_none()) {
-            self.selected = self.entities.last().map(|e| e.id);
-        }
         self.revision += 1;
     }
 
@@ -842,19 +852,26 @@ impl Workspace {
         }
     }
 
-    /// Decode `bytes`, badge them, and add the row. Every way in — drop, picker,
-    /// fresh default, and later a device read — lands here.
-    pub fn ingest(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
+    /// Decode `bytes`, badge them, and add the row, with the detail of what arrived in
+    /// the log. Every way in — drop, picker, fresh default, device read — lands here.
+    ///
+    /// What the status line says is the caller's: [`Workspace::ingest`] announces
+    /// something on this computer and [`Workspace::view`] a slot being looked at, and
+    /// they are not the same arrival.
+    fn add(
+        &mut self,
+        name: String,
+        origin: Origin,
+        bytes: Vec<u8>,
+        log: &mut Log,
+    ) -> (u64, Arrival) {
         let id = self.next_id;
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
-        match (&entity.parse_error, &entity.verify) {
+        let arrival = match (&entity.parse_error, &entity.verify) {
             (Some(e), _) => {
                 log.error(format!("{}: {e}", entity.name));
-                log.trouble(format!(
-                    "“{}” is not a file this app understands.",
-                    entity.name
-                ));
+                Arrival::Unreadable
             }
             (None, VerifyState::Ok) => {
                 log.info(format!(
@@ -863,7 +880,7 @@ impl Workspace {
                     entity.tag(),
                     entity.bytes.len(),
                 ));
-                log.say(format!("“{}” is on this computer.", entity.name));
+                Arrival::Read
             }
             (None, state) => {
                 log.warn(format!(
@@ -873,14 +890,25 @@ impl Workspace {
                     state.badge(),
                     state.detail(),
                 ));
-                log.say(format!(
-                    "“{}” opened, but it does not re-save byte for byte.",
-                    entity.name
-                ));
+                Arrival::Unverified
             }
-        }
+        };
         self.entities.push(entity);
-        self.selected = Some(id);
+        (id, arrival)
+    }
+
+    /// Take `bytes` onto this computer, and say so.
+    pub fn ingest(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
+        let (id, arrival) = self.add(name.clone(), origin, bytes, log);
+        match arrival {
+            Arrival::Unreadable => {
+                log.trouble(format!("“{name}” is not a file this app understands."))
+            }
+            Arrival::Read => log.say(format!("“{name}” is on this computer.")),
+            Arrival::Unverified => log.say(format!(
+                "“{name}” opened, but it does not re-save byte for byte."
+            )),
+        }
         id
     }
 
@@ -888,6 +916,22 @@ impl Workspace {
     fn stamp(&mut self) -> u64 {
         self.revision += 1;
         self.revision
+    }
+
+    /// The stamp a baseline of `bytes` takes under `id`: the asset's own where it holds
+    /// those very bytes, and one of its own where it holds something else.
+    ///
+    /// ⚠️ The one place two bodies are compared. It runs where a baseline moves —
+    /// never per frame — so that [`LocalEntity::is_unsaved`] and the caches over the
+    /// pair are two integers.
+    fn stamp_for(&mut self, id: u64, bytes: &[u8]) -> u64 {
+        match self
+            .get(id)
+            .map(|entity| (entity.stamp, entity.bytes == bytes))
+        {
+            Some((stamp, true)) => stamp,
+            _ => self.stamp(),
+        }
     }
 
     /// Drain whatever the pickers finished with. Call once per frame.
@@ -1030,10 +1074,11 @@ impl Workspace {
     /// about a slot this app does not have to read back, and [`crate::device::link`]
     /// keeps it until a walk of that slot says otherwise.
     pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+        let stamp = self.stamp_for(id, &sent);
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return;
         };
-        entity.saved = Baseline::read(sent);
+        entity.saved = Baseline::read(sent, stamp);
         entity.link = Some((class, at));
         entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
         self.revision += 1;
@@ -1071,21 +1116,29 @@ impl Workspace {
     /// them, and answer with what the re-encode check made of them.
     ///
     /// ⚠️ The saved baseline is not one of those things: it moves only when the asset is
-    /// saved, so an edit and the revert of it are measured against the same bytes.
+    /// saved, so an edit and the revert of it are measured against the same bytes. Nor is
+    /// the link, or the write this app made — both are evidence about a slot, which an
+    /// edit here says nothing about.
     fn respell(&mut self, id: u64, bytes: Vec<u8>) -> Option<VerifyState> {
         if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
             return None;
         }
         let stamp = self.stamp();
+        // The baseline stays where it is; whether the asset is holding it does not. A
+        // revert, and an edit made and then unmade, each put back what it was saved as.
+        let held = self
+            .get(id)
+            .is_some_and(|entity| entity.saved.bytes == bytes);
         let entity = self.entities.iter_mut().find(|e| e.id == id)?;
-        let (kept, link) = (entity.kept, entity.link);
-        let saved = std::mem::replace(
-            &mut entity.saved,
-            Baseline {
-                bytes: Vec::new(),
-                crc32: None,
+        let (kept, link, wrote) = (entity.kept, entity.link, entity.wrote);
+        let saved = std::mem::take(&mut entity.saved);
+        let saved = Baseline {
+            stamp: match held {
+                true => stamp,
+                false => saved.stamp,
             },
-        );
+            ..saved
+        };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
         let verify = replaced.verify.clone();
@@ -1093,6 +1146,7 @@ impl Workspace {
             kept,
             link,
             saved,
+            wrote,
             ..replaced
         };
         Some(verify)
@@ -1111,9 +1165,6 @@ impl Workspace {
         };
         let gone = self.entities.remove(at);
         self.revision += 1;
-        if self.selected == Some(id) {
-            self.selected = self.entities.last().map(|e| e.id);
-        }
         log.say(format!("Removed “{}” from this computer.", gone.name));
     }
 
@@ -1122,15 +1173,18 @@ impl Workspace {
         self.next_id
     }
 
-    /// Put back what a previous session held.
+    /// Put back what a previous session held, answering with how many of them were
+    /// refused.
     ///
     /// Every asset is decoded and re-checked on the way in: bytes out of a store have
     /// been sitting somewhere this app does not control and get no more trust than bytes
-    /// off a disk.
+    /// off a disk. An id is refused on the same terms: one that leaves no room for the
+    /// next, and one already standing in the list, are each a line nothing can restore.
     ///
     /// ⚠️ Restore decodes and re-encodes every asset before the first wasm frame. The
     /// tab cannot yield while checking up to the store budget.
-    pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) {
+    pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
+        let mut refused = 0;
         for Saved {
             id,
             name,
@@ -1139,24 +1193,37 @@ impl Workspace {
             unsaved,
         } in saved
         {
+            let Some(next) = id.checked_add(1) else {
+                refused += 1;
+                continue;
+            };
+            if self.entities.iter().any(|e| e.id == id) {
+                refused += 1;
+                continue;
+            }
             let stamp = self.stamp();
-            let baseline = Baseline::read(saved);
-            let bytes = unsaved.unwrap_or_else(|| baseline.bytes.clone());
+            let bytes = unsaved.unwrap_or_else(|| saved.clone());
+            // The store says what was saved and what was held; the two are one asset's
+            // bytes exactly when they are the same bytes.
+            let held = match bytes == saved {
+                true => stamp,
+                false => self.stamp(),
+            };
             let entity = LocalEntity {
-                saved: baseline,
+                saved: Baseline::read(saved, held),
                 ..LocalEntity::new(id, name, origin, bytes, stamp)
             };
             if let Some(e) = &entity.parse_error {
                 log.warn(format!("{}: {e}", entity.name));
             }
-            self.next_id = self.next_id.max(id + 1);
+            self.next_id = self.next_id.max(next);
             self.entities.push(entity);
         }
         if let Some(next) = next_id {
             self.next_id = self.next_id.max(next);
         }
-        self.selected = self.entities.last().map(|e| e.id);
         self.revision += 1;
+        refused
     }
 
     /// Make one of the fresh defaults and add it to the list.
@@ -1295,7 +1362,7 @@ mod tests {
         let container = entity.container.expect("a fresh program is a CBIN file");
         assert!(container.checksum_ok);
         assert_eq!(container.header.generation, Generation::V1);
-        assert_eq!(container.body_len, ne5::program::BODY_LEN as u64);
+        assert_eq!(container.body.len(), ne5::program::BODY_LEN);
         assert_eq!(container.checksum_label, "crc32:");
     }
 
@@ -1434,6 +1501,62 @@ mod tests {
         assert_eq!(workspace.listed().count(), 2);
     }
 
+    /// ⚠️ A view is not on this computer, and the activity log is the record of where a
+    /// slot's bytes went. One line, and it says what actually happened.
+    #[test]
+    fn viewing_a_slot_says_that_and_not_that_it_was_kept() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = workspace.view(
+            "Africa-Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+            Fresh::Program.bytes().unwrap(),
+            &mut log,
+        );
+
+        assert!(workspace.is_view(id));
+        assert!(log.status().1.starts_with("Viewing "), "{}", log.status().1);
+        assert!(
+            !log.iter()
+                .any(|entry| entry.text.contains("is on this computer.")),
+            "a view was never taken onto this computer"
+        );
+        // The detail of what arrived is still recorded, view or not.
+        assert!(log.iter().any(|entry| entry.text.contains("verified")));
+    }
+
+    /// ⚠️ A write is what this app knows about a slot without reading it back — the
+    /// whole of the Agrees mark for a class whose slots report no checksum. An edit and
+    /// the revert of it leave the slot alone, so they must leave that evidence alone.
+    #[test]
+    fn an_edit_and_a_revert_leave_the_write_this_app_made() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let at = Location { bank: 6, slot: 3 };
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let sent = workspace.get(id).unwrap().bytes.clone();
+        workspace.landed(id, ObjectClass::Program, at, sent.clone());
+        let wrote = |workspace: &Workspace| {
+            workspace
+                .get(id)
+                .unwrap()
+                .wrote
+                .map(|held| (held.class, held.at, held.crc32))
+        };
+        let landed = wrote(&workspace).expect("a write this app made");
+
+        let (_, edited) =
+            crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        assert_eq!(wrote(&workspace), Some(landed), "an edit is not a write");
+
+        workspace.revert(id, &mut log);
+        assert_eq!(wrote(&workspace), Some(landed), "and neither is a revert");
+    }
+
     /// A view outlives nothing: once no tab holds it, it is gone. What was kept stays
     /// whether anything is looking at it or not.
     #[test]
@@ -1460,7 +1583,6 @@ mod tests {
         workspace.close_views(|_| false, |_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_none());
         assert!(workspace.get(local).is_some(), "kept is kept");
-        assert_eq!(workspace.selected().map(|e| e.id), Some(local));
     }
 
     /// ⚠️ The loss this rule exists to stop. A view is the only copy of what it holds —
@@ -1705,6 +1827,42 @@ mod tests {
         workspace.revert(id, &mut log);
         assert!(!unsaved(&workspace));
         assert_eq!(workspace.get(id).unwrap().bytes, edited);
+
+        // And an edit unmade by hand is the baseline again, whatever route it took.
+        let (_, away) =
+            crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
+        workspace.replace_bytes(id, away, &mut log);
+        assert!(unsaved(&workspace));
+        workspace.replace_bytes(id, edited, &mut log);
+        assert!(!unsaved(&workspace), "it holds what it was saved as again");
+    }
+
+    /// A write that reached a slot saves the bytes it carried and not the ones the
+    /// asset holds now: an edit made while the write was in flight is on this computer
+    /// alone, and calling it saved would let it be discarded with the tab it is in.
+    #[test]
+    fn a_write_that_landed_saves_what_it_carried_rather_than_a_later_edit() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let at = Location { bank: 6, slot: 3 };
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let sent = workspace.get(id).unwrap().bytes.clone();
+
+        let (_, edited) =
+            crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.landed(id, ObjectClass::Program, at, sent.clone());
+        assert!(
+            workspace.get(id).unwrap().is_unsaved(),
+            "the edit made in flight is still owed"
+        );
+        assert_eq!(workspace.get(id).unwrap().saved.bytes, sent);
+
+        workspace.landed(id, ObjectClass::Program, at, edited);
+        assert!(
+            !workspace.get(id).unwrap().is_unsaved(),
+            "a write of what it holds leaves nothing owed"
+        );
     }
 
     /// The baseline's checksum is the one a slot holding those bytes reports, so a saved

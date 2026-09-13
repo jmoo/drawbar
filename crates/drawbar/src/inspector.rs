@@ -271,10 +271,11 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
 /// asked about and it named something.
 ///
 /// ⚠️ `DEPENDENCIES` answers for one slot at a time and the cache holds the last answer,
-/// so this speaks for the slot that was asked about and for no other. A selection nothing
-/// has asked about has no answer, which is not the same as needing nothing.
-fn answer(device: &Device, at: Location) -> Option<&[Dependency]> {
-    if device.state.detail.at != Some(at) {
+/// so this speaks for the slot that was asked about — that class at that address — and
+/// for no other. A selection nothing has asked about has no answer, which is not the
+/// same as needing nothing.
+fn answer(device: &Device, slot: (ObjectClass, Location)) -> Option<&[Dependency]> {
+    if device.state.detail.at != Some(slot) {
         return None;
     }
     let deps = device.state.detail.deps.as_deref()?;
@@ -287,7 +288,7 @@ fn needs(picked: &[(ObjectClass, Location)], device: &Device) -> Vec<(ObjectClas
     picked
         .iter()
         .copied()
-        .filter(|(_, at)| answer(device, *at).is_some())
+        .filter(|slot| answer(device, *slot).is_some())
         .collect()
 }
 
@@ -295,7 +296,7 @@ fn needs(picked: &[(ObjectClass, Location)], device: &Device) -> Vec<(ObjectClas
 fn dependencies(ui: &mut egui::Ui, answered: &[(ObjectClass, Location)], device: &Device) {
     body(ui, |ui| {
         for (class, at) in answered.iter().copied() {
-            let Some(deps) = answer(device, at) else {
+            let Some(deps) = answer(device, (class, at)) else {
                 continue;
             };
             for dep in deps {
@@ -438,7 +439,6 @@ mod tests {
     use crate::browser::apply;
     use crate::device::Detail;
     use crate::log::Log;
-    use crate::store::Fake;
     use crate::tabs::Tabs;
     use crate::workspace::Fresh;
     use nord_usb::wire::{Dependency, Status};
@@ -465,9 +465,8 @@ mod tests {
             spare: 4,
         });
         device.state.detail = Detail {
-            at: Some(at),
-            info: None,
-            asked: true,
+            at: Some((ObjectClass::Program, at)),
+            info: Some(None),
             deps: Some(vec![
                 Dependency {
                     flag: 1,
@@ -506,7 +505,7 @@ mod tests {
         let workspace = Workspace::new(ctx.clone());
         let queue = Queue::default();
         let mut labels = Tags::default();
-        let sunday = labels.make("Sunday");
+        let sunday = labels.make("Sunday").unwrap();
         labels.set(7, sunday, true);
         let mut said = Vec::new();
         // Twice: the second pass runs with the widget state the first left behind.
@@ -675,30 +674,29 @@ mod tests {
         assert_eq!(tally(1, &[]), "1 picked, 0 unsaved, 0 on the keyboard");
     }
 
-    /// ⚠️ A dependency list answers for the slot it was asked about and for no other, so
-    /// a selection elsewhere is *not asked* rather than *needs nothing*.
+    /// ⚠️ A dependency list answers for the slot it was asked about — that class at that
+    /// address — and for no other, so a selection elsewhere is *not asked* rather than
+    /// *needs nothing*. Every class is addressed in the same banks and slots, so the
+    /// sample at a program's own address must not be shown the program's list.
     #[test]
     fn a_selection_the_instrument_was_not_asked_about_shows_nothing() {
         let ctx = context();
         let (device, at) = attached(&ctx);
         assert_eq!(
-            device.state.dependency_name(
-                Some((ObjectClass::Program, at)),
-                ObjectClass::Piano,
-                0x0102_0304
-            ),
-            Some("Royal Grand 3D"),
+            needs(&[(ObjectClass::Program, at)], &device),
+            [(ObjectClass::Program, at)],
+            "the slot it was asked about"
+        );
+        assert!(
+            needs(&[(ObjectClass::Sample, at)], &device).is_empty(),
+            "another class at the same address"
         );
         let elsewhere = Location { bank: 0, slot: 0 };
-        assert_eq!(
-            device.state.dependency_name(
-                Some((ObjectClass::Program, elsewhere)),
-                ObjectClass::Piano,
-                0x0102_0304
-            ),
-            None,
+        assert!(
+            needs(&[(ObjectClass::Program, elsewhere)], &device).is_empty(),
+            "a program nothing has asked about"
         );
-        // And the one whose name came back blank has nothing but its id to show.
+        // And the dependency whose name came back blank has nothing but its id to show.
         assert_eq!(
             device
                 .state
@@ -719,7 +717,7 @@ mod tests {
     fn the_selections_tags_are_chips_and_nothing_at_all_where_there_are_none() {
         let ctx = context();
         let mut labels = Tags::default();
-        let (both, some) = (labels.make("Sunday"), labels.make("Loud"));
+        let (both, some) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
         for tag in [both, some] {
             labels.set(7, tag, true);
         }
@@ -799,22 +797,5 @@ mod tests {
             }],
         );
         assert!(!browser.tags().on_all(&ids, tag), "a solid one comes off");
-    }
-
-    /// What the last session left collapsed comes back collapsed, panel by panel.
-    #[test]
-    fn each_inspector_panel_comes_back_as_it_was_left() {
-        let mut store = Fake::default();
-        let before = Shell {
-            room_open: false,
-            info_open: true,
-            ..Shell::default()
-        };
-        before.keep(&mut store);
-
-        let mut after = Shell::default();
-        after.restore(&store);
-        assert!(!after.room_open);
-        assert!(after.info_open);
     }
 }

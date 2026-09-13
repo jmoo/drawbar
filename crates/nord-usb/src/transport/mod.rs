@@ -77,7 +77,7 @@ pub(crate) fn needs_terminator(written: usize, packet: usize) -> bool {
 /// requirement would infect every generic bound above this one. The
 /// `async_fn_in_trait` lint fires precisely because callers *cannot* add a `Send`
 /// bound here; that is the intent, so it is allowed deliberately. Desktop callers
-/// needing `Send` should bound on a `SendTransport` marker rather than changing this.
+/// needing `Send` should bound on their own marker rather than changing this.
 ///
 /// **Separate directions, not request/response.** Several operations send multiple
 /// OUTs before any IN (`delete` is `O36 O26 I30`), so a `send_and_receive()` primitive
@@ -139,11 +139,6 @@ pub trait Transport {
         self.write(buf).await.map(|()| true)
     }
 }
-
-/// Opt-in marker for desktop callers that need to move a transport across threads.
-/// Deliberately *not* a supertrait of [`Transport`] — see the note there.
-pub trait SendTransport: Transport + Send {}
-impl<T: Transport + Send> SendTransport for T {}
 
 #[cfg(test)]
 mod tests {

@@ -19,8 +19,10 @@ pub struct FieldValue {
     pub raw: u64,
     /// The bits the field's current value would *write*.
     ///
-    /// Equal to [`raw`](Self::raw) on any panel that has not been edited — decode and
-    /// encode are inverses — so the two diverging is exactly the set of pending changes.
+    /// Equal to [`raw`](Self::raw) on a panel decoded from bytes and not edited since —
+    /// decode and encode are inverses — so the two diverging is exactly the set of
+    /// pending changes. A `Default`-built panel has all-zero raw bytes, so every default
+    /// that encodes non-zero reads as pending.
     pub bits: u64,
     /// The decoded value's `Debug` rendering.
     pub value: String,
@@ -291,6 +293,48 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// The unit's numeric code.
+    ///
+    /// It exists for the same reason [`Library::code`] does: a const generic parameter
+    /// cannot be an enum, so a type that carries its unit —
+    /// [`BipolarOf`](crate::components::BipolarOf) — carries this and turns it back with
+    /// [`expect_code`](Self::expect_code).
+    pub const fn code(self) -> u8 {
+        match self {
+            Unit::Panel10 => 0,
+            Unit::Decibels => 1,
+            Unit::Milliseconds => 2,
+            Unit::Hertz => 3,
+            Unit::Bpm => 4,
+            Unit::ClockDivision => 5,
+            Unit::Semitones => 6,
+            Unit::Octaves => 7,
+            Unit::Pan => 8,
+            Unit::None => 9,
+        }
+    }
+
+    /// The unit a [`code`](Self::code) names, for the type-level parameter this
+    /// vocabulary exists to carry.
+    ///
+    /// ⚠️ Panics on a code naming none, which is a build failure where the value is
+    /// forced at compile time — as the aliases in [`components`](crate::components) are.
+    pub const fn expect_code(code: u8) -> Unit {
+        match code {
+            0 => Unit::Panel10,
+            1 => Unit::Decibels,
+            2 => Unit::Milliseconds,
+            3 => Unit::Hertz,
+            4 => Unit::Bpm,
+            5 => Unit::ClockDivision,
+            6 => Unit::Semitones,
+            7 => Unit::Octaves,
+            8 => Unit::Pan,
+            9 => Unit::None,
+            _ => panic!("no unit has this code"),
+        }
+    }
+
     /// Whether a value in this unit can be *computed* from the stored one.
     ///
     /// False for the units where the panel's curve is not published — a caller that wants

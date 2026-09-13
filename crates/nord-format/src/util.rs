@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::cbin;
 use crate::error::{Error, ParseError};
-use crate::formats::{cn3, midi, nsmpproj};
+use crate::formats::{cn3, midi, nsmpproj, sysex};
 
 /// The container classes [`peek`] distinguishes.
 pub enum FileType {
@@ -89,7 +89,7 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
                 }
             }
 
-            0xf0 => Ok(unknown(FileType::Sysex)),
+            sysex::SYSEX_START => Ok(unknown(FileType::Sysex)),
 
             // 'M' — `MThd`, checked in full so a stray M is not called MIDI.
             0x4d => {

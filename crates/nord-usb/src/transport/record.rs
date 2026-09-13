@@ -17,7 +17,9 @@ use crate::error::Result;
 ///
 /// An I/O failure part-way through is held rather than raised: aborting a live session
 /// mid-transaction leaves the instrument with an open session, which is worse than a
-/// short script. Call [`Recorder::check`] once the operation is done to surface it.
+/// short script. [`Recorder::check`], reached through
+/// [`UsbTransport::finish_recording`](super::UsbTransport::finish_recording), surfaces it
+/// once the operation is done.
 pub struct Recorder {
     file: File,
     failed: Option<std::io::Error>,
@@ -84,16 +86,6 @@ impl Recorder {
         }
     }
 
-    /// Write a free-form comment line, to mark what the following frames belong to.
-    pub fn comment(&mut self, text: &str) {
-        if self.failed.is_some() {
-            return;
-        }
-        if let Err(e) = writeln!(self.file, "\n# {text}") {
-            self.failed = Some(e);
-        }
-    }
-
     /// The first I/O error the recorder hit, if any. Recording stops at that point.
     pub fn check(&mut self) -> Result<()> {
         match self.failed.take() {
@@ -113,5 +105,35 @@ impl Recorder {
         if let Err(e) = writeln!(self.file, "{tag} {hex}") {
             self.failed = Some(e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame the recorder could not write must reach the caller: a script short of
+    /// the frames it claims replays as a different exchange.
+    #[test]
+    fn a_frame_that_could_not_be_written_is_reported_by_the_check() {
+        let path = std::env::temp_dir().join(format!("nord-record-{}.script", std::process::id()));
+        File::create(&path).expect("the script path is writable");
+        let unwritable = File::open(&path).expect("reopening it read-only");
+        let mut recorder = Recorder {
+            file: unwritable,
+            failed: None,
+        };
+
+        recorder.out(&[0x00, 0x11]);
+        let err = recorder
+            .check()
+            .expect_err("the frame never reached the script");
+
+        assert!(matches!(err, crate::error::Error::Io(_)), "{err}");
+        assert!(
+            recorder.check().is_ok(),
+            "a reported failure is not reported twice"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -29,6 +29,8 @@
 use super::Transport;
 use crate::error::{Error, Result};
 
+pub use crate::error::ErrKind;
+
 /// Where a script's bytes came from — which is what says whether it is an oracle.
 ///
 /// Only [`Source::Nsm`] is one for an operation nothing has matched before: it is the
@@ -59,24 +61,6 @@ pub enum Expect {
     #[default]
     Ok,
     Err(ErrKind),
-}
-
-/// The failures a script may name, spelled in kebab-case after the [`Error`] variant.
-///
-/// Deliberately a short list: it exists to tell one *expected* refusal from another, not
-/// to mirror the error type. A device refusal carries its status code, because the code
-/// is the finding — `0x15` (the library classes refusing a rename) and `0x1` (nothing
-/// loaded) are different results, not two spellings of one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrKind {
-    DeviceStatus(u32),
-    ClassRefused(u32),
-    UnexpectedResponse,
-    UnexpectedLocation,
-    UnexpectedPartition,
-    Enumeration,
-    Transport,
-    Replay,
 }
 
 /// One declared intent and the frames it accounts for.
@@ -131,71 +115,6 @@ impl std::fmt::Display for Source {
     }
 }
 
-impl ErrKind {
-    /// Whether an error is the one this names.
-    pub fn matches(&self, e: &Error) -> bool {
-        match (self, e) {
-            (ErrKind::DeviceStatus(want), Error::DeviceStatus(got)) => want == got,
-            (ErrKind::ClassRefused(want), Error::ClassRefused { status, .. }) => want == status,
-            (ErrKind::UnexpectedResponse, Error::UnexpectedResponse { .. }) => true,
-            (ErrKind::UnexpectedLocation, Error::UnexpectedLocation { .. }) => true,
-            (ErrKind::UnexpectedPartition, Error::UnexpectedPartition { .. }) => true,
-            (ErrKind::Enumeration, Error::Enumeration { .. } | Error::ScanLimit { .. }) => true,
-            (ErrKind::Transport, Error::Transport(_)) => true,
-            (ErrKind::Replay, Error::Replay(_)) => true,
-            _ => false,
-        }
-    }
-
-    fn parse(value: &str) -> std::result::Result<Self, String> {
-        let (kind, arg) = match value.split_once(char::is_whitespace) {
-            Some((kind, arg)) => (kind, arg.trim()),
-            None => (value, ""),
-        };
-        match (kind, arg) {
-            ("device-status", "") => Err("device-status needs its code, e.g. \
-                                          'err device-status 0x15'"
-                .into()),
-            ("device-status", code) => parse_u32(code)
-                .map(ErrKind::DeviceStatus)
-                .ok_or_else(|| format!("bad device status {code:?}")),
-            ("class-refused", "") => Err("class-refused needs its code, e.g. \
-                                         'err class-refused 0x5'"
-                .into()),
-            ("class-refused", code) => parse_u32(code)
-                .map(ErrKind::ClassRefused)
-                .ok_or_else(|| format!("bad class refusal status {code:?}")),
-            ("unexpected-response", "") => Ok(ErrKind::UnexpectedResponse),
-            ("unexpected-location", "") => Ok(ErrKind::UnexpectedLocation),
-            ("unexpected-partition", "") => Ok(ErrKind::UnexpectedPartition),
-            ("enumeration", "") => Ok(ErrKind::Enumeration),
-            ("transport", "") => Ok(ErrKind::Transport),
-            ("replay", "") => Ok(ErrKind::Replay),
-            (kind, _) => Err(format!(
-                "unknown failure {kind:?}; the vocabulary is device-status <code>, \
-                class-refused <code>, unexpected-response, unexpected-location, \
-                unexpected-partition, enumeration, \
-                transport, replay"
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for ErrKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ErrKind::DeviceStatus(code) => write!(f, "device-status {code:#x}"),
-            ErrKind::ClassRefused(code) => write!(f, "class-refused {code:#x}"),
-            ErrKind::UnexpectedResponse => f.write_str("unexpected-response"),
-            ErrKind::UnexpectedLocation => f.write_str("unexpected-location"),
-            ErrKind::UnexpectedPartition => f.write_str("unexpected-partition"),
-            ErrKind::Enumeration => f.write_str("enumeration"),
-            ErrKind::Transport => f.write_str("transport"),
-            ErrKind::Replay => f.write_str("replay"),
-        }
-    }
-}
-
 impl Expect {
     fn parse(value: &str) -> std::result::Result<Self, String> {
         match value.strip_prefix("err") {
@@ -232,14 +151,6 @@ fn field(comment: &str) -> Option<(&str, &str)> {
     let (key, value) = comment.trim().split_once(':')?;
     let named = !key.is_empty() && key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
     named.then(|| (key, value.trim()))
-}
-
-/// `0x`-prefixed hex or decimal — status codes are quoted both ways.
-fn parse_u32(s: &str) -> Option<u32> {
-    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(hex) => u32::from_str_radix(hex, 16).ok(),
-        None => s.parse().ok(),
-    }
 }
 
 impl Script {
@@ -344,6 +255,11 @@ impl Script {
                 }
             };
             let hex = hex.trim();
+            // ⚠️ The pairs below are byte slices: a multi-byte character would split
+            // across a char boundary and panic before `from_str_radix` ever saw it.
+            if !hex.is_ascii() {
+                return Err(fail(n, format_args!("non-hex byte")));
+            }
             if hex.len() % 2 != 0 {
                 return Err(fail(n, format_args!("odd-length hex")));
             }
@@ -707,19 +623,56 @@ mod tests {
     }
 
     /// Every kind the recorder writes must read back as the error it names, or a script
-    /// would declare a failure the sweep then judges to be a different one.
+    /// would declare a failure the sweep then judges to be a different one. A failure
+    /// the vocabulary does not name is written as the nearest kind rather than left off,
+    /// where the script would claim the operation succeeded — so every variant round
+    /// trips, not only the ones with a spelling of their own.
     #[test]
     fn a_recorded_failure_reads_back_as_the_error_it_names() {
-        let named = [
+        let at = crate::wire::Location { bank: 1, slot: 2 };
+        let every = [
+            Error::Truncated { got: 2, need: 8 },
+            Error::LengthMismatch {
+                declared: 34,
+                actual: 30,
+            },
+            Error::BadCrc {
+                expected: 0x4a55,
+                actual: 0x7197,
+            },
             Error::DeviceStatus(0x15),
+            Error::ClassRefused {
+                class: crate::wire::ObjectClass::Piano,
+                status: 5,
+            },
             Error::UnexpectedResponse {
                 expected: 0x30,
                 got: 0x1f,
             },
+            Error::UnexpectedLocation {
+                requested: at,
+                reported: crate::wire::Location { bank: 1, slot: 3 },
+            },
+            Error::UnexpectedPartition {
+                requested: 4,
+                reported: 5,
+            },
+            Error::Enumeration {
+                bank: 1,
+                answered: at,
+                slots: 50,
+            },
+            Error::ScanLimit {
+                bank: 1,
+                limit: 4096,
+            },
             Error::Transport("stalled".into()),
+            Error::Envelope("bad magic".into()),
             Error::Replay("mismatch".into()),
+            Error::InvalidArgument("no such bank".into()),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
         ];
-        for e in named {
+        for e in every {
             let line = format!("err {}", e.expect_kind());
             let expect = Expect::parse(&line).unwrap_or_else(|m| panic!("{line}: {m}"));
             assert!(
@@ -727,12 +680,6 @@ mod tests {
                 "{line} does not read back as itself"
             );
         }
-        // A failure the vocabulary does not name is written as the nearest kind rather
-        // than left off, where the script would claim the operation succeeded.
-        assert_eq!(
-            Error::Truncated { got: 2, need: 8 }.expect_kind(),
-            "transport"
-        );
     }
 
     #[test]
@@ -740,6 +687,14 @@ mod tests {
         let err =
             Script::parse("# intent: program status\nO 00\n# intent: program focus\n").unwrap_err();
         assert!(err.to_string().contains("no frames"), "{err}");
+    }
+
+    /// A frame line is read two hex digits at a time, so a multi-byte character in one
+    /// must be refused rather than sliced through.
+    #[test]
+    fn a_frame_carrying_a_non_ascii_character_is_refused() {
+        let err = Script::parse("O aéa\n").unwrap_err();
+        assert!(err.to_string().contains("line 1: non-hex byte"), "{err}");
     }
 
     #[test]

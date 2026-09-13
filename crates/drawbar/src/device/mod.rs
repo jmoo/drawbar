@@ -40,6 +40,14 @@ use web::Link;
 pub use scan::{Progress, Scan};
 pub use worker::{Emit, Flow};
 
+/// The number the panel labels a zero-indexed bank with.
+///
+/// `None` where the device reported an index with no panel number above it, which is
+/// refused rather than wrapped onto another bank's cache.
+pub(crate) fn user_bank(index: u32) -> Option<u32> {
+    index.checked_add(1)
+}
+
 /// One row of the instrument's own partition table: a class it has, under the device's
 /// own name for it.
 ///
@@ -81,8 +89,6 @@ pub enum DeviceCmd {
     Get {
         class: ObjectClass,
         at: Location,
-        /// The wire body verbatim, rather than a whole CBIN file.
-        body: bool,
         why: Purpose,
     },
     Put {
@@ -184,10 +190,9 @@ impl DeviceCmd {
             DeviceCmd::ScanBank { bank, .. } => format!("scan bank {bank}"),
             DeviceCmd::SlotInfo { at, .. } => format!("info {}", shown(*at)),
             DeviceCmd::Deps { at, .. } => format!("deps {}", shown(*at)),
-            DeviceCmd::Get { at, body, why, .. } => match (body, why) {
-                (_, Purpose::Compare) => format!("get {} (to compare)", shown(*at)),
-                (true, _) => format!("get {} (raw body)", shown(*at)),
-                (false, _) => format!("get {}", shown(*at)),
+            DeviceCmd::Get { at, why, .. } => match why {
+                Purpose::Compare => format!("get {} (to compare)", shown(*at)),
+                Purpose::Copy | Purpose::View => format!("get {}", shown(*at)),
             },
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
@@ -389,15 +394,18 @@ pub enum Connection {
 /// One slot's detail, as the last `info`/`deps` reported it.
 #[derive(Default)]
 pub struct Detail {
-    pub at: Option<Location>,
-    pub info: Option<ProgramInfo>,
-    /// Whether the last `info` said the slot was empty, as opposed to never asked.
-    pub asked: bool,
+    /// The slot it answers for, class and address. ⚠️ Both: every class is addressed in
+    /// the same banks and slots — a program and a sample both sit at 1:1 — so only the
+    /// class tells the two answers apart.
+    pub at: Option<(ObjectClass, Location)>,
+    /// What the last `info` reported, shaped as [`DeviceState::slot`] shapes a scanned
+    /// slot: `Some(None)` is a slot answered empty, and `None` is one never asked about.
+    pub info: Option<Option<ProgramInfo>>,
     pub deps: Option<Vec<Dependency>>,
 }
 
 /// The UI's cache of the instrument. Nothing here is authoritative — it is what the
-/// device last said, which [`DeviceState::stale`] flags as possibly out of date.
+/// device last said, and [`Scan::read_at`] is when it said it.
 #[derive(Default)]
 pub struct DeviceState {
     pub connection: Connection,
@@ -458,7 +466,7 @@ impl DeviceState {
             .geometry
             .get(&class.to_raw())?
             .iter()
-            .find(|held| held.index + 1 == bank)?
+            .find(|held| user_bank(held.index) == Some(bank))?
             .name
             .trim();
         (!name.is_empty()).then_some(name)
@@ -470,12 +478,6 @@ impl DeviceState {
     /// until the class is read again.
     pub fn focused(&self, class: ObjectClass) -> Option<Location> {
         self.focus.get(&class.to_raw()).copied().flatten()
-    }
-
-    /// Whether the class answers focus reads at all; also `false` while the class has
-    /// never been read.
-    pub fn focus_applies(&self, class: ObjectClass) -> bool {
-        self.focus.contains_key(&class.to_raw())
     }
 
     /// What the last dependency list called a library id.
@@ -490,8 +492,7 @@ impl DeviceState {
         class: ObjectClass,
         id: u32,
     ) -> Option<&str> {
-        let (_, at) = slot?;
-        if self.detail.at != Some(at) {
+        if self.detail.at != Some(slot?) {
             return None;
         }
         self.detail
@@ -572,7 +573,7 @@ impl DeviceState {
 
     /// What a slot holds, from the scan cache. `Some(None)` is a scanned empty slot.
     pub fn slot(&self, class: ObjectClass, at: Location) -> Option<Option<&ProgramInfo>> {
-        let bank = self.bank(class, at.bank + 1)?;
+        let bank = self.bank(class, user_bank(at.bank)?)?;
         bank.get(at.slot as usize).map(Option::as_ref)
     }
 
@@ -594,15 +595,29 @@ impl DeviceState {
         seen
     }
 
+    /// A scanned bank's slots, each with the address it answers to, in address order. A
+    /// bank no walk has read has none.
+    ///
+    /// ⚠️ The one place the scan cache's own numbering — a bank as the panel counts it,
+    /// slots from one — becomes the zero-indexed [`Location`] everything else addresses.
+    pub fn slots_of(
+        &self,
+        class: ObjectClass,
+        bank: u32,
+    ) -> impl Iterator<Item = (Location, &Option<ProgramInfo>)> + '_ {
+        self.bank(class, bank)
+            .unwrap_or_default()
+            .iter()
+            .zip(1u32..)
+            .map(move |(held, slot)| (Location::from_user(bank, slot), held))
+    }
+
     /// Every slot of `class` a walk found vacant, in address order.
     pub fn free_slots(&self, class: ObjectClass) -> impl Iterator<Item = Location> + '_ {
         self.banks_of(class).into_iter().flat_map(move |bank| {
-            self.bank(class, bank)
-                .unwrap_or_default()
-                .iter()
-                .enumerate()
+            self.slots_of(class, bank)
                 .filter(|(_, held)| held.is_none())
-                .map(move |(slot, _)| Location::from_user(bank, slot as u32 + 1))
+                .map(|(at, _)| at)
         })
     }
 
@@ -760,23 +775,12 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
 
 /// The slot on the attached instrument this asset stands on.
 ///
-/// The slot it came off, while the instrument holds that slot — whatever it holds now.
-/// An asset copied off 1:1 and changed here is still the copy of 1:1, and what the two
-/// have made of each other since is [`crate::library::agrees`]'s question rather than
-/// this one.
-///
-/// With no origin, or an origin the walk found vacant, the saved body is what matches:
-/// the CRC-32 a type-1 container carries **is** the checksum a walk reports for a slot —
-/// see the round trip in [`crate::workspace`] — so an asset and a slot are matched
-/// without either body being hashed again, and [`among`] decides which of them where
-/// several hold it. A class whose slots report no checksum is matched by [`named`]
-/// instead. Saved rather than held now, which is the body
-/// [`crate::library::keyboard_mark`] and the row's own sign are read against, so an
-/// edit nothing has saved cannot make the three disagree about where this stands.
+/// The slot it came off while the instrument still holds one there; otherwise a slot
+/// reporting the body it was saved as ([`among`]), the slot it was last written to
+/// ([`stands`]), or the slot carrying its name ([`named`]).
 ///
 /// ⚠️ Takes the link the asset already carries as its own input, so running it again
-/// over an unchanged cache answers the same thing. That is what lets an edit here keep
-/// the asset pointing where it was matched.
+/// over an unchanged cache answers the same thing.
 pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     // ⚠️ Before anything else: a foreign body whose CRC-32 happens to match a slot's
     // would otherwise be linked into a folder the instrument would refuse it from.
@@ -933,11 +937,6 @@ pub fn read_only(class: ObjectClass) -> bool {
     matches!(class, ObjectClass::Unknown(_))
 }
 
-/// Whether this app will write into a class at all.
-pub fn sendable(class: ObjectClass) -> bool {
-    !read_only(class)
-}
-
 /// What a write into this class disturbs beyond the slot it lands in, for the question
 /// asked before it happens.
 ///
@@ -1021,6 +1020,19 @@ impl Device {
         self.link.disconnect();
     }
 
+    /// Let the instrument go on the way out, and wait for the worker to close the
+    /// session it is in.
+    ///
+    /// ⚠️ The window closing mid-command would otherwise cut a transaction: the
+    /// instrument is left holding an open session until it times out. The wait is
+    /// bounded, because an instrument that has stopped answering must not hold the
+    /// window open.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn release(&mut self) {
+        self.link.disconnect();
+        self.link.join(std::time::Duration::from_secs(2));
+    }
+
     /// Queue one command the user asked for. It runs ahead of the background read, and
     /// after whatever is already in flight — the protocol runs one transaction at a
     /// time.
@@ -1076,14 +1088,20 @@ impl Device {
         self.rescan = match &cmd {
             DeviceCmd::Delete { class, at }
             | DeviceCmd::Rename { class, at, .. }
-            | DeviceCmd::Put { class, at, .. } => vec![(*class, at.bank + 1)],
+            | DeviceCmd::Put { class, at, .. } => user_bank(at.bank)
+                .map(|bank| (*class, bank))
+                .into_iter()
+                .collect(),
             DeviceCmd::Move { class, from, to } | DeviceCmd::Duplicate { class, from, to } => {
-                vec![(*class, from.bank + 1), (*class, to.bank + 1)]
+                [from, to]
+                    .into_iter()
+                    .filter_map(|at| Some((*class, user_bank(at.bank)?)))
+                    .collect()
             }
             DeviceCmd::SendAll { class, items } => {
                 let mut banks: Vec<(ObjectClass, u32)> = items
                     .iter()
-                    .map(|item| (*class, item.at.bank + 1))
+                    .filter_map(|item| Some((*class, user_bank(item.at.bank)?)))
                     .collect();
                 banks.sort_unstable_by_key(|(class, bank)| (class.to_raw(), *bank));
                 banks.dedup();
@@ -1094,7 +1112,8 @@ impl Device {
         for (class, bank) in &self.rescan {
             self.state.forget_bank(*class, *bank);
         }
-        // Confirmed on hardware: writing the loaded slot requires SELECT to reload it.
+        // Confirmed on hardware.
+        // Writing the loaded slot requires SELECT to reload it.
         let loaded = |state: &DeviceState, class: &ObjectClass, at: &Location| {
             state
                 .selected
@@ -1276,7 +1295,7 @@ impl Device {
         for entity in workspace.listed() {
             let Some(at) = entity
                 .link
-                .filter(|(held, at)| *held == class && at.bank + 1 == bank)
+                .filter(|(held, at)| *held == class && user_bank(at.bank) == Some(bank))
                 .map(|(_, at)| at)
             else {
                 continue;
@@ -1378,6 +1397,7 @@ impl Device {
                 DeviceEvent::Partitions(partitions) => {
                     self.state.partitions = partitions;
                     crate::queue::refit(workspace, &self.state, queue, log);
+                    crate::queue::reattach(workspace, self, queue, log);
                     self.resync();
                 }
                 DeviceEvent::Geometry { class, banks } => {
@@ -1386,26 +1406,25 @@ impl Device {
                 DeviceEvent::Focus { class, at } => {
                     self.state.focus.insert(class.to_raw(), at);
                 }
+                // A bank that holds nothing is an answer like any other: dropping it
+                // would leave the names it used to hold standing.
                 DeviceEvent::BankScanned { class, bank, slots } => {
-                    if !slots.is_empty() {
-                        self.state.banks.insert((class.to_raw(), bank), slots);
-                    }
+                    self.state.banks.insert((class.to_raw(), bank), slots);
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
                 }
-                DeviceEvent::SlotInfo { at, info, .. } => {
+                DeviceEvent::SlotInfo { class, at, info } => {
                     self.state.detail = Detail {
-                        at: Some(at),
-                        info,
-                        asked: true,
+                        at: Some((class, at)),
+                        info: Some(info),
                         deps: None,
                     };
                 }
-                DeviceEvent::Deps { at, deps, .. } => {
-                    if self.state.detail.at != Some(at) {
+                DeviceEvent::Deps { class, at, deps } => {
+                    if self.state.detail.at != Some((class, at)) {
                         self.state.detail = Detail {
-                            at: Some(at),
+                            at: Some((class, at)),
                             ..Detail::default()
                         };
                     }
@@ -1710,11 +1729,68 @@ mod tests {
     #[test]
     fn only_a_class_with_no_name_is_read_only() {
         for class in named() {
-            assert!(sendable(class), "{}", folder(class));
             assert!(!read_only(class), "{}", folder(class));
         }
         assert!(read_only(ObjectClass::Unknown(9)));
-        assert!(!sendable(ObjectClass::Unknown(9)));
+    }
+
+    /// A bank a walk found empty is an answer like any other. A folder emptied on the
+    /// instrument must not go on showing the names it used to hold, and must not read
+    /// as one nothing has looked at.
+    #[test]
+    fn a_bank_that_scans_as_empty_replaces_what_it_held() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let class = ObjectClass::Sample;
+
+        device.pretend_scanned(class, 1, &["Marimba"]);
+        assert_eq!(device.state.bank(class, 1).map(<[_]>::len), Some(1));
+
+        device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 1,
+            slots: Vec::new(),
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+        let slots = device.state.bank(class, 1).expect("the bank was read");
+        assert!(slots.is_empty(), "read and empty, not never read");
+    }
+
+    /// ⚠️ A bank index the panel has no number above it is refused rather than wrapped
+    /// onto bank zero, whose cache belongs to another bank entirely.
+    #[test]
+    fn a_bank_index_with_no_panel_number_is_refused() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx);
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 1, &["Africa Split"]);
+        device.state.geometry.insert(
+            class.to_raw(),
+            vec![Bank {
+                index: u32::MAX,
+                name: "Nowhere".into(),
+                slots: 1,
+            }],
+        );
+
+        assert!(device
+            .state
+            .slot(class, Location { bank: 0, slot: 0 })
+            .is_some());
+        assert!(device
+            .state
+            .slot(
+                class,
+                Location {
+                    bank: u32::MAX,
+                    slot: 0
+                }
+            )
+            .is_none());
+        assert_eq!(device.state.bank_name(class, 0), None);
     }
 
     #[test]
@@ -2353,9 +2429,8 @@ mod tests {
         let at = Location { bank: 6, slot: 3 };
         let elsewhere = Location { bank: 0, slot: 0 };
         let detail = Detail {
-            at: Some(at),
-            info: None,
-            asked: true,
+            at: Some((ObjectClass::Program, at)),
+            info: Some(None),
             deps: Some(vec![Dependency {
                 flag: 0,
                 class: ObjectClass::Piano,
@@ -2377,6 +2452,15 @@ mod tests {
         assert_eq!(piano(at, 0x0102_0304).as_deref(), Some("Royal Grand 3D"));
         assert_eq!(piano(elsewhere, 0x0102_0304), None, "another slot's list");
         assert_eq!(piano(at, 0x0999_0999), None, "an id it did not report");
+        assert_eq!(
+            state.dependency_name(
+                Some((ObjectClass::Sample, at)),
+                ObjectClass::Piano,
+                0x0102_0304
+            ),
+            None,
+            "another class at the same address",
+        );
         assert_eq!(
             state.dependency_name(
                 Some((ObjectClass::Program, at)),

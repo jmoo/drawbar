@@ -31,7 +31,7 @@ use crate::cbin::{self, Cbin, Header};
 use crate::components::sparse_enum;
 use crate::error::{Error, ParseError};
 use crate::formats::ne5::{program, song};
-use crate::types::RangedI8;
+use crate::types::{RangedI8, RangedU8};
 use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Debug, Display, Formatter};
@@ -180,7 +180,7 @@ pub struct Settings {
     pub startup_live_slot: LiveSlot,
     #[bits(21..=29)]
     pub startup_program: program::Location,
-    /// Inferred from backup and panel captures; not confirmed on hardware.
+    /// Inferred from specimens; not confirmed on hardware.
     #[bits(30..=37)]
     pub startup_song: song::Location,
 }
@@ -464,19 +464,32 @@ sparse_enum!(
     }
 );
 
+/// A channel number as the panel numbers them, `1..=16`.
+///
+/// The invariant is the type's, not the caller's: the slot stores the number one lower,
+/// so a 0 or a 17 here would be written as some other channel.
+/// [`MidiChannel::channel`] is the only way to build one.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct ChannelNumber(u8);
+
+impl ChannelNumber {
+    /// The panel's channel number, `1..=16`.
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
 /// A MIDI channel slot: `1..=16`, or off.
 ///
 /// Stored zero-based, with 16 for off. A pattern above that has no meaning and is kept
 /// as [`MidiChannel::Unknown`] rather than folded into a channel.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum MidiChannel {
-    /// Channel `1..=16`, as the panel numbers them. ⚠️ Build it with
-    /// [`MidiChannel::channel`]: a number outside that range has no five-bit encoding and
-    /// would be written as some other channel.
-    Channel(u8),
+    /// Channel `1..=16`, as the panel numbers them — see [`MidiChannel::channel`].
+    Channel(ChannelNumber),
     Off,
-    /// A stored value with no known meaning.
-    Unknown(u8),
+    /// A stored pattern with no known meaning, bounded by the five bits it came from.
+    Unknown(RangedU8<31>),
 }
 
 impl MidiChannel {
@@ -491,13 +504,13 @@ impl MidiChannel {
                 bound: format!("1..={}", Self::CHANNELS),
             });
         }
-        Ok(MidiChannel::Channel(number))
+        Ok(MidiChannel::Channel(ChannelNumber(number)))
     }
 
     /// The panel's channel number, or `None` for off or unknown.
     pub fn number(&self) -> Option<u8> {
         match self {
-            MidiChannel::Channel(n) => Some(*n),
+            MidiChannel::Channel(n) => Some(n.get()),
             _ => None,
         }
     }
@@ -507,21 +520,22 @@ impl crate::bits::Packed for MidiChannel {
     const MAX_BITS: u32 = 5;
     const DECODE_BITS: u32 = u8::BITS;
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Selector;
-    type Error = std::convert::Infallible;
+    type Error = ParseError;
 
-    fn from_bits(bits: u64) -> Result<Self, Self::Error> {
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
         Ok(match bits as u8 {
-            n if n < Self::CHANNELS => MidiChannel::Channel(n + 1),
+            n if n < Self::CHANNELS => MidiChannel::Channel(ChannelNumber(n + 1)),
             16 => MidiChannel::Off,
-            other => MidiChannel::Unknown(other),
+            other => MidiChannel::Unknown(other.try_into()?),
         })
     }
 
     fn to_bits(&self) -> u64 {
         match self {
-            MidiChannel::Channel(n) => u64::from(n.saturating_sub(1)),
+            // `1..=16` by the payload's own invariant, so the stored value is in range.
+            MidiChannel::Channel(n) => u64::from(n.get() - 1),
             MidiChannel::Off => 16,
-            MidiChannel::Unknown(raw) => u64::from(*raw),
+            MidiChannel::Unknown(raw) => u64::from(raw.as_u8()),
         }
     }
 }
@@ -530,9 +544,9 @@ impl Debug for MidiChannel {
     /// The channel number alone, so `1` is spelled `1` and not `Channel(1)`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            MidiChannel::Channel(n) => write!(f, "{n}"),
+            MidiChannel::Channel(n) => write!(f, "{}", n.get()),
             MidiChannel::Off => f.write_str("off"),
-            MidiChannel::Unknown(raw) => write!(f, "unknown ({raw})"),
+            MidiChannel::Unknown(raw) => write!(f, "unknown ({})", raw.as_u8()),
         }
     }
 }
@@ -816,26 +830,45 @@ mod tests {
         let mut raw = [0u8; BODY_LEN];
         raw[body(0x32)] = 0x01;
         raw[body(0x33)] = 0xfc;
-        assert!(Settings::try_from(raw).is_err(), "101 cents decoded");
+        assert!(
+            Settings::try_from(raw).is_err(),
+            "a stored 127 decoded, and biased by 50 that is +77 cents"
+        );
     }
 
     /// Channels are stored zero-based with 16 for off, so the two ends and the off value
     /// establish the encoding.
     #[test]
     fn a_midi_channel_is_stored_zero_based_with_sixteen_for_off() {
+        let unknown = |raw: u8| MidiChannel::Unknown(raw.try_into().unwrap());
         for (bits, channel) in [
-            (0u64, MidiChannel::Channel(1)),
-            (1, MidiChannel::Channel(2)),
-            (15, MidiChannel::Channel(16)),
+            (0u64, MidiChannel::channel(1).unwrap()),
+            (1, MidiChannel::channel(2).unwrap()),
+            (15, MidiChannel::channel(16).unwrap()),
             (16, MidiChannel::Off),
-            (17, MidiChannel::Unknown(17)),
-            (31, MidiChannel::Unknown(31)),
+            (17, unknown(17)),
+            (31, unknown(31)),
         ] {
             assert_eq!(MidiChannel::from_bits(bits).unwrap(), channel);
             assert_eq!(channel.to_bits(), bits, "{channel:?} does not round-trip");
         }
-        assert_eq!(format!("{:?}", MidiChannel::Channel(7)), "7");
+        assert_eq!(format!("{:?}", MidiChannel::channel(7).unwrap()), "7");
         assert_eq!(format!("{:?}", MidiChannel::Off), "off");
+    }
+
+    /// The channel a caller can build is the channel the panel numbers: every other
+    /// number is refused rather than stored as a neighbour.
+    #[test]
+    fn only_the_panels_sixteen_channels_can_be_built() {
+        for number in 1..=MidiChannel::CHANNELS {
+            let channel = MidiChannel::channel(number).unwrap();
+            assert_eq!(channel.number(), Some(number));
+            assert_eq!(channel.to_bits(), u64::from(number) - 1);
+        }
+        assert!(MidiChannel::channel(0).is_err());
+        assert!(MidiChannel::channel(17).is_err());
+        // The unknown payload is the slot's own five bits.
+        assert!(RangedU8::<31>::new(32).is_err());
     }
 
     /// Gain is one-based on the panel and zero-based in the file.
@@ -860,7 +893,7 @@ mod tests {
         assert_eq!(p.global_transpose, -6);
         assert_eq!(p.fine_tune, -50);
         assert_eq!(p.ctrl_pedal_gain, 1);
-        assert_eq!(p.global_channel, MidiChannel::Channel(1));
+        assert_eq!(p.global_channel, MidiChannel::channel(1).unwrap());
     }
 
     /// Setting a field lands in its own bits and disturbs no other byte.

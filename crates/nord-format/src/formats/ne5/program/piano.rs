@@ -1,10 +1,10 @@
 //! The piano panel.
 
-use crate::components::sparse_enum;
+use crate::components::{sparse_enum, PianoRef};
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 
-// 0x3a..=0x40 — the piano panel.
+// 0x3a..=0x41 — the piano panel.
 
 /// The piano panel: category and model slot, plus the clav and acoustic
 /// playing options.
@@ -35,7 +35,7 @@ pub struct PianoPanel {
     /// content it needs. The wire carries the piano's *name* too; the file does not, so
     /// resolving one to the other needs the device or a bundle manifest.
     #[bits(22..=53)]
-    pub id: u32,
+    pub id: PianoRef,
 }
 sparse_enum!(
     /// The piano panel's Type dial — which library category the model comes from.
@@ -52,6 +52,7 @@ sparse_enum!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bits::Packed;
     use std::array;
 
     /// Bits no field names survive a re-encode, because each panel keeps the bytes it
@@ -66,7 +67,7 @@ mod tests {
 
         let mut panel = PianoPanel::try_from(GAPS).unwrap();
         panel.category = PianoCategory::EPiano1;
-        panel.id = 0xdead_beef;
+        panel.id = PianoRef::from_bits(0xdead_beef).expect("a 32-bit id decodes totally");
         let out = <[u8; 8]>::from(&panel);
         assert_eq!(gap_bits(out), GAPS, "a re-encode cleared a gap bit");
 

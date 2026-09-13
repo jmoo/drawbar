@@ -22,18 +22,59 @@ use web_sys::{UsbConnectionEvent, UsbDevice, UsbDeviceFilter, UsbDeviceRequestOp
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
 
+/// Where the connection stands, as one value: the device is in exactly one place.
+#[derive(Default)]
+enum Slot {
+    #[default]
+    Absent,
+    /// Attached and free.
+    Idle(Device<WebUsbTransport>),
+    /// A running command has it.
+    Busy,
+    /// It went away, or was let go. Whatever is running is the last thing that runs.
+    Gone,
+}
+
+impl Slot {
+    /// Take the device out and mark the slot busy. Every other state is left as it is.
+    fn take(&mut self) -> Option<Device<WebUsbTransport>> {
+        match std::mem::replace(self, Slot::Busy) {
+            Slot::Idle(device) => Some(device),
+            held => {
+                *self = held;
+                None
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
-    device: Option<Device<WebUsbTransport>>,
+    slot: Slot,
     /// The device the chooser handed over, kept so the browser's own disconnect event
     /// can be told apart from another Clavia's. WebUSB hands back the same object for
     /// the same device, so this is an identity and not a description.
     chosen: Option<UsbDevice>,
     queue: VecDeque<DeviceCmd>,
-    /// A command is running, so the device is out of the cell.
-    busy: bool,
-    /// The device went away. Whatever is running is the last thing that runs.
-    lost: bool,
+    /// Bumped by every [`Link::connect`]. ⚠️ A task spawned under an older number
+    /// belongs to a connection that is over, and finishes into a cell another
+    /// connection owns: its result is dropped rather than applied.
+    generation: u64,
+}
+
+impl Inner {
+    /// The next queued command and the device to run it on, if there is both. A device
+    /// with nothing to run goes back where it was.
+    fn start(&mut self) -> Option<(Device<WebUsbTransport>, DeviceCmd)> {
+        let device = self.slot.take()?;
+        match self.queue.pop_front() {
+            Some(cmd) => Some((device, cmd)),
+            None => {
+                self.slot = Slot::Idle(device);
+                None
+            }
+        }
+    }
 }
 
 pub struct Link {
@@ -67,7 +108,14 @@ impl Link {
                 return;
             }
         };
-        self.inner.borrow_mut().lost = false;
+        // Nothing queued against the last instrument is owed by this one.
+        let generation = {
+            let mut state = self.inner.borrow_mut();
+            state.queue.clear();
+            state.slot = Slot::Absent;
+            state.generation = state.generation.wrapping_add(1);
+            state.generation
+        };
         if self.watch.is_none() {
             self.watch = watch_for_unplug(&self.inner, &self.emit);
         }
@@ -104,17 +152,17 @@ impl Link {
                 Ok(transport) => {
                     let mut device = Device::new(transport);
                     emit.send(DeviceEvent::Connected(card));
-                    // Which classes the instrument has is the first thing read: nothing
-                    // above asks for one before the answer arrives. ⚠️ Awaited before
-                    // the device goes into the cell — a borrow held across an await
-                    // panics the moment the UI touches the same cell.
-                    match worker::announce(&mut device, &emit).await {
-                        Flow::Continue => {
+                    // ⚠️ Awaited before the device goes into the cell — a borrow held
+                    // across an await panics the moment the UI touches the same cell.
+                    let flow = worker::announce(&mut device, &emit).await;
+                    let keep = flow == Flow::Continue && inner.borrow().generation == generation;
+                    match keep {
+                        true => {
                             let mut state = inner.borrow_mut();
-                            state.device = Some(device);
+                            state.slot = Slot::Idle(device);
                             state.chosen = Some(chosen);
                         }
-                        _ => emit.send(DeviceEvent::Disconnected { lost: true }),
+                        false => retire(&inner, &emit, device, flow, generation).await,
                     }
                 }
                 Err(e) => emit.send(DeviceEvent::ConnectFailed(e.to_string())),
@@ -135,18 +183,12 @@ impl Link {
 
 /// Start the next queued command, if the device is free.
 fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
-    let (device, cmd) = {
+    let (started, generation) = {
         let mut state = inner.borrow_mut();
-        if state.busy || state.device.is_none() {
-            return;
-        }
-        let Some(cmd) = state.queue.pop_front() else {
-            return;
-        };
-        state.busy = true;
-        (state.device.take(), cmd)
+        let generation = state.generation;
+        (state.start(), generation)
     };
-    let Some(mut device) = device else {
+    let Some((mut device, cmd)) = started else {
         return;
     };
 
@@ -154,36 +196,57 @@ fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
     let emit = emit.clone();
     spawn_local(async move {
         let flow = worker::run(&mut device, cmd, &emit).await;
-        if flow == Flow::Continue && !inner.borrow().lost {
-            {
-                let mut state = inner.borrow_mut();
-                state.device = Some(device);
-                state.busy = false;
-            }
+        let carry_on = {
+            let state = inner.borrow();
+            flow == Flow::Continue
+                && state.generation == generation
+                && !matches!(state.slot, Slot::Gone)
+        };
+        if carry_on {
+            inner.borrow_mut().slot = Slot::Idle(device);
             return pump(&inner, &emit);
         }
-        // ⚠️ Release a connected interface so other hosts are not locked out.
-        if flow == Flow::Released {
-            if let Err(e) = device.into_transport().close().await {
-                emit.send(DeviceEvent::OpFailed(e.to_string()));
-            }
-        }
-        let said = {
-            let mut state = inner.borrow_mut();
-            state.busy = false;
-            state.queue.clear();
-            state.chosen = None;
-            let said = state.lost;
-            state.lost = said || flow == Flow::Lost;
-            said
-        };
-        // The unplug event may have got here first, and one departure is one message.
-        if !said {
-            emit.send(DeviceEvent::Disconnected {
-                lost: flow == Flow::Lost,
-            });
-        }
+        retire(&inner, &emit, device, flow, generation).await;
     });
+}
+
+/// The end of a connection: release the interface, drop what was queued against it, and
+/// say once that the instrument has gone.
+///
+/// ⚠️ A task of an older generation lands here after another connection has taken the
+/// cell. It closes its own transport, because that interface is claimed either way, and
+/// touches nothing else.
+async fn retire(
+    inner: &Rc<RefCell<Inner>>,
+    emit: &Emit,
+    device: Device<WebUsbTransport>,
+    flow: Flow,
+    generation: u64,
+) {
+    // ⚠️ Release a connected interface so other hosts are not locked out.
+    let closed = device.into_transport().close().await;
+    let said = {
+        let mut state = inner.borrow_mut();
+        if state.generation != generation {
+            return;
+        }
+        state.queue.clear();
+        state.chosen = None;
+        let said = matches!(state.slot, Slot::Gone);
+        state.slot = Slot::Gone;
+        said
+    };
+    // A device that is already gone cannot be closed, and saying so over its departure
+    // is noise rather than news.
+    if let (Err(e), false) = (closed, flow == Flow::Lost) {
+        emit.send(DeviceEvent::OpFailed(e.to_string()));
+    }
+    // The unplug event may have got here first, and one departure is one message.
+    if !said {
+        emit.send(DeviceEvent::Disconnected {
+            lost: flow == Flow::Lost,
+        });
+    }
 }
 
 /// Subscribe to the browser's own "that device is gone" event.
@@ -208,8 +271,8 @@ fn watch_for_unplug(
         state.queue.clear();
         state.chosen = None;
         // An unplugged device cannot be closed; whichever owner holds it drops it.
-        state.device = None;
-        let said = std::mem::replace(&mut state.lost, true);
+        let said = matches!(state.slot, Slot::Gone);
+        state.slot = Slot::Gone;
         drop(state);
         if !said {
             emit.send(DeviceEvent::Disconnected { lost: true });

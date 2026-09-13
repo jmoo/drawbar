@@ -44,7 +44,8 @@ fn fresh_ne5_writers_match_reviewed_minimal_fixtures() {
         (0, 2).try_into().unwrap(),
         1,
         [slot(5, 9), slot(0, 1), slot(0, 2), slot(5, 8)],
-    );
+    )
+    .unwrap();
 
     assert_eq!(written(&program), fixture("ne5/default.ne5p"));
     assert_eq!(written(&live), fixture("ne5/default.ne5l"));
@@ -84,7 +85,7 @@ fn every_registered_cbin_writer_matches_both_reviewed_container_generations() {
             header.generation = generation;
             let file = Cbin {
                 header,
-                body: RawBody(vec![0; body_len as usize]),
+                body: RawBody(vec![0; body_len]),
             };
             assert_eq!(written(&file), fixture(&format!("cbin/{name}")), "{name}");
             expected.insert(name);

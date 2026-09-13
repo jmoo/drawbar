@@ -10,12 +10,9 @@
 //! (Payload bytes. Captures quote frame lengths, which are 40 higher — that is the
 //! sniffer's Darwin header, not anything on the wire.)
 //!
-//! # Why `commit()` and not `Drop`
-//!
-//! This is an RAII shape, and closing in `Drop` is still wrong: `Drop` can be neither
-//! async nor fallible, so a failed close would be silently swallowed — unacceptable
-//! where a half-open transaction may leave the device in an odd state. Closing is
-//! explicit; `Drop` only *complains* in debug builds.
+//! Closing is explicit rather than in `Drop`: `Drop` is neither async nor fallible, so a
+//! failed close there would be swallowed where a half-open transaction may leave the
+//! device in an odd state. `Drop` only complains, in debug builds.
 
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -427,10 +424,55 @@ impl<T: Transport, C> Session<'_, T, C> {
 
 impl<T: Transport, C> Drop for Session<'_, T, C> {
     fn drop(&mut self) {
+        // ⚠️ Asserting during an unwind aborts the process, burying the panic that is
+        // the actual finding.
         debug_assert!(
-            self.closed,
+            self.closed || std::thread::panicking(),
             "Session dropped without commit()/abort() — the device may be left \
              mid-transaction. Close it explicitly."
+        );
+    }
+}
+
+// Where a panic aborts rather than unwinds, the panic these tests observe would take
+// the test binary with it.
+#[cfg(all(test, panic = "unwind"))]
+mod tests {
+    use super::*;
+
+    struct Silent;
+
+    impl Transport for Silent {
+        async fn write(&mut self, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
+            Err(Error::Transport("the test device says nothing".into()))
+        }
+    }
+
+    /// A panic inside a session must arrive at the caller as itself. The `Drop`
+    /// assertion firing during the unwind would abort the process instead.
+    #[test]
+    fn a_panic_inside_a_session_is_not_replaced_by_the_drop_assertion() {
+        let mut transport = Silent;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _session: Session<'_, Silent, ReadOnly> = Session {
+                transport: Some(&mut transport),
+                class: ObjectClass::Program,
+                closed: false,
+                device_changed: false,
+                read_limit: READ_LIMIT,
+                _capability: PhantomData,
+            };
+            panic!("the operation failed");
+        }))
+        .expect_err("the closure panics");
+
+        assert_eq!(
+            *panic.downcast::<&str>().expect("the original payload"),
+            "the operation failed"
         );
     }
 }

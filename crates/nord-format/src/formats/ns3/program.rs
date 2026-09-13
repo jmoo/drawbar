@@ -5,7 +5,7 @@
 //! organ's two presets and their drawbars, the piano, synth, extern and the whole
 //! effects chain — comes from the byte maps. Where the two disagree the hand
 //! decode wins: the map has one 22-bit `split` run where the companion doc, and
-//! this module, break it into eight fields.
+//! this module, break it into ten fields.
 //!
 //! The body is 22 bytes of globals and then two [`Panel`]s — the program's two
 //! complete setups — so the panel is declared once and placed twice rather than
@@ -15,10 +15,10 @@
 //! docs](super) for what that ceiling is and why.
 
 use super::panel::Panel;
-use crate::cbin::{self, Cbin, Header};
+use crate::cbin::{self, Cbin};
 use crate::components::{
-    sparse_enum, Level, MasterTempo, ProgramCategory, Selector, SplitNote, SplitWidth,
-    StageTranspose, SwitchMorph,
+    sparse_enum, Level, MasterTempo, RotorSpeed, Selector, SplitNote, SplitWidth, StageTranspose,
+    SwitchMorph,
 };
 use crate::error::Error;
 use std::io::{Read, Seek};
@@ -104,7 +104,7 @@ pub struct Program {
     #[bits(68..=70)]
     pub organ_vibrato_mode: OrganVibratoMode,
     #[bits(71..=71)]
-    pub rotary_speaker_speed: bool,
+    pub rotary_speaker_speed: RotorSpeed,
     #[bits(72..=72)]
     pub rotary_speaker_stop_mode: bool,
     #[bits(73..=75)]
@@ -138,22 +138,6 @@ pub struct Program {
     pub panel_b: Panel,
 }
 
-/// The preset name, 22 bytes of ASCII padded with NULs.
-pub fn synth_preset_name(body: &Program) -> String {
-    let raw = <[u8; BODY_LEN]>::from(body);
-    String::from_utf8_lossy(&raw[44..66])
-        .trim_end_matches('\0')
-        .trim_end()
-        .to_string()
-}
-
-/// The category byte the header's `aux` word carries; the three bytes above it
-/// are zero on every corpus specimen.
-pub fn category(header: &Header) -> ProgramCategory {
-    use crate::bits::Packed;
-    ProgramCategory::from_bits((header.aux & 0xff) as u64).expect("decoding is total")
-}
-
 /// The `(bank, location)` pair from the header, uninterpreted.
 ///
 /// Not validated: current exports hold bank 0..=15 and location 0..=24, but v3.00
@@ -170,7 +154,8 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error
 }
 
 sparse_enum!(
-    /// From the `ns3-amp-sim-eq-amp-type` table in the Stage byte-map docs.
+    /// From the `ns3-amp-sim-eq-amp-type` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     AmpSimEqAmpType, 3, {
         0 => Clean, "Clean";
         1 => Twin, "Twin";
@@ -182,7 +167,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-clavinet-model` table in the Stage byte-map docs.
+    /// From the `ns3-clavinet-model` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     ClavinetModel, 2, {
         0 => Ca, "CA";
         1 => Cb, "CB";
@@ -192,23 +178,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-organ-kb-zone` table in the Stage byte-map docs.
-    OrganKbZone, 4, {
-        0 => V0, "o---";
-        1 => V1, "-o--";
-        2 => V2, "--o-";
-        3 => V3, "---o";
-        4 => V4, "oo--";
-        5 => V5, "-oo-";
-        6 => V6, "--oo";
-        7 => V7, "ooo-";
-        8 => V8, "-ooo";
-        9 => V9, "oooo";
-    }
-);
-
-sparse_enum!(
-    /// From the `ns3-organ-type` table in the Stage byte-map docs.
+    /// From the `ns3-organ-type` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     OrganType, 3, {
         0 => B3, "B3";
         1 => Vox, "Vox";
@@ -219,19 +190,24 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-organ-vibrato-mode` table in the Stage byte-map docs.
+    /// The organ's vibrato/chorus selection — the six [`VibChorus`] modes, in the order
+    /// the `ns3-organ-vibrato-mode` table in the Stage byte-map docs stores them.
+    /// Inferred from specimens; not confirmed on hardware.
+    ///
+    /// [`VibChorus`]: crate::components::VibChorus
     OrganVibratoMode, 3, {
-        0 => V0, "V1";
-        1 => V1, "C1";
+        0 => V1, "V1";
+        1 => C1, "C1";
         2 => V2, "V2";
-        3 => V3, "C2";
-        4 => V4, "V3";
-        5 => V5, "C3";
+        3 => C2, "C2";
+        4 => V3, "V3";
+        5 => C3, "C3";
     }
 );
 
 sparse_enum!(
-    /// From the `ns3-piano-kb-touch` table in the Stage byte-map docs.
+    /// From the `ns3-piano-kb-touch` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     PianoKbTouch, 2, {
         0 => Normal, "Normal";
         1 => KbTouch1, "KB Touch 1";
@@ -241,7 +217,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-piano-layer-detune` table in the Stage byte-map docs.
+    /// From the `ns3-piano-layer-detune` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     PianoLayerDetune, 2, {
         0 => V0, "Off";
         1 => V1, "1";
@@ -251,7 +228,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-piano-timbre` table in the Stage byte-map docs.
+    /// From the `ns3-piano-timbre` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     PianoTimbre, 3, {
         0 => None, "None";
         1 => Soft, "Soft";
@@ -265,7 +243,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-piano-type` table in the Stage byte-map docs.
+    /// From the `ns3-piano-type` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     PianoType, 3, {
         0 => Grand, "Grand";
         1 => Upright, "Upright";
@@ -277,7 +256,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-amp-env-velocity` table in the Stage byte-map docs.
+    /// From the `ns3-synth-amp-env-velocity` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthAmpEnvVelocity, 2, {
         0 => V0, "Off";
         1 => V1, "1";
@@ -287,7 +267,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-arp-pattern` table in the Stage byte-map docs.
+    /// From the `ns3-synth-arp-pattern` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthArpPattern, 2, {
         0 => Up, "Up";
         1 => Down, "Down";
@@ -297,7 +278,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-arp-range` table in the Stage byte-map docs.
+    /// From the `ns3-synth-arp-range` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthArpRange, 2, {
         0 => V1Octave, "1 Octave";
         1 => V2Octaves, "2 Octaves";
@@ -307,7 +289,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-filter-drive` table in the Stage byte-map docs.
+    /// From the `ns3-synth-filter-drive` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthFilterDrive, 2, {
         0 => V0, "Off";
         1 => V1, "1";
@@ -317,7 +300,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-filter-kb-track` table in the Stage byte-map docs.
+    /// From the `ns3-synth-filter-kb-track` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthFilterKbTrack, 2, {
         0 => V0, "Off";
         1 => V1, "1/3";
@@ -327,7 +311,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-filter-type` table in the Stage byte-map docs.
+    /// From the `ns3-synth-filter-type` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthFilterType, 3, {
         0 => Lp12, "LP12";
         1 => Lp24, "LP24";
@@ -339,7 +324,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-lfo-wave` table in the Stage byte-map docs.
+    /// From the `ns3-synth-lfo-wave` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthLfoWave, 3, {
         0 => Triangle, "Triangle";
         1 => Saw, "Saw";
@@ -350,7 +336,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-oscillator-config` table in the Stage byte-map docs.
+    /// From the `ns3-synth-oscillator-config` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthOscillatorConfig, 4, {
         0 => None, "None";
         1 => Pitch, "Pitch";
@@ -371,7 +358,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-oscillator-type` table in the Stage byte-map docs.
+    /// From the `ns3-synth-oscillator-type` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthOscillatorType, 3, {
         0 => Classic, "Classic";
         1 => Wave, "Wave";
@@ -382,7 +370,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-unison` table in the Stage byte-map docs.
+    /// From the `ns3-synth-unison` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthUnison, 2, {
         0 => V0, "Off";
         1 => V1, "1";
@@ -392,7 +381,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-vibrato` table in the Stage byte-map docs.
+    /// From the `ns3-synth-vibrato` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthVibrato, 3, {
         0 => Off, "Off";
         1 => Delay1, "Delay 1";
@@ -404,7 +394,8 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-synth-voice` table in the Stage byte-map docs.
+    /// From the `ns3-synth-voice` table in the Stage byte-map docs. Inferred from
+    /// specimens; not confirmed on hardware.
     SynthVoice, 2, {
         0 => Poly, "Poly";
         1 => Legato, "Legato";

@@ -6,8 +6,8 @@
 //! selector check. Panel B's copy sits 263 bytes further on, which is how the
 //! program's two panels were found.
 //!
-//! Field names match [`super::program::Program`]'s, so the same parameter reads
-//! the same either side of the tag.
+//! Field names match [`super::panel::Panel`]'s, so the same parameter reads the
+//! same either side of the tag.
 
 use super::program::{
     SynthAmpEnvVelocity, SynthArpPattern, SynthArpRange, SynthFilterDrive, SynthFilterKbTrack,
@@ -31,7 +31,7 @@ pub const BODY_LEN: usize = 58;
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
 /// re-encode verbatim. Placement located in the corpus (see the [module
-/// docs](self)); inferred from specimens, not confirmed on hardware.
+/// docs](self)). Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(58)]
 pub struct SynthPreset {
     #[bits(40..=40)]

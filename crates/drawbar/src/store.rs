@@ -6,7 +6,8 @@
 //! those bytes too. It is read back through the same decode-and-verify any file gets,
 //! because bytes off a store deserve no more trust than bytes off a disk.
 
-use crate::base64;
+use base64::prelude::{Engine as _, BASE64_STANDARD};
+
 use crate::log::Log;
 use crate::queue::Queue;
 use crate::workspace::{Origin, Saved, Workspace};
@@ -26,8 +27,11 @@ enum Shape {
 }
 
 impl Shape {
-    /// The shape a version line asks for. A version this build does not know has none,
-    /// and its store is left alone rather than half-read.
+    /// The shape a version line asks for, or `None` for a version this build does not
+    /// know.
+    ///
+    /// ⚠️ An unknown version is not read, and the next [`save`] overwrites it — so
+    /// running an older build discards a store a newer one wrote.
     fn of(version: &str) -> Option<Shape> {
         match version {
             "drawbar 1" => Some(Shape::Four),
@@ -42,7 +46,7 @@ impl Shape {
 /// ⚠️ A browser gives an origin about 5 MiB for everything it stores, and base64 costs a
 /// third on top. A sample runs to megabytes on its own, so one would fill the store and
 /// take every program with it.
-const MAX_ENTITY: usize = 1024 * 1024;
+pub(crate) const MAX_ENTITY: usize = 1024 * 1024;
 
 /// What the whole store may take.
 ///
@@ -51,6 +55,37 @@ const MAX_ENTITY: usize = 1024 * 1024;
 /// kept here, below the quota, and what does not fit is said out loud rather than lost
 /// quietly.
 const BUDGET: usize = 3 * 1024 * 1024;
+
+/// What a write of the list could not keep.
+///
+/// ⚠️ Answered rather than said out loud: eframe writes the list every few seconds, and
+/// a save that announced its own losses would overwrite the status line and fill the log
+/// for as long as the asset sat there. [`Left::report`] is the announcement, and the
+/// caller makes it only when what is left out changes — see
+/// [`crate::app::DrawbarApp::keep_up`].
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Left {
+    /// Over [`MAX_ENTITY`] on its own.
+    skipped: usize,
+    /// Inside the limit, but past what [`BUDGET`] had left.
+    dropped: usize,
+}
+
+impl Left {
+    pub fn report(self, log: &mut Log) {
+        match (self.skipped, self.dropped) {
+            (0, 0) => {}
+            (skipped, 0) => log.say(plural(skipped, "too big to keep between sessions")),
+            (0, dropped) => {
+                log.trouble(plural(dropped, "left out — there is no room to keep them"))
+            }
+            (skipped, dropped) => log.trouble(plural(
+                skipped + dropped,
+                "not kept between sessions — too big, or no room left",
+            )),
+        }
+    }
+}
 
 /// Write the list. Called by eframe periodically and on the way out.
 ///
@@ -62,13 +97,8 @@ const BUDGET: usize = 3 * 1024 * 1024;
 /// ⚠️ On wasm every call base64-encodes the whole list on the only thread. Callers
 /// must rate-limit writes because dragging mutates the list every frame.
 ///
-/// What is written comes back kept — see [`load`].
-pub fn save(
-    storage: &mut dyn eframe::Storage,
-    workspace: &Workspace,
-    queue: &Queue,
-    log: &mut Log,
-) {
+/// What is written comes back kept — see [`load`]; what is not is [`Left`].
+pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, queue: &Queue) -> Left {
     let mut out = format!("{VERSION}\n{}\n", workspace.next_id());
     let mut skipped = 0;
     let mut dropped = 0;
@@ -83,7 +113,7 @@ pub fn save(
         // The baseline is what the asset is; the tail is what it holds instead, and only
         // an unsaved asset has one.
         let unsaved = match entity.is_unsaved() {
-            true => format!("\t{}", base64::encode(&entity.bytes)),
+            true => format!("\t{}", BASE64_STANDARD.encode(&entity.bytes)),
             false => String::new(),
         };
         let line = format!(
@@ -91,7 +121,7 @@ pub fn save(
             entity.id,
             origin(&entity.origin),
             escape(&entity.name),
-            base64::encode(&entity.saved.bytes),
+            BASE64_STANDARD.encode(&entity.saved.bytes),
         );
         if out.len() + line.len() > BUDGET {
             dropped += 1;
@@ -100,16 +130,7 @@ pub fn save(
         out.push_str(&line);
     }
     storage.set_string(KEY, out);
-
-    match (skipped, dropped) {
-        (0, 0) => {}
-        (skipped, 0) => log.say(plural(skipped, "too big to keep between sessions")),
-        (0, dropped) => log.trouble(plural(dropped, "left out — there is no room to keep them")),
-        (skipped, dropped) => log.trouble(plural(
-            skipped + dropped,
-            "not kept between sessions — too big, or no room left",
-        )),
-    }
+    Left { skipped, dropped }
 }
 
 fn plural(n: usize, tail: &str) -> String {
@@ -130,8 +151,6 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
     };
     let mut lines = text.lines();
     let Some(shape) = lines.next().and_then(Shape::of) else {
-        // A store this build cannot read is left alone rather than half-read: the next
-        // save replaces it.
         log.warn("the saved list is in a format this build does not read");
         return;
     };
@@ -144,8 +163,12 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
             None => unreadable += 1,
         }
     }
-    let count = restored.len();
-    workspace.restore(restored, next_id, log);
+    let read = restored.len();
+    // A line the list itself refuses — an id with no room for the next, or one already
+    // standing — is as unreadable as one that would not parse.
+    let refused = workspace.restore(restored, next_id, log);
+    let count = read.saturating_sub(refused);
+    let unreadable = unreadable + refused;
     if unreadable > 0 {
         log.warn(format!("{unreadable} saved line(s) did not read"));
     }
@@ -162,10 +185,10 @@ fn entry(line: &str, shape: Shape) -> Option<Saved> {
     let id = parts.next()?.parse().ok()?;
     let origin = unorigin(parts.next()?)?;
     let name = unescape(parts.next()?);
-    let saved = base64::decode(parts.next()?)?;
+    let saved = BASE64_STANDARD.decode(parts.next()?).ok()?;
     let unsaved = match (shape, parts.next()) {
         (_, None) => None,
-        (Shape::Five, Some(text)) => Some(base64::decode(text)?),
+        (Shape::Five, Some(text)) => Some(BASE64_STANDARD.decode(text).ok()?),
         (Shape::Four, Some(_)) => return None,
     };
     Some(Saved {
@@ -299,6 +322,15 @@ mod tests {
         }
     }
 
+    /// The bytes of a program a store line can carry, made the way the app makes one.
+    fn a_program() -> Vec<u8> {
+        let (mut workspace, mut log) = workspace();
+        let id = workspace
+            .create(crate::workspace::Fresh::Program, &mut log)
+            .unwrap();
+        workspace.get(id).unwrap().bytes.clone()
+    }
+
     fn workspace() -> (Workspace, Log) {
         (
             Workspace::new(eframe::egui::Context::default()),
@@ -318,7 +350,7 @@ mod tests {
         before.create(Fresh::Settings, &mut log).unwrap();
 
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        save(&mut store, &before, &Queue::default());
 
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
@@ -375,7 +407,7 @@ mod tests {
         );
 
         let mut store = Fake::default();
-        save(&mut store, &before, &queue, &mut log);
+        save(&mut store, &before, &queue);
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
 
@@ -407,7 +439,7 @@ mod tests {
         before.replace_bytes(id, edited.clone(), &mut log);
 
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        save(&mut store, &before, &Queue::default());
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
 
@@ -427,7 +459,7 @@ mod tests {
         let (mut before, mut log) = workspace();
         before.create(Fresh::Program, &mut log).unwrap();
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        save(&mut store, &before, &Queue::default());
         let text = eframe::Storage::get_string(&store, KEY).expect("something was written");
         let line = text.lines().nth(2).expect("the one asset's line");
         assert_eq!(line.split('\t').count(), 4);
@@ -447,7 +479,9 @@ mod tests {
             &mut log,
         );
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        let left = save(&mut store, &before, &Queue::default());
+        assert_eq!((left.skipped, left.dropped), (1, 0));
+        left.report(&mut log);
         assert!(log.status().1.contains("too big"), "{}", log.status().1);
 
         let (mut after, mut log) = workspace();
@@ -479,6 +513,10 @@ mod tests {
             read("7\tfresh\tname\tZm9v\tYmFy").is_some(),
             "saved, and a tail"
         );
+        assert!(
+            read("7\tfresh\tname\tZm9v\tYmFy\tYmFy").is_none(),
+            "a sixth field is not part of the tail"
+        );
         assert!(read("seven\tfresh\tname\tZm9v").is_none(), "no id");
         assert!(read("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
         assert!(read("7\tfresh\tname\t!!!").is_none(), "not base64");
@@ -486,6 +524,52 @@ mod tests {
         // A version-1 line is four fields, and a fifth is a line this is not.
         assert!(entry("7\tfresh\tname\tZm9v", Shape::Four).is_some());
         assert!(entry("7\tfresh\tname\tZm9v\tYmFy", Shape::Four).is_none());
+    }
+
+    /// The last id there is leaves no room for the next one, so the line is refused
+    /// rather than taken — a store says what the next id is, and there would not be one.
+    #[test]
+    fn a_line_whose_id_leaves_no_room_for_the_next_is_refused() {
+        let mut store = Fake::default();
+        eframe::Storage::set_string(
+            &mut store,
+            KEY,
+            format!(
+                "{VERSION}\n1\n{}\tfresh\tlast.ne5p\t{}\n",
+                u64::MAX,
+                BASE64_STANDARD.encode(a_program()),
+            ),
+        );
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        assert!(after.entities().is_empty());
+        assert!(after.get(u64::MAX).is_none());
+        assert!(log.iter().any(|entry| entry.text.contains("did not read")));
+    }
+
+    /// An id names one asset. Two lines claiming the same one are two assets nothing
+    /// could tell apart afterwards — a tab, a send or a removal would reach whichever
+    /// came first — so the second is refused.
+    #[test]
+    fn a_second_line_under_an_id_already_restored_is_refused() {
+        let line = format!(
+            "7\tfresh\tone.ne5p\t{}\n",
+            BASE64_STANDARD.encode(a_program()),
+        );
+        let mut store = Fake::default();
+        eframe::Storage::set_string(&mut store, KEY, format!("{VERSION}\n8\n{line}{line}"));
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        assert_eq!(after.entities().len(), 1);
+        assert_eq!(after.get(7).expect("the first line").name, "one.ne5p");
+        assert!(log.iter().any(|entry| entry.text.contains("did not read")));
+        assert!(
+            log.status().1.contains("1 sound is back"),
+            "{}",
+            log.status().1
+        );
     }
 
     /// A list the version before this one wrote is read rather than thrown away: its
@@ -504,7 +588,7 @@ mod tests {
             KEY,
             format!(
                 "drawbar 1\n8\n7\tfile:Africa Split.ne5p\tAfrica Split.ne5p\t{}\n",
-                base64::encode(&bytes)
+                BASE64_STANDARD.encode(&bytes)
             ),
         );
 

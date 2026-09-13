@@ -77,9 +77,7 @@ pub const UNCOVERED: u8 = 0xff;
 /// The stream versions the prefix offsets are validated against. A body with
 /// another version still reads and writes verbatim; its fields are refused rather
 /// than read from offsets that may not hold them.
-pub const KNOWN_VERSIONS: &[u16] = &[0x450, 0x464];
-/// [`KNOWN_VERSIONS`] as the gate spells them.
-const KNOWN_VERSIONS_U32: &[u32] = &[0x450, 0x464];
+pub const KNOWN_VERSIONS: &[u32] = &[0x450, 0x464];
 
 /// The stream version that also carries a long name and a voicing of their own.
 const VERSION_SPLIT_NAME: u16 = 0x464;
@@ -397,10 +395,16 @@ impl fmt::Debug for Piano {
     }
 }
 
+/// `Name#Variant` split on its separator, as the field spells each half. A field
+/// carrying no separator is all name.
+fn raw_halves(field: &str) -> (&str, &str) {
+    field.split_once(NAME_SEPARATOR).unwrap_or((field, ""))
+}
+
 /// `Name#Variant` split on its separator, each half trimmed of the padding the
 /// vendor lays either side of it.
 fn split_name(field: &str) -> (String, String) {
-    let (name, variant) = field.split_once('#').unwrap_or((field, ""));
+    let (name, variant) = raw_halves(field);
     (name.trim().to_owned(), variant.trim().to_owned())
 }
 
@@ -443,7 +447,7 @@ fn version_of(body: &[u8]) -> Result<u16, Error> {
 /// The magic, and a stream version the prefix offsets are pinned to.
 fn check_mapped(body: &[u8]) -> Result<(), Error> {
     let version = version_of(body)?;
-    crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)
+    crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS)
 }
 
 fn overflow(what: &str) -> Error {
@@ -844,9 +848,8 @@ impl<'a> Library<'a> {
 
     /// Retune one key, in the units [`Library::fine_tune`] reads.
     ///
-    /// The unit's size and direction are confirmed on hardware from libraries as the
-    /// vendor tuned them; that rewriting the byte retunes the key is inferred from
-    /// specimens, not confirmed on hardware.
+    /// The unit's size and direction are confirmed on hardware; that rewriting the byte
+    /// retunes the key is not. Inferred from specimens; not confirmed on hardware.
     pub fn set_fine_tune(&mut self, key: u8, units: i8) -> Result<(), Error> {
         let at = FINE_TUNE_AT + midi_key("key", key)?;
         self.prefix[at] = units as u8;
@@ -890,10 +893,10 @@ impl<'a> Library<'a> {
     /// The long name at `0x3c` and the voicing at `0x5c`, which only
     /// [`VERSION_SPLIT_NAME`] streams carry. Both are `None` on the older stream.
     ///
-    /// They are their own fields, not a split of the `Name#Variant` one: vendor
-    /// libraries spell the long name differently from the name before the `#`
-    /// (`EP5 BrightTines` against `EP5 Bright Tines`), and the voicing holds
-    /// neither the padding nor the size suffix the variant does.
+    /// They are their own fields, not a split of the `Name#Variant` one: a library can
+    /// spell the long name differently from the name before the `#`, and the voicing
+    /// holds neither the padding nor the size suffix the variant does. Inferred from
+    /// specimens; not confirmed on hardware.
     pub fn long_name(&self) -> Option<String> {
         self.split_field(TextField::LONG_NAME)
     }
@@ -918,8 +921,31 @@ impl<'a> Library<'a> {
     /// reads is inferred from specimens; not confirmed on hardware — which is why
     /// both move.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        let field = TextField::COMBINED.read(&self.prefix);
+        let variant = raw_halves(&field).1.to_owned();
+        self.set_name_and_variant(name, &variant)
+    }
+
+    /// Replace the variant — the text after [`NAME_SEPARATOR`], where the vendor
+    /// records the voicing and the library's size — leaving both names alone. A
+    /// variant holding the separator itself is refused.
+    pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
+        check_half("variant", variant)?;
+        let field = TextField::COMBINED.read(&self.prefix);
+        let combined = format!("{}{NAME_SEPARATOR}{variant}", raw_halves(&field).0);
+        TextField::COMBINED.write(&mut self.prefix, &combined)
+    }
+
+    /// Write both halves of the `Name#Variant` field at once, which is what a caller
+    /// replacing both states.
+    ///
+    /// The name a caller gives is checked against the variant it will share the field
+    /// with rather than the one the prefix holds, so a name that fits beside its own
+    /// variant is not refused for a longer one it replaces. The long name follows the
+    /// name as it does in [`Library::set_name`].
+    fn set_name_and_variant(&mut self, name: &str, variant: &str) -> Result<(), Error> {
         check_half("name", name)?;
-        let (_, variant) = self.name();
+        check_half("variant", variant)?;
         let combined = format!("{name}{NAME_SEPARATOR}{variant}");
         let long = (self.stream_version() == VERSION_SPLIT_NAME).then_some(name);
         TextField::COMBINED.check(&combined)?;
@@ -931,18 +957,6 @@ impl<'a> Library<'a> {
             TextField::LONG_NAME.write(&mut self.prefix, long)?;
         }
         Ok(())
-    }
-
-    /// Replace the variant — the text after [`NAME_SEPARATOR`], where the vendor
-    /// records the voicing and the library's size — leaving both names alone. A
-    /// variant holding the separator itself is refused.
-    pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
-        check_half("variant", variant)?;
-        let (name, _) = self.name();
-        TextField::COMBINED.write(
-            &mut self.prefix,
-            &format!("{name}{NAME_SEPARATOR}{variant}"),
-        )
     }
 
     /// Replace the voicing at `0x5c`. Refused on a stream with no such field.
@@ -1102,17 +1116,31 @@ impl<'a> Library<'a> {
     }
 
     /// The first audio offset and the body length the current stroke list implies.
+    ///
+    /// A stroke holding anything other than the `blocks × block_bytes` its record states
+    /// is refused: a body laid out around it is one a read of that body rejects.
     fn extent(&self) -> Result<(usize, usize), Error> {
         let directory_end = RECORD
             .checked_mul(self.strokes.len())
             .and_then(|len| DIRECTORY_AT.checked_add(len))
             .ok_or_else(|| overflow("the stroke directory"))?;
-        let first = first_audio_offset(directory_end, self.block_bytes())?;
+        let block = self.block_bytes();
+        let first = first_audio_offset(directory_end, block)?;
         let mut len = first;
-        for stroke in &self.strokes {
-            len = len
-                .checked_add(stroke.audio.len())
-                .ok_or_else(|| overflow("the audio"))?;
+        for (index, stroke) in self.strokes.iter().enumerate() {
+            let span = usize::from(stroke.blocks())
+                .checked_mul(block)
+                .ok_or_else(|| overflow("a stroke's audio span"))?;
+            if stroke.audio.len() != span {
+                return Err(ParseError::AssertFail(format!(
+                    "stroke {index} holds {} audio bytes where the {} block(s) its record \
+                     states span {span}",
+                    stroke.audio.len(),
+                    stroke.blocks()
+                ))
+                .into());
+            }
+            len = len.checked_add(span).ok_or_else(|| overflow("the audio"))?;
         }
         Ok((first, len))
     }
@@ -1714,6 +1742,53 @@ mod tests {
         assert!(library.set_name("Upright#2").is_err());
         assert!(library.set_variant("Sml#XL").is_err());
         assert_eq!(library.name(), ("Test Piano".into(), "Variant".into()));
+    }
+
+    /// A library with its audio dropped is a donor, not a file: laying it out would
+    /// write a directory whose block counts nothing in the body backs.
+    #[test]
+    fn a_stroke_holding_other_than_the_blocks_its_record_states_is_not_laid_out() {
+        let piano = Build::new().piano();
+        let library = piano.library().unwrap();
+        assert!(library.to_body().is_ok());
+
+        let skeleton = library.without_audio();
+        let error = skeleton
+            .to_body()
+            .expect_err("expected a refusal")
+            .to_string();
+        assert!(error.contains("stroke 0 holds 0 audio bytes"), "{error}");
+        assert!(skeleton.body_len().is_err());
+    }
+
+    /// The halves either side of the separator are the vendor's own bytes, padding and
+    /// all: setting one leaves the other exactly as the field spells it.
+    #[test]
+    fn setting_one_half_of_the_name_field_leaves_the_other_as_it_was_written() {
+        let mut piano = Build::new().piano();
+        let at = TextField::COMBINED.at;
+        let padded = b"Grand Imperial # Bdorf XL";
+        piano.file.body.0[at..at + TextField::COMBINED.len].fill(0);
+        piano.file.body.0[at..at + padded.len()].copy_from_slice(padded);
+
+        assert_eq!(
+            piano.library().unwrap().name(),
+            ("Grand Imperial".into(), "Bdorf XL".into())
+        );
+
+        let mut renamed = piano.library().unwrap();
+        renamed.set_name("Upright").unwrap();
+        assert_eq!(
+            TextField::COMBINED.read(&renamed.prefix),
+            "Upright# Bdorf XL"
+        );
+
+        let mut revoiced = piano.library().unwrap();
+        revoiced.set_variant("Sml").unwrap();
+        assert_eq!(
+            TextField::COMBINED.read(&revoiced.prefix),
+            "Grand Imperial #Sml"
+        );
     }
 
     #[test]

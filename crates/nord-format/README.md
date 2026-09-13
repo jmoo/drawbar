@@ -35,7 +35,7 @@ In brief:
   *built* from recordings, against a template or from the rules alone) and
   Nord Sample Editor projects (`nsmpproj`: the editor's text save file — zones,
   strokes and audio files read and edited, new projects written).
-- **Container-verified stubs** — every other corpus format: 60+ CBIN tags
+- **Container-verified stubs** — every other corpus format: CBIN tags from
   across the whole model line, plus the Lead SysEx/MIDI banks and the `.cn3`
   Electro 2 library, all carried verbatim. ZIP backup bundles parse behind the
   `bundle` feature (read-only).

@@ -44,6 +44,7 @@
 
 use super::Stroke;
 use crate::error::{Error, ParseError};
+use crate::formats::predictor;
 
 /// u16 words in one block, per channel, the header included.
 pub const BLOCK_WORDS: usize = 511;
@@ -55,7 +56,7 @@ pub const OVERLAP: usize = 64;
 pub const RATE: u32 = 35_002;
 
 /// Highest backward-difference order a block header can ask for.
-pub const MAX_ORDER: usize = 4;
+pub const MAX_ORDER: usize = predictor::MAX_ORDER;
 
 /// Narrowest residual field a block header can express.
 pub const MIN_WIDTH: u8 = 1;
@@ -74,14 +75,14 @@ pub fn block_frames(width: u8, block_bytes: usize, channels: usize) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
     /// One vector per channel, each [`Audio::frames`] long.
-    pub channels: Vec<Vec<i16>>,
+    pub lanes: Vec<Vec<i16>>,
     /// The [`OVERLAP`] frames per channel the last block carries past the stroke's
     /// end. The stroke does not own them and nothing plays them; they are here
     /// because coding that block again needs them.
     pub tail: Vec<Vec<i16>>,
-    /// Samples the reconstruction put outside `i16` and that were saturated.
-    /// Specimens produce none; a non-zero count means the stroke is not what this
-    /// codec describes.
+    /// Samples the reconstruction put outside `i16` and that were saturated. A non-zero
+    /// count means the stroke is not what this codec describes. Inferred from
+    /// specimens; not confirmed on hardware.
     pub clipped: usize,
     /// Repeated samples compared against the block before, all of which matched.
     pub overlap_checked: usize,
@@ -90,7 +91,7 @@ pub struct Audio {
 impl Audio {
     /// Samples per channel.
     pub fn frames(&self) -> usize {
-        self.channels.first().map_or(0, Vec::len)
+        self.lanes.first().map_or(0, Vec::len)
     }
 
     pub fn seconds(&self) -> f64 {
@@ -100,9 +101,9 @@ impl Audio {
     /// The frames interleaved by channel, which is what a WAV wants.
     pub fn interleaved(&self) -> Vec<i16> {
         let frames = self.frames();
-        let mut out = Vec::with_capacity(frames * self.channels.len());
+        let mut out = Vec::with_capacity(frames * self.lanes.len());
         for frame in 0..frames {
-            out.extend(self.channels.iter().map(|c| c[frame]));
+            out.extend(self.lanes.iter().map(|c| c[frame]));
         }
         out
     }
@@ -167,19 +168,18 @@ impl<'a> Fields<'a> {
     }
 }
 
-/// `C(n, k)`, for the small orders a block header can express.
-pub(super) fn binomial(n: usize, k: usize) -> i64 {
-    let mut c = 1i64;
-    for i in 0..k {
-        c = c * (n - i) as i64 / (i + 1) as i64;
-    }
-    c
-}
-
 /// Decode one stroke, checking the block overlap and the record's frame count.
 ///
-/// `channels` is the library's, and `stroke.audio()` must be the whole span.
+/// `channels` is the library's — 1 or 2, and any other count is refused — and
+/// `stroke.audio()` must be the whole span.
 pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
+    if !(1..=2).contains(&channels) {
+        return Err(ParseError::OutOfBounds {
+            value: format!("{channels} channels"),
+            bound: "1 or 2, which is what a library states".into(),
+        }
+        .into());
+    }
     let channels = usize::from(channels);
     let block_bytes = BLOCK_WORDS * 2 * channels;
     let audio = stroke.audio();
@@ -197,6 +197,15 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
         value: format!("{} frames", stroke.frames()),
         bound: "a frame count that fits this platform's address space".into(),
     })?;
+    // The narrowest field a header can declare is the longest block, so this is the
+    // most frames the span can own whatever its headers say.
+    let most = blocks * (block_frames(MIN_WIDTH, block_bytes, channels) - OVERLAP);
+    if frames > most {
+        return Err(ParseError::AssertFail(format!(
+            "the blocks own at most {most} frames where the record states {frames}"
+        ))
+        .into());
+    }
     let mut out: Vec<Vec<i16>> = Vec::with_capacity(channels);
     for _ in 0..channels {
         let mut channel = Vec::new();
@@ -226,13 +235,16 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
     for index in 0..blocks {
         let raw = &audio[index * block_bytes..(index + 1) * block_bytes];
         let header = BlockHeader::read(u16::from_be_bytes([raw[0], raw[1]]));
-        if !(1..=MAX_WIDTH).contains(&header.width) || usize::from(header.order) > MAX_ORDER {
+        if !(MIN_WIDTH..=MAX_WIDTH).contains(&header.width) || usize::from(header.order) > MAX_ORDER
+        {
             return Err(ParseError::OutOfBounds {
                 value: format!(
                     "block {index}: width {} order {}",
                     header.width, header.order
                 ),
-                bound: format!("a width of 1 to {MAX_WIDTH} and an order of at most {MAX_ORDER}"),
+                bound: format!(
+                    "a width of {MIN_WIDTH} to {MAX_WIDTH} and an order of at most {MAX_ORDER}"
+                ),
             }
             .into());
         }
@@ -261,17 +273,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
                         "block {index} runs out of words before its {block_frames} frames"
                     ))
                 })?;
-                let mut value = i64::from(residual);
-                for j in 1..=order {
-                    let term = binomial(order, j).saturating_mul(state[j - 1]);
-                    value = if j.is_multiple_of(2) {
-                        value.saturating_sub(term)
-                    } else {
-                        value.saturating_add(term)
-                    };
-                }
-                state.copy_within(0..MAX_ORDER - 1, 1);
-                state[0] = value;
+                let value = predictor::predict(state, order, i64::from(residual));
                 channel.push(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
             }
         }
@@ -337,7 +339,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
     }
 
     Ok(Audio {
-        channels: out,
+        lanes: out,
         tail: narrowed,
         clipped,
         overlap_checked,
@@ -392,31 +394,31 @@ mod tests {
     }
 
     /// Frames one block of `width` holds, the overlap included.
-    fn block_frames(width: u8, channels: usize) -> usize {
-        8 * (BLOCK_WORDS * 2 * channels - 2) / (usize::from(width) * channels)
+    fn frames_per_block(width: u8, channels: usize) -> usize {
+        block_frames(width, BLOCK_WORDS * 2 * channels, channels)
     }
 
     #[test]
     fn order_zero_states_the_samples_outright() {
-        let frames = block_frames(8, 1);
+        let frames = frames_per_block(8, 1);
         let residuals: Vec<i32> = (0..frames).map(|i| (i % 61) as i32 - 30).collect();
         let audio = block(8, 0, 1, &residuals);
         let decoded = decode(&stroke(&audio, (frames - OVERLAP) as u32, 1, [0; 4]), 1).unwrap();
         assert_eq!(decoded.frames(), frames - OVERLAP);
-        assert_eq!(&decoded.channels[0][..4], &[-30, -29, -28, -27]);
+        assert_eq!(&decoded.lanes[0][..4], &[-30, -29, -28, -27]);
         assert_eq!(decoded.clipped, 0);
     }
 
     #[test]
     fn order_one_integrates_from_the_records_newest_seed() {
-        let frames = block_frames(6, 1);
+        let frames = frames_per_block(6, 1);
         let audio = block(6, 1, 1, &vec![3i32; frames]);
         let decoded = decode(
             &stroke(&audio, (frames - OVERLAP) as u32, 1, [0, 0, 0, 100]),
             1,
         )
         .unwrap();
-        assert_eq!(&decoded.channels[0][..4], &[103, 106, 109, 112]);
+        assert_eq!(&decoded.lanes[0][..4], &[103, 106, 109, 112]);
     }
 
     #[test]
@@ -437,6 +439,30 @@ mod tests {
         assert!(error.contains("the record states 7"), "{error}");
     }
 
+    /// The record states its frame count in bytes the file carries, so the blocks the
+    /// stroke holds bound it before anything is reserved to hold them.
+    #[test]
+    fn a_frame_count_larger_than_the_blocks_can_hold_is_refused_before_reserving() {
+        let audio = block(8, 0, 1, &[0i32; 16]);
+        let error = decode(&stroke(&audio, u32::MAX, 1, [0; 4]), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the blocks own at most"), "{error}");
+        assert!(
+            error.contains(&format!("the record states {}", u32::MAX)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_channel_count_no_library_states_is_refused() {
+        let audio = block(8, 0, 1, &[0i32; 16]);
+        let error = decode(&stroke(&audio, 1, 1, [0; 4]), 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 or 2"), "{error}");
+    }
+
     #[test]
     fn a_span_shorter_than_its_block_count_is_refused() {
         let audio = block(8, 0, 1, &[0i32; 16]);
@@ -448,7 +474,7 @@ mod tests {
 
     #[test]
     fn a_block_that_does_not_repeat_the_one_before_is_refused() {
-        let frames = block_frames(8, 1);
+        let frames = frames_per_block(8, 1);
         let first: Vec<i32> = (0..frames).map(|i| (i % 7) as i32).collect();
         // The next block must open with the previous block's last OVERLAP frames;
         // this one opens with zeros.
@@ -462,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_block_repeating_the_one_before_decodes_and_emits_it_once() {
-        let frames = block_frames(8, 1);
+        let frames = frames_per_block(8, 1);
         let owned = frames - OVERLAP;
         let first: Vec<i32> = (0..frames).map(|i| (i % 7) as i32).collect();
         let mut second = vec![0i32; frames];
@@ -475,21 +501,21 @@ mod tests {
         // The repeat is emitted once, by the block that repeats it, so the two
         // blocks' frames run on continuously.
         let repeated: Vec<i16> = first[owned..].iter().map(|&v| v as i16).collect();
-        assert_eq!(&decoded.channels[0][owned..owned + OVERLAP], &repeated[..]);
-        assert_eq!(decoded.channels[0][owned + OVERLAP], 0);
+        assert_eq!(&decoded.lanes[0][owned..owned + OVERLAP], &repeated[..]);
+        assert_eq!(decoded.lanes[0][owned + OVERLAP], 0);
     }
 
     #[test]
     fn a_stereo_block_alternates_channels_field_by_field() {
-        let frames = block_frames(8, 2);
+        let frames = frames_per_block(8, 2);
         let residuals: Vec<i32> = (0..frames * 2)
             .map(|i| if i % 2 == 0 { 10 } else { -10 })
             .collect();
         let audio = block(8, 0, 2, &residuals);
         let decoded = decode(&stroke(&audio, (frames - OVERLAP) as u32, 1, [0; 4]), 2).unwrap();
-        assert_eq!(decoded.channels.len(), 2);
-        assert!(decoded.channels[0].iter().all(|&s| s == 10));
-        assert!(decoded.channels[1].iter().all(|&s| s == -10));
+        assert_eq!(decoded.lanes.len(), 2);
+        assert!(decoded.lanes[0].iter().all(|&s| s == 10));
+        assert!(decoded.lanes[1].iter().all(|&s| s == -10));
         assert_eq!(decoded.interleaved()[..4], [10, -10, 10, -10]);
     }
 }

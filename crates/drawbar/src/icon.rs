@@ -6,210 +6,91 @@
 
 use eframe::egui;
 
-/// One vendored glyph. An enum, so a name nobody vendored is a compile error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Glyph {
-    ArrowDownToLine,
-    ArrowRight,
-    ArrowUpRight,
-    AudioLines,
-    AudioWaveform,
-    Check,
-    ChevronDown,
-    ChevronRight,
-    CircleAlert,
-    CircleCheck,
-    CircleDashed,
-    CircleDot,
-    CircleHelp,
-    Clock,
-    Columns2,
-    Disc3,
-    Equal,
-    Eye,
-    EyeOff,
-    FilePlus2,
-    Folder,
-    FolderGit2,
-    FolderOpen,
-    FolderPlus,
-    Gauge,
-    GitCompareArrows,
-    GripVertical,
-    HardDrive,
-    Info,
-    Keyboard,
-    LibraryBig,
-    Link,
-    Link2Off,
-    ListMusic,
-    Minus,
-    Moon,
-    PanelBottom,
-    PanelLeft,
-    PanelLeftClose,
-    PanelLeftOpen,
-    PanelRight,
-    PanelRightOpen,
-    Pencil,
-    Piano,
-    Plus,
-    RefreshCw,
-    Replace,
-    RotateCcw,
-    Save,
-    ScanEye,
-    Search,
-    SlidersHorizontal,
-    SlidersVertical,
-    Sun,
-    Tag,
-    Tags,
-    Unplug,
-    Upload,
-    Waves,
-    Wrench,
-    X,
+/// The vendored art: one line per glyph, naming the variant and the file behind it.
+///
+/// The enum, the sweep over every variant and the art each one loads all come off this
+/// one list, so a glyph cannot be vendored, named or swept without the other two.
+macro_rules! glyphs {
+    ($($name:ident => $file:literal,)*) => {
+        /// One vendored glyph. An enum, so a name nobody vendored is a compile error.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Glyph {
+            $($name,)*
+        }
+
+        impl Glyph {
+            /// Every variant, so a sweep can prove each one still has art behind it.
+            pub const ALL: &'static [Glyph] = &[$(Glyph::$name,)*];
+
+            fn source(self) -> egui::ImageSource<'static> {
+                match self {
+                    $(Glyph::$name => {
+                        egui::include_image!(concat!("../assets/icons/", $file))
+                    })*
+                }
+            }
+        }
+    };
+}
+
+glyphs! {
+    ArrowDownToLine => "arrow-down-to-line.svg",
+    ArrowRight => "arrow-right.svg",
+    ArrowUpRight => "arrow-up-right.svg",
+    AudioLines => "audio-lines.svg",
+    AudioWaveform => "audio-waveform.svg",
+    Check => "check.svg",
+    ChevronDown => "chevron-down.svg",
+    ChevronRight => "chevron-right.svg",
+    CircleAlert => "circle-alert.svg",
+    CircleCheck => "circle-check.svg",
+    CircleDashed => "circle-dashed.svg",
+    CircleDot => "circle-dot.svg",
+    CircleHelp => "circle-help.svg",
+    Clock => "clock.svg",
+    Columns2 => "columns-2.svg",
+    Disc3 => "disc-3.svg",
+    Equal => "equal.svg",
+    Eye => "eye.svg",
+    EyeOff => "eye-off.svg",
+    FilePlus2 => "file-plus-2.svg",
+    Folder => "folder.svg",
+    FolderGit2 => "folder-git-2.svg",
+    FolderOpen => "folder-open.svg",
+    Gauge => "gauge.svg",
+    GripVertical => "grip-vertical.svg",
+    HardDrive => "hard-drive.svg",
+    Info => "info.svg",
+    Keyboard => "keyboard.svg",
+    LibraryBig => "library-big.svg",
+    Link2Off => "link-2-off.svg",
+    ListMusic => "list-music.svg",
+    Minus => "minus.svg",
+    Moon => "moon.svg",
+    PanelBottom => "panel-bottom.svg",
+    PanelLeft => "panel-left.svg",
+    PanelLeftOpen => "panel-left-open.svg",
+    PanelRight => "panel-right.svg",
+    PanelRightOpen => "panel-right-open.svg",
+    Pencil => "pencil.svg",
+    Piano => "piano.svg",
+    Plus => "plus.svg",
+    RefreshCw => "refresh-cw.svg",
+    Replace => "replace.svg",
+    RotateCcw => "rotate-ccw.svg",
+    Save => "save.svg",
+    ScanEye => "scan-eye.svg",
+    SlidersHorizontal => "sliders-horizontal.svg",
+    SlidersVertical => "sliders-vertical.svg",
+    Sun => "sun.svg",
+    Tag => "tag.svg",
+    Upload => "upload.svg",
+    Waves => "waves.svg",
+    Wrench => "wrench.svg",
+    X => "x.svg",
 }
 
 impl Glyph {
-    /// Every variant, so a sweep can prove each one still has art behind it.
-    pub const ALL: [Glyph; 61] = [
-        Glyph::ArrowDownToLine,
-        Glyph::ArrowRight,
-        Glyph::ArrowUpRight,
-        Glyph::AudioLines,
-        Glyph::AudioWaveform,
-        Glyph::Check,
-        Glyph::ChevronDown,
-        Glyph::ChevronRight,
-        Glyph::CircleAlert,
-        Glyph::CircleCheck,
-        Glyph::CircleDashed,
-        Glyph::CircleDot,
-        Glyph::CircleHelp,
-        Glyph::Clock,
-        Glyph::Columns2,
-        Glyph::Disc3,
-        Glyph::Equal,
-        Glyph::Eye,
-        Glyph::EyeOff,
-        Glyph::FilePlus2,
-        Glyph::Folder,
-        Glyph::FolderGit2,
-        Glyph::FolderOpen,
-        Glyph::FolderPlus,
-        Glyph::Gauge,
-        Glyph::GitCompareArrows,
-        Glyph::GripVertical,
-        Glyph::HardDrive,
-        Glyph::Info,
-        Glyph::Keyboard,
-        Glyph::LibraryBig,
-        Glyph::Link,
-        Glyph::Link2Off,
-        Glyph::ListMusic,
-        Glyph::Minus,
-        Glyph::Moon,
-        Glyph::PanelBottom,
-        Glyph::PanelLeft,
-        Glyph::PanelLeftClose,
-        Glyph::PanelLeftOpen,
-        Glyph::PanelRight,
-        Glyph::PanelRightOpen,
-        Glyph::Pencil,
-        Glyph::Piano,
-        Glyph::Plus,
-        Glyph::RefreshCw,
-        Glyph::Replace,
-        Glyph::RotateCcw,
-        Glyph::Save,
-        Glyph::ScanEye,
-        Glyph::Search,
-        Glyph::SlidersHorizontal,
-        Glyph::SlidersVertical,
-        Glyph::Sun,
-        Glyph::Tag,
-        Glyph::Tags,
-        Glyph::Unplug,
-        Glyph::Upload,
-        Glyph::Waves,
-        Glyph::Wrench,
-        Glyph::X,
-    ];
-
-    fn source(self) -> egui::ImageSource<'static> {
-        match self {
-            Glyph::ArrowDownToLine => {
-                egui::include_image!("../assets/icons/arrow-down-to-line.svg")
-            }
-            Glyph::ArrowRight => egui::include_image!("../assets/icons/arrow-right.svg"),
-            Glyph::ArrowUpRight => egui::include_image!("../assets/icons/arrow-up-right.svg"),
-            Glyph::AudioLines => egui::include_image!("../assets/icons/audio-lines.svg"),
-            Glyph::AudioWaveform => egui::include_image!("../assets/icons/audio-waveform.svg"),
-            Glyph::Check => egui::include_image!("../assets/icons/check.svg"),
-            Glyph::ChevronDown => egui::include_image!("../assets/icons/chevron-down.svg"),
-            Glyph::ChevronRight => egui::include_image!("../assets/icons/chevron-right.svg"),
-            Glyph::CircleAlert => egui::include_image!("../assets/icons/circle-alert.svg"),
-            Glyph::CircleCheck => egui::include_image!("../assets/icons/circle-check.svg"),
-            Glyph::CircleDashed => egui::include_image!("../assets/icons/circle-dashed.svg"),
-            Glyph::CircleDot => egui::include_image!("../assets/icons/circle-dot.svg"),
-            Glyph::CircleHelp => egui::include_image!("../assets/icons/circle-help.svg"),
-            Glyph::Clock => egui::include_image!("../assets/icons/clock.svg"),
-            Glyph::Columns2 => egui::include_image!("../assets/icons/columns-2.svg"),
-            Glyph::Disc3 => egui::include_image!("../assets/icons/disc-3.svg"),
-            Glyph::Equal => egui::include_image!("../assets/icons/equal.svg"),
-            Glyph::Eye => egui::include_image!("../assets/icons/eye.svg"),
-            Glyph::EyeOff => egui::include_image!("../assets/icons/eye-off.svg"),
-            Glyph::FilePlus2 => egui::include_image!("../assets/icons/file-plus-2.svg"),
-            Glyph::Folder => egui::include_image!("../assets/icons/folder.svg"),
-            Glyph::FolderGit2 => egui::include_image!("../assets/icons/folder-git-2.svg"),
-            Glyph::FolderOpen => egui::include_image!("../assets/icons/folder-open.svg"),
-            Glyph::FolderPlus => egui::include_image!("../assets/icons/folder-plus.svg"),
-            Glyph::Gauge => egui::include_image!("../assets/icons/gauge.svg"),
-            Glyph::GitCompareArrows => {
-                egui::include_image!("../assets/icons/git-compare-arrows.svg")
-            }
-            Glyph::GripVertical => egui::include_image!("../assets/icons/grip-vertical.svg"),
-            Glyph::HardDrive => egui::include_image!("../assets/icons/hard-drive.svg"),
-            Glyph::Info => egui::include_image!("../assets/icons/info.svg"),
-            Glyph::Keyboard => egui::include_image!("../assets/icons/keyboard.svg"),
-            Glyph::LibraryBig => egui::include_image!("../assets/icons/library-big.svg"),
-            Glyph::Link => egui::include_image!("../assets/icons/link.svg"),
-            Glyph::Link2Off => egui::include_image!("../assets/icons/link-2-off.svg"),
-            Glyph::ListMusic => egui::include_image!("../assets/icons/list-music.svg"),
-            Glyph::Minus => egui::include_image!("../assets/icons/minus.svg"),
-            Glyph::Moon => egui::include_image!("../assets/icons/moon.svg"),
-            Glyph::PanelBottom => egui::include_image!("../assets/icons/panel-bottom.svg"),
-            Glyph::PanelLeft => egui::include_image!("../assets/icons/panel-left.svg"),
-            Glyph::PanelLeftClose => egui::include_image!("../assets/icons/panel-left-close.svg"),
-            Glyph::PanelLeftOpen => egui::include_image!("../assets/icons/panel-left-open.svg"),
-            Glyph::PanelRight => egui::include_image!("../assets/icons/panel-right.svg"),
-            Glyph::PanelRightOpen => egui::include_image!("../assets/icons/panel-right-open.svg"),
-            Glyph::Pencil => egui::include_image!("../assets/icons/pencil.svg"),
-            Glyph::Piano => egui::include_image!("../assets/icons/piano.svg"),
-            Glyph::Plus => egui::include_image!("../assets/icons/plus.svg"),
-            Glyph::RefreshCw => egui::include_image!("../assets/icons/refresh-cw.svg"),
-            Glyph::Replace => egui::include_image!("../assets/icons/replace.svg"),
-            Glyph::RotateCcw => egui::include_image!("../assets/icons/rotate-ccw.svg"),
-            Glyph::Save => egui::include_image!("../assets/icons/save.svg"),
-            Glyph::ScanEye => egui::include_image!("../assets/icons/scan-eye.svg"),
-            Glyph::Search => egui::include_image!("../assets/icons/search.svg"),
-            Glyph::SlidersHorizontal => {
-                egui::include_image!("../assets/icons/sliders-horizontal.svg")
-            }
-            Glyph::SlidersVertical => egui::include_image!("../assets/icons/sliders-vertical.svg"),
-            Glyph::Sun => egui::include_image!("../assets/icons/sun.svg"),
-            Glyph::Tag => egui::include_image!("../assets/icons/tag.svg"),
-            Glyph::Tags => egui::include_image!("../assets/icons/tags.svg"),
-            Glyph::Unplug => egui::include_image!("../assets/icons/unplug.svg"),
-            Glyph::Upload => egui::include_image!("../assets/icons/upload.svg"),
-            Glyph::Waves => egui::include_image!("../assets/icons/waves.svg"),
-            Glyph::Wrench => egui::include_image!("../assets/icons/wrench.svg"),
-            Glyph::X => egui::include_image!("../assets/icons/x.svg"),
-        }
-    }
-
     /// This glyph as an image, for the widgets and the painters that take one.
     pub fn image(self) -> egui::Image<'static> {
         egui::Image::new(self.source())
@@ -262,7 +143,7 @@ mod tests {
     fn every_glyph_rasterises_to_something_that_can_be_seen() {
         let (ctx, input) = headless();
         let _ = ctx.run(input, |ctx| {
-            for glyph in Glyph::ALL {
+            for glyph in Glyph::ALL.iter().copied() {
                 let source = glyph.source();
                 let egui::ImageSource::Bytes { uri, bytes } = source else {
                     panic!("{glyph:?} is not vendored bytes");
@@ -304,7 +185,7 @@ mod tests {
         let (ctx, input) = headless();
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                for glyph in Glyph::ALL {
+                for glyph in Glyph::ALL.iter().copied() {
                     for size in [10.0_f32, 15.0] {
                         let drawn = icon(ui, glyph, size, egui::Color32::WHITE);
                         assert_eq!(
