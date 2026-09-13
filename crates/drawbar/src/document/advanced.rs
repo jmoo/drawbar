@@ -57,11 +57,11 @@ pub struct Advanced {
     /// Narrows the table by path or label. A body has ninety fields.
     filter: String,
     cell: Cell,
-    /// The entity the cached dump belongs to.
+    /// The id and the [`LocalEntity::stamp`] the cached dump was laid out from.
     ///
     /// ⚠️ `{:#?}` over an undecoded body prints every byte, and a piano library is
-    /// hundreds of megabytes — it is rendered once and kept, never per frame.
-    dump_for: Option<u64>,
+    /// hundreds of megabytes — it is rendered once per set of bytes, never per frame.
+    dump_for: Option<(u64, u64)>,
     dump: String,
 }
 
@@ -403,24 +403,35 @@ impl Advanced {
     }
 
     fn dump(&mut self, ui: &mut egui::Ui, entity: &LocalEntity) {
-        let Some(decoded) = &entity.entity else {
+        if entity.entity.is_none() {
             return;
-        };
+        }
         // ⚠️ Formatting is synchronous; keep large library bodies folded until requested.
         egui::CollapsingHeader::new("Show the decode")
             .id_salt("raw_debug")
             .show(ui, |ui| {
-                if self.dump_for != Some(entity.id) {
-                    self.dump = format!("{decoded:#?}");
-                    self.dump_for = Some(entity.id);
-                }
+                let dump = self.decoded(entity);
                 egui::ScrollArea::both()
                     .max_height(360.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new(&self.dump).monospace().small());
+                        ui.label(egui::RichText::new(dump).monospace().small());
                     });
             });
+    }
+
+    /// The decode as text, laid out once per set of bytes: an edit is a new set of
+    /// bytes and a dump of the old ones is a dump of something nothing holds.
+    fn decoded(&mut self, entity: &LocalEntity) -> &str {
+        let laid = (entity.id, entity.stamp);
+        if self.dump_for != Some(laid) {
+            self.dump = match &entity.entity {
+                Some(decoded) => format!("{decoded:#?}"),
+                None => String::new(),
+            };
+            self.dump_for = Some(laid);
+        }
+        &self.dump
     }
 }
 
@@ -667,6 +678,36 @@ pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::{Fresh, Workspace};
+
+    /// The Raw section shows the decode of the bytes the document holds. An edit is a
+    /// new set of bytes, and a dump kept by id alone would go on describing the old
+    /// ones for as long as the tab stayed open.
+    #[test]
+    fn the_raw_decode_follows_an_edit_to_the_bytes() {
+        let ctx = eframe::egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = crate::log::Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
+        let mut advanced = Advanced::default();
+
+        let before = advanced.decoded(workspace.get(id).expect("it is open")).to_string();
+        assert!(
+            before.contains("organ_type"),
+            "it is the decode: {before:.200}"
+        );
+
+        let bytes = workspace.get(id).expect("it is open").bytes.clone();
+        let (_, edited) = crate::fields::apply(
+            &bytes,
+            &[("center_panel.organ_type".to_string(), "Vox".to_string())],
+        )
+        .expect("the set is legal");
+        workspace.replace_bytes(id, edited, &mut log);
+
+        let after = advanced.decoded(workspace.get(id).expect("it is open"));
+        assert_ne!(before, after, "the dump is of the bytes in front of the reader");
+    }
 
     /// A pair is counted from one, and a half holding the none marker is spelled as one
     /// rather than counted from: `0xffff + 1` is not a slot and does not fit a `u16`.
