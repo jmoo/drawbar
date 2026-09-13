@@ -32,10 +32,17 @@ const TAG: &str = concat!(
 const MOST: usize = 64 * 1024;
 
 /// The most of the modal the notes may claim.
-const NOTES: f32 = 320.0;
+const NOTES: f32 = 440.0;
 
-/// The height the modal needs around the notes — title, notice, expectations and
-/// Continue — so on a short window the notes scroll rather than push Continue off-screen.
+/// The notices' column beside the notes, and the narrowest window the two fit side by side
+/// in; a narrower one stacks the notes beneath.
+const NOTICES: f32 = 380.0;
+const BESIDE: f32 = 1040.0;
+
+/// The height the modal needs around the notes, so on a short window they scroll rather
+/// than push Continue off-screen: title and Continue beside the notices, and the notices
+/// too when stacked.
+const AROUND_BESIDE: f32 = 200.0;
 const AROUND: f32 = 380.0;
 
 /// The notes are never shorter than this, however short the window.
@@ -113,21 +120,43 @@ impl Splash {
 
     /// Returns whether the reader is done with it.
     fn body(&self, ui: &mut egui::Ui) -> bool {
-        ui.set_width(WIDTH);
+        let screen = ui.ctx().screen_rect();
+        let beside = screen.width() >= BESIDE;
+        let around = match beside {
+            true => AROUND_BESIDE,
+            false => AROUND,
+        };
+        let height = (screen.height() - around).clamp(FEWEST, NOTES);
         title(ui);
         ui.add_space(GAP);
-        ui.horizontal(|ui| {
-            let tint = warn(ui.visuals());
-            icon(ui, Glyph::CircleAlert, GLYPH, tint);
-            ui.label(
-                egui::RichText::new("Use at your own risk, this is alpha software.").color(tint),
-            );
-        });
-        ui.add_space(GAP * 2.0);
-        expectations(ui);
-        ui.add_space(GAP * 2.0);
-        ui.separator();
-        self.paint_notes(ui);
+        match beside {
+            true => {
+                ui.horizontal_top(|ui| {
+                    let left = ui.vertical(|ui| {
+                        ui.set_width(NOTICES);
+                        notices(ui);
+                    });
+                    ui.add_space(GAP * 4.0);
+                    let right = ui.vertical(|ui| {
+                        ui.set_width(WIDTH);
+                        self.paint_notes(ui, height);
+                    });
+                    // ⚠️ Not a `Separator`: in a row it grows to all the height below it.
+                    let (left, right) = (left.response.rect, right.response.rect);
+                    ui.painter().vline(
+                        (left.right() + right.left()) / 2.0,
+                        left.top()..=left.bottom().max(right.bottom()),
+                        ui.visuals().widgets.noninteractive.bg_stroke,
+                    );
+                });
+            }
+            false => {
+                ui.set_width(WIDTH);
+                notices(ui);
+                ui.separator();
+                self.paint_notes(ui, height);
+            }
+        }
         ui.separator();
         ui.add_space(GAP);
         let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
@@ -140,7 +169,7 @@ impl Splash {
         continued || escaped
     }
 
-    fn paint_notes(&self, ui: &mut egui::Ui) {
+    fn paint_notes(&self, ui: &mut egui::Ui, height: f32) {
         ui.add_space(GAP);
         match &self.notes {
             Notes::Unasked | Notes::Loading => {
@@ -151,7 +180,7 @@ impl Splash {
             }
             Notes::Read { body, page } => {
                 egui::ScrollArea::vertical()
-                    .max_height((ui.ctx().screen_rect().height() - AROUND).clamp(FEWEST, NOTES))
+                    .max_height(height)
                     .show(ui, |ui| {
                         for line in body.lines() {
                             paint(ui, classify(line));
@@ -171,7 +200,14 @@ impl Splash {
     }
 }
 
-fn expectations(ui: &mut egui::Ui) {
+/// The alpha notice, and what to expect of this build.
+fn notices(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        let tint = warn(ui.visuals());
+        icon(ui, Glyph::CircleAlert, GLYPH, tint);
+        ui.label(egui::RichText::new("Use at your own risk, this is alpha software.").color(tint));
+    });
+    ui.add_space(GAP * 2.0);
     for (standing, claim) in EXPECTATIONS {
         let (glyph, tint) = match standing {
             Standing::Supported => (Glyph::CircleCheck, good(ui.visuals())),
