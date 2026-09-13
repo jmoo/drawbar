@@ -39,11 +39,18 @@ pub fn parse(s: &str) -> Result<u8, String> {
         Some('b') => (-1, &rest[1..]),
         _ => (0, rest),
     };
+    // `parse` would also take `+4`, and an octave has one spelling.
     let octave: i32 = octave
         .parse()
-        .map_err(|_| format!("{s:?} has no octave number"))?;
-    u8::try_from((octave + 1) * 12 + semitone + accidental)
         .ok()
+        .filter(|_| !octave.starts_with('+'))
+        .ok_or_else(|| format!("{s:?} has no octave number"))?;
+    // ⚠️ C-1 is note 0 and G9 is 127. A wider octave overflows the sum in a release
+    // build, where it wraps into a number that passes the range check below.
+    (-1..=9)
+        .contains(&octave)
+        .then(|| (octave + 1) * 12 + semitone + accidental)
+        .and_then(|n| u8::try_from(n).ok())
         .filter(|&n| n <= 127)
         .ok_or_else(|| format!("{s:?} is outside MIDI's 0-127"))
 }
@@ -72,6 +79,17 @@ mod tests {
         assert_eq!(parse("Bb2").unwrap(), 46);
         assert_eq!(parse("c4").unwrap(), 60);
         assert_eq!(parse("60").unwrap(), 60);
+    }
+
+    /// ⚠️ The octave reaches the note number through a multiplication, so an
+    /// unbounded one wraps in a release build: `C357913941` came back as note 8.
+    #[test]
+    fn an_octave_outside_the_keyboard_is_refused_rather_than_wrapped() {
+        for bad in ["C357913941", "C2147483647", "C10", "Cb-1"] {
+            let err = parse(bad).unwrap_err();
+            assert!(err.contains("outside MIDI's 0-127"), "{bad}: {err}");
+        }
+        assert!(parse("C+4").unwrap_err().contains("octave"));
     }
 
     #[test]
