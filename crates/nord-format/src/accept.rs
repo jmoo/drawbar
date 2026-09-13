@@ -100,7 +100,8 @@ pub enum Acceptance {
     /// The tag is this family's own and belongs in this class, but no such write has
     /// been made.
     Inferred,
-    /// The tag is another family's.
+    /// The tag names a family and this class is not where it goes: another family's
+    /// tag, or this family's own in the wrong class.
     Refused,
     /// Nothing here says either way: a tag no family's own files carry — the shared
     /// library formats and the carriers — or one this crate does not read.
@@ -667,20 +668,38 @@ impl Family {
         }
     }
 
+    /// What this family's USB product string contains, where the model's own name is
+    /// known.
+    ///
+    /// Usually the [`label`](Self::label), and separate from it because two rows differ:
+    /// the Stage Classic calls itself `Nord Stage`, "Classic" being the name this
+    /// project gives it to tell it from the numbered Stages, and the `no3` organ's model
+    /// name is not known at all — so no product string names it.
+    fn product_name(self) -> Option<&'static str> {
+        match self {
+            Family::StageClassic => Some("Stage"),
+            Family::Organ3 => None,
+            named => Some(named.label()),
+        }
+    }
+
     /// The family a USB product string names.
     ///
     /// The string is the model and then the keybed — an Electro 5 reads
     /// `Nord Electro 5`, and a 73-key 5D reads `Nord Electro 5D 73` — so the family is
-    /// the **longest** [`label`](Self::label) the string contains. Longest because
-    /// `Piano` sits inside `Piano 5` and `C2` inside `C2D`.
+    /// the **longest** [`product_name`](Self::product_name) the string contains. Longest
+    /// because `Stage` sits inside `Stage 3`, `Piano` inside `Piano 5` and `C2` inside
+    /// `C2D`.
     ///
     /// Confirmed on hardware for the Electro 5: `Nord Electro 5` is the descriptor
     /// string the recorded exchanges in `nord-usb`'s replay scripts carry.
     pub fn from_product(product: &str) -> Option<Family> {
         Family::ALL
             .into_iter()
-            .filter(|family| product.contains(family.label()))
-            .max_by_key(|family| family.label().len())
+            .filter_map(|family| Some((family, family.product_name()?)))
+            .filter(|(_, name)| product.contains(name))
+            .max_by_key(|(_, name)| name.len())
+            .map(|(family, _)| family)
     }
 
     /// The family whose files carry `tag`, where one family's do. `None` for the shared
@@ -700,9 +719,12 @@ impl Family {
         {
             return evidence.acceptance();
         }
+        // A tag naming a family, this one included, does not belong in a class the
+        // table does not list it under: a `ns4p` is refused from the piano partition by
+        // the Stage 4 as surely as by an Electro 5.
         match Family::of_tag(tag) {
-            Some(other) if other != self => Acceptance::Refused,
-            _ => Acceptance::Unknown,
+            Some(_) => Acceptance::Refused,
+            None => Acceptance::Unknown,
         }
     }
 }
@@ -728,6 +750,28 @@ mod tests {
             Acceptance::Inferred
         );
         assert_eq!(e5.accepts(Slot::Program, "zzzz"), Acceptance::Unknown);
+    }
+
+    /// A family's own tag still belongs in one class: the Stage 4 keeps programs in the
+    /// program slots, so a `ns4p` offered to the piano partition is refused rather than
+    /// left an open question.
+    #[test]
+    fn a_familys_own_tag_is_refused_outside_its_class() {
+        assert_eq!(
+            Family::Stage4.accepts(Slot::Piano, ns4::program::FORMAT),
+            Acceptance::Refused
+        );
+        for (tag, owner) in CARRIES {
+            let open: Vec<Slot> = Slot::ALL
+                .into_iter()
+                .filter(|slot| owner.accepts(*slot, tag) != Acceptance::Refused)
+                .collect();
+            assert!(
+                open.len() <= 1,
+                "{} leaves its own {tag} unrefused in {open:?}",
+                owner.label(),
+            );
+        }
     }
 
     /// A shared library format names no family, so it can never refuse an instrument
@@ -810,6 +854,18 @@ mod tests {
         );
         assert_eq!(Family::from_product("Nord C2D"), Some(Family::C2D));
         assert_eq!(Family::from_product("Nord Wave 2"), Some(Family::Wave2));
+        // The instrument calls itself `Nord Stage`; "Classic" is this project's word.
+        assert_eq!(
+            Family::from_product("Nord Stage 88"),
+            Some(Family::StageClassic)
+        );
+        assert_eq!(
+            Family::from_product("Nord Stage EX 76"),
+            Some(Family::StageClassic)
+        );
+        assert_eq!(Family::from_product("Nord Stage 3 88"), Some(Family::Stage3));
+        // No product string is known for the `no3` organ, so its label is not one.
+        assert_eq!(Family::from_product("Nord no3 organ"), None);
         assert_eq!(Family::from_product("Some other keyboard"), None);
     }
 
@@ -825,6 +881,18 @@ mod tests {
                     .count(),
                 1,
                 "{} is not a unique name",
+                family.label()
+            );
+            let Some(name) = family.product_name() else {
+                continue;
+            };
+            assert_eq!(
+                Family::ALL
+                    .iter()
+                    .filter(|held| held.product_name() == Some(name))
+                    .count(),
+                1,
+                "{} is not a unique product name",
                 family.label()
             );
         }
