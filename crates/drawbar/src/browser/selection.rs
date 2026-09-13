@@ -191,9 +191,12 @@ mod tests {
 
         selection.toggle(Item::Local(2));
         assert_eq!(selection.sole(), Some(Item::Local(1)));
-        // And a row can be taken out of a set of one, leaving nothing picked.
         selection.toggle(Item::Local(1));
-        assert_eq!(selection.items().count(), 0);
+        assert_eq!(
+            selection.items().count(),
+            0,
+            "a row goes out of a set of one, leaving nothing picked"
+        );
     }
 
     /// ⇧-click fills the run between the anchor and the row it landed on, either way
@@ -209,11 +212,11 @@ mod tests {
             vec![rows[1], rows[2], rows[3]]
         );
 
-        // Still anchored at 3, so the next one runs the other way from the same place.
         selection.extend(rows[5], &rows);
         assert_eq!(
             selection.items().collect::<Vec<_>>(),
-            vec![rows[3], rows[4], rows[5]]
+            vec![rows[3], rows[4], rows[5]],
+            "still anchored at 3, so this one runs the other way from there"
         );
     }
 
@@ -232,9 +235,12 @@ mod tests {
         selection.extend(rows[2], &rows);
         assert_eq!(selection.sole(), Some(rows[2]));
 
-        // And it re-anchored there, so a second one does span.
         selection.extend(rows[0], &rows);
-        assert_eq!(selection.items().count(), 3);
+        assert_eq!(
+            selection.items().count(),
+            3,
+            "it re-anchored there, so a second one spans"
+        );
     }
 
     /// ⌘ wins over ⇧, and a bare click is a bare click whatever else is held.

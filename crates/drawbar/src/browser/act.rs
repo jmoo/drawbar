@@ -1563,8 +1563,6 @@ mod tests {
                 &mut log,
             )
         };
-        // The slot is empty in the scan and a program carries no write warning, so
-        // nothing is asked.
         act(
             vec![Act::Send {
                 id,
@@ -1575,7 +1573,10 @@ mod tests {
             &mut queue,
         );
         assert_eq!(queue.ids(), vec![id], "queued rather than written");
-        assert!(device.queued().is_empty(), "and nothing has been asked for");
+        assert!(
+            device.queued().is_empty(),
+            "an empty slot carrying no warning asks nothing"
+        );
 
         act(vec![Act::SendAll], &mut device, &mut queue);
         match device.queued().front().expect("a batch was queued") {
@@ -1848,7 +1849,6 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        // Three reads of what is there, and then the one batch that writes them.
         let batch = device
             .queued()
             .iter()
@@ -1871,9 +1871,8 @@ mod tests {
             1,
         );
 
-        // The reads of what is in those slots go out first; each one finishing lets the
-        // next command start, so the batch is what the instrument is doing when it
-        // refuses.
+        // ⚠️ One command runs at a time, so the reads of those slots have to finish
+        // before the batch is what the instrument is doing.
         let waiting = |device: &Device| {
             device
                 .queued()
@@ -2137,7 +2136,6 @@ mod tests {
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         let first = tabs.active().expect("a view opened");
 
-        // Another double-click on the same slot.
         tabs.close(Spot::Document(first));
         apply(
             &mut browser,
@@ -2153,7 +2151,6 @@ mod tests {
         assert_eq!(tabs.active(), Some(first), "its own tab came forward");
         assert_eq!(workspace.entities().len(), 1, "and there is one copy");
 
-        // A slot with no view open is read, as it must be.
         let elsewhere = Location { bank: 6, slot: 4 };
         apply(
             &mut browser,
@@ -2168,7 +2165,11 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        assert_eq!(device.queued().len(), 1);
+        assert_eq!(
+            device.queued().len(),
+            1,
+            "a slot with no view open is read, as it must be"
+        );
     }
 
     /// ⚠️ A file the instrument turns out not to want costs the occupant of the slot —

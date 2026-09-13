@@ -858,9 +858,11 @@ mod tests {
 
         browser.selection.toggle(Item::Local(2));
         assert!(!browser.sole_is(row), "two rows picked");
-        // And a plain click on one of the two lets go of it, leaving the other sole.
         browser.selection.plain(Item::Local(2));
-        assert!(browser.sole_is(row));
+        assert!(
+            browser.sole_is(row),
+            "a plain click on one of the two leaves the other sole"
+        );
     }
 
     /// Escape lets go of everything, whether or not the browser dock is open to show it.
@@ -949,15 +951,6 @@ mod tests {
         assert!(browser.rename.is_none(), "and the editor is done with");
     }
 
-    /// Only Enter renames: an armed editor that commits on blur turns a stray keystroke
-    /// into a rename nobody asked for.
-    #[test]
-    fn a_rename_needs_enter_and_a_real_change() {
-        assert_eq!(renamed("Africa Split", "LA Grand"), Some("LA Grand".into()));
-        // What blur hands back is nothing at all — see `rename_row`.
-        assert_eq!(renamed("Africa Split", "Africa Split"), None);
-    }
-
     /// Enter on an untouched field, or on an empty one, leaves the asset alone.
     #[test]
     fn a_rename_that_changes_nothing_is_not_a_rename() {
@@ -970,6 +963,7 @@ mod tests {
     /// What is typed is what the asset is called, with the spaces around it dropped.
     #[test]
     fn a_rename_takes_the_typed_name_trimmed() {
+        assert_eq!(renamed("Africa Split", "LA Grand"), Some("LA Grand".into()));
         assert_eq!(
             renamed("Africa Split", "  LA Grand  "),
             Some("LA Grand".into())
