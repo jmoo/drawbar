@@ -1654,12 +1654,18 @@ pub fn probe(
         let reply = nord_usb::block_on(async {
             let req = nord_usb::Message::new(svc, subsystem, op, words.clone());
             let t = device.transport();
-            t.write(&req.encode()).await?;
+            let limit = std::time::Duration::from_secs(wait);
+            // ⚠️ `--bare` is the path for an instrument that is already refusing
+            // commands, and a stalled bulk endpoint blocks a plain write forever: the
+            // read timeout below is never reached and the caller hangs with no reason.
+            if !t.write_timeout(&req.encode(), limit).await? {
+                return Err(nord_usb::Error::Transport(format!(
+                    "the device did not accept command {op:#04x} within {wait}s: its bulk \
+                     endpoints are stalled, and a power cycle is the only way out"
+                )));
+            }
             match t
-                .read_timeout(
-                    nord_usb::transport::READ_BUFFER,
-                    std::time::Duration::from_secs(wait),
-                )
+                .read_timeout(nord_usb::transport::READ_BUFFER, limit)
                 .await?
             {
                 Some(raw) => nord_usb::Message::decode_probe(&raw).map(Some),
