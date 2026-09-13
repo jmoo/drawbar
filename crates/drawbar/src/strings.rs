@@ -52,6 +52,10 @@ impl Section {
     }
 }
 
+/// What a run of fields sharing no path prefix is called, where the registry's own paths
+/// are the only division there is.
+pub const UNPREFIXED: &str = "General";
+
 /// The sections a settings document shows, in menu order.
 pub const SETTINGS_SECTIONS: [Section; 5] = [
     Section::System,

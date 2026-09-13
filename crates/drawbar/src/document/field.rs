@@ -211,9 +211,15 @@ impl Doc<'_> {
         (self.fields, self.slots)
     }
 
-    /// How many fields no group named.
-    pub fn unplaced(&self) -> usize {
-        self.leftovers.len()
+    /// How many fields no group named, and how many of those the strings table names —
+    /// which is all the "Also stored" section holds.
+    pub fn unplaced(&self) -> (usize, usize) {
+        let named = self
+            .leftovers
+            .iter()
+            .filter(|field| strings::known(&field.path))
+            .count();
+        (self.leftovers.len(), named)
     }
 }
 
@@ -436,7 +442,7 @@ fn prefixes(fields: &[Field]) -> Vec<Group<'_>> {
             _ => out.push(Group {
                 key: prefix.to_string(),
                 title: match prefix.is_empty() {
-                    true => "General".to_string(),
+                    true => strings::UNPREFIXED.to_string(),
                     false => strings::title(prefix),
                 },
                 rows: vec![field],
@@ -929,7 +935,8 @@ fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
             ui.label(
                 egui::RichText::new(format!(
                     "{unplaced} fields the layout does not place — under Advanced, and under \
-                     Also stored once the strings table names them."
+                     {} once the strings table names them.",
+                    strings::Section::Other.title()
                 ))
                 .font(egui::FontId::proportional(READING))
                 .color(quiet),
@@ -1841,13 +1848,16 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
             "authored — exhaustive".to_string(),
             "every field the body declares is placed".to_string(),
         ),
-        Shape::Authored { exhaustive: false } => (
-            "authored".to_string(),
-            format!(
-                "{} fields no group names; they show under Also stored",
-                doc.unplaced()
-            ),
-        ),
+        Shape::Authored { exhaustive: false } => {
+            let (unplaced, named) = doc.unplaced();
+            (
+                "authored".to_string(),
+                format!(
+                    "{unplaced} fields no group names; {named} of them show under {}",
+                    strings::Section::Other.title()
+                ),
+            )
+        }
         Shape::Menus => (
             "menus".to_string(),
             "this app's own table, in the order the instrument's menus run".to_string(),
@@ -2159,7 +2169,27 @@ mod tests {
         // controls — named as idle, never simply gone.
         assert!(!titles.contains(&"Piano"), "{titles:?}");
         assert!(doc.idle.contains(&"Piano"), "{:?}", doc.idle);
-        assert!(doc.unplaced() > 0);
+        let (unplaced, named) = doc.unplaced();
+        assert!(unplaced > 0);
+        assert!(named <= unplaced, "{named} named of {unplaced} unplaced");
+    }
+
+    /// The "Also stored" section holds the unplaced fields the strings table names, so
+    /// the count beside the layout is those rather than every unplaced field.
+    #[test]
+    fn the_layout_line_counts_what_also_stored_will_hold() {
+        let (bytes, fields) = electro5();
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let doc = of(&decoded, &fields);
+        let (unplaced, named) = doc.unplaced();
+        let also = doc
+            .sections
+            .iter()
+            .find(|section| section.title == strings::Section::Other.title())
+            .expect("the named leftovers have a section");
+        assert_eq!(also.fields.len(), named);
+        assert!(named < unplaced, "{named} of {unplaced} are named");
     }
 
     /// The transpose pair is one control, which needs both halves in the same group —
