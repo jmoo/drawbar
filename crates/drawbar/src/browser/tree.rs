@@ -536,8 +536,9 @@ impl Browser {
                 ..Cells::default()
             },
         );
-        // The row shows the name without its format tag, so the hover carries all of it.
-        let response = drawn.response.on_hover_text(&entity.name);
+        // ⚠️ The whole name is the row's own hover, where the row had to cut it. A second
+        // one here shows it twice.
+        let response = drawn.response;
 
         if response.dragged() {
             if let Some(head) = self.held(item, workspace, &device.state) {
