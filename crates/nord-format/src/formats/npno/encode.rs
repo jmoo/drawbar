@@ -1182,56 +1182,24 @@ fn compare(before: &[u8], coded: &[u8], block: usize) -> Recoded {
 
 #[cfg(test)]
 mod tests {
+    use super::super::synthetic::{take, Build};
     use super::*;
-    use crate::cbin::{Cbin, Header, RawBody};
-    use crate::formats::npno::{be16, Piano, CNSP_MAGIC, DECAYS, FORMAT, REC_DECAYS};
+    use crate::formats::npno::{be16, Piano, DECAYS};
 
     /// A one-stroke library the encoder can donate from: a real prefix and one real
     /// record, holding marks and a full ladder of decay coefficients a new stroke
-    /// inherits.
+    /// inherits, over a block of silence a decode reads back.
     fn template(channels: u16) -> Piano {
-        let block = block_bytes(channels);
-        let directory_end = super::super::DIRECTORY_AT + RECORD;
-        let first = super::super::first_audio_offset(directory_end, block).unwrap();
-        let mut body = vec![0u8; first + block];
-        body[..4].copy_from_slice(CNSP_MAGIC);
-        body[0x04..0x06].copy_from_slice(&0x450u16.to_be_bytes());
-        body[0x61c..0x61e].copy_from_slice(&0x450u16.to_be_bytes());
-        body[0x61e..0x620].copy_from_slice(&channels.to_be_bytes());
-        body[0x1c..0x1c + 9].copy_from_slice(b"Donor#Med");
-        body[KEY_MAP_AT..KEY_MAP_AT + NOTES].fill(UNCOVERED);
-        body[KEY_MAP_AT + 60] = 60;
-        body[0x620..0x622].copy_from_slice(&1u16.to_be_bytes());
-        body[0x622 + 60 * 2..0x622 + 60 * 2 + 2].copy_from_slice(&1u16.to_be_bytes());
-
-        let rec = super::super::DIRECTORY_AT;
-        body[rec..rec + 4].copy_from_slice(&(first as u32).to_be_bytes());
-        body[rec + REC_FRAMES..rec + REC_FRAMES + 4].copy_from_slice(&1000u32.to_be_bytes());
-        body[rec + REC_BLOCKS..rec + REC_BLOCKS + 2].copy_from_slice(&1u16.to_be_bytes());
-        for mark in 0..MARKS {
-            let at = rec + REC_MARKS + mark * 4;
-            body[at..at + 4].copy_from_slice(&((mark as u32 + 6) * 100).to_be_bytes());
-        }
-        body[rec + REC_DECAY..rec + REC_DECAY + 4].copy_from_slice(&0x0000_2000u32.to_be_bytes());
-        for coefficient in 0..DECAYS {
-            let at = rec + REC_DECAYS + coefficient * 4;
-            let value = 0x0000_1000u32 + coefficient as u32;
-            body[at..at + 4].copy_from_slice(&value.to_be_bytes());
-        }
-        body[rec + REC_ID..rec + REC_ID + 4].copy_from_slice(&77u32.to_be_bytes());
-        // One block of order-0 width-16 silence, so the stroke reads back.
-        let audio = first;
-        body[audio..audio + 2].copy_from_slice(&0x6410u16.to_be_bytes());
-        let frames = codec::block_frames(16, block, usize::from(channels));
-        let owned = (frames - OVERLAP) as u32;
-        body[rec + REC_FRAMES..rec + REC_FRAMES + 4].copy_from_slice(&owned.to_be_bytes());
-
-        Piano {
-            file: Cbin {
-                header: Header::new(FORMAT, (0, 0), 530),
-                body: RawBody(body),
-            },
-        }
+        let mut build = Build::new();
+        build.channels = channels;
+        build.map = vec![(60, 60)];
+        build.takes = vec![take(60, Bank::Attack, 0, 1)
+            .marks(std::array::from_fn(|mark| (mark as u32 + 6) * 100))
+            .decay(0x0000_2000)
+            .ladder(std::array::from_fn(|entry| 0x0000_1000 + entry as u32))
+            .id(77)
+            .silent()];
+        build.piano()
     }
 
     /// A decaying tone, which is the shape the coder's width search is built for.
