@@ -4,6 +4,7 @@
 //! carry — the slot name, the names behind dependency ids — is reported as living on
 //! the instrument rather than guessed at.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use nord_format::cbin::{Generation, Header};
@@ -67,22 +68,38 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     }
 }
 
+/// Where a CBIN file of this generation keeps its checksum.
+///
+/// ⚠️ A type-0 file holds body data at `0x18`, where a type-1 file holds its crc32, so
+/// the range follows the generation: read at the wrong one, a program's panel bytes
+/// report as a checksum and a real edit annotates as bookkeeping.
+///
+/// This belongs in `cbin::Generation`, beside the rest of the layout it describes.
+pub(crate) fn checksum_range(generation: Generation, len: usize) -> Option<Range<usize>> {
+    match generation {
+        Generation::V0 => len.checked_sub(2).map(|at| at..len),
+        Generation::V1 => (len >= 0x1c).then_some(0x18..0x1c),
+    }
+}
+
 /// The stored checksum, with the label its generation spells it under.
 ///
-/// The one header fact the parsed [`Header`] does not carry: a type-1 file holds a
-/// crc32 over the body at 0x18, a type-0 file a crc16 over the whole file in its last
-/// two bytes, so the value is read from the bytes either way. `unwrap` verified it, so
-/// this reports what it checked.
+/// The one header fact the parsed [`Header`] does not carry: the value lives in the
+/// bytes, at [`checksum_range`]. `unwrap` verified it, so this reports what it checked.
 fn crc(header: &Header, bytes: &[u8]) -> (&'static str, String) {
-    match header.generation {
-        Generation::V0 => {
-            let crc = u16::from_le_bytes(bytes[bytes.len() - 2..].try_into().unwrap());
-            ("crc16:", format!("{crc:#06x}"))
-        }
-        Generation::V1 => {
-            let crc = u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap());
-            ("crc32:", format!("{crc:#010x}"))
-        }
+    let stored = checksum_range(header.generation, bytes.len()).and_then(|at| bytes.get(at));
+    match (header.generation, stored) {
+        (Generation::V0, Some(b)) => (
+            "crc16:",
+            format!("{:#06x}", u16::from_le_bytes(b.try_into().unwrap())),
+        ),
+        (Generation::V1, Some(b)) => (
+            "crc32:",
+            format!("{:#010x}", u32::from_le_bytes(b.try_into().unwrap())),
+        ),
+        // The header parsed, so the file is longer than either range; a file too short
+        // to hold one says so rather than reporting a number it did not read.
+        _ => ("crc:", "not in these bytes".to_string()),
     }
 }
 
@@ -223,7 +240,11 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     }
     ui.out(ui.dim(format!("{:<8} id", "class")));
     for (class, id) in &refs {
-        ui.out(format!("{:<8} {id:08x}", class.label()));
+        ui.out(format!(
+            "{:<8} {}",
+            class.label(),
+            crate::summary::dep_id(*id)
+        ));
     }
     ui.note(ui.dim("(ids only — the names live on the instrument; `deps BANK:SLOT` shows them)"));
     Ok(())

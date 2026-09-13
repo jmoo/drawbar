@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nord_format::cbin::Generation;
 use nord_format::fields::{ControlKind, Field, Registry, Unit};
 use nord_format::formats::ne5;
 use nord_format::{Entity, Live, Program, Settings, Song};
@@ -40,8 +41,13 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
         None => fresh(class)?,
     };
 
+    let named = |what: String| match &target {
+        Some(Target::File(path)) => format!("{}: {what}", path.display()),
+        Some(Target::Slot(at)) => format!("{}: {what}", crate::slot::addr(*at)),
+        None => format!("a fresh {}: {what}", crate::slot::noun(class)),
+    };
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| named(e.to_string()))?;
     let what = match (&entity, class) {
         (Entity::Program(Program::Electro5(_)), ObjectClass::Program) => "the edited program",
         (Entity::Live(Live::Electro5(_)), ObjectClass::Live) => "the edited live slot",
@@ -310,11 +316,10 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// ⚠️ Fields that do nothing without a companion. The pairing is a fact about the
 /// instrument, not something the declaration carries.
 ///
-/// Transpose: the stored value is ignored while `transpose_enabled` is clear, the
-/// instrument never clears that bit once set, and an untouched program holds `+1` rather
-/// than `0`. So `--set center_panel.transpose=0` alone leaves a program the panel still
-/// calls transposed. Warn rather than refuse — setting one half deliberately is
-/// legitimate.
+/// Transpose: neither half answers on its own, and the enable is sticky once set — see
+/// `ne5::program::center::CenterPanel::transpose_enabled`, which carries the evidence.
+/// So `--set center_panel.transpose=0` alone leaves a program the panel still calls
+/// transposed. Warn rather than refuse — setting one half deliberately is legitimate.
 const STICKY_PAIRS: [(&str, &str); 1] =
     [("center_panel.transpose", "center_panel.transpose_enabled")];
 
@@ -336,17 +341,16 @@ pub(crate) fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
 /// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
 /// are not a CBIN file.
 ///
-/// The two generations put it in different places, and a type-0 file's `0x18` is body
-/// data — annotating it as the type-1 crc32 would label a real edit as bookkeeping.
+/// The generation comes from the header parser rather than a second reading of the
+/// word at `0x04`, and the range from [`crate::file::checksum_range`], so the CLI holds
+/// one account of where a checksum sits.
 fn checksum_bytes(file: &[u8]) -> Option<(std::ops::Range<usize>, &'static str)> {
-    if file.len() < 8 || &file[0..4] != nord_format::cbin::MAGIC {
-        return None;
-    }
-    match u32::from_le_bytes(file[4..8].try_into().unwrap()) {
-        0 => Some((file.len() - 2..file.len(), "  (file crc16)")),
-        1 => Some((0x18..0x1c, "  (body crc32)")),
-        _ => None,
-    }
+    let header = nord_usb::envelope::unwrap(file).ok()?.header;
+    let at = crate::file::checksum_range(header.generation, file.len())?;
+    Some(match header.generation {
+        Generation::V0 => (at, "  (file crc16)"),
+        Generation::V1 => (at, "  (body crc32)"),
+    })
 }
 
 /// The bytes that moved.
@@ -367,8 +371,6 @@ pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
         if b == a {
             continue;
         }
-        // The CBIN checksum, stamped by `nord-format` during encode rather than set by
-        // anyone.
         let note = match &checksum {
             Some((at, label)) if at.contains(&i) => *label,
             _ => "",
@@ -543,6 +545,28 @@ pub(crate) mod tests {
         let err = run(&Ui::piped(), args, ObjectClass::Program).unwrap_err();
         assert!(err.contains("--yes"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    /// A target that does not decode says which target it was, as every other file
+    /// error in the CLI does.
+    #[test]
+    fn a_target_that_does_not_decode_is_named_in_the_error() {
+        let dir = scratch("edit-undecodable");
+        let path = dir.join("junk.ne5p");
+        std::fs::write(&path, b"not a CBIN file at all").unwrap();
+
+        let args = EditArgs {
+            target: Some(path.display().to_string()),
+            common: SetArgs {
+                set: vec!["center_panel.gain=64".into()],
+                dry_run: false,
+                fields: false,
+                out: None,
+                yes: false,
+            },
+        };
+        let err = run(&Ui::piped(), args, ObjectClass::Program).unwrap_err();
+        assert!(err.contains("junk.ne5p"), "{err}");
     }
 
     /// The smallest container-verified stub: enough bytes to decode, nothing to edit.
