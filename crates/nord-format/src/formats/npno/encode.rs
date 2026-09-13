@@ -562,7 +562,8 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
         let audio = codec::decode(stroke, library.channels())?;
         if audio.clipped > 0 {
             return Err(refuse(format!(
-                "{stroke:?}: {} sample(s) left int16 in the decode; coding a stroke this                  codec does not describe would write the saturated frames as new audio",
+                "{stroke:?}: {} sample(s) left int16 in the decode; coding a stroke this \
+                 codec does not describe would write the saturated frames as new audio",
                 audio.clipped
             )));
         }
@@ -706,7 +707,8 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
         }
         if recording.layer > HIGHEST_PLAYED_LAYER {
             return Err(refuse(format!(
-                "{what} states a layer value no velocity selects; {HIGHEST_PLAYED_LAYER} is                  the largest a key ever sounds"
+                "{what} states a layer value no velocity selects; {HIGHEST_PLAYED_LAYER} is \
+                 the largest a key ever sounds"
             )));
         }
         if !seen.insert((recording.root, recording.bank.code(), recording.layer)) {
@@ -1420,6 +1422,10 @@ mod tests {
             Ok(_) => panic!("expected a refusal"),
         };
         assert!(error.contains("left int16"), "{error}");
+        assert!(
+            error.contains("coding a stroke this codec does not describe"),
+            "the refusal does not read as the sentence it states: {error}"
+        );
     }
 
     #[test]
@@ -1711,7 +1717,10 @@ mod tests {
             short.clone(),
         )]);
         assert!(unplayable.contains("no velocity selects"), "{unplayable}");
-        assert!(unplayable.contains("30"), "{unplayable}");
+        assert!(
+            unplayable.contains("30 is the largest a key ever sounds"),
+            "{unplayable}"
+        );
         assert!(error(&[
             one(60, Bank::Attack, 0, short.clone()),
             one(
