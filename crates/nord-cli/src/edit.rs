@@ -288,6 +288,16 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Now, as the 32-bit Unix seconds count the wire protocol and the Sample Editor's
+/// `m_modifyDate` both stamp a write with.
+pub(crate) fn unix_seconds_now() -> Result<u32, String> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system clock is before the Unix epoch: {e}"))?;
+    u32::try_from(elapsed.as_secs())
+        .map_err(|_| "the current time does not fit a 32-bit Unix timestamp".to_string())
+}
+
 pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), String> {
     replace_file(path, bytes)?;
     ui.note(format!("wrote {} ({} bytes)", path.display(), bytes.len()));
