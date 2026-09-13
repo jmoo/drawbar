@@ -85,6 +85,7 @@ use super::{
 use crate::cbin::Header;
 use crate::error::{Error, ParseError};
 use crate::formats::nsmp::kernel;
+use crate::formats::predictor;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
@@ -973,7 +974,8 @@ fn planes(
             for channel in 0..channels {
                 let mut acc = 0i64;
                 for j in 0..=order {
-                    let term = codec::binomial(order, j) * sample(channel, n as isize - j as isize);
+                    let term =
+                        predictor::binomial(order, j) * sample(channel, n as isize - j as isize);
                     acc += if j.is_multiple_of(2) { term } else { -term };
                 }
                 plane[n * channels + channel] = acc as i32;

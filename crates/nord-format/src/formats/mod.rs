@@ -30,6 +30,7 @@
 //! from community byte maps and corpus measurement, not confirmed on hardware —
 //! each module says which.
 
+pub(crate) mod predictor;
 pub(crate) mod raw;
 
 pub mod cn3;

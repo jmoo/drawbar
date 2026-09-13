@@ -44,6 +44,7 @@
 
 use super::Stroke;
 use crate::error::{Error, ParseError};
+use crate::formats::predictor;
 
 /// u16 words in one block, per channel, the header included.
 pub const BLOCK_WORDS: usize = 511;
@@ -55,7 +56,7 @@ pub const OVERLAP: usize = 64;
 pub const RATE: u32 = 35_002;
 
 /// Highest backward-difference order a block header can ask for.
-pub const MAX_ORDER: usize = 4;
+pub const MAX_ORDER: usize = predictor::MAX_ORDER;
 
 /// Narrowest residual field a block header can express.
 pub const MIN_WIDTH: u8 = 1;
@@ -167,15 +168,6 @@ impl<'a> Fields<'a> {
     }
 }
 
-/// `C(n, k)`, for the small orders a block header can express.
-pub(super) fn binomial(n: usize, k: usize) -> i64 {
-    let mut c = 1i64;
-    for i in 0..k {
-        c = c * (n - i) as i64 / (i + 1) as i64;
-    }
-    c
-}
-
 /// Decode one stroke, checking the block overlap and the record's frame count.
 ///
 /// `channels` is the library's — 1 or 2, and any other count is refused — and
@@ -278,17 +270,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
                         "block {index} runs out of words before its {block_frames} frames"
                     ))
                 })?;
-                let mut value = i64::from(residual);
-                for j in 1..=order {
-                    let term = binomial(order, j).saturating_mul(state[j - 1]);
-                    value = if j.is_multiple_of(2) {
-                        value.saturating_sub(term)
-                    } else {
-                        value.saturating_add(term)
-                    };
-                }
-                state.copy_within(0..MAX_ORDER - 1, 1);
-                state[0] = value;
+                let value = predictor::predict(state, order, i64::from(residual));
                 channel.push(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
             }
         }
