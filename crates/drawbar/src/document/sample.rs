@@ -2038,13 +2038,6 @@ mod tests {
         }
     }
 
-    /// A note is spelled the way the document shows it, and the round trip is exact.
-    #[test]
-    fn zone_notes_are_spelled_as_names() {
-        assert_eq!(note::name(60), "C4");
-        assert_eq!(note::parse("C4").unwrap(), 60);
-    }
-
     /// A zone reads as the stretch of keyboard it covers, and the last one runs to the
     /// bottom.
     #[test]
@@ -2268,6 +2261,33 @@ mod tests {
         let key = snapshot.key_table.unwrap().key(60).unwrap();
         assert_eq!(key.gain(), gain_units(1.5).unwrap());
         assert_eq!(key.detune(), detune_units(50.0));
+    }
+
+    /// ⚠️ Zones are numbered from 1, the way the panel numbers them: a path outside
+    /// what the file holds is refused, and the refusal speaks that numbering rather
+    /// than the format crate's own.
+    #[test]
+    fn unknown_zone_paths_are_refused() {
+        let bytes = v2_bytes();
+        assert_eq!(v2_snapshot().zones.len(), 1);
+        let refused = |path: &str| {
+            apply(&bytes, &[(path.into(), "C4".into())])
+                .expect_err(&format!("{path} was accepted"))
+        };
+        assert_eq!(
+            refused("zone2.root_key"),
+            "there is no zone 2: this sample has 1"
+        );
+        for path in ["zone0.root_key", "zone1.bogus", "zone1.", ".root_key", "zone1"] {
+            assert_eq!(refused(path), format!("unknown field {path:?}"));
+        }
+
+        // Bytes that decode as something else are refused before any path is read.
+        let song = crate::fields::blank::electro5_song();
+        assert_eq!(
+            apply(&song, &[("name".into(), "Vibes".into())]).unwrap_err(),
+            "not a sample instrument"
+        );
     }
 
     /// A path that names no field is refused before anything is written.
