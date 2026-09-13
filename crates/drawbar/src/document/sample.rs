@@ -99,71 +99,85 @@ pub fn snapshot(entity: &Entity) -> Option<Result<Snapshot, String>> {
 }
 
 fn read(sample: &Sample) -> Result<Snapshot, String> {
-    // Only the wide chain carries a second name, and the `cat` section this reader
-    // decodes is the narrow one's.
-    let (sub_name, categories) = match sample {
-        Sample::V2(body) => (String::new(), body.categories()),
-        Sample::V3(body) => (body.sub_name().map_err(|e| e.to_string())?, Vec::new()),
-    };
-    let records = match sample {
-        // A `map` version with no zone layout is a body whose zones did not read at
-        // all, and the error the zone read gives is the one worth showing.
-        Sample::V2(body) => body
-            .chain()
-            .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
-        Sample::V3(body) => body
-            .zone_table()
-            .map_or(zone::RECORD_LEN, |table| table.wide.record_len()),
-    };
-    let gains: Vec<Option<u32>> = match sample {
-        Sample::V2(body) => body
-            .zones()
-            .map(|zones| zones.iter().map(|zone| Some(zone.gain)).collect())
-            .unwrap_or_default(),
-        Sample::V3(_) => Vec::new(),
-    };
-    let windows: Vec<Option<(u8, u8)>> = match sample {
-        Sample::V2(_) => Vec::new(),
-        Sample::V3(body) => body
-            .zones()
-            .map(|zones| {
-                zones
-                    .iter()
-                    .map(|zone| zone.velocity.map(|window| (window.low, window.high)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
+    let told = told(sample)?;
     Ok(Snapshot {
         name: sample.name().map_err(|e| e.to_string())?,
         max_name_len: sample.max_name_len(),
-        sub_name,
+        sub_name: told.sub_name,
         generation: sample.generation(),
-        categories,
+        categories: told.categories,
         zones: sample
             .zones()
             .map_err(|e| e.to_string())?
             .iter()
             .enumerate()
-            .map(|(index, zone)| Zone {
-                root_key: zone.root_key,
-                top_note: zone.top_note,
-                low_note: zone.low_note,
-                gain: gains.get(index).copied().flatten(),
-                velocity: windows.get(index).copied().flatten(),
-                bytes: zone.stream.len(),
+            .map(|(index, zone)| {
+                let (gain, velocity) = told.records.get(index).copied().unwrap_or_default();
+                Zone {
+                    root_key: zone.root_key,
+                    top_note: zone.top_note,
+                    low_note: zone.low_note,
+                    gain,
+                    velocity,
+                    bytes: zone.stream.len(),
+                }
             })
             .collect(),
         zones_editable: sample.zones_are_editable(),
-        key_table: match sample {
-            Sample::V2(body) => body.key_table().ok(),
-            Sample::V3(_) => None,
-        },
-        record_len: records,
+        key_table: told.key_table,
+        record_len: told.record_len,
         sound: sound(sample),
-        version: match sample {
-            Sample::V2(body) => body.header.version,
-            Sample::V3(body) => body.header.version,
+        version: told.version,
+    })
+}
+
+/// What one generation's own sections state, in one read of them.
+struct Told {
+    /// Empty on the narrow chain, which has one name.
+    sub_name: String,
+    /// The `cat` section, which only the narrow chain carries.
+    categories: Vec<String>,
+    key_table: Option<KeyTable>,
+    record_len: usize,
+    /// One per zone in stored order: the record's own gain, and the velocity window it
+    /// answers, where this generation's record holds them.
+    records: Vec<(Option<u32>, Option<(u8, u8)>)>,
+    version: u32,
+}
+
+fn told(sample: &Sample) -> Result<Told, String> {
+    Ok(match sample {
+        Sample::V2(body) => Told {
+            sub_name: String::new(),
+            categories: body.categories(),
+            key_table: body.key_table().ok(),
+            // A `map` version with no zone layout is a body whose zones did not read at
+            // all, and the error the zone read gives is the one worth showing.
+            record_len: body
+                .chain()
+                .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
+            records: body
+                .zones()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|zone| (Some(zone.gain), None))
+                .collect(),
+            version: body.header.version,
+        },
+        Sample::V3(body) => Told {
+            sub_name: body.sub_name().map_err(|e| e.to_string())?,
+            categories: Vec::new(),
+            key_table: None,
+            record_len: body
+                .zone_table()
+                .map_or(zone::RECORD_LEN, |table| table.wide.record_len()),
+            records: body
+                .zones()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|zone| (None, zone.velocity.map(|window| (window.low, window.high))))
+                .collect(),
+            version: body.header.version,
         },
     })
 }
@@ -2106,6 +2120,27 @@ mod tests {
             snapshot.key_table.is_none(),
             "the wide layouts expose no keyboard map"
         );
+    }
+
+    /// Each generation's zone record states its own thing, and one read of the body
+    /// brings back whichever it is: the narrow record's gain, the wide record's
+    /// velocity window.
+    #[test]
+    fn a_zone_carries_what_its_own_generation_states() {
+        let narrow = v2_snapshot();
+        assert!(!narrow.zones.is_empty());
+        assert!(narrow
+            .zones
+            .iter()
+            .all(|zone| zone.gain.is_some() && zone.velocity.is_none()));
+
+        let entity = Entity::Sample(Sample::V3(v3_sample(300)));
+        let wide = snapshot(&entity).unwrap().unwrap();
+        assert!(!wide.zones.is_empty());
+        assert!(wide
+            .zones
+            .iter()
+            .all(|zone| zone.gain.is_none() && zone.velocity.is_some()));
     }
 
     #[test]
