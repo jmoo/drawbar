@@ -246,13 +246,11 @@ fn chip(
     rect
 }
 
-/// The corner every rectangle here is drawn with.
-const RADIUS: f32 = 2.0;
+/// The corner every rectangle in a document is drawn with.
+pub(crate) const RADIUS: f32 = 2.0;
 
 const CHIP_TEXT: f32 = 9.5;
 const CHIP_PAD: f32 = 3.0;
-
-// ---- the keyboard -------------------------------------------------------------------
 
 /// A key worth pointing at: a zone's root, or a library's.
 pub struct Mark {

@@ -18,6 +18,7 @@ use nord_format::fields::{ControlKind, Field, PackedOrder, Unit};
 use nord_format::panel::{Panel, Section as Placed, Selection};
 
 use super::controls::{self, Ctx, Sets};
+use super::keys::RADIUS;
 use super::panel::{PianoLookup, PIANO_MODEL};
 use crate::app;
 use crate::icon::{icon, Glyph};
@@ -31,7 +32,6 @@ const TRANSPOSE: &str = "center_panel.transpose";
 /// The name under a control, the edited dot beside it, and the morph dots below.
 const LABEL: f32 = 9.5;
 const DOT: f32 = 6.0;
-const RADIUS: f32 = 2.0;
 
 /// A nested group's title, and the chip a nav row is made of.
 const CARD_TITLE: f32 = 11.5;
@@ -528,7 +528,7 @@ pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
         for section in &doc.sections {
             let active = state.active.as_deref() == Some(section.key.as_str());
-            if chip(ui, &section.title, &section.count.to_string(), active).clicked() {
+            if nav_chip(ui, &section.title, &section.count.to_string(), active).clicked() {
                 state.jump = Some(section.key.clone());
             }
         }
@@ -539,11 +539,11 @@ pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (nth, (_, word, _)) in SLOTS.iter().enumerate().rev() {
                 let count = stored_targets(doc, nth);
-                if chip(ui, word, &count.to_string(), state.lens == Some(nth)).clicked() {
+                if nav_chip(ui, word, &count.to_string(), state.lens == Some(nth)).clicked() {
                     state.lens = Some(nth);
                 }
             }
-            if chip(ui, "Panel", "", state.lens.is_none()).clicked() {
+            if nav_chip(ui, "Panel", "", state.lens.is_none()).clicked() {
                 state.lens = None;
             }
             ui.label(
@@ -563,7 +563,7 @@ fn stored_targets(doc: &Doc<'_>, slot: usize) -> usize {
         .count()
 }
 
-fn chip(ui: &mut egui::Ui, title: &str, count: &str, active: bool) -> egui::Response {
+fn nav_chip(ui: &mut egui::Ui, title: &str, count: &str, active: bool) -> egui::Response {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let ink = match active {
