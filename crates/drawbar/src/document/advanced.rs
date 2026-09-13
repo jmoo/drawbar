@@ -63,6 +63,13 @@ pub struct Advanced {
     /// hundreds of megabytes — it is rendered once per set of bytes, never per frame.
     dump_for: Option<(u64, u64)>,
     dump: String,
+    /// The asset and the two sets of bytes the cached diff is a comparison of.
+    ///
+    /// ⚠️ `byte_diff` walks both bodies. The Metadata face asks for it on every frame
+    /// it is up, and a piano library is hundreds of megabytes — it is walked once per
+    /// pair of bodies.
+    diff_for: Option<(u64, u64, u64)>,
+    diff: Vec<DiffRow>,
 }
 
 impl Advanced {
@@ -393,13 +400,12 @@ impl Advanced {
             verify(ui, entity);
             container(ui, entity);
         });
-        let saved = &entity.saved.bytes;
-        let rows = byte_diff(saved, &entity.bytes);
+        let rows = self.changes(entity);
         let title = match rows.len() {
             0 => "Changes".to_string(),
             n => format!("Changes ({n} bytes)"),
         };
-        controls::section(ui, &title, |ui| diff(ui, entity, saved, rows));
+        controls::section(ui, &title, |ui| diff(ui, entity, rows));
         if entity.origin.slot().is_some() {
             controls::section(ui, "On the instrument", |ui| {
                 asked = slot(ui, entity, device);
@@ -409,6 +415,16 @@ impl Advanced {
             controls::section(ui, "Raw", |ui| self.dump(ui, entity));
         }
         asked
+    }
+
+    /// The bytes that moved since the asset was last saved.
+    fn changes(&mut self, entity: &LocalEntity) -> &[DiffRow] {
+        let against = (entity.id, entity.stamp, entity.saved.stamp);
+        if self.diff_for != Some(against) {
+            self.diff = byte_diff(&entity.saved.bytes, &entity.bytes);
+            self.diff_for = Some(against);
+        }
+        &self.diff
     }
 
     fn dump(&mut self, ui: &mut egui::Ui, entity: &LocalEntity) {
@@ -576,10 +592,10 @@ fn counted(half: u16) -> String {
     }
 }
 
-fn diff(ui: &mut egui::Ui, entity: &LocalEntity, saved: &[u8], rows: Vec<DiffRow>) {
+fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
     if rows.is_empty() {
         ui.label(
-            egui::RichText::new(match saved.len() == entity.bytes.len() {
+            egui::RichText::new(match entity.saved.bytes.len() == entity.bytes.len() {
                 true => "nothing moved",
                 // Nothing here can pair the bytes up across a length change.
                 false => "the length changed, so there is nothing to line up",
@@ -720,6 +736,46 @@ mod tests {
         assert_ne!(
             before, after,
             "the dump is of the bytes in front of the reader"
+        );
+    }
+
+    /// The Changes section is what the asset holds against what it was last saved as,
+    /// and it follows both ends of that: an edit moves the bytes, and saving moves the
+    /// baseline onto them.
+    #[test]
+    fn the_changes_rows_follow_the_bytes_and_the_baseline() {
+        let ctx = eframe::egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = crate::log::Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
+        let mut advanced = Advanced::default();
+        assert!(
+            advanced
+                .changes(workspace.get(id).expect("it is open"))
+                .is_empty(),
+            "nothing has moved yet"
+        );
+
+        let bytes = workspace.get(id).expect("it is open").bytes.clone();
+        let (_, edited) = crate::fields::apply(
+            &bytes,
+            &[("center_panel.gain".to_string(), "96".to_string())],
+        )
+        .expect("the set is legal");
+        workspace.replace_bytes(id, edited, &mut log);
+        assert!(
+            !advanced
+                .changes(workspace.get(id).expect("it is open"))
+                .is_empty(),
+            "the edit is in the section"
+        );
+
+        workspace.mark_saved(id);
+        assert!(
+            advanced
+                .changes(workspace.get(id).expect("it is open"))
+                .is_empty(),
+            "the baseline moved onto the bytes"
         );
     }
 

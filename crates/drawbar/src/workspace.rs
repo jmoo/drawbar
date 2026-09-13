@@ -166,7 +166,7 @@ impl Container {
 ///
 /// ⚠️ The checksum is read when the baseline moves and never per frame. Reading one
 /// streams the whole body, and every listed row asks for it while the library is up.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Baseline {
     pub bytes: Vec<u8>,
     /// The checksum a slot holding these bytes would report, which is what a link and
@@ -176,14 +176,24 @@ pub struct Baseline {
     /// `None` for bytes that are no CBIN container at all — see
     /// [`Container::body_crc32`].
     pub crc32: Option<u32>,
+    /// Which [`LocalEntity::stamp`] these bytes are: the asset's own where it still
+    /// holds them, and one of its own where it does not.
+    ///
+    /// ⚠️ This is what unsaved is read from. Comparing two bodies is O(the library),
+    /// and the header alone asks twice a frame — see [`LocalEntity::is_unsaved`].
+    pub stamp: u64,
 }
 
 impl Baseline {
-    /// The baseline of bytes nothing has inspected yet, which is what a store hands
-    /// back.
-    pub fn read(bytes: Vec<u8>) -> Baseline {
+    /// The baseline of bytes nothing has inspected yet, stamped as `stamp` — which is
+    /// [`Workspace::stamp_for`]'s to decide.
+    fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
-        Baseline { bytes, crc32 }
+        Baseline {
+            bytes,
+            crc32,
+            stamp,
+        }
     }
 }
 
@@ -264,10 +274,7 @@ impl LocalEntity {
             parse_error,
             container,
             verify,
-            saved: Baseline {
-                bytes: Vec::new(),
-                crc32: None,
-            },
+            saved: Baseline::default(),
             kept: true,
             stamp,
             link: None,
@@ -278,8 +285,12 @@ impl LocalEntity {
     }
 
     /// Whether it holds something other than what it was last saved as.
+    ///
+    /// ⚠️ Two stamps, not two bodies: every listed row and every frame of the header
+    /// ask this, and a piano library is hundreds of megabytes. The stamps are settled
+    /// wherever a baseline moves — see [`Baseline::stamp`].
     pub fn is_unsaved(&self) -> bool {
-        self.bytes != self.saved.bytes
+        self.stamp != self.saved.stamp
     }
 
     /// The bytes it holds now, as a baseline: what saving it settles on.
@@ -287,6 +298,7 @@ impl LocalEntity {
         Baseline {
             bytes: self.bytes.clone(),
             crc32: self.container.as_ref().map(|held| held.body_crc32),
+            stamp: self.stamp,
         }
     }
 
@@ -906,6 +918,22 @@ impl Workspace {
         self.revision
     }
 
+    /// The stamp a baseline of `bytes` takes under `id`: the asset's own where it holds
+    /// those very bytes, and one of its own where it holds something else.
+    ///
+    /// ⚠️ The one place two bodies are compared. It runs where a baseline moves —
+    /// never per frame — so that [`LocalEntity::is_unsaved`] and the caches over the
+    /// pair are two integers.
+    fn stamp_for(&mut self, id: u64, bytes: &[u8]) -> u64 {
+        match self
+            .get(id)
+            .map(|entity| (entity.stamp, entity.bytes == bytes))
+        {
+            Some((stamp, true)) => stamp,
+            _ => self.stamp(),
+        }
+    }
+
     /// Drain whatever the pickers finished with. Call once per frame.
     pub fn poll(&mut self, log: &mut Log) {
         while let Ok(message) = self.rx.try_recv() {
@@ -1013,9 +1041,13 @@ impl Workspace {
         if self.respell(id, saved).is_none() {
             return;
         }
-        if let Some(entity) = self.get(id) {
-            log.say(format!("“{}” is back as it was last saved.", entity.name));
-        }
+        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        // The bytes came off the baseline, so the asset is holding it again — nothing
+        // has to compare the two to know it.
+        entity.saved.stamp = entity.stamp;
+        log.say(format!("“{}” is back as it was last saved.", entity.name));
     }
 
     /// The bytes it holds are what it is saved as, from now on.
@@ -1046,10 +1078,11 @@ impl Workspace {
     /// about a slot this app does not have to read back, and [`crate::device::link`]
     /// keeps it until a walk of that slot says otherwise.
     pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+        let stamp = self.stamp_for(id, &sent);
         let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
             return;
         };
-        entity.saved = Baseline::read(sent);
+        entity.saved = Baseline::read(sent, stamp);
         entity.link = Some((class, at));
         entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
         self.revision += 1;
@@ -1097,13 +1130,7 @@ impl Workspace {
         let stamp = self.stamp();
         let entity = self.entities.iter_mut().find(|e| e.id == id)?;
         let (kept, link, wrote) = (entity.kept, entity.link, entity.wrote);
-        let saved = std::mem::replace(
-            &mut entity.saved,
-            Baseline {
-                bytes: Vec::new(),
-                crc32: None,
-            },
-        );
+        let saved = std::mem::take(&mut entity.saved);
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
         let verify = replaced.verify.clone();
@@ -1167,10 +1194,15 @@ impl Workspace {
                 continue;
             }
             let stamp = self.stamp();
-            let baseline = Baseline::read(saved);
-            let bytes = unsaved.unwrap_or_else(|| baseline.bytes.clone());
+            let bytes = unsaved.unwrap_or_else(|| saved.clone());
+            // The store says what was saved and what was held; the two are one asset's
+            // bytes exactly when they are the same bytes.
+            let held = match bytes == saved {
+                true => stamp,
+                false => self.stamp(),
+            };
             let entity = LocalEntity {
-                saved: baseline,
+                saved: Baseline::read(saved, held),
                 ..LocalEntity::new(id, name, origin, bytes, stamp)
             };
             if let Some(e) = &entity.parse_error {
@@ -1787,6 +1819,34 @@ mod tests {
         workspace.revert(id, &mut log);
         assert!(!unsaved(&workspace));
         assert_eq!(workspace.get(id).unwrap().bytes, edited);
+    }
+
+    /// A write that reached a slot saves the bytes it carried and not the ones the
+    /// asset holds now: an edit made while the write was in flight is on this computer
+    /// alone, and calling it saved would let it be discarded with the tab it is in.
+    #[test]
+    fn a_write_that_landed_saves_what_it_carried_rather_than_a_later_edit() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let at = Location { bank: 6, slot: 3 };
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let sent = workspace.get(id).unwrap().bytes.clone();
+
+        let (_, edited) =
+            crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.landed(id, ObjectClass::Program, at, sent.clone());
+        assert!(
+            workspace.get(id).unwrap().is_unsaved(),
+            "the edit made in flight is still owed"
+        );
+        assert_eq!(workspace.get(id).unwrap().saved.bytes, sent);
+
+        workspace.landed(id, ObjectClass::Program, at, edited);
+        assert!(
+            !workspace.get(id).unwrap().is_unsaved(),
+            "a write of what it holds leaves nothing owed"
+        );
     }
 
     /// The baseline's checksum is the one a slot holding those bytes reports, so a saved
