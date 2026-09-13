@@ -412,6 +412,8 @@ struct Facts {
     total: u64,
     strokes: usize,
     roots: Vec<Root>,
+    /// Where each root note sits in `roots`.
+    of_note: BTreeMap<u8, usize>,
     /// The layer values the directory holds, ascending — 0 the loudest.
     layers: Vec<u8>,
     /// The banks present, in [`Bank::ALL`] order.
@@ -437,22 +439,22 @@ impl Facts {
     fn of(saved: &[u8]) -> Result<Facts, String> {
         let library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
         let (name, variant) = library.name();
-        let roots: Vec<Root> = library
-            .roots()
+        let notes = library.roots();
+        let roots: Vec<Root> = notes
             .iter()
             .map(|note| Root {
                 note: *note,
                 keys: library.keys_for(*note),
             })
             .collect();
+        // `Library::roots` is the set of the strokes' own root notes, so every stroke
+        // and every key the map covers names one of these.
+        let of_note: BTreeMap<u8, usize> = notes.iter().copied().zip(0..).collect();
 
         let mut grouped: BTreeMap<(usize, u8, Option<Bank>), u64> = BTreeMap::new();
         let mut strikes: Vec<Strike> = Vec::with_capacity(library.strokes().len());
         for stroke in library.strokes() {
-            let root = roots
-                .iter()
-                .position(|root| root.note == stroke.root)
-                .ok_or("a stroke names a root the directory does not record")?;
+            let root = of_note[&stroke.root];
             *grouped
                 .entry((root, stroke.layer(), stroke.bank()))
                 .or_default() += stroke.audio().len() as u64;
@@ -478,7 +480,7 @@ impl Facts {
         let of_key: Vec<Option<usize>> = library
             .key_map()
             .iter()
-            .map(|note| roots.iter().position(|root| root.note == *note))
+            .map(|note| of_note.get(note).copied())
             .collect();
 
         Ok(Facts {
@@ -489,6 +491,7 @@ impl Facts {
             total: saved.len() as u64,
             strokes: library.strokes().len(),
             roots,
+            of_note,
             layers: layers.into_iter().collect(),
             banks: Bank::ALL
                 .into_iter()
@@ -522,7 +525,7 @@ impl Facts {
     }
 
     fn index_of(&self, note: u8) -> Option<usize> {
-        self.roots.iter().position(|root| root.note == note)
+        self.of_note.get(&note).copied()
     }
 
     /// The layers as the sections list them, softest first, each with its rank among
@@ -967,6 +970,8 @@ pub struct State {
     open: Option<Open>,
     /// The plan as this frame's controls have left it, to be tried before it is kept.
     draft: Plan,
+    /// What the sections read off that plan, worked out when it moves.
+    summary: Option<Summary>,
     view: View,
     audio: Cache,
     /// What the attached instrument has free for pianos, read where the device is in
@@ -997,6 +1002,8 @@ impl State {
                 facts: Facts::of(&entity.saved.bytes),
             });
             self.view = View::default();
+            // The figures go with the facts they were worked out from.
+            self.summary = None;
         }
         let plan = self.plans.entry(id).or_default();
         // A save makes what was dropped gone for good: the rows show the file as it now
@@ -1011,12 +1018,35 @@ impl State {
         self.draft = plan.clone();
         self.audio.follow(id, entity.stamp);
         self.free = room::free_bytes(ObjectClass::Piano, device);
+        self.summarise();
         let standing = self.standing(id);
 
-        let Some(facts) = self.facts() else {
+        let (Some(facts), Some(summary)) = (self.facts(), self.summary.as_ref()) else {
             return Extras::default();
         };
-        extras(facts, &self.draft, self.free, standing)
+        extras(facts, summary.kept, self.free, standing)
+    }
+
+    /// Work the figures out again where the plan or the room it has to fit in has moved.
+    /// A frame that changed neither reads what the last one left.
+    fn summarise(&mut self) {
+        let State {
+            open,
+            draft,
+            free,
+            summary,
+            ..
+        } = self;
+        let Some(facts) = open.as_ref().and_then(|open| open.facts.as_ref().ok()) else {
+            *summary = None;
+            return;
+        };
+        if summary
+            .as_ref()
+            .is_none_or(|held| held.of != *draft || held.free != *free)
+        {
+            *summary = Some(Summary::of(facts, draft, *free));
+        }
     }
 
     /// Where this document's plan stands.
@@ -1116,6 +1146,7 @@ impl State {
         }
         if self.open.as_ref().is_some_and(|open| open.id == id) {
             self.draft = Plan::default();
+            self.summary = None;
             self.open = None;
         }
     }
@@ -1124,6 +1155,7 @@ impl State {
     /// audition go. The plans stay, and so does an apply in flight.
     pub fn leave(&mut self) {
         self.view = View::default();
+        self.summary = None;
         self.open = None;
     }
 
@@ -1259,8 +1291,7 @@ fn waits_on(act: &Act) -> Option<u64> {
 /// What the header shows over a piano library: what it keeps of what it holds, the word
 /// for a library that has been trimmed, and its refusal to be queued when it will not
 /// fit.
-fn extras(facts: &Facts, plan: &Plan, free: Option<u64>, standing: Standing) -> Extras {
-    let kept = kept_bytes(facts, plan);
+fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Extras {
     let over = free
         .and_then(|free| kept.checked_sub(free))
         .filter(|over| *over > 0);
@@ -1497,24 +1528,23 @@ fn root_bytes(facts: &Facts, plan: Option<&Plan>, index: usize) -> u64 {
         .sum()
 }
 
-/// The keys the plan leaves answering something.
-fn covered(facts: &Facts, plan: &Plan) -> Vec<u8> {
+/// The keys the plan leaves answering something, given what each root keeps.
+fn covered(facts: &Facts, plan: &Plan, roots: &[RootLine]) -> Vec<u8> {
     (0..npno::NOTES as u8)
         .filter(|key| {
             plan.range.as_ref().is_none_or(|range| range.contains(key))
                 && plan
                     .answers(facts, *key)
-                    .is_some_and(|root| root_bytes(facts, Some(plan), root) > 0)
+                    .is_some_and(|root| roots[root].kept > 0)
         })
         .collect()
 }
 
-/// The stretches of the keyboard the plan leaves silent, low to high.
-fn silent(facts: &Facts, plan: &Plan) -> Vec<(u8, u8)> {
-    let answered = covered(facts, plan);
+/// The stretches of [`SPAN`] the covered keys leave out, low to high.
+fn gaps(covered: &[u8]) -> Vec<(u8, u8)> {
     let mut out: Vec<(u8, u8)> = Vec::new();
     for key in SPAN.low..=SPAN.high {
-        if answered.contains(&key) {
+        if covered.contains(&key) {
             continue;
         }
         match out.last_mut() {
@@ -1523,6 +1553,114 @@ fn silent(facts: &Facts, plan: &Plan) -> Vec<(u8, u8)> {
         }
     }
     out
+}
+
+/// What every section of a frame reads off the plan.
+///
+/// ⚠️ Worked out when the plan or the instrument's free memory moves, never per frame:
+/// the walks here are over every key, every cell and — while the library does not fit —
+/// every subset of the switches still on.
+struct Summary {
+    /// The plan and the free memory these figures are of, which is what
+    /// [`State::summarise`] checks before working any of them out again.
+    of: Plan,
+    free: Option<u64>,
+    /// Bytes the plan keeps of the file.
+    kept: u64,
+    /// The keys it leaves answering something, and the stretches it leaves silent.
+    covered: Vec<u8>,
+    silent: Vec<(u8, u8)>,
+    /// The cheapest cut left, where what is kept does not fit.
+    cut: Option<Cut>,
+    roots: Vec<RootLine>,
+    /// One cell per stretch of keys a root answers, and the root each belongs to.
+    cells: Vec<SizeCell>,
+    of_root: Vec<usize>,
+}
+
+/// What one root's cell on the map and its row in the list read.
+struct RootLine {
+    note: u8,
+    /// The stretches of keys the plan routes to it.
+    runs: Vec<(u8, u8)>,
+    /// What it keeps, against what the file holds for it.
+    kept: u64,
+    held: u64,
+    in_range: bool,
+    /// Those stretches as its row prints them.
+    answers: String,
+}
+
+impl Summary {
+    fn of(facts: &Facts, plan: &Plan, free: Option<u64>) -> Summary {
+        let roots: Vec<RootLine> = facts
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| {
+                let runs = runs(&plan.keys_of(facts, index));
+                RootLine {
+                    note: root.note,
+                    answers: answered(&runs),
+                    runs,
+                    kept: root_bytes(facts, Some(plan), index),
+                    held: root_bytes(facts, None, index),
+                    in_range: plan.in_range(facts, index),
+                }
+            })
+            .collect();
+        let mut cells: Vec<SizeCell> = Vec::new();
+        let mut of_root: Vec<usize> = Vec::new();
+        for (index, line) in roots.iter().enumerate() {
+            for (low, top) in &line.runs {
+                of_root.push(index);
+                cells.push(SizeCell {
+                    low: *low,
+                    top: *top,
+                    name: note::name(line.note),
+                    kept: mb(line.kept),
+                    original: mb(line.held),
+                    in_range: line.in_range,
+                    hint: format!(
+                        "root {} answers {}–{} · {} of {}",
+                        note::name(line.note),
+                        note::name(*low),
+                        note::name(*top),
+                        room::measure(line.kept),
+                        room::measure(line.held),
+                    ),
+                });
+            }
+        }
+        let covered = covered(facts, plan, &roots);
+        let kept = kept_bytes(facts, plan);
+        Summary {
+            of: plan.clone(),
+            free,
+            kept,
+            silent: gaps(&covered),
+            covered,
+            cut: free
+                .and_then(|free| kept.checked_sub(free))
+                .filter(|over| *over > 0)
+                .and_then(|over| cheapest_cut(facts, plan, over)),
+            roots,
+            cells,
+            of_root,
+        }
+    }
+}
+
+/// The stretches of keys a root answers, as its row prints them.
+fn answered(runs: &[(u8, u8)]) -> String {
+    match runs {
+        [(low, top)] => format!("{} – {}", note::name(*low), note::name(*top)),
+        runs => runs
+            .iter()
+            .map(|(low, top)| format!("{}–{}", note::name(*low), note::name(*top)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
 }
 
 /// A column `width` wide, laid out top down, claiming only the height its contents
@@ -1648,8 +1786,13 @@ impl State {
     /// The key map, pinned above the body: one cell per root over a clickable keyboard,
     /// and a line saying what the last key played.
     pub fn map(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
+        self.summarise();
         let State {
-            open, draft, view, ..
+            open,
+            draft,
+            view,
+            summary,
+            ..
         } = self;
         let facts = match &open.as_ref()?.facts {
             Ok(facts) => facts,
@@ -1658,15 +1801,15 @@ impl State {
                 return None;
             }
         };
+        let summary = summary.as_ref()?;
 
-        let gaps = silent(facts, draft);
-        let ink = match gaps.is_empty() {
+        let ink = match summary.silent.is_empty() {
             true => app::good(ui.visuals()),
             false => app::warn(ui.visuals()),
         };
         let reading = format!(
             "{}  {}–{}",
-            coverage(&gaps),
+            coverage(&summary.silent),
             note::name(SPAN.low),
             note::name(SPAN.high)
         );
@@ -1679,32 +1822,7 @@ impl State {
 
         let lit = view.audition.as_ref().map(|struck| struck.note);
         let answering = lit.and_then(|note| draft.answers(facts, note));
-        let mut cells = Vec::new();
-        let mut of_root = Vec::new();
-        for (index, root) in facts.roots.iter().enumerate() {
-            let kept = root_bytes(facts, Some(draft), index);
-            let original = root_bytes(facts, None, index);
-            let in_range = draft.in_range(facts, index);
-            for (low, top) in runs(&draft.keys_of(facts, index)) {
-                of_root.push(index);
-                cells.push(SizeCell {
-                    low,
-                    top,
-                    name: note::name(root.note),
-                    kept: mb(kept),
-                    original: mb(original),
-                    in_range,
-                    hint: format!(
-                        "root {} answers {}–{} · {} of {}",
-                        note::name(root.note),
-                        note::name(low),
-                        note::name(top),
-                        room::measure(kept),
-                        room::measure(original),
-                    ),
-                });
-            }
-        }
+        let of_root = &summary.of_root;
         let marks: Vec<keys::Mark> = facts
             .roots
             .iter()
@@ -1729,7 +1847,7 @@ impl State {
         let acted = keys::size_cells(
             &mut inner,
             SPAN,
-            &cells,
+            &summary.cells,
             picked,
             cell_lit,
             keys::Edges::Both,
@@ -1783,8 +1901,12 @@ impl State {
                 view.reveal = Some(root);
             }
             Some(keys::BandAct::Drag { bounds, .. }) => {
-                let was: Vec<(u8, u8)> = cells.iter().map(|cell| (cell.low, cell.top)).collect();
-                reroute(facts, draft, &of_root, &was, &bounds);
+                let was: Vec<(u8, u8)> = summary
+                    .cells
+                    .iter()
+                    .map(|cell| (cell.low, cell.top))
+                    .collect();
+                reroute(facts, draft, of_root, &was, &bounds);
             }
             None => {}
         }
@@ -1815,6 +1937,15 @@ impl State {
     }
 }
 
+/// What throwing one switch row of the trim section does. The range is a switch of its
+/// own: no cut the constraint sentence names offers it.
+#[derive(Clone, Copy)]
+enum Throw {
+    Layer(u8),
+    Bank(Bank),
+    Range,
+}
+
 /// One switch of the trim section as its row draws it.
 struct Switch {
     on: bool,
@@ -1826,11 +1957,11 @@ struct Switch {
     /// What the size was, where the plan has changed it.
     was: Option<String>,
     hint: String,
-    what: Option<What>,
+    throws: Throw,
 }
 
 /// The switch rows of the trim section: what the plan keeps, against what it holds.
-fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
+fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary) {
     let layers = facts.layers.len();
     let whole = spans(&facts.layers);
     let mut rows: Vec<Switch> = Vec::new();
@@ -1881,7 +2012,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
                  every layer sounds it at {}",
                 span_text(&whole[rank].1)
             ),
-            what: Some(What::Layer(layer)),
+            throws: Throw::Layer(layer),
         });
     }
     for bank in &facts.banks {
@@ -1898,35 +2029,33 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
             size: room::measure(kept),
             was: (kept != held).then(|| room::measure(held)),
             hint: format!("bank {} in the file", bank.code()),
-            what: Some(What::Bank(*bank)),
+            throws: Throw::Bank(*bank),
         });
     }
-    rows.push(range_switch(facts, plan));
+    rows.push(range_switch(facts, plan, summary.covered.len()));
 
     let mut thrown = None;
     for (index, row) in rows.iter().enumerate() {
         if let Some(keep) = switch_row(ui, index, row) {
-            thrown = Some((row.what, keep));
+            thrown = Some((row.throws, keep));
         }
     }
     match thrown {
-        Some((Some(What::Layer(layer)), keep)) => plan.switch_layer(layer, keep),
-        Some((Some(What::Bank(bank)), keep)) => plan.switch_bank(bank, keep),
-        Some((None, keep)) => {
-            plan.range = (!keep).then(|| default_range(facts));
-        }
+        Some((Throw::Layer(layer), keep)) => plan.switch_layer(layer, keep),
+        Some((Throw::Bank(bank), keep)) => plan.switch_bank(bank, keep),
+        Some((Throw::Range, keep)) => plan.range = (!keep).then(|| default_range(facts)),
         None => {}
     }
 }
 
-/// The Keys row: the whole range, or the middle of it.
-fn range_switch(facts: &Facts, plan: &Plan) -> Switch {
+/// The Keys row: the whole range, or the middle of it. `kept` is how many keys the plan
+/// leaves answering something.
+fn range_switch(facts: &Facts, plan: &Plan, kept: usize) -> Switch {
     let (low, high) = (
         facts.covered.first().copied().unwrap_or(SPAN.low),
         facts.covered.last().copied().unwrap_or(SPAN.high),
     );
     let held = facts.covered.len();
-    let kept = covered(facts, plan).len();
     Switch {
         on: plan.range.is_none(),
         name: format!("Keys {} – {}", note::name(low), note::name(high)),
@@ -1947,7 +2076,7 @@ fn range_switch(facts: &Facts, plan: &Plan) -> Switch {
         size: format!("{kept} keys"),
         was: (kept != held).then(|| format!("{held} keys")),
         hint: "switch it off to keep the middle of the keyboard".to_string(),
-        what: None,
+        throws: Throw::Range,
     }
 }
 
@@ -2050,11 +2179,12 @@ fn switch_row(ui: &mut egui::Ui, index: usize, row: &Switch) -> Option<bool> {
 
 /// The meter: what the file holds, what the plan keeps, what the instrument has free,
 /// and the sentence that names the cheapest cut left.
-fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, free: Option<u64>) {
+fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, summary: &Summary) {
     const TROUGH: f32 = 8.0;
     const LABEL: f32 = 14.0;
 
-    let kept = kept_bytes(facts, plan);
+    let free = summary.free;
+    let kept = summary.kept;
     let visuals = ui.visuals().clone();
     let width = ui.available_width();
     ui.horizontal(|ui| {
@@ -2123,7 +2253,7 @@ fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, free: Option<u64>) {
     }
 
     ui.add_space(10.0);
-    let (said, loud) = constraint(facts, plan, free);
+    let (said, loud) = constraint(plan, summary);
     ui.label(egui::RichText::new(said).size(11.0).color(match loud {
         true => app::warn(&visuals),
         false => app::caption(&visuals),
@@ -2131,9 +2261,9 @@ fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, free: Option<u64>) {
 }
 
 /// The sentence under the meter: whether it fits, and what to throw if it does not.
-fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
-    let kept = kept_bytes(facts, plan);
-    let Some(free) = free else {
+fn constraint(plan: &Plan, summary: &Summary) -> (String, bool) {
+    let kept = summary.kept;
+    let Some(free) = summary.free else {
         return (
             "The instrument has not reported its free piano memory, so nothing here can \
              say whether this fits."
@@ -2156,7 +2286,7 @@ fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
         room::measure(kept),
         room::measure(over)
     );
-    let rest = match cheapest_cut(facts, plan, over) {
+    let rest = match &summary.cut {
         Some(cut) => format!(
             "Dropping {} sheds {} — the cheapest cut left that fits.",
             listed(&cut.picked),
@@ -2546,6 +2676,7 @@ fn roots(
     ui: &mut egui::Ui,
     facts: &Facts,
     plan: &mut Plan,
+    summary: &Summary,
     view: &mut View,
     sounding: Option<u8>,
 ) -> Option<Ask> {
@@ -2597,9 +2728,10 @@ fn roots(
     let mut dropped: Option<usize> = None;
     let layers = facts.shown_layers();
     for (index, root) in facts.roots.iter().enumerate() {
+        let line = &summary.roots[index];
         let picked = view.picked == Some(index);
         let open = picked && view.open_rows.contains(&index);
-        let in_range = plan.in_range(facts, index);
+        let in_range = line.in_range;
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
         // ⚠️ Before the lamps drawn over it, for the reason [`switch_row`] states.
@@ -2636,21 +2768,12 @@ fn roots(
             egui::FontId::new(NAME, app::bold()),
             ink.text,
         );
-        let runs = runs(&plan.keys_of(facts, index));
-        let answers = match runs.as_slice() {
-            [(low, top)] => format!("{} – {}", note::name(*low), note::name(*top)),
-            runs => runs
-                .iter()
-                .map(|(low, top)| format!("{}–{}", note::name(*low), note::name(*top)))
-                .collect::<Vec<_>>()
-                .join(", "),
-        };
         cell(
             &painter,
             left + COL_A + GAP,
             middle,
             answers_w,
-            &answers,
+            &line.answers,
             egui::FontId::monospace(11.0),
             ink.text,
         );
@@ -2702,8 +2825,7 @@ fn roots(
             },
         );
 
-        let kept = root_bytes(facts, Some(plan), index);
-        let held = root_bytes(facts, None, index);
+        let (kept, held) = (line.kept, line.held);
         let right = rect.right() - PAD - CHEVRON - GAP;
         let mono = egui::FontId::monospace(MONO);
         let back = figure(
@@ -2746,7 +2868,7 @@ fn roots(
         }
 
         if open {
-            if let Some(asked) = open_row(ui, facts, plan, index, &runs, sounding) {
+            if let Some(asked) = open_row(ui, facts, plan, index, &line.runs, sounding) {
                 match asked {
                     Opened::Audio(asked) => ask = Some(asked),
                     Opened::Drop => dropped = Some(index),
@@ -3070,6 +3192,7 @@ impl State {
     /// The Edit face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
+        self.summarise();
         let id = self.open.as_ref()?.id;
         let saying =
             self.job
@@ -3082,6 +3205,7 @@ impl State {
         let State {
             open,
             draft,
+            summary,
             view,
             free,
             ..
@@ -3093,9 +3217,10 @@ impl State {
                 return None;
             }
         };
+        let summary = summary.as_ref()?;
         let free = *free;
 
-        let kept = kept_bytes(facts, draft);
+        let kept = summary.kept;
         let (badge, ink) = match (&saying, free) {
             (Some(saying), _) => (saying.clone(), app::caption(ui.visuals())),
             (None, Some(free)) if kept > free => (
@@ -3127,18 +3252,18 @@ impl State {
             true => {
                 ui.horizontal_top(|ui| {
                     ui.add_space(PAD);
-                    column(ui, wide_column, |ui| switches(ui, facts, draft));
+                    column(ui, wide_column, |ui| switches(ui, facts, draft, summary));
                     ui.add_space(24.0);
-                    column(ui, wide_column, |ui| meter(ui, facts, draft, free));
+                    column(ui, wide_column, |ui| meter(ui, facts, draft, summary));
                 });
             }
             false => {
                 ui.horizontal_top(|ui| {
                     ui.add_space(PAD);
                     column(ui, wide_column, |ui| {
-                        switches(ui, facts, draft);
+                        switches(ui, facts, draft, summary);
                         ui.add_space(10.0);
-                        meter(ui, facts, draft, free);
+                        meter(ui, facts, draft, summary);
                     });
                 });
             }
@@ -3181,7 +3306,7 @@ impl State {
                 app::caption(ui.visuals()),
             )),
         );
-        let ask = roots(ui, facts, draft, view, sounding);
+        let ask = roots(ui, facts, draft, summary, view, sounding);
         ui.add_space(12.0);
 
         controls::heading(
@@ -3874,7 +3999,10 @@ mod tests {
             status(&facts, &moved, 56).1.contains("root C3"),
             "the keys moved with the boundary"
         );
-        assert!(silent(&facts, &moved).is_empty(), "and none fell silent");
+        assert!(
+            Summary::of(&facts, &moved, None).silent.is_empty(),
+            "and none fell silent"
+        );
         assert_eq!(
             rebuild(&bytes(), &moved).unwrap().len(),
             bytes().len(),
@@ -3885,7 +4013,7 @@ mod tests {
         let mut cut = plan();
         let now = keys::boundary(&was, SPAN, 2, keys::Edge::Top, 100);
         reroute(&facts, &mut cut, &[0, 1, 2], &was, &now);
-        assert_eq!(silent(&facts, &cut), [(101, SPAN.high)]);
+        assert_eq!(Summary::of(&facts, &cut, None).silent, [(101, SPAN.high)]);
         assert!(!status(&facts, &cut, 105).0);
     }
 
@@ -3960,7 +4088,10 @@ mod tests {
             kept_bytes(&facts, &plan),
             facts.total - root_bytes(&facts, None, 0)
         );
-        assert!(covered(&facts, &plan).iter().all(|key| *key >= 55));
+        assert!(Summary::of(&facts, &plan, None)
+            .covered
+            .iter()
+            .all(|key| *key >= 55));
     }
 
     /// The sentence names the smallest set of switches still on that clears the
@@ -4099,7 +4230,7 @@ mod tests {
         let plenty = attached(facts.total * 2);
         let untouched = extras(
             &facts,
-            &plan(),
+            kept_bytes(&facts, &plan()),
             room::free_bytes(ObjectClass::Piano, &plenty.state),
             Standing::Laid,
         );
@@ -4115,7 +4246,7 @@ mod tests {
         let kept = kept_bytes(&facts, &plan);
         let trimmed = extras(
             &facts,
-            &plan,
+            kept,
             room::free_bytes(ObjectClass::Piano, &plenty.state),
             Standing::Laid,
         );
@@ -4133,7 +4264,7 @@ mod tests {
         // A partition with room for half of it: the loud action carries the overage.
         let cramped = attached(kept / 2);
         let free = room::free_bytes(ObjectClass::Piano, &cramped.state).expect("a unit arrived");
-        let held = extras(&facts, &plan, Some(free), Standing::Laid);
+        let held = extras(&facts, kept, Some(free), Standing::Laid);
         let loud = held.loud.expect("it will not fit");
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.send, None, "a blocked action asks for nothing");
@@ -4147,7 +4278,7 @@ mod tests {
         let alone = Device::new(egui::Context::default());
         let quiet = extras(
             &facts,
-            &plan,
+            kept,
             room::free_bytes(ObjectClass::Piano, &alone.state),
             Standing::Laid,
         );
@@ -4171,7 +4302,12 @@ mod tests {
             name: Some("Wurly 200A".to_string()),
             ..plan()
         };
-        let pending = extras(&facts, &renamed, free, Standing::Pending);
+        let pending = extras(
+            &facts,
+            kept_bytes(&facts, &renamed),
+            free,
+            Standing::Pending,
+        );
         let claim = pending.state.expect("the bytes are the saved ones");
         assert_eq!(claim.words, "edited");
         assert_eq!(claim.ink, Ink::Warn);
@@ -4183,14 +4319,15 @@ mod tests {
 
         let mut dropped = plan();
         dropped.switch_bank(Bank::Release, false);
-        let trimming = extras(&facts, &dropped, free, Standing::Pending);
+        let dropping = kept_bytes(&facts, &dropped);
+        let trimming = extras(&facts, dropping, free, Standing::Pending);
         assert_eq!(
             trimming.state.map(|line| line.words),
             Some("trimmed".to_string()),
             "a plan that drops strokes keeps its own word",
         );
 
-        let applying = extras(&facts, &dropped, free, Standing::Applying);
+        let applying = extras(&facts, dropping, free, Standing::Applying);
         assert_eq!(
             applying.state.as_ref().map(|line| line.words.as_str()),
             Some("applying…")
@@ -4208,19 +4345,19 @@ mod tests {
     fn the_constraint_sentence_names_the_cut_or_says_it_cannot_tell() {
         let facts = facts();
         let plan = plan();
-        let (said, loud) = constraint(&facts, &plan, Some(facts.total * 2));
+        let (said, loud) = constraint(&plan, &Summary::of(&facts, &plan, Some(facts.total * 2)));
         assert!(
             said.starts_with("At ") && said.contains("to spare"),
             "{said}"
         );
         assert!(!loud);
 
-        let (said, loud) = constraint(&facts, &plan, Some(facts.total / 2));
+        let (said, loud) = constraint(&plan, &Summary::of(&facts, &plan, Some(facts.total / 2)));
         assert!(said.contains("over."), "{said}");
         assert!(said.contains("the cheapest cut left that fits"), "{said}");
         assert!(loud);
 
-        let (said, _) = constraint(&facts, &plan, None);
+        let (said, _) = constraint(&plan, &Summary::of(&facts, &plan, None));
         assert!(said.contains("has not reported"), "{said}");
     }
 
@@ -4269,11 +4406,14 @@ mod tests {
     fn the_coverage_reading_counts_the_silent_stretches() {
         let facts = facts();
         let mut plan = plan();
-        assert!(silent(&facts, &plan).is_empty());
-        assert_eq!(coverage(&silent(&facts, &plan)), "every key answered");
+        assert!(Summary::of(&facts, &plan, None).silent.is_empty());
+        assert_eq!(
+            coverage(&Summary::of(&facts, &plan, None).silent),
+            "every key answered"
+        );
 
         plan.range = Some(36..=96);
-        let gaps = silent(&facts, &plan);
+        let gaps = Summary::of(&facts, &plan, None).silent;
         assert_eq!(gaps, [(21, 35), (97, 108)]);
         assert_eq!(coverage(&gaps), "2 silent ranges");
         assert_eq!(coverage(&gaps[..1]), "1 silent range");
@@ -4855,6 +4995,39 @@ mod tests {
         assert!(applied.made.is_none(), "the bytes it made are of nothing");
         assert_eq!(applied.acts.len(), 1, "and the save is let go regardless");
         assert!(editor.state.job.is_none(), "with nothing left to lay out");
+    }
+
+    /// ⚠️ The figures the sections read are of the library they were worked out from.
+    /// Two documents can stand on the same plan — the empty one — and the second must
+    /// not be drawn from the first's.
+    #[test]
+    fn opening_another_document_reads_the_figures_of_its_own_library() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.frame(Vec::new());
+        assert_eq!(
+            editor.state.summary.as_ref().map(|held| held.kept),
+            Some(facts().total)
+        );
+
+        let mut dropped = plan();
+        dropped.switch_bank(Bank::Release, false);
+        let smaller = rebuild(&bytes(), &dropped).expect("the library lays out");
+        let other = editor.workspace.ingest(
+            "Other Piano.npno".into(),
+            Origin::File("Other Piano.npno".into()),
+            smaller.clone(),
+            &mut editor.log,
+        );
+        editor.state.begin(
+            other,
+            editor.workspace.get(other).expect("it is open"),
+            &editor.device.state,
+        );
+        assert_eq!(
+            editor.state.summary.as_ref().map(|held| held.kept),
+            Some(smaller.len() as u64),
+            "the second document's figures are its own",
+        );
     }
 
     /// A document that is removed takes its plan with it: nothing is left pending over
