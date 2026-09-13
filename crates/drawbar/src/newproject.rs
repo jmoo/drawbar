@@ -264,10 +264,16 @@ pub fn default_roots(paths: &[String]) -> Vec<u8> {
             return named;
         }
     }
-    let last = paths.len().saturating_sub(1) as u8;
-    let start = 60.min(HIGHEST_NOTE.saturating_sub(last)).max(LOWEST_NOTE);
-    (0..paths.len())
-        .map(|i| start.saturating_add(i as u8).min(HIGHEST_NOTE))
+    // ⚠️ Counted in usize. Truncating the count to a u8 put a pick of 257 files back at
+    // middle C, where the run walks off the top key and piles take after take onto it.
+    let after_first = paths.len().min(MOST_ZONES).saturating_sub(1);
+    let start = u8::try_from(usize::from(HIGHEST_NOTE).saturating_sub(after_first))
+        .unwrap_or(LOWEST_NOTE)
+        .min(MIDDLE_C)
+        .max(LOWEST_NOTE);
+    (start..=HIGHEST_NOTE)
+        .chain(std::iter::repeat(HIGHEST_NOTE))
+        .take(paths.len())
         .collect()
 }
 
@@ -1022,6 +1028,21 @@ mod tests {
         let mut unique = roots.clone();
         unique.dedup();
         assert_eq!(unique.len(), roots.len(), "one key each");
+    }
+
+    /// ⚠️ A pick this long is refused for its count, but the run under that refusal is
+    /// still one key per file from the lowest one — counted in u8 it wrapped to a short
+    /// pick and started again at middle C, on keys the run had already laid.
+    #[test]
+    fn a_pick_longer_than_a_u8_counts_still_walks_up_from_the_lowest_key() {
+        let many: Vec<String> = (0..MOST_ZONES + 200).map(|i| format!("{i}.wav")).collect();
+        let roots = default_roots(&many);
+        assert_eq!(roots.len(), many.len(), "a key per file");
+        assert_eq!(roots.first(), Some(&LOWEST_NOTE));
+        assert_eq!(roots[MOST_ZONES - 1], HIGHEST_NOTE);
+        let mut laid = roots[..MOST_ZONES].to_vec();
+        laid.dedup();
+        assert_eq!(laid.len(), MOST_ZONES, "one key each, while there are keys");
     }
 
     fn wav(rate: u32, frames: usize) -> Vec<u8> {
