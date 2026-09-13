@@ -315,8 +315,12 @@ impl eframe::App for DrawbarApp {
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.
-        self.workspace
-            .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
+        self.workspace.close_views(
+            |id| self.tabs.holds(id),
+            |id| self.document.pends(id),
+            &self.queue,
+            &mut self.log,
+        );
         self.take_dropped_files(ctx);
         drop_hint(ctx);
         // Raised by a New pick of WAVs, and answered before anything else this frame
@@ -330,7 +334,9 @@ impl eframe::App for DrawbarApp {
         self.browser.let_go(ctx);
 
         // Outside in. A panel claims its space from what the ones before it left.
-        let mut acts = Vec::new();
+        let mut acts = self
+            .document
+            .released(ctx, &mut self.workspace, &mut self.log);
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
         self.status_bar(ctx, &mut acts);
@@ -339,6 +345,12 @@ impl eframe::App for DrawbarApp {
         self.inspector_dock(ctx, &mut acts);
         self.centre(ctx, &mut acts);
 
+        // ⚠️ Between the panels and the acts they asked for: a piano library's plan is
+        // not in its bytes yet, and whatever would carry those bytes waits here until it
+        // is.
+        let acts = self
+            .document
+            .settle(ctx, acts, &mut self.workspace, &mut self.log);
         browser::apply(
             &mut self.browser,
             &mut self.shell,
