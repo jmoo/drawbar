@@ -2284,6 +2284,57 @@ mod tests {
         }
     }
 
+    /// The screen one headless frame is drawn on.
+    fn headless() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 540.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// A whole click at one point: the pointer arrives, presses and lets go.
+    fn click(at: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        vec![egui::Event::PointerMoved(at), button(true), button(false)]
+    }
+
+    /// How many filled circles of one colour a frame painted.
+    fn circles(output: &egui::FullOutput, ink: egui::Color32) -> usize {
+        fn count(shape: &egui::Shape, ink: egui::Color32) -> usize {
+            match shape {
+                egui::Shape::Circle(drawn) => usize::from(drawn.fill == ink),
+                egui::Shape::Vec(shapes) => shapes.iter().map(|shape| count(shape, ink)).sum(),
+                _ => 0,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .map(|clipped| count(&clipped.shape, ink))
+            .sum()
+    }
+
+    /// A lookup that has asked the instrument nothing, for a cell that references no
+    /// library.
+    fn lookup() -> PianoLookup {
+        PianoLookup {
+            id: None,
+            name: None,
+            can_ask: false,
+            asked: false,
+            models: Vec::new(),
+            scan_disagrees: None,
+        }
+    }
+
     /// One headless frame with a single control in it, and how many shapes it painted.
     fn drawn(field: &Field) -> usize {
         fn count(shape: &egui::Shape) -> usize {
@@ -2296,14 +2347,7 @@ mod tests {
         ctx.set_fonts(crate::app::fonts());
         ctx.all_styles_mut(crate::app::metrics);
         let legal = (field.spec.legal)();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 540.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, |ctx| {
+        let output = ctx.run(headless(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 control(ui, field, &legal, &[], None);
             });
@@ -2422,6 +2466,289 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A morph slot is drawn under the parameter it moves rather than beside it, so a
+    /// face that places the parameter draws the slot too — the Advanced table must not
+    /// report three hundred of them as fields the Edit face hides.
+    #[test]
+    fn a_slot_is_shown_where_the_parameter_it_moves_is_placed() {
+        // The layout draws the sections the program is using, so the organ has to be
+        // playing for its parameters — and the slots riding on them — to be placed.
+        let playing = [
+            ("organ_section_enabled".to_string(), "true".to_string()),
+            ("organ_a_layer_enabled".to_string(), "true".to_string()),
+        ];
+        let (_, bytes) = apply(&blank::stage4_program(), &playing).unwrap();
+        let (fields, _) = apply(&bytes, &[]).unwrap();
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let doc = of(&decoded, &fields);
+        assert!(doc.shows("organ_a_volume"), "the organ layer is placed");
+        assert!(doc.shows("organ_a_volume_wheel"));
+
+        let mut ridden = 0;
+        for field in &fields {
+            let Some(parent) = field.spec.morph_parent() else {
+                continue;
+            };
+            if !doc.shows(&parent) {
+                continue;
+            }
+            ridden += 1;
+            assert!(
+                doc.shows(&field.path),
+                "{} rides on {parent}, which is drawn",
+                field.path,
+            );
+        }
+        assert!(ridden > 20, "{ridden} slots ride on a drawn parameter");
+    }
+
+    /// Under a lens the cell writes the morph slot, so the edited dot beside the name is
+    /// the slot's. The parameter it hangs on may be untouched.
+    #[test]
+    fn the_edited_dot_follows_the_field_the_cell_writes() {
+        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let morphs = slots_of(&fields);
+        let part = Part {
+            field: fields
+                .iter()
+                .find(|field| field.path == "organ_a_volume")
+                .expect("the volume knob"),
+            morphs: morphs["organ_a_volume"],
+        };
+
+        let dots = |pending: &str, lens: Option<usize>| -> usize {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::app::fonts());
+            ctx.all_styles_mut(crate::app::metrics);
+            let mut state = State {
+                pending: vec![pending.to_string()],
+                ..Default::default()
+            };
+            if let Some(slot) = lens {
+                state.pretend_lens(slot);
+            }
+            let read = Ctx::default();
+            let mut piano = lookup();
+            let mut sets = Sets::new();
+            let ink = app::warn(&ctx.style().visuals);
+            let output = ctx.run(headless(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    one(ui, &read, &state, &part, &[], &mut piano, &mut sets);
+                });
+            });
+            circles(&output, ink)
+        };
+
+        assert_eq!(
+            dots("organ_a_volume_wheel", Some(0)),
+            1,
+            "the slot it writes"
+        );
+        assert_eq!(dots("organ_a_volume", Some(0)), 0, "not the panel value");
+        assert_eq!(
+            dots("organ_a_volume", None),
+            1,
+            "off the lens, the parameter"
+        );
+    }
+
+    /// The three ways out of the box a wide field is typed into. Enter and leaving both
+    /// mean it, and Escape means the file keeps what it had.
+    #[test]
+    fn a_wide_field_commits_on_enter_or_blur_and_drops_what_escape_typed() {
+        const TYPED: &str = "0xfeed";
+
+        let (stage2, _) = apply(&blank::stage2_program(), &[]).unwrap();
+        let field = stage2
+            .iter()
+            .find(|field| {
+                (field.spec.legal)().is_empty() && matches!(field.spec.control, ControlKind::Number)
+            })
+            .expect("the Stage 2 declares a wide unclassified field");
+        assert_ne!(field.value, TYPED);
+
+        /// What the last frame committed, and whether the typed text is still held.
+        fn exit(field: &Field, focused: bool, events: Vec<egui::Event>) -> (Option<String>, bool) {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::app::fonts());
+            let mut got = None;
+            let mut held = false;
+            // The first frame opens the box; the second delivers the way out of it.
+            for events in [Vec::new(), events] {
+                let input = egui::RawInput {
+                    events,
+                    ..headless()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let id = ui.id().with(("wide", field.path.as_str()));
+                        ui.data_mut(|data| data.insert_temp(id, TYPED.to_string()));
+                        if focused {
+                            ui.memory_mut(|memory| memory.request_focus(id));
+                        }
+                        got = wide(ui, field);
+                        held = ui.data(|data| data.get_temp::<String>(id).is_some());
+                    });
+                });
+            }
+            (got, held)
+        }
+
+        fn key(key: egui::Key) -> Vec<egui::Event> {
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }]
+        }
+
+        assert_eq!(
+            exit(field, true, Vec::new()),
+            (None, true),
+            "half a value waits in the box",
+        );
+        assert_eq!(
+            exit(field, true, key(egui::Key::Enter)),
+            (Some(TYPED.to_string()), false),
+        );
+        assert_eq!(
+            exit(field, true, key(egui::Key::Escape)),
+            (None, false),
+            "escape drops what was typed",
+        );
+        assert_eq!(
+            exit(field, false, Vec::new()),
+            (Some(TYPED.to_string()), false),
+            "leaving the box commits it",
+        );
+    }
+
+    /// A lamp writes the field's own word for the state it was switched to: two states
+    /// may be named rather than spelled `true`/`false`.
+    #[test]
+    fn a_lamp_writes_the_spelling_its_field_lists() {
+        let (stage4, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let field = stage4
+            .iter()
+            .find(|field| matches!(field.spec.control, ControlKind::Toggle))
+            .expect("a stage 4 program has switches");
+
+        let switched = |legal: &[String]| -> Option<String> {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::app::fonts());
+            ctx.all_styles_mut(crate::app::metrics);
+            let mut got = None;
+            let mut at = egui::Pos2::ZERO;
+            // The first pass lays the lamp out; the second clicks the rect it claimed.
+            for pass in 0..2 {
+                let input = egui::RawInput {
+                    events: match pass {
+                        0 => Vec::new(),
+                        _ => click(at),
+                    },
+                    ..headless()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let row = ui.horizontal(|ui| toggle(ui, field, legal));
+                        got = row.inner;
+                        at = row.response.rect.center();
+                    });
+                });
+            }
+            got
+        };
+
+        let named: Vec<String> = ["Off", "On"].iter().map(|word| word.to_string()).collect();
+        assert_eq!(switched(&named).as_deref(), Some("On"));
+
+        let plain: Vec<String> = ["false", "true"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect();
+        let other = (field.value != "true").to_string();
+        assert_eq!(switched(&plain), Some(other));
+    }
+
+    /// A click on one step moves that step's own bits and no others: a pattern edit must
+    /// not disturb the steps beside it.
+    #[test]
+    fn a_click_on_a_step_moves_only_that_steps_bits() {
+        for step in 0..8 {
+            let moved = stepped(0, step, 8, 2, PackedOrder::LowFirst);
+            assert_eq!(moved, Some(1 << (2 * step)), "step {step}");
+        }
+        // HighFirst numbers the steps down from the top of the word.
+        assert_eq!(stepped(0, 0, 8, 2, PackedOrder::HighFirst), Some(1 << 14));
+        assert_eq!(stepped(0, 7, 8, 2, PackedOrder::HighFirst), Some(1));
+        // A step at the top of its range wraps to nothing, and takes nothing with it.
+        let three = 0b11;
+        assert_eq!(
+            stepped((three << 2) | three, 1, 8, 2, PackedOrder::LowFirst),
+            Some(three),
+        );
+        // A step outside the pattern, and a width no stored word can hold, address
+        // nothing rather than some other step's bits.
+        assert_eq!(stepped(0, 8, 8, 2, PackedOrder::LowFirst), None);
+        assert_eq!(stepped(0, 8, 8, 2, PackedOrder::HighFirst), None);
+        assert_eq!(stepped(0, 4, 8, 16, PackedOrder::LowFirst), None);
+        assert_eq!(stepped(0, 0, 8, 65, PackedOrder::LowFirst), None);
+    }
+
+    /// A register is nine fields and a moved bar is one of them: the eight beside it are
+    /// not rewritten with what they already hold.
+    #[test]
+    fn a_register_writes_only_the_bars_that_moved() {
+        let (fields, _) = apply(&blank::stage4_program(), &[]).unwrap();
+        let run: Vec<Part> = fields
+            .iter()
+            .filter(|field| ranked(field).is_some() && field.path.starts_with("organ_a."))
+            .take(drawbar_widget::BARS)
+            .map(|field| Part {
+                field,
+                morphs: Default::default(),
+            })
+            .collect();
+        assert_eq!(run.len(), drawbar_widget::BARS);
+
+        let was = [0_u8; drawbar_widget::BARS];
+        let mut now = was;
+        now[2] = 8;
+        assert_eq!(
+            bar_sets(&run, &was, &now),
+            [(run[2].field.path.clone(), "8".to_string())],
+        );
+        assert!(bar_sets(&run, &was, &was).is_empty());
+    }
+
+    /// A stored word is read the way its field spells it, and a spelling that is no
+    /// number at all is refused rather than read as zero.
+    #[test]
+    fn a_stored_word_is_refused_unless_it_spells_a_number() {
+        assert_eq!(word("0x1f"), Some(31));
+        assert_eq!(word("0X1F"), Some(31));
+        assert_eq!(word(" 42 "), Some(42));
+        assert_eq!(word("0x"), None);
+        assert_eq!(word(""), None);
+        assert_eq!(word("ff"), None);
+        assert_eq!(word("-1"), None);
+    }
+
+    /// The transpose knob turns as far as the amount field says it may, which is the
+    /// panel's own half-step either side of nothing.
+    #[test]
+    fn the_transpose_knob_turns_as_far_as_its_field_allows() {
+        let (_, fields) = electro5();
+        let amount = fields
+            .iter()
+            .find(|field| field.path == TRANSPOSE)
+            .expect("the transpose amount");
+        assert_eq!(contiguous(&(amount.spec.legal)()), Some((-6, 6)));
     }
 
     /// A body with no layout falls into the sections its paths name, and every field
