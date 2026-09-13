@@ -42,7 +42,7 @@ pub use row::{cell_ink, starred, Cells, Drawn};
 pub use selection::Selection;
 pub use tree::new_menu;
 
-use act::write_warnings;
+use act::{will_write, write_warnings};
 use drag::ghost;
 use selection::{gesture, Gesture};
 use tree::{Branch, Sections};
@@ -458,8 +458,8 @@ impl Browser {
         }
     }
 
-    /// The one question a write asks: everything the queue is about to write, and what
-    /// each of it would replace.
+    /// The one question a write asks: everything the batch would write, and what each of
+    /// it would replace. An entry the instrument has already refused is not one of them.
     fn ask_send(
         &mut self,
         workspace: &Workspace,
@@ -470,7 +470,7 @@ impl Browser {
     ) {
         let mut lines = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
-        for held in queue.entries() {
+        for held in will_write(queue) {
             let Some(entity) = workspace.get(held.id) else {
                 continue;
             };

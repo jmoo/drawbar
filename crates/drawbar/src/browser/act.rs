@@ -14,7 +14,7 @@ use crate::device::{
 use crate::filter::Narrow;
 use crate::log::Log;
 use crate::newproject::Making;
-use crate::queue::{enqueue, retarget, Occupancy, Queue};
+use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Page, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
@@ -425,13 +425,19 @@ pub fn apply(
             Act::ClearQueue => queue.clear(),
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
-            Act::AskSendAll => {
-                let title = match queue.len() {
-                    1 => "Send 1 sound to the instrument?".to_string(),
-                    n => format!("Send {n} sounds to the instrument?"),
-                };
-                browser.ask_send(workspace, device, queue, title, Act::SendAll);
-            }
+            Act::AskSendAll => match will_write(queue).count() {
+                0 => log.say(
+                    "Nothing waiting can go to the instrument attached now, so there is \
+                     nothing to send.",
+                ),
+                waiting => {
+                    let title = match waiting {
+                        1 => "Send 1 sound to the instrument?".to_string(),
+                        n => format!("Send {n} sounds to the instrument?"),
+                    };
+                    browser.ask_send(workspace, device, queue, title, Act::SendAll);
+                }
+            },
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
@@ -542,11 +548,10 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
 
 /// What is waiting, gathered per folder in the order the queue holds it.
 ///
-/// A session belongs to a folder, so a folder is the unit a batch is cut into. An entry
-/// carrying a refusal is left out of it and stays in the queue.
+/// A session belongs to a folder, so a folder is the unit a batch is cut into.
 fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
     let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
-    for held in queue.entries().iter().filter(|held| held.failure.is_none()) {
+    for held in will_write(queue) {
         let Some(entity) = workspace.get(held.id) else {
             continue;
         };
@@ -562,6 +567,13 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoi
         }
     }
     by_class
+}
+
+/// What a batch would write: everything waiting that the instrument attached now has not
+/// already refused. An entry carrying a refusal is left where it is, so nothing that
+/// counts or names a write may count or name one of those.
+pub(super) fn will_write(queue: &Queue) -> impl Iterator<Item = &Queued> {
+    queue.entries().iter().filter(|held| held.failure.is_none())
 }
 
 /// Warn when an outgoing tag differs from every scanned resident tag.
@@ -1629,6 +1641,73 @@ mod tests {
         ] {
             assert!(note.contains(said), "{note}");
         }
+    }
+
+    /// ⚠️ The question counts and names what the batch would write. An entry the
+    /// instrument attached now has already refused keeps its place in the queue and is
+    /// not written, so a question naming it promises a write nobody is about to make.
+    #[test]
+    fn the_send_question_leaves_out_what_the_batch_would_skip() {
+        use crate::device::DeviceEvent;
+
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        let theirs = program(&mut workspace, &mut log);
+        let electro = workspace.ingest("Africa-Split.ne5p".into(), Origin::Fresh, theirs, &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            electro,
+            class,
+            at(0),
+        );
+
+        // Another instrument in its place, which refuses the one already waiting.
+        device.pretend(DeviceEvent::Disconnected { lost: true });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        device.pretend_attached_as("Nord Stage 4");
+        let made = workspace
+            .create(Fresh::Stage4Program, &mut log)
+            .expect("a Stage 4 program");
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            made,
+            class,
+            at(1),
+        );
+        device.pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
+            class,
+            name: "Program".into(),
+            native: false,
+            unit: None,
+        }]));
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        assert_eq!(queue.ids(), vec![electro, made], "both are still waiting");
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::AskSendAll],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        let ask = browser.ask.as_ref().expect("a question was raised");
+        assert_eq!(ask.title, "Send 1 sound to the instrument?");
+        let note = ask.note.as_deref().expect("the modal has a note");
+        assert!(
+            !note.contains("Africa-Split"),
+            "the refused entry is not part of this write:\n{note}"
+        );
     }
 
     /// The queue outlives the instrument it was built against. What the one attached now
