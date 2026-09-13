@@ -16,11 +16,10 @@
 //! project file. An instrument and a library hold the audio itself, which is why they
 //! take the encoder's limits on what a WAV may be.
 
-use std::collections::BTreeMap;
-
 use eframe::egui;
 use nord_format::formats::npno::encode::{
-    build, layer_value, resample, Donor, Kind, Options, Recording, Rules, HIGHEST_PLAYED_LAYER,
+    build, parse_stroke_name, resample, Clash, Donor, Kind, LayerTag, Options, Recording, Rules,
+    Stem, HIGHEST_PLAYED_LAYER,
 };
 use nord_format::formats::npno::{Bank, Library};
 use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
@@ -43,9 +42,6 @@ const MOST_ZONES: usize = (HIGHEST_NOTE - LOWEST_NOTE) as usize + 1;
 
 /// The root a file that names none is taken to have been recorded at.
 const MIDDLE_C: u8 = 60;
-
-/// The top of MIDI's own range: a stroke's root is a key, and 128 names none.
-const HIGHEST_MIDI_NOTE: u8 = 127;
 
 /// What a pick of WAVs is turned into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,38 +114,6 @@ impl Making {
                  layer; set them here otherwise. Kind, gain and the damper limit are \
                  edited in the document afterwards."
             }
-        }
-    }
-}
-
-/// What a WAV's name says about the velocity layer its stroke sits at.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum LayerTag {
-    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
-    /// spread over that root's layers gives it.
-    Index(u8),
-    /// `v12`: the layer value itself, written to the record as it stands.
-    Value(u8),
-}
-
-impl LayerTag {
-    fn number(self) -> u8 {
-        match self {
-            LayerTag::Index(n) | LayerTag::Value(n) => n,
-        }
-    }
-
-    fn word(self) -> &'static str {
-        match self {
-            LayerTag::Index(_) => "index",
-            LayerTag::Value(_) => "value",
-        }
-    }
-
-    fn with(self, n: u8) -> LayerTag {
-        match self {
-            LayerTag::Index(_) => LayerTag::Index(n),
-            LayerTag::Value(_) => LayerTag::Value(n),
         }
     }
 }
@@ -291,21 +255,9 @@ fn trailing_note(path: &str) -> Option<u8> {
 
 /// The stroke a WAV's name states: `060-b0-l00`, as `nord piano build` reads it, and
 /// `<stem>-060-b0-l00` as [`crate::workspace::stroke_wav_name`] writes it.
-///
-/// The trailing group is the whole claim, so a name carrying anything of its own in
-/// front of it still names its stroke.
 fn stroke_name(path: &str) -> Option<(u8, Bank, LayerTag)> {
     let stem = path.rsplit_once('.').map_or(path, |(stem, _)| stem);
-    let mut parts = stem.rsplit('-');
-    let third = parts.next()?;
-    let layer = match (third.strip_prefix('l'), third.strip_prefix('v')) {
-        (Some(index), _) => LayerTag::Index(index.parse().ok()?),
-        (None, Some(value)) => LayerTag::Value(value.parse().ok()?),
-        (None, None) => return None,
-    };
-    let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
-    let root: u8 = parts.next()?.parse().ok()?;
-    (root <= HIGHEST_MIDI_NOTE).then_some((root, bank, layer))
+    parse_stroke_name(stem, Stem::Any)
 }
 
 /// Whether a dropped file is one an open draft takes rather than a document to open.
@@ -670,52 +622,23 @@ impl Coding {
     }
 }
 
-/// The layer value each take's stroke states, in the order the takes are listed.
-///
-/// A [`LayerTag::Value`] is that value; a [`LayerTag::Index`] is spread across its root
-/// and bank's own layers, loudest first. The two forms would each mean something
-/// different about how many layers a spread is over, so one root's bank names its
-/// layers one way — and names each of them once, since the spread would otherwise hand
-/// two takes claiming one layer two different values.
+/// The layer value each take's stroke states, in the order the takes are listed, as
+/// [`nord_format::formats::npno::encode::layer_values`] reads what their names claim.
 fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
-    let mut groups: BTreeMap<(u8, Bank), Vec<usize>> = BTreeMap::new();
-    for (index, take) in takes.iter().enumerate() {
-        groups
-            .entry((take.root_key, take.bank))
-            .or_default()
-            .push(index);
-    }
-
-    let mut values = vec![0u8; takes.len()];
-    for ((root, bank), mut members) in groups {
-        let what = || format!("root {} {}", note::name(root), bank.name());
-        let stated = members
-            .iter()
-            .filter(|&&i| matches!(takes[i].layer, LayerTag::Value(_)))
-            .count();
-        if stated != 0 && stated != members.len() {
-            return Err(format!(
-                "{} names some of its layers by index and some by value; one root's \
-                 bank names them one way",
-                what()
-            ));
+    let named: Vec<(u8, Bank, LayerTag)> = takes
+        .iter()
+        .map(|take| (take.root_key, take.bank, take.layer))
+        .collect();
+    nord_format::formats::npno::encode::layer_values(&named).map_err(|clash| {
+        let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+        match clash.how {
+            Clash::BothForms => format!(
+                "{what} names some of its layers by index and some by value; one root's \
+                 bank names them one way"
+            ),
+            Clash::Twice => format!("{what} names one of its layers twice"),
         }
-        members.sort_by_key(|&i| takes[i].layer);
-        if members
-            .windows(2)
-            .any(|pair| takes[pair[0]].layer == takes[pair[1]].layer)
-        {
-            return Err(format!("{} names one of its layers twice", what()));
-        }
-        let layers = members.len();
-        for (rank, index) in members.into_iter().enumerate() {
-            values[index] = match takes[index].layer {
-                LayerTag::Value(value) => value,
-                LayerTag::Index(_) => layer_value(rank, layers),
-            };
-        }
-    }
-    Ok(values)
+    })
 }
 
 /// Unix seconds, for the `m_modifyDate` every block in a project carries.
@@ -881,10 +804,13 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
                 ui.selectable_value(&mut take.bank, bank, bank.name());
             }
         });
-    let number = take.layer.number();
+    let (number, word) = match take.layer {
+        LayerTag::Index(n) => (n, "index"),
+        LayerTag::Value(n) => (n, "value"),
+    };
     egui::ComboBox::from_id_salt(("draft_layer", i))
         .width(64.0)
-        .selected_text(take.layer.word())
+        .selected_text(word)
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut take.layer, LayerTag::Index(number), "index");
             ui.selectable_value(&mut take.layer, LayerTag::Value(number), "value");
@@ -897,7 +823,10 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
         .add(egui::DragValue::new(&mut set).range(0..=HIGHEST_PLAYED_LAYER))
         .changed()
     {
-        take.layer = take.layer.with(set);
+        take.layer = match take.layer {
+            LayerTag::Index(_) => LayerTag::Index(set),
+            LayerTag::Value(_) => LayerTag::Value(set),
+        };
     }
 }
 
@@ -991,6 +920,7 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nord_format::formats::npno::encode::SOFTEST_LAYER;
 
     #[test]
     fn frames_are_counted_at_the_source_rate() {
@@ -1221,14 +1151,7 @@ mod tests {
             Some((60, Bank::Attack, LayerTag::Index(0))),
             "and the one a stroke exported from here is written under"
         );
-        assert_eq!(
-            stroke_name("101-b1-v12.wav"),
-            Some((101, Bank::Resonance, LayerTag::Value(12)))
-        );
-        assert_eq!(stroke_name("060-b3-l00.wav"), None, "no such bank");
-        assert_eq!(stroke_name("200-b0-l00.wav"), None, "no such key");
-        assert_eq!(stroke_name("060-b0-x2.wav"), None, "no such layer form");
-        assert_eq!(stroke_name("060-b0.wav"), None);
+        assert_eq!(stroke_name("060-b0.wav"), None, "no stroke named at all");
 
         assert_eq!(
             stroke_defaults("Marimba-C3.wav"),
@@ -1249,12 +1172,7 @@ mod tests {
         let draft = piano_draft(&["060-b0-l02", "060-b0-l00", "060-b0-l01", "072-b0-l00"]);
         assert_eq!(
             layer_values(&draft.takes).unwrap(),
-            vec![
-                layer_value(2, 3),
-                layer_value(0, 3),
-                layer_value(1, 3),
-                layer_value(0, 1),
-            ],
+            vec![27, 0, 14, 0],
             "the list order is kept; the rank is the layer's own"
         );
     }
@@ -1315,10 +1233,11 @@ mod tests {
         assert_eq!(
             strokes,
             [
-                (60, Some(Bank::Attack), layer_value(0, 2)),
-                (60, Some(Bank::Attack), layer_value(1, 2)),
+                (60, Some(Bank::Attack), 0),
+                (60, Some(Bank::Attack), SOFTEST_LAYER),
                 (72, Some(Bank::Release), 0),
-            ]
+            ],
+            "the root's two layers spread from the loudest to the softest"
         );
     }
 

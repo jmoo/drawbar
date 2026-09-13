@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
+use nord_format::formats::npno::encode::{Clash, LayerTag, Stem};
 use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Library, UNCOVERED};
 use nord_format::Entity;
 
@@ -989,42 +990,12 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// What a WAV's third name component says about its velocity layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum LayerName {
-    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
-    /// spread over that root's layers gives it.
-    Index(u8),
-    /// `v12`: the layer value itself, written to the record as it stands.
-    Value(u8),
-}
-
 /// One WAV a build reads, and what its name says the stroke is.
 struct StrokeFile {
     path: PathBuf,
     root: u8,
     bank: Bank,
-    layer: LayerName,
-}
-
-/// `<root>-b<bank>-l<layer>` or `<root>-b<bank>-v<value>`, as in `060-b0-l00`.
-fn parse_stroke_name(stem: &str) -> Option<(u8, Bank, LayerName)> {
-    let mut parts = stem.split('-');
-    // A root past the key tables is no note a library can hold, and a build that took
-    // one would read every WAV before the tables refused it.
-    let root = parts
-        .next()?
-        .parse()
-        .ok()
-        .filter(|&root| usize::from(root) < npno::NOTES)?;
-    let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
-    let third = parts.next()?;
-    let layer = if let Some(index) = third.strip_prefix('l') {
-        LayerName::Index(index.parse().ok()?)
-    } else {
-        LayerName::Value(third.strip_prefix('v')?.parse().ok()?)
-    };
-    parts.next().is_none().then_some((root, bank, layer))
+    layer: LayerTag,
 }
 
 /// The WAVs in a directory, with what their names say each one is, in stroke order.
@@ -1040,7 +1011,7 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
             continue;
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let (root, bank, layer) = parse_stroke_name(&stem).ok_or_else(|| {
+        let (root, bank, layer) = encode::parse_stroke_name(&stem, Stem::None).ok_or_else(|| {
             format!(
                 "{}: a WAV here is named <root>-b<bank>-l<layer>.wav, as in \
                  060-b0-l00.wav — MIDI note 60, bank 0 (attack), layer 0; \
@@ -1064,59 +1035,35 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
     Ok(out)
 }
 
-/// The layer value each file's stroke states, in the order the files came in.
-///
-/// A `v` name is that value; an `l` name is spread across its root and bank's own
-/// layers, loudest first. The two forms would each mean something different about how
-/// many layers a spread is over, so one root's bank names its layers one way.
+/// The layer value each file's stroke states, in the order the files came in, as
+/// [`encode::layer_values`] reads their names.
 ///
 /// A `v` name past [`encode::HIGHEST_PLAYED_LAYER`] is a stroke no velocity would
 /// reach, and is refused by the file that names it.
 fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
-    let mut groups: BTreeMap<(u8, u8), Vec<usize>> = BTreeMap::new();
-    for (index, file) in files.iter().enumerate() {
-        groups
-            .entry((file.root, file.bank.code()))
-            .or_default()
-            .push(index);
-    }
-
-    let mut values = vec![0u8; files.len()];
-    for ((root, bank), members) in groups {
-        let states = members
-            .iter()
-            .filter(|&&i| matches!(files[i].layer, LayerName::Value(_)))
-            .count();
-        let what = format!("root {} {}", note::name(root), bank_label(bank));
-        if states != 0 && states != members.len() {
-            return Err(format!(
+    let named: Vec<(u8, Bank, LayerTag)> = files
+        .iter()
+        .map(|file| (file.root, file.bank, file.layer))
+        .collect();
+    let values = encode::layer_values(&named).map_err(|clash| {
+        let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+        match clash.how {
+            Clash::BothForms => format!(
                 "{what} names some of its layers by index (l..) and some by value \
                  (v..); one root's bank names them one way"
+            ),
+            Clash::Twice => format!("{what} names one of its layers twice"),
+        }
+    })?;
+    for (file, &value) in files.iter().zip(&values) {
+        if value > encode::HIGHEST_PLAYED_LAYER {
+            return Err(format!(
+                "{}: no velocity selects layer value {}; {} is the largest a key ever \
+                 sounds",
+                file.path.display(),
+                value,
+                encode::HIGHEST_PLAYED_LAYER
             ));
-        }
-        if members
-            .iter()
-            .map(|&i| files[i].layer)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != members.len()
-        {
-            return Err(format!("{what} names one of its layers twice"));
-        }
-        for (rank, &index) in members.iter().enumerate() {
-            values[index] = match files[index].layer {
-                LayerName::Value(value) => value,
-                LayerName::Index(_) => encode::layer_value(rank, members.len()),
-            };
-            if values[index] > encode::HIGHEST_PLAYED_LAYER {
-                return Err(format!(
-                    "{}: no velocity selects layer value {}; {} is the largest a key ever \
-                     sounds",
-                    files[index].path.display(),
-                    values[index],
-                    encode::HIGHEST_PLAYED_LAYER
-                ));
-            }
         }
     }
     Ok(values)
@@ -1321,39 +1268,6 @@ pub fn rebuild(ui: &Ui, args: RebuildArgs) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_stroke_wav_names_its_root_bank_and_layer() {
-        use LayerName::{Index, Value};
-        assert_eq!(
-            parse_stroke_name("060-b0-l00"),
-            Some((60, Bank::Attack, Index(0)))
-        );
-        assert_eq!(
-            parse_stroke_name("36-b2-l7"),
-            Some((36, Bank::Release, Index(7)))
-        );
-        assert_eq!(
-            parse_stroke_name("101-b1-v12"),
-            Some((101, Bank::Resonance, Value(12)))
-        );
-        assert_eq!(parse_stroke_name("060-b3-l00"), None, "no such bank");
-        assert_eq!(parse_stroke_name("300-b0-l00"), None, "no such note");
-        assert_eq!(parse_stroke_name("128-b0-l00"), None, "past the key tables");
-        assert_eq!(
-            parse_stroke_name("127-b0-l00"),
-            Some((127, Bank::Attack, Index(0)))
-        );
-        assert_eq!(parse_stroke_name("060-0-l00"), None);
-        assert_eq!(parse_stroke_name("060-b0-x2"), None, "no such layer form");
-        assert_eq!(parse_stroke_name("060-b0"), None);
-        assert_eq!(parse_stroke_name("060-b0-l00-take2"), None);
-        assert_eq!(
-            parse_stroke_name("C4-b0-l00"),
-            None,
-            "notes are numbers here"
-        );
-    }
-
     /// The smallest library this crate can write: one silent attack stroke at C4.
     fn library() -> Vec<u8> {
         let rules = encode::Rules {
@@ -1401,7 +1315,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    fn wav(root: u8, bank: Bank, layer: LayerName) -> StrokeFile {
+    fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile {
         StrokeFile {
             path: PathBuf::new(),
             root,
@@ -1410,41 +1324,16 @@ mod tests {
         }
     }
 
-    /// The velocity a layer answers to is its value, so the directory of WAVs decides
-    /// which part of the range each recording plays over.
-    #[test]
-    fn indexed_layers_spread_over_their_own_root_and_bank() {
-        let files = [
-            wav(60, Bank::Attack, LayerName::Index(0)),
-            wav(60, Bank::Attack, LayerName::Index(1)),
-            wav(60, Bank::Attack, LayerName::Index(2)),
-            wav(60, Bank::Release, LayerName::Index(0)),
-            wav(72, Bank::Attack, LayerName::Index(0)),
-            wav(72, Bank::Attack, LayerName::Index(1)),
-        ];
-        assert_eq!(layer_values(&files).unwrap(), [0, 14, 27, 0, 0, 27]);
-    }
-
-    #[test]
-    fn a_named_layer_value_is_written_as_it_stands() {
-        let files = [
-            wav(60, Bank::Attack, LayerName::Value(0)),
-            wav(60, Bank::Attack, LayerName::Value(6)),
-            wav(60, Bank::Attack, LayerName::Value(12)),
-        ];
-        assert_eq!(layer_values(&files).unwrap(), [0, 6, 12]);
-    }
-
     /// `v255` parses and is a layer no key would ever sound, so the name is refused
     /// rather than built into a library as a stroke nothing plays.
     #[test]
     fn a_named_layer_value_no_velocity_selects_is_refused() {
         let highest = encode::HIGHEST_PLAYED_LAYER;
         assert_eq!(
-            layer_values(&[wav(60, Bank::Attack, LayerName::Value(highest))]).unwrap(),
+            layer_values(&[wav(60, Bank::Attack, LayerTag::Value(highest))]).unwrap(),
             [highest]
         );
-        let refused = layer_values(&[wav(60, Bank::Attack, LayerName::Value(255))]).unwrap_err();
+        let refused = layer_values(&[wav(60, Bank::Attack, LayerTag::Value(255))]).unwrap_err();
         assert!(refused.contains("no velocity selects"), "{refused}");
         assert!(refused.contains(&highest.to_string()), "{refused}");
     }
@@ -1452,15 +1341,15 @@ mod tests {
     #[test]
     fn one_root_and_bank_names_its_layers_one_way() {
         let mixed = [
-            wav(60, Bank::Attack, LayerName::Index(0)),
-            wav(60, Bank::Attack, LayerName::Value(12)),
+            wav(60, Bank::Attack, LayerTag::Index(0)),
+            wav(60, Bank::Attack, LayerTag::Value(12)),
         ];
         let refused = layer_values(&mixed).unwrap_err();
         assert!(refused.contains("C4 attack"), "{refused}");
 
         let twice = [
-            wav(60, Bank::Attack, LayerName::Index(0)),
-            wav(60, Bank::Attack, LayerName::Index(0)),
+            wav(60, Bank::Attack, LayerTag::Index(0)),
+            wav(60, Bank::Attack, LayerTag::Index(0)),
         ];
         assert!(layer_values(&twice).is_err(), "a layer named twice");
     }

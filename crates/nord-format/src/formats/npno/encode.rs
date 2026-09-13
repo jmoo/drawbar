@@ -85,7 +85,7 @@ use crate::error::{Error, ParseError};
 use crate::formats::nsmp::kernel;
 use crate::formats::predictor;
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Full scale the header's attenuation statistic is measured against.
 const FULL_SCALE: f64 = 8192.0;
@@ -298,6 +298,103 @@ pub fn layer_value(index: usize, layers: usize) -> u8 {
     let index = index.min(last);
     let scale = usize::from(SOFTEST_LAYER);
     ((index * scale * 2 + last) / (last * 2)) as u8
+}
+
+/// What a WAV's name says about the velocity layer its stroke sits at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LayerTag {
+    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
+    /// spread over that root's layers gives it.
+    Index(u8),
+    /// `v12`: the layer value itself, written to the record as it stands.
+    Value(u8),
+}
+
+/// Whether a stroke name may carry a stem of the caller's own in front of the stroke
+/// it states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stem {
+    /// `060-b0-l00`, and nothing else.
+    None,
+    /// `Grand-060-b0-l00` as well: the trailing group is the whole claim.
+    Any,
+}
+
+/// The stroke a name states — `<root>-b<bank>-l<layer>`, or `<root>-b<bank>-v<value>`
+/// naming the layer value itself — read off a file name without its extension.
+///
+/// A root past [`NOTES`] is no note a library can hold.
+pub fn parse_stroke_name(name: &str, stem: Stem) -> Option<(u8, Bank, LayerTag)> {
+    let mut parts = name.rsplit('-');
+    let third = parts.next()?;
+    let layer = match (third.strip_prefix('l'), third.strip_prefix('v')) {
+        (Some(index), _) => LayerTag::Index(index.parse().ok()?),
+        (None, Some(value)) => LayerTag::Value(value.parse().ok()?),
+        (None, None) => return None,
+    };
+    let bank = Bank::from_code(parts.next()?.strip_prefix('b')?.parse().ok()?)?;
+    let root: u8 = parts.next()?.parse().ok()?;
+    if stem == Stem::None && parts.next().is_some() {
+        return None;
+    }
+    (usize::from(root) < NOTES).then_some((root, bank, layer))
+}
+
+/// Why one root and bank's names state no layer values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerClash {
+    pub root: u8,
+    pub bank: Bank,
+    pub how: Clash,
+}
+
+/// The two ways one root and bank's names fail to state a layer each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clash {
+    /// Some layers named by index and some by value. The two forms mean different
+    /// things about how many layers a spread is over, so one root's bank names its
+    /// layers one way.
+    BothForms,
+    /// One layer named twice, which the spread would hand two different values.
+    Twice,
+}
+
+/// The layer value each stroke states, in the order they were given.
+///
+/// A [`LayerTag::Value`] is that value; a [`LayerTag::Index`] is spread across its root
+/// and bank's own layers, loudest first, by [`layer_value`].
+pub fn layer_values(strokes: &[(u8, Bank, LayerTag)]) -> Result<Vec<u8>, LayerClash> {
+    let mut groups: BTreeMap<(u8, Bank), Vec<usize>> = BTreeMap::new();
+    for (index, &(root, bank, _)) in strokes.iter().enumerate() {
+        groups.entry((root, bank)).or_default().push(index);
+    }
+
+    let mut values = vec![0u8; strokes.len()];
+    for ((root, bank), mut members) in groups {
+        let clash = |how| LayerClash { root, bank, how };
+        let stated = members
+            .iter()
+            .filter(|&&i| matches!(strokes[i].2, LayerTag::Value(_)))
+            .count();
+        if stated != 0 && stated != members.len() {
+            return Err(clash(Clash::BothForms));
+        }
+        members.sort_by_key(|&i| strokes[i].2);
+        if members
+            .windows(2)
+            .any(|pair| strokes[pair[0]].2 == strokes[pair[1]].2)
+        {
+            return Err(clash(Clash::Twice));
+        }
+        let layers = members.len();
+        for (rank, index) in members.into_iter().enumerate() {
+            values[index] = match strokes[index].2 {
+                LayerTag::Value(value) => value,
+                LayerTag::Index(_) => layer_value(rank, layers),
+            };
+        }
+    }
+    Ok(values)
 }
 
 /// A library rebuilt from its own audio, and how each stroke's blocks compare with
@@ -1634,6 +1731,126 @@ mod tests {
             &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short)],
         )
         .expect("the bound itself is a value a key sounds");
+    }
+
+    #[test]
+    fn a_wav_name_states_its_root_bank_and_layer() {
+        use LayerTag::{Index, Value};
+        assert_eq!(
+            parse_stroke_name("060-b0-l00", Stem::None),
+            Some((60, Bank::Attack, Index(0)))
+        );
+        assert_eq!(
+            parse_stroke_name("36-b2-l7", Stem::None),
+            Some((36, Bank::Release, Index(7)))
+        );
+        assert_eq!(
+            parse_stroke_name("101-b1-v12", Stem::None),
+            Some((101, Bank::Resonance, Value(12)))
+        );
+        assert_eq!(
+            parse_stroke_name("127-b0-l00", Stem::None),
+            Some((127, Bank::Attack, Index(0)))
+        );
+        for bad in [
+            "060-b3-l00",
+            "300-b0-l00",
+            "128-b0-l00",
+            "060-0-l00",
+            "060-b0-x2",
+            "060-b0",
+            "060-b0-l00-take2",
+            "C4-b0-l00",
+        ] {
+            assert_eq!(parse_stroke_name(bad, Stem::None), None, "{bad}");
+        }
+    }
+
+    /// A name carrying something of its own in front of the stroke it states still
+    /// states it, where the caller asks for that form: the trailing group is the whole
+    /// claim.
+    #[test]
+    fn a_stem_before_the_stroke_is_taken_only_where_the_caller_takes_one() {
+        assert_eq!(
+            parse_stroke_name("Grand-060-b0-l00", Stem::Any),
+            Some((60, Bank::Attack, LayerTag::Index(0)))
+        );
+        assert_eq!(parse_stroke_name("Grand-060-b0-l00", Stem::None), None);
+        assert_eq!(
+            parse_stroke_name("060-b0-l00", Stem::Any),
+            Some((60, Bank::Attack, LayerTag::Index(0))),
+            "a name with no stem states the same stroke either way"
+        );
+        assert_eq!(parse_stroke_name("Grand-060-b0-take2", Stem::Any), None);
+    }
+
+    /// The velocity a layer answers to is its value, so the names decide which part of
+    /// the range each recording plays over.
+    #[test]
+    fn indexed_layers_spread_over_their_own_root_and_bank() {
+        let named = [
+            (60, Bank::Attack, LayerTag::Index(2)),
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Attack, LayerTag::Index(1)),
+            (60, Bank::Release, LayerTag::Index(0)),
+            (72, Bank::Attack, LayerTag::Index(0)),
+            (72, Bank::Attack, LayerTag::Index(1)),
+        ];
+        assert_eq!(
+            layer_values(&named).unwrap(),
+            [27, 0, 14, 0, 0, 27],
+            "the order given is kept; the rank is the layer's own"
+        );
+    }
+
+    #[test]
+    fn a_named_layer_value_is_written_as_it_stands() {
+        let named = [
+            (60, Bank::Attack, LayerTag::Value(0)),
+            (60, Bank::Attack, LayerTag::Value(6)),
+            (60, Bank::Attack, LayerTag::Value(12)),
+        ];
+        assert_eq!(layer_values(&named).unwrap(), [0, 6, 12]);
+    }
+
+    /// A spread over indices and a stated value mean different things about how many
+    /// layers a root has, and two names claiming one layer would be spread to two
+    /// different values — neither of which is what either name said.
+    #[test]
+    fn one_roots_bank_names_its_layers_one_way_and_each_of_them_once() {
+        let mixed = [
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Attack, LayerTag::Value(12)),
+        ];
+        assert_eq!(
+            layer_values(&mixed),
+            Err(LayerClash {
+                root: 60,
+                bank: Bank::Attack,
+                how: Clash::BothForms,
+            })
+        );
+        let twice = [
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Attack, LayerTag::Index(0)),
+        ];
+        assert_eq!(
+            layer_values(&twice),
+            Err(LayerClash {
+                root: 60,
+                bank: Bank::Attack,
+                how: Clash::Twice,
+            })
+        );
+        let apart = [
+            (60, Bank::Attack, LayerTag::Index(0)),
+            (60, Bank::Release, LayerTag::Value(12)),
+        ];
+        assert_eq!(
+            layer_values(&apart).unwrap(),
+            [0, 12],
+            "a bank of its own names its layers its own way"
+        );
     }
 
     #[test]
