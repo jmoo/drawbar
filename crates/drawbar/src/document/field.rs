@@ -2470,7 +2470,7 @@ mod tests {
 
     /// A morph slot is drawn under the parameter it moves rather than beside it, so a
     /// face that places the parameter draws the slot too — the Advanced table must not
-    /// report three hundred of them as fields the Edit face hides.
+    /// flag a slot the lens draws as a field the Edit face hides.
     #[test]
     fn a_slot_is_shown_where_the_parameter_it_moves_is_placed() {
         // The layout draws the sections the program is using, so the organ has to be
