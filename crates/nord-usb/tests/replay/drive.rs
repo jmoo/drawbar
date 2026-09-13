@@ -134,11 +134,7 @@ async fn drive_query(
             let banks = declared_banks(geometry, class).await?;
             session!(t, class, |s| async {
                 for at in op::occupied_slots(&mut s, &banks).await? {
-                    // The cursor's starting address may be empty; status 1 remains in step.
-                    match op::info(&mut s, at).await {
-                        Ok(_) | Err(Error::DeviceStatus(1)) => {}
-                        Err(e) => return Err(e),
-                    }
+                    op::info(&mut s, at).await?;
                 }
                 Ok(())
             })
