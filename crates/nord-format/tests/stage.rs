@@ -1,16 +1,38 @@
 //! The Stage bodies in the default suite: a synthetic specimen per decoded body, so
 //! placing, gating and the round-trip invariant are exercised without the corpus.
 //!
-//! A zeroed body is a legal one for every Stage format; a body of patterned bytes is
-//! not (ranged fields refuse it) — so the re-encode check runs on zeros, and the
-//! pattern is only asked to fail cleanly rather than panic.
+//! Three synthetic bodies carry the round-trip invariant: all zeros, all ones, and the
+//! body that holds 1 at every bit no field claims and 0 at every bit one does. The last
+//! isolates the unclaimed bits, which is where the invariant can break silently.
 
 use nord_format::bits::Packed;
 use nord_format::cbin::{Cbin, Header};
-use nord_format::components::ProgramCategory;
+use nord_format::components::{KbZone4, ProgramCategory};
 use nord_format::fields::{ControlKind, FieldSpec, Unit};
 use nord_format::formats::{ns2, ns3, ns4};
+use nord_format::layout::{BodyLayout, LayoutField};
 use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Synth};
+
+/// A body holding 1 at every bit no [`LayoutField`] claims and 0 at every bit one does:
+/// the most unclaimed bits a body can carry with no field asked to decode a value it
+/// may refuse.
+fn unclaimed_ones<const LEN: usize>(fields: &'static [LayoutField]) -> [u8; LEN] {
+    fn clear(fields: &'static [LayoutField], base: u32, raw: &mut [u8]) {
+        for field in fields {
+            match field.nested {
+                Some(nested) => clear(nested(), base + field.lo, raw),
+                None => {
+                    for bit in base + field.lo..=base + field.hi {
+                        raw[bit as usize / 8] &= !(1 << (7 - bit % 8));
+                    }
+                }
+            }
+        }
+    }
+    let mut raw = [0xffu8; LEN];
+    clear(fields, 0, &mut raw);
+    raw
+}
 
 macro_rules! stage_body {
     ($name:ident, $body:ty, $len:expr, $format:expr, $versions:expr, $wrap:expr, $unwrap:pat => $inner:expr) => {
@@ -41,12 +63,24 @@ macro_rules! stage_body {
 
             #[test]
             fn unclaimed_bits_ride_through_a_re_encode() {
-                // Every byte set: what no field claims must come back as it went in,
-                // and what a field claims either decodes or is refused — never wrapped.
+                let raw: [u8; $len] = unclaimed_ones(<$body>::layout());
+                let body = <$body>::try_from(raw).expect("a body whose every claimed bit is zero");
+                assert_eq!(
+                    <[u8; $len]>::from(&body),
+                    raw,
+                    "a bit no field claims did not survive the round trip"
+                );
+            }
+
+            #[test]
+            fn an_all_ones_body_decodes_and_re_encodes_byte_for_byte() {
                 let raw = [0xffu8; $len];
-                if let Ok(body) = <$body>::try_from(raw) {
-                    assert_eq!(<[u8; $len]>::from(&body), raw);
-                }
+                let body = <$body>::try_from(raw).expect("every field decodes its maximum");
+                assert_eq!(
+                    <[u8; $len]>::from(&body),
+                    raw,
+                    "a field wrapped its maximum instead of holding it"
+                );
             }
 
             #[test]
@@ -173,33 +207,33 @@ fn program_split_bits_have_exact_placements() {
     assert_eq!(<[u8; ns4::program::BODY_LEN]>::from(&stage4), raw);
 }
 
-/// The placements in the Stage 4 presets the corpus confirms rather than a published
-/// table: layer A's zone, one layer stride above B's in each preset.
+/// In each Stage 4 preset, layer A's keyboard zone sits one layer stride above B's.
+///
+/// Inferred from specimens; not confirmed on hardware.
 #[test]
 fn stage4_preset_zones_sit_one_stride_apart() {
-    // Zone 9 is placed directly into both layers at each preset type's declared offsets.
     let mut raw = [0u8; ns4::synth::BODY_LEN];
     raw[42] |= 0b0010_0100;
     raw[93] |= 0b0010_0100;
     let body = ns4::synth::SynthPreset::try_from(raw).unwrap();
-    assert_eq!(format!("{:?}", body.synth_a_performance.kb_zones), "V9");
-    assert_eq!(format!("{:?}", body.synth_b_performance.kb_zones), "V9");
+    assert_eq!(body.synth_a_performance.kb_zones, KbZone4::V9, "synth A");
+    assert_eq!(body.synth_b_performance.kb_zones, KbZone4::V9, "synth B");
     assert_eq!(<[u8; ns4::synth::BODY_LEN]>::from(&body), raw);
 
     let mut raw = [0u8; ns4::organ_preset::BODY_LEN];
     raw[23] |= 0b1001_0000;
     raw[54] |= 0b1001_0000;
     let body = ns4::organ_preset::OrganPreset::try_from(raw).unwrap();
-    assert_eq!(format!("{:?}", body.organ_a.kb_zones), "V9");
-    assert_eq!(format!("{:?}", body.organ_b.kb_zones), "V9");
+    assert_eq!(body.organ_a.kb_zones, KbZone4::V9, "organ A");
+    assert_eq!(body.organ_b.kb_zones, KbZone4::V9, "organ B");
     assert_eq!(<[u8; ns4::organ_preset::BODY_LEN]>::from(&body), raw);
 
     let mut raw = [0u8; ns4::piano_preset::BODY_LEN];
     raw[18] |= 0b1001_0000;
     raw[30] |= 0b1001_0000;
     let body = ns4::piano_preset::PianoPreset::try_from(raw).unwrap();
-    assert_eq!(format!("{:?}", body.piano_a.kb_zones), "V9");
-    assert_eq!(format!("{:?}", body.piano_b.kb_zones), "V9");
+    assert_eq!(body.piano_a.kb_zones, KbZone4::V9, "piano A");
+    assert_eq!(body.piano_b.kb_zones, KbZone4::V9, "piano B");
     assert_eq!(<[u8; ns4::piano_preset::BODY_LEN]>::from(&body), raw);
 }
 
