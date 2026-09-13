@@ -8,8 +8,10 @@
 use eframe::egui;
 use nord_usb::ObjectClass;
 
-use crate::browser::{new_menu, Act, Kind};
+use crate::browser::{Act, Kind};
 use crate::icon::{painted, Glyph};
+use crate::panel::{GAP, GLYPH, PAD};
+use crate::shell::new_button;
 use crate::workspace::Workspace;
 
 /// ⚠️ The strip's own scroll id. The strip and the document body are drawn into the same
@@ -28,26 +30,10 @@ pub enum Spot {
     Keyboard,
 }
 
-enum Tab {
-    Document { id: u64 },
-    Library,
-    Keyboard,
-}
-
-impl Tab {
-    fn spot(&self) -> Spot {
-        match self {
-            Tab::Document { id } => Spot::Document(*id),
-            Tab::Library => Spot::Library,
-            Tab::Keyboard => Spot::Keyboard,
-        }
-    }
-}
-
 pub struct Tabs {
-    /// ⚠️ [`Tab::Library`] is the first of these and stays there: it is what the centre
+    /// ⚠️ [`Spot::Library`] is the first of these and stays there: it is what the centre
     /// falls back to, so nothing closes it and nothing moves it.
-    open: Vec<Tab>,
+    open: Vec<Spot>,
     active: Option<Spot>,
     /// Which class the keyboard tab is switched to, as the tree last asked. There is one
     /// keyboard tab, so the class it is on is the tab's state rather than a tab of its
@@ -58,7 +44,7 @@ pub struct Tabs {
 impl Default for Tabs {
     fn default() -> Tabs {
         Tabs {
-            open: vec![Tab::Library],
+            open: vec![Spot::Library],
             active: Some(Spot::Library),
             keyboard: None,
         }
@@ -69,7 +55,7 @@ impl Tabs {
     /// Open a document, or bring the tab already on it forward.
     pub fn open(&mut self, id: u64) {
         if !self.holds(id) {
-            self.open.push(Tab::Document { id });
+            self.open.push(Spot::Document(id));
         }
         self.active = Some(Spot::Document(id));
     }
@@ -79,10 +65,10 @@ impl Tabs {
     /// ⚠️ There is one keyboard, so showing it is opening it. The library is always
     /// open, and a document tab is made by [`Tabs::open`] alone.
     pub fn show(&mut self, spot: Spot) {
-        let held = self.open.iter().any(|tab| tab.spot() == spot);
+        let held = self.open.contains(&spot);
         match (held, spot) {
             (true, _) => {}
-            (false, Spot::Keyboard) => self.open.push(Tab::Keyboard),
+            (false, Spot::Keyboard) => self.open.push(Spot::Keyboard),
             (false, Spot::Library | Spot::Document(_)) => return,
         }
         self.active = Some(spot);
@@ -120,9 +106,9 @@ impl Tabs {
         if spot == Spot::Library {
             return;
         }
-        self.open.retain(|tab| tab.spot() != spot);
+        self.open.retain(|held| *held != spot);
         if self.active == Some(spot) {
-            self.active = self.open.last().map(Tab::spot);
+            self.active = self.open.last().copied();
         }
     }
 
@@ -142,29 +128,26 @@ impl Tabs {
     /// The document tab nearest the front, whether or not it is showing.
     pub fn last_document(&self) -> Option<u64> {
         self.active().or_else(|| {
-            self.open.iter().rev().find_map(|tab| match tab.spot() {
-                Spot::Document(id) => Some(id),
-                _ => None,
+            self.open.iter().rev().find_map(|spot| match spot {
+                Spot::Document(id) => Some(*id),
+                Spot::Library | Spot::Keyboard => None,
             })
         })
     }
 
     /// Whether a tab is open on this document, in front or behind.
     pub fn holds(&self, id: u64) -> bool {
-        self.open.iter().any(|tab| tab.spot() == Spot::Document(id))
+        self.open.contains(&Spot::Document(id))
     }
 
     /// Drop tabs whose asset is no longer on this computer.
     pub fn prune(&mut self, workspace: &Workspace) {
-        self.open.retain(|tab| match tab {
-            Tab::Document { id } => workspace.entities().iter().any(|e| e.id == *id),
-            Tab::Library | Tab::Keyboard => true,
+        self.open.retain(|spot| match spot {
+            Spot::Document(id) => workspace.entities().iter().any(|e| e.id == *id),
+            Spot::Library | Spot::Keyboard => true,
         });
-        if self
-            .active
-            .is_some_and(|spot| !self.open.iter().any(|tab| tab.spot() == spot))
-        {
-            self.active = self.open.last().map(Tab::spot);
+        if self.active.is_some_and(|spot| !self.open.contains(&spot)) {
+            self.active = self.open.last().copied();
         }
     }
 
@@ -194,11 +177,10 @@ impl Tabs {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 ui.horizontal(|ui| {
-                    for (index, tab) in self.open.iter().enumerate() {
-                        let Some(face) = face(tab, workspace) else {
+                    for (index, spot) in self.open.iter().copied().enumerate() {
+                        let Some(face) = face(spot, workspace) else {
                             continue;
                         };
-                        let spot = tab.spot();
                         let drawn = paint(ui, &face, self.active == Some(spot));
                         painted.push((index, drawn.tab.rect));
                         let mut label = drawn.tab;
@@ -222,7 +204,8 @@ impl Tabs {
                             close = Some(spot);
                         }
                     }
-                    plus(ui, acts);
+                    let ink = crate::app::caption(ui.visuals());
+                    new_button(ui, Glyph::Plus, ink, acts);
                 });
             });
         if let Some(spot) = activate {
@@ -270,29 +253,29 @@ struct Face {
     shut: bool,
 }
 
-fn face(tab: &Tab, workspace: &Workspace) -> Option<Face> {
-    match tab {
-        Tab::Library => Some(Face {
+fn face(spot: Spot, workspace: &Workspace) -> Option<Face> {
+    match spot {
+        Spot::Library => Some(Face {
             glyph: Glyph::LibraryBig,
             name: "Library".into(),
             unsaved: false,
             hint: None,
             shut: false,
         }),
-        Tab::Keyboard => Some(Face {
+        Spot::Keyboard => Some(Face {
             glyph: Glyph::Keyboard,
             name: "Keyboard".into(),
             unsaved: false,
             hint: None,
             shut: true,
         }),
-        Tab::Document { id } => {
-            let entity = workspace.get(*id)?;
+        Spot::Document(id) => {
+            let entity = workspace.get(id)?;
             Some(Face {
                 glyph: Kind::of(entity.entity.as_ref()).glyph(),
                 name: entity.name.clone(),
                 unsaved: entity.is_unsaved(),
-                hint: Some(match workspace.is_view(*id) {
+                hint: Some(match workspace.is_view(id) {
                     true => format!("{} — the instrument's copy, viewed in place", entity.name),
                     false => entity.name.clone(),
                 }),
@@ -309,15 +292,8 @@ struct Drawn {
     close: Option<egui::Response>,
 }
 
-/// The kind glyph's box.
-const GLYPH: f32 = 13.0;
-
 /// The × at the end of every tab.
 const SHUT: f32 = 11.0;
-
-/// A tab's own padding, and the gap between its parts.
-const PAD: f32 = 8.0;
-const GAP: f32 = 6.0;
 
 fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     let visuals = ui.visuals().clone();
@@ -383,17 +359,21 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     Drawn { tab, close }
 }
 
-/// The one after the last tab: whatever the File menu's New offers.
-fn plus(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-    ui.scope(|ui| {
-        crate::panel::flat(ui);
-        let ink = crate::app::caption(ui.visuals());
-        ui.menu_image_button(crate::icon::sized(Glyph::Plus, GLYPH, ink), |ui| {
-            new_menu(ui, acts);
-        })
-        .response
-        .on_hover_text("something new on this computer");
-    });
+/// Every string a frame painted, headers and button labels included.
+#[cfg(test)]
+pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+            _ => {}
+        }
+    }
+    let mut said = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut said);
+    }
+    said
 }
 
 #[cfg(test)]
@@ -444,8 +424,7 @@ mod tests {
         ] {
             tabs.close(spot);
         }
-        let left: Vec<Spot> = tabs.open.iter().map(Tab::spot).collect();
-        assert_eq!(left, vec![Spot::Library]);
+        assert_eq!(tabs.open, vec![Spot::Library]);
         assert_eq!(tabs.showing(), Some(Spot::Library));
     }
 
@@ -482,14 +461,6 @@ mod tests {
     /// star, which is what it wears in the tree and the table as well.
     #[test]
     fn a_tab_over_an_unsaved_document_wears_a_star() {
-        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-                _ => {}
-            }
-        }
-
         let ctx = egui::Context::default();
         ctx.all_styles_mut(crate::app::metrics);
         let mut ws = Workspace::new(ctx.clone());
@@ -516,11 +487,7 @@ mod tests {
                         tabs.ui(ui, ws, &mut Vec::new());
                     });
             });
-            let mut said = Vec::new();
-            for clipped in &output.shapes {
-                words(&clipped.shape, &mut said);
-            }
-            said
+            words(&output)
         };
 
         let said = strip(&mut tabs, &ws);
@@ -569,7 +536,7 @@ mod tests {
         tabs.open(1);
         tabs.open(2);
         tabs.show(Spot::Keyboard);
-        let order = |tabs: &Tabs| tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
+        let order = |tabs: &Tabs| tabs.open.clone();
 
         tabs.reorder(1, 3);
         assert_eq!(
@@ -627,11 +594,11 @@ mod tests {
         let mut tabs = Tabs::default();
         tabs.open(1);
         tabs.open(2);
-        let before = tabs.open.iter().map(Tab::spot).collect::<Vec<_>>();
+        let before = tabs.open.clone();
         for (from, to) in [(0, 0), (0, 2), (5, 1), (9, 9)] {
             tabs.reorder(from, to);
         }
-        assert_eq!(tabs.open.iter().map(Tab::spot).collect::<Vec<_>>(), before);
+        assert_eq!(tabs.open, before);
     }
 
     /// Where a drop lands: the tab under the pointer, or the tab at whichever end it was
@@ -708,7 +675,7 @@ mod tests {
         }
 
         assert_eq!(
-            tabs.open.iter().map(Tab::spot).collect::<Vec<_>>(),
+            tabs.open,
             vec![Spot::Library, Spot::Document(second), Spot::Document(first)],
             "the dragged tab landed past its neighbour"
         );

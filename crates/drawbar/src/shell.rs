@@ -16,7 +16,7 @@ use crate::device::occupancy;
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
-use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK};
+use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK, GAP, GLYPH, PAD};
 use crate::strings::folder;
 use crate::tabs::Spot;
 
@@ -44,12 +44,7 @@ const SIDE_LEAST: f32 = 180.0;
 const CENTRE_WIDE: f32 = 300.0;
 const CENTRE_TALL: f32 = 200.0;
 
-/// The room the bars keep at each end, and the gap between their parts.
-const PAD: f32 = 8.0;
-const GAP: f32 = 6.0;
-
-/// A glyph in a bar, the check beside a menu item, and the height of a control.
-const GLYPH: f32 = 13.0;
+/// The check beside a menu item, and the height of a control.
 const CHECK: f32 = 12.0;
 const BUTTON: f32 = 22.0;
 
@@ -431,6 +426,17 @@ fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, accented: bool) -> egui:
     .inner
 }
 
+/// The New menu behind a glyph. The tool bar's and the tab strip's are one button, so
+/// what New offers is one list reached two ways.
+pub(crate) fn new_button(ui: &mut egui::Ui, glyph: Glyph, ink: egui::Color32, acts: &mut Vec<Act>) {
+    ui.scope(|ui| {
+        flat(ui);
+        ui.menu_image_button(sized(glyph, GLYPH, ink), |ui| new_menu(ui, acts))
+            .response
+            .on_hover_text("something new on this computer");
+    });
+}
+
 /// A 24 × 22 button carrying one glyph. `on` is a toggle whose dock is open, which is
 /// the one state that fills without the pointer on it.
 fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, on: bool, hint: &str) -> egui::Response {
@@ -764,15 +770,8 @@ impl DrawbarApp {
                     if glyph_button(ui, Glyph::FolderOpen, false, "open files…").clicked() {
                         acts.push(Act::OpenFiles);
                     }
-                    ui.scope(|ui| {
-                        flat(ui);
-                        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-                        ui.menu_image_button(sized(Glyph::FilePlus2, GLYPH, ink), |ui| {
-                            new_menu(ui, acts);
-                        })
-                        .response
-                        .on_hover_text("something new on this computer");
-                    });
+                    let ink = ui.visuals().widgets.inactive.fg_stroke.color;
+                    new_button(ui, Glyph::FilePlus2, ink, acts);
                     let open = self.tabs.active();
                     if glyph_button(ui, Glyph::Save, false, "save the open document").clicked() {
                         if let Some(id) = open {
@@ -1208,14 +1207,6 @@ mod tests {
 
     /// One frame with something arriving in it.
     fn frame_of(ctx: &egui::Context, app: &mut DrawbarApp, events: Vec<egui::Event>) -> Painted {
-        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-                _ => {}
-            }
-        }
-
         let mut frame = eframe::Frame::_new_kittest();
         let input = egui::RawInput {
             events,
@@ -1228,10 +1219,6 @@ mod tests {
             // Panels shrink this as they are added; the central panel does not.
             centre = ctx.available_rect();
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            words(&clipped.shape, &mut said);
-        }
         let panels = REGIONS
             .iter()
             .filter_map(|id| {
@@ -1242,7 +1229,7 @@ mod tests {
         Painted {
             centre,
             panels,
-            words: said,
+            words: crate::tabs::words(&output),
         }
     }
 

@@ -14,11 +14,14 @@ pub const HEADER: f32 = 24.0;
 /// of every dock beside it read as one line across the window.
 pub const DOCK: f32 = crate::tabs::HEIGHT;
 
-/// The room a header keeps at each end.
-const PAD: f32 = 8.0;
+/// The room a bar keeps at each end, and the gap between its parts. The title bar, the
+/// tool bar, the tab strip and every header share them, so their contents line up down
+/// the window.
+pub(crate) const PAD: f32 = 8.0;
+pub(crate) const GAP: f32 = 6.0;
 
-/// The gap between a header's parts.
-const GAP: f32 = 6.0;
+/// A glyph in a bar: a toolbar action's, a tab's kind, a menu item's mark.
+pub(crate) const GLYPH: f32 = 13.0;
 
 /// The collapse triangle's box, and the grip a dock header wears before its title.
 const CHEVRON: f32 = 12.0;
