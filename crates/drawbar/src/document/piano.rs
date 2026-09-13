@@ -3745,12 +3745,11 @@ mod tests {
     const DIRECTORY_AT: usize = 0x732;
     const REC_TRIM: usize = 0x34;
 
-    /// The body offsets a plan moves. Anything outside the body is the container's own
-    /// checksum, which every write moves.
-    fn moved(saved: &[u8], plan: &Plan) -> Vec<usize> {
+    /// How long the file a plan makes comes out, and the body offsets it moves. Anything
+    /// outside the body is the container's own checksum, which every write moves.
+    fn moved(saved: &[u8], plan: &Plan) -> (usize, Vec<usize>) {
         let base = rebuild(saved, &Plan::default()).unwrap();
         let made = rebuild(saved, plan).unwrap();
-        assert_eq!(made.len(), base.len(), "the plan re-laid the audio");
         let body_at = saved
             .windows(4)
             .position(|word| word == b"CNSP")
@@ -3762,31 +3761,35 @@ mod tests {
             .unwrap()
             .body_len()
             .unwrap();
-        (0..base.len())
+        let offsets = (0..base.len())
             .filter(|at| base[*at] != made[*at])
             .filter_map(|at| at.checked_sub(body_at).filter(|at| *at < body_len))
-            .collect()
+            .collect();
+        (made.len(), offsets)
     }
 
+    /// Each of these is one field of the prefix or of a stroke's record: it writes the
+    /// bytes it names, and it re-lays no audio.
     #[test]
     fn each_playback_field_writes_only_the_byte_it_names() {
         let saved = bytes();
+        let whole = saved.len();
 
         let mut gained = plan();
         gained.gain = Some(-20);
-        assert_eq!(moved(&saved, &gained), [GAIN_AT]);
+        assert_eq!(moved(&saved, &gained), (whole, vec![GAIN_AT]));
 
         let mut damped = plan();
         damped.damper_top = Some(90);
-        assert_eq!(moved(&saved, &damped), [DAMPER_TOP_AT]);
+        assert_eq!(moved(&saved, &damped), (whole, vec![DAMPER_TOP_AT]));
 
         let mut filed = plan();
         filed.kind = Some(Kind::Wurlitzer);
-        assert_eq!(moved(&saved, &filed), [KIND_AT]);
+        assert_eq!(moved(&saved, &filed), (whole, vec![KIND_AT]));
 
         let mut routed = plan();
         routed.key_roots.insert(60, Some(ROOTS[0]));
-        assert_eq!(moved(&saved, &routed), [KEY_MAP_AT + 60]);
+        assert_eq!(moved(&saved, &routed), (whole, vec![KEY_MAP_AT + 60]));
 
         // The trim is a u16 in the record of the stroke it names — the first of them,
         // which is the lowest root's loudest attack.
@@ -3794,7 +3797,10 @@ mod tests {
         trimmed
             .trims
             .insert((ROOTS[0], Bank::Attack.code(), LAYERS[0]), 6);
-        assert_eq!(moved(&saved, &trimmed), [DIRECTORY_AT + REC_TRIM + 1]);
+        assert_eq!(
+            moved(&saved, &trimmed),
+            (whole, vec![DIRECTORY_AT + REC_TRIM + 1])
+        );
     }
 
     /// A trim names the stroke it belongs to, not the place in the directory that
