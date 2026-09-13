@@ -134,6 +134,14 @@ impl UsbTransport {
     async fn write_frame(&mut self, buf: &[u8]) -> Result<()> {
         let completion = self.interface.bulk_out(EP_OUT, buf.to_vec()).await;
         completion.status.map_err(map_err("bulk write"))?;
+        // A short write truncates a frame and desynchronizes the next response.
+        let written = completion.data.actual_length();
+        if written != buf.len() {
+            return Err(Error::Transport(format!(
+                "bulk write sent {written} of {} bytes",
+                buf.len()
+            )));
+        }
         self.terminate(buf.len()).await
     }
 
