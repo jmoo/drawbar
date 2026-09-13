@@ -128,6 +128,7 @@ Reverse-engineered claims use one of these exact provenance forms:
 ```rust
 // Confirmed on hardware.
 // Inferred from specimens; not confirmed on hardware.
+// Reported by public documentation; not confirmed on hardware.
 // Unexplained: real programs hold this, and the panel cannot produce it.
 ```
 
