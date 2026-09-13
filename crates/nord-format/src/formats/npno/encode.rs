@@ -37,7 +37,7 @@
 //! them — each is no longer than what is left when it starts, and the cap only ever
 //! removes candidates — so it lays out the same blocks and this time lands exactly.
 //!
-//! Confirmed on hardware: what this codes plays. Libraries built here load and
+//! What this codes plays. Confirmed on hardware. Libraries built here load and
 //! sound — mono and stereo, every key of a full-keyboard library including its lowest
 //! and highest root, each of three attack layers, the release stroke at note-off, a
 //! long stroke to its end, and the keys between roots transposed — and a vendor
@@ -68,7 +68,7 @@
 //! [`Donor::Rules`] states them instead, so a library can be written from recordings
 //! alone. Every one is then a neutral playback parameter: no decay applied over the
 //! recordings, each stroke trimmed by its own layer value, and the damper reaching the
-//! keys the kind of instrument dampens. Confirmed on hardware: a library written this
+//! keys the kind of instrument dampens. Confirmed on hardware. A library written this
 //! way plays like the same audio built against a template, within about a decibel at
 //! every velocity and key, and sustains longer because nothing is applied over it.
 
@@ -131,9 +131,9 @@ pub enum Donor<'a> {
 
 /// The kind of instrument a library states it holds, at body `0x18`.
 ///
-/// The instrument files the library under it. Which code names which kind is inferred
-/// from specimens; not confirmed on hardware. Confirmed on hardware: the byte changes
-/// nothing a library sounds like.
+/// The instrument files the library under it. Which code names which kind: Inferred
+/// from specimens; not confirmed on hardware. The byte changes nothing a library
+/// sounds like. Confirmed on hardware.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     ElectricGrand,
@@ -498,8 +498,9 @@ pub fn build(
 }
 
 /// The content version the container states where no template donates one: a library's
-/// own version times a hundred, as the instrument reports it. Confirmed on hardware
-/// only in that a library stating it loads and plays.
+/// own version times a hundred, as the instrument reports it. The hardware evidence
+/// reaches no further than this: a library stating it loads and plays. Confirmed on
+/// hardware.
 const CONTENT_VERSION: u32 = 540;
 
 /// The stream version a rule-written prefix states, at [`VERSION_AT`],
@@ -579,7 +580,7 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
 /// The damper cut's entry for `note`, at [`DAMPER_CUT_AT`] `+ note`.
 ///
 /// A plateau over the lowest notes, a straight fall to the highest key an instrument
-/// plays, and a fixed value past it. Confirmed on hardware: a curve of this shape takes
+/// plays, and a fixed value past it. Confirmed on hardware. A curve of this shape takes
 /// a held key down within tens of milliseconds, where a flat table of any level takes
 /// about half a second. What axis the instrument reads the table on is open.
 fn damper_cut(note: usize) -> u8 {

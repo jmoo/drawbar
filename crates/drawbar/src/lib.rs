@@ -4,6 +4,7 @@
 //! same shell runs as a native window and as a wasm module in a browser tab.
 //!
 
+pub mod about;
 pub mod app;
 pub mod audio;
 pub mod browser;
@@ -26,6 +27,7 @@ pub mod panel;
 pub mod queue;
 pub mod room;
 pub mod shell;
+pub mod splash;
 pub mod store;
 pub mod strings;
 pub mod tabs;

@@ -73,7 +73,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             _capability: PhantomData,
         };
 
-        // ⚠️ Confirmed on hardware: an abandoned UI session makes every slot appear empty.
+        // ⚠️ An abandoned UI session makes every slot appear empty. Confirmed on hardware.
         s.handshake().await?;
 
         let opened = s.open_class(class).await;
@@ -136,7 +136,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     /// Tell the device to drop a session it still thinks is open.
     ///
     /// Sent **bare** — no `HELLO`, no open — because the machinery that would wrap it is
-    /// exactly what the device is refusing. Confirmed on hardware: an instrument that
+    /// exactly what the device is refusing. Confirmed on hardware. An instrument that
     /// answers `0x12` to everything is well again immediately afterwards.
     async fn discard_stale_session(&mut self) -> Result<()> {
         let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());

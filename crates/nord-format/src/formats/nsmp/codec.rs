@@ -36,11 +36,11 @@
 //! number of field slots, or rotates the values inside their width when the tail is
 //! not a multiple of it.
 //!
-//! Confirmed on hardware for [`Layout::V2`]: a decode of both our own encodes and
-//! vendor content matches the Electro 5's own playback of the same instrument, a
-//! transposed note plays as exact `2^(n/12)` resampling, and a stereo stroke's two
-//! streams reach the outputs in the order the de-interleave produces. The V3 and V4
-//! constants are inferred from specimens; not confirmed on hardware — the Electro 5
+//! For [`Layout::V2`], a decode of both our own encodes and vendor content matches
+//! the Electro 5's own playback of the same instrument, a transposed note plays as
+//! exact `2^(n/12)` resampling, and a stereo stroke's two streams reach the outputs
+//! in the order the de-interleave produces. Confirmed on hardware. The V3 and V4
+//! constants: Inferred from specimens; not confirmed on hardware. The Electro 5
 //! plays only v2.
 
 use crate::formats::predictor;

@@ -937,9 +937,9 @@ fn active_eq_fields(node: &Node, scope: &str) -> Result<Vec<String>, ParseError>
 /// the editor derives for an untouched import: the loop starts halfway, runs to
 /// one frame short of the end, and cross-fades over 15% of its length.
 ///
-/// Inferred from specimens. A few hold a loop start half a frame above
-/// `end / 2` — an analysis result, like `m_startSecondary`, that nothing here
-/// reproduces.
+/// Inferred from specimens; not confirmed on hardware. A few hold a loop start half
+/// a frame above `end / 2` — an analysis result, like `m_startSecondary`, that
+/// nothing here reproduces.
 fn common_stroke(global_id: u32, frames: u64, date: &str) -> Node {
     let end = frames as f64;
     // The editor writes `m_start = 1` for an untouched import; the encoded audio

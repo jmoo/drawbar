@@ -13,7 +13,7 @@
 //!                                           with u32 status  preceding bytes
 //! ```
 //!
-//! Derived from captured traffic and confirmed on hardware: this framing carries every
+//! Derived from captured traffic. Confirmed on hardware. This framing carries every
 //! operation the crate performs, and two platforms emit byte-identical request frames
 //! for the same verb. What an individual command *means* is a separate question, and
 //! several below are still open.
@@ -157,11 +157,11 @@ pub mod cmd {
 
     /// Erases an entire partition.
     ///
-    /// Reported by public documentation; not confirmed on hardware, and deliberately
-    /// not to be. A session is class-scoped, so the session is what aims this: opened on
-    /// a library class it takes the whole piano or sample store, which is hundreds of
-    /// megabytes and a long restore from a backup. Named here so it can be recognised
-    /// and refused, not so it can be sent.
+    /// Reported by public documentation; not confirmed on hardware. Deliberately left
+    /// unconfirmed: a session is class-scoped, so the session is what aims this —
+    /// opened on a library class it takes the whole piano or sample store, which is
+    /// hundreds of megabytes and a long restore from a backup. Named here so it can be
+    /// recognised and refused, not so it can be sent.
     pub const ERASE_ALL: u32 = 0x24;
 
     /// Highest command the instrument has ever been seen to answer.
@@ -815,7 +815,7 @@ impl Message {
 /// What kind of object a session is about.
 ///
 /// `SESSION_OPEN` carries one of these, and [`cmd::STATUS`] then reports on that class
-/// alone. Confirmed on hardware: **the class code is the device's partition index**,
+/// alone. Confirmed on hardware. **The class code is the device's partition index**,
 /// and the partition table names each one. An unrecognized numeric class is preserved.
 ///
 /// The gaps at `0` and `2` are the `Piano (Native)` and `Samp Lib (Native)` partitions
@@ -1430,7 +1430,7 @@ mod tests {
     }
 
     /// A set list's dependencies are programs: slot-addressed, [`Dependency::id`]
-    /// always `0`, the address in the location words. Confirmed on hardware — a real
+    /// always `0`, the address in the location words. Confirmed on hardware. A real
     /// set list read back four such rows, all live. A required-filter keyed on id
     /// alone classifies every one as "routed but nothing assigned".
     ///

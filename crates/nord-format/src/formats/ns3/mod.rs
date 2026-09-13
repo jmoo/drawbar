@@ -10,6 +10,10 @@
 //! traps here: `f` is the program, `s` is a *song* (a set list on the Electro 5),
 //! `y` is a synth patch (the *settings* on the Stage 2), and `t` is the settings.
 //!
+//! The community byte maps the placements come from are
+//! [Chris55/nord-documentation](https://github.com/Chris55/nord-documentation), the
+//! public documentation this crate's provenance marks name.
+//!
 //! Community documentation reports a second checksum at file offset `0x78`
 //! ("covering synth and organ panel data"). The corpus refutes it: the word
 //! there is not any common CRC-32 over any contiguous or field-excised range,

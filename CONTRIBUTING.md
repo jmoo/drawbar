@@ -173,6 +173,30 @@ intentional contract change. Test names state behavior. Assertions report the
 relevant value and location. Helpers clarify setup but must not hide the claim.
 Tests do not need comments that repeat those three things.
 
+## Documentation
+
+`docs/` is the user guide and the READMEs are shop windows. A pull request that
+changes what a user sees, or adds a feature, updates both in the same change.
+Review the pages that describe the touched behavior even when nothing seems to
+need editing; stale text is a bug.
+
+- Write for the reader in front of the page. The drawbar and nord-cli sections
+  are for people using the app or the command. Engineering detail belongs in
+  Reference, and format or protocol evidence in the code's own documentation.
+- Describe the current state. Readers do not need a feature's history, the
+  designs that were rejected, or the count of specimens behind a claim.
+- State each claim once, where it belongs. Instrument support and hardware
+  qualifiers live on What is supported; other pages link there rather than
+  repeating them, and name a specific instrument only there and in examples.
+- A README sells its package in a few lines: what it is, why, how to start, and
+  where to learn more. Each package has its own tagline, not the repository's.
+  README links to `docs/` are relative paths, so they hold on GitHub and
+  crates.io.
+- Be concise and plain. Short sentences, no em dashes, no "not X but Y", no
+  lists padded to three, no marketing words. If a page can lose a paragraph
+  without losing a fact a reader needs, lose it.
+- Links to the running app point at https://drawbar.app/.
+
 ## Tooling and checks
 
 This is a Nix-native project. Do not assume a tool is installed globally. Run
@@ -189,6 +213,15 @@ Cargo from `crates/` inside the development shell; the parent
 - `nix build .#nord.all-corpus-full` uses the R2 corpus tier and requires a
   seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
   the corpus assemblies.
+- `nix build .#docs` renders the user guide, the mdBook under `docs/`.
+  `mdbook serve docs` previews it from the development shell.
+- `nix build .#site` assembles this checkout's Pages tree for local preview: its
+  browser build at the root, its guide at `/docs`. `nix run .#drawbar-web`
+  serves that tree. `scripts/site.bash` assembles the tree that is deployed,
+  which is the same layout with the app taken from the latest `drawbar-v*` tag.
+- `scripts/licences.bash` regenerates the licence notices drawbar shows for its
+  Rust crates. The drawbar suite fails when the registry packages in `Cargo.lock`
+  change, until the script is re-run.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
 would change, and treats Clippy warnings as failures. The public suite must
@@ -199,6 +232,12 @@ committed fixtures, plus the private corpus when enabled, and applies sidecar
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
 `NORD_CORPUS_DEPLOY_KEY`; forks cannot receive that secret, so the job skips them.
+
+Every push to `master` deploys to GitHub Pages after the release job runs: the
+guide from `master`, the app from the latest `drawbar-v*` tag. A docs-only
+change therefore goes live without a release, and an app change goes live once
+its version is bumped and the release job tags it. The deploy hangs off that job
+because a tag `GITHUB_TOKEN` creates fires no workflow event of its own.
 
 Nix style is two spaces and alphabetized attribute-set keys. Use a dotted path
 for one child (`a.b.c = v`) and braces for two or more children, decided per
@@ -220,6 +259,7 @@ Before declaring a change done:
    formatting, Clippy, and the applicable Nix builds.
 5. Run corpus tests when the change touches decoded layout or protocol evidence.
 6. Remove dead code, redundant tests, stale comments, and temporary diagnostics.
+7. Update `docs/` and the READMEs for any behavior a user can see.
 
 Refactors are behavior-preserving. The default suite and, where available, the
 corpus round trip are the proof. Do not commit unless asked. When commits are

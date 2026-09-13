@@ -1,5 +1,5 @@
 {
-  description = "Rust tools for reading, editing, and moving programs on Clavia Nord instruments.";
+  description = "Read, edit and move the sounds on your Nord keyboard: an app, a command, and Rust libraries.";
 
   inputs = {
     crane.url = "github:ipetkov/crane";
@@ -41,9 +41,9 @@
             };
 
             # `nix run` prefers apps over packages, so `nix run .#drawbar-web`
-            # launches the bundle that `nix build .#drawbar-web` produces.
+            # launches the site that `nix build .#site` produces.
             apps.drawbar-web = {
-              meta.description = "serve the drawbar browser build and open it";
+              meta.description = "serve the drawbar browser build with its guide and open it";
               program = pkgs.lib.getExe pkgs.nord.drawbar-web-launch;
               type = "app";
             };
@@ -70,18 +70,20 @@
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/*.bash (see their `nix-deps` lines)
+              # scripts/*.bash (see their `nix-deps` lines), plus `mdbook serve docs`.
               packages = with pkgs; [
+                cargo-about
                 curl
                 gh
                 jq
+                mdbook
                 rust-analyzer
               ];
             };
 
             legacyPackages = pkgs;
 
-            packages = pkgs.nord.crates // pkgs.nord.crossPackages;
+            packages = pkgs.nord.crates // pkgs.nord.crossPackages // { inherit (pkgs.nord) docs site; };
 
             treefmt = {
               programs = {

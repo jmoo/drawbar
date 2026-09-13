@@ -1,13 +1,13 @@
 [package]
 name = "nord-bits-derive"
 categories = ["development-tools::procedural-macro-helpers"]
-description = "Derive macro for bit-packed binary layouts — the proc-macro behind nord-format"
+description = "The proc-macro behind nord-format: bit-packed binary layouts declared once"
 edition.workspace = true
 rust-version.workspace = true
 keywords = ["bitfield", "nord", "proc-macro"]
 license.workspace = true
 repository.workspace = true
-version = "0.3.0"
+version = "0.4.0"
 
 [lib]
 proc-macro = true

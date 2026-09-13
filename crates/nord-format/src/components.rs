@@ -57,7 +57,7 @@ impl<const FULL: u8> LevelOf<FULL> {
 
     /// The panel's 0..10 reading.
     ///
-    /// Confirmed on hardware: reverb wet reads `43` in the file and the panel shows
+    /// Confirmed on hardware. Reverb wet reads `43` in the file and the panel shows
     /// 3.4, and `43 / 127 * 10 = 3.39`.
     pub fn as_panel(&self) -> f32 {
         let () = Self::VALID;
@@ -276,7 +276,7 @@ knob!(
 /// rather than writing the code out.
 ///
 /// ⚠️ The centre is taken as 64 — the midpoint of the slot. Inferred from specimens; not
-/// confirmed on hardware — the corpus does not distinguish 63 from 64, and no manual
+/// confirmed on hardware. The corpus does not distinguish 63 from 64, and no manual
 /// states it. A reading is therefore accurate at the endpoints and approximate in
 /// between.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -952,8 +952,7 @@ impl Debug for StageTranspose {
 
 /// The master clock rate the Stage 2 and 3 store in a program: `stored + 30` BPM.
 ///
-/// Reported by the Nord User Forum's ns3-program-viewer documentation
-/// (github.com/Chris55/ns3-program-viewer); not confirmed on hardware.
+/// Reported by public documentation; not confirmed on hardware.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MasterTempo {
     inner: u8,
@@ -1168,7 +1167,7 @@ macro_rules! switch {
 /// left then four right then four left — but correlating the highest non-zero step
 /// against the sibling `arp_pattern_length` fails in both directions, so either the word
 /// keeps all sixteen steps regardless of the active length or that field is not a step
-/// count. Not confirmed on hardware.
+/// count. Inferred from specimens; not confirmed on hardware.
 ///
 /// The slot is wider than [`crate::fields::ENUMERABLE_BITS`], so `--set` spells it by its
 /// stored bits — `0x55aa5500` is the readable form for a pattern anyway.
@@ -1381,9 +1380,8 @@ sparse_enum!(
 sparse_enum!(
     /// A Stage split boundary, one of the ten notes the panel offers.
     ///
-    /// The Stage 2 and 3 store the same ten-note table. Reported by the Nord User
-    /// Forum's ns3-program-viewer documentation (github.com/Chris55/ns3-program-viewer);
-    /// not confirmed on hardware.
+    /// The Stage 2 and 3 store the same ten-note table. Reported by public
+    /// documentation; not confirmed on hardware.
     SplitNote, 4, {
         0 => F2, "F2";
         1 => C3, "C3";
@@ -1401,7 +1399,7 @@ sparse_enum!(
 sparse_enum!(
     /// A Stage 3 split crossfade width, in semitones.
     ///
-    /// Reported by the ns3-program-viewer documentation; not confirmed on hardware.
+    /// Reported by public documentation; not confirmed on hardware.
     SplitWidth, 2, {
         0 => One, "1";
         1 => Six, "6";
@@ -1412,7 +1410,7 @@ sparse_enum!(
 sparse_enum!(
     /// The program category byte the Stage 2 and 3 keep in the header's `aux` word.
     ///
-    /// Reported by the ns3-program-viewer documentation; not confirmed on hardware.
+    /// Reported by public documentation; not confirmed on hardware.
     /// The gaps are real: no name is known for the values between these.
     ProgramCategory, 8, {
         0x00 => Acoustic, "Acoustic";

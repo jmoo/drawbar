@@ -9,7 +9,7 @@
 //! settings — so the declaration below is grouped the way the instrument's menus are and
 //! the placements do the reordering.
 //!
-//! Every placement is confirmed on hardware: a capture that changed one setting on the
+//! Every placement: Confirmed on hardware. A capture that changed one setting on the
 //! panel moves exactly the bits that setting's field claims, and nothing else. Where a
 //! field's *range* runs past the values the captures reach, the field says so.
 //!
@@ -24,7 +24,7 @@
 //!
 //! **Two cataloged settings are not stored here.** Toggling *memory protect* and *local
 //! control* on the panel — the change verified on the display — and re-reading the object
-//! moves no bit of the body. Confirmed on hardware: both live outside this object, so
+//! moves no bit of the body. Confirmed on hardware. Both live outside this object, so
 //! neither is decoded.
 
 use crate::cbin::{self, Cbin, Header};
@@ -87,7 +87,7 @@ pub type FineTune = RangedI8<50, -50, 50>;
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`] and the aux word, and refuses any slot but `0:0`. Every
-/// placement is confirmed on hardware by a change-one-setting sweep.
+/// placement is pinned by a change-one-setting sweep. Confirmed on hardware.
 #[bitbody(34)]
 pub struct Settings {
     // ── System ─────────────────────────────────────────────────────────────────
@@ -109,9 +109,9 @@ pub struct Settings {
     pub output_routing: OutputRouting,
     #[bits(68..=71)]
     pub global_transpose: GlobalTranspose,
-    /// Confirmed on hardware at `-50`, `0` and `+5`: written over USB, each moves the
-    /// instrument's pitch by its own value in cents. The values between are inferred
-    /// from specimens; not confirmed on hardware.
+    /// At `-50`, `0` and `+5`, written over USB, each moves the instrument's pitch by
+    /// its own value in cents. Confirmed on hardware. The values between: Inferred from
+    /// specimens; not confirmed on hardware.
     #[bits(55..=61)]
     pub fine_tune: FineTune,
 
@@ -132,8 +132,8 @@ pub struct Settings {
     pub transpose_at: TransposeAt,
 
     // ── Sound ──────────────────────────────────────────────────────────────────
-    /// Only `-6`, `0` and `+6` dB appear in the sweep, so every odd value is inferred
-    /// from specimens; not confirmed on hardware. The bias matches [`GlobalTranspose`],
+    /// Only `-6`, `0` and `+6` dB appear in the sweep. Every odd value: Inferred from
+    /// specimens; not confirmed on hardware. The bias matches [`GlobalTranspose`],
     /// whose odd values the sweep does reach.
     #[bits(64..=67)]
     pub piano_string_resonance: ResonanceLevel,

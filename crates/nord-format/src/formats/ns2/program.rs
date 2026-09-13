@@ -3,7 +3,9 @@
 //!
 //! The program-wide globals were decoded first and by hand; everything else — the
 //! organ's B3, Vox and Farfisa drawbar banks, the piano, synth, extern and the
-//! effects chain — comes from the byte maps.
+//! effects chain — comes from the byte maps. They are
+//! [Chris55/nord-documentation](https://github.com/Chris55/nord-documentation), the
+//! public documentation this module's provenance marks name.
 //!
 //! ⚠️ Stage 2 files are **type-0** containers, where the Stage 3's are type-1. The
 //! byte maps number both in the type-1 layout; since type-0 differs only by

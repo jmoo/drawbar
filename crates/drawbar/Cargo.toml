@@ -1,11 +1,11 @@
 [package]
 name = "drawbar"
-description = "Desktop and browser app for Clavia / Nord keyboards — view, edit, and transfer sounds over USB"
+description = "Your Nord's sounds, in a window: browse, edit and send programs, samples and pianos, in the browser or on the desktop"
 edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
-version = "0.5.0"
+version = "0.6.0"
 
 [lib]
 # `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
@@ -28,7 +28,7 @@ eframe = { version = "0.32", default-features = false, features = [
   "x11",
 ] }
 egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
-nord-format = { path = "../nord-format", version = "0.5.0", features = [
+nord-format = { path = "../nord-format", version = "0.6.0", features = [
   "bundle",
 ] }
 rfd = "0.15"
@@ -36,12 +36,12 @@ rfd = "0.15"
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests
 # need a `.npno` and nothing else in the workspace builds one without a template.
-nord-format = { path = "../nord-format", version = "0.5.0", features = [
+nord-format = { path = "../nord-format", version = "0.6.0", features = [
   "synthetic",
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-nord-usb = { path = "../nord-usb", version = "0.5.0", features = [
+nord-usb = { path = "../nord-usb", version = "0.6.0", features = [
   "blocking",
   "nusb",
 ] }
@@ -67,9 +67,14 @@ web-sys = { version = "0.3", features = [
   "BlobPropertyBag",
   "Document",
   "Element",
+  "Headers",
   "HtmlAnchorElement",
   "HtmlCanvasElement",
   "Navigator",
+  "Request",
+  "RequestInit",
+  "Response",
+  "Storage",
   "Url",
   "Usb",
   "UsbConnectionEvent",
@@ -78,6 +83,6 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceRequestOptions",
   "Window",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.5.0", default-features = false, features = [
+nord-usb = { path = "../nord-usb", version = "0.6.0", default-features = false, features = [
   "web",
 ] }
