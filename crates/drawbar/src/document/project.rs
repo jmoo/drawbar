@@ -625,7 +625,7 @@ fn parameters(ui: &mut egui::Ui, snapshot: &Snapshot, sets: &mut Sets) {
             ] {
                 sample::cell(ui, label, 132.0, |ui| {
                     if let Some(moved) = crate::knob::ui(ui, field, i64::from(value), 0, 255) {
-                        sets.push((format!("velocity.{field}"), moved.to_string()));
+                        sets.push((format!("velocity.{field}"), moved));
                     }
                 });
             }

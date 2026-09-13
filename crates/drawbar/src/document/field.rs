@@ -960,7 +960,7 @@ fn cells(
             match cell {
                 Cell::One(part) => one(ui, ctx, state, part, rows, piano, sets),
                 Cell::Register(bars) => register(ui, ctx, state, bars, sets),
-                Cell::Transpose => transpose(ui, state, rows, sets),
+                Cell::Transpose => transpose(ui, ctx, state, rows, sets),
             }
         }
     });
@@ -1406,7 +1406,12 @@ fn turned(
     if centred {
         detent(ui, dial.rect);
     }
-    let shown = moved.unwrap_or(value);
+    // What was typed may be no number at all, and the field is what refuses it; until it
+    // does, the reading stands on the value the file holds.
+    let shown = moved
+        .as_deref()
+        .and_then(|spelled| spelled.parse().ok())
+        .unwrap_or(value);
     match reading(unit, centred, shown, min, max) {
         Some(text) => {
             ui.label(
@@ -1433,7 +1438,7 @@ fn turned(
             }
         }
     }
-    moved.filter(|moved| *moved != value).map(|m| m.to_string())
+    moved
 }
 
 /// The mark at twelve o'clock on a knob whose musical zero is its centre.
@@ -1747,8 +1752,6 @@ fn plain(ui: &mut egui::Ui, field: &Field, legal: &[String]) -> Option<String> {
     };
     let value: i64 = field.value.trim_start_matches('+').parse().ok()?;
     knob::ui(ui, &field.path, value, min, max)
-        .filter(|moved| *moved != value)
-        .map(|moved| moved.to_string())
 }
 
 /// A field too wide to enumerate: its stored bits, typed as they are spelled.
@@ -1789,12 +1792,12 @@ fn wide(ui: &mut egui::Ui, field: &Field) -> Option<String> {
 /// untouched program stores `+1` in the value rather than `0`. The instrument ignores the
 /// amount while the lamp is dark, and moving the amount is what lights it.
 /// Confirmed on hardware.
-fn transpose(ui: &mut egui::Ui, state: &State, rows: &[&Field], sets: &mut Sets) {
-    /// The panel's own travel, either side of nothing.
-    const SEMITONES: i64 = 6;
-
+fn transpose(ui: &mut egui::Ui, ctx: &Ctx, state: &State, rows: &[&Field], sets: &mut Sets) {
     let held = |path: &str| rows.iter().find(|field| field.path == path);
     let (Some(lamp), Some(amount)) = (held(TRANSPOSE_ENABLED), held(TRANSPOSE)) else {
+        return;
+    };
+    let Some((least, most)) = contiguous(&ctx.legal(amount)) else {
         return;
     };
     let on = lamp.value == "true";
@@ -1811,7 +1814,7 @@ fn transpose(ui: &mut egui::Ui, state: &State, rows: &[&Field], sets: &mut Sets)
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 switched = led::ui(ui, on, "");
-                moved = knob::ui(ui, TRANSPOSE, semitones, -SEMITONES, SEMITONES);
+                moved = knob::ui(ui, TRANSPOSE, semitones, least, most);
             });
             caption(ui, lamp, edited);
         });
@@ -1822,14 +1825,12 @@ fn transpose(ui: &mut egui::Ui, state: &State, rows: &[&Field], sets: &mut Sets)
     // Moving the semitones turns the light on, which is what the panel does.
     let (on, semitones) = match (switched, moved) {
         (_, Some(want)) => (true, want),
-        (Some(want_on), None) => (want_on, semitones),
+        (Some(want_on), None) => (want_on, semitones.to_string()),
         (None, None) => return,
     };
     sets.push((TRANSPOSE_ENABLED.to_string(), on.to_string()));
-    sets.push((TRANSPOSE.to_string(), semitones.to_string()));
+    sets.push((TRANSPOSE.to_string(), semitones));
 }
-
-// ---- what the Advanced face reads --------------------------------------------------
 
 /// The rows of the Advanced face's "About this file": a label, a value, and a note.
 pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, String)> {

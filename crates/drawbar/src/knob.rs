@@ -80,14 +80,19 @@ fn arc(centre: egui::Pos2, radius: f32, from: f32, to: f32) -> Vec<egui::Pos2> {
         .collect()
 }
 
-/// A knob for `value` somewhere in `min..=max`, with its number under it. Returns the new
-/// value when it has been turned.
+/// A knob for `value` somewhere in `min..=max`, with its number under it. Returns what it
+/// was turned or typed to, spelled the way the field takes it.
 ///
 /// Drag up to open it out, down to close it; double-click to type a number; with the
 /// focus on it the arrows step and Home/End go to the stops.
-pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> Option<i64> {
+///
+/// ⚠️ A drag stops at the stops; what is typed is handed back as it was spelled, past a
+/// stop or not a number at all. The field is what refuses a value it cannot hold, and a
+/// widget that substituted one would write what nobody typed.
+pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> Option<String> {
     let id = ui.make_persistent_id(("knob", id_salt));
     let mut moved = None;
+    let mut typed = None;
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -146,27 +151,22 @@ pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> O
         let typing = response.double_clicked();
         response.on_hover_text(format!("{min} … {max} — drag, or double-click to type"));
 
-        if let Some(typed) = readout(ui, id, value, min, max, typing) {
-            moved = Some(typed);
-        }
+        typed = readout(ui, id, value, typing);
     });
 
-    moved.filter(|want| *want != value)
+    typed
+        .or_else(|| moved.map(|want| want.to_string()))
+        .filter(|want| *want != value.to_string())
 }
 
-/// The number under the dial, and the box it becomes when double-clicked.
+/// The number under the dial, and the box it becomes when double-clicked. Answers with
+/// what was typed, exactly as it was spelled.
 ///
-/// ⚠️ What is typed is clamped into the field's range rather than refused: a knob cannot
-/// be turned past its stop, so it must not accept a value it could not have been turned
-/// to. Anything that is not a number at all is dropped, and the dial keeps what it had.
-fn readout(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    value: i64,
-    min: i64,
-    max: i64,
-    start_editing: bool,
-) -> Option<i64> {
+/// ⚠️ Nothing here clamps or parses. A number past a stop and text that is no number at
+/// all are both the field's to refuse, in the field's own words — dropping them here
+/// would leave the dial sitting on a value the operator did not type and no word on
+/// screen saying why.
+fn readout(ui: &mut egui::Ui, id: egui::Id, value: i64, start_editing: bool) -> Option<String> {
     let editing = id.with("editing");
     let arming = id.with("arming");
     let mut buffer: Option<String> = ui.data(|d| d.get_temp(editing));
@@ -234,11 +234,7 @@ fn readout(
         d.remove::<String>(editing);
         d.remove::<bool>(arming);
     });
-    text.trim()
-        .trim_start_matches('+')
-        .parse::<i64>()
-        .ok()
-        .map(|typed| typed.clamp(min, max))
+    Some(text.trim().to_string())
 }
 
 fn paint(
@@ -404,7 +400,7 @@ mod tests {
             let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     if let Some(moved) = ui_for(ui, "gain", value, 0, 127) {
-                        value = moved;
+                        value = moved.parse().expect("a drag lands on a stop");
                     }
                 });
             });
@@ -413,11 +409,16 @@ mod tests {
         assert!((60..=68).contains(&value), "half a sweep landed on {value}");
     }
 
-    /// Double-clicking the dial opens its number for typing, and what is typed lands on
-    /// the knob — clamped to the stops, because a knob cannot be turned past them.
+    /// Double-clicking the dial opens its number for typing, and what is typed is handed
+    /// on as it was spelled: a value past a stop, or no number at all, is the field's to
+    /// refuse in its own words.
     #[test]
-    fn a_typed_number_lands_on_the_knob_within_its_stops() {
-        for (typed, expected) in [("96", Some(96)), ("400", Some(127)), ("zero", None)] {
+    fn a_typed_number_is_handed_on_as_it_was_spelled() {
+        for (typed, expected) in [
+            ("96", Some("96")),
+            ("400", Some("400")),
+            ("zero", Some("zero")),
+        ] {
             let ctx = egui::Context::default();
             let on_dial = egui::pos2(28.0, 28.0);
             let mut got = None;
@@ -467,7 +468,7 @@ mod tests {
                     });
                 });
             }
-            assert_eq!(got, expected, "typing {typed:?}");
+            assert_eq!(got.as_deref(), expected, "typing {typed:?}");
         }
     }
 
@@ -501,7 +502,7 @@ mod tests {
                         ui.memory_mut(|m| m.request_focus(id));
                     }
                     if let Some(moved) = ui_for(ui, "gain", value, 0, 127) {
-                        value = moved;
+                        value = moved.parse().expect("an arrow steps to a stop");
                     }
                 });
             });
@@ -511,7 +512,7 @@ mod tests {
     }
 
     /// The knob as the document draws it, with an id of its own.
-    fn ui_for(ui: &mut egui::Ui, salt: &str, value: i64, min: i64, max: i64) -> Option<i64> {
+    fn ui_for(ui: &mut egui::Ui, salt: &str, value: i64, min: i64, max: i64) -> Option<String> {
         super::ui(ui, salt, value, min, max)
     }
 
