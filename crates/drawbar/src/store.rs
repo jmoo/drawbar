@@ -46,7 +46,7 @@ impl Shape {
 /// ⚠️ A browser gives an origin about 5 MiB for everything it stores, and base64 costs a
 /// third on top. A sample runs to megabytes on its own, so one would fill the store and
 /// take every program with it.
-const MAX_ENTITY: usize = 1024 * 1024;
+pub(crate) const MAX_ENTITY: usize = 1024 * 1024;
 
 /// What the whole store may take.
 ///
@@ -55,6 +55,37 @@ const MAX_ENTITY: usize = 1024 * 1024;
 /// kept here, below the quota, and what does not fit is said out loud rather than lost
 /// quietly.
 const BUDGET: usize = 3 * 1024 * 1024;
+
+/// What a write of the list could not keep.
+///
+/// ⚠️ Answered rather than said out loud: eframe writes the list every few seconds, and
+/// a save that announced its own losses would overwrite the status line and fill the log
+/// for as long as the asset sat there. [`Left::report`] is the announcement, and the
+/// caller makes it only when what is left out changes — see
+/// [`crate::app::DrawbarApp::keep_up`].
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Left {
+    /// Over [`MAX_ENTITY`] on its own.
+    skipped: usize,
+    /// Inside the limit, but past what [`BUDGET`] had left.
+    dropped: usize,
+}
+
+impl Left {
+    pub fn report(self, log: &mut Log) {
+        match (self.skipped, self.dropped) {
+            (0, 0) => {}
+            (skipped, 0) => log.say(plural(skipped, "too big to keep between sessions")),
+            (0, dropped) => {
+                log.trouble(plural(dropped, "left out — there is no room to keep them"))
+            }
+            (skipped, dropped) => log.trouble(plural(
+                skipped + dropped,
+                "not kept between sessions — too big, or no room left",
+            )),
+        }
+    }
+}
 
 /// Write the list. Called by eframe periodically and on the way out.
 ///
@@ -66,13 +97,8 @@ const BUDGET: usize = 3 * 1024 * 1024;
 /// ⚠️ On wasm every call base64-encodes the whole list on the only thread. Callers
 /// must rate-limit writes because dragging mutates the list every frame.
 ///
-/// What is written comes back kept — see [`load`].
-pub fn save(
-    storage: &mut dyn eframe::Storage,
-    workspace: &Workspace,
-    queue: &Queue,
-    log: &mut Log,
-) {
+/// What is written comes back kept — see [`load`]; what is not is [`Left`].
+pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, queue: &Queue) -> Left {
     let mut out = format!("{VERSION}\n{}\n", workspace.next_id());
     let mut skipped = 0;
     let mut dropped = 0;
@@ -104,16 +130,7 @@ pub fn save(
         out.push_str(&line);
     }
     storage.set_string(KEY, out);
-
-    match (skipped, dropped) {
-        (0, 0) => {}
-        (skipped, 0) => log.say(plural(skipped, "too big to keep between sessions")),
-        (0, dropped) => log.trouble(plural(dropped, "left out — there is no room to keep them")),
-        (skipped, dropped) => log.trouble(plural(
-            skipped + dropped,
-            "not kept between sessions — too big, or no room left",
-        )),
-    }
+    Left { skipped, dropped }
 }
 
 fn plural(n: usize, tail: &str) -> String {
@@ -320,7 +337,7 @@ mod tests {
         before.create(Fresh::Settings, &mut log).unwrap();
 
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        save(&mut store, &before, &Queue::default());
 
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
@@ -377,7 +394,7 @@ mod tests {
         );
 
         let mut store = Fake::default();
-        save(&mut store, &before, &queue, &mut log);
+        save(&mut store, &before, &queue);
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
 
@@ -409,7 +426,7 @@ mod tests {
         before.replace_bytes(id, edited.clone(), &mut log);
 
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        save(&mut store, &before, &Queue::default());
         let (mut after, mut log) = workspace();
         load(&store, &mut after, &mut log);
 
@@ -429,7 +446,7 @@ mod tests {
         let (mut before, mut log) = workspace();
         before.create(Fresh::Program, &mut log).unwrap();
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        save(&mut store, &before, &Queue::default());
         let text = eframe::Storage::get_string(&store, KEY).expect("something was written");
         let line = text.lines().nth(2).expect("the one asset's line");
         assert_eq!(line.split('\t').count(), 4);
@@ -449,7 +466,9 @@ mod tests {
             &mut log,
         );
         let mut store = Fake::default();
-        save(&mut store, &before, &Queue::default(), &mut log);
+        let left = save(&mut store, &before, &Queue::default());
+        assert_eq!((left.skipped, left.dropped), (1, 0));
+        left.report(&mut log);
         assert!(log.status().1.contains("too big"), "{}", log.status().1);
 
         let (mut after, mut log) = workspace();
