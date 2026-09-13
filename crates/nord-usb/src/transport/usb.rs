@@ -63,8 +63,8 @@ pub struct UsbTransport {
     product: Option<String>,
     /// Set to mirror every frame into a replay script. `None` is the normal case.
     record: Option<Recorder>,
-    // A persistent IN queue: submitting a fresh buffer per read is simpler to reason
-    // about than juggling completions, and the protocol is strictly turn-taking.
+    /// A persistent IN queue, one buffer submitted per read: the protocol is strictly
+    /// turn-taking, so at most one transfer is ever outstanding.
     read_queue: Queue<RequestBuffer>,
 }
 
@@ -219,9 +219,7 @@ pub struct Identity {
     pub firmware: u16,
     /// Largest transfer the device will accept or produce, in bytes, framing included.
     ///
-    /// [`crate::op`]'s read chunk is this minus the frame header and CRC — a bound
-    /// derived from captures long before the device was asked for it, and the two agree
-    /// exactly.
+    /// [`crate::op`]'s read chunk is this minus the frame header and CRC.
     pub max_transfer: u32,
     /// Reported at request `0x00`. Reads as a small constant; its meaning is not pinned
     /// down, so it is carried verbatim rather than named something it might not be.

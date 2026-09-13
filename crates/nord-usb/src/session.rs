@@ -10,12 +10,9 @@
 //! (Payload bytes. Captures quote frame lengths, which are 40 higher — that is the
 //! sniffer's Darwin header, not anything on the wire.)
 //!
-//! # Why `commit()` and not `Drop`
-//!
-//! This is an RAII shape, and closing in `Drop` is still wrong: `Drop` can be neither
-//! async nor fallible, so a failed close would be silently swallowed — unacceptable
-//! where a half-open transaction may leave the device in an odd state. Closing is
-//! explicit; `Drop` only *complains* in debug builds.
+//! Closing is explicit rather than in `Drop`: `Drop` is neither async nor fallible, so a
+//! failed close there would be swallowed where a half-open transaction may leave the
+//! device in an odd state. `Drop` only complains, in debug builds.
 
 use std::marker::PhantomData;
 use std::time::Duration;

@@ -2,7 +2,7 @@
 //!
 //! Every message on the vendor bulk endpoints is a length-prefixed, CRC-trailered
 //! frame of **big-endian** `u32`s. Note big-endian — the *file* formats
-//! ([`nord_format`]) are little-endian, and mixing them up is an easy afternoon lost.
+//! ([`nord_format`]) are little-endian.
 //!
 //! ```text
 //! ┌────────┬─────────┬───────────┬─────────┬───────────────┬───────┐
@@ -222,9 +222,8 @@ pub mod ui {
     ///
     /// Fails for a label longer than [`MAX_LABEL_LEN`] **bytes** rather than truncating
     /// the length into a `u8`: a 256-byte label would silently encode a length of `0`
-    /// and put a malformed frame on the wire. Malformed progress frames are exactly
-    /// what sent this crate down a wrong path once already, so they are refused rather
-    /// than emitted. Note the bound is on UTF-8 bytes, not characters.
+    /// and put a malformed frame on the wire. Note the bound is on UTF-8 bytes, not
+    /// characters.
     pub fn label(text: &str) -> Result<Message> {
         if text.len() > MAX_LABEL_LEN {
             return Err(Error::InvalidArgument(format!(
@@ -242,8 +241,7 @@ pub mod ui {
     ///
     /// Clamped to 100. Unlike [`label`] an out-of-range value cannot produce a
     /// malformed frame — every `u16` encodes fine — so this is a cosmetic nonsense
-    /// value on the instrument's display, not a protocol error, and clamping beats
-    /// making every call site handle a `Result`.
+    /// value on the instrument's display, not a protocol error.
     pub fn percent(pct: u16) -> Message {
         let mut args = 1u16.to_be_bytes().to_vec();
         args.extend_from_slice(&pct.min(100).to_be_bytes());
@@ -1290,7 +1288,7 @@ mod tests {
 
     /// The progress strings encode byte-for-byte to what NSM put on the wire — the
     /// "Deleting..." label from `delete_prog_bank7_loc50` and the 100% bar from the
-    /// program read. Reproducing these exactly is the whole point of un-retracting them.
+    /// program read.
     #[test]
     fn ui_label_and_percent_match_the_wire() {
         assert_eq!(
@@ -1327,7 +1325,7 @@ mod tests {
 
     /// A 54-character sample name, straight off the wire.
     #[test]
-    fn object_info_reads_names_longer_than_the_old_scan_bound() {
+    fn object_info_reads_a_54_character_name() {
         let info = ProgramInfo::decode(
             &Message::decode_response(&hex(
                 "000000780000000c0000000a0000001f00000000000000000000004b002700f66e736d70000000c8554777330009000200000036332056696f6c696e7320534d5f4368616d6265726c696e5f4d4d6173746572206d6f6e6f20736d616c6c2076657273696f6e20322e300000000000000000ffffffff062d",

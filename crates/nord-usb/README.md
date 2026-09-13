@@ -25,8 +25,8 @@ writes of the live slots (class 6) and the settings singleton (class 7), and
 reads, deletes and writes of the piano (class 1) and sample (class 3) libraries —
 a library write sizes the instrument's cleaning pass from `STATUS`, runs it in
 the write's own session, and chunks the body. On Linux the read path and a
-multi-chunk sample write are hardware-verified. Across 14 recorded read-only
-commands, every request frame is byte-identical to its macOS counterpart.
+multi-chunk sample write are hardware-verified. Every recorded read-only command
+emits a request frame byte-identical to its macOS counterpart.
 
 `BEGIN_WRITE` is the only frame in a write that carries a name. The library
 classes take their immutable name there because they refuse `rename`; live and
@@ -109,8 +109,7 @@ so wasm builds must be run from `crates/` or below.
 ## The protocol
 
 Every message on the vendor bulk endpoints is a length-prefixed, CRC-trailered
-frame of **big-endian** `u32`s (the *file* formats are little-endian — mixing
-them up costs real debugging time):
+frame of **big-endian** `u32`s (the *file* formats are little-endian):
 
 ```
 ┌────────┬─────────┬───────────┬─────────┬───────────────┬───────┐
