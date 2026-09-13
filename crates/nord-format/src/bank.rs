@@ -60,10 +60,12 @@ where
         }
     }
 
-    /// Put `item` in the slot it claims, under `name`, displacing whatever was there.
-    pub fn replace(&mut self, name: Option<String>, item: T) {
-        self.items
-            .insert(item.location().as_u16(), Entry { name, item });
+    /// Put `item` in the slot it claims, under `name`, returning whatever it displaced.
+    ///
+    /// A bank holds one item per slot, so a caller walking several files has to decide
+    /// what a displacement means; returning the loser is what lets it.
+    pub fn replace(&mut self, name: Option<String>, item: T) -> Option<Entry<T>> {
+        self.items.insert(item.location().as_u16(), Entry { name, item })
     }
 
     pub fn get(&self, location: L) -> Option<&Entry<T>> {
@@ -146,13 +148,14 @@ mod tests {
 
         let mut bank = Bank::new();
 
-        bank.replace(
+        let displaced = bank.replace(
             Some("foo".to_string()),
             TestItem {
                 value: 69,
                 location: (4, 1).try_into()?,
             },
         );
+        assert!(displaced.is_none(), "an empty slot displaced something");
 
         if let Some(result) = bank.get((4, 1).try_into()?) {
             assert_eq!(result.item.value, 69);
@@ -163,6 +166,19 @@ mod tests {
         }
 
         assert!(bank.get((0, 0).try_into()?).is_none());
+
+        let displaced = bank
+            .replace(
+                Some("bar".to_string()),
+                TestItem {
+                    value: 70,
+                    location: (4, 1).try_into()?,
+                },
+            )
+            .expect("the occupied slot's previous entry");
+        assert_eq!(displaced.name.as_deref(), Some("foo"));
+        assert_eq!(displaced.item.value, 69);
+        assert_eq!(bank.len(), 1, "a displaced item left a second slot behind");
 
         Ok(())
     }
