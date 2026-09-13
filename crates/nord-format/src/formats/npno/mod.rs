@@ -77,9 +77,7 @@ pub const UNCOVERED: u8 = 0xff;
 /// The stream versions the prefix offsets are validated against. A body with
 /// another version still reads and writes verbatim; its fields are refused rather
 /// than read from offsets that may not hold them.
-pub const KNOWN_VERSIONS: &[u16] = &[0x450, 0x464];
-/// [`KNOWN_VERSIONS`] as the gate spells them.
-const KNOWN_VERSIONS_U32: &[u32] = &[0x450, 0x464];
+pub const KNOWN_VERSIONS: &[u32] = &[0x450, 0x464];
 
 /// The stream version that also carries a long name and a voicing of their own.
 const VERSION_SPLIT_NAME: u16 = 0x464;
@@ -449,7 +447,7 @@ fn version_of(body: &[u8]) -> Result<u16, Error> {
 /// The magic, and a stream version the prefix offsets are pinned to.
 fn check_mapped(body: &[u8]) -> Result<(), Error> {
     let version = version_of(body)?;
-    crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS_U32)
+    crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS)
 }
 
 fn overflow(what: &str) -> Error {
