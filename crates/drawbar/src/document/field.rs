@@ -1761,9 +1761,16 @@ fn wide(ui: &mut egui::Ui, field: &Field) -> Option<String> {
     let mut text = held.clone().unwrap_or_else(|| field.value.clone());
     let response = ui.add(
         egui::TextEdit::singleline(&mut text)
+            .id(id)
             .desired_width(150.0)
             .font(egui::FontId::monospace(11.0)),
     );
+    // ⚠️ Escape takes the focus away in the frame it is pressed, so it is read before the
+    // box is: an unfocused box is one that was left, and leaving commits.
+    if response.ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.data_mut(|data| data.remove::<String>(id));
+        return None;
+    }
     let entered = response.ctx.input(|i| i.key_pressed(egui::Key::Enter));
     if response.has_focus() && !entered {
         ui.data_mut(|data| data.insert_temp(id, text));
