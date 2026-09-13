@@ -49,7 +49,8 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-# Exact: the Nix build's `wasm-bindgen-cli` is pinned to match it (see overlay.nix).
+# Exact: `wasm-bindgen-cli` must match this version, and the Nix build takes the CLI
+# nixpkgs ships, so this pin follows nixpkgs (see overlay.nix).
 wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
