@@ -1,5 +1,5 @@
 {
-  description = "Rust tools for reading, editing, and moving programs on Clavia Nord instruments.";
+  description = "Read, edit and move the sounds on your Nord keyboard: an app, a command, and Rust libraries.";
 
   inputs = {
     crane.url = "github:ipetkov/crane";

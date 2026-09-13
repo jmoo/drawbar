@@ -1,6 +1,6 @@
 [package]
 name = "nord-cli"
-description = "Command-line tool for Clavia / Nord keyboards — inspect, edit, verify, and transfer programs, samples, and settings"
+description = "Your Nord from the terminal: inspect, edit and move the sounds in Nord files and on a connected instrument"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

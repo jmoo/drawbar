@@ -1,6 +1,6 @@
 [package]
 name = "drawbar"
-description = "Desktop and browser app for Clavia / Nord keyboards — view, edit, and transfer sounds over USB"
+description = "Your Nord's sounds, in a window: browse, edit and send programs, samples and pianos, in the browser or on the desktop"
 edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
