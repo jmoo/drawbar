@@ -77,8 +77,6 @@ pub fn info(ui: &Ui) -> Result<(), String> {
     if devices.is_empty() {
         return Err("no Clavia device found".into());
     }
-    // Remembered rather than returned on the spot: the descriptors below are worth
-    // printing for every device even when one of them will not answer.
     let mut unreachable = None;
     for (i, d) in devices.iter().enumerate() {
         if i > 0 {
@@ -147,8 +145,6 @@ fn print_table(ui: &Ui, report: &[Status]) {
     )));
     let mut any_dirty = false;
     for s in report {
-        // Fixed-size classes are far clearer as slots than as byte counts: programs
-        // report 400, which is exactly the instrument's 8 banks x 50.
         let (used, free, of) = match s.slots() {
             Some(slots) => (
                 format!("{} / {} slots", s.count, slots),
@@ -229,8 +225,8 @@ fn print_json(ui: &Ui, report: &[Status]) {
 
 /// Turn the device's bare status code into something actionable.
 ///
-/// All three confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address
-/// past the instrument's geometry, `0x4` from a write aimed at an occupied slot.
+/// Confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address past the
+/// instrument's geometry, `0x4` from a write aimed at an occupied slot.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
         nord_usb::Error::DeviceStatus(1) => {
@@ -451,8 +447,6 @@ pub fn get(
         return Ok(());
     }
 
-    // Parse the bytes just built rather than reporting the wire fields directly, so this
-    // runs the same decode path `nord inspect` does.
     let entity = nord_format::from_stream(&mut std::io::Cursor::new(&file)).map_err(|e| {
         format!(
             "{} decoded off the device but did not parse: {e}",
@@ -1396,9 +1390,9 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
                 None => String::new(),
             };
             ui.out(format!(
-                "{:<8} {:08x}   {}{loc}",
+                "{:<8} {:<10} {}{loc}",
                 d.class.label(),
-                d.id,
+                crate::summary::dep_id(d.id),
                 d.name.trim_end(),
             ));
         }
@@ -1426,7 +1420,11 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
             } else {
                 d.name.trim_end().to_string()
             };
-            ui.note(format!("  {} {:08x} {}", d.class.label(), d.id, named));
+            ui.note(format!(
+                "  {} {} {named}",
+                d.class.label(),
+                crate::summary::dep_id(d.id)
+            ));
         }
     }
     Ok(())
@@ -1570,25 +1568,15 @@ pub fn controls(
             }
             Ok(data) => {
                 answered += 1;
-                let hex: Vec<String> = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
-                let text: String = data
-                    .iter()
-                    .map(|&b| {
-                        if (0x20..0x7f).contains(&b) {
-                            b as char
-                        } else {
-                            '.'
-                        }
-                    })
-                    .collect();
+                // A sweep asks which requests answer at all; the row states the whole
+                // length and shows as much of it as one line holds.
+                let (hex, text) = dump(&data[..data.len().min(24)]);
                 ui.out(format!(
-                    "{request:#04x} ({request:>3}) {:>5}  {}",
+                    "{request:#04x} ({request:>3}) {:>5}  {hex}",
                     data.len(),
-                    hex.join(" ")
                 ));
                 ui.out(format!("{:>16}  {}", "", ui.dim(text)));
             }
-            // The overwhelmingly common case while sweeping: not implemented.
             Err(_) => ui.out(ui.dim(format!("{request:#04x} ({request:>3})     -  —"))),
         }
     }
@@ -1837,19 +1825,29 @@ fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
     let payload = reply.payload();
     ui.out(format!("payload {} bytes", payload.len()));
     for (i, chunk) in payload.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        let ascii: String = chunk
-            .iter()
-            .map(|&b| {
-                if (0x20..0x7f).contains(&b) {
-                    b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-        ui.out(format!("  {:04x}  {:<47}  {ascii}", i * 16, hex.join(" ")));
+        let (hex, text) = dump(chunk);
+        ui.out(format!("  {:04x}  {hex:<47}  {text}", i * 16));
     }
+}
+
+/// Bytes as hex pairs, and the same bytes as text with everything unprintable shown
+/// as `.`.
+///
+/// ⚠️ Both dumps read one run of bytes: a byte shown in one column and not the other
+/// would have the reader lining up different data.
+fn dump(bytes: &[u8]) -> (String, String) {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let text = bytes
+        .iter()
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect();
+    (hex.join(" "), text)
 }
 
 /// Report everything the instrument knows about one slot. Read-only.
@@ -1878,8 +1876,6 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
         format!(
             "{} bytes{}",
             grouped(info.body_len),
-            // A piano is nine digits of bytes; the rounded size is what tells you it is
-            // a 200MB object rather than a 20MB one.
             match human_size(info.body_len) {
                 Some(h) => format!("  {}", ui.dim(format!("({h})"))),
                 None => String::new(),
