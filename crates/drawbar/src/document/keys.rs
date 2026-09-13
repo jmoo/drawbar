@@ -473,12 +473,97 @@ pub fn gaps(bounds: &[(u8, u8)], span: Span) -> Vec<(u8, u8)> {
     out
 }
 
-/// Where a dragged handle lands, and what follows it.
+/// How far a lane's rows may be dragged into each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Room {
+    /// Whether the row next along the keyboard gives up the keys this one takes. Where it
+    /// does not, an edge stops a key short of it and the rows may gap but never overlap.
+    shared: bool,
+    /// The fewest keys a row may be left answering, its neighbour included.
+    fewest: u8,
+}
+
+/// The fewest keys a band may be left answering. A band whose ends met would have its two
+/// handles on top of each other, and no way back off the one underneath.
+const BAND_KEYS: u8 = 2;
+
+/// Where a dragged edge lands, and what follows it.
 ///
-/// A top stops one key short of the band above's low and never reaches its own low; a
-/// low stops one key above the band below's top and never reaches its own top. With
-/// [`Edges::TopOnly`] the band above's low follows the top it is derived from, so bands
-/// may gap but never overlap.
+/// ⚠️ The neighbour is the row next along the keyboard, not the next index: a lane draws
+/// its rows in the file's order, which is not the keyboard's.
+///
+/// An edge with nowhere left to land — the row is already down to [`Room::fewest`] keys,
+/// or its neighbour is — leaves every bound where it was rather than stepping onto the
+/// row beside it.
+fn dragged(
+    bounds: &[(u8, u8)],
+    span: Span,
+    row: usize,
+    edge: Edge,
+    note: u8,
+    room: Room,
+) -> Vec<(u8, u8)> {
+    let mut next = bounds.to_vec();
+    let (span_low, span_high) = span.ends();
+    let Some(&(low, top)) = next.get(row) else {
+        return next;
+    };
+    // How far the row's own two ends stay apart, so that it keeps `fewest` keys.
+    let apart = room.fewest.saturating_sub(1);
+    match edge {
+        Edge::Top => {
+            let above = next
+                .iter()
+                .enumerate()
+                .filter(|(index, (their_low, _))| *index != row && *their_low > low)
+                .min_by_key(|(_, (their_low, _))| *their_low)
+                .map(|(index, _)| index);
+            let ceiling = match (above, room.shared) {
+                (Some(above), true) => next[above].1.saturating_sub(room.fewest),
+                (Some(above), false) => next[above].0.saturating_sub(1),
+                (None, _) => span_high,
+            };
+            let floor = low.saturating_add(apart);
+            if floor > ceiling {
+                return next;
+            }
+            let landed = note.clamp(floor, ceiling);
+            next[row].1 = landed;
+            if let (Some(above), true) = (above, room.shared) {
+                next[above].0 = landed.saturating_add(1);
+            }
+        }
+        Edge::Low => {
+            let below = next
+                .iter()
+                .enumerate()
+                .filter(|(index, (_, their_top))| *index != row && *their_top < top)
+                .max_by_key(|(_, (_, their_top))| *their_top)
+                .map(|(index, _)| index);
+            let floor = match (below, room.shared) {
+                (Some(below), true) => next[below].0.saturating_add(room.fewest),
+                (Some(below), false) => next[below].1.saturating_add(1),
+                (None, _) => span_low,
+            };
+            let ceiling = top.saturating_sub(apart);
+            if floor > ceiling {
+                return next;
+            }
+            let landed = note.clamp(floor, ceiling);
+            next[row].0 = landed;
+            if let (Some(below), true) = (below, room.shared) {
+                next[below].1 = landed.saturating_sub(1);
+            }
+        }
+    }
+    next
+}
+
+/// Where a dragged band edge lands, and what follows it.
+///
+/// A band keeps [`BAND_KEYS`] keys of its own and stops a key short of the band beside
+/// it. With [`Edges::TopOnly`] — the only shape that offers one handle rather than two —
+/// the band above's low follows the top it is derived from.
 fn clamped(
     bounds: &[(u8, u8)],
     span: Span,
@@ -487,32 +572,11 @@ fn clamped(
     note: u8,
     edges: Edges,
 ) -> Vec<(u8, u8)> {
-    let mut next = bounds.to_vec();
-    let (span_low, span_high) = span.ends();
-    let Some(&(low, top)) = next.get(zone) else {
-        return next;
+    let room = Room {
+        shared: edges == Edges::TopOnly,
+        fewest: BAND_KEYS,
     };
-    match edge {
-        Edge::Top => {
-            let ceiling = match zone.checked_sub(1).map(|above| next[above].0) {
-                Some(above_low) => above_low.saturating_sub(1),
-                None => span_high,
-            };
-            let shown = note.min(ceiling).max(low.saturating_add(1)).min(span_high);
-            next[zone].1 = shown;
-            if let (Edges::TopOnly, Some(above)) = (edges, zone.checked_sub(1)) {
-                next[above].0 = shown.saturating_add(1);
-            }
-        }
-        Edge::Low => {
-            let floor = match next.get(zone + 1) {
-                Some(&(_, below_top)) => below_top.saturating_add(1),
-                None => span_low,
-            };
-            next[zone].0 = note.max(floor).min(top.saturating_sub(1)).max(span_low);
-        }
-    }
-    next
+    dragged(bounds, span, zone, edge, note, room)
 }
 
 /// The zone lane: one band per zone, the keys between them hatched.
@@ -813,8 +877,8 @@ const TRIMMED: f32 = 0.05;
 ///
 /// The two roots either side of a boundary share it, so what one gives up the other
 /// takes and neither is left without a key; the outer end of the lowest or the highest
-/// has no root to share with, and covers or uncovers keys instead. `bounds` may be in
-/// any order — the neighbour is the cell next along the keyboard, not the next index.
+/// has no root to share with, and covers or uncovers keys instead. `bounds` may be in any
+/// order — the neighbour is the cell next along the keyboard, not the next index.
 pub fn boundary(
     bounds: &[(u8, u8)],
     span: Span,
@@ -822,48 +886,11 @@ pub fn boundary(
     edge: Edge,
     note: u8,
 ) -> Vec<(u8, u8)> {
-    let mut next = bounds.to_vec();
-    let (span_low, span_high) = span.ends();
-    let Some(&(low, top)) = next.get(cell) else {
-        return next;
+    let room = Room {
+        shared: true,
+        fewest: 1,
     };
-    match edge {
-        Edge::Top => {
-            let above = next
-                .iter()
-                .enumerate()
-                .filter(|(index, (their_low, _))| *index != cell && *their_low > low)
-                .min_by_key(|(_, (their_low, _))| *their_low)
-                .map(|(index, _)| index);
-            let ceiling = match above {
-                Some(above) => next[above].1.saturating_sub(1),
-                None => span_high,
-            };
-            let landed = note.clamp(low, ceiling.max(low));
-            next[cell].1 = landed;
-            if let Some(above) = above {
-                next[above].0 = landed.saturating_add(1);
-            }
-        }
-        Edge::Low => {
-            let below = next
-                .iter()
-                .enumerate()
-                .filter(|(index, (_, their_top))| *index != cell && *their_top < top)
-                .max_by_key(|(_, (_, their_top))| *their_top)
-                .map(|(index, _)| index);
-            let floor = match below {
-                Some(below) => next[below].0.saturating_add(1),
-                None => span_low,
-            };
-            let landed = note.clamp(floor.min(top), top);
-            next[cell].0 = landed;
-            if let Some(below) = below {
-                next[below].1 = landed.saturating_sub(1);
-            }
-        }
-    }
-    next
+    dragged(bounds, span, cell, edge, note, room)
 }
 
 /// What a root boundary says it does.
@@ -1915,9 +1942,46 @@ mod tests {
         assert_eq!(moved[0], (56, 96), "the zone above starts a key higher");
         assert_eq!(moved[2], bounds[2], "and nothing else moves");
 
+        // Upwards as well: the zone above gives up the keys this one takes, down to the
+        // last it can answer with.
+        let up = clamped(&bounds, NSMP, 1, Edge::Top, 70, Edges::TopOnly);
+        assert_eq!((up[1], up[0]), ((41, 70), (71, 96)));
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Top, 127, Edges::TopOnly)[0],
+            (95, 96),
+            "the band above keeps the keys it needs to stay grabbable",
+        );
+
         // With both edges stored, the neighbour is left where it was and a gap opens.
         let apart = clamped(&bounds, NSMP, 1, Edge::Top, 55, Edges::Both);
         assert_eq!((apart[1], apart[0]), ((41, 55), (61, 96)));
+    }
+
+    /// A band the drag would leave overlapping its neighbour does not move at all: the
+    /// keys either side of a band edge belong to one band or the other, never to both.
+    #[test]
+    fn a_band_with_no_room_left_refuses_the_drag() {
+        let bounds = [(61, 96), (60, 60)];
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Top, 55, Edges::Both),
+            bounds
+        );
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Top, 90, Edges::Both),
+            bounds
+        );
+        // It is the room that is gone, not the handle: the low still has keys below it.
+        assert_eq!(
+            clamped(&bounds, NSMP, 1, Edge::Low, 30, Edges::Both)[1],
+            (30, 60),
+        );
+
+        // The neighbour is the band next along the keyboard, not the one before it in
+        // the file: a top dragged into it stops a key short either way.
+        let jumbled = [(41, 55), (61, 96), (24, 40)];
+        let moved = clamped(&jumbled, NSMP, 0, Edge::Top, 70, Edges::Both);
+        assert_eq!(moved[0], (41, 60), "a key short of the band above's low");
+        assert_eq!(moved[1], jumbled[1], "and the band above stays where it is");
     }
 
     /// The clamps are what keeps zones from overlapping or turning inside out.
