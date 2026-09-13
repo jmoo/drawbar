@@ -4,7 +4,7 @@
 //! gaining a sidecar there, not by anyone adding a case here.
 
 use crate::lookup;
-use crate::sidecar::{sidecar_of, SPECIMEN_KEYS};
+use crate::sidecar::{expectation, sidecar_of, SPECIMEN_KEYS};
 use libtest_mimic::Failed;
 use nord_format::formats::ne5::{OrganModel, Preset};
 use nord_format::formats::nsmp;
@@ -20,6 +20,8 @@ pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), 
         return Ok(());
     }
 
+    // `load` type-checks every key it returns, and refuses a claim beside
+    // `unoracled`, so each access below reads a value of the declared type.
     let v = crate::sidecar::load(&sidecar, SPECIMEN_KEYS).map_err(Failed::from)?;
     if v.get("unoracled").is_some() {
         return Ok(());
@@ -27,7 +29,7 @@ pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), 
 
     let mut wrong: Vec<String> = Vec::new();
 
-    if let Some(sibling) = v.get("same_body_as").and_then(Value::as_str) {
+    if let Some(sibling) = v.get("same_body_as").map(as_str) {
         let other = path.parent().unwrap().join(sibling);
         let other_bytes =
             fs::read(&other).map_err(|e| Failed::from(format!("same_body_as {sibling}: {e}")))?;
@@ -39,7 +41,10 @@ pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), 
         }
     }
 
-    if let Some(fields) = v.get("fields").and_then(Value::as_object) {
+    if let Some(fields) = v
+        .get("fields")
+        .map(|f| f.as_object().expect("a checked object"))
+    {
         for (field_path, expected) in fields {
             let (want, slack) =
                 expectation(expected).map_err(|e| Failed::from(format!("{field_path}: {e}")))?;
@@ -56,10 +61,12 @@ pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), 
         }
     }
 
-    if let Some(traits) = v.get("traits").and_then(Value::as_array) {
+    if let Some(traits) = v
+        .get("traits")
+        .map(|t| t.as_array().expect("a checked array"))
+    {
         for t in traits {
-            let name = t.as_str().unwrap_or_default();
-            check_trait(name, entity, &mut wrong);
+            check_trait(as_str(t), entity, &mut wrong);
         }
     }
 
@@ -75,24 +82,8 @@ pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), 
     }
 }
 
-/// A field expectation: a bare string is exact, an object is `{value, slack}`
-/// with both sides read as numbers.
-fn expectation(v: &Value) -> Result<(String, Option<f64>), String> {
-    match v {
-        Value::String(s) => Ok((s.clone(), None)),
-        Value::Object(o) => {
-            let value = o
-                .get("value")
-                .and_then(Value::as_str)
-                .ok_or("expectation object without a value")?;
-            let slack = o
-                .get("slack")
-                .and_then(Value::as_f64)
-                .ok_or("expectation object without a slack")?;
-            Ok((value.to_string(), Some(slack)))
-        }
-        other => Err(format!("unreadable expectation {other}")),
-    }
+fn as_str(v: &Value) -> &str {
+    v.as_str().expect("a checked string")
 }
 
 /// `+5`, `5` and ` 5 ` are one value, and case never distinguishes two.

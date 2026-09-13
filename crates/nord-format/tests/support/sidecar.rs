@@ -32,8 +32,13 @@ pub fn sidecar_of(specimen: &Path) -> PathBuf {
     specimen.with_file_name(name)
 }
 
-/// Parse a sidecar, refusing an unknown schema or vocabulary rather than
-/// skipping it.
+/// The keys `unoracled` contradicts: a sidecar either states what the specimen
+/// pins or states that it pins nothing.
+const CLAIMS: &[&str] = &["fields", "same_body_as", "traits"];
+
+/// Parse a sidecar, refusing an unknown schema, an unknown key, a key whose value
+/// has the wrong type, or a claim beside `unoracled` — rather than skipping it. A
+/// reader may take any present key at its declared type without re-checking.
 pub fn load(path: &Path, allowed: &[&str]) -> Result<Value, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("sidecar: {e}"))?;
     let value: Value = serde_json::from_str(&text).map_err(|e| format!("sidecar: {e}"))?;
@@ -44,8 +49,52 @@ pub fn load(path: &Path, allowed: &[&str]) -> Result<Value, String> {
     if let Some(unknown) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(format!("unknown sidecar key {unknown:?}"));
     }
-    if object.get("unoracled").is_some() && object.get("fields").is_some() {
-        return Err("unoracled beside fields — the two are mutually exclusive".into());
+    if let Some(fields) = object.get("fields") {
+        let fields = fields.as_object().ok_or("fields is not an object")?;
+        for (path, expected) in fields {
+            expectation(expected).map_err(|e| format!("fields.{path}: {e}"))?;
+        }
+    }
+    if let Some(traits) = object.get("traits") {
+        let traits = traits.as_array().ok_or("traits is not an array")?;
+        for name in traits {
+            name.as_str()
+                .ok_or_else(|| format!("traits holds {name}, which is not a string"))?;
+        }
+    }
+    for key in ["same_body_as", "note"] {
+        if let Some(value) = object.get(key) {
+            value
+                .as_str()
+                .ok_or_else(|| format!("{key} is {value}, which is not a string"))?;
+        }
+    }
+    if object.contains_key("unoracled") {
+        if let Some(claim) = CLAIMS.iter().find(|key| object.contains_key(**key)) {
+            return Err(format!(
+                "unoracled beside {claim} — the two are mutually exclusive"
+            ));
+        }
     }
     Ok(value)
+}
+
+/// A field expectation: a bare string is exact, an object is `{value, slack}`
+/// with both sides read as numbers.
+pub fn expectation(v: &Value) -> Result<(String, Option<f64>), String> {
+    match v {
+        Value::String(s) => Ok((s.clone(), None)),
+        Value::Object(o) => {
+            let value = o
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or("expectation object without a string value")?;
+            let slack = o
+                .get("slack")
+                .and_then(Value::as_f64)
+                .ok_or("expectation object without a numeric slack")?;
+            Ok((value.to_string(), Some(slack)))
+        }
+        other => Err(format!("unreadable expectation {other}")),
+    }
 }
