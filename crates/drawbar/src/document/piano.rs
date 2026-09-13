@@ -4,8 +4,7 @@
 //! bank and velocity layer — and what an editor of one is for is deciding which of them
 //! go on the instrument. So an edit here is not a field write: it is a **plan** over the
 //! bytes the asset was last saved as, and the working bytes are what [`rebuild`] makes
-//! of the two. Dropping strokes throws audio away, and a switch that cannot go back on
-//! is not a switch.
+//! of the two.
 //!
 //! ⚠️ An edit never makes those bytes. [`planned`] applies a plan over the borrowed
 //! baseline and is what a switch is checked against; [`materialise`] is the one whole-
@@ -69,8 +68,6 @@ fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
 
 /// The stretch of keyboard the map draws: a full piano, A0 to C8.
 const SPAN: Span = Span { low: 21, high: 108 };
-
-// ---- the plan -----------------------------------------------------------------------
 
 /// What the asset was last saved as, as far as anything here tells two baselines apart.
 /// A save moves both halves at once.
@@ -301,8 +298,7 @@ pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, St
     for bank in &plan.banks {
         library.drop_bank(*bank);
     }
-    // One predicate rather than a layer pass and a per-root pass: an exception keeps a
-    // layer its switch dropped, which `Layers::Only` cannot express.
+    // One predicate over both: an exception keeps a layer its switch dropped.
     if !plan.layers.is_empty() || !plan.roots.is_empty() {
         library.retain_strokes(|stroke| plan.keeps_layer(stroke.root, stroke.layer()));
     }
@@ -333,16 +329,12 @@ pub fn materialise(library: &npno::Library<'_>) -> Result<Vec<u8>, String> {
     nord_format::to_bytes(&Entity::Piano(edited)).map_err(|e| e.to_string())
 }
 
-/// The bytes a plan makes of the baseline: read it, edit it, re-lay it, write it.
-///
-/// All of it or none, the same rule every other editor's apply follows. The app itself
-/// keeps the two halves apart, so that it checks a plan without laying one out.
+/// The bytes a plan makes of the baseline: [`planned`] and then [`materialise`], which
+/// the app itself keeps apart so that it checks a plan without laying one out.
 #[cfg(test)]
 pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
     materialise(&planned(saved, plan)?)
 }
-
-// ---- what the baseline holds --------------------------------------------------------
 
 /// One root note: the recording, and the keys the map sends to it.
 struct Root {
@@ -352,9 +344,12 @@ struct Root {
 
 /// Ascending `keys` as the stretches they run in.
 ///
-/// A root's keys are one run — inferred from specimens; not confirmed on hardware —
-/// and the key map can hold anything, so a root whose keys are not contiguous gets one
-/// cell per run rather than one cell over the keys between them.
+/// A root's keys are one run.
+///
+/// Inferred from specimens; not confirmed on hardware.
+///
+/// The key map can hold anything, so a root whose keys are not contiguous gets one cell
+/// per run rather than one cell over the keys between them.
 fn runs(keys: &[u8]) -> Vec<(u8, u8)> {
     let mut out: Vec<(u8, u8)> = Vec::new();
     for key in keys {
@@ -391,8 +386,11 @@ struct Strike {
 
 /// What the applied-decay ladder is worth, in decibels a second, read off its first
 /// entry: a one-pole coefficient of `entry / 2^23` a frame at [`npno::codec::RATE`], so
-/// `20·log10(e)·rate·(1 − entry/2^23)`. `None` where every entry of it is
-/// [`npno::LADDER_UNITY`], which applies nothing.
+/// `20·log10(e)·rate·(1 − entry/2^23)`.
+///
+/// Inferred from specimens; not confirmed on hardware.
+///
+/// `None` where every entry of it is [`npno::LADDER_UNITY`], which applies nothing.
 fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
     let held = 1.0 - f64::from(ladder[0]) / f64::from(npno::LADDER_UNITY);
     ladder
@@ -545,12 +543,8 @@ impl Facts {
     }
 }
 
-// ---- what a plan costs --------------------------------------------------------------
-
-/// Bytes a plan keeps: the file, less the audio of every stroke it drops.
-///
-/// Against the file rather than a sum of its parts, so a plan that drops nothing reads
-/// as the whole file and nothing has to be weighted to make the figures agree.
+/// Bytes a plan keeps: the file, less the audio of every stroke it drops, so a plan
+/// that drops nothing reads as the whole file.
 fn kept_bytes(facts: &Facts, plan: &Plan) -> u64 {
     facts.total.saturating_sub(
         facts
@@ -614,7 +608,7 @@ fn cheapest_cut(facts: &Facts, plan: &Plan, over: u64) -> Option<Cut> {
             })
         };
         let shed = shed_bytes(facts, plan, selects);
-        // A cut that takes every stroke still kept is not a cut: nothing would play.
+        // A cut that sheds every stroke still kept would leave nothing to play.
         if shed < over || shed >= live {
             continue;
         }
@@ -776,8 +770,6 @@ fn default_range(facts: &Facts) -> RangeInclusive<u8> {
     (*MIDDLE.start()).max(low)..=(*MIDDLE.end()).min(high)
 }
 
-// ---- the decoded audio --------------------------------------------------------------
-
 /// One stroke, decoded.
 struct Played {
     /// Frames interleaved by channel at [`npno::codec::RATE`], which is what both the
@@ -906,8 +898,6 @@ pub struct Sound<'a> {
     /// What a WAV of it is called — the spelling `nord piano decode` writes.
     pub name: String,
 }
-
-// ---- the document's state -----------------------------------------------------------
 
 /// The row the map and the rows agree on, and what the keyboard is sounding. A tab
 /// switch resets all of it — but never the plan, which is the edit.
@@ -1337,8 +1327,6 @@ fn claim(trimmed: bool, standing: Standing) -> Option<StateLine> {
     }
 }
 
-// ---- the pieces the sections are painted out of -------------------------------------
-
 /// The corner every rectangle here is drawn with, and the page's own margin.
 const RADIUS: f32 = 2.0;
 const PAD: f32 = 12.0;
@@ -1556,8 +1544,6 @@ fn column(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
 fn mb(bytes: u64) -> f32 {
     bytes as f32 / (1024.0 * 1024.0)
 }
-
-// ---- the key map --------------------------------------------------------------------
 
 /// What the keyboard last played, as the line under it reads: whether it sounded, and
 /// the sentence.
@@ -1828,8 +1814,6 @@ impl State {
         Some(left)
     }
 }
-
-// ---- the trim section ---------------------------------------------------------------
 
 /// One switch of the trim section as its row draws it.
 struct Switch {
@@ -2189,8 +2173,6 @@ fn constraint(facts: &Facts, plan: &Plan, free: Option<u64>) -> (String, bool) {
     (format!("{head} {rest}"), true)
 }
 
-// ---- the playback fields ------------------------------------------------------------
-
 /// A control of the playback section: the caps label, and the control under it.
 fn field(ui: &mut egui::Ui, label: &str, hint: &str, body: impl FnOnce(&mut egui::Ui)) {
     let response = ui
@@ -2286,8 +2268,6 @@ fn damper_picker(ui: &mut egui::Ui, top: u8) -> Option<u8> {
     let picked = value.round() as u8;
     (response.inner.changed() && picked != top).then_some(picked)
 }
-
-// ---- the velocity layer lanes -------------------------------------------------------
 
 /// One lane per layer: the switch that speaks for every root, and one segment per root
 /// so a per-root exception shows where it is.
@@ -2522,8 +2502,6 @@ fn root_layer_bytes(facts: &Facts, root: usize, layer: u8) -> u64 {
         .sum()
 }
 
-// ---- the roots rows -----------------------------------------------------------------
-
 /// The ink every cell of a row wears.
 ///
 /// ⚠️ A selected row is one colour throughout, warn text included: a row lit by the
@@ -2624,9 +2602,7 @@ fn roots(
         let in_range = plan.in_range(facts, index);
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
-        // ⚠️ Before the lamps drawn over it: egui gives a click to the last widget
-        // registered over the point, and a row-wide target added afterwards would
-        // swallow every one of them.
+        // ⚠️ Before the lamps drawn over it, for the reason [`switch_row`] states.
         let response = ui
             .interact(
                 rect,
@@ -2937,8 +2913,6 @@ fn open_row(
     asked
 }
 
-// ---- the per-key lane ---------------------------------------------------------------
-
 /// What the lane draws a key's tune at, where full deflection is [`TUNE_CENTS`].
 const TUNE_CENTS: i32 = 25;
 
@@ -3091,8 +3065,6 @@ fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
                 });
         });
 }
-
-// ---- the faces ----------------------------------------------------------------------
 
 impl State {
     /// The Edit face under the key map: what is kept, which layers, which roots, and
@@ -3548,8 +3520,6 @@ mod tests {
         Plan::default()
     }
 
-    // ---- the plan -------------------------------------------------------------------
-
     #[test]
     fn a_plan_that_drops_nothing_rebuilds_the_bytes_it_was_saved_as() {
         let saved = bytes();
@@ -3767,8 +3737,6 @@ mod tests {
         assert!(refused.is_err(), "a set list is not a piano library");
     }
 
-    // ---- the playback fields, the trims and the key map -----------------------------
-
     // Where the piano document writes, as the Advanced face states the offsets.
     const KIND_AT: usize = 0x18;
     const KEY_MAP_AT: usize = 0x8c;
@@ -3948,8 +3916,6 @@ mod tests {
         assert!((rate - 36.2).abs() < 0.1, "{rate}");
     }
 
-    // ---- the arithmetic -------------------------------------------------------------
-
     /// Every figure the trim section prints comes off the strokes' own byte lengths,
     /// and the file is the scale: a plan that drops nothing keeps all of it.
     #[test]
@@ -4067,8 +4033,6 @@ mod tests {
         assert_eq!(layer_short(2, 3), "S");
     }
 
-    // ---- the fine tune lane ---------------------------------------------------------
-
     /// The file stores units and the lane shows cents, so the conversion has to come
     /// back to the unit it started at — including at the ends of an `i8`.
     #[test]
@@ -4100,8 +4064,6 @@ mod tests {
         assert_eq!(library.fine_tune(60).unwrap(), -4);
         assert_eq!(library.fine_tune(61).unwrap(), 0);
     }
-
-    // ---- the header's extras --------------------------------------------------------
 
     /// A partition with about `free` bytes left for pianos, and nothing else attached.
     ///
@@ -4256,8 +4218,6 @@ mod tests {
         assert!(said.contains("has not reported"), "{said}");
     }
 
-    // ---- the status line ------------------------------------------------------------
-
     /// What a struck key says: which root answered it, how far it was shifted, and why
     /// it was silent where it was.
     #[test]
@@ -4322,8 +4282,6 @@ mod tests {
         assert!(runs(&[]).is_empty());
     }
 
-    // ---- the capability table -------------------------------------------------------
-
     /// Every capability the Advanced face calls editable is something this editor
     /// actually does: a plan change that lands in the rebuilt bytes, a stroke it decodes
     /// when asked, or the send its header offers.
@@ -4383,8 +4341,6 @@ mod tests {
             _ => None,
         }
     }
-
-    // ---- the painted editor ---------------------------------------------------------
 
     /// The piano editor over the test library, in a headless window.
     struct Editor {
