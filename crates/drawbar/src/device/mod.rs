@@ -1072,9 +1072,10 @@ impl Device {
         self.rescan = match &cmd {
             DeviceCmd::Delete { class, at }
             | DeviceCmd::Rename { class, at, .. }
-            | DeviceCmd::Put { class, at, .. } => {
-                user_bank(at.bank).map(|bank| (*class, bank)).into_iter().collect()
-            }
+            | DeviceCmd::Put { class, at, .. } => user_bank(at.bank)
+                .map(|bank| (*class, bank))
+                .into_iter()
+                .collect(),
             DeviceCmd::Move { class, from, to } | DeviceCmd::Duplicate { class, from, to } => {
                 [from, to]
                     .into_iter()
