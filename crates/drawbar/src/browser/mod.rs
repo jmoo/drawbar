@@ -271,8 +271,8 @@ impl Browser {
     /// What the drag rules need to know about a row, or nothing for a row that is never
     /// dragged — wherever the row was drawn, the tree or the library's table.
     ///
-    /// ⚠️ Pianos are libraries the instrument installs and indexes for itself, so a slot
-    /// in one is not something a drag can pick up and copy back.
+    /// ⚠️ A slot of a partition this app cannot name is not something a drag can pick up
+    /// and copy back: nothing here knows what it holds.
     pub(crate) fn held(
         &self,
         item: Item,

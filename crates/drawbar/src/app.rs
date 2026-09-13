@@ -215,12 +215,15 @@ impl DrawbarApp {
         app
     }
 
-    /// Ingest anything dropped on the window.
+    /// Ingest anything dropped on the window, or hand it to the New dialog while one is
+    /// open and it is a WAV.
     ///
     /// The web backend fills `bytes` and the native backend fills `path`, so both are
     /// handled rather than cfg'd apart.
     fn take_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        let drafting = self.workspace.draft_mut().is_some();
+        let mut joining = Vec::new();
         for file in dropped {
             let name = match (file.name.is_empty(), &file.path) {
                 (false, _) => file.name.clone(),
@@ -246,10 +249,17 @@ impl DrawbarApp {
                     None
                 }
             };
-            if let Some(bytes) = bytes {
-                self.workspace
-                    .ingest(name.clone(), Origin::File(name), bytes, &mut self.log);
+            let Some(bytes) = bytes else { continue };
+            match drafting && crate::newproject::is_wav_name(&name) {
+                true => joining.push((name, bytes)),
+                false => {
+                    self.workspace
+                        .ingest(name.clone(), Origin::File(name), bytes, &mut self.log);
+                }
             }
+        }
+        if let Some(draft) = self.workspace.draft_mut() {
+            draft.add(joining);
         }
     }
 
@@ -315,8 +325,12 @@ impl eframe::App for DrawbarApp {
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.
-        self.workspace
-            .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
+        self.workspace.close_views(
+            |id| self.tabs.holds(id),
+            |id| self.document.pends(id),
+            &self.queue,
+            &mut self.log,
+        );
         self.take_dropped_files(ctx);
         drop_hint(ctx);
         // Raised by a New pick of WAVs, and answered before anything else this frame
@@ -330,7 +344,9 @@ impl eframe::App for DrawbarApp {
         self.browser.let_go(ctx);
 
         // Outside in. A panel claims its space from what the ones before it left.
-        let mut acts = Vec::new();
+        let mut acts = self
+            .document
+            .released(ctx, &mut self.workspace, &mut self.log);
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
         self.status_bar(ctx, &mut acts);
@@ -339,6 +355,12 @@ impl eframe::App for DrawbarApp {
         self.inspector_dock(ctx, &mut acts);
         self.centre(ctx, &mut acts);
 
+        // ⚠️ Between the panels and the acts they asked for: a piano library's plan is
+        // not in its bytes yet, and whatever would carry those bytes waits here until it
+        // is.
+        let acts = self
+            .document
+            .settle(ctx, acts, &mut self.workspace, &mut self.log);
         browser::apply(
             &mut self.browser,
             &mut self.shell,

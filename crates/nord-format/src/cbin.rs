@@ -55,7 +55,7 @@ impl Generation {
     }
 
     /// Bytes of checksum after the body: the type-0 crc16 trails the file.
-    fn trailer_len(self) -> u64 {
+    pub(crate) fn trailer_len(self) -> u64 {
         match self {
             Generation::V0 => 2,
             Generation::V1 => 0,
@@ -237,7 +237,7 @@ fn tag_from_slice(bytes: &[u8]) -> Tag {
 
 /// Parse the header; for a type-1 file also consume the crc32 word and the pad,
 /// leaving the stream at the first body byte.
-fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
+pub(crate) fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
     let mut head = [0u8; HEAD_LEN];
     r.read_exact(&mut head)?;
     if &head[0..4] != MAGIC {
