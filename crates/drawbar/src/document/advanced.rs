@@ -596,7 +596,7 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
     {
         asked = Some(SlotDetails { class, at });
     }
-    if device.state.detail.at != Some(at) {
+    if device.state.detail.at != Some((class, at)) {
         return asked;
     }
     match &device.state.detail.info {

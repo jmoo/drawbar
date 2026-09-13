@@ -394,7 +394,10 @@ pub enum Connection {
 /// One slot's detail, as the last `info`/`deps` reported it.
 #[derive(Default)]
 pub struct Detail {
-    pub at: Option<Location>,
+    /// The slot it answers for, class and address. ⚠️ Both: every class is addressed in
+    /// the same banks and slots, so a program and a sample sit at 1:1 alike, and an
+    /// address alone would show one of them what the other was asked about.
+    pub at: Option<(ObjectClass, Location)>,
     /// What the last `info` reported, shaped as [`DeviceState::slot`] shapes a scanned
     /// slot: `Some(None)` is a slot answered empty, and `None` is one never asked about.
     pub info: Option<Option<ProgramInfo>>,
@@ -489,8 +492,7 @@ impl DeviceState {
         class: ObjectClass,
         id: u32,
     ) -> Option<&str> {
-        let (_, at) = slot?;
-        if self.detail.at != Some(at) {
+        if self.detail.at != Some(slot?) {
             return None;
         }
         self.detail
@@ -1412,17 +1414,17 @@ impl Device {
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
                 }
-                DeviceEvent::SlotInfo { at, info, .. } => {
+                DeviceEvent::SlotInfo { class, at, info } => {
                     self.state.detail = Detail {
-                        at: Some(at),
+                        at: Some((class, at)),
                         info: Some(info),
                         deps: None,
                     };
                 }
-                DeviceEvent::Deps { at, deps, .. } => {
-                    if self.state.detail.at != Some(at) {
+                DeviceEvent::Deps { class, at, deps } => {
+                    if self.state.detail.at != Some((class, at)) {
                         self.state.detail = Detail {
-                            at: Some(at),
+                            at: Some((class, at)),
                             ..Detail::default()
                         };
                     }
@@ -2427,7 +2429,7 @@ mod tests {
         let at = Location { bank: 6, slot: 3 };
         let elsewhere = Location { bank: 0, slot: 0 };
         let detail = Detail {
-            at: Some(at),
+            at: Some((ObjectClass::Program, at)),
             info: Some(None),
             deps: Some(vec![Dependency {
                 flag: 0,
@@ -2450,6 +2452,11 @@ mod tests {
         assert_eq!(piano(at, 0x0102_0304).as_deref(), Some("Royal Grand 3D"));
         assert_eq!(piano(elsewhere, 0x0102_0304), None, "another slot's list");
         assert_eq!(piano(at, 0x0999_0999), None, "an id it did not report");
+        assert_eq!(
+            state.dependency_name(Some((ObjectClass::Sample, at)), ObjectClass::Piano, 0x0102_0304),
+            None,
+            "another class at the same address",
+        );
         assert_eq!(
             state.dependency_name(
                 Some((ObjectClass::Program, at)),

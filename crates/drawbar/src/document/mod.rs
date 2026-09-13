@@ -325,7 +325,7 @@ impl Document {
             None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            if lookup.asked || self.owes_deps(&lookup, at, device) {
+            if lookup.asked || self.owes_deps(&lookup, (class, at), device) {
                 self.fetched_deps = true;
                 device.send(crate::device::DeviceCmd::Deps { class, at }, log);
             }
@@ -477,12 +477,17 @@ impl Document {
     /// rather than sitting on an id until someone clicks. Once per document, and never
     /// with nothing to learn: no instrument, no piano named, a name already in hand, or a
     /// list the instrument has already given for this slot and simply did not name it in.
-    fn owes_deps(&self, lookup: &panel::PianoLookup, at: Location, device: &Device) -> bool {
+    fn owes_deps(
+        &self,
+        lookup: &panel::PianoLookup,
+        slot: (ObjectClass, Location),
+        device: &Device,
+    ) -> bool {
         if self.fetched_deps || !lookup.can_ask || lookup.id.is_none() || lookup.name.is_some() {
             return false;
         }
         let detail = &device.state.detail;
-        !(detail.at == Some(at) && detail.deps.is_some())
+        !(detail.at == Some(slot) && detail.deps.is_some())
     }
 
     /// Nothing is open any more.

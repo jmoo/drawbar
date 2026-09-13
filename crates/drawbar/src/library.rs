@@ -494,10 +494,9 @@ pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
 /// What the instrument said a slot plays, where that slot is the one it was last asked
 /// about.
 ///
-/// ⚠️ Programs only. The cached detail records an address and no class, so a set list at
-/// the same address would otherwise wear a program's piano.
+/// ⚠️ Programs only: the piano or sample a program plays is what this column stands for.
 fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
-    if class != ObjectClass::Program || device.detail.at != Some(at) {
+    if class != ObjectClass::Program || device.detail.at != Some((class, at)) {
         return Needs::Nothing;
     }
     let Some(deps) = device.detail.deps.as_ref() else {
