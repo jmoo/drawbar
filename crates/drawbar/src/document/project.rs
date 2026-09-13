@@ -54,10 +54,12 @@ pub struct Zone {
     pub bottom_note: u8,
     pub top_note: u8,
     pub enabled: bool,
-    /// The stroke this zone plays — the enabled one, where it has several.
+    /// The stroke this zone plays, where one of them is switched on.
     ///
     /// ⚠️ A zone plays one stroke: a project may hold more, but only the enabled one is
-    /// written into an instrument.
+    /// written into an instrument, and a zone with none switched on plays nothing.
+    ///
+    /// Inferred from specimens; not confirmed on hardware.
     pub played: Option<u32>,
 }
 
@@ -151,7 +153,6 @@ fn read(project: &Project) -> Result<Snapshot, String> {
                     .strokes
                     .iter()
                     .find(|s| s.enabled)
-                    .or_else(|| z.strokes.first())
                     .map(|s| s.global_id),
             })
             .collect(),
@@ -1162,6 +1163,40 @@ mod tests {
         assert!(facts.contains(&file.path), "{facts}");
         assert!(facts.contains("vel 0–127"), "{facts}");
         assert_eq!(leaf("/Users/x/Nord/low.wav"), "low.wav");
+    }
+
+    /// The same project with the one stroke of its first zone switched off, which the
+    /// format allows and nothing here writes.
+    fn stroke_switched_off(bytes: &[u8]) -> Vec<u8> {
+        const FLAG: &str = "m_isEnabled = 1";
+        let text = String::from_utf8(bytes.to_vec()).expect("a project is text");
+        let stroke = text.find("map_stroke {").expect("a map_stroke block");
+        let flag = text[stroke..].find(FLAG).expect("its own flag") + stroke;
+        let mut out = text;
+        out.replace_range(flag..flag + FLAG.len(), "m_isEnabled = 0");
+        out.into_bytes()
+    }
+
+    /// ⚠️ Only the enabled stroke is written into an instrument, so a zone with none
+    /// switched on plays nothing: the row says so rather than reading a stroke that
+    /// would never be built.
+    #[test]
+    fn a_zone_whose_stroke_is_switched_off_plays_nothing() {
+        let snapshot = read_back(&stroke_switched_off(&project_bytes()));
+        let zone = &snapshot.zones[0];
+        assert_eq!(zone.played, None);
+        assert!(played(&snapshot, zone).is_none());
+        assert!(
+            facts_of(&snapshot, zone, None).contains("no stroke"),
+            "{}",
+            facts_of(&snapshot, zone, None)
+        );
+        assert!(
+            snapshot.zones[1].played.is_some(),
+            "the other zone still plays its own"
+        );
+        // A band with no stroke states no velocity window, so it is not in the field.
+        assert!(map_zones(&snapshot)[0].velocity.is_none());
     }
 
     /// ⚠️ A zone whose trim-in is at or past its trim-out plays nothing, and the build
