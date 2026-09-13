@@ -1,7 +1,6 @@
 //! MIDI note names, the spelling the formats' key ranges are read and written in.
 //!
-//! Middle C (60) is spelled C4, matching how the sample editor labels keys — the
-//! corpus specimens were named off that display (`D2-rootkey-C3` holds 48).
+//! Middle C (60) is spelled C4, the sample editor's own labelling.
 //! Inferred from specimens; not confirmed on hardware.
 
 const NAMES: [&str; 12] = [
