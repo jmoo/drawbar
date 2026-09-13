@@ -99,7 +99,10 @@ fn spoil(gone: &mut bool, at: Option<Location>) -> impl FnOnce(Error) -> String 
 /// Run one command to completion.
 ///
 /// Emits exactly one [`DeviceEvent::Started`] and one [`DeviceEvent::Finished`], so the
-/// UI's in-flight marker cannot be left set by an operation that failed halfway.
+/// UI's in-flight marker cannot be left set by an operation that failed halfway, and at
+/// most one [`DeviceEvent::OpOk`] or [`DeviceEvent::OpFailed`]: each is one outcome of
+/// one command, and a second would be put against a second entry of the send queue.
+/// Steps within a command speak through [`DeviceEvent::Note`].
 pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Emit) -> Flow {
     if matches!(cmd, DeviceCmd::Disconnect) {
         return Flow::Released;
@@ -336,7 +339,7 @@ async fn put<T: Transport>(
         (Err(e), None) => Err(spoil(gone, Some(at))(e)),
         // Restore the occupant before reporting the original error.
         (Err(e), Some(backup)) => {
-            emit.send(DeviceEvent::OpFailed(format!(
+            emit.send(DeviceEvent::Note(format!(
                 "the write failed and {}; putting the original back",
                 aftermath(class, at)
             )));
@@ -487,7 +490,7 @@ async fn batch<T: Transport>(
                 match put(s, unit, item.at, &item.name, item.bytes.clone(), emit, gone).await? {
                     Ok(note) => {
                         *done += 1;
-                        emit.send(DeviceEvent::OpOk(note));
+                        emit.send(DeviceEvent::Note(note));
                         emit.send(DeviceEvent::Sent {
                             id: item.id,
                             class,
@@ -1067,6 +1070,7 @@ mod wire_tests {
         enumerates: bool,
         focus: Option<Location>,
         refuses_first_write: bool,
+        refuses_every_write: bool,
     }
 
     /// The Electro 5's own division, which is what an unremarkable Puppet stands for.
@@ -1095,6 +1099,7 @@ mod wire_tests {
                 enumerates: true,
                 focus: None,
                 refuses_first_write: false,
+                refuses_every_write: false,
             }
         }
 
@@ -1138,6 +1143,13 @@ mod wire_tests {
             self
         }
 
+        /// Refuses the restore as well, which is what leaves an occupant with nowhere
+        /// to go but the local list.
+        fn refusing_every_write(mut self) -> Puppet {
+            self.refuses_every_write = true;
+            self
+        }
+
         fn holds(&self, at: Location) -> Option<&'static str> {
             self.filled
                 .as_ref()?
@@ -1156,6 +1168,7 @@ mod wire_tests {
                 slot: u32::from_be_bytes(msg.args[4..8].try_into().unwrap()),
             };
             match msg.command {
+                cmd::BEGIN_WRITE if self.refuses_every_write => Some((4, Vec::new())),
                 cmd::BEGIN_WRITE
                     if self.refuses_first_write
                         && !self.heard.iter().any(|m| m.command == cmd::BEGIN_WRITE) =>
@@ -1163,8 +1176,9 @@ mod wire_tests {
                     Some((4, Vec::new()))
                 }
                 cmd::PARTITIONS => Some((0, partition_table())),
-                // Five words, as the Electro 5 answers: `count, free, used, dirty,
-                // spare`. A slot class parks nothing, so the last two are zero.
+                // Five words in the order `nord_usb::wire::Status` decodes them, whose
+                // doc carries both this shape and the zero `dirty`/`spare` a class
+                // outside the libraries reports.
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
                     let total: u32 = self.banks.iter().map(|(_, slots)| slots).sum();
@@ -1191,8 +1205,9 @@ mod wire_tests {
                 cmd::NEXT_SLOT if !self.enumerates => Some((op::ENUMERATION_DISABLED, Vec::new())),
                 cmd::NEXT_SLOT => {
                     let from = at();
-                    // Third word is the direction; the hardware refuses its absence
-                    // (`0x11`) after a write, so the puppet insists on it too.
+                    // Third word is the direction, which `op::next_occupied` always
+                    // sends because the instrument answers its absence with
+                    // `op::ENUMERATION_DISABLED`.
                     let Some(dir) = msg.args.get(8..12) else {
                         return Some((op::ENUMERATION_DISABLED, Vec::new()));
                     };
@@ -1229,6 +1244,7 @@ mod wire_tests {
                 }
                 cmd::INFO => {
                     let at = at();
+                    // Confirmed on hardware.
                     // Status 3 marks the address-space boundary for geometry-free walks.
                     let capacity = self.banks.get(at.bank as usize).map(|(_, slots)| *slots);
                     if capacity.is_none_or(|slots| at.slot >= slots) {
@@ -1435,7 +1451,7 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 3 };
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_the_first_write();
-        drive(
+        let (_, events) = drive(
             &mut device,
             DeviceCmd::Put {
                 id: 1,
@@ -1447,6 +1463,87 @@ mod wire_tests {
         );
 
         assert_eq!(written_names(&device), ["Africa-Split", "Squabble B"]);
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert_eq!(
+            failures(&said).len(),
+            1,
+            "one refusal is one failure: {:?}",
+            failures(&said)
+        );
+    }
+
+    /// A write that fails and cannot be put back is still one failure, and the occupant
+    /// it displaced reaches the local list once, under the name its bytes are filed as.
+    #[test]
+    fn an_occupant_that_cannot_be_restored_is_rescued_once() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device =
+            Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_every_write();
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                bytes: a_program(),
+            },
+        );
+        assert!(flow == Flow::Continue, "it said no, it did not go away");
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let rescued: Vec<&str> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Rescued { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rescued, ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(
+            failures(&said).len(),
+            1,
+            "one refusal is one failure: {:?}",
+            failures(&said)
+        );
+    }
+
+    /// A batch lands once. Every item reports its own line to the log, but the sentence
+    /// that says the send is done belongs to the whole of it.
+    #[test]
+    fn a_batch_succeeds_once_however_many_items_it_carries() {
+        let bytes = a_program();
+        let item = |slot, name: &str| Outgoing {
+            id: slot as u64,
+            at: Location { bank: 6, slot },
+            name: name.into(),
+            bytes: bytes.clone(),
+        };
+        let mut device = Puppet::new(1);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::SendAll {
+                class: ObjectClass::Program,
+                items: vec![item(3, "Africa-Split.ne5p"), item(4, "Squabble-B.ne5p")],
+            },
+        );
+        assert!(flow == Flow::Continue);
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let landed: Vec<&str> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::OpOk(note) => Some(note.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert!(landed[0].contains("wrote 2 of 2"), "{}", landed[0]);
+        let sent = said
+            .iter()
+            .filter(|event| matches!(event, DeviceEvent::Sent { .. }))
+            .count();
+        assert_eq!(sent, 2, "each item is owed no longer");
     }
 
     #[test]
@@ -1616,15 +1713,21 @@ mod wire_tests {
             .collect()
     }
 
-    fn refused(events: Receiver<DeviceEvent>) -> String {
-        events
-            .try_iter()
+    /// The failures reported for one command. `run` emits one; a second means a step
+    /// inside the command reported its own, which the send queue would put against the
+    /// next entry waiting.
+    fn failures(said: &[DeviceEvent]) -> Vec<&str> {
+        said.iter()
             .filter_map(|event| match event {
-                DeviceEvent::OpFailed(why) => Some(why),
+                DeviceEvent::OpFailed(why) => Some(why.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join(" | ")
+            .collect()
+    }
+
+    fn refused(events: Receiver<DeviceEvent>) -> String {
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        failures(&said).join(" | ")
     }
 
     fn counted(device: &Puppet, command: u32) -> usize {
