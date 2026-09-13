@@ -152,27 +152,47 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "B3 preset 1 drawbars",
     ),
-    ("organ_panel.b3_preset1_perc", Section::Organ, "Percussion"),
-    ("organ_panel.b3_preset1_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.b3_preset1_perc",
+        Section::Organ,
+        "B3 preset 1 percussion",
+    ),
+    (
+        "organ_panel.b3_preset1_vib",
+        Section::Organ,
+        "B3 preset 1 vibrato",
+    ),
     (
         "organ_panel.b3_preset2_drawbars",
         Section::Organ,
         "B3 preset 2 drawbars",
     ),
-    ("organ_panel.b3_preset2_perc", Section::Organ, "Percussion"),
+    (
+        "organ_panel.b3_preset2_perc",
+        Section::Organ,
+        "B3 preset 2 percussion",
+    ),
     (
         "organ_panel.b3_preset2_selected",
         Section::Organ,
         "B3 preset",
     ),
-    ("organ_panel.b3_preset2_vib", Section::Organ, "Vibrato"),
-    ("organ_panel.b3_vib", Section::Organ, "Vibrato / chorus"),
+    (
+        "organ_panel.b3_preset2_vib",
+        Section::Organ,
+        "B3 preset 2 vibrato",
+    ),
+    ("organ_panel.b3_vib", Section::Organ, "B3 vibrato / chorus"),
     (
         "organ_panel.farfisa_preset1_drawbars",
         Section::Organ,
         "Farfisa preset 1 registers",
     ),
-    ("organ_panel.farfisa_preset1_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.farfisa_preset1_vib",
+        Section::Organ,
+        "Farfisa preset 1 vibrato",
+    ),
     (
         "organ_panel.farfisa_preset2_drawbars",
         Section::Organ,
@@ -183,11 +203,15 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "Farfisa preset",
     ),
-    ("organ_panel.farfisa_preset2_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.farfisa_preset2_vib",
+        Section::Organ,
+        "Farfisa preset 2 vibrato",
+    ),
     (
         "organ_panel.farfisa_vib",
         Section::Organ,
-        "Vibrato / chorus",
+        "Farfisa vibrato / chorus",
     ),
     (
         "organ_panel.pipe_preset1_drawbars",
@@ -209,7 +233,11 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "Vox preset 1 drawbars",
     ),
-    ("organ_panel.vox_preset1_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.vox_preset1_vib",
+        Section::Organ,
+        "Vox preset 1 vibrato",
+    ),
     (
         "organ_panel.vox_preset2_drawbars",
         Section::Organ,
@@ -220,8 +248,12 @@ const FIELDS: &[(&str, Section, &str)] = &[
         Section::Organ,
         "Vox preset",
     ),
-    ("organ_panel.vox_preset2_vib", Section::Organ, "Vibrato"),
-    ("organ_panel.vox_vib", Section::Organ, "Vibrato"),
+    (
+        "organ_panel.vox_preset2_vib",
+        Section::Organ,
+        "Vox preset 2 vibrato",
+    ),
+    ("organ_panel.vox_vib", Section::Organ, "Vox vibrato"),
     // ── Piano ──────────────────────────────────────────────────────────────────
     ("piano_panel.acoustics", Section::Piano, "Acoustics"),
     ("piano_panel.category", Section::Piano, "Type"),
@@ -249,11 +281,11 @@ const FIELDS: &[(&str, Section, &str)] = &[
         "Effect 1 on the control pedal",
     ),
     ("effects_panel.fx1_rate", Section::Effects, "Effect 1 rate"),
-    ("effects_panel.fx1_type", Section::Effects, "Effect 1"),
+    ("effects_panel.fx1_type", Section::Effects, "Effect 1 type"),
     ("effects_panel.fx2", Section::Effects, "Effect 2"),
     ("effects_panel.fx2_deep", Section::Effects, "Effect 2 deep"),
     ("effects_panel.fx2_rate", Section::Effects, "Effect 2 rate"),
-    ("effects_panel.fx2_type", Section::Effects, "Effect 2"),
+    ("effects_panel.fx2_type", Section::Effects, "Effect 2 type"),
     ("effects_panel.fx3", Section::Effects, "Amp / compressor"),
     (
         "effects_panel.fx3_compression",
@@ -276,7 +308,7 @@ const FIELDS: &[(&str, Section, &str)] = &[
     ("effects_panel.fx4_tempo", Section::Effects, "Delay time"),
     ("effects_panel.fx5", Section::Effects, "Reverb"),
     ("effects_panel.fx5_moisture", Section::Effects, "Reverb mix"),
-    ("effects_panel.fx5_type", Section::Effects, "Reverb"),
+    ("effects_panel.fx5_type", Section::Effects, "Reverb type"),
     (
         "effects_panel.rotary_speed",
         Section::Effects,
@@ -721,6 +753,25 @@ mod tests {
         let mut seen = HashSet::new();
         for (path, _, _) in FIELDS {
             assert!(seen.insert(*path), "{path} is in the table twice");
+        }
+    }
+
+    /// ⚠️ A queue diff names a field by its label and nothing else, so two fields a
+    /// reader can see side by side must not answer to one word. A program's fields and a
+    /// settings document's are never in one list, so each document is its own list.
+    #[test]
+    fn no_two_fields_of_one_document_answer_to_one_label() {
+        for settings in [false, true] {
+            let mut seen = HashSet::new();
+            for (path, section, label) in FIELDS {
+                if SETTINGS_SECTIONS.contains(section) != settings {
+                    continue;
+                }
+                assert!(
+                    seen.insert(*label),
+                    "{path} and another field are both “{label}”"
+                );
+            }
         }
     }
 
