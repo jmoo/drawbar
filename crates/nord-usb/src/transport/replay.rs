@@ -255,6 +255,11 @@ impl Script {
                 }
             };
             let hex = hex.trim();
+            // ⚠️ The pairs below are byte slices: a multi-byte character would split
+            // across a char boundary and panic before `from_str_radix` ever saw it.
+            if !hex.is_ascii() {
+                return Err(fail(n, format_args!("non-hex byte")));
+            }
             if hex.len() % 2 != 0 {
                 return Err(fail(n, format_args!("odd-length hex")));
             }
@@ -682,6 +687,14 @@ mod tests {
         let err =
             Script::parse("# intent: program status\nO 00\n# intent: program focus\n").unwrap_err();
         assert!(err.to_string().contains("no frames"), "{err}");
+    }
+
+    /// A frame line is read two hex digits at a time, so a multi-byte character in one
+    /// must be refused rather than sliced through.
+    #[test]
+    fn a_frame_carrying_a_non_ascii_character_is_refused() {
+        let err = Script::parse("O aéa\n").unwrap_err();
+        assert!(err.to_string().contains("line 1: non-hex byte"), "{err}");
     }
 
     #[test]
