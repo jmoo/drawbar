@@ -1,85 +1,39 @@
-//! Enumeration walks driven by recorded exchanges.
+//! Recordings of `nord <noun> list` from the private corpus, hence `corpus`-gated: the
+//! scripts carry slot names.
 //!
-//! The walk is the one hardware-verified surface a replay could not cover, because no
-//! capture of it existed: `ReplayTransport` needed a script and NSM never performs a
-//! bare enumeration. These scripts are `nord`'s own traffic, taken with `--record`
-//! against the instrument.
-//!
-//! The exact-match transport checks bank boundaries, transitions, and termination for
-//! each addressable class.
-//!
-//! Corpus-gated: the scripts carry slot names, so they live in the private corpus rather
-//! than in this repo.
-//!
-//! What is here rather than in `tests/replay` is the *result* of each walk: the sweep
-//! drives a script and checks its bytes, and these four also say how many slots the walk
-//! must find. Give those scripts a `# intent: <class> walk` header and the sweep drives
-//! them too, from the same files.
-//!
-//! ```sh
-//! NORD_CORPUS_ROOT=/path/to/nord-corpus \
-//!   cargo test -p nord-usb --features corpus
-//! ```
+//! Each test states the slot count its walk must find; `tests/replay` drives the same
+//! files for their bytes.
 
 #![cfg(all(feature = "replay", feature = "corpus"))]
 
-use std::path::PathBuf;
-
+#[path = "support/geometry.rs"]
+mod geometry;
 #[path = "support/scripts.rs"]
 mod scripts;
 
-use nord_usb::device::Geometry;
 use nord_usb::op;
-use nord_usb::transport::{Direction, ReplayTransport, Step};
+use nord_usb::transport::{ReplayTransport, Step};
 use nord_usb::wire::{Bank, ObjectClass};
 use nord_usb::Session;
 
-/// Where the recorded walks live: the Electro 5 tree's USB recordings.
-fn walk_dir() -> PathBuf {
-    let root: PathBuf = std::env::var_os("NORD_CORPUS_ROOT")
-        .map(PathBuf::from)
-        .expect("set NORD_CORPUS_ROOT to a nord-corpus checkout for --features corpus");
-    root.join("ne5/usb/device/enumeration_walk")
-}
-
-/// Parse a `<O|I> <hex>` script. Blank lines and `#` comments are skipped.
+/// One recorded walk, by its name under the Electro 5 tree's USB recordings.
 fn script(name: &str) -> Vec<Step> {
-    let path = walk_dir().join(name);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|line| {
-            let (tag, hex) = line
-                .split_once(' ')
-                .expect("a script line is '<O|I> <hex>'");
-            let direction = match tag {
-                "O" => Direction::Out,
-                "I" => Direction::In,
-                other => panic!("unknown direction {other:?} in {}", path.display()),
-            };
-            let bytes = (0..hex.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
-                .collect();
-            Step { direction, bytes }
-        })
-        .collect()
+    scripts::read(
+        &scripts::corpus()
+            .join("ne5/usb/device/enumeration_walk")
+            .join(name),
+    )
+    .steps()
 }
 
 /// The banks each walk is bounded by. The recordings carry no geometry section of their
-/// own, so they are read from the committed recording of `device geometry` — the same
-/// instrument, and tables that do not change.
+/// own, so they are bounded by the committed one.
 fn banks(class: ObjectClass) -> Vec<Bank> {
-    let mut t = ReplayTransport::new(scripts::fixture("device/geometry.script").steps());
-    pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
-        let geometry = Geometry::read(&mut s).await.unwrap();
-        s.commit().await.unwrap();
-        geometry.banks(class).unwrap().to_vec()
-    })
+    pollster::block_on(geometry::committed())
+        .expect("the committed geometry recording")
+        .banks(class)
+        .unwrap_or_else(|e| panic!("{}: {e}", class.label()))
+        .to_vec()
 }
 
 /// Replay one recorded listing and return the slots it found.

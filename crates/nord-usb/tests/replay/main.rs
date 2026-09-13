@@ -19,6 +19,8 @@
 
 mod drive;
 
+#[path = "../support/geometry.rs"]
+mod geometry;
 #[path = "../support/scripts.rs"]
 mod scripts;
 

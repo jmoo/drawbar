@@ -77,7 +77,7 @@ pub async fn drive(
 async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Result<Vec<Bank>> {
     match geometry {
         Some(read) => read.banks(class).map(<[Bank]>::to_vec),
-        None => committed_geometry()
+        None => crate::geometry::committed()
             .await?
             .banks(class)
             .map(<[Bank]>::to_vec),
@@ -87,14 +87,8 @@ async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Resu
 async fn declared_unit(geometry: &Option<Geometry>, class: ObjectClass) -> Result<AllocationUnit> {
     match geometry {
         Some(read) => read.allocation_unit(class),
-        None => committed_geometry().await?.allocation_unit(class),
+        None => crate::geometry::committed().await?.allocation_unit(class),
     }
-}
-
-/// The committed recording of `device geometry`, replayed on a transport of its own.
-async fn committed_geometry() -> Result<Geometry> {
-    let mut t = ReplayTransport::new(crate::scripts::fixture("device/geometry.script").steps());
-    session!(&mut t, ObjectClass::Program, |s| Geometry::read(&mut s))
 }
 
 async fn drive_query(
