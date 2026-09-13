@@ -619,9 +619,6 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
     let audio = codec::decode(stroke, library.channels()).map_err(|e| e.to_string())?;
     let wav = nord_format::wav::pcm16(&audio.interleaved(), codec::RATE, library.channels())
         .map_err(|e| e.to_string())?;
-    if let Some(parent) = args.out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
     write_file(ui, &args.out, &wav)?;
 
     let peak = audio

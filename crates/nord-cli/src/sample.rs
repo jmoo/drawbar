@@ -465,7 +465,7 @@ fn decode_target(
                     let wav =
                         nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels)
                             .map_err(|e| format!("{}: {e}", file.display()))?;
-                    std::fs::write(&file, wav).map_err(|e| format!("{}: {e}", file.display()))?;
+                    crate::edit::replace_file(&file, &wav)?;
                     row.push_str(&format!("  -> {}", file.display()));
                 }
                 ui.out(row);

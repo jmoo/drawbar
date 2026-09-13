@@ -306,6 +306,9 @@ pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), Strin
 
 /// Put `bytes` at `path`, leaving whatever was there untouched if that cannot be done.
 ///
+/// Every write this CLI makes goes through here, so a destination under a directory that
+/// does not exist yet is created rather than refused, wherever the bytes came from.
+///
 /// ⚠️ The bytes land in a sibling file that is then renamed over the target, because an
 /// edit reads its own destination: a write that truncates first and fails part way
 /// through leaves neither the original nor the edit. The temporary is a sibling so the
@@ -314,6 +317,9 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let name = path
         .file_name()
         .ok_or_else(|| format!("{}: not a file to write", path.display()))?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
     let mut temp = name.to_os_string();
     temp.push(format!(".nord{}.tmp", std::process::id()));
     let temp = path.with_file_name(temp);
@@ -522,13 +528,31 @@ pub(crate) mod tests {
     }
 
     /// An edit's destination is usually its own source, so a write that cannot
-    /// finish has to leave that file as it was rather than truncated.
+    /// finish has to leave that file as it was rather than truncated — and must not
+    /// leave its own temporary behind either.
     #[test]
     fn a_write_that_cannot_finish_leaves_its_directory_as_it_was() {
         let dir = scratch("write-fails");
-        let missing = dir.join("no-such-directory").join("out.ne5p");
-        assert!(replace_file(&missing, b"edited").is_err());
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let blocked = dir.join("out.ne5p");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("held"), b"kept").unwrap();
+
+        assert!(replace_file(&blocked, b"edited").is_err());
+        assert_eq!(
+            std::fs::read(blocked.join("held")).unwrap(),
+            b"kept".to_vec()
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    /// A destination under a directory that is not there yet is made, not refused:
+    /// every verb that writes reaches this, and they used to disagree about it.
+    #[test]
+    fn a_write_makes_the_directory_its_destination_names() {
+        let dir = scratch("write-makes-dirs");
+        let nested = dir.join("wavs").join("zone1.wav");
+        replace_file(&nested, b"edited").unwrap();
+        assert_eq!(std::fs::read(&nested).unwrap(), b"edited".to_vec());
     }
 
     #[test]

@@ -436,7 +436,7 @@ pub fn get(
     let (info, file) = read_object(&mut device, at, class, body)?;
 
     if let Some(path) = out {
-        std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::edit::replace_file(&path, &file)?;
         ui.note(format!(
             "read {:?} ({} bytes) from {} -> {}",
             info.name,
