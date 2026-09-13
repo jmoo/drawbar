@@ -4588,7 +4588,6 @@ mod tests {
                 .renaming(self.workspace.get(self.id).expect("it is open"))
         }
 
-        /// The apply in flight, waited for.
         fn awaited(&mut self) -> Applied {
             self.state
                 .awaited(&self.ctx, &self.workspace)
