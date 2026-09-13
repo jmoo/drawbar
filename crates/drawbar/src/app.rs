@@ -215,12 +215,15 @@ impl DrawbarApp {
         app
     }
 
-    /// Ingest anything dropped on the window.
+    /// Ingest anything dropped on the window, or hand it to the New dialog while one is
+    /// open and it is a WAV.
     ///
     /// The web backend fills `bytes` and the native backend fills `path`, so both are
     /// handled rather than cfg'd apart.
     fn take_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        let drafting = self.workspace.draft_mut().is_some();
+        let mut joining = Vec::new();
         for file in dropped {
             let name = match (file.name.is_empty(), &file.path) {
                 (false, _) => file.name.clone(),
@@ -246,10 +249,17 @@ impl DrawbarApp {
                     None
                 }
             };
-            if let Some(bytes) = bytes {
-                self.workspace
-                    .ingest(name.clone(), Origin::File(name), bytes, &mut self.log);
+            let Some(bytes) = bytes else { continue };
+            match drafting && crate::newproject::is_wav_name(&name) {
+                true => joining.push((name, bytes)),
+                false => {
+                    self.workspace
+                        .ingest(name.clone(), Origin::File(name), bytes, &mut self.log);
+                }
             }
+        }
+        if let Some(draft) = self.workspace.draft_mut() {
+            draft.add(joining);
         }
     }
 
