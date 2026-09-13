@@ -725,10 +725,11 @@ mod tests {
             (0, 0).try_into().unwrap(),
             ne5::song::DEFAULT_VERSION,
             [(0, 0).try_into().unwrap(); 4],
-        );
+        )
+        .unwrap();
         for bad in ["65537:1", "1:65537", "4294967297:1"] {
             assert!(SongEditor(&mut song).set("slot1", bad).is_err(), "{bad}");
         }
-        assert_eq!(song.get(0).inner(), (0, 0));
+        assert_eq!(song.get(ne5::song::Slot::A).inner(), (0, 0));
     }
 }

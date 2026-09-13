@@ -472,11 +472,14 @@ pub(crate) mod tests {
         .unwrap();
         assert!(editable(&mut stage3));
 
-        let mut song = Entity::Song(Song::Electro5(ne5::song::new(
-            (0, 0).try_into().unwrap(),
-            ne5::song::DEFAULT_VERSION,
-            [(0, 0).try_into().unwrap(); 4],
-        )));
+        let mut song = Entity::Song(Song::Electro5(
+            ne5::song::new(
+                (0, 0).try_into().unwrap(),
+                ne5::song::DEFAULT_VERSION,
+                [(0, 0).try_into().unwrap(); 4],
+            )
+            .unwrap(),
+        ));
         assert!(editable(&mut song));
 
         let mut project = Entity::SampleProject(
