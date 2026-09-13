@@ -80,9 +80,9 @@ pub struct Audio {
     /// end. The stroke does not own them and nothing plays them; they are here
     /// because coding that block again needs them.
     pub tail: Vec<Vec<i16>>,
-    /// Samples the reconstruction put outside `i16` and that were saturated.
-    /// Specimens produce none; a non-zero count means the stroke is not what this
-    /// codec describes.
+    /// Samples the reconstruction put outside `i16` and that were saturated. A non-zero
+    /// count means the stroke is not what this codec describes. Inferred from
+    /// specimens; not confirmed on hardware.
     pub clipped: usize,
     /// Repeated samples compared against the block before, all of which matched.
     pub overlap_checked: usize,

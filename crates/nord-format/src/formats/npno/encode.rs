@@ -44,15 +44,13 @@
 //! library coded again from its own audio plays indistinguishably from the original,
 //! in level and in spectrum.
 //!
-//! That the width and order it *chooses* are the vendor's own choice is inferred from
-//! specimens: given each block's width, order and attenuation, this reproduces the
-//! blocks of every specimen read, byte for byte, and the width and order it derives
-//! are the ones those files declare, apart from a handful of libraries whose headers
-//! were decided on a signal that is not the one they store. The attenuation is the
-//! same kind of thing one step smaller: it is a statistic the vendor's encoder
-//! recorded rather than a function of the frames it went on to store, so a block
-//! coded again from its own audio can declare a neighbouring value. Nothing in
-//! [`codec`] reads it.
+//! Given a block's width, order and attenuation, this reproduces its bytes, and the
+//! width and order it derives are the ones the file declares — except where a library's
+//! headers were decided on a signal the file does not store. The attenuation is the same
+//! kind of thing one step smaller: it is a statistic the vendor's encoder recorded
+//! rather than a function of the frames it went on to store, so a block coded again from
+//! its own audio can declare a neighbouring value. Nothing in [`codec`] reads it.
+//! Inferred from specimens; not confirmed on hardware.
 //!
 //! # What the audio does not say
 //!
@@ -489,7 +487,7 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
 /// a held key down within tens of milliseconds, where a flat table of any level takes
 /// about half a second. What axis the instrument reads the table on is open.
 fn damper_cut(note: usize) -> u8 {
-    /// The last note of the plateau, and the note the fall ends on.
+    /// The last note of the plateau, where the fall begins; it ends on `TOP`.
     const FLAT_TO: usize = 24;
     const TOP: usize = 108;
     const PLATEAU: f64 = 79.0;
@@ -748,9 +746,7 @@ fn refuse(what: impl Into<String>) -> Error {
 /// The root each key plays: the lowest root the key sits no more than a semitone
 /// above. A key more than a semitone above the highest root is left uncovered.
 ///
-/// Inferred from the key maps of vendor libraries; not confirmed on hardware. Those
-/// also stop short of the lowest keys, which is the acoustic instrument's range
-/// rather than anything the map derives.
+/// Inferred from specimens; not confirmed on hardware.
 fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
     let mut map = [UNCOVERED; NOTES];
     for (key, slot) in map.iter_mut().enumerate() {
@@ -1083,9 +1079,9 @@ fn attenuation(peak: i64) -> u8 {
 /// The four seeds a new recording declares, oldest first: a zero, then the recording's
 /// own first three frames.
 ///
-/// Vendor strokes carry the four frames before the recording, the oldest of them zero
-/// on every stroke of every specimen read. A recording that starts in silence has no
-/// such frames to carry and this states zeros, which is the same thing.
+/// Vendor strokes carry the four frames before the recording, the oldest of them zero.
+/// A recording that starts in silence has no such frames to carry and this states zeros,
+/// which is the same thing. Inferred from specimens; not confirmed on hardware.
 fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
     let mut out = [[0i16; SEEDS]; 2];
     for (channel, group) in source.iter().zip(out.iter_mut()) {

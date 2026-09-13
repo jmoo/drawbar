@@ -848,9 +848,8 @@ impl<'a> Library<'a> {
 
     /// Retune one key, in the units [`Library::fine_tune`] reads.
     ///
-    /// The unit's size and direction are confirmed on hardware from libraries as the
-    /// vendor tuned them; that rewriting the byte retunes the key is inferred from
-    /// specimens, not confirmed on hardware.
+    /// The unit's size and direction are confirmed on hardware; that rewriting the byte
+    /// retunes the key is not. Inferred from specimens; not confirmed on hardware.
     pub fn set_fine_tune(&mut self, key: u8, units: i8) -> Result<(), Error> {
         let at = FINE_TUNE_AT + midi_key("key", key)?;
         self.prefix[at] = units as u8;
@@ -894,10 +893,10 @@ impl<'a> Library<'a> {
     /// The long name at `0x3c` and the voicing at `0x5c`, which only
     /// [`VERSION_SPLIT_NAME`] streams carry. Both are `None` on the older stream.
     ///
-    /// They are their own fields, not a split of the `Name#Variant` one: vendor
-    /// libraries spell the long name differently from the name before the `#`
-    /// (`EP5 BrightTines` against `EP5 Bright Tines`), and the voicing holds
-    /// neither the padding nor the size suffix the variant does.
+    /// They are their own fields, not a split of the `Name#Variant` one: a library can
+    /// spell the long name differently from the name before the `#`, and the voicing
+    /// holds neither the padding nor the size suffix the variant does. Inferred from
+    /// specimens; not confirmed on hardware.
     pub fn long_name(&self) -> Option<String> {
         self.split_field(TextField::LONG_NAME)
     }
