@@ -76,10 +76,11 @@
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, Bank, Library, Stroke, CNSP_MAGIC, DECAYS, DIRECTORY_AT,
-    FINE_TUNE_AT, FORMAT, KEY_MAP_AT, LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS,
-    REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_SEEDS,
-    REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
+    be32, block_bytes, midi_key, Bank, Library, Stroke, CNSP_MAGIC, DAMPER_TOP_AT, DECAYS,
+    DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT, LADDER_UNITY, MARKS, NOTES,
+    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
+    REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT,
+    VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{Error, ParseError};
@@ -389,9 +390,9 @@ const FILE_ID: u32 = 1;
 /// The stream version again, ahead of the echo at [`VERSION_ECHO_AT`].
 const VERSION_REPEAT_AT: usize = 0x16;
 
-/// [`Kind::code`], then a model id within the kind and the library's version digit —
-/// neither of which a rule-written prefix claims — then a format constant.
-const KIND_AT: usize = 0x18;
+/// The three bytes after [`KIND_AT`]: a model id within the kind and the library's
+/// version digit — neither of which a rule-written prefix claims — then a format
+/// constant.
 const KIND_TRAILER: [u8; 3] = [0, 0, 2];
 
 /// The per-note tables, [`NOTES`] bytes each, at the value that states nothing about
@@ -407,10 +408,8 @@ const PER_NOTE_TABLES: [(usize, u8); 6] = [
     (0x38c, 0),
 ];
 
-/// The playback parameters, zero but for the fields below.
+/// The playback parameters, zero but for the fields [`rules_prefix`] writes into them.
 const PARAMETERS: std::ops::Range<usize> = 0x40c..0x60f;
-const GAIN_AT: usize = 0x40c;
-const DAMPER_TOP_AT: usize = 0x40d;
 /// The three bytes after the damper limit, whose meaning is open; every library holds
 /// these.
 const PARAMETER_TAIL_AT: usize = 0x40e;
