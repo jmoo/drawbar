@@ -270,17 +270,44 @@ mod tests {
         zero_rate[28..32].fill(0);
         assert!(read_pcm16(&zero_rate).is_err());
 
-        let mut partial = mono_pcm16(&[1], 44_100).unwrap();
-        partial.push(0);
-        partial[4..8].copy_from_slice(&37u32.to_le_bytes());
-        partial[40..44].copy_from_slice(&3u32.to_le_bytes());
-        assert!(read_pcm16(&partial).is_err());
+        // An odd-sized chunk pads to even, and the pad byte is missing here: the data
+        // chunk claims 3 bytes of the 3 that follow it, leaving no room for the pad.
+        let mut no_pad = mono_pcm16(&[1], 44_100).unwrap();
+        no_pad.push(0);
+        no_pad[4..8].copy_from_slice(&39u32.to_le_bytes());
+        no_pad[40..44].copy_from_slice(&3u32.to_le_bytes());
+        let err = read_pcm16(&no_pad).unwrap_err().to_string();
+        assert!(err.contains("pad byte"), "refused for the wrong reason: {err}");
 
         let mut stereo_half_frame = mono_pcm16(&[1], 44_100).unwrap();
         stereo_half_frame[22..24].copy_from_slice(&2u16.to_le_bytes());
         stereo_half_frame[28..32].copy_from_slice(&176_400u32.to_le_bytes());
         stereo_half_frame[32..34].copy_from_slice(&4u16.to_le_bytes());
         assert!(read_pcm16(&stereo_half_frame).is_err());
+    }
+
+    /// Chunk order is the file's business: the reader collects both chunks wherever
+    /// they sit, so a data chunk ahead of the fmt chunk reads the same.
+    #[test]
+    fn a_data_chunk_before_the_fmt_chunk_still_reads() {
+        let wav = mono_pcm16(&[7i16, -8], 44_100).unwrap();
+        let mut swapped = wav[..12].to_vec();
+        swapped.extend_from_slice(&wav[36..]); // the data chunk
+        swapped.extend_from_slice(&wav[12..36]); // then the fmt chunk
+        assert_eq!(swapped.len(), wav.len());
+        assert_eq!(read_pcm16(&swapped).unwrap().samples, vec![7, -8]);
+    }
+
+    /// Bytes after the last chunk are not a chunk, and reading past them would be
+    /// reading whatever they are as audio.
+    #[test]
+    fn trailing_bytes_that_form_no_chunk_are_refused() {
+        let mut trailing = mono_pcm16(&[1i16], 44_100).unwrap();
+        trailing.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let declared = u32::from_le_bytes(trailing[4..8].try_into().unwrap()) + 4;
+        trailing[4..8].copy_from_slice(&declared.to_le_bytes());
+        let err = read_pcm16(&trailing).unwrap_err().to_string();
+        assert!(err.contains("trailing"), "refused for the wrong reason: {err}");
     }
 
     #[test]
