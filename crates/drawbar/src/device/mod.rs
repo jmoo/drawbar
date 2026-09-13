@@ -1378,6 +1378,7 @@ impl Device {
                 DeviceEvent::Partitions(partitions) => {
                     self.state.partitions = partitions;
                     crate::queue::refit(workspace, &self.state, queue, log);
+                    crate::queue::reattach(workspace, self, queue, log);
                     self.resync();
                 }
                 DeviceEvent::Geometry { class, banks } => {
