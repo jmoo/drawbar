@@ -6,10 +6,9 @@
 //! still share one effects chain, so its fields carry no layer.
 
 use super::fx::FxChain;
+use super::organ_layers::OrganLayer;
 use crate::cbin::{self, Cbin};
-use crate::components::{
-    Drawbar, DrawbarMorph, KbZone4, Level, MorphTarget, OctaveShiftNibble, Selector,
-};
+use crate::components::{Level, MorphTarget};
 use crate::error::Error;
 use std::io::{Read, Seek};
 
@@ -23,7 +22,7 @@ pub const BODY_LEN: usize = 139;
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
 /// re-encode verbatim. Placements derived from ns4decode's published tables;
-/// values raw. Not confirmed on hardware.
+/// values raw. Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(139)]
 pub struct OrganPreset {
     #[bits(41..=41)]
@@ -50,192 +49,11 @@ pub struct OrganPreset {
     pub organ_b_volume_aftertouch: MorphTarget,
     #[bits(100..=107)]
     pub organ_b_volume_ctrl_pedal: MorphTarget,
-    #[bits(184..=187)]
-    pub organ_a_kb_zones: KbZone4,
-    #[bits(188..=191)]
-    pub organ_a_octave_shift: OctaveShiftNibble,
-    #[bits(192..=192)]
-    pub organ_a_sustain_pedal_enabled: bool,
-    #[bits(193..=195)]
-    pub organ_a_model: Selector<3>,
-    #[bits(196..=196)]
-    pub organ_a_preset_enabled: bool,
-    #[bits(216..=219)]
-    pub organ_a_drawbar_1: Drawbar,
-    #[bits(220..=224)]
-    pub organ_a_drawbar_1_wheel: DrawbarMorph,
-    #[bits(225..=229)]
-    pub organ_a_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(230..=234)]
-    pub organ_a_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(235..=238)]
-    pub organ_a_drawbar_2: Drawbar,
-    #[bits(239..=243)]
-    pub organ_a_drawbar_2_wheel: DrawbarMorph,
-    #[bits(244..=248)]
-    pub organ_a_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(249..=253)]
-    pub organ_a_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(254..=257)]
-    pub organ_a_drawbar_3: Drawbar,
-    #[bits(258..=262)]
-    pub organ_a_drawbar_3_wheel: DrawbarMorph,
-    #[bits(263..=267)]
-    pub organ_a_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(268..=272)]
-    pub organ_a_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(273..=276)]
-    pub organ_a_drawbar_4: Drawbar,
-    #[bits(277..=281)]
-    pub organ_a_drawbar_4_wheel: DrawbarMorph,
-    #[bits(282..=286)]
-    pub organ_a_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(287..=291)]
-    pub organ_a_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(292..=295)]
-    pub organ_a_drawbar_5: Drawbar,
-    #[bits(296..=300)]
-    pub organ_a_drawbar_5_wheel: DrawbarMorph,
-    #[bits(301..=305)]
-    pub organ_a_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(306..=310)]
-    pub organ_a_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(311..=314)]
-    pub organ_a_drawbar_6: Drawbar,
-    #[bits(315..=319)]
-    pub organ_a_drawbar_6_wheel: DrawbarMorph,
-    #[bits(320..=324)]
-    pub organ_a_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(325..=329)]
-    pub organ_a_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(330..=333)]
-    pub organ_a_drawbar_7: Drawbar,
-    #[bits(334..=338)]
-    pub organ_a_drawbar_7_wheel: DrawbarMorph,
-    #[bits(339..=343)]
-    pub organ_a_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(344..=348)]
-    pub organ_a_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(349..=352)]
-    pub organ_a_drawbar_8: Drawbar,
-    #[bits(353..=357)]
-    pub organ_a_drawbar_8_wheel: DrawbarMorph,
-    #[bits(358..=362)]
-    pub organ_a_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(363..=367)]
-    pub organ_a_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(368..=371)]
-    pub organ_a_drawbar_9: Drawbar,
-    #[bits(372..=376)]
-    pub organ_a_drawbar_9_wheel: DrawbarMorph,
-    #[bits(377..=381)]
-    pub organ_a_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(382..=386)]
-    pub organ_a_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(408..=408)]
-    pub organ_a_vib_chorus_enabled: bool,
-    #[bits(409..=409)]
-    pub organ_a_percussion_enabled: bool,
-    #[bits(410..=410)]
-    pub organ_a_percussion_harmonic_3rd_enabled: bool,
-    #[bits(411..=411)]
-    pub organ_a_percussion_decay_fast_enabled: bool,
-    #[bits(412..=412)]
-    pub organ_a_percussion_volume_soft_enabled: bool,
-    #[bits(432..=435)]
-    pub organ_b_kb_zones: KbZone4,
-    #[bits(436..=439)]
-    pub organ_b_octave_shift: OctaveShiftNibble,
-    #[bits(440..=440)]
-    pub organ_b_sustain_pedal_enabled: bool,
-    #[bits(441..=443)]
-    pub organ_b_model: Selector<3>,
-    #[bits(444..=444)]
-    pub organ_b_preset_enabled: bool,
-    #[bits(464..=467)]
-    pub organ_b_drawbar_1: Drawbar,
-    #[bits(468..=472)]
-    pub organ_b_drawbar_1_wheel: DrawbarMorph,
-    #[bits(473..=477)]
-    pub organ_b_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(478..=482)]
-    pub organ_b_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(483..=486)]
-    pub organ_b_drawbar_2: Drawbar,
-    #[bits(487..=491)]
-    pub organ_b_drawbar_2_wheel: DrawbarMorph,
-    #[bits(492..=496)]
-    pub organ_b_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(497..=501)]
-    pub organ_b_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(502..=505)]
-    pub organ_b_drawbar_3: Drawbar,
-    #[bits(506..=510)]
-    pub organ_b_drawbar_3_wheel: DrawbarMorph,
-    #[bits(511..=515)]
-    pub organ_b_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(516..=520)]
-    pub organ_b_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(521..=524)]
-    pub organ_b_drawbar_4: Drawbar,
-    #[bits(525..=529)]
-    pub organ_b_drawbar_4_wheel: DrawbarMorph,
-    #[bits(530..=534)]
-    pub organ_b_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(535..=539)]
-    pub organ_b_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(540..=543)]
-    pub organ_b_drawbar_5: Drawbar,
-    #[bits(544..=548)]
-    pub organ_b_drawbar_5_wheel: DrawbarMorph,
-    #[bits(549..=553)]
-    pub organ_b_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(554..=558)]
-    pub organ_b_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(559..=562)]
-    pub organ_b_drawbar_6: Drawbar,
-    #[bits(563..=567)]
-    pub organ_b_drawbar_6_wheel: DrawbarMorph,
-    #[bits(568..=572)]
-    pub organ_b_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(573..=577)]
-    pub organ_b_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(578..=581)]
-    pub organ_b_drawbar_7: Drawbar,
-    #[bits(582..=586)]
-    pub organ_b_drawbar_7_wheel: DrawbarMorph,
-    #[bits(587..=591)]
-    pub organ_b_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(592..=596)]
-    pub organ_b_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(597..=600)]
-    pub organ_b_drawbar_8: Drawbar,
-    #[bits(601..=605)]
-    pub organ_b_drawbar_8_wheel: DrawbarMorph,
-    #[bits(606..=610)]
-    pub organ_b_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(611..=615)]
-    pub organ_b_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(616..=619)]
-    pub organ_b_drawbar_9: Drawbar,
-    #[bits(620..=624)]
-    pub organ_b_drawbar_9_wheel: DrawbarMorph,
-    #[bits(625..=629)]
-    pub organ_b_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(630..=634)]
-    pub organ_b_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(656..=656)]
-    pub organ_b_vib_chorus_enabled: bool,
-    #[bits(657..=657)]
-    pub organ_b_percussion_enabled: bool,
-    #[bits(658..=658)]
-    pub organ_b_percussion_harmonic_3rd_enabled: bool,
-    #[bits(659..=659)]
-    pub organ_b_percussion_decay_fast_enabled: bool,
-    #[bits(660..=660)]
-    pub organ_b_percussion_volume_soft_enabled: bool,
 
-    /// The organ section's effects chain.
+    #[at(23..52)]
+    pub organ_a: OrganLayer,
+    #[at(54..83)]
+    pub organ_b: OrganLayer,
     #[at(85..137)]
     pub organ_fx: FxChain,
 }

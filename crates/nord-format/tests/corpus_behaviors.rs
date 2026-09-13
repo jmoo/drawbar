@@ -157,15 +157,18 @@ fn ns4_octave_shifts_stay_in_panel_range() {
                 seen.insert("program");
             }
             Entity::OrganPreset(OrganPreset::Stage4(p)) => {
-                assert!(in_range(p.organ_a_octave_shift.octaves()), "{where_}");
+                assert!(in_range(p.organ_a.octave_shift.octaves()), "{where_}");
                 seen.insert("organ preset");
             }
             Entity::PianoPreset(PianoPreset::Stage4(p)) => {
-                assert!(in_range(p.piano_a_octave_shift.octaves()), "{where_}");
+                assert!(in_range(p.piano_a.octave_shift.octaves()), "{where_}");
                 seen.insert("piano preset");
             }
             Entity::Synth(Synth::Stage4(p)) => {
-                assert!(in_range(p.synth_a_octave_shift.octaves()), "{where_}");
+                assert!(
+                    in_range(p.synth_a_performance.octave_shift.octaves()),
+                    "{where_}"
+                );
                 seen.insert("synth preset");
             }
             _ => {}
@@ -196,14 +199,14 @@ fn ns4_selectors_stay_in_panel_range() {
                 seen.insert("program");
             }
             Entity::OrganPreset(OrganPreset::Stage4(p)) => {
-                assert!(p.organ_a_model.raw() <= 5, "{where_}");
-                assert!(p.organ_b_model.raw() <= 5, "{where_}");
+                assert!(p.organ_a.model.raw() <= 5, "{where_}");
+                assert!(p.organ_b.model.raw() <= 5, "{where_}");
                 assert!(p.organ_fx.reverb_type.raw() <= 11, "{where_}");
                 seen.insert("organ preset");
             }
             Entity::PianoPreset(PianoPreset::Stage4(p)) => {
-                assert!(p.piano_a_type.raw() <= 5, "{where_}");
-                assert!(p.piano_b_type.raw() <= 5, "{where_}");
+                assert!(p.piano_a.piano_type.raw() <= 5, "{where_}");
+                assert!(p.piano_b.piano_type.raw() <= 5, "{where_}");
                 assert!(p.piano_a_fx.reverb_type.raw() <= 11, "{where_}");
                 seen.insert("piano preset");
             }
@@ -211,7 +214,7 @@ fn ns4_selectors_stay_in_panel_range() {
                 assert!(p.synth_a_voice.filter_type.raw() <= 5, "{where_}");
                 assert!(p.synth_b_voice.filter_type.raw() <= 5, "{where_}");
                 assert!(p.synth_a_voice.lfo_shape.raw() <= 4, "{where_}");
-                assert!(p.synth_a_voice_priority.raw() <= 2, "{where_}");
+                assert!(p.synth_a_performance.voice_priority.raw() <= 2, "{where_}");
                 assert!(p.synth_a_fx.reverb_type.raw() <= 11, "{where_}");
                 seen.insert("synth preset");
             }

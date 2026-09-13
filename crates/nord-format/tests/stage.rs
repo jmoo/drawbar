@@ -179,23 +179,23 @@ fn stage4_preset_zones_sit_one_stride_apart() {
     raw[42] |= 0b0010_0100;
     raw[93] |= 0b0010_0100;
     let body = ns4::synth::SynthPreset::try_from(raw).unwrap();
-    assert_eq!(format!("{:?}", body.synth_a_kb_zones), "V9");
-    assert_eq!(format!("{:?}", body.synth_b_kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.synth_a_performance.kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.synth_b_performance.kb_zones), "V9");
     assert_eq!(<[u8; ns4::synth::BODY_LEN]>::from(&body), raw);
 
     let mut raw = [0u8; ns4::organ_preset::BODY_LEN];
     raw[23] |= 0b1001_0000;
     raw[54] |= 0b1001_0000;
     let body = ns4::organ_preset::OrganPreset::try_from(raw).unwrap();
-    assert_eq!(format!("{:?}", body.organ_a_kb_zones), "V9");
-    assert_eq!(format!("{:?}", body.organ_b_kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.organ_a.kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.organ_b.kb_zones), "V9");
     assert_eq!(<[u8; ns4::organ_preset::BODY_LEN]>::from(&body), raw);
 
     let mut raw = [0u8; ns4::piano_preset::BODY_LEN];
     raw[18] |= 0b1001_0000;
     raw[30] |= 0b1001_0000;
     let body = ns4::piano_preset::PianoPreset::try_from(raw).unwrap();
-    assert_eq!(format!("{:?}", body.piano_a_kb_zones), "V9");
-    assert_eq!(format!("{:?}", body.piano_b_kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.piano_a.kb_zones), "V9");
+    assert_eq!(format!("{:?}", body.piano_b.kb_zones), "V9");
     assert_eq!(<[u8; ns4::piano_preset::BODY_LEN]>::from(&body), raw);
 }

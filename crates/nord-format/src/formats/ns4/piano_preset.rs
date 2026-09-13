@@ -5,8 +5,9 @@
 //! confirmed against the corpus, where it varies as a zone does.
 
 use super::fx::FxChain;
+use super::piano_layers::PianoLayer;
 use crate::cbin::{self, Cbin};
-use crate::components::{KbZone4, Level, MorphTarget, OctaveShiftNibble, PianoRef, Selector};
+use crate::components::{Level, MorphTarget};
 use crate::error::Error;
 use std::io::{Read, Seek};
 
@@ -20,7 +21,7 @@ pub const BODY_LEN: usize = 151;
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
 /// re-encode verbatim. Placements derived from ns4decode's published tables;
-/// values raw. Not confirmed on hardware.
+/// values raw. Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(151)]
 pub struct PianoPreset {
     #[bits(41..=41)]
@@ -47,71 +48,13 @@ pub struct PianoPreset {
     pub piano_b_volume_aftertouch: MorphTarget,
     #[bits(100..=107)]
     pub piano_b_volume_ctrl_pedal: MorphTarget,
-    #[bits(144..=147)]
-    pub piano_a_kb_zones: KbZone4,
-    #[bits(148..=151)]
-    pub piano_a_octave_shift: OctaveShiftNibble,
-    #[bits(152..=152)]
-    pub piano_a_pitch_stick_enabled: bool,
-    #[bits(153..=153)]
-    pub piano_a_sustain_pedal_enabled: bool,
-    #[bits(154..=156)]
-    pub piano_a_type: Selector<3>,
-    #[bits(157..=161)]
-    pub piano_a_model_slot: Selector<5>,
-    #[bits(162..=163)]
-    pub piano_a_model_variation: Selector<2>,
-    #[bits(164..=195)]
-    pub piano_a_model_id: PianoRef,
-    #[bits(196..=196)]
-    pub piano_a_soft_rel_enabled: bool,
-    #[bits(197..=197)]
-    pub piano_a_string_res_enabled: bool,
-    #[bits(198..=198)]
-    pub piano_a_pedal_noise_enabled: bool,
-    #[bits(199..=200)]
-    pub piano_a_touch: Selector<2>,
-    #[bits(201..=202)]
-    pub piano_a_unison_level: Selector<2>,
-    #[bits(203..=204)]
-    pub piano_a_dyn_comp: Selector<2>,
-    #[bits(206..=208)]
-    pub piano_a_timbre: Selector<3>,
-    #[bits(240..=243)]
-    pub piano_b_kb_zones: KbZone4,
-    #[bits(244..=247)]
-    pub piano_b_octave_shift: OctaveShiftNibble,
-    #[bits(248..=248)]
-    pub piano_b_pitch_stick_enabled: bool,
-    #[bits(249..=249)]
-    pub piano_b_sustain_pedal_enabled: bool,
-    #[bits(250..=252)]
-    pub piano_b_type: Selector<3>,
-    #[bits(253..=257)]
-    pub piano_b_model_slot: Selector<5>,
-    #[bits(258..=259)]
-    pub piano_b_model_variation: Selector<2>,
-    #[bits(260..=291)]
-    pub piano_b_model_id: PianoRef,
-    #[bits(292..=292)]
-    pub piano_b_soft_rel_enabled: bool,
-    #[bits(293..=293)]
-    pub piano_b_string_res_enabled: bool,
-    #[bits(294..=294)]
-    pub piano_b_pedal_noise_enabled: bool,
-    #[bits(295..=296)]
-    pub piano_b_touch: Selector<2>,
-    #[bits(297..=298)]
-    pub piano_b_unison_level: Selector<2>,
-    #[bits(299..=300)]
-    pub piano_b_dyn_comp: Selector<2>,
-    #[bits(302..=304)]
-    pub piano_b_timbre: Selector<3>,
 
-    /// The piano a section's effects chain.
+    #[at(18..27)]
+    pub piano_a: PianoLayer,
+    #[at(30..39)]
+    pub piano_b: PianoLayer,
     #[at(42..94)]
     pub piano_a_fx: FxChain,
-    /// The piano b section's effects chain.
     #[at(97..149)]
     pub piano_b_fx: FxChain,
 }

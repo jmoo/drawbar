@@ -30,7 +30,7 @@ pub const BODY_LEN: usize = 824;
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
 /// re-encode verbatim. Placements derived from ns4decode's published tables;
-/// values raw. Not confirmed on hardware.
+/// values raw. Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(824)]
 pub struct Program {
     #[bits(24..=31)]
@@ -196,17 +196,14 @@ pub struct Program {
     pub organ_a: OrganLayer,
     #[at(99..128)]
     pub organ_b: OrganLayer,
-    /// The organ section's effects chain.
     #[at(130..182)]
     pub organ_fx: FxChain,
     #[at(198..207)]
     pub piano_a: PianoLayer,
     #[at(210..219)]
     pub piano_b: PianoLayer,
-    /// The piano a section's effects chain.
     #[at(222..274)]
     pub piano_a_fx: FxChain,
-    /// The piano b section's effects chain.
     #[at(277..329)]
     pub piano_b_fx: FxChain,
     #[at(363..410)]
@@ -221,13 +218,10 @@ pub struct Program {
     pub synth_b_voice: SynthVoice,
     #[at(612..656)]
     pub synth_c_voice: SynthVoice,
-    /// The synth a section's effects chain.
     #[at(660..712)]
     pub synth_a_fx: FxChain,
-    /// The synth b section's effects chain.
     #[at(715..767)]
     pub synth_b_fx: FxChain,
-    /// The synth c section's effects chain.
     #[at(770..822)]
     pub synth_c_fx: FxChain,
 }
