@@ -519,7 +519,7 @@ fn container(ui: &mut egui::Ui, entity: &LocalEntity) {
         );
         row(ui, "format", container.tag());
         row(ui, "version", container.header.version.to_string());
-        row(ui, "slot", stored_slot(&container.header));
+        row(ui, "slot", stored_slot(container.header.slot()));
         row(ui, "body", format!("{} bytes", container.body_len));
         row(ui, "file", format!("{} bytes", entity.bytes.len()));
         row(
@@ -533,14 +533,26 @@ fn container(ui: &mut egui::Ui, entity: &LocalEntity) {
     });
 }
 
+/// What a stored half carries where it names no position.
+const NO_SLOT: u16 = 0xffff;
+
 /// The stored slot, one-indexed as `BANK:SLOT`.
 ///
 /// Library files carry `0xffff:0xffff` where slot files keep a bank/slot pair — a
 /// library object has no slot until an instrument gives it one.
-fn stored_slot(header: &nord_format::cbin::Header) -> String {
-    match header.slot() {
-        (0xffff, 0xffff) => "none (a library file, not a slot save)".into(),
-        (bank, slot) => format!("{}:{}", bank + 1, slot + 1),
+fn stored_slot(slot: (u16, u16)) -> String {
+    match slot {
+        (NO_SLOT, NO_SLOT) => "none (a library file, not a slot save)".into(),
+        (bank, slot) => format!("{}:{}", counted(bank), counted(slot)),
+    }
+}
+
+/// One half of a stored slot, counted from one. A half holding the none marker names no
+/// position, so there is nothing to count from — and `0xffff + 1` does not fit a `u16`.
+fn counted(half: u16) -> String {
+    match half {
+        NO_SLOT => "none".to_string(),
+        half => (u32::from(half) + 1).to_string(),
     }
 }
 
@@ -650,4 +662,24 @@ pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
         DeviceCmd::SlotInfo { class, at },
         DeviceCmd::Deps { class, at },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pair is counted from one, and a half holding the none marker is spelled as one
+    /// rather than counted from: `0xffff + 1` is not a slot and does not fit a `u16`.
+    #[test]
+    fn a_stored_slot_counts_from_one_and_names_a_half_that_holds_no_position() {
+        assert_eq!(stored_slot((0, 0)), "1:1");
+        assert_eq!(stored_slot((6, 3)), "7:4");
+        assert_eq!(
+            stored_slot((NO_SLOT, NO_SLOT)),
+            "none (a library file, not a slot save)"
+        );
+        assert_eq!(stored_slot((NO_SLOT, 5)), "none:6");
+        assert_eq!(stored_slot((5, NO_SLOT)), "6:none");
+        assert_eq!(stored_slot((0xfffe, 0xfffe)), "65535:65535");
+    }
 }
