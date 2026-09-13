@@ -1,5 +1,5 @@
 //! Synthetic replay tests for the set-list scan used before program moves.
-//! Confirmed on hardware: a move rewrites every set list that references the program,
+//! Confirmed on hardware. A move rewrites every set list that references the program,
 //! and the scan has been run against the instrument.
 
 #![cfg(feature = "replay")]

@@ -1254,7 +1254,7 @@ fn piano_lookup(
 /// The Pianos folder's names for the document's current category, by Model dial
 /// position — what turns the Model dial into a list of pianos.
 ///
-/// Bank ↔ category and slot order ↔ dial position are confirmed on hardware: the
+/// Bank ↔ category and slot order ↔ dial position: Confirmed on hardware. The
 /// device's own bank list names the piano banks after the panel's categories, in the
 /// panel's order, and a program's stored category and model read back as the bank and
 /// slot the instrument reports for the piano it depends on. The dependency name stays

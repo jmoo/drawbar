@@ -640,7 +640,7 @@ fn every_sample_preset_parses_under_its_own_schema() {
     assert!(v2 > 0 && v3 > 0 && v4 > 0, "a generation went unseen");
 }
 
-/// Confirmed on hardware: a live slot and a stored program use the same body.
+/// A live slot and a stored program use the same body. Confirmed on hardware.
 #[test]
 fn ne5_live_body_decodes_as_a_program() {
     use nord_format::formats::ne5;

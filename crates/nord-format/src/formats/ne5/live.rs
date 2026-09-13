@@ -1,6 +1,6 @@
 //! The Electro 5 live buffer (`.ne5l`) — the panel as it stands, in three slots.
 //!
-//! Confirmed on hardware: the live buffer is the `ne5p` program body under another tag.
+//! The live buffer is the `ne5p` program body under another tag. Confirmed on hardware.
 //! The same panel state read as object class 6 slot `1:1` and as program `5:40` gives
 //! byte-identical 121-byte bodies, so this module is [`program::Program`] in the live
 //! slot space and every program field applies here unchanged.

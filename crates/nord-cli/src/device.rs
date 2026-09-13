@@ -225,7 +225,7 @@ fn print_json(ui: &Ui, report: &[Status]) {
 
 /// Turn the device's bare status code into something actionable.
 ///
-/// Confirmed on hardware: `0x1` from a vacant slot, `0x3` from an address past the
+/// Confirmed on hardware. `0x1` from a vacant slot, `0x3` from an address past the
 /// instrument's geometry, `0x4` from a write aimed at an occupied slot.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {

@@ -58,7 +58,7 @@ pub type Bank = bank::Bank<Cbin<Program>, Location>;
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`] and the aux word, validates the slot, and range-checks
 /// every field. Placements are pinned by a change-one-knob specimen corpus
-/// written by the instrument; each panel marks what is confirmed on hardware.
+/// written by the instrument; each panel marks its own placements' provenance.
 #[nord_bits_derive::bitbody(121)]
 pub struct Program {
     /// Every specimen echoes the header's schema version.
@@ -99,7 +99,7 @@ pub(crate) use crate::formats::known_version;
 
 /// Gate a read on the `aux` word every slot-addressed specimen holds.
 ///
-/// Inferred from specimens; not confirmed on hardware: every slot-addressed file in
+/// Inferred from specimens; not confirmed on hardware. Every slot-addressed file in
 /// the corpus carries `0xFFFFFFFF` at `0x10`. Another value there means the word
 /// carries something this build does not model, so the file is refused rather than
 /// decoded on the assumption it does not matter. ⚠️ Library formats (`nsmp`) use the

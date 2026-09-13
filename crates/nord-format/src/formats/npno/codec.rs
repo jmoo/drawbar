@@ -36,9 +36,9 @@
 //! either. The last block has no next block to repeat into, so its own final
 //! [`OVERLAP`] frames sit past the stroke's end; [`Audio::tail`] carries them.
 //!
-//! The packing and the predictor are inferred from specimens; not confirmed on
-//! hardware — nothing here is played, only reconstructed. Confirmed on hardware:
-//! the frames play at [`RATE`], and a stroke owns the whole
+//! The packing and the predictor: Inferred from specimens; not confirmed on
+//! hardware. Nothing here is played, only reconstructed. Confirmed on hardware.
+//! The frames play at [`RATE`], and a stroke owns the whole
 //! `blocks × BLOCK_WORDS × 2 × channels` bytes the container gives it — a library
 //! whose spans were moved at that size still plays.
 

@@ -25,13 +25,13 @@
 //! | `0x622` | 128 × u16 strokes per root note, summing to `N` |
 //! | `0x732` | `N` × 118-byte stroke records, grouped in ascending root order |
 //!
-//! The prefix's individual field placements are inferred from specimens; not
-//! confirmed on hardware. Confirmed on hardware: the container layout as
-//! [`Library::to_body`] writes it — a library whose directory and audio this crate
-//! re-laid, and one whose audio [`encode`] coded outright, load on the instrument and
-//! play at the original's level — and, within it, that the key map's value is the
-//! recording's root note, that a stroke's [`Bank`] is what it is played for, and that
-//! [`Stroke::layer`] states the softness the velocity threshold reads.
+//! The prefix's individual field placements: Inferred from specimens; not
+//! confirmed on hardware. The container layout as [`Library::to_body`] writes it — a
+//! library whose directory and audio this crate re-laid, and one whose audio
+//! [`encode`] coded outright, load on the instrument and play at the original's
+//! level — and, within it, the key map's value being the recording's root note, a
+//! stroke's [`Bank`] being what it is played for, and [`Stroke::layer`] stating the
+//! softness the velocity threshold reads: Confirmed on hardware.
 //!
 //! Audio follows the directory, one span per record in the directory's own order.
 //! The first span starts at the next `1022 × channels` boundary offset by
@@ -145,9 +145,9 @@ pub const LADDER_UNITY: u32 = 0x0080_0000;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
-/// Unexplained: every library holds it and nothing in the file derives it. That the
-/// grid it defines is the one the instrument reads is confirmed on hardware — a
-/// library laid out on it plays.
+/// Unexplained: every library holds it and nothing in the file derives it. The grid
+/// it defines is the one the instrument reads. Confirmed on hardware. A library laid
+/// out on it plays.
 pub const AUDIO_ALIGN_BIAS: usize = 192;
 
 /// Cents one unit of [`Library::fine_tune`] is worth. Measured between 0.6 and
@@ -510,7 +510,7 @@ impl<'a> Stroke<'a> {
     /// A key sounds the largest value the root holds that is at most
     /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
     /// value above 30 ([`encode::HIGHEST_PLAYED_LAYER`]) never plays at all. Confirmed
-    /// on hardware; the 31 is measured to about ±2, so a layer sitting on the bound
+    /// on hardware. The 31 is measured to about ±2, so a layer sitting on the bound
     /// switches a few velocities either side of where the formula puts it. Vendor
     /// libraries spread a root over 0..[`encode::SOFTEST_LAYER`].
     pub fn layer(&self) -> u8 {
@@ -848,8 +848,8 @@ impl<'a> Library<'a> {
 
     /// Retune one key, in the units [`Library::fine_tune`] reads.
     ///
-    /// The unit's size and direction are confirmed on hardware; that rewriting the byte
-    /// retunes the key is not. Inferred from specimens; not confirmed on hardware.
+    /// The unit's size and direction: Confirmed on hardware. That rewriting the byte
+    /// retunes the key: Inferred from specimens; not confirmed on hardware.
     pub fn set_fine_tune(&mut self, key: u8, units: i8) -> Result<(), Error> {
         let at = FINE_TUNE_AT + midi_key("key", key)?;
         self.prefix[at] = units as u8;
@@ -885,7 +885,7 @@ impl<'a> Library<'a> {
 
     /// File the library under another kind of instrument.
     ///
-    /// Confirmed on hardware: the byte changes nothing a library sounds like.
+    /// The byte changes nothing a library sounds like. Confirmed on hardware.
     pub fn set_kind(&mut self, kind: encode::Kind) {
         self.prefix[KIND_AT] = kind.code();
     }
@@ -918,8 +918,8 @@ impl<'a> Library<'a> {
     /// On a stream that carries one, the long name is set to the same text: both
     /// are the library's name, and a rename that moved only one would leave the
     /// old name showing wherever the instrument reads the other. Which of the two it
-    /// reads is inferred from specimens; not confirmed on hardware — which is why
-    /// both move.
+    /// reads: Inferred from specimens; not confirmed on hardware. That is why both
+    /// move.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
         let field = TextField::COMBINED.read(&self.prefix);
         let variant = raw_halves(&field).1.to_owned();
@@ -978,7 +978,7 @@ impl<'a> Library<'a> {
     /// no stroke to play.
     ///
     /// That the instrument follows a rewritten map — a key routed to another root, or
-    /// to nothing — is inferred from specimens; not confirmed on hardware.
+    /// to nothing: Inferred from specimens; not confirmed on hardware.
     pub fn set_key_root(&mut self, key: u8, root: Option<u8>) -> Result<(), Error> {
         let key = midi_key("key", key)?;
         if let Some(root) = root {
@@ -998,8 +998,8 @@ impl<'a> Library<'a> {
     /// Drop every stroke of one bank — the resonance set turns a large library into
     /// a small one, the release set silences the note-off sample.
     ///
-    /// Confirmed on hardware for [`Bank::Release`]: the instrument damps the note at
-    /// note-off where the library it came from plays a release tail.
+    /// For [`Bank::Release`], the instrument damps the note at note-off where the
+    /// library it came from plays a release tail. Confirmed on hardware.
     pub fn drop_bank(&mut self, bank: Bank) -> Change {
         let code = bank.code();
         self.retain(|s| s.bank_code() != code)
@@ -1007,7 +1007,7 @@ impl<'a> Library<'a> {
 
     /// Keep only the layers `keep` selects, per root and bank.
     ///
-    /// Confirmed on hardware: a library with its softest layers dropped plays the
+    /// Confirmed on hardware. A library with its softest layers dropped plays the
     /// softest one left at the velocities they had, and is unchanged at loud ones.
     pub fn keep_layers(&mut self, keep: &Layers) -> Change {
         match keep {
@@ -1052,7 +1052,7 @@ impl<'a> Library<'a> {
     /// more. Keys inside the range keep the roots they had.
     ///
     /// That an uncovered key falls silent rather than reaching for a neighbouring
-    /// root is inferred from specimens; not confirmed on hardware.
+    /// root: Inferred from specimens; not confirmed on hardware.
     pub fn cut_range(&mut self, range: RangeInclusive<u8>) -> Result<Change, Error> {
         midi_key("the range's lowest key", *range.start())?;
         midi_key("the range's highest key", *range.end())?;
@@ -1149,7 +1149,7 @@ impl<'a> Library<'a> {
     /// every audio offset recomputed, the zero gap, then the audio spans in
     /// directory order.
     ///
-    /// Confirmed on hardware: a body laid out here, with a directory the transforms
+    /// Confirmed on hardware. A body laid out here, with a directory the transforms
     /// shortened and every span moved, is accepted by the instrument and plays at the
     /// level the library it came from plays at.
     pub fn to_body(&self) -> Result<Vec<u8>, Error> {
@@ -1202,9 +1202,9 @@ impl<'a> Library<'a> {
     ///
     /// The u32 at body `0x06` is unique per file and is not a checksum, a size or a
     /// hash of anything in it; with nothing to recompute it from, an edit carries
-    /// it over rather than inventing a value. Confirmed on hardware only in that a
-    /// library carrying its source's word loads and plays; what the word means is
-    /// open.
+    /// it over rather than inventing a value. The hardware evidence reaches no further
+    /// than this: a library carrying its source's word loads and plays. Confirmed on
+    /// hardware. What the word means is open.
     pub fn to_piano(&self) -> Result<Piano, Error> {
         Ok(Piano {
             file: Cbin {

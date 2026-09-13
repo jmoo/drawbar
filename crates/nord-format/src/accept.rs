@@ -691,8 +691,8 @@ impl Family {
     /// because `Stage` sits inside `Stage 3`, `Piano` inside `Piano 5` and `C2` inside
     /// `C2D`.
     ///
-    /// Confirmed on hardware for the Electro 5: `Nord Electro 5` is the descriptor
-    /// string the recorded exchanges in `nord-usb`'s replay scripts carry.
+    /// For the Electro 5, `Nord Electro 5` is the descriptor string the recorded
+    /// exchanges in `nord-usb`'s replay scripts carry. Confirmed on hardware.
     pub fn from_product(product: &str) -> Option<Family> {
         Family::ALL
             .into_iter()

@@ -265,7 +265,7 @@ pub(crate) fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
         let mut rest = [0u8; 20];
         r.read_exact(&mut rest)?;
         stored_crc32 = le_u32(&rest, 0);
-        // Zero on every specimen — inferred from specimens; not confirmed on
+        // Zero on every specimen. Inferred from specimens; not confirmed on
         // hardware. A file that used these bytes would round-trip wrong silently,
         // so refuse it loudly instead.
         if rest[4..] != [0u8; 16] {

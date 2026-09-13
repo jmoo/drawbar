@@ -99,11 +99,11 @@ pub struct EffectsPanel {
 pub enum Routing {
     #[default]
     Off = 0,
-    /// Off, as older firmware spelled it. Confirmed on hardware: presents as off
+    /// Off, as older firmware spelled it. Confirmed on hardware. It presents as off
     /// (no light, no effect), and a front-panel store preserves it byte-for-byte
     /// while the current panel's own off-writes are `0`. That it was the pre-2.04
-    /// encoding is inferred from specimens; not confirmed on hardware — every
-    /// carrier is a factory program or predates the instrument's 2.04 update.
+    /// encoding: Inferred from specimens; not confirmed on hardware. Every carrier
+    /// is a factory program or predates the instrument's 2.04 update.
     Unknown = 1,
     Lower = 2,
     Upper = 3,
@@ -161,8 +161,8 @@ sparse_enum!(
     /// Effect 1's modulation type.
     ///
     /// Values are the ones **as stored**, which is rotated relative to the panel's own
-    /// ordering — stored 0 is trem 1, not pan 1. Inferred from specimens named for the
-    /// panel setting each was stored from; not confirmed on hardware.
+    /// ordering — stored 0 is trem 1, not pan 1. Inferred from specimens; not confirmed
+    /// on hardware. Each specimen is named for the panel setting it was stored from.
     Fx1Type, 4, {
         0 => Trem1, "trem 1";
         1 => Trem2, "trem 2";

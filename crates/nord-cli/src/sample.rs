@@ -459,8 +459,8 @@ fn decode_target(
 
 /// The gate the wide generations sit behind.
 ///
-/// v2 has no gate. Confirmed on hardware: mono, stereo and looped v2 encodes play on an
-/// Electro 5.
+/// v2 has no gate. Confirmed on hardware. Mono, stereo and looped v2 encodes play on
+/// an Electro 5.
 fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), String> {
     if generation == 2 || acknowledged {
         return Ok(());

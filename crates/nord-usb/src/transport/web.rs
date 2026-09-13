@@ -179,8 +179,8 @@ impl WebUsbTransport {
     }
 
     /// End a frame the device would otherwise still be reading — see
-    /// [`needs_terminator`], whose rule is confirmed on hardware through the desktop
-    /// backend.
+    /// [`needs_terminator`]. Its rule was established through the desktop backend.
+    /// Confirmed on hardware.
     ///
     /// An empty `transferOut` is the zero-length packet that satisfies it. Per the
     /// WebUSB specification.
@@ -247,7 +247,7 @@ impl Transport for WebUsbTransport {
 
     async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
         // ⚠️ WebUSB has no timeout, so this relies on each message ending with a
-        // short packet. Confirmed on hardware; `READ_BUFFER` is packet-aligned.
+        // short packet. Confirmed on hardware. `READ_BUFFER` is packet-aligned.
         let result = JsFuture::from(self.device.transfer_in(endpoint_number(EP_IN), max as u32))
             .await
             .map_err(map_err("bulk read"))?;

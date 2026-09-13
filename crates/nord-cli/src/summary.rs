@@ -285,7 +285,7 @@ fn effects(ui: &Ui, p: &ne5::Program) {
         )),
         None => off("delay", &fx.fx4),
     }
-    // Inferred from specimens; not confirmed on hardware: `fx5` set means reverb on.
+    // `fx5` set means reverb on. Inferred from specimens; not confirmed on hardware.
     if fx.fx5 {
         ui.out(format!(
             "    {:<FX_WIDTH$}{:<15}  {} {}",

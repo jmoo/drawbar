@@ -176,7 +176,7 @@ impl OrganPanel {
     /// ⚠️ Do **not** read bars 1–2 from [`Self::drawbars`] in this mode — those two
     /// nibbles hold stale leftovers, not zero and not the bass values.
     ///
-    /// Confirmed on hardware — captures `1100_400000000` and `1100_040000000`.
+    /// Confirmed on hardware. The captures are `1100_400000000` and `1100_040000000`.
     pub fn b3_bass_drawbars(&self) -> [u8; 2] {
         [self.b3_bass_bar1.raw(), self.b3_bass_bar2.raw()]
     }

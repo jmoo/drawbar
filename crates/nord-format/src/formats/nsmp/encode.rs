@@ -14,10 +14,10 @@
 //! Under either predictor a file from here **round-trips through this crate's own
 //! decoder exactly** and obeys every structural law the format is known to have.
 //!
-//! Confirmed on hardware for [`Layout::V2`]: the Electro 5 loads and plays one under
-//! either predictor, at the pitch the decoder renders. The wide generations reproduce
-//! the editor's own renders, but the Electro 5 plays only v2, so their playback is
-//! inferred from specimens; not confirmed on hardware.
+//! For [`Layout::V2`], the Electro 5 loads and plays one under either predictor, at
+//! the pitch the decoder renders. Confirmed on hardware. The wide generations
+//! reproduce the editor's own renders, but the Electro 5 plays only v2, so their
+//! playback: Inferred from specimens; not confirmed on hardware.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -48,8 +48,9 @@
 //! generation: v2 and v3 alternate fields in one bitstream, v4 packs each channel's
 //! half into its own words and alternates those.
 //!
-//! Confirmed on hardware for [`Layout::V2`]: a stereo encode plays with its channels
-//! in order and independent. The wide generations are inferred from specimens.
+//! For [`Layout::V2`], a stereo encode plays with its channels in order and
+//! independent. Confirmed on hardware. The wide generations: Inferred from specimens;
+//! not confirmed on hardware.
 //!
 //! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
 //! which is the whole of what the container stores about looping: the crossfade is
@@ -59,8 +60,9 @@
 //! and the short loop's as a percentage of its length — and it arrives here already in
 //! frames, fraction and all.
 //!
-//! Confirmed on hardware for [`Layout::V2`]: the Electro 5 sustains a looped encode to
-//! note-off, and the seam is clean. The wide generations are inferred from specimens.
+//! For [`Layout::V2`], the Electro 5 sustains a looped encode to note-off, and the
+//! seam is clean. Confirmed on hardware. The wide generations: Inferred from
+//! specimens; not confirmed on hardware.
 
 use super::codec::{self, Layout, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
@@ -208,7 +210,7 @@ const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
 /// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
 /// one: both quantise at the peak term alone.
 ///
-/// Inferred from specimens; not confirmed on hardware, the Electro 5 playing v2 only.
+/// Inferred from specimens; not confirmed on hardware. The Electro 5 plays v2 only.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
     if plan.channels != 1 {
         return false;
