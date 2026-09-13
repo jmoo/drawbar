@@ -39,11 +39,20 @@ pub fn parse(s: &str) -> Result<u8, String> {
         Some('b') => (-1, &rest[1..]),
         _ => (0, rest),
     };
-    let octave: i32 = octave
-        .parse()
-        .map_err(|_| format!("{s:?} has no octave number"))?;
-    u8::try_from((octave + 1) * 12 + semitone + accidental)
-        .ok()
+    let octave: i32 = match octave.starts_with('+') {
+        // An octave is spelled the way `name` writes it — `4`, `-1` — and a signed number
+        // is refused here as it is in the plain-number form above.
+        true => return Err(format!("{s:?} has no octave number")),
+        false => octave
+            .parse()
+            .map_err(|_| format!("{s:?} has no octave number"))?,
+    };
+    // ⚠️ Checked: `C2147483647` parses an octave whose semitones overflow the multiply.
+    octave
+        .checked_add(1)
+        .and_then(|octaves| octaves.checked_mul(12))
+        .and_then(|base| base.checked_add(semitone + accidental))
+        .and_then(|note| u8::try_from(note).ok())
         .filter(|&n| n <= 127)
         .ok_or_else(|| format!("{s:?} is outside MIDI's 0-127"))
 }
@@ -76,7 +85,7 @@ mod tests {
 
     #[test]
     fn nonsense_is_refused() {
-        for bad in ["128", "H4", "C", "C99", ""] {
+        for bad in ["128", "H4", "C", "C99", "", "C2147483647", "Cb-1", "C+4"] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
     }
