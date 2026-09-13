@@ -37,6 +37,7 @@ pub mod error;
 pub mod fields;
 pub mod formats;
 pub mod layout;
+pub mod note;
 pub mod panel;
 pub mod types;
 pub mod util;

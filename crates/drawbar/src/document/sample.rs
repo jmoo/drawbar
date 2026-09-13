@@ -29,7 +29,7 @@ use super::keys;
 use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
 use crate::icon::{icon, Glyph};
-use crate::note;
+use nord_format::note;
 use crate::room;
 use crate::workspace::Baseline;
 

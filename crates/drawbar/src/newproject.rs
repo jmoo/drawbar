@@ -34,7 +34,7 @@ use crate::document::controls::fits;
 use crate::document::encode::{refusal as encodable, Source};
 use crate::document::note_picker;
 use crate::log::Log;
-use crate::note;
+use nord_format::note;
 use crate::work::{self, Job, Progress};
 use crate::workspace::{Origin, Workspace};
 

@@ -26,7 +26,7 @@ use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
 use crate::app;
-use crate::note;
+use nord_format::note;
 
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {

@@ -28,7 +28,7 @@ use nord_usb::ObjectClass;
 
 use crate::edit::{print_byte_diff, write_edit, write_file};
 use crate::editors;
-use crate::note;
+use nord_format::note;
 use crate::slot::Target;
 use crate::ui::Ui;
 

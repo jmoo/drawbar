@@ -12,7 +12,7 @@
 use eframe::egui;
 
 use crate::app;
-use crate::note;
+use nord_format::note;
 
 /// The velocity a click on the keyboard plays at.
 pub const AUDITION_VELOCITY: u8 = 90;

@@ -16,7 +16,7 @@ use nord_format::wav::Pcm16;
 
 use super::controls;
 use super::sample::note_picker;
-use crate::note;
+use nord_format::note;
 
 /// Whether these bytes are worth offering an encode panel over.
 ///

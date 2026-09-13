@@ -23,7 +23,6 @@ mod edit;
 mod editors;
 mod file;
 mod file_edit;
-mod note;
 mod piano;
 mod sample;
 mod slot;

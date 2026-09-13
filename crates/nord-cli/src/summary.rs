@@ -11,7 +11,7 @@ use nord_format::formats::nsmp::{codec, stroke, Chain, Sample};
 use nord_format::formats::nsmpproj;
 use nord_format::{Entity, Live, Program, Settings, Song};
 
-use crate::note;
+use nord_format::note;
 use crate::slot::shown_at;
 use crate::ui::Ui;
 

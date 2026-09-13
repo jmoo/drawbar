@@ -32,7 +32,7 @@ use crate::browser::Act;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
-use crate::note;
+use nord_format::note;
 use crate::room;
 use crate::work;
 use crate::workspace::{LocalEntity, Workspace};

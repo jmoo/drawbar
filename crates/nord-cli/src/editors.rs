@@ -9,7 +9,7 @@ use nord_format::formats::ne5::{program, song, Song};
 use nord_format::formats::nsmpproj::{Project, StrokeField, MAX_VELOCITY};
 use nord_format::Sample;
 
-use crate::note;
+use nord_format::note;
 use crate::ui::Ui;
 
 /// One settable field: its path, its current value, and what it takes.

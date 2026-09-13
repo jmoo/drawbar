@@ -1,6 +1,8 @@
-//! MIDI note names, for zone display and edit values.
+//! MIDI note names, the spelling the formats' key ranges are read and written in.
 //!
-//! Middle C (60) is spelled C4, the sample editor's own labelling.
+//! Middle C (60) is spelled C4, matching how the sample editor labels keys — the
+//! corpus specimens were named off that display (`D2-rootkey-C3` holds 48).
+//! Inferred from specimens; not confirmed on hardware.
 
 const NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -38,20 +40,18 @@ pub fn parse(s: &str) -> Result<u8, String> {
         Some('b') => (-1, &rest[1..]),
         _ => (0, rest),
     };
-    let octave: i32 = match octave.starts_with('+') {
-        // An octave is spelled the way `name` writes it — `4`, `-1` — and a signed number
-        // is refused here as it is in the plain-number form above.
-        true => return Err(format!("{s:?} has no octave number")),
-        false => octave
-            .parse()
-            .map_err(|_| format!("{s:?} has no octave number"))?,
-    };
-    // ⚠️ Checked: `C2147483647` parses an octave whose semitones overflow the multiply.
-    octave
-        .checked_add(1)
-        .and_then(|octaves| octaves.checked_mul(12))
-        .and_then(|base| base.checked_add(semitone + accidental))
-        .and_then(|note| u8::try_from(note).ok())
+    // `parse` would also take `+4`, and an octave has one spelling.
+    let octave: i32 = octave
+        .parse()
+        .ok()
+        .filter(|_| !octave.starts_with('+'))
+        .ok_or_else(|| format!("{s:?} has no octave number"))?;
+    // ⚠️ C-1 is note 0 and G9 is 127. A wider octave overflows the sum in a release
+    // build, where it wraps into a number that passes the range check below.
+    (-1..=9)
+        .contains(&octave)
+        .then(|| (octave + 1) * 12 + semitone + accidental)
+        .and_then(|n| u8::try_from(n).ok())
         .filter(|&n| n <= 127)
         .ok_or_else(|| format!("{s:?} is outside MIDI's 0-127"))
 }
@@ -82,9 +82,20 @@ mod tests {
         assert_eq!(parse("60").unwrap(), 60);
     }
 
+    /// ⚠️ The octave reaches the note number through a multiplication, so an
+    /// unbounded one wraps in a release build: `C357913941` came back as note 8.
+    #[test]
+    fn an_octave_outside_the_keyboard_is_refused_rather_than_wrapped() {
+        for bad in ["C357913941", "C2147483647", "C10", "Cb-1"] {
+            let err = parse(bad).unwrap_err();
+            assert!(err.contains("outside MIDI's 0-127"), "{bad}: {err}");
+        }
+        assert!(parse("C+4").unwrap_err().contains("octave"));
+    }
+
     #[test]
     fn nonsense_is_refused() {
-        for bad in ["128", "H4", "C", "C99", "", "C2147483647", "Cb-1", "C+4"] {
+        for bad in ["128", "H4", "C", "C99", ""] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
     }

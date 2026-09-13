@@ -23,7 +23,7 @@ use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Libr
 use nord_format::Entity;
 
 use crate::edit::{write_edit, write_file};
-use crate::note;
+use nord_format::note;
 use crate::ui::Ui;
 
 /// The banks a trim can drop by name. The attack bank is every library's reason to

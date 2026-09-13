@@ -22,7 +22,6 @@ pub mod library;
 pub mod log;
 pub mod named;
 pub mod newproject;
-pub mod note;
 pub mod panel;
 pub mod queue;
 pub mod room;
