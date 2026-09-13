@@ -28,6 +28,7 @@ use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
 use nord_format::formats::nsmpproj::{
     project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
 };
+use nord_format::note;
 use nord_format::wav::Pcm16;
 use nord_format::Entity;
 
@@ -35,7 +36,6 @@ use crate::document::controls::fits;
 use crate::document::encode::{refusal as encodable, Source};
 use crate::document::note_picker;
 use crate::log::Log;
-use nord_format::note;
 use crate::work::{self, Job, Progress};
 use crate::workspace::{Origin, Workspace};
 

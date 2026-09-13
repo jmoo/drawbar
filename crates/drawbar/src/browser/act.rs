@@ -389,9 +389,8 @@ pub fn apply(
                             let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
                             browser.start_rename(Item::Tag(tag), &name);
                         }
-                        None => {
-                            log.trouble("The tag list is full, so there is no gig to save it under.")
-                        }
+                        None => log
+                            .trouble("The tag list is full, so there is no gig to save it under."),
                     },
                 }
             }

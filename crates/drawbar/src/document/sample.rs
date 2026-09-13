@@ -20,6 +20,7 @@ use std::io::Cursor;
 use eframe::egui;
 use nord_format::formats::nsmp::codec::{self, Audio};
 use nord_format::formats::nsmp::{keymap, zone, KeyTable, Level, Sty};
+use nord_format::note;
 use nord_format::{Entity, Sample};
 
 use super::capability::{Fact, Offset, Row, State as Cap};
@@ -29,7 +30,6 @@ use super::keys;
 use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
 use crate::icon::{icon, Glyph};
-use nord_format::note;
 use crate::room;
 use crate::workspace::Baseline;
 

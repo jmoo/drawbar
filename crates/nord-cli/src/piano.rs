@@ -19,12 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
-use nord_format::formats::npno::encode::{Clash, LayerTag, Stem};
+use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem};
 use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Library, UNCOVERED};
+use nord_format::note;
 use nord_format::Entity;
 
 use crate::edit::{write_edit, write_file};
-use nord_format::note;
 use crate::ui::Ui;
 
 /// The banks a trim can drop by name. The attack bank is every library's reason to
@@ -1011,7 +1011,7 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
             continue;
         }
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let (root, bank, layer) = encode::parse_stroke_name(&stem, Stem::None).ok_or_else(|| {
+        let (root, bank, layer) = parse_stroke_name(&stem, Stem::None).ok_or_else(|| {
             format!(
                 "{}: a WAV here is named <root>-b<bank>-l<layer>.wav, as in \
                  060-b0-l00.wav — MIDI note 60, bank 0 (attack), layer 0; \

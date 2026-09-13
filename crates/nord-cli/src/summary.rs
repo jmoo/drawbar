@@ -9,9 +9,9 @@ use nord_format::formats::ne5::{Instrument, OrganModel};
 use nord_format::formats::nsmp::zone::VelocityWindow;
 use nord_format::formats::nsmp::{codec, stroke, Chain, Sample};
 use nord_format::formats::nsmpproj;
+use nord_format::note;
 use nord_format::{Entity, Live, Program, Settings, Song};
 
-use nord_format::note;
 use crate::slot::shown_at;
 use crate::ui::Ui;
 

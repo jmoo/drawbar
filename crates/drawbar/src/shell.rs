@@ -1431,14 +1431,11 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::COMMAND,
         };
-        let left = |ctx: &egui::Context| {
-            ctx.input(|input| {
-                input
-                    .events
-                    .iter()
-                    .any(|event| matches!(event, egui::Event::Key { key, .. } if *key == egui::Key::R))
-            })
+        let reload = |event: &egui::Event| match event {
+            egui::Event::Key { key, .. } => *key == egui::Key::R,
+            _ => false,
         };
+        let left = |ctx: &egui::Context| ctx.input(|input| input.events.iter().any(reload));
 
         let _ = drawn(&ctx, &mut app);
         let _ = frame_of(&ctx, &mut app, vec![pressed()]);

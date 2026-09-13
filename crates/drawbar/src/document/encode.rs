@@ -12,11 +12,11 @@
 use eframe::egui;
 use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
+use nord_format::note;
 use nord_format::wav::Pcm16;
 
 use super::controls;
 use super::sample::note_picker;
-use nord_format::note;
 
 /// Whether these bytes are worth offering an encode panel over.
 ///

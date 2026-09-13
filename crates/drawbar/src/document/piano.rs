@@ -20,6 +20,7 @@ use std::ops::RangeInclusive;
 use eframe::egui;
 use nord_format::formats::npno::encode::{Kind, ALL_KEYS_DAMPED};
 use nord_format::formats::npno::{self, Bank, FINE_TUNE_CENTS_PER_UNIT};
+use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -32,7 +33,6 @@ use crate::browser::Act;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
-use nord_format::note;
 use crate::room;
 use crate::work;
 use crate::workspace::{LocalEntity, Workspace};

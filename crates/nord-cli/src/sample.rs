@@ -22,13 +22,15 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{self, codec, encode};
-use nord_format::formats::nsmpproj::{self, NewZone, Project, Stroke, Zone, LOWEST_NOTE, PROJECT_RATE};
+use nord_format::formats::nsmpproj::{
+    self, NewZone, Project, Stroke, Zone, LOWEST_NOTE, PROJECT_RATE,
+};
+use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
 use crate::edit::{print_byte_diff, write_edit, write_file};
 use crate::editors;
-use nord_format::note;
 use crate::slot::Target;
 use crate::ui::Ui;
 

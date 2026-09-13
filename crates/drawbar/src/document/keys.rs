@@ -10,9 +10,9 @@
 //! paints what it was handed, and answers with what the pointer asked for.
 
 use eframe::egui;
+use nord_format::note;
 
 use crate::app;
-use nord_format::note;
 
 /// The velocity a click on the keyboard plays at.
 pub const AUDITION_VELOCITY: u8 = 90;

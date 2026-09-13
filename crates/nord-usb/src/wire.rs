@@ -158,10 +158,10 @@ pub mod cmd {
     /// Erases an entire partition.
     ///
     /// Reported by public documentation; not confirmed on hardware, and deliberately
-    /// not to be. A session is class-scoped, so the session is what aims
-    /// this: opened on a library class it takes the whole piano or sample store, which is
-    /// hundreds of megabytes and a long restore from a backup. Named here so it can be
-    /// recognised and refused, not so it can be sent.
+    /// not to be. A session is class-scoped, so the session is what aims this: opened on
+    /// a library class it takes the whole piano or sample store, which is hundreds of
+    /// megabytes and a long restore from a backup. Named here so it can be recognised
+    /// and refused, not so it can be sent.
     pub const ERASE_ALL: u32 = 0x24;
 
     /// Highest command the instrument has ever been seen to answer.

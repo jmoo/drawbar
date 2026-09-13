@@ -18,6 +18,7 @@ use eframe::egui;
 use nord_format::formats::nsmpproj::{
     Project, StrokeField, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
 };
+use nord_format::note;
 use nord_format::Entity;
 
 use super::capability::{Fact, Offset, Row, State as Cap};
@@ -26,7 +27,6 @@ use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
 use crate::app;
-use nord_format::note;
 
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {
