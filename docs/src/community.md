@@ -29,11 +29,9 @@ above.
 ### [simonflore/opennord](https://github.com/simonflore/opennord) · AGPL-3.0
 
 A browser companion for the Stage 4 and Stage 2 that reads, organises and
-transfers programs and samples. Its Stage 4 decode and USB work come from
-studying Nord Sound Manager's binary. drawbar keeps to files and captures, so it
-takes nothing from that work without confirming it on an instrument of its own.
-The project's documentation is thorough, and marks what has been verified on
-hardware.
+transfers programs and samples, with a fully decoded Stage 4 program body and
+hardware-verified USB transfer in both directions. Its documentation is
+thorough, and marks what has been verified on hardware.
 
 ## Adding to this list
 
