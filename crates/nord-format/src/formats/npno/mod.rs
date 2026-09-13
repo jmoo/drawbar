@@ -880,6 +880,13 @@ impl<'a> Library<'a> {
         self.prefix[KIND_AT]
     }
 
+    /// File the library under another kind of instrument.
+    ///
+    /// Confirmed on hardware: the byte changes nothing a library sounds like.
+    pub fn set_kind(&mut self, kind: encode::Kind) {
+        self.prefix[KIND_AT] = kind.code();
+    }
+
     /// The long name at `0x3c` and the voicing at `0x5c`, which only
     /// [`VERSION_SPLIT_NAME`] streams carry. Both are `None` on the older stream.
     ///
@@ -1610,6 +1617,21 @@ mod tests {
         let damped = library.to_body().unwrap();
         assert_eq!(library.damper_top(), 90);
         assert_eq!(changed(&gained, &damped), [DAMPER_TOP_AT]);
+    }
+
+    #[test]
+    fn the_instrument_kind_writes_one_byte_and_reads_back_as_the_kind_it_was_given() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+
+        library.set_kind(encode::Kind::Wurlitzer);
+        let filed = library.to_body().unwrap();
+        assert_eq!(
+            encode::Kind::from_code(library.kind_code()),
+            Some(encode::Kind::Wurlitzer)
+        );
+        assert_eq!(changed(&before, &filed), [KIND_AT]);
     }
 
     #[test]
