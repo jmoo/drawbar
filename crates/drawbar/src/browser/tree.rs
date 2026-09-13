@@ -272,11 +272,11 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         self.computer_row(ui, workspace, device, filter, acts);
-        let naming = Naming {
-            kept: super::families_present(workspace),
-            instrument: device.state.product().and_then(Family::from_product),
-        };
         if self.open.contains(&Branch::Computer) {
+            let naming = Naming {
+                kept: super::families_present(workspace),
+                instrument: device.state.product().and_then(Family::from_product),
+            };
             for id in self.folder_ids() {
                 self.folder_row(ui, id, workspace, device, queue, &naming, acts);
             }
