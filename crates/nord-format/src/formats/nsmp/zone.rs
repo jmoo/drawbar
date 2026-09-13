@@ -343,18 +343,17 @@ pub enum KeyMap {
     Populated,
 }
 
+fn no_low_note() -> ParseError {
+    ParseError::AssertFail("map v12 stores no low note".into())
+}
+
 /// Zones as `(root, low, top)` ascending by root, which is the order the
 /// partner law reads them in.
 fn ladder(zones: &[ZoneV3]) -> Result<Vec<(u8, u8, u8)>, ParseError> {
     let mut out = zones
         .iter()
         .map(|z| {
-            let low = z.low_note.ok_or_else(|| {
-                ParseError::AssertFail(
-                    "a per-key table needs each zone's low note, and this layout stores none"
-                        .into(),
-                )
-            })?;
+            let low = z.low_note.ok_or_else(no_low_note)?;
             Ok((z.root_key, low, z.top_note))
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -573,13 +572,7 @@ impl Table {
                 self.count
             )));
         }
-        let at = self.wide.field_at(field).ok_or_else(|| {
-            ParseError::AssertFail(
-                "this map layout stores no low note: a zone reaches down to one above \
-                 the next-lower zone's top"
-                    .into(),
-            )
-        })?;
+        let at = self.wide.field_at(field).ok_or_else(no_low_note)?;
         map[self.at + index * self.wide.record_len() + at] = note;
         Ok(())
     }
