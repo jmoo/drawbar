@@ -397,10 +397,16 @@ impl fmt::Debug for Piano {
     }
 }
 
+/// `Name#Variant` split on its separator, as the field spells each half. A field
+/// carrying no separator is all name.
+fn raw_halves(field: &str) -> (&str, &str) {
+    field.split_once(NAME_SEPARATOR).unwrap_or((field, ""))
+}
+
 /// `Name#Variant` split on its separator, each half trimmed of the padding the
 /// vendor lays either side of it.
 fn split_name(field: &str) -> (String, String) {
-    let (name, variant) = field.split_once('#').unwrap_or((field, ""));
+    let (name, variant) = raw_halves(field);
     (name.trim().to_owned(), variant.trim().to_owned())
 }
 
@@ -918,8 +924,31 @@ impl<'a> Library<'a> {
     /// reads is inferred from specimens; not confirmed on hardware — which is why
     /// both move.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        let field = TextField::COMBINED.read(&self.prefix);
+        let variant = raw_halves(&field).1.to_owned();
+        self.set_name_and_variant(name, &variant)
+    }
+
+    /// Replace the variant — the text after [`NAME_SEPARATOR`], where the vendor
+    /// records the voicing and the library's size — leaving both names alone. A
+    /// variant holding the separator itself is refused.
+    pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
+        check_half("variant", variant)?;
+        let field = TextField::COMBINED.read(&self.prefix);
+        let combined = format!("{}{NAME_SEPARATOR}{variant}", raw_halves(&field).0);
+        TextField::COMBINED.write(&mut self.prefix, &combined)
+    }
+
+    /// Write both halves of the `Name#Variant` field at once, which is what a caller
+    /// replacing both states.
+    ///
+    /// The name a caller gives is checked against the variant it will share the field
+    /// with rather than the one the prefix holds, so a name that fits beside its own
+    /// variant is not refused for a longer one it replaces. The long name follows the
+    /// name as it does in [`Library::set_name`].
+    fn set_name_and_variant(&mut self, name: &str, variant: &str) -> Result<(), Error> {
         check_half("name", name)?;
-        let (_, variant) = self.name();
+        check_half("variant", variant)?;
         let combined = format!("{name}{NAME_SEPARATOR}{variant}");
         let long = (self.stream_version() == VERSION_SPLIT_NAME).then_some(name);
         TextField::COMBINED.check(&combined)?;
@@ -931,18 +960,6 @@ impl<'a> Library<'a> {
             TextField::LONG_NAME.write(&mut self.prefix, long)?;
         }
         Ok(())
-    }
-
-    /// Replace the variant — the text after [`NAME_SEPARATOR`], where the vendor
-    /// records the voicing and the library's size — leaving both names alone. A
-    /// variant holding the separator itself is refused.
-    pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
-        check_half("variant", variant)?;
-        let (name, _) = self.name();
-        TextField::COMBINED.write(
-            &mut self.prefix,
-            &format!("{name}{NAME_SEPARATOR}{variant}"),
-        )
     }
 
     /// Replace the voicing at `0x5c`. Refused on a stream with no such field.
@@ -1745,6 +1762,36 @@ mod tests {
             .to_string();
         assert!(error.contains("stroke 0 holds 0 audio bytes"), "{error}");
         assert!(skeleton.body_len().is_err());
+    }
+
+    /// The halves either side of the separator are the vendor's own bytes, padding and
+    /// all: setting one leaves the other exactly as the field spells it.
+    #[test]
+    fn setting_one_half_of_the_name_field_leaves_the_other_as_it_was_written() {
+        let mut piano = Build::new().piano();
+        let at = TextField::COMBINED.at;
+        let padded = b"Grand Imperial # Bdorf XL";
+        piano.file.body.0[at..at + TextField::COMBINED.len].fill(0);
+        piano.file.body.0[at..at + padded.len()].copy_from_slice(padded);
+
+        assert_eq!(
+            piano.library().unwrap().name(),
+            ("Grand Imperial".into(), "Bdorf XL".into())
+        );
+
+        let mut renamed = piano.library().unwrap();
+        renamed.set_name("Upright").unwrap();
+        assert_eq!(
+            TextField::COMBINED.read(&renamed.prefix),
+            "Upright# Bdorf XL"
+        );
+
+        let mut revoiced = piano.library().unwrap();
+        revoiced.set_variant("Sml").unwrap();
+        assert_eq!(
+            TextField::COMBINED.read(&revoiced.prefix),
+            "Grand Imperial #Sml"
+        );
     }
 
     #[test]
