@@ -7,12 +7,15 @@
 //! of the two. Dropping strokes throws audio away, and a switch that cannot go back on
 //! is not a switch.
 //!
+//! ⚠️ An edit never makes those bytes. [`planned`] applies a plan over the borrowed
+//! baseline and is what a switch is checked against; [`materialise`] is the one whole-
+//! body copy, and it runs off the frame when the library is saved, sent or exported.
+//!
 //! ⚠️ Nothing decodes to draw a frame. The facts the sections read — the roots, the
 //! layers, the banks and what each of them costs — are read out of the saved baseline
 //! once and kept; a stroke's audio is decoded only when someone asks to hear it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Cursor;
 use std::ops::RangeInclusive;
 
 use eframe::egui;
@@ -27,12 +30,14 @@ use super::keys::{self, Audition, Scale, SizeCell, Span};
 use super::sample::note_picker;
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
+use crate::browser::Act;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
 use crate::note;
 use crate::room;
-use crate::workspace::LocalEntity;
+use crate::work;
+use crate::workspace::{LocalEntity, Workspace};
 
 pub fn is_piano(entity: &Entity) -> bool {
     matches!(entity, Entity::Piano(_))
@@ -103,6 +108,37 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Whether it edits nothing at all. The baseline it stands against is not an edit.
+    pub fn is_empty(&self) -> bool {
+        let Plan {
+            against: _,
+            banks,
+            layers,
+            roots,
+            range,
+            name,
+            variant,
+            fine_tune,
+            gain,
+            damper_top,
+            kind,
+            trims,
+            key_roots,
+        } = self;
+        banks.is_empty()
+            && layers.is_empty()
+            && roots.is_empty()
+            && range.is_none()
+            && name.is_none()
+            && variant.is_none()
+            && fine_tune.is_empty()
+            && gain.is_none()
+            && damper_top.is_none()
+            && kind.is_none()
+            && trims.is_empty()
+            && key_roots.is_empty()
+    }
+
     /// Whether one root keeps one layer: its own exception, or what the switch says.
     fn keeps_layer(&self, root: u8, layer: u8) -> bool {
         match self.roots.get(&(root, layer)) {
@@ -207,14 +243,14 @@ impl Plan {
     }
 }
 
-/// The bytes a plan makes of the baseline: read it, edit it, re-lay it, write it.
+/// The library a plan makes of the baseline, with nothing copied: every stroke's audio
+/// is still borrowed out of `saved`.
 ///
-/// All of it or none, the same rule every other editor's apply follows — and from the
-/// baseline every time, so a switch put back on puts its strokes back with it.
-pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
-    let entity = nord_format::from_stream(&mut Cursor::new(saved)).map_err(|e| e.to_string())?;
-    let piano = piano(&entity).ok_or("not a piano library")?;
-    let mut library = piano.library().map_err(|e| e.to_string())?;
+/// This is where a plan is checked — the format's own refusals, and the one this editor
+/// adds — so throwing a switch costs a walk of the stroke directory and no more. From
+/// the baseline every time, so a switch put back on puts its strokes back with it.
+pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, String> {
+    let mut library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
     if let Some(name) = &plan.name {
         library.set_name(name).map_err(|e| e.to_string())?;
     }
@@ -269,8 +305,26 @@ pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
             library.set_trim(at, *decibels).map_err(|e| e.to_string())?;
         }
     }
+    Ok(library)
+}
+
+/// The bytes a planned library is written as: the directory and every audio offset
+/// re-laid, the container's checksum recomputed.
+///
+/// ⚠️ The whole body is copied here, and a vendor library is hundreds of megabytes. It
+/// is the one slow step, and [`State::start`] is what keeps it off the frame.
+pub fn materialise(library: &npno::Library<'_>) -> Result<Vec<u8>, String> {
     let edited = library.to_piano().map_err(|e| e.to_string())?;
     nord_format::to_bytes(&Entity::Piano(edited)).map_err(|e| e.to_string())
+}
+
+/// The bytes a plan makes of the baseline: read it, edit it, re-lay it, write it.
+///
+/// All of it or none, the same rule every other editor's apply follows. The app itself
+/// keeps the two halves apart, so that it checks a plan without laying one out.
+#[cfg(test)]
+pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
+    materialise(&planned(saved, plan)?)
 }
 
 // ---- what the baseline holds --------------------------------------------------------
@@ -368,10 +422,7 @@ struct Facts {
 
 impl Facts {
     fn of(saved: &[u8]) -> Result<Facts, String> {
-        let entity =
-            nord_format::from_stream(&mut Cursor::new(saved)).map_err(|e| e.to_string())?;
-        let piano = piano(&entity).ok_or("not a piano library")?;
-        let library = piano.library().map_err(|e| e.to_string())?;
+        let library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
         let (name, variant) = library.name();
         let roots: Vec<Root> = library
             .roots()
@@ -712,17 +763,22 @@ fn default_range(facts: &Facts) -> RangeInclusive<u8> {
 
 // ---- the decoded audio --------------------------------------------------------------
 
-/// One root's loudest kept attack stroke, decoded.
+/// One stroke, decoded.
 struct Played {
     /// Frames interleaved by channel at [`npno::codec::RATE`], which is what both the
     /// speakers and a WAV take.
     samples: Vec<i16>,
     channels: u16,
-    /// The layer the stroke states, which is what names its WAV.
-    layer: u8,
 }
 
-/// Strokes decoded on request.
+/// The one stroke a decode names: `(root, bank code, layer value)`.
+type Pick = (u8, u8, u8);
+
+/// How many decoded strokes are kept. A vendor stroke is seconds of audio, so the cache
+/// is small and the least recently heard one goes.
+const KEPT_STROKES: usize = 8;
+
+/// Strokes decoded on request, most recently used first.
 ///
 /// ⚠️ Keyed by the asset's [`stamp`](LocalEntity::stamp) as well as its id, the way the
 /// sample editor's cache is: a trim re-lays the file, and what was decoded from what it
@@ -730,54 +786,79 @@ struct Played {
 #[derive(Default)]
 struct Cache {
     of: Option<(u64, u64)>,
-    roots: HashMap<u8, Result<Played, String>>,
+    strokes: Vec<(Pick, Result<Played, String>)>,
 }
 
 impl Cache {
     fn follow(&mut self, id: u64, stamp: u64) {
         if self.of != Some((id, stamp)) {
             self.of = Some((id, stamp));
-            self.roots.clear();
+            self.strokes.clear();
         }
     }
 
-    fn get(&self, root: u8) -> Option<&Result<Played, String>> {
-        self.roots.get(&root)
+    /// The newest decode of this root, which is the one a decode of it just made or
+    /// reached for.
+    fn newest(&self, root: u8) -> Option<(Pick, &Played)> {
+        self.strokes
+            .iter()
+            .find(|(stroke, _)| stroke.0 == root)
+            .and_then(|(stroke, played)| Some((*stroke, played.as_ref().ok()?)))
     }
 
-    /// Decode one root, once. A refusal is remembered like a success: clicking again
-    /// would only produce it a second time.
-    fn decode(&mut self, entity: &Entity, root: u8) {
-        if self.roots.contains_key(&root) {
-            return;
+    /// Bring one stroke to the front, where it is held at all.
+    fn touch(&mut self, stroke: Pick) -> Option<&Result<Played, String>> {
+        let at = self.strokes.iter().position(|(held, _)| *held == stroke)?;
+        let held = self.strokes.remove(at);
+        self.strokes.insert(0, held);
+        self.strokes.first().map(|(_, played)| played)
+    }
+
+    /// Decode one root's loudest kept attack stroke, once. A refusal by the codec is
+    /// remembered like a success: asking again would only produce it a second time.
+    ///
+    /// ⚠️ One stroke, whatever else the library holds: the audio of a whole root is more
+    /// than this app ever has a use for at once.
+    fn decode(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
+        let library = npno::Library::borrow(bytes).map_err(|e| e.to_string())?;
+        let stroke = loudest(&library, plan, root)?;
+        let key = (root, Bank::Attack.code(), stroke.layer());
+        if let Some(held) = self.touch(key) {
+            return held.as_ref().map(|_| ()).map_err(String::clone);
         }
-        self.roots.insert(root, decode(entity, root));
+        let made = npno::codec::decode(stroke, library.channels())
+            .map_err(|e| e.to_string())
+            .map(|audio| Played {
+                samples: audio.interleaved(),
+                channels: library.channels(),
+            });
+        let answer = made.as_ref().map(|_| ()).map_err(String::clone);
+        self.strokes.insert(0, (key, made));
+        self.strokes.truncate(KEPT_STROKES);
+        answer
     }
 }
 
-/// The root's loudest stroke of [`Bank::Attack`] — the recording a key on it reaches
-/// for at the top of the velocity range, which is
+/// The root's loudest stroke of [`Bank::Attack`] the plan keeps — the recording a key on
+/// it reaches for at the top of the velocity range, which is
 /// [`Stroke::layer`](npno::Stroke::layer)'s law. Confirmed on hardware.
-fn decode(entity: &Entity, root: u8) -> Result<Played, String> {
-    let piano = piano(entity).ok_or("this is not a piano library")?;
-    let library = piano.library().map_err(|e| e.to_string())?;
-    let stroke = library
+fn loudest<'a>(
+    library: &'a npno::Library<'a>,
+    plan: &Plan,
+    root: u8,
+) -> Result<&'a npno::Stroke<'a>, String> {
+    library
         .strokes()
         .iter()
         .filter(|stroke| stroke.root == root && stroke.bank() == Some(Bank::Attack))
+        .filter(|stroke| plan.keeps_layer(root, stroke.layer()))
         .min_by_key(|stroke| stroke.layer())
         .ok_or_else(|| {
             format!(
                 "root {} has no attack stroke left to play",
                 note::name(root)
             )
-        })?;
-    let audio = npno::codec::decode(stroke, library.channels()).map_err(|e| e.to_string())?;
-    Ok(Played {
-        samples: audio.interleaved(),
-        channels: library.channels(),
-        layer: stroke.layer(),
-    })
+        })
 }
 
 /// What a piano document's frame asked the app to do about one root's audio. The root
@@ -832,6 +913,39 @@ struct Open {
     facts: Result<Facts, String>,
 }
 
+/// One plan being laid out, and the document it belongs to.
+struct Laying {
+    id: u64,
+    /// What it is laying out, so an answer over a plan that has since moved is dropped.
+    plan: Plan,
+    job: work::Job<Result<Vec<u8>, String>>,
+}
+
+/// Where a document's plan stands between the switch being thrown and the bytes it
+/// makes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// The working bytes hold it.
+    Laid,
+    /// It is an edit nothing has laid out yet.
+    Pending,
+    /// It is being laid out now.
+    Applying,
+}
+
+/// One act waiting on a document's apply.
+type Held = (u64, Act);
+
+/// What a finished apply left: the bytes it made of one document's plan, and the acts
+/// that have nothing left to wait for.
+pub struct Applied {
+    pub id: u64,
+    /// `None` where the plan moved while the apply ran, and the bytes it made are of a
+    /// library nobody asked for any more.
+    pub made: Option<Result<Vec<u8>, String>>,
+    pub acts: Vec<Act>,
+}
+
 #[derive(Default)]
 pub struct State {
     /// The plan for each piano document, by id.
@@ -839,6 +953,14 @@ pub struct State {
     /// ⚠️ Not dropped when the tab changes. The plan is the only record of what the
     /// working bytes were trimmed from, so leaving the tab must not throw it away.
     plans: HashMap<u64, Plan>,
+    /// The plan each document's working bytes were laid out from. A plan they already
+    /// hold is not pending, and laying it again would copy the body for nothing.
+    laid: HashMap<u64, Plan>,
+    /// The one apply in flight, and the acts held until it answers.
+    job: Option<Laying>,
+    held: Vec<Held>,
+    /// Whether this frame's Apply now was clicked.
+    asked_apply: bool,
     open: Option<Open>,
     /// The plan as this frame's controls have left it, to be tried before it is kept.
     draft: Plan,
@@ -881,15 +1003,39 @@ impl State {
                 against: baseline,
                 ..Plan::default()
             };
+            self.laid.remove(&id);
         }
         self.draft = plan.clone();
         self.audio.follow(id, entity.stamp);
         self.free = room::free_bytes(ObjectClass::Piano, device);
+        let standing = self.standing(id);
 
         let Some(facts) = self.facts() else {
             return Extras::default();
         };
-        extras(facts, &self.draft, self.free)
+        extras(facts, &self.draft, self.free, standing)
+    }
+
+    /// Where this document's plan stands.
+    fn standing(&self, id: u64) -> Standing {
+        match &self.job {
+            Some(job) if job.id == id => Standing::Applying,
+            _ => match self.pending(id) {
+                true => Standing::Pending,
+                false => Standing::Laid,
+            },
+        }
+    }
+
+    /// Whether this document's plan has yet to reach its working bytes.
+    pub fn pending(&self, id: u64) -> bool {
+        let Some(plan) = self.plans.get(&id) else {
+            return false;
+        };
+        match self.laid.get(&id) {
+            Some(laid) => plan != laid,
+            None => !plan.is_empty(),
+        }
     }
 
     fn facts(&self) -> Option<&Facts> {
@@ -931,55 +1077,156 @@ impl State {
         }
     }
 
-    /// Forget this document's plan. Revert puts the saved bytes back, and a plan over
-    /// bytes nothing holds is not an edit of anything.
+    /// Forget this document's plan, and anything waiting on it. Revert puts the saved
+    /// bytes back, and a plan over bytes nothing holds is not an edit of anything.
     pub fn forget(&mut self, id: u64) {
         self.plans.remove(&id);
+        self.laid.remove(&id);
+        self.held.retain(|(held, _)| *held != id);
+        if self.job.as_ref().is_some_and(|job| job.id == id) {
+            self.job = None;
+        }
         self.draft = Plan::default();
         self.open = None;
     }
 
     /// Nothing is open any more: the selection, the open rows, the key table and the
-    /// audition go. The plans stay.
+    /// audition go. The plans stay, and so does an apply in flight.
     pub fn leave(&mut self) {
         self.view = View::default();
         self.open = None;
     }
 
-    /// Decode one root's loudest kept attack stroke, once.
-    pub fn decode(&mut self, entity: &Entity, root: u8) {
-        self.audio.decode(entity, root);
+    /// Whether this frame's Apply now was clicked, asked once.
+    pub fn asked_apply(&mut self) -> bool {
+        std::mem::take(&mut self.asked_apply)
     }
 
-    /// What a decoded root holds, or the codec's own reason it does not.
-    pub fn sound(&self, root: u8) -> Option<Result<Sound<'_>, String>> {
+    /// Whether a plan is being laid out, which is the one thing here that outlives a
+    /// frame.
+    pub fn applying(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// Hold an act that must not run until the plan in hand has reached the bytes, and
+    /// start or join the apply that puts it there. Answers with the act where it is free
+    /// to run now.
+    pub fn hold(&mut self, ctx: &egui::Context, act: Act, workspace: &Workspace) -> Option<Act> {
+        let Some(id) = waits_on(&act).filter(|id| self.pending(*id)) else {
+            return Some(act);
+        };
+        self.held.push((id, act));
+        self.start(ctx, id, workspace);
+        None
+    }
+
+    /// Lay one document's plan out, unless something else is already being laid.
+    pub fn start(&mut self, ctx: &egui::Context, id: u64, workspace: &Workspace) {
+        if self.job.is_some() || !self.pending(id) {
+            return;
+        }
+        let Some(plan) = self.plans.get(&id).cloned() else {
+            return;
+        };
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        let saved = entity.saved.bytes.clone();
+        let laying = plan.clone();
+        let job = work::run(ctx, move |progress| {
+            let library = planned(&saved, &laying)?;
+            progress.say(format!("laying out {} strokes", library.strokes().len()));
+            materialise(&library)
+        });
+        self.job = Some(Laying { id, plan, job });
+    }
+
+    /// The apply that has answered, where one has.
+    ///
+    /// ⚠️ An answer over a plan that has since moved is dropped rather than written: the
+    /// bytes it made are of a library nobody asked for any more. Whatever was waiting on
+    /// that document waits on the apply of the plan in hand instead — unless the plan
+    /// has caught up with the bytes on its own, when there is nothing left to wait for.
+    pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
+        let made = self.job.as_ref()?.job.poll()?;
+        let laying = self.job.take()?;
+        let fresh = self.plans.get(&laying.id) == Some(&laying.plan);
+        match (fresh, made.is_ok()) {
+            (true, true) => {
+                self.laid.insert(laying.id, laying.plan);
+            }
+            // A refusal is the end of the wait: nothing can carry bytes the format
+            // would not make, and asking again would only produce it a second time.
+            (true, false) => self.held.retain(|(id, _)| *id != laying.id),
+            (false, _) => {}
+        }
+        let applied = Applied {
+            id: laying.id,
+            made: fresh.then_some(made),
+            acts: self.freed(workspace),
+        };
+        self.next(ctx, workspace);
+        Some(applied)
+    }
+
+    /// The held acts with nothing left to wait for: their document's bytes hold its
+    /// plan, or there is no such document any more.
+    fn freed(&mut self, workspace: &Workspace) -> Vec<Act> {
+        let (free, waiting): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|(id, _)| !self.pending(*id) || workspace.get(*id).is_none());
+        self.held = waiting;
+        free.into_iter().map(|(_, act)| act).collect()
+    }
+
+    /// Start the next apply something is waiting on.
+    fn next(&mut self, ctx: &egui::Context, workspace: &Workspace) {
+        let Some((id, _)) = self.held.first() else {
+            return;
+        };
+        self.start(ctx, *id, workspace);
+    }
+
+    /// Decode one root's loudest kept attack stroke, once, and answer with the codec's
+    /// own words where it will not.
+    pub fn decode(&mut self, entity: &LocalEntity, root: u8) -> Result<(), String> {
+        let held = self.plans.get(&entity.id);
+        self.audio
+            .decode(&entity.bytes, held.unwrap_or(&Plan::default()), root)
+    }
+
+    /// What the newest decode of this root holds.
+    pub fn sound(&self, root: u8) -> Option<Sound<'_>> {
         let facts = self.facts()?;
-        Some(match self.audio.get(root)? {
-            Ok(played) => Ok(Sound {
-                samples: &played.samples,
-                channels: played.channels,
-                rate: npno::codec::RATE,
-                name: crate::workspace::stroke_wav_name(
-                    &facts.name,
-                    root,
-                    Bank::Attack.code(),
-                    played.layer,
-                ),
-            }),
-            Err(why) => Err(why.clone()),
+        let ((root, bank, layer), played) = self.audio.newest(root)?;
+        Some(Sound {
+            samples: &played.samples,
+            channels: played.channels,
+            rate: npno::codec::RATE,
+            name: crate::workspace::stroke_wav_name(&facts.name, root, bank, layer),
         })
+    }
+}
+
+/// The document an act must wait for, where it is one that would carry a document's
+/// bytes out of this app.
+fn waits_on(act: &Act) -> Option<u64> {
+    match act {
+        Act::SaveDoc(id) | Act::WriteBack(id) | Act::Export(id) | Act::Send { id, .. } => Some(*id),
+        _ => None,
     }
 }
 
 /// What the header shows over a piano library: what it keeps of what it holds, the word
 /// for a library that has been trimmed, and its refusal to be queued when it will not
 /// fit.
-fn extras(facts: &Facts, plan: &Plan, free: Option<u64>) -> Extras {
+fn extras(facts: &Facts, plan: &Plan, free: Option<u64>, standing: Standing) -> Extras {
     let kept = kept_bytes(facts, plan);
     let over = free
         .and_then(|free| kept.checked_sub(free))
         .filter(|over| *over > 0);
     let trimmed = kept < facts.total;
+    let claim = claim(trimmed, standing);
     Extras {
         size: trimmed.then(|| SizeLine {
             text: room::measure_out_of(kept, facts.total),
@@ -989,19 +1236,54 @@ fn extras(facts: &Facts, plan: &Plan, free: Option<u64>) -> Extras {
                 None => "the instrument has not reported its free piano memory".to_string(),
             },
         }),
-        edited: trimmed.then(|| StateLine {
-            words: "trimmed".to_string(),
+        // ⚠️ Both slots, because a pending plan is not unsaved bytes: the strip reads
+        // `edited` where the asset holds something other than what it was saved as, and
+        // `state` where it does not — and a plan is an edit either way.
+        edited: claim.clone(),
+        state: claim,
+        loud: match standing {
+            Standing::Applying => Some(Loud {
+                label: "Applying…".to_string(),
+                short: "Applying".to_string(),
+                glyph: Glyph::Clock,
+                tone: Tone::Blocked,
+                hint: "wait for the apply".to_string(),
+                send: None,
+            }),
+            Standing::Laid | Standing::Pending => over.map(|over| Loud {
+                label: format!("No room · {} over", room::measure(over)),
+                short: format!("{} over", room::measure(over)),
+                glyph: Glyph::CircleAlert,
+                tone: Tone::Blocked,
+                hint: format!("trim {} before this can be queued", room::measure(over)),
+                send: None,
+            }),
+        },
+    }
+}
+
+/// The one claim the header makes about a plan: what it does to the library, or that it
+/// is being laid out now.
+fn claim(trimmed: bool, standing: Standing) -> Option<StateLine> {
+    let words = match trimmed {
+        true => "trimmed",
+        false => "edited",
+    };
+    match standing {
+        Standing::Applying => Some(StateLine {
+            words: "applying…".to_string(),
+            ink: Ink::Quiet,
+            hint: "laying the plan out over the library".to_string(),
+        }),
+        Standing::Pending => Some(StateLine {
+            words: words.to_string(),
+            ink: Ink::Warn,
+            hint: "applied when this is saved, sent or applied".to_string(),
+        }),
+        Standing::Laid => trimmed.then(|| StateLine {
+            words: words.to_string(),
             ink: Ink::Warn,
             hint: "the plan drops strokes the saved file holds".to_string(),
-        }),
-        state: None,
-        loud: over.map(|over| Loud {
-            label: format!("Won't fit · {} over", room::measure(over)),
-            short: format!("{} over", room::measure(over)),
-            glyph: Glyph::CircleAlert,
-            tone: Tone::Blocked,
-            hint: format!("trim {} before this can be queued", room::measure(over)),
-            send: None,
         }),
     }
 }
@@ -2728,6 +3010,17 @@ impl State {
     /// The Edit face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
+        let id = self.open.as_ref()?.id;
+        let standing = self.standing(id);
+        let saying =
+            self.job
+                .as_ref()
+                .filter(|job| job.id == id)
+                .map(|job| match job.job.progress() {
+                    said if said.is_empty() => "applying…".to_string(),
+                    said => said,
+                });
+        let mut asked_apply = false;
         let State {
             open,
             draft,
@@ -2745,16 +3038,17 @@ impl State {
         let free = *free;
 
         let kept = kept_bytes(facts, draft);
-        let (badge, ink) = match free {
-            Some(free) if kept > free => (
+        let (badge, ink) = match (&saying, free) {
+            (Some(saying), _) => (saying.clone(), app::caption(ui.visuals())),
+            (None, Some(free)) if kept > free => (
                 format!("{} over", room::measure(kept - free)),
                 app::warn(ui.visuals()),
             ),
-            Some(free) => (
+            (None, Some(free)) => (
                 format!("fits · {} to spare", room::measure(free - kept)),
                 app::good(ui.visuals()),
             ),
-            None => (
+            (None, None) => (
                 "no free piano memory reported".to_string(),
                 app::caption(ui.visuals()),
             ),
@@ -2765,6 +3059,23 @@ impl State {
             "what is kept, against what the instrument has free",
             Some((&badge, ink)),
         );
+        if standing == Standing::Pending {
+            ui.horizontal(|ui| {
+                ui.add_space(PAD);
+                if action(ui, Glyph::Check, "Apply now", app::accent(ui.visuals())) {
+                    asked_apply = true;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "the switches are a plan; this lays it over the library, which \
+                         saving, sending and exporting do anyway",
+                    )
+                    .size(11.0)
+                    .color(app::caption(ui.visuals())),
+                );
+            });
+            ui.add_space(8.0);
+        }
         let width = ui.available_width();
         let wide = width >= 640.0;
         let wide_column = match wide {
@@ -2843,6 +3154,7 @@ impl State {
             column(ui, width - PAD * 2.0, |ui| per_key(ui, facts, draft, view));
         });
         ui.add_space(12.0);
+        self.asked_apply = asked_apply;
         ask
     }
 
@@ -3102,6 +3414,8 @@ fn offsets() -> Vec<Offset> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use nord_format::formats::npno::synthetic::{take, Build};
     use nord_usb::wire::Status;
 
@@ -3701,6 +4015,7 @@ mod tests {
             &facts,
             &plan(),
             room::free_bytes(ObjectClass::Piano, &plenty.state),
+            Standing::Laid,
         );
         assert!(
             untouched.size.is_none(),
@@ -3716,6 +4031,7 @@ mod tests {
             &facts,
             &plan,
             room::free_bytes(ObjectClass::Piano, &plenty.state),
+            Standing::Laid,
         );
         assert_eq!(
             trimmed.size.as_ref().map(|size| size.text.clone()),
@@ -3731,13 +4047,13 @@ mod tests {
         // A partition with room for half of it: the loud action carries the overage.
         let cramped = attached(kept / 2);
         let free = room::free_bytes(ObjectClass::Piano, &cramped.state).expect("a unit arrived");
-        let held = extras(&facts, &plan, Some(free));
+        let held = extras(&facts, &plan, Some(free), Standing::Laid);
         let loud = held.loud.expect("it will not fit");
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.send, None, "a blocked action asks for nothing");
         assert_eq!(
             loud.label,
-            format!("Won't fit · {} over", room::measure(kept - free))
+            format!("No room · {} over", room::measure(kept - free))
         );
         assert!(held.size.expect("a size line").warn);
 
@@ -3747,6 +4063,7 @@ mod tests {
             &facts,
             &plan,
             room::free_bytes(ObjectClass::Piano, &alone.state),
+            Standing::Laid,
         );
         assert!(quiet.loud.is_none(), "nothing has reported its free memory");
         assert!(quiet
@@ -3754,6 +4071,49 @@ mod tests {
             .expect("it is still trimmed")
             .hint
             .contains("not reported"));
+    }
+
+    /// A plan that has not reached the bytes yet is still an edit, and the header says
+    /// so on a document the workspace reads as saved — and says what it is doing while
+    /// the library is being laid out.
+    #[test]
+    fn the_header_claims_a_plan_the_bytes_do_not_hold_yet() {
+        let facts = facts();
+        let free = room::free_bytes(ObjectClass::Piano, &attached(facts.total * 2).state);
+
+        let renamed = Plan {
+            name: Some("Wurly 200A".to_string()),
+            ..plan()
+        };
+        let pending = extras(&facts, &renamed, free, Standing::Pending);
+        let claim = pending.state.expect("the bytes are the saved ones");
+        assert_eq!(claim.words, "edited");
+        assert_eq!(claim.ink, Ink::Warn);
+        assert_eq!(
+            pending.edited.map(|line| line.words),
+            Some("edited".to_string()),
+            "the same claim in whichever slot the strip reads",
+        );
+
+        let mut dropped = plan();
+        dropped.switch_bank(Bank::Release, false);
+        let trimming = extras(&facts, &dropped, free, Standing::Pending);
+        assert_eq!(
+            trimming.state.map(|line| line.words),
+            Some("trimmed".to_string()),
+            "a plan that drops strokes keeps its own word",
+        );
+
+        let applying = extras(&facts, &dropped, free, Standing::Applying);
+        assert_eq!(
+            applying.state.as_ref().map(|line| line.words.as_str()),
+            Some("applying…")
+        );
+        assert_eq!(applying.state.map(|line| line.ink), Some(Ink::Quiet));
+        let loud = applying.loud.expect("the write waits for the apply");
+        assert_eq!(loud.tone, Tone::Blocked);
+        assert_eq!(loud.hint, "wait for the apply");
+        assert_eq!(loud.send, None);
     }
 
     /// The sentence under the meter says whether it fits, what to throw when it does
@@ -3970,6 +4330,33 @@ mod tests {
             self.driven(events, |_| {})
         }
 
+        /// Wait for the apply in flight to answer, the way a frame polls it.
+        fn awaited(&mut self) -> Applied {
+            for _ in 0..100_000 {
+                if let Some(applied) = self.state.answered(&self.ctx, &self.workspace) {
+                    return applied;
+                }
+                std::thread::yield_now();
+            }
+            panic!("the apply never answered");
+        }
+
+        /// Lay the plan in hand out and put the bytes under the document, which is what
+        /// the app does once something has to carry them.
+        fn apply(&mut self) -> Applied {
+            self.state.start(&self.ctx, self.id, &self.workspace);
+            let applied = self.awaited();
+            let made = applied
+                .made
+                .as_ref()
+                .expect("the plan stood")
+                .as_ref()
+                .expect("the library lays out")
+                .clone();
+            self.workspace.replace_bytes(self.id, made, &mut self.log);
+            applied
+        }
+
         /// One frame, with `edit` throwing whatever switch a click on its lamp would.
         fn driven(&mut self, events: Vec<egui::Event>, edit: impl FnOnce(&mut Plan)) -> Painted {
             let input = egui::RawInput {
@@ -3993,13 +4380,12 @@ mod tests {
                     asked = self.state.ui(ui, None).or(asked);
                 });
             });
+            // What [`Document::replan`] does with the plan a frame left behind: try it
+            // over the baseline, and keep it where the library takes it.
             if let Some(plan) = self.state.drafted() {
                 let saved = self.workspace.get(self.id).unwrap().saved.bytes.clone();
-                match rebuild(&saved, &plan) {
-                    Ok(made) => {
-                        self.state.commit(plan);
-                        self.workspace.replace_bytes(self.id, made, &mut self.log);
-                    }
+                match planned(&saved, &plan) {
+                    Ok(_) => self.state.commit(plan),
                     Err(_) => self.state.discard(),
                 }
             }
@@ -4156,24 +4542,137 @@ mod tests {
         assert!(some.said("damper"), "{:?}", some.words);
     }
 
-    /// Throwing a switch trims the library: the bytes shrink, the header says
-    /// `trimmed`, and throwing it back puts the strokes back byte for byte.
+    /// ⚠️ Throwing a switch copies nothing: the working bytes are the ones the library
+    /// was saved as until something has to carry them. The header is what says an edit
+    /// is standing, because the workspace reads the document as saved.
     #[test]
-    fn a_switch_thrown_and_put_back_leaves_the_library_as_it_was() {
+    fn a_switch_thrown_leaves_the_bytes_alone_and_the_header_says_so() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().bytes.clone();
+        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
-        let trimmed = editor.workspace.get(editor.id).unwrap().bytes.clone();
-        assert!(trimmed.len() < saved.len(), "the release bank is gone");
-        assert!(editor.workspace.get(editor.id).unwrap().is_unsaved());
+        let held = editor.workspace.get(editor.id).unwrap();
+        assert_eq!(held.bytes, saved, "no body was copied for a switch");
+        assert!(!held.is_unsaved(), "and the workspace reads it as saved");
+        assert!(editor.state.pending(editor.id));
+
+        let said = editor
+            .state
+            .begin(editor.id, held, &editor.device.state)
+            .state
+            .expect("the header claims the plan");
+        assert_eq!(said.words, "trimmed");
+        assert_eq!(said.hint, "applied when this is saved, sent or applied");
+
+        // And throwing it back is no edit at all.
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, true));
+        assert!(!editor.state.pending(editor.id));
+    }
+
+    /// A save lays the plan out first: the act waits, the bytes it makes are the ones a
+    /// rebuild from the baseline makes, and only then is the document saved.
+    #[test]
+    fn a_save_waits_for_the_plan_to_be_laid_over_the_library() {
+        let mut editor = Editor::new(facts().total * 2);
+        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+
+        let held = editor
+            .state
+            .hold(&editor.ctx, Act::SaveDoc(editor.id), &editor.workspace);
+        assert!(held.is_none(), "the save is held back");
+
+        let applied = editor.awaited();
+        assert_eq!(applied.id, editor.id);
+        assert_eq!(
+            applied.made.expect("the plan stood").expect("it lays out"),
+            rebuild(&saved, &editor.state.plans[&editor.id]).unwrap(),
+            "what the apply made is what a rebuild from the baseline makes",
+        );
+        assert!(
+            matches!(applied.acts.as_slice(), [Act::SaveDoc(id)] if *id == editor.id),
+            "and the save is let go the moment it is laid",
+        );
+        assert!(
+            !editor.state.pending(editor.id),
+            "the bytes hold the plan now",
+        );
+    }
+
+    /// One apply at a time: a second save while one runs waits on the same job and is
+    /// let go with the first.
+    #[test]
+    fn two_saves_during_one_apply_are_one_apply() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+
+        for _ in 0..2 {
+            assert!(editor
+                .state
+                .hold(&editor.ctx, Act::SaveDoc(editor.id), &editor.workspace)
+                .is_none());
+        }
+        assert_eq!(editor.state.held.len(), 2, "both are waiting");
+
+        let applied = editor.awaited();
+        assert_eq!(applied.acts.len(), 2, "on the one apply between them");
+        assert!(editor.state.job.is_none(), "and nothing is left running");
+    }
+
+    /// ⚠️ An answer over a plan that has moved is of a library nobody asked for. It is
+    /// dropped, and the apply starts again from the plan in hand.
+    #[test]
+    fn a_plan_changed_during_an_apply_starts_it_again() {
+        let mut editor = Editor::new(facts().total * 2);
+        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        assert!(editor
+            .state
+            .hold(&editor.ctx, Act::SaveDoc(editor.id), &editor.workspace)
+            .is_none());
+
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Resonance, false));
+        let wanted = editor.state.plans[&editor.id].clone();
+        assert!(wanted.banks.contains(&Bank::Resonance));
+
+        let dropped = editor.awaited();
+        assert!(
+            dropped.made.is_none(),
+            "the first answer is of another plan"
+        );
+        assert!(dropped.acts.is_empty(), "so the save is still waiting");
+
+        let applied = editor.awaited();
+        assert_eq!(
+            applied
+                .made
+                .expect("the plan stood")
+                .expect("the second apply lays out"),
+            rebuild(&saved, &wanted).unwrap(),
+            "the bytes are of the plan in hand, not the one the job started on",
+        );
+        assert_eq!(applied.acts.len(), 1, "the save waited through both");
+    }
+
+    /// ⚠️ An edit undone while its apply ran leaves nothing to wait for. The save that
+    /// was waiting still has to happen: held for a plan that no longer exists, it would
+    /// never run at all.
+    #[test]
+    fn a_save_waiting_on_a_plan_that_was_undone_is_let_go() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        assert!(editor
+            .state
+            .hold(&editor.ctx, Act::SaveDoc(editor.id), &editor.workspace)
+            .is_none());
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, true));
-        assert_eq!(
-            editor.workspace.get(editor.id).unwrap().bytes,
-            saved,
-            "putting the switch back put every stroke back"
-        );
+        assert!(!editor.state.pending(editor.id), "the edit is undone");
+
+        let applied = editor.awaited();
+        assert!(applied.made.is_none(), "the bytes it made are of nothing");
+        assert_eq!(applied.acts.len(), 1, "and the save is let go regardless");
+        assert!(editor.state.job.is_none(), "with nothing left to lay out");
     }
 
     /// A save is the end of the plan: what was dropped is gone, and the rows show the
@@ -4186,6 +4685,11 @@ mod tests {
             .banks
             .contains(&Bank::Release));
 
+        editor.apply();
+        let trimmed = editor.workspace.get(editor.id).unwrap();
+        assert!(trimmed.bytes.len() < trimmed.saved.bytes.len());
+        assert!(trimmed.is_unsaved(), "the apply is what makes it unsaved");
+
         editor.workspace.mark_saved(editor.id);
         editor.frame(Vec::new());
         assert_eq!(
@@ -4197,5 +4701,148 @@ mod tests {
             "the plan starts again from what is now saved",
         );
         assert!(!editor.workspace.get(editor.id).unwrap().is_unsaved());
+    }
+
+    /// The Apply now action is the one way to spend the time on purpose, and it is
+    /// offered only where there is a plan to spend it on.
+    #[test]
+    fn apply_now_is_offered_while_a_plan_is_pending_and_lays_it_out() {
+        let mut editor = Editor::new(facts().total * 2);
+        assert!(
+            !editor.frame(Vec::new()).said("Apply now"),
+            "nothing is pending",
+        );
+
+        // The plan is taken up at the end of the frame it was drafted in, so the action
+        // appears on the next one.
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        let painted = editor.frame(Vec::new());
+        assert!(painted.said("Apply now"), "{:?}", painted.words);
+
+        editor.apply();
+        assert!(
+            !editor.frame(Vec::new()).said("Apply now"),
+            "the bytes hold the plan now",
+        );
+    }
+
+    /// A library whose audio the codec can read: the same three roots of three attack
+    /// layers, each a short tone.
+    ///
+    /// ⚠️ [`synthetic::Build`] fills its audio spans rather than coding them, and
+    /// [`npno::codec::decode`] refuses that, so a test about hearing a stroke has to
+    /// code its own.
+    fn coded() -> Vec<u8> {
+        use nord_format::formats::npno::encode::{self, Donor, Options, Recording, Rules};
+
+        let recordings: Vec<Recording> = ROOTS
+            .into_iter()
+            .flat_map(|root| {
+                LAYERS.into_iter().map(move |layer| Recording {
+                    root,
+                    bank: Bank::Attack,
+                    layer,
+                    channels: vec![(0..1024)
+                        .map(|frame| {
+                            let hz = f32::from(root) + f32::from(layer);
+                            ((frame as f32 / hz).sin() * 8_000.0) as i16
+                        })
+                        .collect()],
+                })
+            })
+            .collect();
+        let library = encode::build(
+            &Donor::Rules(Rules::default()),
+            &Options::new("Test Piano"),
+            &recordings,
+        )
+        .expect("the encoder codes the takes");
+        materialise(&library).expect("it lays out")
+    }
+
+    /// Every decode is one stroke: the loudest attack layer of that root the plan keeps,
+    /// and the least recently heard goes once nine of them have been asked for.
+    #[test]
+    fn one_root_decodes_one_stroke_and_the_cache_keeps_the_last_eight() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut log = Log::default();
+        let id = workspace.ingest(
+            "Test Piano.npno".into(),
+            Origin::File("Test Piano.npno".into()),
+            coded(),
+            &mut log,
+        );
+        let entity = workspace.get(id).expect("it is open");
+        let mut state = State::default();
+        state.begin(id, entity, &Device::new(ctx).state);
+
+        state.decode(entity, ROOTS[0]).expect("it decodes");
+        assert_eq!(
+            state.audio.strokes.len(),
+            1,
+            "one stroke, not one root's worth",
+        );
+        let loudest = state.audio.newest(ROOTS[0]).expect("it is held").0;
+        assert_eq!(loudest, (ROOTS[0], Bank::Attack.code(), LAYERS[0]));
+        assert_eq!(
+            state.sound(ROOTS[0]).expect("it is ready").name,
+            crate::workspace::stroke_wav_name(
+                "Test Piano",
+                ROOTS[0],
+                Bank::Attack.code(),
+                LAYERS[0]
+            ),
+        );
+
+        state.decode(entity, ROOTS[1]).expect("it decodes");
+        assert_eq!(
+            state.audio.newest(ROOTS[0]).map(|held| held.0),
+            Some(loudest),
+            "another root's decode left this one where it was",
+        );
+
+        // Nine strokes: every root's three attack layers, reached by dropping the
+        // louder ones on that root as it goes.
+        let mut plan = state.plans[&id].clone();
+        for root in ROOTS {
+            for layer in LAYERS {
+                state.plans.insert(id, plan.clone());
+                let asked = state.decode(entity, root);
+                assert!(asked.is_ok(), "{root} at layer {layer}: {asked:?}");
+                assert_eq!(
+                    state.audio.newest(root).expect("it is held").0,
+                    (root, Bank::Attack.code(), layer),
+                    "the loudest layer the plan keeps is what plays",
+                );
+                plan.roots.insert((root, layer), false);
+            }
+        }
+        assert_eq!(state.audio.strokes.len(), KEPT_STROKES);
+        assert!(
+            !state.audio.strokes.iter().any(|(held, _)| *held == loudest),
+            "the first stroke asked for is the first to go",
+        );
+    }
+
+    /// Checking a plan and laying it out are the same edit: the body the borrowed
+    /// library says it would occupy is the body the bytes come out holding.
+    #[test]
+    fn a_planned_library_is_the_size_of_the_bytes_it_makes() {
+        let saved = bytes();
+        let around = saved.len()
+            - planned(&saved, &plan())
+                .expect("the baseline plans")
+                .body_len()
+                .expect("it lays out");
+
+        let mut plan = plan();
+        plan.switch_bank(Bank::Release, false);
+        let body = planned(&saved, &plan)
+            .expect("the library takes it")
+            .body_len()
+            .expect("it lays out");
+        assert_eq!(rebuild(&saved, &plan).unwrap().len(), body + around);
+        assert!(body + around < saved.len(), "the release bank is gone");
     }
 }

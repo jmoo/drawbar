@@ -788,14 +788,23 @@ impl Workspace {
     /// edit — and the × sits beside the badge saying the edit is owed back to a slot.
     /// So an edited or owed view is promoted into the list instead, and only an
     /// untouched one is dropped.
-    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
+    ///
+    /// `pending` says an id holds an edit its bytes do not — a piano library's plan,
+    /// which is an edit like any other and the only copy of itself.
+    pub fn close_views(
+        &mut self,
+        open: impl Fn(u64) -> bool,
+        pending: impl Fn(u64) -> bool,
+        queue: &Queue,
+        log: &mut Log,
+    ) {
         let mut rescued = Vec::new();
         let before = self.entities.len();
         self.entities.retain_mut(|entity| {
             if entity.kept || open(entity.id) {
                 return true;
             }
-            if !precious(entity, queue) {
+            if !precious(entity, queue) && !pending(entity.id) {
                 return false;
             }
             entity.kept = true;
@@ -1176,7 +1185,7 @@ async fn save(name: String, bytes: Vec<u8>) -> Incoming {
     else {
         return Incoming::Note(format!("{name}: save cancelled"));
     };
-    match handle.write(&bytes).await {
+    match write_beside(handle.path(), &bytes) {
         Ok(()) => Incoming::Note(format!(
             "wrote {} ({} bytes)",
             handle.file_name(),
@@ -1184,6 +1193,23 @@ async fn save(name: String, bytes: Vec<u8>) -> Incoming {
         )),
         Err(e) => Incoming::Failed(format!("{name}: {e}")),
     }
+}
+
+/// Write `bytes` to a sibling of `path` and rename it over `path`.
+///
+/// ⚠️ A library is hundreds of megabytes, and a write that stops halfway through one the
+/// operator chose would leave the file it replaced as neither. The rename is the only
+/// moment the chosen path changes, and the temp file goes when anything fails.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_beside(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = std::path::PathBuf::from(temp);
+    let wrote = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path));
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    wrote
 }
 
 /// The browser has no save picker: the bytes become a Blob behind an object URL, and
@@ -1428,10 +1454,10 @@ mod tests {
         let local = workspace.create(Fresh::Program, &mut log).unwrap();
 
         let queue = Queue::default();
-        workspace.close_views(|id| id == viewed, &queue, &mut log);
+        workspace.close_views(|id| id == viewed, |_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_some(), "its tab is still open");
 
-        workspace.close_views(|_| false, &queue, &mut log);
+        workspace.close_views(|_| false, |_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_none());
         assert!(workspace.get(local).is_some(), "kept is kept");
         assert_eq!(workspace.selected().map(|e| e.id), Some(local));
@@ -1480,7 +1506,7 @@ mod tests {
         assert!(!precious(workspace.get(untouched).unwrap(), &queue));
 
         // Every tab closes at once.
-        workspace.close_views(|_| false, &queue, &mut log);
+        workspace.close_views(|_| false, |_| false, &queue, &mut log);
 
         assert!(workspace.get(untouched).is_none(), "the slot still has it");
         let listed: Vec<u64> = workspace.listed().map(|e| e.id).collect();
@@ -1489,6 +1515,59 @@ mod tests {
         // What was owed is still owed: promoting it must not pay a debt.
         assert!(queue.holds(owed));
         assert!(log.status().1.contains("kept on this computer"));
+    }
+
+    /// ⚠️ An edit that has not reached the bytes yet is the same loss: a piano library's
+    /// plan is held by the document rather than by the file, and dropping the view would
+    /// take it with nothing said.
+    #[test]
+    fn a_view_whose_edit_is_still_a_plan_is_kept_rather_than_dropped() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let planning = workspace.view(
+            "Africa-Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+            Fresh::Program.bytes().unwrap(),
+            &mut log,
+        );
+        let queue = Queue::default();
+        assert!(!precious(workspace.get(planning).unwrap(), &queue));
+
+        workspace.close_views(|_| false, |id| id == planning, &queue, &mut log);
+        assert!(workspace.get(planning).is_some(), "the plan survives");
+        assert!(!workspace.is_view(planning), "and is listed to survive in");
+    }
+
+    /// ⚠️ A library is hundreds of megabytes. The file the operator picked is replaced
+    /// only by a rename, so a write that stops halfway leaves what was there; and
+    /// nothing is left beside it whether the write lands or not.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_save_lands_whole_and_leaves_no_temporary_beside_it() {
+        let dir = std::env::temp_dir().join("drawbar-save-beside");
+        std::fs::create_dir_all(&dir).expect("a directory to save into");
+        let path = dir.join("Royal Grand.npno");
+        std::fs::write(&path, b"what was there before").expect("a file to replace");
+
+        write_beside(&path, b"the bytes the editor made").expect("it writes");
+        assert_eq!(
+            std::fs::read(&path).expect("it is there"),
+            b"the bytes the editor made"
+        );
+        let left: Vec<std::ffi::OsString> = std::fs::read_dir(&dir)
+            .expect("it is still a directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(left, [path.file_name().expect("a name")], "{left:?}");
+
+        let nowhere = dir.join("no-such-folder").join("Royal Grand.npno");
+        assert!(write_beside(&nowhere, b"anything").is_err());
+        assert!(!nowhere.with_extension("npno.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// One view per slot, so a second double-click has something to be pointed at rather
