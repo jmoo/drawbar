@@ -452,6 +452,8 @@ pub fn apply(
             Act::Remove(id) => {
                 tabs.close(Spot::Document(id));
                 queue.forget(id);
+                // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
+                browser.forget_rename(Item::Local(id));
                 browser.folders.forget(id);
                 browser.tags.forget(id);
                 workspace.remove(id, log);
@@ -1981,6 +1983,34 @@ mod tests {
         assert_eq!(
             browser.rename.as_ref().map(|r| r.text.as_str()),
             Some("New folder")
+        );
+    }
+
+    /// An asset that leaves the list while its name is being typed takes the editor and
+    /// its place in the selection with it: no row will be drawn to close either, and the
+    /// next asset to take its id would inherit both.
+    #[test]
+    fn removing_an_asset_mid_rename_takes_the_editor_with_it() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.start_rename(Item::Local(id), "Africa Split");
+        assert!(browser.selection.holds(Item::Local(id)));
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::Remove(id)],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert!(browser.rename.is_none(), "the editor went with it");
+        assert!(
+            !browser.selection.holds(Item::Local(id)),
+            "and nothing is picked that no row stands for"
         );
     }
 
