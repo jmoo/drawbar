@@ -1102,17 +1102,31 @@ impl<'a> Library<'a> {
     }
 
     /// The first audio offset and the body length the current stroke list implies.
+    ///
+    /// A stroke holding anything other than the `blocks × block_bytes` its record states
+    /// is refused: a body laid out around it is one a read of that body rejects.
     fn extent(&self) -> Result<(usize, usize), Error> {
         let directory_end = RECORD
             .checked_mul(self.strokes.len())
             .and_then(|len| DIRECTORY_AT.checked_add(len))
             .ok_or_else(|| overflow("the stroke directory"))?;
-        let first = first_audio_offset(directory_end, self.block_bytes())?;
+        let block = self.block_bytes();
+        let first = first_audio_offset(directory_end, block)?;
         let mut len = first;
-        for stroke in &self.strokes {
-            len = len
-                .checked_add(stroke.audio.len())
-                .ok_or_else(|| overflow("the audio"))?;
+        for (index, stroke) in self.strokes.iter().enumerate() {
+            let span = usize::from(stroke.blocks())
+                .checked_mul(block)
+                .ok_or_else(|| overflow("a stroke's audio span"))?;
+            if stroke.audio.len() != span {
+                return Err(ParseError::AssertFail(format!(
+                    "stroke {index} holds {} audio bytes where the {} block(s) its record \
+                     states span {span}",
+                    stroke.audio.len(),
+                    stroke.blocks()
+                ))
+                .into());
+            }
+            len = len.checked_add(span).ok_or_else(|| overflow("the audio"))?;
         }
         Ok((first, len))
     }
@@ -1714,6 +1728,23 @@ mod tests {
         assert!(library.set_name("Upright#2").is_err());
         assert!(library.set_variant("Sml#XL").is_err());
         assert_eq!(library.name(), ("Test Piano".into(), "Variant".into()));
+    }
+
+    /// A library with its audio dropped is a donor, not a file: laying it out would
+    /// write a directory whose block counts nothing in the body backs.
+    #[test]
+    fn a_stroke_holding_other_than_the_blocks_its_record_states_is_not_laid_out() {
+        let piano = Build::new().piano();
+        let library = piano.library().unwrap();
+        assert!(library.to_body().is_ok());
+
+        let skeleton = library.without_audio();
+        let error = skeleton
+            .to_body()
+            .expect_err("expected a refusal")
+            .to_string();
+        assert!(error.contains("stroke 0 holds 0 audio bytes"), "{error}");
+        assert!(skeleton.body_len().is_err());
     }
 
     #[test]
