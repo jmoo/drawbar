@@ -70,12 +70,14 @@ impl Ui {
     ///
     /// ⚠️ Not `println!`, which **panics** when the reader goes away: `nord program edit
     /// --fields | head` would print a Rust backtrace over the user's terminal. A closed
-    /// pipe exits successfully and silently instead.
+    /// pipe ends the run silently instead — but not successfully: every mutation echoes
+    /// what it is about to change here *before* it writes, so exiting 0 would report an
+    /// edit that never happened.
     pub fn out(&self, line: impl Display) {
         let mut stdout = std::io::stdout().lock();
         if let Err(e) = writeln!(stdout, "{line}") {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
-                std::process::exit(0);
+                std::process::exit(BROKEN_PIPE);
             }
             eprintln!("writing to stdout: {e}");
             std::process::exit(1);
@@ -196,6 +198,9 @@ impl Ui {
         Ok((!answer.is_empty()).then(|| answer.to_string()))
     }
 }
+
+/// What a shell reports for a process `SIGPIPE` killed: 128 plus the signal's number.
+const BROKEN_PIPE: i32 = 141;
 
 const BOLD: &str = "1";
 const BOLD_RED: &str = "1;31";
