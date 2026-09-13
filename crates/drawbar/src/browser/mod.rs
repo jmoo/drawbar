@@ -799,6 +799,37 @@ mod tests {
         assert!(matches!(sent[0], Act::Send { id, .. } if id == ids[0]));
     }
 
+    /// ⚠️ A row drawn inside a folder is that folder's drop target, not the loose list's.
+    /// Otherwise letting a filed asset go where it was pressed, or on one of its own
+    /// siblings, would take it out of the folder it is in.
+    #[test]
+    fn a_drop_onto_a_row_inside_a_folder_never_unfiles_it() {
+        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let folder = browser.folders.make();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.folders.file(id, Some(folder));
+        let head = browser
+            .held(Item::Local(id), &workspace, &device.state)
+            .expect("a local is dragged");
+        let carried = Arc::new(browser.carrying(head, "Africa Split", &workspace, &device.state));
+
+        let mut onto_sibling = Vec::new();
+        browser.land(&carried, tree::onto_list(Some(folder)), &mut onto_sibling);
+        assert!(
+            !onto_sibling
+                .iter()
+                .any(|act| matches!(act, Act::File { folder: None, .. })),
+            "a member row stands for its folder, so a drop on it is no way out of one"
+        );
+
+        let mut onto_loose = Vec::new();
+        browser.land(&carried, tree::onto_list(None), &mut onto_loose);
+        assert!(
+            matches!(onto_loose.as_slice(), [Act::File { folder: None, .. }]),
+            "and the loose rows beside the folder are the way out"
+        );
+    }
+
     /// ⚠️ F2 renames the row that is the only one picked. A rename typed while several
     /// are picked reads as a rename of all of them, and only one would take it.
     #[test]

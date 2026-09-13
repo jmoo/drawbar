@@ -155,6 +155,15 @@ fn worth_choosing(kinds: &[Kind]) -> bool {
     kinds.len() > 1
 }
 
+/// Where a drop onto a row of the local list lands: the folder that row is drawn under,
+/// or the loose part of the list.
+pub(super) fn onto_list(folder: Option<u64>) -> Onto {
+    match folder {
+        Some(id) => Onto::Group(id),
+        None => Onto::Computer,
+    }
+}
+
 /// Whether a bank's own name says anything the number beside every row does not.
 ///
 /// Programs come back called "Bank 1", "Bank 2" — a caption repeating the number the
@@ -250,7 +259,7 @@ impl Browser {
                 .collect();
             for entity in workspace.listed() {
                 if self.folders.holding(entity.id).is_none() {
-                    self.local_row(ui, entity, 1, &loose, workspace, device, queue, acts);
+                    self.local_row(ui, entity, None, &loose, workspace, device, queue, acts);
                 }
             }
             if loose.is_empty() && self.folders.all().is_empty() {
@@ -464,7 +473,7 @@ impl Browser {
             nothing(ui, 2, "empty — drag sounds in");
         }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
-            self.local_row(ui, entity, 2, &inside, workspace, device, queue, acts);
+            self.local_row(ui, entity, Some(id), &inside, workspace, device, queue, acts);
         }
     }
 
@@ -473,7 +482,7 @@ impl Browser {
         &mut self,
         ui: &mut egui::Ui,
         entity: &LocalEntity,
-        depth: usize,
+        folder: Option<u64>,
         list: &[Item],
         workspace: &Workspace,
         device: &Device,
@@ -483,6 +492,10 @@ impl Browser {
         let item = Item::Local(entity.id);
         let kind = Kind::of(entity.entity.as_ref());
         let selected = self.selection.holds(item);
+        let depth = match folder {
+            Some(_) => 2,
+            None => 1,
+        };
 
         // While a name is being typed the row stops sensing anything: a drag sense over
         // the field would take the clicks that place the cursor in it.
@@ -523,9 +536,9 @@ impl Browser {
                 egui::DragAndDrop::set_payload(ui.ctx(), carried);
             }
         }
-        // A drop onto a row is a drop onto the list; it is taken here so the branch's
-        // own zone does not act on it a second time.
-        self.drop_zone(ui, &response, Onto::Computer, acts);
+        // A drop onto a row lands where that row is drawn, and is taken here so the
+        // branch's own zone does not act on it a second time.
+        self.drop_zone(ui, &response, onto_list(folder), acts);
 
         if response.double_clicked() {
             acts.push(Act::Open(item));
