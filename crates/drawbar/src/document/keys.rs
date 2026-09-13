@@ -163,8 +163,6 @@ impl Audition {
     }
 }
 
-// ---- shared paint -------------------------------------------------------------------
-
 /// The dashes of an outline. egui draws dashes along a line, so a shape is its corners
 /// in order.
 fn dashed(painter: &egui::Painter, corners: &[egui::Pos2], stroke: egui::Stroke) {
@@ -391,8 +389,8 @@ fn root_mark(
 
 /// What is sounding, over the key sounding it.
 ///
-/// ⚠️ Painted on a foreground layer above the keyboard, where the design puts it: the
-/// key map's own rect ends at the keys, and a chip inside it would cover the root marks.
+/// ⚠️ Painted on a foreground layer above the keyboard: the key map's own rect ends at
+/// the keys, and a chip inside it would cover the root marks.
 fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -407,8 +405,6 @@ fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
         ui.visuals().text_color(),
     );
 }
-
-// ---- the zone lane ------------------------------------------------------------------
 
 /// One zone as the lane draws it: the keys it answers, and what it is called.
 pub struct Band {
@@ -791,8 +787,6 @@ fn handle(
     }
 }
 
-// ---- the size lane ------------------------------------------------------------------
-
 /// One root as the size lane draws it: the keys it answers, and what it costs.
 pub struct SizeCell {
     pub low: u8,
@@ -1027,8 +1021,6 @@ pub fn size_cells(
 fn cell_keys(cell: &SizeCell) -> usize {
     (cell.top.max(cell.low) - cell.low) as usize + 1
 }
-
-// ---- the velocity field -------------------------------------------------------------
 
 /// One zone as the velocity field draws it: the keys it answers, the velocities it
 /// answers them at, and what it is called.
@@ -1413,8 +1405,6 @@ fn vel_handle(
     }
 }
 
-// ---- the per-key lane ---------------------------------------------------------------
-
 /// What a per-key value means, and how it reads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scale {
@@ -1679,8 +1669,6 @@ mod tests {
         ]
     }
 
-    // ---- geometry -------------------------------------------------------------------
-
     /// The white keys share the width and the blacks hang between them, and the key
     /// under a point is the key whose cell holds it — which is what every hit test in
     /// the map rests on.
@@ -1801,8 +1789,6 @@ mod tests {
         assert!(!struck.live(11.0 + Audition::HOLD));
     }
 
-    // ---- the keyboard ---------------------------------------------------------------
-
     /// The two spans the editors draw are a six-octave sample map and a full piano, and
     /// both are laid out by their white keys.
     #[test]
@@ -1894,8 +1880,6 @@ mod tests {
             "the octave label and the marker's chip: {said:?}",
         );
     }
-
-    // ---- the zone lane --------------------------------------------------------------
 
     fn bands_of(bounds: &[(u8, u8)]) -> Vec<Band> {
         bounds
@@ -1999,8 +1983,6 @@ mod tests {
         assert_eq!(act, None);
     }
 
-    // ---- the size lane --------------------------------------------------------------
-
     fn size_cell(low: u8, top: u8, kept: f32, original: f32) -> SizeCell {
         SizeCell {
             low,
@@ -2096,8 +2078,6 @@ mod tests {
         assert_eq!(boundary(&bounds, span, 2, Edge::Top, 90)[2], (72, 90));
     }
 
-    // ---- the velocity field ---------------------------------------------------------
-
     fn vel_blocks(of: &[(u8, u8, (u8, u8))]) -> Vec<VelBlock> {
         of.iter()
             .enumerate()
@@ -2185,8 +2165,6 @@ mod tests {
         assert_eq!(velocity_at(rect, rect.top() - 50.0), VELOCITY_HIGH);
         assert_eq!(velocity_at(rect, y_of(rect, 64.0)), 64);
     }
-
-    // ---- the per-key lane -----------------------------------------------------------
 
     #[test]
     fn a_painted_value_snaps_to_a_twentieth_and_to_zero_near_the_middle() {

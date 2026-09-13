@@ -56,8 +56,6 @@ const SLOTS: [(&str, &str, &str); 3] = [
     ("_ctrl_pedal", "Control pedal", "P"),
 ];
 
-// ---- what the document keeps between frames -----------------------------------------
-
 /// What the field document holds that is not an edit: which morph lens is on, where the
 /// reader is, and the box a wide field is being typed into.
 ///
@@ -113,8 +111,6 @@ impl State {
         self.lens = Some(slot);
     }
 }
-
-// ---- the document ---------------------------------------------------------------------
 
 /// How a body arrived at its sections.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -518,8 +514,6 @@ fn paths<'a>(section: &Sect<'a>) -> Vec<&'a str> {
     out
 }
 
-// ---- the sticky nav and the morph lens -------------------------------------------------
-
 /// The row above the scroll region: one chip per section, and the morph lens where the
 /// body has morph slots.
 ///
@@ -616,8 +610,6 @@ fn chip(ui: &mut egui::Ui, title: &str, count: &str, active: bool) -> egui::Resp
     }
     response
 }
-
-// ---- the body ---------------------------------------------------------------------
 
 /// Draw the whole document. Returns whether something asked for the Advanced face.
 pub fn body(
@@ -920,8 +912,6 @@ fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
     asked
 }
 
-// ---- the cells ---------------------------------------------------------------------
-
 /// A run of fields as cells, wrapping where the window is narrow.
 fn cells(
     ui: &mut egui::Ui,
@@ -1159,7 +1149,7 @@ fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
 /// widget.
 fn note(field: &Field) -> &'static str {
     match field.spec.control {
-        // Confirmed on hardware: the panel reads this slot either way.
+        // Inferred from specimens; not confirmed on hardware.
         ControlKind::Bipolar(_) => {
             "centre is the slot midpoint — accurate at the ends, approximate between"
         }
@@ -1226,8 +1216,6 @@ fn neutral(width: u32) -> Option<u64> {
 fn is_neutral(slot: &Field) -> bool {
     word(&slot.value) == neutral(slot.spec.width)
 }
-
-// ---- one renderer per control kind ---------------------------------------------------
 
 /// How wide a cell is, which is as wide as what stands in it.
 fn width(field: &Field, legal: &[String]) -> f32 {
@@ -1886,8 +1874,6 @@ fn unit_word(unit: Unit) -> &'static str {
         Unit::None => "",
     }
 }
-
-// ---- shared readings ----------------------------------------------------------------
 
 /// A stored word as a field spells it: `0x…`, or decimal.
 fn word(value: &str) -> Option<u64> {
