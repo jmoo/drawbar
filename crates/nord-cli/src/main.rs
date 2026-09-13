@@ -363,13 +363,17 @@ enum PianoAction {
     /// Cut a library in two at a key, writing both halves.
     Split(piano::SplitArgs),
 
-    /// Build a piano library from a directory of WAVs, against a template library.
+    /// Build a piano library from a directory of WAVs.
     ///
-    /// The WAVs name the root, bank and layer they are; the template supplies
-    /// everything the audio does not decide — the length marks, the decay
-    /// coefficients, the per-note tables and the stream version — from its own stroke
-    /// of the same bank and nearest root. Any rate resamples onto the lattice the
-    /// instrument plays at.
+    /// The WAVs name the root, bank and layer they are. Any rate resamples onto the
+    /// lattice the instrument plays at.
+    ///
+    /// Everything the audio does not decide — the length marks, the decay
+    /// coefficients, the per-note tables, the playback parameters and the stream
+    /// version — comes from `--template`, out of its own stroke of the same bank and
+    /// nearest root. Without a template the library states neutral playback instead:
+    /// no decay applied over the recordings, each stroke trimmed by its own layer
+    /// value, and the damper limit `--kind` implies.
     ///
     /// Every key up to one semitone above the highest root sounds, playing the
     /// nearest root at or above it; keys past that are left uncovered. A key sounds
@@ -378,7 +382,8 @@ enum PianoAction {
     /// its own part of the velocity range.
     ///
     /// Hardware-verified: a library built this way loads and plays, mono and stereo,
-    /// on every key it covers.
+    /// on every key it covers, and one written without a template sounds like the same
+    /// audio built against one.
     Build(piano::BuildArgs),
 
     /// Code a library's audio again from the frames it decodes to, and report how each

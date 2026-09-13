@@ -383,6 +383,7 @@ nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
 nord piano split grand.npno --at C4 -o halves/
 nord piano verify --deep grand.npno
 nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
+nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
 nord piano rebuild grand.npno -o again.npno
 ```
 
@@ -393,12 +394,18 @@ its lowest and highest root, each of three attack layers, the release stroke at
 note-off, a long stroke to its end, the keys between roots transposed, and a vendor
 library coded again playing indistinguishably from the original in level and in
 spectrum. The other edits — renames, retunes, remaps and a narrowed key range — are
-inferred from specimens and have not been played. The fields a build cannot derive
-from audio — the length marks, the decay coefficients, the per-note tables, the word
-at the body's start — go in as the template donated them: the instrument accepts
-them, and what it makes of them beyond accepting is not known.
+inferred from specimens and have not been played.
 
-A library is hundreds of megabytes, so moving one is `nord piano get` and `nord
+The fields a build cannot derive from audio — the length marks, the decay
+coefficients, the per-note tables, the playback parameters, the word at the body's
+start — go in as `--template` donated them: the instrument accepts them, and what it
+makes of them beyond accepting is not known. Given no template, `build` states them by
+rule, and they are then neutral playback parameters: no decay applied over the
+recordings, the layer trims taken from the layer values, and the damper limit `--kind`
+implies. A library written that way has been played and sounds like the same audio
+built against a template.
+
+A library is tens of megabytes, so moving one is `nord piano get` and `nord
 piano put`, and the rest of the slot verbs address class 1 the way they address
 programs.
 

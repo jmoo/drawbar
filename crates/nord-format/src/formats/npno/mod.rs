@@ -107,6 +107,12 @@ const REC_SEEDS: usize = 0x0c;
 const REC_MARKS: usize = 0x1c;
 const REC_MARK_BLOCK: usize = 0x2c;
 const REC_DECAY: usize = 0x2e;
+/// u16 holding the layer value again in vendor records. Sweeping it moved nothing
+/// measurable. Confirmed on hardware.
+const REC_WINDOW: usize = 0x32;
+/// u16 the instrument attenuates the stroke by, one decibel per unit. Confirmed on
+/// hardware.
+const REC_TRIM: usize = 0x34;
 const REC_DECAYS: usize = 0x36;
 const REC_ID: usize = 0x6e;
 
@@ -117,10 +123,16 @@ const SEEDS: usize = 4;
 const MARKS: usize = 4;
 
 /// One-pole decay coefficients a record carries after the one at [`REC_DECAY`], from
-/// [`REC_DECAYS`] up to the identifier. All fifteen are zero on a release stroke and
-/// on no other; nothing here derives them from audio.
+/// [`REC_DECAYS`] up to the identifier. This ladder is the decay the instrument applies
+/// over the stroke's own; it is non-decreasing across its entries, and a stroke of any
+/// bank carries it — including a release stroke, which zeroes only the coefficient at
+/// [`REC_DECAY`]. Nothing here derives them from audio. Confirmed on hardware.
 const DECAYS: usize = 14;
 const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
+
+/// One [`REC_DECAYS`] entry applying nothing: 1.0 in the ladder's fixed point, where
+/// the vendor's own entries sit just below it.
+const LADDER_UNITY: u32 = 0x0080_0000;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
@@ -478,10 +490,10 @@ impl<'a> Stroke<'a> {
     ///
     /// A key sounds the largest value the root holds that is at most
     /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
-    /// value above 31 never plays at all. Confirmed on hardware; the 31 is measured
-    /// to about ±2, so a layer sitting on the bound switches a few velocities either
-    /// side of where the formula puts it. Vendor libraries spread a root over
-    /// 0..[`encode::SOFTEST_LAYER`].
+    /// value above 30 ([`encode::HIGHEST_PLAYED_LAYER`]) never plays at all. Confirmed
+    /// on hardware; the 31 is measured to about ±2, so a layer sitting on the bound
+    /// switches a few velocities either side of where the formula puts it. Vendor
+    /// libraries spread a root over 0..[`encode::SOFTEST_LAYER`].
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
     }
