@@ -2532,8 +2532,8 @@ const CAPABILITIES: &[Row] = &[
     },
     Row {
         name: "replace / add a stroke",
-        state: Cap::NeedsEncode,
-        note: "the encoder builds one; nothing here calls it",
+        state: Cap::Editable,
+        note: "File › New › piano library builds one from WAVs; a template is optional",
     },
     Row {
         name: "cut / move / drop strokes",
@@ -3180,6 +3180,8 @@ mod tests {
             let Some(edit) = plan_for(row.name) else {
                 match row.name {
                     "decode / audition" => {}
+                    "replace / add a stroke" => assert!(crate::newproject::Making::FROM_WAVS
+                        .contains(&crate::newproject::Making::Piano)),
                     "write to the instrument" => {
                         assert!(crate::device::sendable(ObjectClass::Piano))
                     }

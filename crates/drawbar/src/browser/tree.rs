@@ -48,22 +48,10 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         });
     }
     ui.separator();
-    // Not families: both are laid out from audio files rather than started from a
+    // Not families: each is laid out from audio files rather than started from a
     // default, so they ask for the files before they exist.
-    for (making, item, hint) in [
-        (
-            Making::Project,
-            "Sample Editor project…",
-            "pick the WAVs it plays; the project stores their names and the editor \
-             looks for them beside it",
-        ),
-        (
-            Making::Instrument,
-            "Sample instrument…",
-            "pick the WAVs it plays; the audio is encoded into the instrument, so the \
-             files are not needed afterwards",
-        ),
-    ] {
+    for making in Making::FROM_WAVS {
+        let (item, hint) = making.item();
         if ui.button(item).on_hover_text(hint).clicked() {
             acts.push(Act::NewFromWavs(making));
             ui.close();
@@ -1296,18 +1284,20 @@ mod tests {
     use crate::browser::bench::{bench, context, words};
     use crate::shell::Shell;
 
-    /// ⚠️ Both things laid out from audio are on the one New menu. A pick of WAVs makes
-    /// either, and a menu offering only the project hides half of what the dialog does.
+    /// ⚠️ Everything laid out from audio is on the one New menu. A pick of WAVs makes
+    /// any of them, and a menu offering only some hides what the dialog does.
     #[test]
-    fn the_new_menu_offers_both_things_a_pick_of_wavs_makes() {
+    fn the_new_menu_offers_everything_a_pick_of_wavs_makes() {
         let ctx = context();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
         });
         let said = words(&output);
-        for item in ["Sample Editor project…", "Sample instrument…", "New folder"] {
+        for making in Making::FROM_WAVS {
+            let item = making.item().0;
             assert!(said.iter().any(|word| word == item), "{item} is missing");
         }
+        assert!(said.iter().any(|word| word == "New folder"));
     }
 
     /// ⚠️ A row says what a sound is called, not what file it is in. The name the
