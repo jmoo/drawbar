@@ -329,7 +329,7 @@ const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 #[cfg(target_arch = "wasm32")]
 pub(crate) const GUIDE: &str = "docs/";
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) const GUIDE: &str = "https://jmoo.github.io/drawbar/docs/";
+pub(crate) const GUIDE: &str = "https://drawbar.app/docs/";
 
 /// The key text beside a menu label — a window's, never a tab's.
 fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {

@@ -13,6 +13,9 @@
 - [Files on this computer](drawbar/this-computer.md)
 - [The instrument](drawbar/instrument.md)
 - [Editing](drawbar/editing.md)
+- [Samples](drawbar/samples.md)
+- [Pianos](drawbar/pianos.md)
+- [Help and About](drawbar/help.md)
 - [Build and run](drawbar/build.md)
 
 # nord-cli

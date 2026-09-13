@@ -21,8 +21,8 @@ writes of the live slots (class 6) and the settings singleton (class 7), and
 reads, deletes and writes of the piano (class 1) and sample (class 3) libraries —
 a library write sizes the instrument's cleaning pass from `STATUS`, runs it in
 the write's own session, and chunks the body. On Linux the read path and a
-multi-chunk sample write are hardware-verified. Across 14 recorded read-only
-commands, every request frame is byte-identical to its macOS counterpart.
+multi-chunk sample write are hardware-verified, and every recorded read-only
+command's request frame is byte-identical to its macOS counterpart.
 
 `BEGIN_WRITE` is the only frame in a write that carries a name. The library
 classes take their immutable name there because they refuse `rename`; live and
@@ -102,6 +102,7 @@ The protocol is testable without hardware, which is the whole point of the split
 | `replay` | | Drive the protocol from committed captures, no hardware. |
 | `blocking` | | Block on the async API from synchronous callers (the CLI). Tiny; not a runtime. |
 | `corpus` | | Corpus-backed tests (`NORD_CORPUS_ROOT`), implies `replay`. |
+| `fault-injection` | | Deliberate protocol and transfer-shape faults for reverse engineering. A wrong value can stall the instrument's bulk endpoints. |
 
 WebUSB is the binding constraint on the API shape. Its handles are not `Send`, so
 neither is this crate's `Transport` trait — which in turn keeps it

@@ -10,8 +10,8 @@ nix run github:jmoo/drawbar#drawbar-web          # drawbar in the browser
 ```
 
 From a checkout of the repository, `.#` replaces `github:jmoo/drawbar#`. The
-browser build is also hosted one level up from this guide:
-[run drawbar in your browser](../).
+latest released browser build is also hosted one level up from this guide:
+[run drawbar in your browser](../../).
 
 ## Browsers
 

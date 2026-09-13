@@ -7,12 +7,13 @@ tab or a desktop one.
 
 ![drawbar with a Nord Electro 5 attached and a piano library open in its trim-to-fit editor](../../docs/src/assets/screenshot.png)
 
-The window is a file browser over the places your sounds live: files on this
-computer — dropped, opened, pulled off the instrument, or made fresh — beside an
-attached instrument's own folders, so moving a sound between the two is a short
-drag. Anything you open becomes a document with a **Basic** face laid out like the
-front panel and an **Advanced** face that is the whole body as a table. Edits to
-something read off the instrument are held as pending until you send them back.
+It opens at <https://drawbar.app/>. The window is a dock shell around your sounds:
+a browser tree over this computer, an attached instrument's folders, kinds and
+tags; a Library table over both places; a Keyboard tab for the instrument; and an
+inspector. Anything you open becomes a document under one header, with an editor
+for Nord Electro 5 and Stage programs, set lists, sample instruments, Sample Editor
+projects and piano libraries. A send waits in a send queue, where you can review
+what it replaces, until you send the queue.
 
 ## Usage
 
@@ -21,14 +22,15 @@ nix run .#drawbar            # the desktop app
 nix run .#drawbar-web        # drawbar in the browser
 ```
 
-Both open the same window: the sidebar with **Open…**, **New** and **Connect
-instrument**, a tab per open document, and a status strip that expands into the
-activity log. The user guide walks through it:
+The user guide walks through it:
 
-- [Using drawbar](https://jmoo.github.io/drawbar/docs/drawbar/overview.html) — the
-  window, this computer, the instrument, and the two document faces.
-- [Build and run](https://jmoo.github.io/drawbar/docs/drawbar/build.html) — the
-  native and web builds in full, and browser support.
+- [Using drawbar](https://drawbar.app/docs/drawbar/overview.html): the window,
+  this computer, the instrument and the send queue.
+- [Editing](https://drawbar.app/docs/drawbar/editing.html),
+  [Samples](https://drawbar.app/docs/drawbar/samples.html) and
+  [Pianos](https://drawbar.app/docs/drawbar/pianos.html): the document editors.
+- [Build and run](https://drawbar.app/docs/drawbar/build.html): the native and web
+  builds in full, and browser support.
 
 ## Build and test
 
@@ -39,8 +41,8 @@ cargo run -p drawbar
 cargo test -p drawbar
 ```
 
-`nix build .#drawbar-web` produces the whole servable bundle — the bound wasm
-module beside `index.html` — in one step. The `--target wasm32-unknown-unknown`
+`nix build .#drawbar-web` produces the whole servable bundle, the bound wasm
+module beside `index.html`, in one step. The `--target wasm32-unknown-unknown`
 builds must run from `crates/` or below, because `crates/.cargo/config.toml`
 supplies the `--cfg=web_sys_unstable_apis` that WebUSB needs in `web-sys`.
 

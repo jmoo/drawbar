@@ -86,5 +86,5 @@ Nord hardware, for interoperability.
 [`thiserror`]: https://docs.rs/thiserror
 [`Entity`]: https://docs.rs/nord-format
 [`formats`]: https://docs.rs/nord-format/latest/nord_format/formats/
-[guide]: https://jmoo.github.io/drawbar/docs/reference/file-formats.html
-[testing]: https://jmoo.github.io/drawbar/docs/reference/testing.html
+[guide]: https://drawbar.app/docs/reference/file-formats.html
+[testing]: https://drawbar.app/docs/reference/testing.html

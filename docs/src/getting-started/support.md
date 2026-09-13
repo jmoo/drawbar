@@ -9,7 +9,7 @@ its claim was established with.
 | Electro 5 program, live, song, settings | Decoded and fully supported; values pinned by hardware sweeps |
 | Stage 2, 3 and 4 programs and selected presets | Supported from community documentation and specimen evidence; **not validated on hardware** |
 | Sample instruments (`nsmp`, `nsmp3`, `nsmp4`) | Encoding and decoding of v2/v3/v4; only v2 confirmed with hardware playback |
-| Piano libraries (`npno`) | Rename, retune, remap, trim and split — confirmed on hardware for a dropped bank and dropped velocity layers; renames, retunes, remaps and a narrowed key range are inferred from specimens and have not been played |
+| Piano libraries (`npno`) | Audio decoded; renamed, retuned, remapped, trimmed and split; audio encoded outright, built from WAVs or re-coded. Confirmed on hardware: libraries built or re-coded here play on the instrument, mono and stereo, across every key they cover, and a trimmed library plays with a bank or velocity layers dropped. Renaming, retuning, remapping and a narrowed key range, the split's included, are inferred from specimens and have not been played |
 | Everything else | CBIN tags across the model line, the Lead SysEx/MIDI banks and the `.cn3` Electro 2 library — recognized and carried verbatim without decoding their parameters |
 
 Writable entities round-trip byte-for-byte, verified against a change-one-knob

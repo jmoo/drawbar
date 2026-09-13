@@ -31,11 +31,11 @@ nix run .#drawbar
 nix run .#drawbar-web
 ```
 
-The latest released browser build is published at [jmoo.github.io/drawbar](https://jmoo.github.io/drawbar/),
-with the user guide at [jmoo.github.io/drawbar/docs](https://jmoo.github.io/drawbar/docs/).
+The latest released browser build is published at [drawbar.app](https://drawbar.app/),
+with the user guide at [drawbar.app/docs](https://drawbar.app/docs/).
 `nix build .#docs` builds that guide locally. As well as being a reference implementation, this repo
 documents Nord file structure and protocols: the byte mapping tables are generated from the code and
-browsable in the [rustdoc](https://jmoo.github.io/drawbar/docs/reference/file-formats.html).
+browsable in the [rustdoc](https://docs.rs/nord-format/latest/nord_format/formats/).
 
 ## Status
 
@@ -44,7 +44,7 @@ effort -- protocols and formats are decoded by interaction with real Nord device
 decompiling Clavia software, and hardware validation has focused on the **Electro 5**. Which instruments,
 formats and USB operations are supported, and which claims are confirmed on hardware rather than inferred
 from specimens, is listed under
-[Supported instruments and formats](https://jmoo.github.io/drawbar/docs/getting-started/support.html).
+[Supported instruments and formats](https://drawbar.app/docs/getting-started/support.html).
 
 ## Disclaimer
 

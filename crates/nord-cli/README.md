@@ -16,6 +16,7 @@ nord inspect patch.ne5p                 # readable summary of a file
 nord verify *.ne5p                      # re-encode and check the bytes come back identical
 nord program get 7:4 -o patch.ne5p      # read bank 7 slot 4 off the instrument
 nord program put patch.ne5p 7:4 --yes   # and write one back
+nord piano build strokes/ --name Marimba -o marimba.npno   # a piano library from WAVs
 ```
 
 Slots are written `BANK:SLOT`, the way the instrument and Nord Sound Manager show
@@ -27,7 +28,7 @@ exclusively.
 The guide covers every verb, the file formats, editing fields, and the sample and
 piano libraries:
 
-- [nord-cli guide](https://jmoo.github.io/drawbar/docs/nord-cli/overview.html)
+- [nord-cli guide](https://drawbar.app/docs/nord-cli/overview.html)
 
 ## Build & run
 

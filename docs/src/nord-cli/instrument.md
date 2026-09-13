@@ -78,7 +78,8 @@ Two other guards worth knowing about:
 Writing into an occupied slot is a **delete followed by a write** — the
 instrument refuses to overwrite in place. `nord` reads the occupant first and
 puts it back if the write fails; if the restore fails too, the bytes are written
-to a `nord-rescued-BANK-SLOT.ne5p` in the working directory.
+to a file in the working directory named for the slot and the object's format,
+such as `nord-rescued-7-50.ne5p`, which `put` takes straight back.
 
 `live` and `settings` are the exception: the instrument accepts a write at one of
 their occupied slots, so nothing is deleted to make room. The occupant is still

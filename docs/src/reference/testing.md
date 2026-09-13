@@ -15,7 +15,8 @@ each to run both; the private corpus adds the rest.
 Unit tests live inline (`#[cfg(test)] mod tests`) and run on a plain
 `cargo test`, alongside `tests/dispatch.rs`, which synthesizes a file for
 every registered tag in memory and checks dispatch + round-trip for both
-header generations, and the **specimen sweep**, `tests/corpus`: one generated
+header generations, `tests/stage.rs`, which exercises each decoded Stage body on a
+synthetic specimen, and the **specimen sweep**, `tests/corpus`: one generated
 test per file — container checksum, parse, byte-exact round trip, no
 unnameable decoded values, every registry field set to a new value and read
 back without moving another, and the file's oracle sidecar

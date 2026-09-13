@@ -1,10 +1,12 @@
 # Editing an object
 
 `edit` is the only verb that changes what is *inside* an object, and it exists on
-five nouns: `nord program edit`, `nord live edit` (the live buffer is the
+six nouns: `nord program edit`, `nord live edit` (the live buffer is the
 program body under another tag, so the fields are identical), `nord settings
 edit` (the menu settings, plus the `startup_*` state the instrument restores at
-power-up), `nord setlist edit` (below), and `nord sample edit` (below). For the
+power-up), `nord setlist edit` (below), `nord sample edit` (below), and `nord
+piano edit`, which takes its own flags rather than `--set` and is covered under
+[samples and pianos](libraries.md). For the
 first three the field paths are `nord-format`'s own names, generated from the
 panel declarations, so `--fields` lists whatever the library currently knows:
 
@@ -74,7 +76,7 @@ A set list is the four program slots it points at, so those are its fields:
 ```sh
 nord setlist edit song.ne5t --fields
 nord setlist edit song.ne5t --set slot1=2:5 --set slot4=8:50 -o out.ne5t
-nord setlist edit --set slot1=1:1 -o blank.ne5t     # a fresh set list
+nord setlist edit --set slot1=2:5 -o blank.ne5t     # a fresh set list
 ```
 
 ## `nord sample edit`

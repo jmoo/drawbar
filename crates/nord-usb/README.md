@@ -20,27 +20,30 @@ committed captures with no hardware at all.
 ## Usage
 
 ```rust
-use nord_usb::{op, Location, ObjectClass, Session};
+use nord_usb::{op, Device, Location, ObjectClass};
 use nord_usb::transport::UsbTransport;
 
-let mut transport = UsbTransport::open_first()?;
+let mut device = Device::new(UsbTransport::open_first()?);
 
-// Read-only by default — the type system will not let a mutating op through.
 // `from_user` takes the instrument's own one-indexed numbering: 7:4 on the panel.
-let mut session = Session::open(&mut transport, ObjectClass::Program).await?;
 let at = Location::from_user(7, 4);
-let info = op::info(&mut session, at).await?;
-let file = op::read_program(&mut session, at).await?;
-session.commit().await?;
+
+// `read` hands the chain a read-only session: a mutating op does not type-check.
+let (info, file) = device
+    .read(ObjectClass::Program, async |s| {
+        Ok((op::info(s, at).await?, op::read_program(s, at).await?))
+    })
+    .await?;
 ```
 
-Mutating operations need the capability to be asked for explicitly
-(`session.allow_destructive_writes()`).
+Mutating operations run through `device.destructive(class, …)` instead, whose
+chain is handed a session that can write.
 
-**Always `commit()`, including on the error path.** The closing exchanges are what
-clear the instrument's progress display; abandoning a transaction after a progress
-label has been sent leaves the device stuck until it is power-cycled. `Session`
-carries a `Drop` assertion to catch the mistake in debug builds.
+Both brackets run the closing exchanges whether the chain succeeds or fails. Those
+exchanges are what clear the instrument's progress display; abandoning a
+transaction after a progress label has been sent leaves the device stuck until it
+is power-cycled. A `Session` opened by hand must be `commit()`ed on every path,
+and carries a `Drop` assertion to catch the mistake in debug builds.
 
 ## Build & test
 
@@ -73,5 +76,5 @@ and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
 hardware this protocol belongs to. All reverse engineering is of traffic to and
 from hardware the author owns, for interoperability.
 
-[guide]: https://jmoo.github.io/drawbar/docs/reference/usb-protocol.html
-[testing]: https://jmoo.github.io/drawbar/docs/reference/testing.html
+[guide]: https://drawbar.app/docs/reference/usb-protocol.html
+[testing]: https://drawbar.app/docs/reference/testing.html
