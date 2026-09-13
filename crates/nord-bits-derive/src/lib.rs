@@ -349,9 +349,23 @@ struct Placement {
     nested: bool,
 }
 
+const ONE_PLACEMENT: &str =
+    "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body";
+
+/// The one `#[name]` attribute on `field`; a second is refused rather than dropped
+/// unread, since the expansion reads the first alone.
+fn sole_attr<'a>(field: &'a syn::Field, name: &str) -> syn::Result<Option<&'a syn::Attribute>> {
+    let mut found = field.attrs.iter().filter(|attr| attr.path().is_ident(name));
+    let first = found.next();
+    match found.next() {
+        Some(second) => Err(syn::Error::new_spanned(second, ONE_PLACEMENT)),
+        None => Ok(first),
+    }
+}
+
 fn placement(field: &syn::Field) -> syn::Result<Placement> {
-    let bits = field.attrs.iter().find(|attr| attr.path().is_ident("bits"));
-    let at = field.attrs.iter().find(|attr| attr.path().is_ident("at"));
+    let bits = sole_attr(field, "bits")?;
+    let at = sole_attr(field, "at")?;
     match (bits, at) {
         (Some(attr), None) => {
             let Bits { lo, hi } = attr.parse_args()?;
@@ -378,10 +392,7 @@ fn placement(field: &syn::Field) -> syn::Result<Placement> {
                 nested: true,
             })
         }
-        (Some(_), Some(and)) => Err(syn::Error::new_spanned(
-            and,
-            "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body",
-        )),
+        (Some(_), Some(and)) => Err(syn::Error::new_spanned(and, ONE_PLACEMENT)),
         (None, None) => Err(syn::Error::new_spanned(
             field,
             "every field needs a placement: `#[bits(LO..=HI)]` for a leaf, \
@@ -986,6 +997,44 @@ mod tests {
         assert_eq!(unclaimed(&[(0, 2), (5, 9)], 16), vec![(3, 4), (10, 15)]);
         assert_eq!(unclaimed(&[(0, 7)], 8), vec![]);
         assert_eq!(unclaimed(&[(4, 7)], 8), vec![(0, 3)]);
+    }
+
+    fn refused(len: TokenStream2, body: TokenStream2) -> String {
+        expand(len, body)
+            .expect_err("the body should not expand")
+            .to_string()
+    }
+
+    /// A second placement is refused rather than silently dropped: the field would
+    /// otherwise be decoded from the first range alone.
+    #[test]
+    fn a_field_takes_exactly_one_placement() {
+        let both = quote! {
+            struct Both {
+                #[bits(0..=3)]
+                #[at(0x00..0x01)]
+                a: u8,
+            }
+        };
+        assert!(refused(quote!(1), both).contains("one placement per field"));
+
+        let twice = quote! {
+            struct TwiceBits {
+                #[bits(0..=3)]
+                #[bits(8..=11)]
+                a: u8,
+            }
+        };
+        assert!(refused(quote!(2), twice).contains("one placement per field"));
+
+        let twice_at = quote! {
+            struct TwiceAt {
+                #[at(0x00..0x01)]
+                #[at(0x01..0x02)]
+                child: Child,
+            }
+        };
+        assert!(refused(quote!(2), twice_at).contains("one placement per field"));
     }
 
     #[test]
