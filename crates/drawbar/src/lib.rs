@@ -6,7 +6,6 @@
 
 pub mod app;
 pub mod audio;
-pub mod base64;
 pub mod browser;
 pub mod device;
 pub mod document;

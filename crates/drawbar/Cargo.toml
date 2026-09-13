@@ -17,6 +17,7 @@ name = "drawbar"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 # glow (WebGL2 / OpenGL) rather than the default wgpu backend: it is the smaller
 # wasm module, and the browsers that have WebUSB all have WebGL2.
 eframe = { version = "0.32", default-features = false, features = [

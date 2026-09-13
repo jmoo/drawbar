@@ -6,7 +6,8 @@
 //! those bytes too. It is read back through the same decode-and-verify any file gets,
 //! because bytes off a store deserve no more trust than bytes off a disk.
 
-use crate::base64;
+use base64::prelude::{Engine as _, BASE64_STANDARD};
+
 use crate::log::Log;
 use crate::queue::Queue;
 use crate::workspace::{Origin, Saved, Workspace};
@@ -26,8 +27,11 @@ enum Shape {
 }
 
 impl Shape {
-    /// The shape a version line asks for. A version this build does not know has none,
-    /// and its store is left alone rather than half-read.
+    /// The shape a version line asks for, or `None` for a version this build does not
+    /// know.
+    ///
+    /// ⚠️ An unknown version is not read, and the next [`save`] overwrites it — so
+    /// running an older build discards a store a newer one wrote.
     fn of(version: &str) -> Option<Shape> {
         match version {
             "drawbar 1" => Some(Shape::Four),
@@ -83,7 +87,7 @@ pub fn save(
         // The baseline is what the asset is; the tail is what it holds instead, and only
         // an unsaved asset has one.
         let unsaved = match entity.is_unsaved() {
-            true => format!("\t{}", base64::encode(&entity.bytes)),
+            true => format!("\t{}", BASE64_STANDARD.encode(&entity.bytes)),
             false => String::new(),
         };
         let line = format!(
@@ -91,7 +95,7 @@ pub fn save(
             entity.id,
             origin(&entity.origin),
             escape(&entity.name),
-            base64::encode(&entity.saved.bytes),
+            BASE64_STANDARD.encode(&entity.saved.bytes),
         );
         if out.len() + line.len() > BUDGET {
             dropped += 1;
@@ -130,8 +134,6 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
     };
     let mut lines = text.lines();
     let Some(shape) = lines.next().and_then(Shape::of) else {
-        // A store this build cannot read is left alone rather than half-read: the next
-        // save replaces it.
         log.warn("the saved list is in a format this build does not read");
         return;
     };
@@ -162,10 +164,10 @@ fn entry(line: &str, shape: Shape) -> Option<Saved> {
     let id = parts.next()?.parse().ok()?;
     let origin = unorigin(parts.next()?)?;
     let name = unescape(parts.next()?);
-    let saved = base64::decode(parts.next()?)?;
+    let saved = BASE64_STANDARD.decode(parts.next()?).ok()?;
     let unsaved = match (shape, parts.next()) {
         (_, None) => None,
-        (Shape::Five, Some(text)) => Some(base64::decode(text)?),
+        (Shape::Five, Some(text)) => Some(BASE64_STANDARD.decode(text).ok()?),
         (Shape::Four, Some(_)) => return None,
     };
     Some(Saved {
@@ -479,6 +481,10 @@ mod tests {
             read("7\tfresh\tname\tZm9v\tYmFy").is_some(),
             "saved, and a tail"
         );
+        assert!(
+            read("7\tfresh\tname\tZm9v\tYmFy\tYmFy").is_none(),
+            "a sixth field is not part of the tail"
+        );
         assert!(read("seven\tfresh\tname\tZm9v").is_none(), "no id");
         assert!(read("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
         assert!(read("7\tfresh\tname\t!!!").is_none(), "not base64");
@@ -504,7 +510,7 @@ mod tests {
             KEY,
             format!(
                 "drawbar 1\n8\n7\tfile:Africa Split.ne5p\tAfrica Split.ne5p\t{}\n",
-                base64::encode(&bytes)
+                BASE64_STANDARD.encode(&bytes)
             ),
         );
 
