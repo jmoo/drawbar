@@ -12,16 +12,15 @@
 //!
 //! The body is 23 bytes of globals and then two [`Slot`]s — the program's two
 //! complete setups — so the slot is declared once and placed twice. Registry paths
-//! follow: `slot_a.organ_type`.
+//! follow: `slot_a.organ_volume`.
 //!
 //! Values are raw except where the documentation enumerates them; see [the module
 //! docs](super) for what that ceiling is and why.
 
 use super::slot::Slot;
-use crate::cbin::{self, Cbin, Header};
+use crate::cbin::{self, Cbin};
 use crate::components::{
-    Level, MasterTempo, ProgramCategory, ReverbType, RotorSpeed, Selector, SplitNote,
-    StageTranspose,
+    Level, MasterTempo, MorphOf, ReverbType, RotorSpeed, Selector, SplitNote, StageTranspose,
 };
 use crate::error::Error;
 use std::io::{Read, Seek};
@@ -104,18 +103,18 @@ pub struct Program {
     #[bits(166..=166)]
     pub rotary_speaker_speed: RotorSpeed,
     #[bits(167..=167)]
-    pub rotary_speaker_speed_wheel: bool,
+    pub rotary_speaker_speed_wheel: MorphOf<1>,
     #[bits(168..=168)]
-    pub rotary_speaker_speed_aftertouch: bool,
+    pub rotary_speaker_speed_aftertouch: MorphOf<1>,
     #[bits(169..=169)]
-    pub rotary_speaker_speed_ctrl_pedal: bool,
+    pub rotary_speaker_speed_ctrl_pedal: MorphOf<1>,
 
     /// Slot A — the first of the program's two complete setups.
     #[at(23..272)]
     pub slot_a: Slot,
 
     /// Slot B. Same type: the two are the same layout, and neither is
-    /// a copy of the other — `slot_enabled_and_selection` says which sound.
+    /// a copy of the other — `slot_selection` says which sounds.
     #[at(272..521)]
     pub slot_b: Slot,
 }
@@ -125,13 +124,6 @@ impl Program {
     pub fn split_enabled(&self) -> bool {
         self.split_two_zones || self.split_three_zones
     }
-}
-
-/// The category byte the header's `aux` word carries; the three bytes above it
-/// are zero on every corpus specimen.
-pub fn category(header: &Header) -> ProgramCategory {
-    use crate::bits::Packed;
-    ProgramCategory::from_bits((header.aux & 0xff) as u64).expect("decoding is total")
 }
 
 /// The `(bank, location)` pair from the header, uninterpreted: bank 0..=3,

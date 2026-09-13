@@ -3,10 +3,10 @@
 //! The program body decodes in full, **both panels**. A program is 22 bytes of
 //! globals then two 263-byte panel blocks of the same layout — Panel A and Panel B,
 //! the instrument's two independent setups, each with its own organ, piano, synth,
-//! extern and effects. They are not copies of each other: no corpus program has
-//! them equal, and `panel_enable` selects A, B, or both layered. Panel A's fields
-//! are unprefixed and Panel B's carry `panel_b_`. The synth preset (`ns3y`) is
-//! Panel A's synth block under its own tag. The song and settings are stubs. ⚠️ The extension letters are
+//! extern and effects. They are not copies of each other, `panel_enable` selects
+//! A, B, or both layered, and their fields are reached as `panel_a.*` and
+//! `panel_b.*`. The synth preset (`ns3y`) is Panel A's synth block under its own
+//! tag. The song and settings are stubs. ⚠️ The extension letters are
 //! traps here: `f` is the program, `s` is a *song* (a set list on the Electro 5),
 //! `y` is a synth patch (the *settings* on the Stage 2), and `t` is the settings.
 //!

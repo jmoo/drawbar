@@ -1437,6 +1437,21 @@ sparse_enum!(
     }
 );
 
+impl ProgramCategory {
+    /// The category a Stage 2 or 3 header names, or `None` where the `aux` word carries
+    /// no category id at all or one too wide for this byte-sized table.
+    ///
+    /// The whole id is examined: a value above `0xff` names no category here rather than
+    /// being truncated into one.
+    pub fn of(header: &crate::cbin::Header) -> Option<ProgramCategory> {
+        let id = u8::try_from(header.category()?).ok()?;
+        match Self::from_bits(id as u64) {
+            Ok(category) => Some(category),
+            Err(never) => match never {},
+        }
+    }
+}
+
 sparse_enum!(
     /// From the `ns2-effect-1-type` table in the Stage byte-map docs.
     Effect1Type, 3, {

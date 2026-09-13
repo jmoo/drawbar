@@ -19,6 +19,14 @@ fn location(x: u16, y: u16) -> String {
     format!("bank {} slot {}", x + 1, y + 1)
 }
 
+/// The Stage 2/3 program category, or the `aux` word that names none.
+fn category(header: &nord_format::cbin::Header) -> String {
+    match nord_format::components::ProgramCategory::of(header) {
+        Some(category) => format!("{category:?}"),
+        None => format!("none ({:#010x})", header.aux),
+    }
+}
+
 fn yn(b: bool) -> &'static str {
     if b {
         "yes"
@@ -827,17 +835,10 @@ pub fn print(ui: &Ui, entity: &Entity) {
 
 /// The Stage 2 program-wide globals — the decoded slice of a mostly-raw body.
 fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>) {
-    use nord_format::formats::ns2::program;
-
     ui.out(field(ui, 2, "type", kind));
     let (bank, slot) = p.header.slot();
     ui.out(field(ui, 2, "location", location(bank, slot)));
-    ui.out(field(
-        ui,
-        2,
-        "category",
-        format!("{:?}", program::category(&p.header)),
-    ));
+    ui.out(field(ui, 2, "category", category(&p.header)));
     ui.out(field(ui, 2, "version", p.header.version.to_string()));
 
     section(ui, "Globals");
@@ -867,17 +868,10 @@ fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>
 
 /// The Stage 3 program-wide globals.
 fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>) {
-    use nord_format::formats::ns3::program;
-
     ui.out(field(ui, 2, "type", kind));
     let (bank, slot) = p.header.slot();
     ui.out(field(ui, 2, "location", location(bank, slot)));
-    ui.out(field(
-        ui,
-        2,
-        "category",
-        format!("{:?}", program::category(&p.header)),
-    ));
+    ui.out(field(ui, 2, "category", category(&p.header)));
     ui.out(field(ui, 2, "version", version_label(p.header.version)));
 
     section(ui, "Globals");
