@@ -86,32 +86,43 @@ pub(crate) fn known_version(
     }
 }
 
-/// One ZIP member, allocated from the length its directory entry declares.
+/// One ZIP member, read under the length its directory entry declares.
 ///
 /// ⚠️ A member's decompressed length is the archive author's choice, not the
-/// archive's size: reading to the end would let a small archive expand until the
-/// allocator aborts. An entry that yields a byte past its declared length is
-/// refused rather than grown into.
+/// archive's size: memory follows the bytes the entry yields, capped by the
+/// declaration, so neither the declaration nor the entry alone sizes an
+/// allocation. An entry yielding a length other than the one it declares is
+/// refused.
 #[cfg(feature = "bundle")]
 pub(crate) fn zip_member_bytes(file: &mut zip::read::ZipFile<'_>) -> Result<Vec<u8>, Error> {
+    use std::cmp::Ordering;
     use std::io::Read;
 
-    let declared = file.size();
-    let len = usize::try_from(declared).map_err(|_| ParseError::OutOfBounds {
-        value: format!("{declared} member bytes"),
-        bound: "a length that fits this platform's usize".into(),
-    })?;
-    let mut bytes = crate::error::try_vec(len)?;
-    file.read_exact(&mut bytes)?;
-    let mut past_the_end = [0u8; 1];
-    if file.read(&mut past_the_end)? != 0 {
-        return Err(ParseError::OutOfBounds {
-            value: format!("a member yielding more than the {declared} bytes it declares"),
+    let refuse = |value: String| -> Error {
+        ParseError::OutOfBounds {
+            value,
             bound: "the length its directory entry declares".into(),
         }
-        .into());
+        .into()
+    };
+
+    let declared = file.size();
+    let one_past_declared = declared
+        .checked_add(1)
+        .ok_or_else(|| refuse(format!("a member declaring {declared} bytes")))?;
+    let mut bytes = Vec::new();
+    file.take(one_past_declared).read_to_end(&mut bytes)?;
+
+    let yielded = bytes.len() as u64;
+    match yielded.cmp(&declared) {
+        Ordering::Greater => Err(refuse(format!(
+            "a member yielding more than the {declared} bytes it declares"
+        ))),
+        Ordering::Less => Err(refuse(format!(
+            "a member yielding {yielded} of the {declared} bytes it declares"
+        ))),
+        Ordering::Equal => Ok(bytes),
     }
-    Ok(bytes)
 }
 
 /// Every member of a ZIP archive, each parsed as a CBIN file of `format`.
@@ -174,8 +185,8 @@ mod tests {
 
     /// A one-member stored archive whose headers declare `declared` uncompressed
     /// bytes while the entry still holds all of [`MEMBER`]: `zip` caps a stored
-    /// read at the *compressed* size, so understating only the uncompressed size
-    /// leaves an entry that yields more than it declares.
+    /// read at the *compressed* size, so patching only the uncompressed size
+    /// leaves an entry that yields a length other than the one it declares.
     fn archive_declaring(declared: u32) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         writer
@@ -220,6 +231,32 @@ mod tests {
             err.to_string()
                 .contains("more than the 15 bytes it declares"),
             "expected a refusal naming the declared length, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_member_yielding_fewer_bytes_than_it_declares_is_refused() {
+        let archive = archive_declaring(MEMBER.len() as u32 + 1);
+        let err = member_bytes(&archive).unwrap_err();
+        assert!(
+            err.to_string().contains("16 of the 17 bytes it declares"),
+            "expected a refusal naming both lengths, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_member_declaring_more_than_the_archive_holds_is_refused() {
+        let archive = archive_declaring(64 * 1024 * 1024);
+        assert!(
+            archive.len() < 1024,
+            "a declaration of 64 MiB should sit in a tiny archive, which is {} bytes",
+            archive.len()
+        );
+        let err = member_bytes(&archive).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("16 of the 67108864 bytes it declares"),
+            "expected a refusal naming the bytes the member yielded, got {err}"
         );
     }
 }
