@@ -1104,7 +1104,8 @@ fn one(
                 if let Some(value) = control(ui, drawn, &legal, rows, named) {
                     sets.push((drawn.path.clone(), value));
                 }
-                caption(ui, part.field, state.pending.contains(&part.field.path));
+                // The name is the parameter's; the dot is the slot the cell writes.
+                caption(ui, part.field, state.pending.contains(&drawn.path));
                 if state.lens.is_none() {
                     dots(ui, &part.morphs);
                 }
@@ -1608,11 +1609,17 @@ fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets:
                         if let Some(value) = plain(ui, target, &legal) {
                             sets.push((target.path.clone(), value));
                         }
-                        ui.label(
-                            egui::RichText::new(format!("bar {}", nth + 1))
-                                .font(egui::FontId::proportional(LABEL))
-                                .color(ui.visuals().weak_text_color()),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if state.pending.contains(&target.path) {
+                                app::dot(ui, app::warn(ui.visuals()), DOT);
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("bar {}", nth + 1))
+                                    .font(egui::FontId::proportional(LABEL))
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        });
                     });
                 })
                 .response;
