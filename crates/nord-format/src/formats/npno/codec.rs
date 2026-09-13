@@ -178,8 +178,16 @@ pub(super) fn binomial(n: usize, k: usize) -> i64 {
 
 /// Decode one stroke, checking the block overlap and the record's frame count.
 ///
-/// `channels` is the library's, and `stroke.audio()` must be the whole span.
+/// `channels` is the library's — 1 or 2, and any other count is refused — and
+/// `stroke.audio()` must be the whole span.
 pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
+    if !(1..=2).contains(&channels) {
+        return Err(ParseError::OutOfBounds {
+            value: format!("{channels} channels"),
+            bound: "1 or 2, which is what a library states".into(),
+        }
+        .into());
+    }
     let channels = usize::from(channels);
     let block_bytes = BLOCK_WORDS * 2 * channels;
     let audio = stroke.audio();
@@ -197,6 +205,15 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
         value: format!("{} frames", stroke.frames()),
         bound: "a frame count that fits this platform's address space".into(),
     })?;
+    // The narrowest field a header can declare is the longest block, so this is the
+    // most frames the span can own whatever its headers say.
+    let most = blocks * (block_frames(MIN_WIDTH, block_bytes, channels) - OVERLAP);
+    if frames > most {
+        return Err(ParseError::AssertFail(format!(
+            "the blocks own at most {most} frames where the record states {frames}"
+        ))
+        .into());
+    }
     let mut out: Vec<Vec<i16>> = Vec::with_capacity(channels);
     for _ in 0..channels {
         let mut channel = Vec::new();
@@ -435,6 +452,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("the record states 7"), "{error}");
+    }
+
+    /// The record states its frame count in bytes the file carries, so the blocks the
+    /// stroke holds bound it before anything is reserved to hold them.
+    #[test]
+    fn a_frame_count_larger_than_the_blocks_can_hold_is_refused_before_reserving() {
+        let audio = block(8, 0, 1, &[0i32; 16]);
+        let error = decode(&stroke(&audio, u32::MAX, 1, [0; 4]), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the blocks own at most"), "{error}");
+        assert!(
+            error.contains(&format!("the record states {}", u32::MAX)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_channel_count_no_library_states_is_refused() {
+        let audio = block(8, 0, 1, &[0i32; 16]);
+        let error = decode(&stroke(&audio, 1, 1, [0; 4]), 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 or 2"), "{error}");
     }
 
     #[test]
