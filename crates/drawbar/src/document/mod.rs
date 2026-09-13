@@ -896,34 +896,35 @@ impl Document {
         let Some(entity) = workspace.get(id) else {
             return Ok(());
         };
-        let bytes = entity.bytes.clone();
-        let result = match shape(entity) {
-            Shape::Sample => sample::apply(&bytes, &sets),
-            Shape::Project => project::apply(&bytes, &sets),
+        // ⚠️ Over the asset's own bytes, never a copy of them. A piano library is
+        // hundreds of megabytes and every set of every frame comes through here; the
+        // piano arm makes no bytes at all, because its sets land in a plan.
+        let made = match shape(entity) {
+            Shape::Sample => sample::apply(&entity.bytes, &sets).map(Some),
+            Shape::Project => project::apply(&entity.bytes, &sets).map(Some),
             // A piano's sets land in its plan, and the plan is what makes its bytes —
             // see [`Document::replan`].
-            Shape::Piano => self.piano.take(&sets).map(|()| bytes.clone()),
-            Shape::SetList => setlist::apply(&bytes, &sets),
+            Shape::Piano => self.piano.take(&sets).map(|()| None),
+            Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
             Shape::Fields | Shape::Verbatim | Shape::Wav | Shape::Undecoded => {
-                fields::apply(&bytes, &sets).map(|(_, out)| out)
+                fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
             }
         };
-        match result {
-            Ok(out) if out == bytes => {
-                self.error = None;
-                Ok(())
-            }
-            Ok(out) => {
-                self.error = None;
-                workspace.replace_bytes(id, out, log);
-                Ok(())
-            }
+        let made = match made {
+            Ok(made) => made,
             Err(why) => {
                 log.error(why.clone());
                 self.error = Some(why.clone());
-                Err(why)
+                return Err(why);
             }
+        };
+        self.error = None;
+        // Bytes that did not move are not a new set of bytes, which `replace_bytes` is
+        // what decides — and that is the one comparison of two bodies there is.
+        if let Some(out) = made {
+            workspace.replace_bytes(id, out, log);
         }
+        Ok(())
     }
 }
 
@@ -1974,6 +1975,40 @@ mod tests {
         assert!(taken.is_ok());
         document.advanced.settled(taken);
         assert!(document.error.is_none());
+    }
+
+    /// A set that spells a field the way it is already spelled is not an edit: the
+    /// asset keeps the bytes it had, and the stamp anything cached over them answers to.
+    #[test]
+    fn a_set_that_leaves_the_bytes_alone_is_not_an_edit() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut document = Document::default();
+        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
+
+        let entity = workspace.get(id).expect("it is open");
+        let (stamp, bytes) = (entity.stamp, entity.bytes.clone());
+        let held = fields::apply(&bytes, &[]).expect("it decodes").0;
+        let gain = held
+            .iter()
+            .find(|field| field.path == "center_panel.gain")
+            .expect("a gain field")
+            .value
+            .clone();
+
+        let outcome = document.apply(
+            id,
+            vec![("center_panel.gain".into(), gain)],
+            &mut workspace,
+            &mut log,
+        );
+        assert!(outcome.is_ok(), "{outcome:?}");
+
+        let entity = workspace.get(id).expect("it is open");
+        assert_eq!(entity.bytes, bytes);
+        assert_eq!(entity.stamp, stamp, "nothing new landed under this id");
+        assert!(!entity.is_unsaved());
     }
 
     /// ⚠️ The strip and the body are two scroll regions in one `Ui`. While they shared
