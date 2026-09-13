@@ -397,7 +397,7 @@ fn decode_target(
     let bytes = read(&origin).map_err(|e| format!("{spec}: {e}"))?;
     let body = body(&bytes).map_err(|e| format!("{spec}: {e}"))?;
     let stem = stem(&origin, &body);
-    let layout = body.layout();
+    let layout = body.layout().map_err(|e| e.to_string())?;
 
     for (index, zone) in body.zones().map_err(|e| e.to_string())?.iter().enumerate() {
         coverage.zones += 1;
@@ -1074,7 +1074,7 @@ fn deep(bytes: &[u8]) -> Result<String, String> {
 }
 
 fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
-    let layout = body.layout();
+    let layout = body.layout().map_err(|e| e.to_string())?;
     let chain = body.chain().map_err(|e| e.to_string())?;
     let streams = body.stroke_streams();
     let mut records = 0usize;

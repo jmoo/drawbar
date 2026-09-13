@@ -28,7 +28,8 @@ fn sample_streams() -> impl Iterator<
             }
             Entity::Sample(Sample::V3(sample)) => Some((
                 specimen,
-                nsmp::codec::Layout::from_version(sample.header.version),
+                nsmp::codec::Layout::from_version(sample.header.version)
+                    .expect("a corpus specimen states a content version the codec models"),
                 sample.stroke_streams(),
             )),
             _ => None,

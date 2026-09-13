@@ -866,7 +866,7 @@ fn audio(bytes: &[u8]) -> Vec<Vec<i16>> {
     let Entity::Sample(sample) = &entity else {
         panic!("not a sample instrument");
     };
-    let layout = sample.layout();
+    let layout = sample.layout().unwrap();
     sample
         .zones()
         .unwrap()
@@ -1425,7 +1425,7 @@ fn wide_twin(path: &std::path::Path) -> Option<&'static nord_format::cbin::Cbin<
 
 /// The gain the stroke `id` names was built from, read off a wide render's decibel.
 fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
-    let layout = nsmp::codec::Layout::from_version(wide.header.version);
+    let layout = nsmp::codec::Layout::from_version(wide.header.version)?;
     let (_, stroke) = wide
         .stroke_streams()
         .into_iter()
@@ -1455,7 +1455,8 @@ fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
         {
             continue;
         }
-        let layout = nsmp::codec::Layout::from_version(sample.header.version);
+        let layout = nsmp::codec::Layout::from_version(sample.header.version)
+            .expect("a corpus specimen states a content version the codec models");
         let streams = sample.stroke_streams();
         let peak = streams
             .iter()

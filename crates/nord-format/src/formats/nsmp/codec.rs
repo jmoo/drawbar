@@ -57,13 +57,20 @@ pub enum Layout {
     V4,
 }
 
+/// The content version at which the wide chain passes the generations this codec
+/// describes. A version at or above it has unknown stream units, so it is refused
+/// rather than decoded as [`Layout::V4`].
+pub const V5_FROM_VERSION: u32 = 500;
+
 impl Layout {
-    /// The layout implied by a `format × 100 + revision` content version.
-    pub fn from_version(version: u32) -> Layout {
+    /// The layout implied by a `format × 100 + revision` content version, or `None`
+    /// for a version at or above [`V5_FROM_VERSION`].
+    pub fn from_version(version: u32) -> Option<Layout> {
         match version {
-            v if v >= super::V4_FROM_VERSION => Layout::V4,
-            v if v >= super::V3_FROM_VERSION => Layout::V3,
-            _ => Layout::V2,
+            v if v >= V5_FROM_VERSION => None,
+            v if v >= super::V4_FROM_VERSION => Some(Layout::V4),
+            v if v >= super::V3_FROM_VERSION => Some(Layout::V3),
+            _ => Some(Layout::V2),
         }
     }
 
@@ -1337,12 +1344,25 @@ mod tests {
 
     #[test]
     fn the_layout_follows_the_content_version() {
-        assert_eq!(Layout::from_version(8), Layout::V2);
-        assert_eq!(Layout::from_version(200), Layout::V2);
-        assert_eq!(Layout::from_version(300), Layout::V3);
-        assert_eq!(Layout::from_version(310), Layout::V3);
-        assert_eq!(Layout::from_version(400), Layout::V4);
-        assert_eq!(Layout::from_version(420), Layout::V4);
+        assert_eq!(Layout::from_version(8), Some(Layout::V2));
+        assert_eq!(Layout::from_version(200), Some(Layout::V2));
+        assert_eq!(Layout::from_version(300), Some(Layout::V3));
+        assert_eq!(Layout::from_version(310), Some(Layout::V3));
+        assert_eq!(Layout::from_version(400), Some(Layout::V4));
+        assert_eq!(Layout::from_version(420), Some(Layout::V4));
+    }
+
+    /// A generation past the last one modelled has unknown stream units, so it is
+    /// refused rather than decoded as the newest one known.
+    #[test]
+    fn a_content_version_past_the_last_modelled_generation_is_refused() {
+        assert_eq!(
+            Layout::from_version(V5_FROM_VERSION - 1),
+            Some(Layout::V4),
+            "the ceiling is exclusive"
+        );
+        assert_eq!(Layout::from_version(V5_FROM_VERSION), None);
+        assert_eq!(Layout::from_version(u32::MAX), None);
     }
 
     #[test]

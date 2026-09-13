@@ -3949,7 +3949,7 @@ mod tests {
                 panic!("{layout:?} did not read back as a sample");
             };
             assert_eq!(read.name().unwrap(), "Encoded", "{layout:?}");
-            assert_eq!(read.layout(), layout, "{layout:?}");
+            assert_eq!(read.layout().unwrap(), layout, "{layout:?}");
             assert_eq!(read.to_bytes().unwrap(), bytes, "{layout:?}");
             let crate::Sample::V3(read) = &read else {
                 panic!("{layout:?} did not read back on the wide chain");

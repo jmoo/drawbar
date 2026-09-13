@@ -414,7 +414,7 @@ impl Cache {
 
 fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
     let sample = sample(entity).ok_or("this is not a sample instrument")?;
-    let layout = sample.layout();
+    let layout = sample.layout().map_err(|e| e.to_string())?;
     let zones = sample.zones().map_err(|e| e.to_string())?;
     let zone = zones
         .get(index)

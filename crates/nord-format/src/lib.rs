@@ -287,11 +287,21 @@ impl Sample {
         }
     }
 
-    /// Which generation's units this body's stroke streams are in.
-    pub fn layout(&self) -> nsmp::codec::Layout {
+    /// Which generation's units this body's stroke streams are in. A content version
+    /// past the generations the codec describes is refused rather than guessed at.
+    pub fn layout(&self) -> Result<nsmp::codec::Layout, Error> {
         match self {
-            Sample::V2(_) => nsmp::codec::Layout::V2,
-            Sample::V3(s) => nsmp::codec::Layout::from_version(s.header.version),
+            Sample::V2(_) => Ok(nsmp::codec::Layout::V2),
+            Sample::V3(s) => nsmp::codec::Layout::from_version(s.header.version).ok_or_else(|| {
+                ParseError::OutOfBounds {
+                    value: format!("content version {}", s.header.version),
+                    bound: format!(
+                        "the generations this codec describes, below {}",
+                        nsmp::codec::V5_FROM_VERSION
+                    ),
+                }
+                .into()
+            }),
         }
     }
 
@@ -300,7 +310,7 @@ impl Sample {
     pub fn generation(&self) -> &'static str {
         match self {
             Sample::V2(_) => "v2",
-            Sample::V3(s) if s.header.version >= 400 => "v4",
+            Sample::V3(s) if s.header.version >= nsmp::V4_FROM_VERSION => "v4",
             Sample::V3(_) => "v3",
         }
     }
