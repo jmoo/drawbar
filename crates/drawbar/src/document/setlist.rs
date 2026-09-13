@@ -135,9 +135,12 @@ impl Stands {
         }
     }
 
-    fn ink(&self, visuals: &egui::Visuals) -> egui::Color32 {
+    /// The colour this state wears. `resolved` is what an entry that resolves takes:
+    /// the good ink where the state is spelled out, the accent on the disc that stands
+    /// for the program itself.
+    fn ink(&self, visuals: &egui::Visuals, resolved: egui::Color32) -> egui::Color32 {
         match self {
-            Stands::Resolves => app::good(visuals),
+            Stands::Resolves => resolved,
             Stands::Vacant | Stands::Needs { .. } => app::warn(visuals),
             Stands::Unread => app::caption(visuals),
         }
@@ -305,7 +308,9 @@ pub fn claim(entity: &Entity, seen: &Catalogue<'_>) -> Option<super::StateLine> 
     (ink == super::Ink::Warn).then(|| super::StateLine {
         words,
         ink,
-        hint: "an entry names a program the instrument does not have where it says".to_string(),
+        hint: "an entry points at a slot with no program, or at a program playing a \
+               library the instrument has not named"
+            .to_string(),
     })
 }
 
@@ -483,11 +488,7 @@ fn entry(
         ui,
         Glyph::Disc3,
         cell_rect(cells[2], rect, GLYPH),
-        match row.stands {
-            Stands::Resolves => app::accent(&visuals),
-            Stands::Vacant | Stands::Needs { .. } => app::warn(&visuals),
-            Stands::Unread => quiet,
-        },
+        row.stands.ink(&visuals, app::accent(&visuals)),
     );
     plays_cell(ui, cells[3], rect, row);
     address(ui, state, index, row, cells[4], rect, sets);
@@ -675,7 +676,7 @@ fn state_cell(
     rect: egui::Rect,
     row: &Row,
 ) {
-    let ink = row.stands.ink(ui.visuals());
+    let ink = row.stands.ink(ui.visuals(), app::good(ui.visuals()));
     painted(
         ui,
         row.stands.glyph(),
@@ -1182,6 +1183,39 @@ mod tests {
                 .iter()
                 .any(|word| word.ends_with("Reordering rewrites every slot below the move.")),
             "the sentence says what the drag did"
+        );
+    }
+
+    /// ⚠️ The reading counts two states, and the claim on the header stands for both of
+    /// them: a slot the instrument has read and found empty, and a program here playing
+    /// a library nothing has named.
+    #[test]
+    fn the_header_claim_speaks_for_both_of_the_states_it_counts() {
+        let mut shown = Shown::new();
+        shown
+            .device
+            .pretend_scanned(ObjectClass::Program, 1, &["Africa Split", ""]);
+        let entity = shown.workspace.get(shown.id).expect("it is still open");
+        let seen = Catalogue {
+            device: &shown.device.state,
+            workspace: &shown.workspace,
+        };
+        let claim = claim(
+            entity.entity.as_ref().expect("a set list decodes"),
+            &seen,
+        )
+        .expect("a vacant slot is trouble");
+
+        assert_eq!(claim.words, "1 entry needs attention");
+        assert!(
+            claim.hint.contains("no program"),
+            "the vacant slot: {}",
+            claim.hint
+        );
+        assert!(
+            claim.hint.contains("has not named"),
+            "the unnamed library: {}",
+            claim.hint
         );
     }
 
