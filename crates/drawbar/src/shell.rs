@@ -577,7 +577,10 @@ impl DrawbarApp {
         if hit(&key::DOCK) {
             acts.push(Act::ToggleDock(Dock::Bottom));
         }
-        if self.attached() && hit(&key::QUEUE) {
+        // ⚠️ Consumed whether or not one is attached, and before ⌘S below. egui matches a
+        // shortcut's modifiers logically, so an unconsumed ⌘⇧S goes on to match ⌘S — and
+        // saving is what asking for the queue would have done instead.
+        if hit(&key::QUEUE) && self.attached() {
             acts.push(Act::ShowPage(Page::Queue));
         }
         if self.attached() && hit(&key::RESYNC) {
@@ -1380,6 +1383,50 @@ mod tests {
         app.tabs.show(Spot::Document(id));
         let _ = drawn(&ctx, &mut app);
         assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
+    }
+
+    /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
+    /// a ⌘⇧S nothing consumed goes on to match ⌘S. The gesture that asks to review the
+    /// send queue would then mark the open document saved instead, taking the revert it
+    /// still had with it.
+    #[test]
+    fn the_send_queue_shortcut_never_falls_through_to_save() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.tabs.open(id);
+        assert!(app.workspace.get(id).unwrap().is_unsaved());
+
+        let pressed = || egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+        };
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(!app.attached(), "nothing was attached");
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "there is no queue to review, and there is no save either"
+        );
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        assert!(app.shell.dock_open && app.shell.page == Page::Queue);
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "reviewing the queue is not saving"
+        );
     }
 
     /// What was collapsed comes back collapsed in the next session's window.
