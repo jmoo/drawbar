@@ -133,20 +133,28 @@ fn run(timer: &'static Timer) {
     }
 }
 
+/// `at` plus as much of `limit` as this platform's clock can represent.
+///
+/// A limit too large to add is a caller asking not to be interrupted, so it is clamped
+/// to the furthest deadline rather than refused or panicked on.
+fn deadline(at: Instant, limit: Duration) -> Instant {
+    let mut limit = limit;
+    loop {
+        if let Some(deadline) = at.checked_add(limit) {
+            return deadline;
+        }
+        limit /= 2;
+    }
+}
+
 /// Run `future` to completion, returning `None` when `limit` passes first.
 ///
 /// Dropping an I/O future does not necessarily cancel work already submitted to
 /// the operating system. Transport implementations must cancel that work before
 /// issuing another request.
-///
-/// # Panics
-///
-/// Panics when `limit` cannot be represented as a deadline from the current instant.
 pub async fn with_timeout<F: Future>(future: F, limit: Duration) -> Option<F::Output> {
     let mut future = Box::pin(future);
-    let deadline = Instant::now()
-        .checked_add(limit)
-        .expect("deadline overflow: limit cannot be represented from the current instant");
+    let deadline = deadline(Instant::now(), limit);
     let mut registration: Option<Registration> = None;
 
     poll_fn(move |cx| {
@@ -186,12 +194,20 @@ mod tests {
         assert_eq!(got, None);
     }
 
+    /// `nord --wait 18446744073709551615` reaches this. A limit no clock can add is a
+    /// caller asking not to be interrupted, and must not take the process down.
     #[test]
-    fn an_unrepresentable_deadline_panics() {
-        let result = std::panic::catch_unwind(|| {
-            pollster::block_on(with_timeout(async {}, Duration::MAX));
-        });
-        assert!(result.is_err());
+    fn a_limit_too_large_to_represent_becomes_the_furthest_deadline() {
+        let now = Instant::now();
+        let at = deadline(now, Duration::MAX);
+        assert!(
+            at.saturating_duration_since(now) > Duration::from_secs(365 * 24 * 60 * 60),
+            "a clamped deadline must still be further off than any transfer"
+        );
+        assert_eq!(
+            pollster::block_on(with_timeout(async { 7 }, Duration::MAX)),
+            Some(7)
+        );
     }
 
     #[test]
