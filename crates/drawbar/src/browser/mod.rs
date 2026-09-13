@@ -271,8 +271,9 @@ impl Browser {
     /// What the drag rules need to know about a row, or nothing for a row that is never
     /// dragged — wherever the row was drawn, the tree or the library's table.
     ///
-    /// ⚠️ A slot of a partition this app cannot name is not something a drag can pick up
-    /// and copy back: nothing here knows what it holds.
+    /// ⚠️ Neither a slot of a partition this app cannot name nor one the scan found
+    /// vacant is something a drag can pick up and copy back: neither holds anything this
+    /// app could ask the instrument for.
     pub(crate) fn held(
         &self,
         item: Item,
@@ -291,7 +292,9 @@ impl Browser {
             }
             Item::Folder(_) | Item::Tag(_) => None,
             // What is already on the instrument fits it by having got there.
-            Item::Slot { class, .. } => (!read_only(class)).then_some(Held {
+            Item::Slot { class, at } => (!read_only(class)
+                && device.slot(class, at).flatten().is_some())
+            .then_some(Held {
                 what: item,
                 kind: Kind::from_class(class),
                 filed: None,
@@ -559,7 +562,7 @@ impl Browser {
             });
             return;
         }
-        let wanted = bulk(action, checked);
+        let wanted = bulk(action, checked, state);
         // ⚠️ Only a queue asks the instrument's opinion. Everything else here happens on
         // this computer, where a file that is another instrument's is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
@@ -755,6 +758,33 @@ mod tests {
         let alone = browser.carrying(outside, "Squabble B", &workspace, &device.state);
         assert!(alone.rest.is_empty(), "a row nobody picked carries itself");
         assert_eq!(alone.name, "Squabble B", "and says only its own name");
+    }
+
+    /// ⚠️ A slot the walk found vacant holds nothing to pick up. Carried with the rest of
+    /// a selection it would become a copy the instrument is asked for, and a read of what
+    /// is not there costs a round trip that can only end in an error.
+    #[test]
+    fn an_empty_slot_is_not_something_a_drag_carries() {
+        let (mut browser, workspace, mut device, _tabs, _queue, _log) = bench();
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
+        let slot = |slot| Item::Slot {
+            class: ObjectClass::Program,
+            at: Location { bank: 6, slot },
+        };
+
+        let held = browser
+            .held(slot(0), &workspace, &device.state)
+            .expect("7:1 holds something");
+        assert!(
+            browser.held(slot(1), &workspace, &device.state).is_none(),
+            "7:2 was read and found empty"
+        );
+
+        browser.selection.toggle(slot(0));
+        browser.selection.toggle(slot(1));
+        let carried = browser.carrying(held, "Africa Split", &workspace, &device.state);
+        assert!(carried.rest.is_empty(), "the empty slot stays where it is");
+        assert_eq!(carried.name, "Africa Split", "and the ghost counts nothing");
     }
 
     /// ⚠️ The rest of the selection follows only where the drop is one act repeated.

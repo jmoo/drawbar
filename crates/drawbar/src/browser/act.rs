@@ -249,7 +249,7 @@ pub fn fits(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Fit
 ///
 /// [`Bulk::Tag`] answers with the ids a tag would hang on rather than with acts: which
 /// tag is picked from a menu of its own, and only then is there an act.
-pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
+pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
     match action {
         Bulk::Queue => match checked
             .iter()
@@ -263,7 +263,8 @@ pub fn bulk(action: Bulk, checked: &[Item]) -> Vec<Act> {
         Bulk::Copy => checked
             .iter()
             .filter_map(|item| match item {
-                Item::Slot { class, at } => Some(Act::Copy {
+                // A slot the scan found vacant holds nothing to ask the instrument for.
+                Item::Slot { class, at } => state.slot(*class, *at).flatten().map(|_| Act::Copy {
                     class: *class,
                     at: *at,
                 }),
@@ -1003,30 +1004,34 @@ mod tests {
     /// instrument's, and deleting reaches all of it.
     #[test]
     fn each_action_over_a_checked_set_asks_only_about_the_rows_it_is_for() {
+        let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        device.pretend_scanned(ObjectClass::SetList, 7, &["", "", "", "Sunday"]);
+        let state = &device.state;
         let checked = checked();
 
-        let queued = bulk(Bulk::Queue, &checked);
+        let queued = bulk(Bulk::Queue, &checked, state);
         assert!(
             matches!(queued.as_slice(), [Act::SendChecked(ids)] if *ids == vec![1, 2]),
             "one queueing, over this computer's rows"
         );
-        assert_eq!(bulk(Bulk::Copy, &checked).len(), 2, "one per slot");
-        assert!(bulk(Bulk::Copy, &checked)
+        assert_eq!(bulk(Bulk::Copy, &checked, state).len(), 2, "one per slot");
+        assert!(bulk(Bulk::Copy, &checked, state)
             .iter()
             .all(|act| matches!(act, Act::Copy { .. })));
         assert!(
             matches!(
-                bulk(Bulk::Export, &checked).as_slice(),
+                bulk(Bulk::Export, &checked, state).as_slice(),
                 [Act::Export(1), Act::Export(2)]
             ),
             "one export per asset on this computer"
         );
         assert!(
-            bulk(Bulk::Tag, &checked).is_empty(),
+            bulk(Bulk::Tag, &checked, state).is_empty(),
             "a tag is picked first"
         );
         assert!(matches!(
-            bulk(Bulk::Delete, &checked).as_slice(),
+            bulk(Bulk::Delete, &checked, state).as_slice(),
             [
                 Act::Remove(1),
                 Act::Remove(2),
@@ -1038,17 +1043,31 @@ mod tests {
 
     /// A control the checked set gives nothing to do is a control that is offered dead,
     /// which is what an empty answer says.
+    ///
+    /// ⚠️ A slot the walk found vacant is one of those: asking the instrument for what is
+    /// not there costs a round trip that can only end in an error.
     #[test]
     fn an_action_with_nothing_to_act_on_asks_for_nothing() {
+        let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
+        let state = &device.state;
         let slots = vec![Item::Slot {
             class: ObjectClass::Program,
             at: at(0),
         }];
+        let vacant = vec![Item::Slot {
+            class: ObjectClass::Program,
+            at: at(1),
+        }];
         let locals = vec![Item::Local(1)];
-        assert!(bulk(Bulk::Queue, &slots).is_empty());
-        assert!(bulk(Bulk::Export, &slots).is_empty());
-        assert!(bulk(Bulk::Copy, &locals).is_empty());
-        assert!(bulk(Bulk::Delete, &[]).is_empty());
+        assert!(bulk(Bulk::Queue, &slots, state).is_empty());
+        assert!(bulk(Bulk::Export, &slots, state).is_empty());
+        assert!(bulk(Bulk::Copy, &locals, state).is_empty());
+        assert!(bulk(Bulk::Delete, &[], state).is_empty());
+        assert!(
+            bulk(Bulk::Copy, &vacant, state).is_empty(),
+            "7:2 was read and found empty"
+        );
     }
 
     /// Queueing a checked set puts each of them where it is bound: the slot it is owed
@@ -1089,6 +1108,7 @@ mod tests {
             bulk(
                 Bulk::Queue,
                 &[Item::Local(owed), Item::Local(opened), Item::Local(nowhere)],
+                &device.state,
             ),
             &mut workspace,
             &mut device,
@@ -1154,6 +1174,7 @@ mod tests {
                     .copied()
                     .map(Item::Local)
                     .collect::<Vec<_>>(),
+                &device.state,
             ),
             &mut workspace,
             &mut device,
@@ -1201,7 +1222,11 @@ mod tests {
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &[Item::Local(mine), Item::Local(stage)]),
+            bulk(
+                Bulk::Queue,
+                &[Item::Local(mine), Item::Local(stage)],
+                &device.state,
+            ),
             &mut workspace,
             &mut device,
             &mut tabs,
@@ -1345,6 +1370,11 @@ mod tests {
             })
             .collect();
 
+        let queueing = bulk(
+            Bulk::Queue,
+            &ids.iter().copied().map(Item::Local).collect::<Vec<_>>(),
+            &device.state,
+        );
         let mut run = |acts, queue: &mut Queue, workspace: &mut Workspace| {
             apply(
                 &mut browser,
@@ -1357,14 +1387,7 @@ mod tests {
                 &mut log,
             )
         };
-        run(
-            bulk(
-                Bulk::Queue,
-                &ids.iter().copied().map(Item::Local).collect::<Vec<_>>(),
-            ),
-            &mut queue,
-            &mut workspace,
-        );
+        run(queueing, &mut queue, &mut workspace);
         assert_eq!(queue.ids(), ids);
 
         run(vec![Act::Unqueue(ids[1])], &mut queue, &mut workspace);
@@ -1439,7 +1462,7 @@ mod tests {
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &[Item::Local(id)]),
+            bulk(Bulk::Queue, &[Item::Local(id)], &device.state),
             &mut workspace,
             &mut device,
             &mut tabs,
@@ -1850,7 +1873,7 @@ mod tests {
         apply(
             &mut browser,
             &mut Shell::default(),
-            bulk(Bulk::Queue, &members),
+            bulk(Bulk::Queue, &members, &device.state),
             &mut workspace,
             &mut device,
             &mut tabs,
