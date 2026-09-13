@@ -173,6 +173,30 @@ intentional contract change. Test names state behavior. Assertions report the
 relevant value and location. Helpers clarify setup but must not hide the claim.
 Tests do not need comments that repeat those three things.
 
+## Documentation
+
+`docs/` is the user guide and the READMEs are shop windows. A pull request that
+changes what a user sees, or adds a feature, updates both in the same change.
+Review the pages that describe the touched behavior even when nothing seems to
+need editing; stale text is a bug.
+
+- Write for the reader in front of the page. The drawbar and nord-cli sections
+  are for people using the app or the command. Engineering detail belongs in
+  Reference, and format or protocol evidence in the code's own documentation.
+- Describe the current state. Readers do not need a feature's history, the
+  designs that were rejected, or the count of specimens behind a claim.
+- State each claim once, where it belongs. Instrument support and hardware
+  qualifiers live on What is supported; other pages link there rather than
+  repeating them, and name a specific instrument only there and in examples.
+- A README sells its package in a few lines: what it is, why, how to start, and
+  where to learn more. Each package has its own tagline, not the repository's.
+  README links to `docs/` are relative paths, so they hold on GitHub and
+  crates.io.
+- Be concise and plain. Short sentences, no em dashes, no "not X but Y", no
+  lists padded to three, no marketing words. If a page can lose a paragraph
+  without losing a fact a reader needs, lose it.
+- Links to the running app point at https://drawbar.app/.
+
 ## Tooling and checks
 
 This is a Nix-native project. Do not assume a tool is installed globally. Run
@@ -235,6 +259,7 @@ Before declaring a change done:
    formatting, Clippy, and the applicable Nix builds.
 5. Run corpus tests when the change touches decoded layout or protocol evidence.
 6. Remove dead code, redundant tests, stale comments, and temporary diagnostics.
+7. Update `docs/` and the READMEs for any behavior a user can see.
 
 Refactors are behavior-preserving. The default suite and, where available, the
 corpus round trip are the proof. Do not commit unless asked. When commits are
