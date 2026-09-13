@@ -220,7 +220,10 @@ mod tests {
             assert_eq!(written(value, bars(value)), Some(value));
         }
         let positions = [1, 2, 3, 4, 5, 6, 7, 8, 0];
-        assert_eq!(bars(written(0, positions).expect("every bar is a stop")), positions);
+        assert_eq!(
+            bars(written(0, positions).expect("every bar is a stop")),
+            positions
+        );
     }
 
     /// A bar pulled past the end would walk into its neighbour's nibble, since two share

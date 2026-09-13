@@ -2453,7 +2453,11 @@ mod tests {
         assert_eq!(piano(elsewhere, 0x0102_0304), None, "another slot's list");
         assert_eq!(piano(at, 0x0999_0999), None, "an id it did not report");
         assert_eq!(
-            state.dependency_name(Some((ObjectClass::Sample, at)), ObjectClass::Piano, 0x0102_0304),
+            state.dependency_name(
+                Some((ObjectClass::Sample, at)),
+                ObjectClass::Piano,
+                0x0102_0304
+            ),
             None,
             "another class at the same address",
         );
