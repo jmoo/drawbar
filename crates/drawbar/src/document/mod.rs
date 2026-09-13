@@ -354,9 +354,6 @@ impl Document {
             }
         }
         self.replan(id, workspace, log);
-        if self.piano.asked_apply() {
-            self.piano.start(ui.ctx(), id, workspace);
-        }
         if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
             // The strip was drawn from the bytes this frame then edited; one more frame
             // shows what the edit made of them.

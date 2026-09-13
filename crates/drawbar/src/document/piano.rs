@@ -27,7 +27,6 @@ use nord_usb::ObjectClass;
 use super::capability::{self, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys::{self, Audition, Scale, SizeCell, Span};
-use super::sample::note_picker;
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::browser::Act;
@@ -959,8 +958,6 @@ pub struct State {
     /// The one apply in flight, and the acts held until it answers.
     job: Option<Laying>,
     held: Vec<Held>,
-    /// Whether this frame's Apply now was clicked.
-    asked_apply: bool,
     open: Option<Open>,
     /// The plan as this frame's controls have left it, to be tried before it is kept.
     draft: Plan,
@@ -1095,11 +1092,6 @@ impl State {
     pub fn leave(&mut self) {
         self.view = View::default();
         self.open = None;
-    }
-
-    /// Whether this frame's Apply now was clicked, asked once.
-    pub fn asked_apply(&mut self) -> bool {
-        std::mem::take(&mut self.asked_apply)
     }
 
     /// Whether a plan is being laid out, which is the one thing here that outlives a
@@ -1278,7 +1270,7 @@ fn claim(trimmed: bool, standing: Standing) -> Option<StateLine> {
         Standing::Pending => Some(StateLine {
             words: words.to_string(),
             ink: Ink::Warn,
-            hint: "applied when this is saved, sent or applied".to_string(),
+            hint: "applied when this is saved, sent or exported".to_string(),
         }),
         Standing::Laid => trimmed.then(|| StateLine {
             words: words.to_string(),
@@ -1577,7 +1569,7 @@ fn damper_mark(ui: &egui::Ui, rect: egui::Rect, top: u8) {
     painter.text(
         egui::pos2(at + 3.0, rect.top() + 1.0),
         egui::Align2::LEFT_TOP,
-        "damper",
+        "damper stops here",
         egui::FontId::proportional(MICRO),
         app::caption(&visuals),
     );
@@ -2158,7 +2150,7 @@ fn field(ui: &mut egui::Ui, label: &str, hint: &str, body: impl FnOnce(&mut egui
 }
 
 /// What the instrument applies over every stroke: a gain over the whole library, the
-/// key the damper still reaches, and the kind of instrument the library is filed under.
+/// key above which notes ring on, and the kind of instrument the library is filed under.
 fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
     ui.spacing_mut().item_spacing = egui::vec2(24.0, 10.0);
     ui.horizontal_wrapped(|ui| {
@@ -2174,25 +2166,19 @@ fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
                 plan.gain = (tenths != facts.gain).then_some(tenths);
             }
         });
-        field(
-            ui,
-            "Damper reaches",
-            "0x40d: keys above ring on at note-off",
-            |ui| {
-                let held = plan.damper_top.unwrap_or(facts.damper_top);
-                if let Some(key) = note_picker(ui, ("piano_damper", 0), held) {
-                    plan.damper_top = (key != facts.damper_top).then_some(key);
-                }
-                let mut every = held >= ALL_KEYS_DAMPED;
-                if ui.checkbox(&mut every, "every key").changed() {
-                    let key = match every {
-                        true => ALL_KEYS_DAMPED,
-                        false => SPAN.high,
-                    };
-                    plan.damper_top = (key != facts.damper_top).then_some(key);
-                }
-            },
-        );
+        let held = plan.damper_top.unwrap_or(facts.damper_top);
+        let from_kind = plan
+            .kind
+            .is_some_and(|kind| plan.damper_top == Some(kind.damper_top()));
+        let hint = match from_kind {
+            true => "0x40d, set by the kind just picked: the highest key the damper reaches",
+            false => "0x40d: the highest key the damper reaches; `none` damps every key",
+        };
+        field(ui, "Keys ring on above", hint, |ui| {
+            if let Some(key) = damper_picker(ui, held) {
+                plan.damper_top = (key != facts.damper_top).then_some(key);
+            }
+        });
         field(
             ui,
             "Kind",
@@ -2219,6 +2205,29 @@ fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
             },
         );
     });
+}
+
+/// The damper limit as one control: a key, or `none` for a limit past the last key,
+/// which damps every one of them.
+fn damper_picker(ui: &mut egui::Ui, top: u8) -> Option<u8> {
+    let mut value = f64::from(top.min(ALL_KEYS_DAMPED));
+    let response = ui.push_id("piano_damper", |ui| {
+        ui.add(
+            egui::DragValue::new(&mut value)
+                .range(0.0..=f64::from(ALL_KEYS_DAMPED))
+                .speed(0.2)
+                .custom_formatter(|n, _| match n as u8 > SPAN.high {
+                    true => "none".to_string(),
+                    false => note::name(n as u8),
+                })
+                .custom_parser(|text| match text.trim() {
+                    "none" | "every" | "-" => Some(f64::from(ALL_KEYS_DAMPED)),
+                    text => note::parse(text).ok().map(f64::from),
+                }),
+        )
+    });
+    let picked = value.round() as u8;
+    (response.inner.changed() && picked != top).then_some(picked)
 }
 
 // ---- the velocity layer lanes -------------------------------------------------------
@@ -3011,7 +3020,6 @@ impl State {
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
         let id = self.open.as_ref()?.id;
-        let standing = self.standing(id);
         let saying =
             self.job
                 .as_ref()
@@ -3020,7 +3028,6 @@ impl State {
                     said if said.is_empty() => "applying…".to_string(),
                     said => said,
                 });
-        let mut asked_apply = false;
         let State {
             open,
             draft,
@@ -3059,23 +3066,6 @@ impl State {
             "what is kept, against what the instrument has free",
             Some((&badge, ink)),
         );
-        if standing == Standing::Pending {
-            ui.horizontal(|ui| {
-                ui.add_space(PAD);
-                if action(ui, Glyph::Check, "Apply now", app::accent(ui.visuals())) {
-                    asked_apply = true;
-                }
-                ui.label(
-                    egui::RichText::new(
-                        "the switches are a plan; this lays it over the library, which \
-                         saving, sending and exporting do anyway",
-                    )
-                    .size(11.0)
-                    .color(app::caption(ui.visuals())),
-                );
-            });
-            ui.add_space(8.0);
-        }
         let width = ui.available_width();
         let wide = width >= 640.0;
         let wide_column = match wide {
@@ -3154,7 +3144,6 @@ impl State {
             column(ui, width - PAD * 2.0, |ui| per_key(ui, facts, draft, view));
         });
         ui.add_space(12.0);
-        self.asked_apply = asked_apply;
         ask
     }
 
@@ -4528,6 +4517,27 @@ mod tests {
         );
     }
 
+    /// The damper is one control, worded from the player's side: the key notes ring on
+    /// above, or `none` where every key is damped.
+    #[test]
+    fn the_damper_limit_reads_as_a_key_or_none() {
+        let mut editor = Editor::new(facts().total * 2);
+        let every = editor.driven(Vec::new(), |plan| {
+            plan.damper_top = Some(ALL_KEYS_DAMPED);
+        });
+        assert!(every.said("KEYS RING ON ABOVE"), "{:?}", every.words);
+        assert!(every.said("none"), "{:?}", every.words);
+        assert!(
+            !every.words.iter().any(|word| word == "every key"),
+            "{:?}",
+            every.words
+        );
+
+        let some = editor.driven(Vec::new(), |plan| plan.damper_top = Some(90));
+        assert!(some.said("F#6"), "{:?}", some.words);
+        assert!(!some.said("none"), "{:?}", some.words);
+    }
+
     /// The keyboard says where the damper stops reaching, and says nothing at all
     /// where it reaches every key.
     #[test]
@@ -4562,7 +4572,7 @@ mod tests {
             .state
             .expect("the header claims the plan");
         assert_eq!(said.words, "trimmed");
-        assert_eq!(said.hint, "applied when this is saved, sent or applied");
+        assert_eq!(said.hint, "applied when this is saved, sent or exported");
 
         // And throwing it back is no edit at all.
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, true));
@@ -4701,29 +4711,6 @@ mod tests {
             "the plan starts again from what is now saved",
         );
         assert!(!editor.workspace.get(editor.id).unwrap().is_unsaved());
-    }
-
-    /// The Apply now action is the one way to spend the time on purpose, and it is
-    /// offered only where there is a plan to spend it on.
-    #[test]
-    fn apply_now_is_offered_while_a_plan_is_pending_and_lays_it_out() {
-        let mut editor = Editor::new(facts().total * 2);
-        assert!(
-            !editor.frame(Vec::new()).said("Apply now"),
-            "nothing is pending",
-        );
-
-        // The plan is taken up at the end of the frame it was drafted in, so the action
-        // appears on the next one.
-        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
-        let painted = editor.frame(Vec::new());
-        assert!(painted.said("Apply now"), "{:?}", painted.words);
-
-        editor.apply();
-        assert!(
-            !editor.frame(Vec::new()).said("Apply now"),
-            "the bytes hold the plan now",
-        );
     }
 
     /// A library whose audio the codec can read: the same three roots of three attack
