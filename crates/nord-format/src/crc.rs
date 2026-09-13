@@ -1,8 +1,8 @@
 //! The container's two checksums, as slices and as streams.
 //!
-//! One per header generation: a type-1 file carries a CRC-32 (ISO-HDLC) over the
-//! body at `0x18`; a type-0 file ends with a CRC-16 (IBM-3740, a.k.a. CCITT-FALSE)
-//! over every byte before it, stored little-endian.
+//! One per header generation: a type-1 file stores a CRC-32 (ISO-HDLC) of the body
+//! (which starts at `0x2c`) in the word at `0x18`; a type-0 file ends with a CRC-16
+//! (IBM-3740, a.k.a. CCITT-FALSE) over every byte before it, stored little-endian.
 
 use crcxx::crc16;
 use crcxx::crc32;

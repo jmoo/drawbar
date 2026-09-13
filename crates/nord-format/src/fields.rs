@@ -19,8 +19,10 @@ pub struct FieldValue {
     pub raw: u64,
     /// The bits the field's current value would *write*.
     ///
-    /// Equal to [`raw`](Self::raw) on any panel that has not been edited — decode and
-    /// encode are inverses — so the two diverging is exactly the set of pending changes.
+    /// Equal to [`raw`](Self::raw) on a panel decoded from bytes and not edited since —
+    /// decode and encode are inverses — so the two diverging is exactly the set of
+    /// pending changes. A `Default`-built panel has all-zero raw bytes, so every default
+    /// that encodes non-zero reads as pending.
     pub bits: u64,
     /// The decoded value's `Debug` rendering.
     pub value: String,
