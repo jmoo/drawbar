@@ -295,6 +295,10 @@ pub fn set_recording(path: Option<PathBuf>) {
 /// written at the same moment: the intent goes ahead of the frames, the outcome is only
 /// known once they are on disk. A success writes nothing, because a section that says
 /// nothing expects `ok`.
+///
+/// A recording that lost frames is reported once the transaction has closed, so a script
+/// is never silently short. The transaction's own failure outranks it: that is what the
+/// operator asked about.
 fn transact<T>(
     device: &mut Device<UsbTransport>,
     intent: impl std::fmt::Display,
@@ -305,7 +309,8 @@ fn transact<T>(
     if let Err(e) = &outcome {
         device.transport().mark_expect(e);
     }
-    outcome
+    let recorded = device.transport().finish_recording();
+    outcome.and_then(|value| recorded.map(|()| value))
 }
 
 fn open_usb() -> Result<Device<UsbTransport>, String> {

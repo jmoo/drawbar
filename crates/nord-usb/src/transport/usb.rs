@@ -184,10 +184,14 @@ impl UsbTransport {
         }
     }
 
-    /// Surface the first error the recorder hit, if it is recording. Call after the
-    /// operation completes: a failed write is deliberately not allowed to abort a live
-    /// session part-way.
-    pub fn recording_result(&mut self) -> Result<()> {
+    /// Surface the first error the recorder hit, if it is recording, and resume
+    /// recording.
+    ///
+    /// ⚠️ Call once the transaction has closed, never inside one: a failed write is
+    /// deliberately not allowed to abort a live session part-way, and the script being
+    /// short is worth less than the instrument being left mid-transaction. Never calling
+    /// it loses the frames silently.
+    pub fn finish_recording(&mut self) -> Result<()> {
         match self.record.as_mut() {
             Some(r) => r.check(),
             None => Ok(()),
