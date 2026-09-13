@@ -9,6 +9,8 @@ use eframe::egui;
 use crate::shell::GUIDE;
 use crate::splash::{link, title, GAP, WIDTH};
 
+mod crates;
+
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
 
@@ -24,8 +26,29 @@ struct Notice {
     text: &'static str,
 }
 
-/// Every licence whose terms require its notice to travel with a copy of the app: drawbar
-/// first, then the bundled material by what it covers, alphabetically.
+/// The Rust crates under one licence, each distinct text of it once.
+struct Group {
+    licence: &'static str,
+    texts: &'static [Text],
+}
+
+impl Group {
+    /// The licence and how many crates are under it, e.g. `MIT · 2 crates`.
+    fn summary(&self) -> String {
+        match self.texts.iter().map(|text| text.crates.len()).sum() {
+            1 => format!("{} · 1 crate", self.licence),
+            count => format!("{} · {count} crates", self.licence),
+        }
+    }
+}
+
+/// One licence text and the crates, as `name version`, that carry it.
+struct Text {
+    crates: &'static [&'static str],
+    text: &'static str,
+}
+
+/// drawbar first, then the bundled material by what it covers, alphabetically.
 const NOTICES: &[Notice] = &[
     Notice {
         covers: "drawbar",
@@ -121,11 +144,7 @@ fn body(ui: &mut egui::Ui) -> bool {
     egui::ScrollArea::vertical()
         .id_salt("licences")
         .max_height((ui.ctx().screen_rect().height() - AROUND).max(LICENCES))
-        .show(ui, |ui| {
-            for notice in NOTICES {
-                row(ui, notice);
-            }
-        });
+        .show(ui, licences);
     ui.add_space(GAP);
     ui.separator();
     ui.add_space(GAP);
@@ -141,34 +160,57 @@ fn body(ui: &mut egui::Ui) -> bool {
     closed || escaped
 }
 
-/// Collapsed, what a licence covers and its name; open, where that came from and the terms.
-fn row(ui: &mut egui::Ui, notice: &Notice) {
-    let id = ui.make_persistent_id(notice.covers);
+/// Every licence whose terms require its notice to travel with a copy of the app: the
+/// [`NOTICES`], then the Rust crates by licence.
+fn licences(ui: &mut egui::Ui) {
+    for notice in NOTICES {
+        row(ui, notice.covers, notice.licence, |ui| {
+            terms(ui, notice.source, notice.text);
+        });
+    }
+    for group in crates::GROUPS {
+        row(ui, "Rust crates", &group.summary(), |ui| {
+            for text in group.texts {
+                terms(ui, Some(&text.crates.join(", ")), text.text);
+                ui.add_space(GAP);
+            }
+        });
+    }
+}
+
+/// Collapsed, what a licence covers and its name; open, the terms.
+fn row(ui: &mut egui::Ui, covers: &str, licence: &str, body: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.make_persistent_id((covers, licence));
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
         .show_header(ui, |ui| {
-            ui.label(notice.covers);
+            ui.label(covers);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The list's scrollbar floats over its content; keep the name out from under it.
                 let scroll = ui.spacing().scroll;
                 ui.add_space(scroll.bar_width + scroll.bar_outer_margin);
-                ui.label(egui::RichText::new(notice.licence).weak());
+                ui.label(egui::RichText::new(licence).weak());
             });
         })
-        .body(|ui| {
-            if let Some(source) = notice.source {
-                ui.label(egui::RichText::new(source).small().weak());
-                ui.add_space(GAP);
-            }
-            ui.label(
-                egui::RichText::new(notice.text)
-                    .font(egui::FontId::monospace(MONO))
-                    .weak(),
-            );
-        });
+        .body(body);
+}
+
+/// A licence text, under what it applies to where that needs saying.
+fn terms(ui: &mut egui::Ui, applies_to: Option<&str>, text: &str) {
+    if let Some(applies_to) = applies_to {
+        ui.label(egui::RichText::new(applies_to).small().weak());
+        ui.add_space(GAP);
+    }
+    ui.label(
+        egui::RichText::new(text)
+            .font(egui::FontId::monospace(MONO))
+            .weak(),
+    );
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -216,6 +258,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_crate_text_carries_the_licence_its_group_names() {
+        let phrases: &[(&str, &[&str])] = &[
+            ("Apache-2.0", &["Apache License", "Version 2.0"]),
+            (
+                "BSD-2-Clause",
+                &["Redistribution and use in source and binary forms"],
+            ),
+            (
+                "BSD-3-Clause",
+                &[
+                    "Redistribution and use in source and binary forms",
+                    "endorse or promote products",
+                ],
+            ),
+            (
+                "ISC",
+                &["Permission to use, copy, modify, and/or distribute this software"],
+            ),
+            ("MIT", &["Permission is hereby granted"]),
+            ("Unicode-3.0", &["UNICODE LICENSE V3"]),
+        ];
+        for group in crates::GROUPS {
+            let Some((_, required)) = phrases.iter().find(|(id, _)| *id == group.licence) else {
+                panic!("no phrases known for {:?}", group.licence);
+            };
+            for text in group.texts {
+                // Hard wrapping differs between copies of the same licence.
+                let words = text.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                for phrase in *required {
+                    assert!(
+                        words.contains(phrase),
+                        "{:?}: the {:?} text lacks {phrase:?}",
+                        text.crates,
+                        group.licence
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_crate_text_is_an_unfilled_licence_template() {
+        let unfilled: Vec<_> = crates::GROUPS
+            .iter()
+            .flat_map(|group| group.texts)
+            .filter(|text| {
+                let text = text.text.to_lowercase();
+                ["<year>", "<owner>", "<copyright holder"]
+                    .iter()
+                    .any(|placeholder| text.contains(placeholder))
+            })
+            .flat_map(|text| text.crates)
+            .collect();
+        assert!(
+            unfilled.is_empty(),
+            "these crates' notices name no copyright holder: {unfilled:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_summary_counts_the_crates_across_its_texts() {
+        let one = Group {
+            licence: "ISC",
+            texts: &[Text {
+                crates: &["libloading 0.8.9"],
+                text: "",
+            }],
+        };
+        let three = Group {
+            licence: "MIT",
+            texts: &[
+                Text {
+                    crates: &["hex 0.4.3"],
+                    text: "",
+                },
+                Text {
+                    crates: &["png 0.17.16", "png 0.18.1"],
+                    text: "",
+                },
+            ],
+        };
+        assert_eq!(one.summary(), "ISC · 1 crate");
+        assert_eq!(three.summary(), "MIT · 3 crates");
+    }
+
+    /// A summary sums each text's crates.
+    #[test]
+    fn no_crate_is_listed_twice_under_one_licence() {
+        for group in crates::GROUPS {
+            let mut crates: Vec<_> = group.texts.iter().flat_map(|text| text.crates).collect();
+            crates.sort_unstable();
+            let repeated = crates.windows(2).find(|pair| pair[0] == pair[1]);
+            assert_eq!(repeated, None, "{} lists a crate twice", group.licence);
+        }
+    }
+
+    #[test]
+    fn the_vendored_crate_licences_match_the_lockfile() {
+        let locked: BTreeSet<_> = registry_packages(include_str!("../../Cargo.lock"));
+        let vendored: BTreeSet<_> = crates::LOCKED.iter().copied().collect();
+        let added: Vec<_> = locked.difference(&vendored).collect();
+        let removed: Vec<_> = vendored.difference(&locked).collect();
+        assert!(
+            added.is_empty() && removed.is_empty(),
+            "Cargo.lock's registry packages changed since the crate licences were vendored; \
+             run scripts/licences.bash.\nadded: {added:?}\nremoved: {removed:?}"
+        );
+    }
+
+    /// `(name, version)` of each `[[package]]` in a Cargo.lock whose source is a registry.
+    fn registry_packages(lock: &str) -> BTreeSet<(&str, &str)> {
+        lock.split("[[package]]")
+            .filter_map(|block| {
+                let field = |key: &str| {
+                    block.lines().find_map(|line| {
+                        line.strip_prefix(key)?
+                            .strip_prefix(" = \"")?
+                            .strip_suffix('"')
+                    })
+                };
+                field("source")?
+                    .starts_with("registry+")
+                    .then_some((field("name")?, field("version")?))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lockfile_yields_only_its_registry_packages() {
+        let lock = r#"version = 4
+
+[[package]]
+name = "drawbar"
+version = "0.5.0"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "egui"
+version = "0.32.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0000"
+
+[[package]]
+name = "forked"
+version = "1.0.0"
+source = "git+https://example.com/forked#0000"
+"#;
+        assert_eq!(
+            registry_packages(lock),
+            BTreeSet::from([("egui", "0.32.3")])
+        );
     }
 
     #[test]

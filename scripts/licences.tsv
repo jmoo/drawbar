@@ -1,0 +1,11 @@
+crate	version	licence	file	source
+block2	0.5.1	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/4fc083f1c6d6784577e38b0ee8dbd344481e2fd2/LICENSE.txt
+block2	0.6.2	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/757cd841d0293341dbefd9b99d7548dec244ffde/LICENSE.txt
+dispatch	0.2.0	MIT	MIT-Steven-Sheldon.txt	https://docs.rs/crate/dispatch/0.2.0/source/Cargo.toml
+objc-sys	0.3.5	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/4fc083f1c6d6784577e38b0ee8dbd344481e2fd2/LICENSE.txt
+objc2	0.5.2	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/4fc083f1c6d6784577e38b0ee8dbd344481e2fd2/LICENSE.txt
+objc2	0.6.4	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/757cd841d0293341dbefd9b99d7548dec244ffde/LICENSE.txt
+objc2-app-kit	0.2.2	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt
+objc2-encode	4.1.0	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/757cd841d0293341dbefd9b99d7548dec244ffde/LICENSE.txt
+objc2-foundation	0.2.2	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt
+objc2-foundation	0.3.2	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/757cd841d0293341dbefd9b99d7548dec244ffde/LICENSE.txt

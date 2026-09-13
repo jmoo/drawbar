@@ -195,6 +195,9 @@ Cargo from `crates/` inside the development shell; the parent
   browser build at the root, its guide at `/docs`. `nix run .#drawbar-web`
   serves that tree. `scripts/site.bash` assembles the tree that is deployed,
   which is the same layout with the app taken from the latest `drawbar-v*` tag.
+- `scripts/licences.bash` regenerates the licence notices drawbar shows for its
+  Rust crates. The drawbar suite fails when the registry packages in `Cargo.lock`
+  change, until the script is re-run.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
 would change, and treats Clippy warnings as failures. The public suite must

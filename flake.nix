@@ -72,6 +72,7 @@
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
               # scripts/*.bash (see their `nix-deps` lines), plus `mdbook serve docs`.
               packages = with pkgs; [
+                cargo-about
                 curl
                 gh
                 jq
