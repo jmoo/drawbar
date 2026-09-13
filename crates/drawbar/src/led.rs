@@ -8,6 +8,8 @@ use eframe::egui;
 
 const LENS: f32 = 9.0;
 const PAD: egui::Vec2 = egui::vec2(8.0, 5.0);
+/// Between the lens and the word it lights.
+const GAP: f32 = 5.0;
 
 /// A lit button carrying `word`. Returns the state it was switched to.
 ///
@@ -22,7 +24,7 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
         egui::TextStyle::Small,
     );
     let size = egui::vec2(
-        galley.size().x + LENS + PAD.x * 2.0 + 5.0,
+        galley.size().x + LENS + PAD.x * 2.0 + GAP,
         galley.size().y.max(LENS) + PAD.y * 2.0,
     );
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -73,7 +75,7 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
         }
         painter.galley(
             egui::pos2(
-                lens.x + LENS / 2.0 + 5.0,
+                lens.x + LENS / 2.0 + GAP,
                 rect.center().y - galley.size().y / 2.0,
             ),
             galley,
