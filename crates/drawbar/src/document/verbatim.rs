@@ -8,29 +8,15 @@
 use eframe::egui;
 use nord_format::accept::Family;
 use nord_format::cbin::Generation;
-use nord_format::Entity;
 
 use super::capability::{facts, Fact};
 use super::{controls, sample};
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
+use crate::room;
 use crate::strings::kind_word;
 use crate::workspace::LocalEntity;
-use crate::{fields, room};
-
-/// Whether this is a body the app can only keep as it found it.
-///
-/// ⚠️ Not a catch-all. A piano library is not one of these: its name and variant are
-/// edited on the header, so a page saying nothing is editable would be false. The
-/// instrument, the project and the set list have editors of their own.
-pub fn is_verbatim(entity: &Entity) -> bool {
-    !(fields::has_registry(entity)
-        || fields::is_set_list(entity)
-        || sample::is_sample(entity)
-        || super::project::is_project(entity)
-        || Kind::of(Some(entity)) == Kind::Piano)
-}
 
 /// How many bytes of the body the page shows, which is enough to recognise a header and
 /// no more. The whole of it is on the Advanced face.
@@ -265,27 +251,6 @@ fn readable(byte: u8) -> char {
 mod tests {
     use super::*;
     use crate::workspace::Fresh;
-
-    /// The kinds with an editor of their own are not swept up by the catch-all, and the
-    /// ones with nothing else are.
-    #[test]
-    fn only_a_body_with_no_editor_of_its_own_is_verbatim() {
-        let decode = |bytes: Vec<u8>| {
-            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes")
-        };
-        assert!(
-            is_verbatim(&decode(fields::blank::stage3_song())),
-            "a song that decodes no further than its container"
-        );
-        assert!(
-            !is_verbatim(&decode(Fresh::SetList.bytes().unwrap())),
-            "a set list has its own four rows"
-        );
-        assert!(
-            !is_verbatim(&decode(Fresh::Stage4Program.bytes().unwrap())),
-            "a registry body has its panel"
-        );
-    }
 
     /// ⚠️ The dump lays out only the rows it was asked for. A piano library is
     /// hundreds of megabytes, and one galley per sixteen bytes of it is a frame that

@@ -33,10 +33,6 @@ use crate::note;
 use crate::room;
 use crate::workspace::Baseline;
 
-pub fn is_sample(entity: &Entity) -> bool {
-    matches!(entity, Entity::Sample(_))
-}
-
 fn sample(entity: &Entity) -> Option<&Sample> {
     match entity {
         Entity::Sample(sample) => Some(sample),
@@ -2094,7 +2090,6 @@ mod tests {
     #[test]
     fn a_later_generation_reads_and_edits() {
         let entity = Entity::Sample(Sample::V3(v3_sample(300)));
-        assert!(is_sample(&entity));
 
         let snapshot = snapshot(&entity).expect("a sample").expect("it reads");
         assert_eq!(snapshot.name, "Bass Clarinet");

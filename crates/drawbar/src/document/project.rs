@@ -28,10 +28,6 @@ use super::table::PAD;
 use crate::app;
 use crate::note;
 
-pub fn is_project(entity: &Entity) -> bool {
-    matches!(entity, Entity::SampleProject(_))
-}
-
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {
         Entity::SampleProject(project) => Some(project),

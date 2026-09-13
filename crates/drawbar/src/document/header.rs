@@ -13,7 +13,7 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::controls::Sets;
-use super::{encode, piano, project, sample, setlist, SendBack};
+use super::{encode, piano, project, sample, setlist, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
 use crate::device::{read_only, DeviceState};
@@ -250,6 +250,8 @@ pub(super) struct Facts<'a> {
     /// What a piano library's plan will save its name and its variant as, from
     /// [`piano::State::renaming`]: the box holds what a save writes.
     pub renaming: (Option<String>, Option<String>),
+    /// What the document is, which is what decides where its name is kept.
+    pub shape: Shape,
     pub extras: Extras,
 }
 
@@ -360,7 +362,7 @@ fn left(
     let glyph = Kind::of(entity.entity.as_ref()).glyph();
     icon(ui, glyph, KIND, accent(&visuals));
 
-    let (held, stored) = named(entity, facts.view, facts.renaming.clone());
+    let (held, stored) = named(entity, facts.shape, facts.view, facts.renaming.clone());
     act.rename = name(ui, entity, &held, &stored, boxes, sets);
 
     let (badge, hint) = badge(entity);
@@ -797,46 +799,69 @@ enum Named {
     Device,
 }
 
-/// What the name box holds, and what typing in it does. `renaming` is what a piano
-/// library's plan will save each half as, where it renames it.
+/// The name the file itself stores, where this shape keeps one, and how its box is
+/// dressed. `renaming` is what a piano library's plan will save each half as, where it
+/// renames it.
+fn stored_name(
+    entity: &LocalEntity,
+    shape: Shape,
+    renaming: (Option<String>, Option<String>),
+) -> Option<(Named, String)> {
+    let decoded = entity.entity.as_ref()?;
+    match shape {
+        Shape::Sample => {
+            let held = sample::snapshot(decoded)?.ok()?;
+            Some((
+                Named::Stored {
+                    limit: Some(held.max_name_len),
+                    variant: None,
+                    width: NAME,
+                },
+                held.name,
+            ))
+        }
+        Shape::Project => {
+            let held = project::snapshot(decoded)?.ok()?;
+            Some((
+                Named::Stored {
+                    limit: None,
+                    variant: None,
+                    width: NAME,
+                },
+                held.name,
+            ))
+        }
+        Shape::Piano => {
+            let held = piano::snapshot(decoded)?.ok()?;
+            let (name, variant) = renaming;
+            Some((
+                Named::Stored {
+                    limit: None,
+                    variant: Some(variant.unwrap_or(held.variant)),
+                    width: PIANO_NAME,
+                },
+                name.unwrap_or(held.name),
+            ))
+        }
+        Shape::Fields
+        | Shape::SetList
+        | Shape::Verbatim
+        | Shape::Wav
+        | Shape::Undecoded => None,
+    }
+}
+
+/// What the name box holds, and what typing in it does.
 fn named(
     entity: &LocalEntity,
+    shape: Shape,
     view: bool,
     renaming: (Option<String>, Option<String>),
 ) -> (Named, String) {
-    let decoded = entity.entity.as_ref();
-    if let Some(Ok(held)) = decoded.and_then(sample::snapshot) {
-        return (
-            Named::Stored {
-                limit: Some(held.max_name_len),
-                variant: None,
-                width: NAME,
-            },
-            held.name,
-        );
+    if let Some(held) = stored_name(entity, shape, renaming) {
+        return held;
     }
-    if let Some(Ok(held)) = decoded.and_then(project::snapshot) {
-        return (
-            Named::Stored {
-                limit: None,
-                variant: None,
-                width: NAME,
-            },
-            held.name,
-        );
-    }
-    if let Some(Ok(held)) = decoded.and_then(piano::snapshot) {
-        let (name, variant) = renaming;
-        return (
-            Named::Stored {
-                limit: None,
-                variant: Some(variant.unwrap_or(held.variant)),
-                width: PIANO_NAME,
-            },
-            name.unwrap_or(held.name),
-        );
-    }
-    let settings = Kind::of(decoded) == Kind::Settings;
+    let settings = Kind::of(entity.entity.as_ref()) == Kind::Settings;
     match view && settings {
         true => (Named::Device, display_name(&entity.name).to_string()),
         false => (Named::Asset, display_name(&entity.name).to_string()),
@@ -846,10 +871,11 @@ fn named(
 /// What the name boxes hold when a document opens.
 pub(super) fn boxes(
     entity: &LocalEntity,
+    shape: Shape,
     view: bool,
     renaming: (Option<String>, Option<String>),
 ) -> (String, String) {
-    let (held, stored) = named(entity, view, renaming);
+    let (held, stored) = named(entity, shape, view, renaming);
     let variant = match held {
         Named::Stored { variant, .. } => variant.unwrap_or_default(),
         Named::Asset | Named::Device => String::new(),
@@ -1429,6 +1455,7 @@ mod tests {
             tags,
             view: false,
             renaming: (None, None),
+            shape: Shape::Fields,
             extras: Extras::default(),
         }
     }

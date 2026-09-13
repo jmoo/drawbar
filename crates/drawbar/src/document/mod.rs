@@ -50,6 +50,91 @@ pub const PAGE: &str = "document_page";
 /// of it.
 const BODY_MARGIN: f32 = 8.0;
 
+/// What a document is, which decides the body it draws, the faces it offers, what its
+/// header says and what an edit to it becomes.
+///
+/// ⚠️ One answer per frame, from an exhaustive match on [`nord_format::Entity`]: a
+/// family the library adds is a compile error here rather than a document that quietly
+/// loses a face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Shape {
+    /// A body whose fields the generated registry declares.
+    Fields,
+    /// An Electro 5 set list: the four programs it points at are the whole of it.
+    SetList,
+    Sample,
+    Project,
+    /// An `npno` piano library, edited as a plan over bytes nothing copies.
+    Piano,
+    /// A body no registry describes, kept byte for byte.
+    Verbatim,
+    /// Bytes that did not decode, and are audio an instrument can be built from.
+    Wav,
+    /// Bytes that did not decode.
+    Undecoded,
+}
+
+/// One asset as a frame reads it: what it holds, and what that makes it. The two travel
+/// together so that nothing can draw one asset's body from another's shape.
+#[derive(Clone, Copy)]
+struct Asset<'a> {
+    entity: &'a LocalEntity,
+    shape: Shape,
+}
+
+impl<'a> Asset<'a> {
+    fn of(entity: &'a LocalEntity) -> Asset<'a> {
+        Asset {
+            entity,
+            shape: shape(entity),
+        }
+    }
+
+    fn decoded(&self) -> Option<&'a nord_format::Entity> {
+        self.entity.entity.as_ref()
+    }
+}
+
+/// Which of the shapes this asset is.
+fn shape(entity: &LocalEntity) -> Shape {
+    use nord_format::Entity as E;
+
+    let Some(decoded) = &entity.entity else {
+        return match encode::is_wav(&entity.bytes) {
+            true => Shape::Wav,
+            false => Shape::Undecoded,
+        };
+    };
+    match decoded {
+        E::Sample(_) => Shape::Sample,
+        E::SampleProject(_) => Shape::Project,
+        E::Piano(_) => Shape::Piano,
+        E::Song(_) => match fields::is_set_list(decoded) {
+            true => Shape::SetList,
+            false => Shape::Verbatim,
+        },
+        // ⚠️ A Stage Classic piano library is not a [`Shape::Piano`]: `npno` is the one
+        // library that decodes into strokes, and the rest is a container over a body
+        // this app can only keep as it found it.
+        E::Bundle(_)
+        | E::Cne3(_)
+        | E::Live(_)
+        | E::Midi(_)
+        | E::OrganPreset(_)
+        | E::Performance(_)
+        | E::PianoLibrary(_)
+        | E::PianoPreset(_)
+        | E::PipeLibrary(_)
+        | E::Program(_)
+        | E::Settings(_)
+        | E::Synth(_)
+        | E::Sysex(_) => match fields::has_registry(decoded) {
+            true => Shape::Fields,
+            false => Shape::Verbatim,
+        },
+    }
+}
+
 /// A put the header asked for. The browser owns the question it may need to raise.
 pub struct SendBack {
     pub id: u64,
@@ -146,6 +231,8 @@ impl Document {
         let decoded = entity.entity.as_ref();
         let registry = decoded.map(fields::fields_of).unwrap_or_default();
         let viewing = workspace.is_view(id);
+        let asset = Asset::of(entity);
+        let shape = asset.shape;
 
         if self.target != Some(id) {
             self.target = Some(id);
@@ -153,7 +240,8 @@ impl Document {
             self.fetched_deps = false;
             self.advanced.leave();
             self.ctx = Ctx::default();
-            (self.name, self.variant) = header::boxes(entity, viewing, self.piano.renaming(entity));
+            (self.name, self.variant) =
+                header::boxes(entity, shape, viewing, self.piano.renaming(entity));
             self.paths.clear();
             self.sample = sample::State::default();
             self.fields = field::State::default();
@@ -164,12 +252,18 @@ impl Document {
             self.piano.leave();
             // Reading a WAV copies every sample, so it happens on arrival and never per
             // frame — the panel works from what is read here.
-            self.wav = match decoded.is_none() && encode::is_wav(&entity.bytes) {
-                true => Some((
+            self.wav = match shape {
+                Shape::Wav => Some((
                     encode::Draft::new(&entity.name),
                     encode::Source::read(&entity.bytes),
                 )),
-                false => None,
+                Shape::Fields
+                | Shape::SetList
+                | Shape::Sample
+                | Shape::Project
+                | Shape::Piano
+                | Shape::Verbatim
+                | Shape::Undecoded => None,
             };
         }
         // Decoded audio belongs to one set of bytes; an edit re-encodes all of them.
@@ -192,12 +286,12 @@ impl Document {
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        let faces = faces(entity, registry.as_deref());
+        let faces = faces(shape);
         let face = showing(&faces, self.views.get(&id).copied().unwrap_or_default());
 
         // ⚠️ Only a registry body. Reading the saved bytes means decoding them, and a
         // piano library is hundreds of megabytes with no field in it.
-        if registry.is_some() {
+        if shape == Shape::Fields {
             self.fields.follow(entity);
         }
         let doc = match (decoded, registry.as_deref()) {
@@ -221,9 +315,16 @@ impl Document {
                 tags: around.tags,
                 view: viewing,
                 renaming: self.piano.renaming(entity),
-                extras: match decoded.is_some_and(piano::is_piano) {
-                    true => self.piano.begin(id, entity, &device.state),
-                    false => extras(entity, device, workspace, pending),
+                shape,
+                extras: match shape {
+                    Shape::Piano => self.piano.begin(id, entity, &device.state),
+                    Shape::Fields
+                    | Shape::SetList
+                    | Shape::Sample
+                    | Shape::Project
+                    | Shape::Verbatim
+                    | Shape::Wav
+                    | Shape::Undecoded => extras(asset, device, workspace, pending),
                 },
             },
             (&mut self.name, &mut self.variant),
@@ -258,7 +359,7 @@ impl Document {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
             if face == Face::Edit {
-                asked = self.pinned(ui, entity, doc.as_ref(), &mut sets);
+                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -270,7 +371,7 @@ impl Document {
                         Face::Edit => {
                             if let Some(from_body) = self.body(
                                 ui,
-                                entity,
+                                asset,
                                 doc.as_ref(),
                                 &mut lookup,
                                 &setlist::Catalogue {
@@ -282,27 +383,38 @@ impl Document {
                                 asked = Some(from_body);
                             }
                         }
-                        Face::Advanced => match doc.as_ref() {
-                            Some(doc) => {
-                                Advanced::about(ui, &field::about(doc, entity));
-                                let table = advanced::Table {
-                                    fields: registry.as_deref().unwrap_or_default(),
-                                    saved: self.fields.settled(),
-                                    changed: self.fields.pending(),
-                                    doc: Some(doc),
-                                };
-                                self.advanced.table(ui, &table, &mut sets);
-                                typed = !sets.is_empty();
+                        Face::Advanced => match shape {
+                            Shape::Fields => {
+                                if let Some(doc) = doc.as_ref() {
+                                    Advanced::about(ui, &field::about(doc, entity));
+                                    let table = advanced::Table {
+                                        fields: registry.as_deref().unwrap_or_default(),
+                                        saved: self.fields.settled(),
+                                        changed: self.fields.pending(),
+                                        doc: Some(doc),
+                                    };
+                                    self.advanced.table(ui, &table, &mut sets);
+                                    typed = !sets.is_empty();
+                                }
                             }
-                            None if entity.entity.as_ref().is_some_and(piano::is_piano) => {
-                                self.piano.advanced(ui)
-                            }
-                            None => capabilities(ui, entity),
+                            Shape::Piano => self.piano.advanced(ui),
+                            Shape::SetList
+                            | Shape::Sample
+                            | Shape::Project
+                            | Shape::Verbatim
+                            | Shape::Wav
+                            | Shape::Undecoded => capabilities(ui, asset),
                         },
                         Face::Metadata => {
-                            match entity.entity.as_ref().is_some_and(piano::is_piano) {
-                                true => self.piano.meta(ui),
-                                false => record(ui, entity),
+                            match shape {
+                                Shape::Piano => self.piano.meta(ui),
+                                Shape::Fields
+                                | Shape::SetList
+                                | Shape::Sample
+                                | Shape::Project
+                                | Shape::Verbatim
+                                | Shape::Wav
+                                | Shape::Undecoded => record(ui, asset),
                             }
                             details = self.advanced.meta(ui, entity, device)
                         }
@@ -502,38 +614,36 @@ impl Document {
         self.player.stop();
     }
 
-    /// Whichever shape this asset is.
+    /// The body this shape draws.
     fn body(
         &mut self,
         ui: &mut egui::Ui,
-        entity: &LocalEntity,
+        asset: Asset<'_>,
         doc: Option<&field::Doc<'_>>,
         piano: &mut panel::PianoLookup,
         seen: &setlist::Catalogue<'_>,
         sets: &mut Sets,
     ) -> Option<Asked> {
-        let Some(decoded) = &entity.entity else {
-            return self.wav_body(ui);
-        };
-        if sample::is_sample(decoded) {
-            return self.sample_body(ui, decoded, sets).map(Asked::Zone);
+        match asset.shape {
+            Shape::Wav | Shape::Undecoded => self.wav_body(ui),
+            Shape::Sample => self
+                .sample_body(ui, asset.decoded()?, sets)
+                .map(Asked::Zone),
+            Shape::Project => {
+                self.project_body(ui, asset.decoded()?, sets);
+                None
+            }
+            Shape::SetList => {
+                setlist::ui(ui, &mut self.list, asset.entity, seen, sets).map(Asked::Open)
+            }
+            Shape::Piano => {
+                let sounding = self.sounding_root();
+                self.piano.ui(ui, sounding).map(Asked::Root)
+            }
+            Shape::Fields => field::body(ui, &self.ctx, &mut self.fields, doc?, piano, sets)
+                .then_some(Asked::Advanced),
+            Shape::Verbatim => verbatim::ui(ui, asset.entity).then_some(Asked::Export),
         }
-        if project::is_project(decoded) {
-            self.project_body(ui, decoded, sets);
-            return None;
-        }
-        if fields::is_set_list(decoded) {
-            return setlist::ui(ui, &mut self.list, entity, seen, sets).map(Asked::Open);
-        }
-        if piano::is_piano(decoded) {
-            let sounding = self.sounding_root();
-            return self.piano.ui(ui, sounding).map(Asked::Root);
-        }
-        if let Some(doc) = doc {
-            return field::body(ui, &self.ctx, &mut self.fields, doc, piano, sets)
-                .then_some(Asked::Advanced);
-        }
-        verbatim::ui(ui, entity).then_some(Asked::Export)
     }
 
     /// Bytes that did not decode: the encode panel where they are a WAV, and the plain
@@ -583,25 +693,28 @@ impl Document {
     fn pinned(
         &mut self,
         ui: &mut egui::Ui,
-        entity: &LocalEntity,
+        asset: Asset<'_>,
         doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
     ) -> Option<Asked> {
-        if let Some(doc) = doc {
-            field::nav(ui, &mut self.fields, doc);
-            return None;
+        match asset.shape {
+            Shape::Fields => {
+                field::nav(ui, &mut self.fields, doc?);
+                None
+            }
+            Shape::Piano => self.piano.map(ui).map(Asked::Root),
+            Shape::Sample => match sample::snapshot(asset.decoded()?)? {
+                Ok(snapshot) => sample::map(ui, &mut self.sample, &snapshot, sets).map(Asked::Zone),
+                Err(_) => None,
+            },
+            Shape::Project => {
+                if let Some(Ok(snapshot)) = project::snapshot(asset.decoded()?) {
+                    project::map(ui, &mut self.sample, &snapshot, sets);
+                }
+                None
+            }
+            Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
         }
-        let decoded = entity.entity.as_ref()?;
-        if piano::is_piano(decoded) {
-            return self.piano.map(ui).map(Asked::Root);
-        }
-        if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-            return sample::map(ui, &mut self.sample, &snapshot, sets).map(Asked::Zone);
-        }
-        if let Some(Ok(snapshot)) = project::snapshot(decoded) {
-            project::map(ui, &mut self.sample, &snapshot, sets);
-        }
-        None
     }
 
     /// Do what the Basic view asked for, now that nothing is borrowing the asset.
@@ -784,19 +897,16 @@ impl Document {
             return Ok(());
         };
         let bytes = entity.bytes.clone();
-        let decoded = entity.entity.as_ref();
-        let result = if decoded.is_some_and(sample::is_sample) {
-            sample::apply(&bytes, &sets)
-        } else if decoded.is_some_and(project::is_project) {
-            project::apply(&bytes, &sets)
-        } else if decoded.is_some_and(piano::is_piano) {
+        let result = match shape(entity) {
+            Shape::Sample => sample::apply(&bytes, &sets),
+            Shape::Project => project::apply(&bytes, &sets),
             // A piano's sets land in its plan, and the plan is what makes its bytes —
             // see [`Document::replan`].
-            self.piano.take(&sets).map(|()| bytes.clone())
-        } else if decoded.is_some_and(fields::is_set_list) {
-            setlist::apply(&bytes, &sets)
-        } else {
-            fields::apply(&bytes, &sets).map(|(_, out)| out)
+            Shape::Piano => self.piano.take(&sets).map(|()| bytes.clone()),
+            Shape::SetList => setlist::apply(&bytes, &sets),
+            Shape::Fields | Shape::Verbatim | Shape::Wav | Shape::Undecoded => {
+                fields::apply(&bytes, &sets).map(|(_, out)| out)
+            }
         };
         match result {
             Ok(out) if out == bytes => {
@@ -821,38 +931,27 @@ impl Document {
 ///
 /// Metadata is always one of them — every asset has a record, even bytes that decoded
 /// into nothing.
-fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
-    let mut faces = Vec::new();
-    let friendly = match &entity.entity {
-        Some(e) => {
-            fields::has_registry(e)
-                || fields::is_set_list(e)
-                || sample::is_sample(e)
-                || project::is_project(e)
-                || piano::is_piano(e)
-                || verbatim::is_verbatim(e)
-        }
-        // A WAV decodes into nothing, but it is the one thing this app can make an
-        // instrument out of, so it gets a panel rather than only a byte record.
-        None => encode::is_wav(&entity.bytes),
+fn faces(shape: Shape) -> Vec<Face> {
+    // A WAV decodes into nothing, but it is the one thing this app can make an
+    // instrument out of, so it gets a panel rather than only a byte record. The deep
+    // face is whatever the panel left out: the field table, the capability table, the
+    // addresses a set list stores, or the body a verbatim document keeps.
+    let (panel, deep) = match shape {
+        Shape::Fields
+        | Shape::SetList
+        | Shape::Sample
+        | Shape::Project
+        | Shape::Piano
+        | Shape::Verbatim => (true, true),
+        Shape::Wav => (true, false),
+        Shape::Undecoded => (false, false),
     };
-    if friendly {
+    let mut faces = Vec::new();
+    if panel {
         faces.push(Face::Edit);
     }
     faces.push(Face::Metadata);
-    // Whatever the Edit face left out: the capability table, the addresses a set list
-    // stores, or the body a verbatim document keeps.
-    let deeper = match &entity.entity {
-        Some(e) => {
-            sample::is_sample(e)
-                || project::is_project(e)
-                || fields::is_set_list(e)
-                || verbatim::is_verbatim(e)
-                || piano::is_piano(e)
-        }
-        None => false,
-    };
-    if registry.is_some() || deeper {
+    if deep {
         faces.push(Face::Advanced);
     }
     faces
@@ -860,16 +959,14 @@ fn faces(entity: &LocalEntity, registry: Option<&[Field]>) -> Vec<Face> {
 
 /// What the strip shows instead of what it works out for itself.
 fn extras(
-    entity: &LocalEntity,
+    asset: Asset<'_>,
     device: &Device,
     workspace: &Workspace,
     pending: usize,
 ) -> header::Extras {
-    let Some(decoded) = &entity.entity else {
-        return header::Extras::default();
-    };
-    if fields::has_registry(decoded) {
-        return header::Extras {
+    let entity = asset.entity;
+    match asset.shape {
+        Shape::Fields => header::Extras {
             edited: (pending > 0).then(|| StateLine {
                 words: format!("{pending} pending"),
                 ink: Ink::Warn,
@@ -877,32 +974,34 @@ fn extras(
             }),
             loud: queued(entity, device, pending),
             ..header::Extras::default()
-        };
-    }
-    if fields::is_set_list(decoded) {
-        return header::Extras {
-            state: setlist::claim(
-                decoded,
-                &setlist::Catalogue {
-                    device: &device.state,
-                    workspace,
-                },
-            ),
+        },
+        Shape::SetList => header::Extras {
+            state: asset.decoded().and_then(|decoded| {
+                setlist::claim(
+                    decoded,
+                    &setlist::Catalogue {
+                        device: &device.state,
+                        workspace,
+                    },
+                )
+            }),
             ..header::Extras::default()
-        };
+        },
+        Shape::Verbatim => {
+            // The same write the strip works out for itself, in the words a body
+            // nothing can edit calls it by.
+            let mut loud = header::action(entity, &device.state);
+            loud.label = "Send as-is".to_string();
+            loud.short = "Send".to_string();
+            header::Extras {
+                loud: Some(loud),
+                ..header::Extras::default()
+            }
+        }
+        Shape::Sample | Shape::Project | Shape::Piano | Shape::Wav | Shape::Undecoded => {
+            header::Extras::default()
+        }
     }
-    if verbatim::is_verbatim(decoded) {
-        // The same write the strip works out for itself, in the words a body nothing
-        // can edit calls it by.
-        let mut loud = header::action(entity, &device.state);
-        loud.label = "Send as-is".to_string();
-        loud.short = "Send".to_string();
-        return header::Extras {
-            loud: Some(loud),
-            ..header::Extras::default()
-        };
-    }
-    header::Extras::default()
 }
 
 /// The face to show: the one this document was last left on, where that face still
@@ -915,34 +1014,53 @@ fn showing(faces: &[Face], remembered: Face) -> Face {
 }
 
 /// What the file says about itself, ahead of the container record every asset has.
-fn record(ui: &mut egui::Ui, entity: &LocalEntity) {
-    let Some(decoded) = &entity.entity else {
+fn record(ui: &mut egui::Ui, asset: Asset<'_>) {
+    let Some(decoded) = asset.decoded() else {
         return;
     };
-    if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-        sample::metadata(ui, &snapshot);
-    } else if let Some(Ok(snapshot)) = project::snapshot(decoded) {
-        project::metadata(ui, &snapshot);
+    match asset.shape {
+        Shape::Sample => {
+            if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+                sample::metadata(ui, &snapshot);
+            }
+        }
+        Shape::Project => {
+            if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+                project::metadata(ui, &snapshot);
+            }
+        }
+        Shape::Fields
+        | Shape::SetList
+        | Shape::Piano
+        | Shape::Verbatim
+        | Shape::Wav
+        | Shape::Undecoded => {}
     }
 }
 
 /// The Advanced face of a body with no field registry: what the format holds and where
 /// each field of it lands, the addresses a set list stores, or the bytes a body nothing
 /// describes is keeping.
-fn capabilities(ui: &mut egui::Ui, entity: &LocalEntity) {
-    let Some(decoded) = &entity.entity else {
+fn capabilities(ui: &mut egui::Ui, asset: Asset<'_>) {
+    let Some(decoded) = asset.decoded() else {
         return;
     };
-    if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-        capability::table(ui, &sample::capabilities(snapshot.generation));
-        capability::offsets(ui, &sample::offsets(&snapshot));
-    } else if let Some(Ok(snapshot)) = project::snapshot(decoded) {
-        capability::table(ui, &project::capabilities());
-        capability::offsets(ui, &project::offsets(&snapshot));
-    } else if fields::is_set_list(decoded) {
-        setlist::stored(ui, decoded);
-    } else {
-        verbatim::bytes(ui, entity);
+    match asset.shape {
+        Shape::Sample => {
+            if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+                capability::table(ui, &sample::capabilities(snapshot.generation));
+                capability::offsets(ui, &sample::offsets(&snapshot));
+            }
+        }
+        Shape::Project => {
+            if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+                capability::table(ui, &project::capabilities());
+                capability::offsets(ui, &project::offsets(&snapshot));
+            }
+        }
+        Shape::SetList => setlist::stored(ui, decoded),
+        Shape::Verbatim => verbatim::bytes(ui, asset.entity),
+        Shape::Fields | Shape::Piano | Shape::Wav | Shape::Undecoded => {}
     }
 }
 
@@ -1753,9 +1871,7 @@ mod tests {
         let mut log = Log::default();
 
         let offered = |workspace: &Workspace, id: u64| -> Vec<&'static str> {
-            let entity = workspace.get(id).unwrap();
-            let registry = entity.entity.as_ref().and_then(fields::fields_of);
-            faces(entity, registry.as_deref())
+            faces(shape(workspace.get(id).unwrap()))
                 .iter()
                 .map(|face| face.label())
                 .collect()
@@ -2147,6 +2263,58 @@ mod tests {
         assert!(said.iter().any(|word| word == "3 rows"), "{said:?}");
     }
 
+    /// A Stage Classic piano library (`nsp`): a container over a body nothing here
+    /// decodes. Built rather than committed — a stub container is a zeroed body under
+    /// the format's own tag.
+    fn piano_library_bytes() -> Vec<u8> {
+        use nord_format::cbin::{Cbin, Header, RawBody};
+        use nord_format::formats::nsclassic;
+
+        let file = Cbin {
+            header: Header::new(nsclassic::piano_library::FORMAT, (0, 0), 0),
+            body: RawBody(vec![0u8; 48]),
+        };
+        nord_format::to_bytes(&nord_format::Entity::PianoLibrary(file)).expect("a stub encodes")
+    }
+
+    /// Each editor claims the bodies it has a view for, and everything else is the
+    /// verbatim body.
+    ///
+    /// ⚠️ A Stage Classic piano library is a verbatim body, not a [`Shape::Piano`]:
+    /// `npno` is the one library this app decodes into strokes.
+    #[test]
+    fn a_body_with_no_editor_of_its_own_is_verbatim_whatever_kind_it_is() {
+        let held = |bytes: Vec<u8>| shape(Open::file("held", bytes).entity());
+        assert_eq!(held(fields::blank::stage4_program()), Shape::Fields);
+        assert_eq!(held(fields::blank::electro5_song()), Shape::SetList);
+        assert_eq!(held(sample_bytes()), Shape::Sample);
+        assert_eq!(held(project_bytes()), Shape::Project);
+        assert_eq!(held(piano_bytes()), Shape::Piano);
+        assert_eq!(held(fields::blank::stage3_song()), Shape::Verbatim);
+        assert_eq!(held(piano_library_bytes()), Shape::Verbatim);
+        assert_eq!(held(wav_bytes()), Shape::Wav);
+        assert_eq!(held(b"not a nord file".to_vec()), Shape::Undecoded);
+    }
+
+    /// A piano library this app cannot decode is a document like any other body it can
+    /// only keep as it found it: the page saying so, the bytes under it, and the send
+    /// in that page's own words.
+    #[test]
+    fn a_stage_classic_piano_library_wears_the_verbatim_faces() {
+        let mut open = Open::file("Grand.nsp", piano_library_bytes());
+        assert_eq!(
+            faces(shape(open.entity()))
+                .iter()
+                .map(|face| face.label())
+                .collect::<Vec<_>>(),
+            ["Edit", "Metadata", "Advanced"],
+        );
+        let said = open.twice();
+        let has = |word: &str| said.iter().any(|held| held == word);
+        assert!(has("Nothing to edit here yet"), "{said:?}");
+        assert!(has("Send as-is"), "{said:?}");
+    }
+
     /// A set list's header says what the list amounts to, and only when that is
     /// something to look at: nothing read is not four problems.
     #[test]
@@ -2194,7 +2362,7 @@ mod tests {
         let bytes = wav_bytes();
         let mut open = Open::file("Marimba hit.wav", bytes.clone());
         assert_eq!(
-            faces(open.entity(), None)
+            faces(shape(open.entity()))
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
@@ -2304,7 +2472,7 @@ mod tests {
             let registry = entity.entity.as_ref().and_then(fields::fields_of);
             assert!(registry.is_none(), "{name} declares no field registry");
             assert_eq!(
-                faces(entity, registry.as_deref())
+                faces(shape(entity))
                     .iter()
                     .map(|face| face.label())
                     .collect::<Vec<_>>(),
@@ -2421,7 +2589,7 @@ mod tests {
     fn a_piano_document_offers_every_face_and_paints_on_each_of_them() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         assert_eq!(
-            faces(open.entity(), None)
+            faces(shape(open.entity()))
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
