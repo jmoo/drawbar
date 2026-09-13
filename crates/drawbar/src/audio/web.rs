@@ -15,12 +15,12 @@ pub struct Sound {
 }
 
 impl Sound {
-    pub fn play(&mut self, samples: &[i16], channels: u16) -> Result<(), String> {
-        self.start(samples, channels)
+    pub fn play(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<(), String> {
+        self.start(samples, channels, rate)
             .map_err(|e| format!("the browser refused to play this zone: {e:?}"))
     }
 
-    fn start(&mut self, samples: &[i16], channels: u16) -> Result<(), JsValue> {
+    fn start(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<(), JsValue> {
         // One voice: whatever is sounding gives way rather than mixing with this.
         self.stop();
         let channels = u32::from(channels).max(1);
@@ -45,6 +45,9 @@ impl Sound {
         }
         let source = context.create_buffer_source()?;
         source.set_buffer(Some(&buffer));
+        if rate.is_finite() && rate > 0.0 {
+            source.playback_rate().set_value(rate);
+        }
         source.connect_with_audio_node(&context.destination())?;
         source.start()?;
         self.source = Some(source);

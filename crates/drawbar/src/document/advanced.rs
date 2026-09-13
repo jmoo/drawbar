@@ -9,8 +9,11 @@ use nord_format::fields::Field;
 use nord_usb::{Location, ObjectClass};
 
 use super::controls::{self, Sets};
+use super::field;
+use crate::app;
 use crate::device::{Device, DeviceCmd};
 use crate::fields::{byte_diff, DiffRow};
+use crate::icon::{icon, Glyph};
 use crate::strings;
 use crate::workspace::LocalEntity;
 
@@ -20,10 +23,23 @@ pub struct SlotDetails {
     pub at: Location,
 }
 
-/// Column widths for the table. Wide enough for the longest of each in an ne5 body.
-const NAME_W: f32 = 230.0;
-const BITS_W: f32 = 70.0;
-const STORED_W: f32 = 220.0;
+/// The table's columns, left to right. Wide enough for the longest of each in an ne5
+/// body, and fixed rather than reflowing: a path is long, a body has hundreds of them,
+/// and a column that moves per row cannot be read down.
+const COLUMNS: [(&str, f32); 6] = [
+    ("Path", 250.0),
+    ("Bits", 74.0),
+    ("Control", 110.0),
+    ("Raw", 150.0),
+    ("Writes · editable", 140.0),
+    ("", 20.0),
+];
+
+/// One row of it, and the page's own left margin.
+const ROW: f32 = 22.0;
+const PAD: f32 = 12.0;
+const MONO: f32 = 10.5;
+const HEAD: f32 = 9.0;
 
 /// A cell being typed into, and what the library said about it last.
 #[derive(Default)]
@@ -50,103 +66,202 @@ pub struct Advanced {
 }
 
 impl Advanced {
+    /// What the file says about itself: the same facts the document was built from,
+    /// read here and never written differently.
+    pub fn about(ui: &mut egui::Ui, rows: &[(&'static str, String, String)]) {
+        let quiet = app::caption(ui.visuals());
+        controls::heading(
+            ui,
+            "About this file",
+            "what the file says about itself",
+            None,
+        );
+        for (label, value, note) in rows {
+            ui.horizontal(|ui| {
+                ui.add_space(PAD);
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.add_sized(
+                    [110.0, ROW],
+                    egui::Label::new(
+                        egui::RichText::new(*label)
+                            .font(egui::FontId::proportional(11.0))
+                            .color(ui.visuals().weak_text_color()),
+                    )
+                    .halign(egui::Align::LEFT),
+                );
+                ui.label(
+                    egui::RichText::new(value)
+                        .font(egui::FontId::monospace(11.0))
+                        .color(ui.visuals().text_color()),
+                );
+                if !note.is_empty() {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(note)
+                                .font(egui::FontId::proportional(10.0))
+                                .color(quiet),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+        }
+    }
+
     /// The whole body as a table: every field the library declares, engineering-only
     /// ones included, each value editable by the spelling `set_field` takes.
     ///
     /// This is the engineer's view, so nothing is hidden and nothing is prettied up: an
     /// unrecognised value is spelled `unknown (9)` here and that spelling is accepted
-    /// back, which the friendly view deliberately will not do.
-    pub fn table(&mut self, ui: &mut egui::Ui, fields: &[Field], sets: &mut Sets) {
+    /// back, and a field the Edit face does not draw is a row like any other, flagged
+    /// for what it is.
+    pub fn table(&mut self, ui: &mut egui::Ui, table: &Table<'_>, sets: &mut Sets) {
+        let quiet = app::caption(ui.visuals());
+        let rows: Vec<&Field> = table
+            .fields
+            .iter()
+            .filter(|field| self.matches(field))
+            .collect();
+        let unseen = rows
+            .iter()
+            .filter(|field| !table.shows(&field.path))
+            .count();
+        controls::heading(
+            ui,
+            "Every field",
+            "registry order · raw is what was read; type in Writes to change it — the value \
+             is taken as spelled, refused if the field cannot hold it",
+            Some((
+                &format!(
+                    "{} of {} rows · {unseen} hidden from Edit",
+                    rows.len(),
+                    table.fields.len()
+                ),
+                quiet,
+            )),
+        );
         ui.horizontal(|ui| {
-            ui.label("Filter");
+            ui.add_space(PAD);
+            ui.label(egui::RichText::new("Filter").small().color(quiet));
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
                     .desired_width(200.0)
                     .hint_text("path or name"),
             );
-            let shown = fields.iter().filter(|f| self.matches(f)).count();
-            ui.label(
-                egui::RichText::new(format!("{shown} of {} fields", fields.len()))
-                    .small()
-                    .weak(),
-            );
+        });
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.add_space(PAD);
+            ui.spacing_mut().item_spacing.x = 10.0;
+            for (head, width) in COLUMNS {
+                ui.add_sized(
+                    [width, 14.0],
+                    egui::Label::new(
+                        egui::RichText::new(head.to_uppercase())
+                            .font(egui::FontId::proportional(HEAD))
+                            .color(quiet),
+                    )
+                    .halign(egui::Align::LEFT),
+                );
+            }
         });
         ui.separator();
 
-        egui::Grid::new("registry_table")
-            .num_columns(4)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("field").small().weak());
-                ui.label(egui::RichText::new("bits").small().weak());
-                ui.label(egui::RichText::new("stored").small().weak());
-                ui.label(egui::RichText::new("value").small().weak());
-                ui.end_row();
-
-                // Declaration order: it is the order the body is laid out in, which is
-                // what an engineer reading a dump alongside this is following.
-                let rows: Vec<&Field> = fields.iter().filter(|f| self.matches(f)).collect();
-                for field in rows {
-                    self.cell_row(ui, field, sets);
-                    ui.end_row();
-                }
-            });
-    }
-
-    fn matches(&self, field: &Field) -> bool {
-        let wanted = self.filter.trim().to_ascii_lowercase();
-        if wanted.is_empty() {
-            return true;
+        // Declaration order: it is the order the body is laid out in, which is what an
+        // engineer reading a dump alongside this is following.
+        for field in rows {
+            self.row(ui, field, table, sets);
         }
-        field.path.to_ascii_lowercase().contains(&wanted)
-            || strings::label(&field.path)
-                .to_ascii_lowercase()
-                .contains(&wanted)
     }
 
-    fn cell_row(&mut self, ui: &mut egui::Ui, field: &Field, sets: &mut Sets) {
-        // Widths are set rather than left to the text: a path is long and a body has
-        // ninety of them, and a column that reflows per row cannot be read down.
-        ui.vertical(|ui| {
-            ui.set_min_width(NAME_W);
-            ui.add(egui::Label::new(strings::label(&field.path)).truncate());
-            ui.add(
-                egui::Label::new(egui::RichText::new(&field.path).monospace().small().weak())
-                    .truncate(),
-            );
-        });
-        ui.add_sized(
-            [BITS_W, ui.spacing().interact_size.y],
+    fn row(&mut self, ui: &mut egui::Ui, field: &Field, table: &Table<'_>, sets: &mut Sets) {
+        let visuals = ui.visuals().clone();
+        let changed = table.changed.contains(&field.path);
+        let hidden = !table.shows(&field.path);
+        let labelled = strings::known(&field.path);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
+        if changed {
+            ui.painter()
+                .rect_filled(rect, 0.0, visuals.selection.bg_fill);
+        }
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        row.spacing_mut().item_spacing.x = 10.0;
+        row.add_space(PAD);
+        let ink = match hidden {
+            true => app::caption(&visuals),
+            false => visuals.weak_text_color(),
+        };
+        cell(&mut row, &field.path, COLUMNS[0].1, ink);
+        cell(
+            &mut row,
+            field.spec.placement,
+            COLUMNS[1].1,
+            app::caption(&visuals),
+        );
+        row.add_sized(
+            [COLUMNS[2].1, ROW],
             egui::Label::new(
-                egui::RichText::new(field.spec.placement)
-                    .monospace()
-                    .small()
-                    .weak(),
+                egui::RichText::new(field::kind_word(field))
+                    .font(egui::FontId::proportional(MONO))
+                    .color(app::caption(&visuals)),
             )
             .truncate()
             .halign(egui::Align::LEFT),
         );
-        ui.add_sized(
-            [STORED_W, ui.spacing().interact_size.y],
-            egui::Label::new(egui::RichText::new(&field.display).monospace().small())
-                .truncate()
-                .halign(egui::Align::LEFT),
-        );
+        cell(&mut row, table.raw(&field.path), COLUMNS[3].1, ink);
+        self.writes(&mut row, field, sets);
+        if let Some((glyph, tint)) = flag(changed, hidden, labelled, &visuals) {
+            icon(&mut row, glyph, 11.0, tint);
+        }
 
-        let editing = self.cell.path == field.path;
-        if !editing {
-            // Not a `selectable_label`: clicking the value is what opens it.
-            if ui
-                .add_sized(
-                    [180.0, ui.spacing().interact_size.y],
-                    egui::Label::new(egui::RichText::new(&field.value).monospace())
-                        .truncate()
-                        .halign(egui::Align::LEFT)
-                        .sense(egui::Sense::click()),
+        // ⚠️ Asked only of the row under the pointer. Enumerating a field walks every
+        // bit pattern it can hold, and a body has hundreds of fields in one table.
+        if !response.hovered() {
+            return;
+        }
+        let accepts = match (field.spec.legal)() {
+            legal if legal.is_empty() => "its stored bits, as spelled".to_string(),
+            legal if legal.len() > 12 => format!("{} .. {}", legal[0], legal[legal.len() - 1]),
+            legal => legal.join(", "),
+        };
+        response.on_hover_text(format!(
+            "{} · accepts {accepts}",
+            match (hidden, labelled) {
+                (true, _) => "not relevant: the instrument is not using this for the state the \
+                              file holds — stored, valid, writable"
+                    .to_string(),
+                (false, true) => strings::label(&field.path),
+                (false, false) => "no label in this app's table yet".to_string(),
+            }
+        ));
+    }
+
+    /// The one editable column. A box opens where the value is clicked, commits on Enter
+    /// or on losing focus, and stays open holding what was typed while the library is
+    /// refusing it.
+    fn writes(&mut self, ui: &mut egui::Ui, field: &Field, sets: &mut Sets) {
+        let width = COLUMNS[4].1;
+        if self.cell.path != field.path {
+            let drawn = ui.add_sized(
+                [width, ROW - 4.0],
+                egui::Button::new(
+                    egui::RichText::new(&field.value)
+                        .font(egui::FontId::monospace(MONO))
+                        .color(ui.visuals().text_color()),
                 )
-                .on_hover_text("click to edit")
-                .clicked()
-            {
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    ui.visuals().widgets.noninteractive.bg_stroke.color,
+                )),
+            );
+            if drawn.on_hover_text("click to type a value").clicked() {
                 self.cell = Cell {
                     path: field.path.clone(),
                     text: field.value.clone(),
@@ -157,10 +272,9 @@ impl Advanced {
             return;
         }
 
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut self.cell.text)
-                .desired_width(160.0)
-                .font(egui::TextStyle::Monospace),
+        let response = ui.add_sized(
+            [width, ROW - 4.0],
+            egui::TextEdit::singleline(&mut self.cell.text).font(egui::FontId::monospace(MONO)),
         );
         // ⚠️ Taken once. Asking for focus every frame would mean the cell could never be
         // left by clicking anything else.
@@ -177,11 +291,14 @@ impl Advanced {
                 state.store(ui.ctx(), response.id);
             }
         }
-        // The refusal sits beside the cell it is about: a message at the foot of ninety
-        // rows is a message about nothing in particular.
+        // The refusal sits beside the cell it is about: a message at the foot of eight
+        // hundred rows is a message about nothing in particular.
         if let Some(why) = &self.cell.error {
-            let bad = crate::app::bad(ui.visuals());
-            ui.label(egui::RichText::new(why).small().color(bad));
+            ui.label(
+                egui::RichText::new(why)
+                    .small()
+                    .color(crate::app::bad(ui.visuals())),
+            );
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.cell = Cell::default();
@@ -200,6 +317,17 @@ impl Advanced {
             return;
         }
         sets.push((field.path.clone(), typed));
+    }
+
+    fn matches(&self, field: &Field) -> bool {
+        let wanted = self.filter.trim().to_ascii_lowercase();
+        if wanted.is_empty() {
+            return true;
+        }
+        field.path.to_ascii_lowercase().contains(&wanted)
+            || strings::label(&field.path)
+                .to_ascii_lowercase()
+                .contains(&wanted)
     }
 
     /// Forget the cell being typed into.
@@ -293,6 +421,63 @@ impl Advanced {
                         ui.label(egui::RichText::new(&self.dump).monospace().small());
                     });
             });
+    }
+}
+
+/// What the Advanced table reads besides the working fields: the decode of the bytes
+/// this document was last saved as, the paths the two spell differently, and which
+/// fields the Edit face draws at all.
+pub struct Table<'a> {
+    pub fields: &'a [Field],
+    pub saved: &'a [Field],
+    pub changed: &'a [String],
+    pub doc: Option<&'a field::Doc<'a>>,
+}
+
+impl Table<'_> {
+    /// The value this path held in the bytes the document was last saved as. A field the
+    /// saved decode does not carry reads as what is in front of the operator.
+    fn raw(&self, path: &str) -> &str {
+        self.saved
+            .iter()
+            .chain(self.fields)
+            .find(|field| field.path == path)
+            .map_or("", |field| field.value.as_str())
+    }
+
+    fn shows(&self, path: &str) -> bool {
+        self.doc.is_none_or(|doc| doc.shows(path))
+    }
+}
+
+/// One mono column of a row.
+fn cell(ui: &mut egui::Ui, text: &str, width: f32, ink: egui::Color32) {
+    ui.add_sized(
+        [width, ROW],
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(egui::FontId::monospace(MONO))
+                .color(ink),
+        )
+        .truncate()
+        .halign(egui::Align::LEFT),
+    );
+}
+
+/// The one mark at the end of a row, in the order that decides which it wears: what the
+/// operator changed, then what the Edit face does not draw, then what this app has no
+/// name for.
+fn flag(
+    changed: bool,
+    hidden: bool,
+    labelled: bool,
+    visuals: &egui::Visuals,
+) -> Option<(Glyph, egui::Color32)> {
+    match (changed, hidden, labelled) {
+        (true, _, _) => Some((Glyph::Pencil, app::warn(visuals))),
+        (false, true, _) => Some((Glyph::EyeOff, app::caption(visuals))),
+        (false, false, false) => Some((Glyph::Tag, app::caption(visuals))),
+        (false, false, true) => None,
     }
 }
 
