@@ -52,6 +52,8 @@ let
           || hasInfix "/tests/scripts/" path
           # The vendored glyphs and fonts, which drawbar `include_bytes!`s.
           || hasInfix "/drawbar/assets/" path
+          # The licence texts the About box `include_str!`s.
+          || hasInfix "/drawbar/licences/" path
         );
     };
 
@@ -373,13 +375,28 @@ let
 
         installPhaseCommand = ''
           mkdir -p "$out"
-          wasm-bindgen --target web --out-dir "$out/pkg" \
+          wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" \
             target/wasm32-unknown-unknown/web/drawbar.wasm
-          cp ${./crates/drawbar/index.html} "$out/index.html"
+
+          # Pages caches for ten minutes, so a cached glue file can meet a freshly
+          # fetched module; the content hash in each name keeps that pair unreachable.
+          wasm="drawbar_bg-$(sha256sum "$out/pkg/drawbar_bg.wasm" | cut -c-16).wasm"
+          mv "$out/pkg/drawbar_bg.wasm" "$out/pkg/$wasm"
+          substituteInPlace "$out/pkg/drawbar.js" --replace-fail drawbar_bg.wasm "$wasm"
+
+          js="drawbar-$(sha256sum "$out/pkg/drawbar.js" | cut -c-16).js"
+          mv "$out/pkg/drawbar.js" "$out/pkg/$js"
+          substitute ${./crates/drawbar/index.html} "$out/index.html" \
+            --replace-fail pkg/drawbar.js "pkg/$js"
+
+          if grep -qF drawbar_bg.wasm "$out/pkg/$js" || grep -qF pkg/drawbar.js "$out/index.html"; then
+            echo "an unhashed asset name survived the rewrite" >&2
+            exit 1
+          fi
 
           # The page imports `start` from the module; a bundle without it loads
           # and does nothing.
-          grep -q 'function start' "$out/pkg/drawbar.js" || {
+          grep -q 'function start' "$out/pkg/$js" || {
             echo "wasm-bindgen output lacks the page's entry point" >&2
             exit 1
           }
