@@ -414,13 +414,7 @@ pub struct DeviceState {
     pub inventory: Vec<Status>,
     /// The background read of every class.
     pub scan: Scan,
-    /// The slot this app last asked the instrument to load, per class.
-    ///
-    /// ⚠️ Only what **this app** selected, and kept for the reselect a write owes. What
-    /// the panel is actually on is [`DeviceState::focused`], which is a device answer
-    /// rather than a record of our own commands.
-    selected: HashMap<u32, Location>,
-    /// The slot the panel had loaded when the class was last read, per class.
+    /// The slot the panel has loaded in a class, as the instrument last reported it.
     focus: HashMap<u32, Option<Location>>,
     /// The device's own banks, per class: their names and their capacities.
     geometry: HashMap<u32, Vec<Bank>>,
@@ -472,10 +466,11 @@ impl DeviceState {
         (!name.is_empty()).then_some(name)
     }
 
-    /// The slot the panel had loaded in a class when it was last read.
+    /// The slot the panel has loaded in a class, as the instrument last said: at the
+    /// head of a walk, and after a select this app asked for.
     ///
-    /// ⚠️ Read once per walk, so a selection made on the panel afterwards is not in here
-    /// until the class is read again.
+    /// ⚠️ A selection made on the panel itself is not in here until the class is read
+    /// again.
     pub fn focused(&self, class: ObjectClass) -> Option<Location> {
         self.focus.get(&class.to_raw()).copied().flatten()
     }
@@ -645,7 +640,6 @@ impl DeviceState {
         self.inventory.clear();
         self.detail = Detail::default();
         self.scan.clear();
-        self.selected.clear();
     }
 }
 
@@ -1115,11 +1109,7 @@ impl Device {
         // Confirmed on hardware.
         // Writing the loaded slot requires SELECT to reload it.
         let loaded = |state: &DeviceState, class: &ObjectClass, at: &Location| {
-            state
-                .selected
-                .get(&class.to_raw())
-                .filter(|held| *held == at)
-                .map(|at| (*class, *at))
+            (state.focused(*class) == Some(*at)).then_some((*class, *at))
         };
         self.reselect = match &cmd {
             DeviceCmd::Put { class, at, .. } | DeviceCmd::Rename { class, at, .. } => {
@@ -1135,9 +1125,6 @@ impl Device {
             DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
             _ => None,
         };
-        if let DeviceCmd::Select { class, at } = &cmd {
-            self.state.selected.insert(class.to_raw(), *at);
-        }
         self.state.in_flight = Some(cmd.words());
         self.link.send(cmd);
     }
@@ -2419,6 +2406,58 @@ mod tests {
         assert!(entity.is_unsaved(), "the edit never went anywhere");
         assert_eq!(entity.link, Some((class, at)));
         assert!(!queue.holds(id), "it landed");
+    }
+
+    /// ⚠️ The panel goes on playing what it read before a write, so a write into the
+    /// slot it has loaded is followed by a select that makes it read the new bytes. The
+    /// panel's own focus is what says which slot that is, however it got there.
+    #[test]
+    fn writing_the_slot_the_panel_has_loaded_reloads_it() {
+        let class = ObjectClass::Program;
+        let at = Location { bank: 4, slot: 2 };
+        let elsewhere = Location { bank: 4, slot: 3 };
+
+        let reloaded = |focused: Location, written: Location| {
+            let ctx = egui::Context::default();
+            let mut workspace = Workspace::new(ctx.clone());
+            let mut device = Device::new(ctx);
+            let mut log = Log::default();
+            device.pretend_attached();
+            device.pretend_focused(class, focused);
+            device.send(
+                DeviceCmd::Put {
+                    id: 1,
+                    class,
+                    at: written,
+                    name: "Africa Split".into(),
+                    bytes: vec![0; 4],
+                },
+                &mut log,
+            );
+            device.pump();
+            device.pretend(DeviceEvent::Finished);
+            device.poll(
+                &mut log,
+                &mut workspace,
+                &mut Tabs::default(),
+                &mut Queue::default(),
+            );
+            device
+                .queued()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    DeviceCmd::Select { at, .. } => Some(*at),
+                    _ => None,
+                })
+                .map(|at| (at.bank, at.slot))
+        };
+
+        assert_eq!(reloaded(at, at), Some((at.bank, at.slot)));
+        assert_eq!(
+            reloaded(elsewhere, at),
+            None,
+            "the panel is playing another slot, and a select would take it off it"
+        );
     }
 
     /// A library id resolves to a name only where the instrument has actually said so:
