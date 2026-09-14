@@ -1347,6 +1347,21 @@ mod tests {
         assert!(centre.height() >= CENTRE_TALL, "the centre: {centre:?}");
     }
 
+    /// ⚠️ The page has to answer a phone before the module that would answer has
+    /// loaded, so the threshold and the words are written a second time in `index.html`.
+    /// A CSS pixel is the point the shell lays itself out in.
+    #[test]
+    fn the_page_gates_where_the_shell_does_and_says_the_same_thing() {
+        let page = include_str!("../index.html");
+        let gate = format!("@media (width < {}px), (height < {}px)", LEAST.x, LEAST.y);
+        assert!(page.contains(&gate), "index.html does not gate at `{gate}`");
+        assert!(page.contains(TOO_SMALL), "index.html: {TOO_SMALL:?}");
+        assert!(
+            page.contains(TOO_SMALL_WHY),
+            "index.html: {TOO_SMALL_WHY:?}"
+        );
+    }
+
     /// The notice is the whole of what a gated frame draws: what is wrong, and the
     /// guide to read while the reader finds a bigger screen.
     #[test]
