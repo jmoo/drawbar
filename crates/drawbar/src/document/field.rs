@@ -2529,7 +2529,6 @@ mod tests {
             id: None,
             name: None,
             can_ask: false,
-            asked: false,
             models: Vec::new(),
             scan_disagrees: None,
         }

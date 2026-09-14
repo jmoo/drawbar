@@ -134,8 +134,8 @@ impl Needs {
             ),
             Needs::Wanted { class, id } => format!(
                 "This names a {} the instrument has not listed by id ({id:#010x}). Only the \
-                 instrument can put a name to one, and only for a slot it has been asked \
-                 about.",
+                 instrument can put a name to one, and nothing it has been asked about \
+                 names this id.",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -461,7 +461,7 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
     }
 }
 
-/// The library a file names, and the name the instrument gave it if it has been asked.
+/// The library a file names, and the name the instrument gave it where it has named it.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
     let Some(fields) = entity.entity.as_ref().and_then(crate::fields::fields_of) else {
         return Needs::Nothing;
@@ -480,7 +480,7 @@ pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
         else {
             continue;
         };
-        return match device.dependency_name(entity.origin.slot(), class, id) {
+        return match device.dependency_name(class, id) {
             Some(name) => Needs::Named {
                 class,
                 name: name.to_string(),
