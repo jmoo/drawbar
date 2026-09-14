@@ -26,7 +26,7 @@ use nord_usb::ObjectClass;
 
 use super::capability::{self, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
-use super::keys::{self, Audition, Scale, SizeCell, Span};
+use super::keys::{self, Audition, Scale, SizeCell, Span, Struck};
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::browser::Act;
@@ -1702,7 +1702,8 @@ fn mb(bytes: u64) -> f32 {
 
 /// What the keyboard last played, as the line under it reads: whether it sounded, and
 /// the sentence.
-fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
+fn status(facts: &Facts, plan: &Plan, struck: Struck) -> (bool, String) {
+    let key = struck.note;
     let silent = |why: &str| (false, format!("{} — {why}", note::name(key)));
     let answers = plan
         .answers(facts, key)
@@ -1727,7 +1728,7 @@ fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
     let said = format!(
         "{} at vel {} → root {} · {}",
         note::name(key),
-        keys::AUDITION_VELOCITY,
+        struck.velocity,
         note::name(root.note),
         keys::shifted(key, root.note),
     );
@@ -1802,7 +1803,7 @@ fn coverage(gaps: &[(u8, u8)]) -> String {
 impl State {
     /// The key map, pinned above the body: one cell per root over a clickable keyboard,
     /// and a line saying what the last key played.
-    pub fn map(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
+    pub fn map(&mut self, ui: &mut egui::Ui, played: Option<Struck>) -> Option<Ask> {
         self.summarise();
         let State {
             open,
@@ -1837,8 +1838,8 @@ impl State {
             Some((&reading, ink)),
         );
 
-        let lit = view.audition.as_ref().map(|struck| struck.note);
-        let answering = lit.and_then(|note| draft.answers(facts, note));
+        let lit = view.audition.as_ref().map(|held| held.struck);
+        let answering = lit.and_then(|struck| draft.answers(facts, struck.note));
         let of_root = &summary.of_root;
         let marks: Vec<keys::Mark> = facts
             .roots
@@ -1873,7 +1874,7 @@ impl State {
             inner.next_widget_position(),
             egui::vec2(inner.available_width().max(1.0), keys::KEYBOARD_H),
         );
-        let struck = keys::keyboard(&mut inner, SPAN, lit, &marks);
+        let struck = keys::keyboard(&mut inner, SPAN, lit, &marks, played);
         damper_mark(
             &inner,
             keyboard,
@@ -1881,8 +1882,8 @@ impl State {
         );
         let room = inner.available_rect_before_wrap().width();
         let (line, _) = inner.allocate_exact_size(egui::vec2(room, LANE), egui::Sense::hover());
-        if let Some(note) = lit {
-            let (good, said) = status(facts, draft, note);
+        if let Some(struck) = lit {
+            let (good, said) = status(facts, draft, struck);
             let (glyph, ink) = match good {
                 true => (Glyph::AudioLines, app::good(inner.visuals())),
                 false => (Glyph::CircleAlert, app::warn(inner.visuals())),
@@ -1927,17 +1928,17 @@ impl State {
             }
             None => {}
         }
-        let note = struck?;
-        view.audition = Some(Audition::new(note, ui.input(|input| input.time)));
+        let struck = struck?;
+        view.audition = Some(Audition::new(struck, ui.input(|input| input.time)));
         // Only a key that sounds is asked for. A root with nothing left to play would
         // answer with the codec's refusal, and the line under the keyboard is where
         // silence is explained.
-        let (sounds, _) = status(facts, draft, note);
-        let root = draft.answers(facts, note).filter(|_| sounds)?;
+        let (sounds, _) = status(facts, draft, struck);
+        let root = draft.answers(facts, struck.note).filter(|_| sounds)?;
         let root = facts.roots[root].note;
         Some(Ask::Strike {
             root,
-            semitones: i16::from(note) - i16::from(root),
+            semitones: i16::from(struck.note) - i16::from(root),
         })
     }
 
@@ -3610,6 +3611,14 @@ mod tests {
     const ROOTS: [u8; 3] = [48, 60, 72];
     const LAYERS: [u8; 3] = [0, 6, 12];
 
+    /// `note` as a click on the keyboard strikes it.
+    fn clicked(note: u8) -> Struck {
+        Struck {
+            note,
+            velocity: keys::AUDITION_VELOCITY,
+        }
+    }
+
     /// A library shaped like a small vendor one: three roots of three attack layers,
     /// one of them also carrying a pedal-resonance and a release stroke, and a map that
     /// answers every key from A0 to C8.
@@ -4013,7 +4022,7 @@ mod tests {
         reroute(&facts, &mut moved, &[0, 1, 2], &was, &now);
         assert_eq!(spread(&moved), [(SPAN.low, 57), (58, 66), (67, SPAN.high)]);
         assert!(
-            status(&facts, &moved, 56).1.contains("root C3"),
+            status(&facts, &moved, clicked(56)).1.contains("root C3"),
             "the keys moved with the boundary"
         );
         assert!(
@@ -4031,7 +4040,7 @@ mod tests {
         let now = keys::boundary(&was, SPAN, 2, keys::Edge::Top, 100);
         reroute(&facts, &mut cut, &[0, 1, 2], &was, &now);
         assert_eq!(Summary::of(&facts, &cut, None).silent, [(101, SPAN.high)]);
-        assert!(!status(&facts, &cut, 105).0);
+        assert!(!status(&facts, &cut, clicked(105)).0);
     }
 
     /// A key sounds the largest layer value its root holds that is at most
@@ -4384,7 +4393,7 @@ mod tests {
     fn a_struck_key_says_which_root_answered_it() {
         let facts = facts();
         let mut plan = plan();
-        let (good, said) = status(&facts, &plan, 61);
+        let (good, said) = status(&facts, &plan, clicked(61));
         assert!(good);
         assert_eq!(
             said,
@@ -4396,7 +4405,7 @@ mod tests {
 
         // With the loudest layer of that root dropped, the next kept one plays.
         plan.roots.insert((60, LAYERS[0]), false);
-        let (good, said) = status(&facts, &plan, 60);
+        let (good, said) = status(&facts, &plan, clicked(60));
         assert!(good, "{said}");
         assert!(said.ends_with("the loudest layer is dropped, so the next kept layer plays"));
 
@@ -4404,7 +4413,7 @@ mod tests {
         for layer in LAYERS {
             plan.roots.insert((60, layer), false);
         }
-        let (good, said) = status(&facts, &plan, 60);
+        let (good, said) = status(&facts, &plan, clicked(60));
         assert!(!good);
         assert!(
             said.contains("every layer of this root is dropped"),
@@ -4414,7 +4423,7 @@ mod tests {
         // A key the trim has cut away answers nothing at all.
         let mut cut = plan.clone();
         cut.range = Some(21..=53);
-        let (good, said) = status(&facts, &cut, 72);
+        let (good, said) = status(&facts, &cut, clicked(72));
         assert!(!good);
         assert!(said.contains("no root answers this key"), "{said}");
     }
@@ -4629,7 +4638,7 @@ mod tests {
                     if let Some(edit) = edit.take() {
                         edit(&mut self.state.draft);
                     }
-                    asked = self.state.map(ui);
+                    asked = self.state.map(ui, None);
                     asked = self.state.ui(ui, None).or(asked);
                 });
             });

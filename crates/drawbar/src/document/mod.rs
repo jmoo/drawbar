@@ -778,11 +778,11 @@ impl Document {
                 field::nav(ui, &mut self.open.as_mut()?.fields, doc?);
                 None
             }
-            Shape::Piano => self.piano.map(ui).map(Asked::Root),
+            Shape::Piano => self.piano.map(ui, None).map(Asked::Root),
             Shape::Sample => match sample::snapshot(asset.decoded()?)? {
                 Ok(snapshot) => {
                     let open = self.open.as_mut()?;
-                    sample::map(ui, &mut open.sample, &snapshot, sets).map(Asked::Zone)
+                    sample::map(ui, &mut open.sample, &snapshot, sets, None).map(Asked::Zone)
                 }
                 Err(_) => None,
             },
