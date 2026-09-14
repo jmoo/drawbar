@@ -223,9 +223,17 @@ pub struct LocalEntity {
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     pub verify: VerifyState,
-    /// What this asset was last saved as. Unsaved is not a flag: it is bytes that are
-    /// not these — see [`LocalEntity::is_unsaved`].
+    /// What this asset was last saved as. Unsaved is bytes that are not these, or an
+    /// editor holding an edit that has not reached them — see
+    /// [`LocalEntity::is_unsaved`].
     pub saved: Baseline,
+    /// Whether an editor holds an edit of this asset its bytes do not.
+    ///
+    /// A piano library is hundreds of megabytes, so an edit of one is a plan and the
+    /// bytes are laid out only when something has to carry them. The plan lives in
+    /// [`crate::document::piano::State`], which says so here — see
+    /// [`Workspace::mark_pending`].
+    pending: bool,
     /// Whether this is on this computer, as opposed to a view of a slot.
     ///
     /// A view is a working copy like any other — it is edited and sent back the same
@@ -275,6 +283,7 @@ impl LocalEntity {
             container,
             verify,
             saved: Baseline::default(),
+            pending: false,
             kept: true,
             stamp,
             link: None,
@@ -284,13 +293,18 @@ impl LocalEntity {
         held
     }
 
-    /// Whether it holds something other than what it was last saved as.
+    /// Whether it holds something other than what it was last saved as, an editor's
+    /// pending edit included.
+    ///
+    /// The one question every unsaved reading asks: the star on a row and on a tab, the
+    /// header's claim, the File menu's revert, the queue's counts, and what the store
+    /// keeps between sessions.
     ///
     /// ⚠️ Two stamps, not two bodies: every listed row and every frame of the header
     /// ask this, and a piano library is hundreds of megabytes. The stamps are settled
     /// wherever a baseline moves — see [`Baseline::stamp`].
     pub fn is_unsaved(&self) -> bool {
-        self.stamp != self.saved.stamp
+        self.pending || self.stamp != self.saved.stamp
     }
 
     /// The bytes it holds now, as a baseline: what saving it settles on.
@@ -801,23 +815,14 @@ impl Workspace {
     /// edit — and the × sits beside the badge saying the edit is owed back to a slot.
     /// So an edited or owed view is promoted into the list instead, and only an
     /// untouched one is dropped.
-    ///
-    /// `pending` says an id holds an edit its bytes do not — a piano library's plan,
-    /// which is an edit like any other and the only copy of itself.
-    pub fn close_views(
-        &mut self,
-        open: impl Fn(u64) -> bool,
-        pending: impl Fn(u64) -> bool,
-        queue: &Queue,
-        log: &mut Log,
-    ) {
+    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
         let mut rescued = Vec::new();
         let before = self.entities.len();
         self.entities.retain_mut(|entity| {
             if entity.kept || open(entity.id) {
                 return true;
             }
-            if !precious(entity, queue) && !pending(entity.id) {
+            if !precious(entity, queue) {
                 return false;
             }
             entity.kept = true;
@@ -1032,18 +1037,39 @@ impl Workspace {
         });
     }
 
-    /// Put back the bytes this asset was last saved as. What was saved is what it holds
-    /// again, so it is not unsaved any more.
+    /// Put back the bytes this asset was last saved as, and drop the pending edit any
+    /// editor was holding of it. What was saved is what it holds again, so it is not
+    /// unsaved any more.
+    ///
+    /// ⚠️ A pending edit has not reached the bytes, so putting them back is no change at
+    /// all. The revert of a piano library's plan is the flag alone.
     pub fn revert(&mut self, id: u64, log: &mut Log) {
         let Some(saved) = self.get(id).map(|entity| entity.saved.bytes.clone()) else {
             return;
         };
-        if self.respell(id, saved).is_none() {
+        let dropped = self.mark_pending(id, false);
+        if self.respell(id, saved).is_none() && !dropped {
             return;
         }
         if let Some(entity) = self.get(id) {
             log.say(format!("“{}” is back as it was last saved.", entity.name));
         }
+    }
+
+    /// Say whether an editor holds an edit of this asset its bytes do not, and answer
+    /// with whether that moved — see [`LocalEntity::is_unsaved`].
+    ///
+    /// ⚠️ The editor holding the edit is what says so, on every frame it might have
+    /// moved. Nothing else can tell: the bytes are the saved ones either way.
+    pub fn mark_pending(&mut self, id: u64, pending: bool) -> bool {
+        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        if std::mem::replace(&mut entity.pending, pending) == pending {
+            return false;
+        }
+        self.revision += 1;
+        true
     }
 
     /// The bytes it holds are what it is saved as, from now on.
@@ -1130,7 +1156,7 @@ impl Workspace {
             .get(id)
             .is_some_and(|entity| entity.saved.bytes == bytes);
         let entity = self.entities.iter_mut().find(|e| e.id == id)?;
-        let (kept, link, wrote) = (entity.kept, entity.link, entity.wrote);
+        let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
         let saved = std::mem::take(&mut entity.saved);
         let saved = Baseline {
             stamp: match held {
@@ -1147,6 +1173,7 @@ impl Workspace {
             link,
             saved,
             wrote,
+            pending,
             ..replaced
         };
         Some(verify)
@@ -1577,10 +1604,10 @@ mod tests {
         let local = workspace.create(Fresh::Program, &mut log).unwrap();
 
         let queue = Queue::default();
-        workspace.close_views(|id| id == viewed, |_| false, &queue, &mut log);
+        workspace.close_views(|id| id == viewed, &queue, &mut log);
         assert!(workspace.get(viewed).is_some(), "its tab is still open");
 
-        workspace.close_views(|_| false, |_| false, &queue, &mut log);
+        workspace.close_views(|_| false, &queue, &mut log);
         assert!(workspace.get(viewed).is_none());
         assert!(workspace.get(local).is_some(), "kept is kept");
     }
@@ -1628,7 +1655,7 @@ mod tests {
         assert!(!precious(workspace.get(untouched).unwrap(), &queue));
 
         // Every tab closes at once.
-        workspace.close_views(|_| false, |_| false, &queue, &mut log);
+        workspace.close_views(|_| false, &queue, &mut log);
 
         assert!(workspace.get(untouched).is_none(), "the slot still has it");
         let listed: Vec<u64> = workspace.listed().map(|e| e.id).collect();
@@ -1659,7 +1686,9 @@ mod tests {
         let queue = Queue::default();
         assert!(!precious(workspace.get(planning).unwrap(), &queue));
 
-        workspace.close_views(|_| false, |id| id == planning, &queue, &mut log);
+        workspace.mark_pending(planning, true);
+        assert!(precious(workspace.get(planning).unwrap(), &queue));
+        workspace.close_views(|_| false, &queue, &mut log);
         assert!(workspace.get(planning).is_some(), "the plan survives");
         assert!(!workspace.is_view(planning), "and is listed to survive in");
     }
@@ -1794,8 +1823,8 @@ mod tests {
         assert_eq!(stamp(&workspace), third);
     }
 
-    /// Unsaved is not a flag anything sets: it is holding bytes other than the ones this
-    /// asset was last saved as. An edit makes it so, saving and reverting each end it.
+    /// Unsaved is holding bytes other than the ones this asset was last saved as. An
+    /// edit makes it so, saving and reverting each end it.
     #[test]
     fn an_asset_is_unsaved_while_it_holds_something_its_baseline_does_not() {
         let ctx = egui::Context::default();
@@ -1835,6 +1864,38 @@ mod tests {
         assert!(unsaved(&workspace));
         workspace.replace_bytes(id, edited, &mut log);
         assert!(!unsaved(&workspace), "it holds what it was saved as again");
+    }
+
+    /// ⚠️ The other half of unsaved. A piano library's plan is an edit its bytes do not
+    /// hold — nothing is copied until something has to carry them — and an asset that
+    /// read as saved while one stood would be offered no revert, wear no star, and be
+    /// thrown away with the view it was edited in.
+    #[test]
+    fn an_asset_is_unsaved_while_an_editor_holds_an_edit_its_bytes_do_not() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let queue = Queue::default();
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        assert!(!workspace.get(id).unwrap().is_unsaved());
+
+        assert!(workspace.mark_pending(id, true), "the edit is news");
+        assert!(!workspace.mark_pending(id, true), "and is news only once");
+        let held = workspace.get(id).unwrap();
+        assert!(held.is_unsaved());
+        assert_eq!(held.bytes, held.saved.bytes, "with no body copied for it");
+        assert!(precious(held, &queue));
+
+        workspace.revert(id, &mut log);
+        assert!(
+            !workspace.get(id).unwrap().is_unsaved(),
+            "and the revert of an edit the bytes never held is the edit alone",
+        );
+        assert!(
+            log.status().1.contains("back as it was last saved"),
+            "{}",
+            log.status().1,
+        );
     }
 
     /// A write that reached a slot saves the bytes it carried and not the ones the
