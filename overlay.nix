@@ -54,6 +54,8 @@ let
           || hasInfix "/drawbar/assets/" path
           # The licence texts the About box `include_str!`s.
           || hasInfix "/drawbar/licences/" path
+          # The page, whose small-screen gate a test holds to the shell's.
+          || path == toString (workspace + "/drawbar/index.html")
         );
     };
 
