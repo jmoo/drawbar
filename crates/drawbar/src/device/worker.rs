@@ -238,6 +238,12 @@ async fn execute<T: Transport>(
             select(device, class, at)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
+            // `select` is what puts the panel on a slot, so this is the answer a
+            // `FOCUS` read would give, without walking the class for it.
+            emit.send(DeviceEvent::Focus {
+                class,
+                at: Some(at),
+            });
             Ok(Some(format!("selected {} on the instrument", shown(at))))
         }
 
@@ -1479,6 +1485,33 @@ mod wire_tests {
                 class.label()
             );
         }
+    }
+
+    /// A select leaves the panel on the slot it names, so the app hears where the panel
+    /// is from the select itself rather than waiting for the next walk of the class.
+    #[test]
+    fn a_select_reports_where_it_left_the_panel() {
+        let at = Location { bank: 6, slot: 3 };
+        let mut device = Puppet::new(1);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::Select {
+                class: ObjectClass::Program,
+                at,
+            },
+        );
+
+        assert!(flow == Flow::Continue, "the instrument is still there");
+        assert!(
+            events.try_iter().any(|event| matches!(
+                event,
+                DeviceEvent::Focus {
+                    class: ObjectClass::Program,
+                    at: Some(loaded)
+                } if loaded == at
+            )),
+            "the select said nothing about the panel"
+        );
     }
 
     #[test]
