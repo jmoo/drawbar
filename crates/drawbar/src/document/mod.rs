@@ -1939,13 +1939,13 @@ mod tests {
     }
 
     /// A path this app has no word for reads as a rough name rather than as a nameless
-    /// knob — unpolished has to look unpolished.
+    /// knob — unpolished has to look unpolished. A cell wears its name in caps.
     #[test]
     fn a_path_with_no_label_yet_reads_as_its_prettified_self() {
         let said = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()).twice();
         assert!(!strings::known("synth_a_volume"));
         assert!(
-            said.iter().any(|word| word == "Synth a volume"),
+            said.iter().any(|word| word == "SYNTH A VOLUME"),
             "{:?}",
             &said[..said.len().min(40)]
         );
