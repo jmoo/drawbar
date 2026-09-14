@@ -55,6 +55,7 @@ glyphs! {
     Eye => "eye.svg",
     EyeOff => "eye-off.svg",
     FilePlus2 => "file-plus-2.svg",
+    FileText => "file-text.svg",
     Folder => "folder.svg",
     FolderGit2 => "folder-git-2.svg",
     FolderOpen => "folder-open.svg",

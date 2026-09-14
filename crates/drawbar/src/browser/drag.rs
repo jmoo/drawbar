@@ -197,7 +197,7 @@ impl Kind {
             Kind::PipeLibrary => Glyph::SlidersVertical,
             Kind::Bundle => Glyph::Folder,
             Kind::Project => Glyph::FolderGit2,
-            Kind::Text => Glyph::FilePlus2,
+            Kind::Text => Glyph::FileText,
             Kind::Other => Glyph::HardDrive,
         }
     }
