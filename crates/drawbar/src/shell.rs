@@ -851,6 +851,17 @@ impl DrawbarApp {
         if action(ui, Glyph::Upload, &label, waiting > 0).clicked() && waiting > 0 {
             acts.push(Act::AskSendAll);
         }
+        // An edit does not queue itself, so what a send would walk past stands here as
+        // an offer to queue it. Nothing changed is nothing to offer, and no button.
+        let behind = crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue);
+        if let Some((label, hint)) = behind.offer() {
+            if action(ui, Glyph::Plus, &label, false)
+                .on_hover_text(hint)
+                .clicked()
+            {
+                acts.push(Act::QueueChanged);
+            }
+        }
         rule(ui, 16.0);
     }
 
@@ -992,34 +1003,6 @@ impl DrawbarApp {
                 {
                     picked = Some(page_click(page, on));
                 }
-            }
-            // An edit does not queue itself, so what a send would carry stands beside
-            // what it would walk past, in one line, next to the button that closes the
-            // gap between them. Each part wears the ink and the words of the mark it
-            // stands for, which makes the line the legend for every dot in the window.
-            let behind = crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue);
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                for (index, (said, mark)) in behind.parts().into_iter().enumerate() {
-                    if index > 0 {
-                        ui.label(crate::queue::aside("·", crate::app::caption(ui.visuals())));
-                    }
-                    ui.label(crate::queue::aside(
-                        &said,
-                        crate::library::mark_ink(mark, ui.visuals()),
-                    ))
-                    .on_hover_text(crate::library::mark_words(mark));
-                }
-            });
-            if ui
-                .add_enabled(
-                    behind.changed > 0,
-                    egui::Button::new(behind.action()).small(),
-                )
-                .on_disabled_hover_text("nothing here differs from what the instrument holds")
-                .clicked()
-            {
-                acts.push(Act::QueueChanged);
             }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1458,6 +1441,67 @@ mod tests {
 
         assert_eq!(dark.centre, light.centre);
         assert_eq!(dark.panels, light.panels);
+    }
+
+    /// The toolbar's offer to queue what changed is the changed set itself: it says how
+    /// many there are, and with none it is not drawn at all.
+    #[test]
+    fn the_queue_button_offers_exactly_what_a_send_would_walk_past() {
+        use nord_usb::Location;
+
+        let class = ObjectClass::Program;
+        let at = Location { bank: 6, slot: 0 };
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+
+        let fresh = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let bytes = app.workspace.get(fresh).unwrap().bytes.clone();
+        app.workspace.remove(fresh, &mut app.log);
+        let id = app.workspace.ingest(
+            "Africa-Split.ne5p".into(),
+            crate::workspace::Origin::Device { class, at },
+            bytes.clone(),
+            &mut app.log,
+        );
+        let held = app.workspace.get(id).unwrap().saved.crc32.unwrap();
+        app.device
+            .pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
+        app.device.relink(&mut app.workspace);
+
+        let _ = drawn(&ctx, &mut app);
+        assert!(
+            !drawn(&ctx, &mut app).wrote("Queue 1"),
+            "the slot holds what this is saved as"
+        );
+
+        // Saved on this computer and nowhere else: the slot holds the older body.
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace.mark_saved(id);
+        app.device.relink(&mut app.workspace);
+
+        assert_eq!(
+            crate::queue::changed(&app.workspace, &app.device.state, &app.queue).len(),
+            1
+        );
+        let _ = drawn(&ctx, &mut app);
+        assert!(drawn(&ctx, &mut app).wrote("Queue 1"), "one to offer");
+
+        crate::queue::queue_changed(
+            &app.workspace,
+            &mut app.device,
+            &mut app.queue,
+            &mut app.log,
+        );
+        let _ = drawn(&ctx, &mut app);
+        let painted = drawn(&ctx, &mut app);
+        assert!(!painted.wrote("Queue 1"), "the gap is closed");
+        assert!(painted.wrote("Send 1"), "and what closed it is waiting");
     }
 
     /// ⚠️ With nothing attached there is nothing to read from, nothing to send to and no

@@ -41,6 +41,10 @@ sound that belongs to a slot all add to the queue in the bottom dock. Each row
 shows its destination: click it to change it, × to remove the row, and pick a row
 to see what would change on the keyboard.
 
+When a sound on this computer no longer matches the slot it came from, a **Queue**
+button appears in the toolbar beside **Send**, with how many there are. Click it
+to queue each of them for the slot it stands on.
+
 **Send all** asks once, listing every destination and what it replaces, then
 writes folder by folder. If the instrument refuses an item, that folder's batch
 stops there. What was written stays, and the rest stays queued. The queue also
