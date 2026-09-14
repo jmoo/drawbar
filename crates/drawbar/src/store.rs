@@ -489,6 +489,30 @@ mod tests {
         assert!(after.entities().is_empty());
     }
 
+    /// ⚠️ A piano library is hundreds of megabytes, and a plan makes it unsaved without
+    /// moving a byte. What is left out is decided on the size alone, before any body is
+    /// encoded, so an unsaved library costs a write nothing and is still counted.
+    #[test]
+    fn an_oversized_asset_holding_a_pending_edit_is_left_out_like_any_other() {
+        use crate::workspace::Origin;
+
+        let (mut before, mut log) = workspace();
+        let id = before.ingest(
+            "huge.npno".into(),
+            Origin::Fresh,
+            vec![0; MAX_ENTITY + 1],
+            &mut log,
+        );
+        before.mark_pending(id, true);
+        assert!(before.get(id).unwrap().is_unsaved());
+
+        let mut store = Fake::default();
+        let left = save(&mut store, &before, &Queue::default());
+        assert_eq!((left.skipped, left.dropped), (1, 0));
+        let text = eframe::Storage::get_string(&store, KEY).expect("something was written");
+        assert_eq!(text.lines().count(), 2, "and neither body was written");
+    }
+
     /// A store written by another build is left alone rather than half-read.
     #[test]
     fn a_store_from_another_build_is_not_guessed_at() {

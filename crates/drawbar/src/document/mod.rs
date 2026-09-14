@@ -508,9 +508,11 @@ impl Document {
             }
         }
         self.replan(id, workspace, log);
-        if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
-            // The strip was drawn from the bytes this frame then edited; one more frame
-            // shows what the edit made of them.
+        // The strip was drawn before this frame's edit reached the document; one more
+        // frame shows what the edit, or the plan it left standing, made of it.
+        let edited = self.note_pending(id, workspace)
+            || workspace.get(id).is_some_and(|held| held.stamp != stamp);
+        if edited {
             ui.ctx().request_repaint();
         }
         wants
@@ -545,8 +547,17 @@ impl Document {
     }
 
     /// Whether this document holds an edit its bytes do not.
-    pub fn pends(&self, id: u64) -> bool {
+    fn pends(&self, id: u64) -> bool {
         self.piano.pending(id)
+    }
+
+    /// Tell the workspace what this document is holding, and answer with whether that
+    /// moved.
+    ///
+    /// The plan lives here, but unsaved is asked of the asset — see
+    /// [`LocalEntity::is_unsaved`]. Run wherever a plan is taken up or laid out.
+    fn note_pending(&self, id: u64, workspace: &mut Workspace) -> bool {
+        workspace.mark_pending(id, self.pends(id))
     }
 
     /// Hold back the acts that would carry a piano library's bytes while its plan is
@@ -605,6 +616,7 @@ impl Document {
             Some(Ok(bytes)) => {
                 self.refused(None);
                 workspace.replace_bytes(applied.id, bytes, log);
+                self.note_pending(applied.id, workspace);
             }
             Some(Err(why)) => {
                 log.error(why.clone());
@@ -2875,10 +2887,17 @@ mod tests {
         assert!(named(&open).contains('X'), "{}", named(&open));
         assert!(open.entity().is_unsaved(), "and it is the save's to settle");
         assert!(!open.document.pends(open.id));
+
+        open.workspace.mark_saved(open.id);
+        assert!(
+            !open.entity().is_unsaved(),
+            "which settles it: the plan is in the bytes the save wrote",
+        );
     }
 
-    /// A revert is the end of a plan wherever the gesture came from: the File menu
-    /// raises the same act the header's own control does.
+    /// A plan the bytes do not hold is what the asset is unsaved for, which is what
+    /// offers the revert — and a revert is the end of a plan wherever the gesture came
+    /// from: the File menu raises the same act the header's own control does.
     #[test]
     fn reverting_a_piano_from_the_menu_drops_the_plan_it_was_holding() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
@@ -2887,6 +2906,15 @@ mod tests {
         open.frame(vec![egui::Event::Text("X".to_string())]);
         open.frame(vec![enter()]);
         assert!(open.document.pends(open.id));
+        assert!(
+            open.entity().is_unsaved(),
+            "which is what puts Revert to saved in the menu",
+        );
+        assert_eq!(
+            open.entity().bytes,
+            open.entity().saved.bytes,
+            "though no body was copied for it",
+        );
 
         let ctx = open.ctx.clone();
         let acts = open.document.settle(
@@ -2895,8 +2923,22 @@ mod tests {
             &mut open.workspace,
             &mut open.log,
         );
-        assert_eq!(acts.len(), 1, "the revert itself still runs");
+        assert!(
+            matches!(acts.as_slice(), [crate::browser::Act::Revert(id)] if *id == open.id),
+            "the revert itself still runs",
+        );
         assert!(!open.document.pends(open.id), "the plan is gone with it");
+
+        open.workspace.revert(open.id, &mut open.log);
+        assert!(
+            !open.entity().is_unsaved(),
+            "and what is left is what it was saved as",
+        );
+        assert!(
+            open.log.status().1.contains("back as it was last saved"),
+            "{}",
+            open.log.status().1,
+        );
     }
 
     #[test]
