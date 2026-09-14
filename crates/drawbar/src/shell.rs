@@ -44,6 +44,23 @@ const SIDE_LEAST: f32 = 180.0;
 const CENTRE_WIDE: f32 = 300.0;
 const CENTRE_TALL: f32 = 200.0;
 
+/// The least room the whole shell lays out in: the three docks at the least each opens
+/// to, around a centre that still keeps [`CENTRE_WIDE`] by [`CENTRE_TALL`].
+///
+/// A window is held above this by its own minimum size; a browser tab is any size the
+/// device is, so the web build shows [`too_small_notice`] instead of a shell that cannot
+/// fit.
+pub const LEAST: egui::Vec2 = egui::vec2(
+    SIDE_LEAST + CENTRE_WIDE + SIDE_LEAST,
+    TITLEBAR + TOOLBAR + STATUS + DOCK + BODY_LEAST + CENTRE_TALL,
+);
+
+/// What that notice says, and what `index.html` says before the module has loaded.
+const TOO_SMALL: &str = "drawbar needs a larger screen";
+const TOO_SMALL_WHY: &str = "It is a desktop application: its panels need more room \
+                             than a phone or a narrow window has. Open it on a larger \
+                             screen, or make this window wider.";
+
 /// The check beside a menu item, and the height of a control.
 const CHECK: f32 = 12.0;
 const BUTTON: f32 = 22.0;
@@ -1167,6 +1184,32 @@ fn reopen(ui: &mut egui::Ui, glyph: Glyph, hint: &str) -> egui::Response {
         .on_hover_text(hint)
 }
 
+/// Whether a screen this size leaves the shell too little room to lay out in.
+pub fn too_small(screen: egui::Vec2) -> bool {
+    screen.x < LEAST.x || screen.y < LEAST.y
+}
+
+/// What a screen too small for the shell shows instead of it.
+pub fn too_small_notice(ctx: &egui::Context) {
+    let fill = ctx.style().visuals.panel_fill;
+    egui::CentralPanel::default()
+        .frame(
+            egui::Frame::new()
+                .fill(fill)
+                .inner_margin(egui::Margin::symmetric(16, 0)),
+        )
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() / 3.0);
+                ui.label(egui::RichText::new(TOO_SMALL).size(18.0).strong());
+                ui.add_space(GAP);
+                ui.label(TOO_SMALL_WHY);
+                ui.add_space(GAP * 2.0);
+                crate::splash::link(ui, "User guide", GUIDE);
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,15 +1265,25 @@ mod tests {
     /// One frame at 900 × 540, answering with the centre's rect, every panel's, and the
     /// text the frame put on screen.
     fn drawn(ctx: &egui::Context, app: &mut DrawbarApp) -> Painted {
-        frame_of(ctx, app, Vec::new())
+        drawn_at(ctx, app, SCREEN)
+    }
+
+    /// One frame on a screen of some other size.
+    fn drawn_at(ctx: &egui::Context, app: &mut DrawbarApp, screen: egui::Vec2) -> Painted {
+        frame_of(ctx, app, screen, Vec::new())
     }
 
     /// One frame with something arriving in it.
-    fn frame_of(ctx: &egui::Context, app: &mut DrawbarApp, events: Vec<egui::Event>) -> Painted {
+    fn frame_of(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        screen: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Painted {
         let mut frame = eframe::Frame::_new_kittest();
         let input = egui::RawInput {
             events,
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
             ..Default::default()
         };
         let mut centre = egui::Rect::NOTHING;
@@ -1251,6 +1304,67 @@ mod tests {
             panels,
             words: crate::tabs::words(&output),
         }
+    }
+
+    /// The gate is the screen and the metrics alone: what the reader has shut, and what
+    /// the device calls itself, do not make room the shell does not have.
+    #[test]
+    fn a_screen_short_of_the_least_room_is_gated_in_either_dimension_alone() {
+        assert!(!too_small(LEAST), "the least the shell lays out in");
+        assert!(!too_small(SCREEN), "the window the design is drawn to");
+        assert!(
+            too_small(LEAST - egui::vec2(1.0, 0.0)),
+            "a point too narrow"
+        );
+        assert!(too_small(LEAST - egui::vec2(0.0, 1.0)), "a point too short");
+        // A phone, either way up, and a canvas with no room at all.
+        assert!(too_small(egui::vec2(390.0, 844.0)));
+        assert!(too_small(egui::vec2(844.0, 390.0)));
+        assert!(too_small(egui::Vec2::ZERO));
+    }
+
+    /// What [`LEAST`] claims: at exactly that size the three docks and the bars still
+    /// fit, and the centre keeps the room no dock may take from it.
+    #[test]
+    fn at_the_least_room_it_claims_every_region_fits_and_the_centre_keeps_its_own() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.dock_open = true;
+        attach(&mut app);
+        let _ = drawn_at(&ctx, &mut app, LEAST);
+        let painted = drawn_at(&ctx, &mut app, LEAST);
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, LEAST);
+        assert_eq!(painted.panels.len(), REGIONS.len(), "every region drew");
+        for (id, rect) in &painted.panels {
+            assert!(
+                screen.contains_rect(*rect),
+                "{id} is outside the window: {rect:?}"
+            );
+        }
+        let centre = painted.centre;
+        assert!(centre.width() >= CENTRE_WIDE, "the centre: {centre:?}");
+        assert!(centre.height() >= CENTRE_TALL, "the centre: {centre:?}");
+    }
+
+    /// The notice is the whole of what a gated frame draws: what is wrong, and the
+    /// guide to read while the reader finds a bigger screen.
+    #[test]
+    fn the_notice_says_what_is_wrong_and_offers_the_guide() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(390.0, 844.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, too_small_notice);
+        let said = crate::tabs::words(&output);
+
+        assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");
+        assert!(said.iter().any(|word| word == TOO_SMALL_WHY), "{said:?}");
+        assert!(said.iter().any(|word| word == "User guide"), "{said:?}");
     }
 
     /// Every fixed region fits inside the window the design is drawn to, and the centre
@@ -1381,7 +1495,12 @@ mod tests {
         assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
 
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH)));
-        let _ = frame_of(&ctx, &mut app, vec![egui::Event::Text("afr".into())]);
+        let _ = frame_of(
+            &ctx,
+            &mut app,
+            SCREEN,
+            vec![egui::Event::Text("afr".into())],
+        );
         assert_eq!(app.shell.omnibox, "afr");
         assert_eq!(app.tabs.showing(), Some(Spot::Library));
 
@@ -1419,7 +1538,7 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
         };
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![pressed()]);
         assert!(!app.attached(), "nothing was attached");
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
@@ -1428,7 +1547,7 @@ mod tests {
 
         attach(&mut app);
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![pressed()]);
         assert!(app.shell.dock_open && app.shell.page == Page::Queue);
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
@@ -1457,13 +1576,13 @@ mod tests {
         let left = |ctx: &egui::Context| ctx.input(|input| input.events.iter().any(reload));
 
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![pressed()]);
         assert!(!app.attached(), "nothing was attached");
         assert!(!left(&ctx), "⌘R reached the tab with nothing attached");
 
         attach(&mut app);
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, vec![pressed()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![pressed()]);
         assert!(!left(&ctx), "⌘R reached the tab with one attached");
     }
 

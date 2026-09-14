@@ -350,6 +350,14 @@ impl eframe::App for DrawbarApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Only the browser build: a native window cannot be dragged below the minimum
+        // size `main` gives it. Nothing under this draws, so no input reaches a shell
+        // with nowhere to lay itself out, and the state it holds is untouched.
+        #[cfg(target_arch = "wasm32")]
+        if crate::shell::too_small(ctx.screen_rect().size()) {
+            crate::shell::too_small_notice(ctx);
+            return;
+        }
         self.log.tick(ctx);
         self.workspace.poll(&mut self.log);
         self.device.poll(
