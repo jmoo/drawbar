@@ -161,7 +161,7 @@ pub struct Wants {
     pub open: Option<crate::browser::Item>,
 }
 
-/// What the Edit face asked for that cannot be done while the asset is borrowed to
+/// What the Basic face asked for that cannot be done while the asset is borrowed to
 /// draw it: audio, or a new asset made out of this one.
 enum Asked {
     Zone(sample::Ask),
@@ -395,7 +395,7 @@ impl Document {
             if let Some(why) = self.open.as_ref().and_then(|open| open.error.as_ref()) {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
-            if face == Face::Edit {
+            if face == Face::Basic {
                 asked = self.pinned(ui, asset, doc.as_ref(), &mut sets);
             }
             egui::ScrollArea::vertical()
@@ -405,7 +405,7 @@ impl Document {
                     // ⚠️ Widget state keyed only by field path leaks between tabs of
                     // the same format, so every control also answers to the document id.
                     ui.push_id(id, |ui| match face {
-                        Face::Edit => {
+                        Face::Basic => {
                             if let Some(from_body) = self.body(
                                 ui,
                                 asset,
@@ -420,39 +420,36 @@ impl Document {
                                 asked = Some(from_body);
                             }
                         }
-                        Face::Advanced => match shape {
-                            Shape::Fields => {
-                                if let (Some(doc), Some(open)) = (doc.as_ref(), self.open.as_ref())
-                                {
-                                    Advanced::about(ui, &field::about(doc, entity));
-                                    let table = advanced::Table {
-                                        fields: registry.as_deref().unwrap_or_default(),
-                                        saved: open.fields.settled(),
-                                        changed: open.fields.pending(),
-                                        doc: Some(doc),
-                                    };
-                                    self.advanced.table(ui, &table, &mut sets);
-                                    typed = !sets.is_empty();
-                                }
-                            }
-                            Shape::Piano => self.piano.advanced(ui),
-                            Shape::SetList
-                            | Shape::Sample
-                            | Shape::Project
-                            | Shape::Verbatim
-                            | Shape::Wav
-                            | Shape::Undecoded => capabilities(ui, asset),
-                        },
-                        Face::Metadata => {
+                        Face::Advanced => {
                             match shape {
-                                Shape::Piano => self.piano.meta(ui),
-                                Shape::Fields
-                                | Shape::SetList
+                                Shape::Fields => {
+                                    if let (Some(doc), Some(open)) =
+                                        (doc.as_ref(), self.open.as_ref())
+                                    {
+                                        Advanced::about(ui, &field::about(doc, entity));
+                                        let table = advanced::Table {
+                                            fields: registry.as_deref().unwrap_or_default(),
+                                            saved: open.fields.settled(),
+                                            changed: open.fields.pending(),
+                                            doc: Some(doc),
+                                        };
+                                        self.advanced.table(ui, &table, &mut sets);
+                                        typed = !sets.is_empty();
+                                    }
+                                }
+                                Shape::Piano => {
+                                    self.piano.meta(ui);
+                                    self.piano.advanced(ui);
+                                }
+                                Shape::SetList
                                 | Shape::Sample
                                 | Shape::Project
                                 | Shape::Verbatim
                                 | Shape::Wav
-                                | Shape::Undecoded => record(ui, asset),
+                                | Shape::Undecoded => {
+                                    record(ui, asset);
+                                    capabilities(ui, asset);
+                                }
                             }
                             details = self.advanced.meta(ui, entity, device)
                         }
@@ -1017,31 +1014,26 @@ impl Document {
 
 /// The faces this document offers, in the order the control shows them.
 ///
-/// Metadata is always one of them — every asset has a record, even bytes that decoded
+/// Advanced is always one of them — every asset has a record, even bytes that decoded
 /// into nothing.
 fn faces(shape: Shape) -> Vec<Face> {
     // A WAV decodes into nothing, but it is the one thing this app can make an
-    // instrument out of, so it gets a panel rather than only a byte record. The deep
-    // face is whatever the panel left out: the field table, the capability table, the
-    // addresses a set list stores, or the body a verbatim document keeps.
-    let (panel, deep) = match shape {
+    // instrument out of, so it gets a panel rather than only a byte record.
+    let panel = match shape {
         Shape::Fields
         | Shape::SetList
         | Shape::Sample
         | Shape::Project
         | Shape::Piano
-        | Shape::Verbatim => (true, true),
-        Shape::Wav => (true, false),
-        Shape::Undecoded => (false, false),
+        | Shape::Verbatim
+        | Shape::Wav => true,
+        Shape::Undecoded => false,
     };
     let mut faces = Vec::new();
     if panel {
-        faces.push(Face::Edit);
+        faces.push(Face::Basic);
     }
-    faces.push(Face::Metadata);
-    if deep {
-        faces.push(Face::Advanced);
-    }
+    faces.push(Face::Advanced);
     faces
 }
 
@@ -1097,7 +1089,7 @@ fn extras(
 fn showing(faces: &[Face], remembered: Face) -> Face {
     match faces.contains(&remembered) {
         true => remembered,
-        false => faces.first().copied().unwrap_or(Face::Metadata),
+        false => faces.first().copied().unwrap_or(Face::Advanced),
     }
 }
 
@@ -1465,7 +1457,7 @@ mod tests {
     }
 
     fn render(sets: &[(&str, &str)], kind: Fresh) {
-        render_view(sets, kind, Face::Edit);
+        render_view(sets, kind, Face::Basic);
     }
 
     /// Every kind gets the same strip, in both faces of the theme, and it names the
@@ -1482,8 +1474,8 @@ mod tests {
                 });
                 let said = open.twice();
                 let has = |word: &str| said.iter().any(|held| held == word);
-                assert!(has("Edit"), "{kind:?} in {dark}: {said:?}");
-                assert!(has("Metadata"), "{kind:?} in {dark}: {said:?}");
+                assert!(has("Basic"), "{kind:?} in {dark}: {said:?}");
+                assert!(has("Advanced"), "{kind:?} in {dark}: {said:?}");
                 assert!(has("Queue send"), "the loud action: {said:?}");
                 assert!(has("Revert") && has("Export…"), "the quiet ones: {said:?}");
             }
@@ -1537,11 +1529,10 @@ mod tests {
         }
         // The controls, and the glyphs painted where their art would load. The kind
         // glyph at the far left is the one glyph that is not a control.
-        const CONTROLS: [&str; 7] = [
+        const CONTROLS: [&str; 6] = [
             "Send",
             "Queue send",
-            "Edit",
-            "Metadata",
+            "Basic",
             "Advanced",
             "Revert",
             "Export…",
@@ -1589,16 +1580,19 @@ mod tests {
 
         let full = at(1100.0);
         assert!(full.contains(&"Export…".to_string()), "{full:?}");
-        assert!(full.contains(&"Edit".to_string()));
+        assert!(full.contains(&"Basic".to_string()));
         assert!(full.contains(&"Queue send".to_string()));
 
         let quiet = at(900.0);
         assert!(!quiet.contains(&"Export…".to_string()), "{quiet:?}");
-        assert!(quiet.contains(&"Edit".to_string()), "the faces keep theirs");
+        assert!(
+            quiet.contains(&"Basic".to_string()),
+            "the faces keep theirs"
+        );
         assert!(quiet.contains(&"Queue send".to_string()));
 
         let faces = at(800.0);
-        assert!(!faces.contains(&"Edit".to_string()), "{faces:?}");
+        assert!(!faces.contains(&"Basic".to_string()), "{faces:?}");
         assert!(faces.contains(&"Queue send".to_string()));
 
         let narrow = at(700.0);
@@ -1870,23 +1864,25 @@ mod tests {
         );
     }
 
-    /// What the Edit face hides is a row in Advanced like any other, counted where the
-    /// reader can see how much of the body is not on the other face.
+    /// Advanced opens on what the file says about itself, and the table under it holds
+    /// every field — the ones Basic hides included, counted where the reader can see how
+    /// much of the body the other face leaves out.
     #[test]
-    fn the_fields_the_edit_face_hides_are_rows_under_advanced() {
+    fn the_advanced_face_holds_the_record_and_the_fields_basic_hides() {
         let mut open = Open::fresh(Fresh::Program);
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
         let reading = said
             .iter()
-            .find(|word| word.contains("hidden from Edit"))
-            .unwrap_or_else(|| panic!("the table counts what Edit does not draw: {said:?}"));
+            .find(|word| word.contains("hidden from Basic"))
+            .unwrap_or_else(|| panic!("the table counts what Basic does not draw: {said:?}"));
         assert!(!reading.contains("· 0 hidden"), "{reading}");
-        assert!(
-            said.iter().any(|word| word == "About this file"),
-            "{said:?}"
-        );
-        assert!(said.iter().any(|word| word == "Every field"), "{said:?}");
+        for section in ["About this file", "Every field"] {
+            assert!(
+                said.iter().any(|word| word == section),
+                "{section}: {said:?}"
+            );
+        }
     }
 
     /// Both stored registrations stay on screen: the one the instrument plays says so,
@@ -1976,28 +1972,22 @@ mod tests {
         }
     }
 
-    /// The record: the container grid, the byte diff — with something in it and with
-    /// nothing — and the folded dump.
+    /// The engineer's face paints, filters and holds an edit — for a body with ninety
+    /// fields and for one with forty — and with it the record: the container grid, the
+    /// byte diff with something in it and with nothing, and the folded dump.
     #[test]
-    fn the_meta_face_paints() {
+    fn the_advanced_face_paints() {
         render_view(
             &[("center_panel.gain", "96")],
             Fresh::Program,
-            Face::Metadata,
+            Face::Advanced,
         );
-        render_view(&[], Fresh::Settings, Face::Metadata);
-    }
-
-    /// The engineer's table paints, filters and holds an edit — for a body with ninety
-    /// fields and for one with forty.
-    #[test]
-    fn the_advanced_table_paints() {
         render_view(&[], Fresh::Program, Face::Advanced);
         render_view(&[], Fresh::Settings, Face::Advanced);
     }
 
-    /// A body with a registry has all three faces; one with a view of its own but no
-    /// registry has no field table to offer; bytes with neither have only the record.
+    /// Anything with a panel offers both faces; bytes that decoded into nothing have
+    /// only the deep one, which is where their record is.
     #[test]
     fn the_faces_offered_are_the_ones_the_asset_has() {
         let ctx = egui::Context::default();
@@ -2012,10 +2002,7 @@ mod tests {
         };
 
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
-        assert_eq!(
-            offered(&workspace, program),
-            ["Edit", "Metadata", "Advanced"]
-        );
+        assert_eq!(offered(&workspace, program), ["Basic", "Advanced"]);
 
         let song = workspace.ingest(
             "blank.ne5t".into(),
@@ -2025,8 +2012,8 @@ mod tests {
         );
         assert_eq!(
             offered(&workspace, song),
-            ["Edit", "Metadata", "Advanced"],
-            "the four entries, the record, and the addresses as stored"
+            ["Basic", "Advanced"],
+            "the four entries, and the record with the addresses as stored"
         );
 
         let stub = workspace.ingest(
@@ -2037,7 +2024,7 @@ mod tests {
         );
         assert_eq!(
             offered(&workspace, stub),
-            ["Edit", "Metadata", "Advanced"],
+            ["Basic", "Advanced"],
             "a body no registry describes still says so, and shows its bytes"
         );
 
@@ -2047,24 +2034,22 @@ mod tests {
             b"not a nord file".to_vec(),
             &mut log,
         );
-        assert_eq!(offered(&workspace, junk), ["Metadata"]);
+        assert_eq!(offered(&workspace, junk), ["Advanced"]);
     }
 
-    /// A document opens on the face it was left on, and on something that has no such
-    /// face falls back rather than showing an empty page.
+    /// A document opens on the face it was left on — the panel where it has never been
+    /// left on one — and on something that has no such face falls back rather than
+    /// showing an empty page.
     #[test]
     fn a_document_falls_back_to_a_face_it_actually_has() {
-        let all = [Face::Edit, Face::Metadata, Face::Advanced];
-        assert_eq!(showing(&all, Face::Metadata), Face::Metadata);
-        assert_eq!(showing(&all[..2], Face::Advanced), Face::Edit);
+        let both = [Face::Basic, Face::Advanced];
+        assert_eq!(showing(&both, Face::default()), Face::Basic);
+        assert_eq!(showing(&both, Face::Advanced), Face::Advanced);
 
-        let record_only = [Face::Metadata];
-        for left_on in [Face::Edit, Face::Advanced, Face::Metadata] {
-            assert_eq!(showing(&record_only, left_on), Face::Metadata);
+        let record_only = [Face::Advanced];
+        for left_on in [Face::Basic, Face::Advanced] {
+            assert_eq!(showing(&record_only, left_on), Face::Advanced);
         }
-        // A set list has no field table: the table's operator lands on the panel.
-        let no_table = [Face::Edit, Face::Metadata];
-        assert_eq!(showing(&no_table, Face::Advanced), Face::Edit);
     }
 
     /// A cell the library refuses stays open with what was typed in it, because that is
@@ -2399,7 +2384,7 @@ mod tests {
             ("blank.ns4n", Fresh::Stage4Piano.bytes().unwrap()),
             ("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()),
         ] {
-            render_file(name, bytes.clone(), Face::Edit);
+            render_file(name, bytes.clone(), Face::Basic);
             render_file(name, bytes, Face::Advanced);
         }
     }
@@ -2413,7 +2398,7 @@ mod tests {
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+        for face in [Face::Basic, Face::Advanced] {
             render_file("blank.ne5t", bytes.clone(), face);
         }
     }
@@ -2506,7 +2491,7 @@ mod tests {
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Edit", "Metadata", "Advanced"],
+            ["Basic", "Advanced"],
         );
         let said = open.twice();
         let has = |word: &str| said.iter().any(|held| held == word);
@@ -2556,6 +2541,22 @@ mod tests {
         nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
     }
 
+    /// A WAV has no field table and no capabilities to list, so its Advanced face is
+    /// the record every asset has — which is the one page the merged face must not have
+    /// dropped.
+    #[test]
+    fn the_advanced_face_of_a_wav_is_the_record() {
+        let mut open = Open::file("Marimba hit.wav", wav_bytes());
+        open.document.views.insert(open.id, Face::Advanced);
+        let said = open.twice();
+        for section in ["Container", "Changes"] {
+            assert!(
+                said.iter().any(|word| word == section),
+                "{section}: {said:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_wav_offers_an_encode_and_leaves_itself_alone() {
         let bytes = wav_bytes();
@@ -2565,7 +2566,7 @@ mod tests {
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Edit", "Metadata"],
+            ["Basic", "Advanced"],
         );
 
         open.frame(Vec::new());
@@ -2657,10 +2658,10 @@ mod tests {
         include_bytes!("../../../nord-format/tests/fixtures/nsmpproj/three-zones.nsmpproj").to_vec()
     }
 
-    /// An instrument and the project it is built from each have all three faces: the
-    /// panel, the record, and the capability table that says what the format holds.
+    /// An instrument and the project it is built from each have both faces: the panel,
+    /// and the record with the capability table that says what the format holds.
     #[test]
-    fn an_instrument_and_a_project_offer_all_three_faces() {
+    fn an_instrument_and_a_project_offer_both_faces() {
         for (name, bytes) in [
             ("Marimba.nsmp", sample_bytes()),
             ("clarinet.nsmpproj", project_bytes()),
@@ -2674,7 +2675,7 @@ mod tests {
                     .iter()
                     .map(|face| face.label())
                     .collect::<Vec<_>>(),
-                ["Edit", "Metadata", "Advanced"],
+                ["Basic", "Advanced"],
                 "{name}",
             );
         }
@@ -2683,7 +2684,7 @@ mod tests {
     /// Every face of an instrument and of a project paints, twice over.
     #[test]
     fn a_project_document_paints_on_every_face() {
-        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+        for face in [Face::Basic, Face::Advanced] {
             render_file("clarinet.nsmpproj", project_bytes(), face);
             render_file("Marimba.nsmp", sample_bytes(), face);
         }
@@ -2781,7 +2782,7 @@ mod tests {
             .expect("the builder lays out a library")
     }
 
-    /// A piano library is a document like any other: it offers all three faces, and the
+    /// A piano library is a document like any other: it offers both faces, and the
     /// panel that decides what goes on the instrument is one of them.
     #[test]
     fn a_piano_document_offers_every_face_and_paints_on_each_of_them() {
@@ -2791,10 +2792,10 @@ mod tests {
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Edit", "Metadata", "Advanced"],
+            ["Basic", "Advanced"],
         );
 
-        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+        for face in [Face::Basic, Face::Advanced] {
             for dark in [true, false] {
                 let mut open = Open::file("Test Piano.npno", piano_bytes());
                 open.ctx.set_theme(match dark {
@@ -2806,19 +2807,17 @@ mod tests {
                 let has = |word: &str| said.iter().any(|held| held == word);
                 assert!(has("Test Piano"), "{face:?} in {dark}: {said:?}");
                 match face {
-                    Face::Edit => assert!(has("Trim to fit"), "{said:?}"),
-                    Face::Metadata => {
-                        assert!(has("Metadata") && has("Container"), "{said:?}");
-                        assert!(!has("Key map"), "the map is the Edit face's: {said:?}");
-                    }
+                    Face::Basic => assert!(has("Trim to fit"), "{said:?}"),
                     Face::Advanced => {
-                        assert!(has("What this format holds") && has("Offsets"), "{said:?}")
+                        assert!(has("About this file"), "{said:?}");
+                        assert!(has("What this format holds") && has("Offsets"), "{said:?}");
+                        assert!(!has("Key map"), "the map is the Basic face's: {said:?}");
                     }
                 }
             }
         }
         // And the map is pinned above the body rather than drawn inside it.
-        open.document.views.insert(open.id, Face::Edit);
+        open.document.views.insert(open.id, Face::Basic);
         assert!(open.twice().iter().any(|word| word == "Key map"));
     }
 
@@ -2907,8 +2906,8 @@ mod tests {
             .unwrap()
             .to_bytes()
             .unwrap();
-        render_file("Marimba.nsmp", bytes.clone(), Face::Edit);
-        render_file("Marimba.nsmp", bytes, Face::Metadata);
-        render_file("Marimba hit.wav", wav_bytes(), Face::Edit);
+        render_file("Marimba.nsmp", bytes.clone(), Face::Basic);
+        render_file("Marimba.nsmp", bytes, Face::Advanced);
+        render_file("Marimba hit.wav", wav_bytes(), Face::Basic);
     }
 }

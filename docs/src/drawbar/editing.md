@@ -18,11 +18,12 @@ over` when the send cannot happen yet.
 
 ## The faces
 
-- **Edit** is the sound's controls, in the instrument's own words.
-- **Metadata** is what the file says about itself, and changes nothing.
-- **Advanced** is every field in the file as a table, for when you need a value
-  the Edit face does not draw. Type into the **Writes** column to set one. A
-  value the field cannot hold is refused, with the reason.
+- **Basic** is the sound's controls, in the instrument's own words.
+- **Advanced** is what the file says about itself, every field in the file as a
+  table for when you need a value the Basic face does not draw, and the record
+  of the container and the bytes that have moved. Type into the **Writes**
+  column to set a field. A value the field cannot hold is refused, with the
+  reason.
 
 ## Programs, live slots, settings and presets
 

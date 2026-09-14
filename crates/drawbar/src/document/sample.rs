@@ -1739,7 +1739,7 @@ pub fn stated(entity: &Entity) -> Option<Cell> {
 pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     controls::heading(
         ui,
-        "Metadata",
+        "About this file",
         "what the file says about itself — read here, never written differently",
         None,
     );
@@ -1794,7 +1794,7 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
 /// The nineteen capabilities of the instrument editor, as this generation stands in
 /// them.
 ///
-/// `Editable` is a field a control on the Edit face writes or an act it performs,
+/// `Editable` is a field a control on the Basic face writes or an act it performs,
 /// `ReadOnly` a field the format states and nothing here writes, `Absent` a field the
 /// format does not have at all. The table is checked against the paths [`set`] accepts —
 /// see the tests.
@@ -1934,7 +1934,7 @@ pub fn capabilities(generation: &str) -> Vec<Row> {
     ]
 }
 
-/// Where each field the Edit face reads or writes lands in the file.
+/// Where each field the Basic face reads or writes lands in the file.
 ///
 /// Every figure is one of `nord_format`'s own declarations rather than a measurement.
 pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
@@ -2330,7 +2330,7 @@ mod tests {
         ("name", Some("name")),
         ("key zones: root / top / low", Some("zone1.top_note")),
         ("per-key table", Some("key60.gain")),
-        // The two the Edit face performs as acts rather than field writes.
+        // The two the Basic face performs as acts rather than field writes.
         ("decode / audition", None),
         ("write to the instrument", None),
         // Named here so the wide generations' table is covered by the same check.
