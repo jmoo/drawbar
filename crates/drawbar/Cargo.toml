@@ -41,6 +41,8 @@ nord-format = { path = "../nord-format", version = "0.6.0", features = [
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# MIDI in. Input only: nothing in this app opens an output port.
+midir = "0.11"
 nord-usb = { path = "../nord-usb", version = "0.6.0", features = [
   "blocking",
   "nusb",
@@ -68,6 +70,11 @@ web-sys = { version = "0.3", features = [
   "Document",
   "Element",
   "Headers",
+  "MidiAccess",
+  "MidiInput",
+  "MidiInputMap",
+  "MidiMessageEvent",
+  "MidiPort",
   "HtmlAnchorElement",
   "HtmlCanvasElement",
   "Navigator",

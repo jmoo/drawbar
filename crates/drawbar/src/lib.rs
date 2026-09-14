@@ -21,6 +21,7 @@ pub mod knob;
 pub mod led;
 pub mod library;
 pub mod log;
+pub mod midi;
 pub mod named;
 pub mod newproject;
 pub mod panel;
