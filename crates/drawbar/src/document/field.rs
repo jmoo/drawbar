@@ -202,7 +202,7 @@ pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
 }
 
 impl Doc<'_> {
-    /// Whether the Edit face draws this path at all, the morph slots a lens puts under a
+    /// Whether the Basic face draws this path at all, the morph slots a lens puts under a
     /// parameter's own control included.
     pub fn shows(&self, path: &str) -> bool {
         self.shown.contains(path)
@@ -2671,7 +2671,7 @@ mod tests {
 
     /// A morph slot is drawn under the parameter it moves rather than beside it, so a
     /// face that places the parameter draws the slot too — the Advanced table must not
-    /// flag a slot the lens draws as a field the Edit face hides.
+    /// flag a slot the lens draws as a field the Basic face hides.
     #[test]
     fn a_slot_is_shown_where_the_parameter_it_moves_is_placed() {
         // The layout draws the sections the program is using, so the organ has to be

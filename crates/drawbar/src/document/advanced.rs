@@ -17,7 +17,7 @@ use crate::icon::{icon, Glyph};
 use crate::strings;
 use crate::workspace::LocalEntity;
 
-/// A read the Meta face asked the instrument for.
+/// A read the Advanced face asked the instrument for.
 pub struct SlotDetails {
     pub class: ObjectClass,
     pub at: Location,
@@ -65,7 +65,7 @@ pub struct Advanced {
     dump: String,
     /// The asset and the two sets of bytes the cached diff is a comparison of.
     ///
-    /// ⚠️ `byte_diff` walks both bodies. The Metadata face asks for it on every frame
+    /// ⚠️ `byte_diff` walks both bodies. The Advanced face asks for it on every frame
     /// it is up, and a piano library is hundreds of megabytes — it is walked once per
     /// pair of bodies.
     diff_for: Option<(u64, u64, u64)>,
@@ -80,7 +80,7 @@ impl Advanced {
         controls::heading(
             ui,
             "About this file",
-            "what the file says about itself",
+            "what the file says about itself — read here, never written differently",
             None,
         );
         for (label, value, note) in rows {
@@ -120,7 +120,7 @@ impl Advanced {
     ///
     /// This is the engineer's view, so nothing is hidden and nothing is prettied up: an
     /// unrecognised value is spelled `unknown (9)` here and that spelling is accepted
-    /// back, and a field the Edit face does not draw is a row like any other, flagged
+    /// back, and a field the Basic face does not draw is a row like any other, flagged
     /// for what it is.
     pub fn table(&mut self, ui: &mut egui::Ui, table: &Table<'_>, sets: &mut Sets) {
         let quiet = app::caption(ui.visuals());
@@ -140,7 +140,7 @@ impl Advanced {
              is taken as spelled, refused if the field cannot hold it",
             Some((
                 &format!(
-                    "{} of {} rows · {unseen} hidden from Edit",
+                    "{} of {} rows · {unseen} hidden from Basic",
                     rows.len(),
                     table.fields.len()
                 ),
@@ -461,7 +461,7 @@ impl Advanced {
 
 /// What the Advanced table reads besides the working fields: the decode of the bytes
 /// this document was last saved as, the paths the two spell differently, and which
-/// fields the Edit face draws at all.
+/// fields the Basic face draws at all.
 pub struct Table<'a> {
     pub fields: &'a [Field],
     pub saved: &'a [Field],
@@ -500,7 +500,7 @@ fn cell(ui: &mut egui::Ui, text: &str, width: f32, ink: egui::Color32) {
 }
 
 /// The one mark at the end of a row, in the order that decides which it wears: what the
-/// operator changed, then what the Edit face does not draw, then what this app has no
+/// operator changed, then what the Basic face does not draw, then what this app has no
 /// name for.
 fn flag(
     changed: bool,
@@ -690,7 +690,7 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
     asked
 }
 
-/// The two reads the Meta face asks for, in the order the CLI asks them.
+/// The two reads the Advanced face asks for, in the order the CLI asks them.
 pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
     let SlotDetails { class, at } = details;
     [

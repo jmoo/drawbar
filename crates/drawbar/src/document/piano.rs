@@ -3203,7 +3203,7 @@ fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
 }
 
 impl State {
-    /// The Edit face under the key map: what is kept, which layers, which roots, and
+    /// The Basic face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
         self.summarise();
@@ -3344,7 +3344,7 @@ impl State {
         };
         controls::heading(
             ui,
-            "Metadata",
+            "About this file",
             "what the file says about itself — read here, never written differently",
             None,
         );
