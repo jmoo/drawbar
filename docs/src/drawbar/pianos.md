@@ -12,6 +12,9 @@ once, and every switch can be turned back on. The file is laid out only when it
 has to be: on Save, Export, or Queue send. The header reads `applying…` while
 that runs, and the action waits for it.
 
+A plan is an unsaved edit like any other: the name is starred until it is saved,
+and **Revert** drops it.
+
 ## The key map
 
 Each root has a cell over the keys it answers, showing the megabytes it keeps.
