@@ -863,22 +863,27 @@ impl Document {
         }
     }
 
-    /// Hear or write one root of a piano library. The stroke is decoded on the way,
-    /// once, because either answer needs it.
+    /// Draw, hear or write one root of a piano library. The stroke is decoded on the
+    /// way, once, because every answer needs it.
     fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
         let root = ask.root();
         let Some(entity) = workspace.get(id) else {
             return;
         };
         if let Err(why) = self.piano.decode(entity, root) {
-            log.error(why);
-            log.trouble("That root could not be decoded.");
+            // ⚠️ An open row asks for its own waveform: it says why it has none, and
+            // the log is for what the operator asked for.
+            if !matches!(ask, piano::Ask::Show(_)) {
+                log.error(why);
+                log.trouble("That root could not be decoded.");
+            }
             return;
         }
         let Some(sound) = self.piano.sound(root) else {
             return;
         };
         match ask {
+            piano::Ask::Show(_) => {}
             piano::Ask::Play(_) => {
                 if let Err(why) =
                     self.player
@@ -2732,6 +2737,34 @@ mod tests {
         assert!(
             map.bottom() <= scrolling.top(),
             "the map at {map:?} is inside the rows' own region {scrolling:?}",
+        );
+    }
+
+    /// ⚠️ An open zone shows what its stroke sounds like, so the row asks for the
+    /// decode itself. Nothing decodes while every row is closed, and the cache is what
+    /// keeps a frame from decoding again.
+    #[test]
+    fn an_open_zone_draws_its_own_waveform() {
+        let mut open = Open::file("Marimba.nsmp", sample_bytes());
+        let said = open.twice();
+        assert!(
+            open.document.audio.get(0).is_none(),
+            "a closed row decodes nothing: {said:?}"
+        );
+
+        sample::pick_row(&mut open.state().sample, 0);
+        let said = open.twice();
+        let decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the open row asked for the decode")
+            .as_ref()
+            .expect("the zone decodes");
+        assert!(!decoded.envelope.is_empty());
+        assert!(
+            said.iter().any(|word| word == "Save WAV…"),
+            "the second frame drew the audio the first asked for: {said:?}"
         );
     }
 
