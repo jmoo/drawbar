@@ -795,26 +795,45 @@ fn side_by_side(
                 true => app::accent(ui.visuals()),
                 false => ui.visuals().widgets.noninteractive.bg_stroke.color,
             };
-            egui::Frame::new()
+            let mut picked = false;
+            let card = egui::Frame::new()
                 .fill(ui.visuals().window_fill)
                 .stroke(egui::Stroke::new(1.0_f32, stroke))
                 .corner_radius(RADIUS)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    if let Some(selection) = alternative.pick {
-                        if card_title(ui, &alternative.title, Some(alternative.selected))
-                            && !alternative.selected
-                        {
-                            sets.push((selection.field.to_string(), selection.value.to_string()));
+                    // The cards stand side by side, so each one stacks its own head over
+                    // its own controls rather than inheriting the row they sit in.
+                    ui.vertical(|ui| {
+                        if alternative.pick.is_some() {
+                            picked |=
+                                card_title(ui, &alternative.title, Some(alternative.selected));
                         }
-                    }
-                    if !alternative.selected {
-                        ui.set_opacity(0.45);
-                    }
-                    cells(ui, ctx, state, doc, &alternative.fields, piano, sets);
+                        if !alternative.selected {
+                            ui.set_opacity(0.45);
+                        }
+                        cells(ui, ctx, state, doc, &alternative.fields, piano, sets);
+                    });
                 });
+            let Some(selection) = alternative.pick else {
+                continue;
+            };
+            picked |= clicked_in(ui, card.response.rect);
+            if picked && !alternative.selected {
+                sets.push((selection.field.to_string(), selection.value.to_string()));
+            }
         }
     });
+}
+
+/// Whether a click landed anywhere in `card`, whichever of its own controls took it.
+///
+/// ⚠️ The click is read off the pointer rather than claimed as a widget of its own:
+/// a card-sized target over the controls would swallow every drawbar in it, and one
+/// under them would hear only the clicks that missed. Pulling a drawbar of the stored
+/// registration is a click on that card, and picks it.
+fn clicked_in(ui: &egui::Ui, card: egui::Rect) -> bool {
+    ui.rect_contains_pointer(card) && ui.input(|input| input.pointer.primary_clicked())
 }
 
 /// A card's own head. With `playing` it is the selector as well, and returns whether it
@@ -2266,6 +2285,97 @@ mod tests {
         assert_eq!(all, fields.len());
         assert!(slots > 300, "{slots} morph slots");
         assert!(ns4::program::PANEL.resolve(&fields).sections.len() > 1);
+    }
+
+    /// ⚠️ A stored alternative is picked by a click anywhere in its card, not by the
+    /// label alone: an operator who reaches for its drawbars has said which registration
+    /// they mean, and a card that answered only its own title would take the pull and go
+    /// on playing the other one.
+    #[test]
+    fn a_click_anywhere_in_a_stored_alternative_picks_it() {
+        /// The stroked card of the alternative that is not the one playing.
+        fn kept_card(output: &egui::FullOutput, stroke: egui::Color32) -> Option<egui::Rect> {
+            fn walk(shape: &egui::Shape, stroke: egui::Color32, found: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Rect(drawn) if drawn.stroke.color == stroke => {
+                        found.push(drawn.rect)
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        shapes.iter().for_each(|shape| walk(shape, stroke, found))
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, stroke, &mut found);
+            }
+            found
+                .into_iter()
+                .find(|rect| rect.width() > 120.0 && rect.height() > 120.0)
+        }
+
+        let (bytes, fields) = electro5();
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let doc = of(&decoded, &fields);
+        let alternatives: Vec<&Sect> = doc
+            .sections
+            .iter()
+            .flat_map(|section| &section.nested)
+            .filter(|nested| nested.pick.is_some())
+            .collect();
+        assert!(
+            alternatives.iter().filter(|kept| !kept.selected).count() > 0,
+            "the Electro 5 stores a preset it is not playing",
+        );
+        let kept = alternatives
+            .iter()
+            .find(|kept| !kept.selected)
+            .expect("a stored alternative");
+        let wanted = kept.pick.expect("a card is picked by its own selector");
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        ctx.all_styles_mut(crate::app::metrics);
+        let screen = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let quiet = ctx.style().visuals.widgets.noninteractive.bg_stroke.color;
+        let read = Ctx::default();
+        let state = State::default();
+        let mut sets = Sets::new();
+        let mut body = egui::Rect::NOTHING;
+        // The first pass lays the cards out; the second clicks the middle of the one
+        // that is kept, which is a control of its own rather than its title.
+        for pass in 0..2 {
+            let mut piano = lookup();
+            sets.clear();
+            let input = egui::RawInput {
+                events: match pass {
+                    0 => Vec::new(),
+                    _ => click(body.center()),
+                },
+                ..screen.clone()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    side_by_side(ui, &read, &state, &doc, &alternatives, &mut piano, &mut sets);
+                });
+            });
+            if pass == 0 {
+                body = kept_card(&output, quiet).expect("the kept card is stroked");
+            }
+        }
+        assert!(
+            sets.contains(&(wanted.field.to_string(), wanted.value.to_string())),
+            "a click at {:?} left {sets:?}",
+            body.center(),
+        );
     }
 
     /// Which kind a field is, for a sweep that has to see every one of them drawn.
