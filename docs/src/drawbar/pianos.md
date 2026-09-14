@@ -39,9 +39,9 @@ segment to drop that layer for that root only.
 which is what the instrument files the library under. Kind changes nothing about
 the sound.
 
-**Roots** lists each root with its strokes. There you can trim a stroke in dB,
-audition the root, save it as a WAV, or drop it. **Per key** paints a fine tune
-across the keyboard.
+**Roots** lists each root with its strokes. Open one for the waveform of its
+loudest kept stroke. There you can trim a stroke in dB, audition the root, save
+it as a WAV, or drop it. **Per key** paints a fine tune across the keyboard.
 
 ## A new library
 
