@@ -1942,6 +1942,15 @@ impl State {
         })
     }
 
+    /// Let go of `note`, and say whether it was the key the map was auditioning.
+    pub fn release(&mut self, note: u8) -> bool {
+        if self.view.audition.as_ref().map(|held| held.struck.note) != Some(note) {
+            return false;
+        }
+        self.view.audition = None;
+        true
+    }
+
     /// Let go of an audition whose hold is up, and answer with how long a live one has
     /// left — the caller asks for the frame that will clear it.
     pub fn settle(&mut self, now: f64) -> Option<f64> {
@@ -4619,6 +4628,26 @@ mod tests {
             applied
         }
 
+        /// One frame of the map alone, with `played` struck on a controller.
+        fn played(&mut self, played: Option<Struck>) -> Option<Ask> {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut asked = None;
+            let _ = self.ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let entity = self.workspace.get(self.id).expect("it is open");
+                    self.state.begin(self.id, entity, &self.device.state);
+                    asked = self.state.map(ui, played);
+                });
+            });
+            asked
+        }
+
         /// One frame, with `edit` throwing whatever switch a click on its lamp would.
         fn driven(&mut self, events: Vec<egui::Event>, edit: impl FnOnce(&mut Plan)) -> Painted {
             let input = egui::RawInput {
@@ -4750,6 +4779,38 @@ mod tests {
             "{:?}",
             after.words
         );
+    }
+
+    /// A key played on a controller asks for the same root a click on it does, at the
+    /// velocity it was played at. Letting it go ends that audition; letting go of a key
+    /// that is not the one sounding leaves it alone.
+    #[test]
+    fn a_played_key_asks_for_the_root_a_click_on_it_would() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.frame(Vec::new());
+
+        let played = Struck {
+            note: 62,
+            velocity: 118,
+        };
+        assert_eq!(
+            editor.played(Some(played)),
+            Some(Ask::Strike {
+                root: 60,
+                semitones: 2
+            })
+        );
+        let after = editor.frame(Vec::new());
+        assert!(
+            after.said("D4 at vel 118 → root C4 · shifted +2 st"),
+            "{:?}",
+            after.words
+        );
+
+        assert!(!editor.state.release(60), "another key is not this one");
+        assert!(editor.state.view.audition.is_some());
+        assert!(editor.state.release(62));
+        assert!(editor.state.view.audition.is_none());
     }
 
     /// Clicking a root's cell in the map opens that root's row, which is where its own

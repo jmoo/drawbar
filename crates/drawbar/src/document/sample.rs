@@ -553,6 +553,19 @@ pub fn pick_row(state: &mut State, row: usize) {
     state.pick(row, true);
 }
 
+/// Let go of `note`, and say whether it was the key the map was auditioning.
+///
+/// A key let go on a controller ends its own audition and nothing else: where another
+/// key has taken the voice since, the release of the one before it is late.
+pub fn release(state: &mut State, note: u8) -> bool {
+    if state.audition.as_ref().map(|held| held.struck.note) != Some(note) {
+        return false;
+    }
+    state.audition = None;
+    state.answer = None;
+    true
+}
+
 /// One zone as the key map draws it, whichever format states it.
 pub struct MapZone {
     /// The row of the zone list this band stands for.
@@ -2808,6 +2821,45 @@ mod tests {
                 .any(|(text, _)| text == "C7 — no zone answers this key; silence."),
             "{said:?}"
         );
+    }
+
+    /// A key played on a controller asks for the same strike a click on that key asks
+    /// for, at the velocity it was played at. Letting it go ends that audition, and
+    /// letting go of any other key leaves it sounding.
+    #[test]
+    fn a_played_key_strikes_the_zone_a_click_on_it_would() {
+        let ctx = dressed();
+        let snapshot = v2_snapshot();
+        let mut state = State::default();
+
+        let (said, sets, ask) = mapped(
+            &ctx,
+            &mut state,
+            &snapshot,
+            Vec::new(),
+            Some(keys::Struck {
+                note: 60,
+                velocity: 23,
+            }),
+        );
+        assert_eq!(
+            ask,
+            Some(Ask::Strike {
+                zone: 0,
+                semitones: 0
+            })
+        );
+        assert!(sets.is_empty(), "a played key is never an edit");
+        assert!(
+            said.iter()
+                .any(|(text, _)| text == "C4 at vel 23 → Zone 1 · root C4 · shifted +0 st"),
+            "{said:?}"
+        );
+
+        assert!(!release(&mut state, 62), "another key is not this one");
+        assert!(state.audition.is_some());
+        assert!(release(&mut state, 60));
+        assert!(state.audition.is_none() && state.answer.is_none());
     }
 
     /// A moved band writes the ends the record states, and nothing that did not move.

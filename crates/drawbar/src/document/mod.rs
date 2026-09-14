@@ -12,6 +12,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::device::Device;
 use crate::fields;
+use crate::icon::Glyph;
 use crate::log::Log;
 use crate::queue::Queue;
 use crate::strings;
@@ -262,6 +263,8 @@ pub struct Document {
     /// ⚠️ Not one document's. An apply runs on a thread of its own and the acts it holds
     /// come back after the tab it was started in may have gone — see [`Document::settle`].
     piano: piano::State,
+    /// The controller the key map is played from, where the reader has connected one.
+    midi: crate::midi::Midi,
 }
 
 impl Document {
@@ -303,6 +306,10 @@ impl Document {
         if let Some(open) = &mut self.open {
             sample::follow(&mut open.sample, id, &entity.saved);
         }
+        // ⚠️ Every frame, whatever is open: a controller's keys are taken and dropped by
+        // a document that has no key map rather than left to fill the queue.
+        let played = self.midi.played(ui.input(|input| input.time));
+        let struck = self.controller(shape, played);
         self.player.settle();
         if let Some(left) = self.piano.settle(ui.input(|input| input.time)) {
             ui.ctx()
@@ -396,7 +403,7 @@ impl Document {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
             if face == Face::Edit {
-                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets);
+                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets, struck);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -772,17 +779,21 @@ impl Document {
         asset: Asset<'_>,
         doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
+        struck: Option<keys::Struck>,
     ) -> Option<Asked> {
+        if matches!(asset.shape, Shape::Piano | Shape::Sample) {
+            midi_control(ui, &mut self.midi);
+        }
         match asset.shape {
             Shape::Fields => {
                 field::nav(ui, &mut self.open.as_mut()?.fields, doc?);
                 None
             }
-            Shape::Piano => self.piano.map(ui, None).map(Asked::Root),
+            Shape::Piano => self.piano.map(ui, struck).map(Asked::Root),
             Shape::Sample => match sample::snapshot(asset.decoded()?)? {
                 Ok(snapshot) => {
                     let open = self.open.as_mut()?;
-                    sample::map(ui, &mut open.sample, &snapshot, sets, None).map(Asked::Zone)
+                    sample::map(ui, &mut open.sample, &snapshot, sets, struck).map(Asked::Zone)
                 }
                 Err(_) => None,
             },
@@ -793,6 +804,41 @@ impl Document {
                 None
             }
             Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+        }
+    }
+
+    /// What a key played on a controller does here, and the key the map is to strike.
+    ///
+    /// A strike is the key map's to answer, exactly as it answers a click on that key.
+    /// A release is answered here instead: a key let go has stopped sounding, and only
+    /// the audition it belongs to ends — a key let go after another has taken the voice
+    /// leaves that one playing.
+    fn controller(
+        &mut self,
+        shape: Shape,
+        played: Option<crate::midi::Played>,
+    ) -> Option<keys::Struck> {
+        match played? {
+            crate::midi::Played::Struck { note, velocity } => Some(keys::Struck { note, velocity }),
+            crate::midi::Played::Released { note } => {
+                let let_go = match shape {
+                    Shape::Sample => self
+                        .open
+                        .as_mut()
+                        .is_some_and(|open| sample::release(&mut open.sample, note)),
+                    Shape::Piano => self.piano.release(note),
+                    Shape::Fields
+                    | Shape::SetList
+                    | Shape::Project
+                    | Shape::Verbatim
+                    | Shape::Wav
+                    | Shape::Undecoded => false,
+                };
+                if let_go {
+                    self.player.stop();
+                }
+                None
+            }
         }
     }
 
@@ -1150,6 +1196,54 @@ fn capabilities(ui: &mut egui::Ui, asset: Asset<'_>) {
         Shape::Verbatim => verbatim::bytes(ui, asset.entity),
         Shape::Fields | Shape::Piano | Shape::Wav | Shape::Undecoded => {}
     }
+}
+
+/// The key map's other input: a controller, and what it is doing.
+///
+/// ⚠️ Listening is asked for from the click itself. A browser tab may only ask the
+/// reader for MIDI access while the click's user activation is live.
+fn midi_control(ui: &mut egui::Ui, midi: &mut crate::midi::Midi) {
+    use crate::midi::State;
+
+    const TEXT: f32 = 11.0;
+    /// The heading's own indent, so the control lines up with the title under it.
+    const PAD: f32 = 12.0;
+
+    let visuals = ui.visuals().clone();
+    let state = midi.state();
+    let listening = matches!(state, State::On(_));
+    // Asking counts as started: the button is how a request the browser is still putting
+    // to the reader is taken back.
+    let started = listening || matches!(state, State::Asking);
+    let (said, ink) = match state {
+        State::Off => (
+            "play the key map from a MIDI controller".to_string(),
+            crate::app::caption(&visuals),
+        ),
+        State::Asking => (
+            "asking this browser for MIDI access…".to_string(),
+            crate::app::caption(&visuals),
+        ),
+        State::On(ports) if ports.is_empty() => (
+            "listening — no MIDI input on this machine yet".to_string(),
+            crate::app::warn(&visuals),
+        ),
+        State::On(ports) => (
+            format!("listening to {}", ports.join(", ")),
+            crate::app::good(&visuals),
+        ),
+        State::Failed(why) => (why, crate::app::warn(&visuals)),
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(PAD);
+        if sample::action(ui, "MIDI", Glyph::Piano, listening) {
+            match started {
+                true => midi.stop(),
+                false => midi.listen(ui.ctx()),
+            }
+        }
+        ui.label(egui::RichText::new(said).size(TEXT).color(ink));
+    });
 }
 
 /// The strip over a document that is a view of a slot rather than an asset on this
@@ -1649,6 +1743,25 @@ mod tests {
         open.frame(Vec::new());
         let (draft, _) = open.state().wav.as_ref().expect("the same panel");
         assert_eq!((draft.root_key, draft.top_note), (48, 60));
+    }
+
+    /// The instrument key map offers the controller it can be played from, and says
+    /// what MIDI is doing. A document with no keyboard to play offers nothing.
+    #[test]
+    fn a_key_map_offers_the_controller_it_can_be_played_from() {
+        let said = Open::file("whatever.nsmp", sample_bytes()).twice();
+        assert!(said.iter().any(|word| word == "MIDI"), "{said:?}");
+        assert!(
+            said.iter()
+                .any(|word| word == "play the key map from a MIDI controller"),
+            "{said:?}"
+        );
+
+        let elsewhere = Open::fresh(Fresh::Program).twice();
+        assert!(
+            !elsewhere.iter().any(|word| word == "MIDI"),
+            "a program has no key map: {elsewhere:?}"
+        );
     }
 
     /// Where the file stores the name, the box commits through the format rather than
