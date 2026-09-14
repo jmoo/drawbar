@@ -300,10 +300,7 @@ fn dependencies(ui: &mut egui::Ui, answered: &[(ObjectClass, Location)], device:
                 continue;
             };
             for dep in deps {
-                let named = device
-                    .state
-                    .dependency_name(Some((class, at)), dep.class, dep.id)
-                    .filter(|name| !name.is_empty());
+                let named = Some(dep.name.trim()).filter(|name| !name.is_empty());
                 needed(ui, dep.class, named, dep.id);
             }
             ui.label(
@@ -437,7 +434,6 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 mod tests {
     use super::*;
     use crate::browser::apply;
-    use crate::device::Detail;
     use crate::log::Log;
     use crate::tabs::Tabs;
     use crate::workspace::Fresh;
@@ -464,10 +460,10 @@ mod tests {
             dirty: 0,
             spare: 4,
         });
-        device.state.detail = Detail {
-            at: Some((ObjectClass::Program, at)),
-            info: Some(None),
-            deps: Some(vec![
+        device.pretend_deps(
+            ObjectClass::Program,
+            at,
+            vec![
                 Dependency {
                     flag: 1,
                     class: ObjectClass::Piano,
@@ -482,8 +478,8 @@ mod tests {
                     name: "   ".into(),
                     location: None,
                 },
-            ]),
-        };
+            ],
+        );
         (device, at)
     }
 
@@ -700,12 +696,7 @@ mod tests {
         assert_eq!(
             device
                 .state
-                .dependency_name(
-                    Some((ObjectClass::Program, at)),
-                    ObjectClass::Sample,
-                    0x0999_0999
-                )
-                .filter(|name| !name.is_empty()),
+                .dependency_name(ObjectClass::Sample, 0x0999_0999),
             None,
         );
     }
