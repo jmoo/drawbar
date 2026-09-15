@@ -35,11 +35,17 @@ const COLUMNS: [(&str, f32); 6] = [
     ("", 20.0),
 ];
 
-/// One row of it, and the page's own left margin.
+/// One row of it, the label column a record block reads down, and the page's own left
+/// margin.
 const ROW: f32 = 22.0;
+const LABEL: f32 = 110.0;
 const PAD: f32 = 12.0;
 const MONO: f32 = 10.5;
 const HEAD: f32 = 9.0;
+const HEAD_ROW: f32 = 14.0;
+
+/// The room a typed value keeps inside its box, which is what a `TextEdit` leaves.
+const BOX_PAD: f32 = 4.0;
 
 /// A cell being typed into, and what the library said about it last.
 #[derive(Default)]
@@ -76,43 +82,13 @@ impl Advanced {
     /// What the file says about itself: the same facts the document was built from,
     /// read here and never written differently.
     pub fn about(ui: &mut egui::Ui, rows: &[(&'static str, String, String)]) {
-        let quiet = app::caption(ui.visuals());
         controls::heading(
             ui,
             "About this file",
             "what the file says about itself — read here, never written differently",
             None,
         );
-        for (label, value, note) in rows {
-            ui.horizontal(|ui| {
-                ui.add_space(PAD);
-                ui.spacing_mut().item_spacing.x = 10.0;
-                ui.add_sized(
-                    [110.0, ROW],
-                    egui::Label::new(
-                        egui::RichText::new(*label)
-                            .font(egui::FontId::proportional(11.0))
-                            .color(ui.visuals().weak_text_color()),
-                    )
-                    .halign(egui::Align::LEFT),
-                );
-                ui.label(
-                    egui::RichText::new(value)
-                        .font(egui::FontId::monospace(11.0))
-                        .color(ui.visuals().text_color()),
-                );
-                if !note.is_empty() {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(note)
-                                .font(egui::FontId::proportional(10.0))
-                                .color(quiet),
-                        )
-                        .truncate(),
-                    );
-                }
-            });
-        }
+        facts(ui, rows);
     }
 
     /// The whole body as a table: every field the library declares, engineering-only
@@ -162,14 +138,12 @@ impl Advanced {
             ui.add_space(PAD);
             ui.spacing_mut().item_spacing.x = 10.0;
             for (head, width) in COLUMNS {
-                ui.add_sized(
-                    [width, 14.0],
-                    egui::Label::new(
-                        egui::RichText::new(head.to_uppercase())
-                            .font(egui::FontId::proportional(HEAD))
-                            .color(quiet),
-                    )
-                    .halign(egui::Align::LEFT),
+                cell(
+                    ui,
+                    &head.to_uppercase(),
+                    egui::vec2(width, HEAD_ROW),
+                    egui::FontId::proportional(HEAD),
+                    quiet,
                 );
             }
         });
@@ -203,24 +177,35 @@ impl Advanced {
             true => app::caption(&visuals),
             false => visuals.weak_text_color(),
         };
-        cell(&mut row, &field.path, COLUMNS[0].1, ink);
+        let mono = egui::FontId::monospace(MONO);
+        cell(
+            &mut row,
+            &field.path,
+            egui::vec2(COLUMNS[0].1, ROW),
+            mono.clone(),
+            ink,
+        );
         cell(
             &mut row,
             field.spec.placement,
-            COLUMNS[1].1,
+            egui::vec2(COLUMNS[1].1, ROW),
+            mono.clone(),
             app::caption(&visuals),
         );
-        row.add_sized(
-            [COLUMNS[2].1, ROW],
-            egui::Label::new(
-                egui::RichText::new(field::kind_word(field))
-                    .font(egui::FontId::proportional(MONO))
-                    .color(app::caption(&visuals)),
-            )
-            .truncate()
-            .halign(egui::Align::LEFT),
+        cell(
+            &mut row,
+            &field::kind_word(field),
+            egui::vec2(COLUMNS[2].1, ROW),
+            egui::FontId::proportional(MONO),
+            app::caption(&visuals),
         );
-        cell(&mut row, table.raw(&field.path), COLUMNS[3].1, ink);
+        cell(
+            &mut row,
+            table.raw(&field.path),
+            egui::vec2(COLUMNS[3].1, ROW),
+            mono,
+            ink,
+        );
         self.writes(&mut row, field, sets);
         if let Some((glyph, tint)) = flag(changed, hidden, labelled, &visuals) {
             icon(&mut row, glyph, 11.0, tint);
@@ -254,19 +239,7 @@ impl Advanced {
     fn writes(&mut self, ui: &mut egui::Ui, field: &Field, sets: &mut Sets) {
         let width = COLUMNS[4].1;
         if self.cell.path != field.path {
-            let drawn = ui.add_sized(
-                [width, ROW - 4.0],
-                egui::Button::new(
-                    egui::RichText::new(&field.value)
-                        .font(egui::FontId::monospace(MONO))
-                        .color(ui.visuals().text_color()),
-                )
-                .fill(egui::Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(
-                    1.0_f32,
-                    ui.visuals().widgets.noninteractive.bg_stroke.color,
-                )),
-            );
+            let drawn = held(ui, &field.value, width);
             if drawn.on_hover_text("click to type a value").clicked() {
                 self.cell = Cell {
                     path: field.path.clone(),
@@ -486,17 +459,84 @@ impl Table<'_> {
 }
 
 /// One mono column of a row.
-fn cell(ui: &mut egui::Ui, text: &str, width: f32, ink: egui::Color32) {
-    ui.add_sized(
-        [width, ROW],
-        egui::Label::new(
-            egui::RichText::new(text)
-                .font(egui::FontId::monospace(MONO))
-                .color(ink),
-        )
-        .truncate()
-        .halign(egui::Align::LEFT),
+/// One cell, drawn at its column's own width so the column reads down, and left where
+/// its heading is.
+fn cell(ui: &mut egui::Ui, text: &str, size: egui::Vec2, font: egui::FontId, ink: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let mut cell = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
+    cell.add(
+        egui::Label::new(egui::RichText::new(text).font(font).color(ink))
+            .truncate()
+            .halign(egui::Align::LEFT),
+    );
+}
+
+/// A record block: one row per fact, the label in its own column and the value with the
+/// note after it.
+pub fn facts(ui: &mut egui::Ui, rows: &[(&'static str, String, String)]) {
+    let quiet = app::caption(ui.visuals());
+    for (label, value, note) in rows {
+        ui.horizontal(|ui| {
+            ui.add_space(PAD);
+            ui.spacing_mut().item_spacing.x = 10.0;
+            cell(
+                ui,
+                label,
+                egui::vec2(LABEL, ROW),
+                egui::FontId::proportional(11.0),
+                ui.visuals().weak_text_color(),
+            );
+            ui.label(
+                egui::RichText::new(value)
+                    .font(egui::FontId::monospace(11.0))
+                    .color(ui.visuals().text_color()),
+            );
+            if !note.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(note)
+                            .font(egui::FontId::proportional(10.0))
+                            .color(quiet),
+                    )
+                    .truncate(),
+                );
+            }
+        });
+    }
+}
+
+/// The Writes column as it stands before it is typed in: the value in the box the box
+/// it opens will be, and left where the box puts it.
+fn held(ui: &mut egui::Ui, value: &str, width: f32) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, ROW - 4.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    ui.painter().rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    let ink = visuals.text_color();
+    let inner = rect.shrink2(egui::vec2(BOX_PAD, 0.0));
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        value,
+        0.0,
+        egui::TextFormat::simple(egui::FontId::monospace(MONO), ink),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width().max(0.0));
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        egui::pos2(inner.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        ink,
+    );
+    response
 }
 
 /// The one mark at the end of a row, in the order that decides which it wears: what the

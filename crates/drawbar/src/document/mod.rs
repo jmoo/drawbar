@@ -1877,6 +1877,64 @@ mod tests {
         }
     }
 
+    /// ⚠️ Every column of the Advanced face reads down from its own heading. A cell
+    /// centred in the space its column keeps has no edge for the eye to follow, and a
+    /// record read that way is read a row at a time.
+    #[test]
+    fn every_column_of_the_advanced_face_reads_down_from_its_heading() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.document.views.insert(open.id, Face::Advanced);
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
+
+        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => into.push((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+                _ => {}
+            }
+        }
+        let mut placed = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut placed);
+        }
+        let left = |word: &str| -> f32 {
+            placed
+                .iter()
+                .find(|(text, _)| text == word)
+                .unwrap_or_else(|| panic!("{word} was never painted: {placed:?}"))
+                .1
+                .left()
+        };
+
+        let edge = left("Format");
+        for word in ["Fields", "Layout", "Stored at", "Instrument", "PATH"] {
+            assert_eq!(left(word), edge, "{word} left the column its label starts");
+        }
+        assert!(
+            left("program v4") > edge,
+            "the value column stands clear of it"
+        );
+
+        for (head, cell) in [
+            ("PATH", "center_panel.lower_part"),
+            ("BITS", "0..=2"),
+            ("CONTROL", "selector"),
+            ("RAW", "Organ"),
+        ] {
+            let under = left(head);
+            assert!(
+                placed
+                    .iter()
+                    .any(|(text, rect)| text == cell && rect.left() == under),
+                "no {cell} cell stands under {head} at {under}",
+            );
+        }
+    }
+
     /// Both stored registrations stay on screen: the one the instrument plays says so,
     /// and the other is the switch that would bring it back.
     #[test]
