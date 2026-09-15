@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
-version = "0.6.0"
+version = "0.7.0"
 
 [lib]
 # `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
