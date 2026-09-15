@@ -1194,7 +1194,10 @@ impl Workspace {
 
     pub fn duplicate(&mut self, id: u64, log: &mut Log) -> Option<u64> {
         let source = self.entities.iter().find(|e| e.id == id)?;
-        let name = format!("{} copy", source.name);
+        let name = crate::strings::tagged(
+            &source.name,
+            &format!("{} copy", crate::strings::display_name(&source.name)),
+        );
         let (origin, bytes) = (source.origin.clone(), source.bytes.clone());
         Some(self.ingest(name, origin, bytes, log))
     }
@@ -1514,6 +1517,49 @@ mod tests {
         let held = tags.len();
         tags.dedup();
         assert_eq!(tags.len(), held);
+    }
+
+    /// A duplicate is named after what it was copied from, and keeps the format tag on
+    /// the end where the name carries one.
+    ///
+    /// ⚠️ `Africa Split.ne5p copy` puts the tag in the middle of the name, where nothing
+    /// reads it: an export then stacks a second one on the end.
+    #[test]
+    fn a_duplicate_is_a_copy_of_the_name_under_the_same_tag() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        for (name, copied, exported) in [
+            ("untitled.txt", "untitled copy.txt", "untitled-copy.txt"),
+            (
+                "Africa Split.ne5p",
+                "Africa Split copy.ne5p",
+                "Africa-Split-copy.ne5p",
+            ),
+            // No tag to keep, so the export takes one from the bytes, which are words.
+            (
+                "no tag at all",
+                "no tag at all copy",
+                "no-tag-at-all-copy.txt",
+            ),
+        ] {
+            let id = workspace.ingest(
+                name.to_string(),
+                Origin::Fresh,
+                b"Set 1\n".to_vec(),
+                &mut log,
+            );
+            let copy = workspace
+                .duplicate(id, &mut log)
+                .expect("it is on the list");
+            let copy = workspace.get(copy).expect("the copy");
+            assert_eq!(copy.name, copied);
+            assert_eq!(
+                export_filename(&copy.name, &copy.bytes),
+                exported,
+                "and an export does not stack a second tag on it"
+            );
+        }
     }
 
     /// A slot opened for a look is a working copy that nothing lists, and it goes when

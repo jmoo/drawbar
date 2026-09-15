@@ -22,7 +22,7 @@ use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
 use crate::queue::Queue;
 use crate::room;
-use crate::strings::{carries_tag, display_name, folder, kind_word, place, shown};
+use crate::strings::{display_name, folder, kind_word, place, shown, tagged};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Origin};
 
@@ -958,21 +958,6 @@ fn settled(
         controls::fits(text, limit);
     }
     response.lost_focus()
-}
-
-/// What a typed name is stored as: the words that were typed, under the format tag the
-/// stored name carries.
-///
-/// The glyph beside the box already says what kind of file it is, so the tag is never in
-/// the box — and it must not be lost by typing in one.
-fn tagged(stored: &str, typed: &str) -> String {
-    match carries_tag(stored) {
-        true => match stored.rsplit_once('.') {
-            Some((_, tag)) => format!("{typed}.{tag}"),
-            None => typed.to_string(),
-        },
-        false => typed.to_string(),
-    }
 }
 
 /// The mono badge over a document, and the sentence behind it.
