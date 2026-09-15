@@ -567,32 +567,47 @@ pub fn bold() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
 
-/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces.
+/// Ubuntu Regular for the body, Ubuntu Bold beside it, and Hack for the monospace runs.
 ///
 /// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
 /// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
 /// heavier weight to ask for and no 400 to set the body in.
+///
+/// ⚠️ Every face is named here rather than added to [`egui::FontDefinitions::default`],
+/// which carries Ubuntu Light and two emoji faces as well — a megabyte of glyphs nothing
+/// here asks for by name. Text none of these three faces covers draws as the replacement
+/// box, emoji included.
 pub(crate) fn fonts() -> egui::FontDefinitions {
-    let mut fonts = egui::FontDefinitions::default();
-    let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
-    for (family, face, ttf) in [
+    const UBUNTU: &str = "Ubuntu";
+    const UBUNTU_BOLD: &str = "Ubuntu-Bold";
+    const HACK: &str = "Hack";
+    let mut fonts = egui::FontDefinitions::empty();
+    for (face, ttf) in [
         (
-            egui::FontFamily::Proportional,
-            "Ubuntu",
+            UBUNTU,
             include_bytes!("../assets/fonts/Ubuntu-R.ttf").as_slice(),
         ),
         (
-            bold(),
-            "Ubuntu-Bold",
+            UBUNTU_BOLD,
             include_bytes!("../assets/fonts/Ubuntu-B.ttf").as_slice(),
         ),
+        (HACK, epaint_default_fonts::HACK_REGULAR),
     ] {
         fonts.font_data.insert(
             face.to_owned(),
             std::sync::Arc::new(egui::FontData::from_static(ttf)),
         );
-        let mut faces = bundled.clone();
-        faces.insert(0, face.to_owned());
+    }
+    // Ubuntu behind the other two for what they do not cover, as egui's own monospace
+    // family keeps Ubuntu Light behind Hack.
+    for (family, faces) in [
+        (egui::FontFamily::Proportional, vec![UBUNTU.to_owned()]),
+        (bold(), vec![UBUNTU_BOLD.to_owned(), UBUNTU.to_owned()]),
+        (
+            egui::FontFamily::Monospace,
+            vec![HACK.to_owned(), UBUNTU.to_owned()],
+        ),
+    ] {
         fonts.families.insert(family, faces);
     }
     fonts
@@ -805,19 +820,27 @@ mod tests {
     }
 
     #[test]
-    fn each_family_leads_with_its_ubuntu_face_over_the_same_fallbacks() {
+    fn each_family_leads_with_its_own_face_and_ends_at_ubuntu() {
         let fonts = fonts();
-        assert!(fonts.font_data.contains_key("Ubuntu"));
-        assert!(fonts.font_data.contains_key("Ubuntu-Bold"));
-        let body = &fonts.families[&egui::FontFamily::Proportional];
-        let mark = &fonts.families[&bold()];
-        assert_eq!(body.first().map(String::as_str), Some("Ubuntu"));
-        assert_eq!(mark.first().map(String::as_str), Some("Ubuntu-Bold"));
-        assert_eq!(body[1..], mark[1..]);
-        assert!(
-            !body[1..].is_empty(),
-            "a glyph Ubuntu lacks would draw as tofu"
-        );
+        for (family, lead) in [
+            (egui::FontFamily::Proportional, "Ubuntu"),
+            (bold(), "Ubuntu-Bold"),
+            (egui::FontFamily::Monospace, "Hack"),
+        ] {
+            let faces = &fonts.families[&family];
+            assert_eq!(faces.first().map(String::as_str), Some(lead), "{family:?}");
+            assert_eq!(
+                faces.last().map(String::as_str),
+                Some("Ubuntu"),
+                "{family:?} has nothing behind it"
+            );
+            for face in faces {
+                assert!(
+                    fonts.font_data.contains_key(face),
+                    "{family:?} names {face}, which carries no bytes"
+                );
+            }
+        }
     }
 
     #[test]

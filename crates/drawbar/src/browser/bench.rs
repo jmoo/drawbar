@@ -47,6 +47,7 @@ pub(in crate::browser) fn onto(class: ObjectClass, bank: u32, at: u32) -> Onto {
 /// A face that never learned them panics the frame that resolves one.
 pub(in crate::browser) fn context() -> egui::Context {
     let ctx = egui::Context::default();
+    ctx.set_fonts(crate::app::fonts());
     ctx.all_styles_mut(crate::app::metrics);
     ctx
 }
