@@ -56,6 +56,8 @@ let
           || hasInfix "/drawbar/licences/" path
           # The page, whose small-screen gate a test holds to the shell's.
           || path == toString (workspace + "/drawbar/index.html")
+          # The page's icon, which a test holds to the titlebar's mark.
+          || path == toString (workspace + "/drawbar/favicon.svg")
         );
     };
 
@@ -390,6 +392,7 @@ let
           mv "$out/pkg/drawbar.js" "$out/pkg/$js"
           substitute ${./crates/drawbar/index.html} "$out/index.html" \
             --replace-fail pkg/drawbar.js "pkg/$js"
+          cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js" || grep -qF pkg/drawbar.js "$out/index.html"; then
             echo "an unhashed asset name survived the rewrite" >&2
@@ -464,6 +467,14 @@ let
 
         # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
         touch "$out/.nojekyll"
+
+        # The page's metadata names files by absolute URL, some of them the guide's.
+        for url in $(grep -o 'https://drawbar\.app/[^"]*' "$out/index.html" | sort -u); do
+          [ -e "$out/''${url#https://drawbar.app/}" ] || {
+            echo "index.html names $url, which the site lacks" >&2
+            exit 1
+          }
+        done
       ''
   ) { web = drawbar-web; };
 
