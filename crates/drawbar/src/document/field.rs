@@ -556,8 +556,9 @@ fn paths<'a>(section: &Sect<'a>) -> Vec<&'a str> {
 /// The row above the scroll region: one chip per section, and the morph lens where the
 /// body has morph slots.
 ///
-/// ⚠️ It wraps rather than scrolling sideways. The lens is at the right of it, and a row
-/// that clipped would put the lens out of reach on a narrow window.
+/// ⚠️ Every chip is in the one wrapping flow, the lens included. A row that clipped
+/// would put the last sections out of reach on a narrow window, and a lens laid out
+/// from the right edge of a row the chips have filled is drawn over them.
 pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
     if doc.sections.is_empty() {
         return;
@@ -574,23 +575,25 @@ pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
         if doc.slots == 0 {
             return;
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for (nth, (_, word, _)) in SLOTS.iter().enumerate().rev() {
-                let count = stored_targets(doc, nth);
-                if nav_chip(ui, word, &count.to_string(), state.lens == Some(nth)).clicked() {
-                    state.lens = Some(nth);
-                }
-            }
-            if nav_chip(ui, "Panel", "", state.lens.is_none()).clicked() {
-                state.lens = None;
-            }
-            ui.label(
+        // ⚠️ A label left to wrap lays its text out across the whole row rather than
+        // taking a place in it, which puts the word over the chips already there.
+        ui.add(
+            egui::Label::new(
                 egui::RichText::new("MORPH")
                     .font(egui::FontId::proportional(COUNT_TEXT))
                     .color(quiet),
-            );
-        });
+            )
+            .wrap_mode(egui::TextWrapMode::Extend),
+        );
+        if nav_chip(ui, "Panel", "", state.lens.is_none()).clicked() {
+            state.lens = None;
+        }
+        for (nth, (_, word, _)) in SLOTS.iter().enumerate() {
+            let count = stored_targets(doc, nth);
+            if nav_chip(ui, word, &count.to_string(), state.lens == Some(nth)).clicked() {
+                state.lens = Some(nth);
+            }
+        }
     });
 }
 
@@ -2928,5 +2931,86 @@ mod tests {
         let stage2 = titles(Fresh::Stage2Program.bytes().unwrap());
         assert!(stage2.contains(&"Slot a — organ".to_string()), "{stage2:?}");
         assert_eq!(titles(Fresh::Stage3Synth.bytes().unwrap()), ["General"]);
+    }
+
+    /// ⚠️ The nav row is the only way into a section or the morph lens. A chip past the
+    /// right edge cannot be clicked, and a lens drawn over the chips hides both.
+    #[test]
+    fn every_nav_chip_and_the_morph_lens_keep_their_own_room_at_every_width() {
+        fn words(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+            fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+                match shape {
+                    egui::Shape::Text(drawn) => into.push((
+                        drawn.galley.text().to_string(),
+                        egui::Rect::from_min_size(drawn.pos, drawn.galley.size()),
+                    )),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut found);
+            }
+            found
+        }
+
+        let bytes = Fresh::Stage3Program.bytes().unwrap();
+        let (fields, _) = apply(&bytes, &[]).unwrap();
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let doc = of(&decoded, &fields);
+        assert!(doc.sections.len() > 20, "{} sections", doc.sections.len());
+        assert!(doc.slots > 0, "and a morph lens to place beside them");
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        ctx.all_styles_mut(crate::app::metrics);
+        for width in [320.0, 480.0, 660.0, 900.0] {
+            let mut state = State::default();
+            let mut room = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+            let screen = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 540.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run(screen, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    nav(ui, &mut state, &doc);
+                    room = (ui.max_rect(), ui.min_rect());
+                });
+            });
+            let (page, took) = room;
+            assert!(
+                took.right() <= page.right(),
+                "the nav row runs {} past the right edge of a {width} wide page",
+                took.right() - page.right(),
+            );
+
+            let painted = words(&output);
+            for wanted in doc
+                .sections
+                .iter()
+                .map(|section| section.title.as_str())
+                .chain(["MORPH", "Panel"])
+                .chain(SLOTS.iter().map(|(_, word, _)| *word))
+            {
+                assert!(
+                    painted.iter().any(|(text, _)| text == wanted),
+                    "{wanted} is not on a {width} wide nav row",
+                );
+            }
+            for (nth, (word, rect)) in painted.iter().enumerate() {
+                for (other, over) in &painted[nth + 1..] {
+                    let shared = rect.intersect(*over);
+                    assert!(
+                        shared.width() <= 0.0 || shared.height() <= 0.0,
+                        "{word} and {other} overlap at {width} wide",
+                    );
+                }
+            }
+        }
     }
 }
