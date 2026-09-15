@@ -29,7 +29,7 @@ use crate::{drawbar_widget, knob, led, strings};
 const TRANSPOSE_ENABLED: &str = "center_panel.transpose_enabled";
 const TRANSPOSE: &str = "center_panel.transpose";
 
-/// The name under a control, the edited dot beside it, and the morph dots below.
+/// The name over a control, the edited dot beside it, and the morph dots below.
 const LABEL: f32 = 9.5;
 const DOT: f32 = 6.0;
 
@@ -38,6 +38,12 @@ const CARD_TITLE: f32 = 11.5;
 const CHIP: f32 = 20.0;
 const CHIP_TEXT: f32 = 11.0;
 const COUNT_TEXT: f32 = 9.5;
+
+/// The stepped counter a signed offset is set with: its square buttons, the room its
+/// number keeps between them, and the size both are set in.
+const NUDGE: f32 = 17.0;
+const COUNTER: f32 = 22.0;
+const COUNTER_TEXT: f32 = 11.0;
 
 /// The reading beside a knob, and the caption that stands where there is none.
 const READING: f32 = 10.0;
@@ -795,26 +801,45 @@ fn side_by_side(
                 true => app::accent(ui.visuals()),
                 false => ui.visuals().widgets.noninteractive.bg_stroke.color,
             };
-            egui::Frame::new()
+            let mut picked = false;
+            let card = egui::Frame::new()
                 .fill(ui.visuals().window_fill)
                 .stroke(egui::Stroke::new(1.0_f32, stroke))
                 .corner_radius(RADIUS)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    if let Some(selection) = alternative.pick {
-                        if card_title(ui, &alternative.title, Some(alternative.selected))
-                            && !alternative.selected
-                        {
-                            sets.push((selection.field.to_string(), selection.value.to_string()));
+                    // The cards stand side by side, so each one stacks its own head over
+                    // its own controls rather than inheriting the row they sit in.
+                    ui.vertical(|ui| {
+                        if alternative.pick.is_some() {
+                            picked |=
+                                card_title(ui, &alternative.title, Some(alternative.selected));
                         }
-                    }
-                    if !alternative.selected {
-                        ui.set_opacity(0.45);
-                    }
-                    cells(ui, ctx, state, doc, &alternative.fields, piano, sets);
+                        if !alternative.selected {
+                            ui.set_opacity(0.45);
+                        }
+                        cells(ui, ctx, state, doc, &alternative.fields, piano, sets);
+                    });
                 });
+            let Some(selection) = alternative.pick else {
+                continue;
+            };
+            picked |= clicked_in(ui, card.response.rect);
+            if picked && !alternative.selected {
+                sets.push((selection.field.to_string(), selection.value.to_string()));
+            }
         }
     });
+}
+
+/// Whether a click landed anywhere in `card`, whichever of its own controls took it.
+///
+/// ⚠️ The click is read off the pointer rather than claimed as a widget of its own:
+/// a card-sized target over the controls would swallow every drawbar in it, and one
+/// under them would hear only the clicks that missed. Pulling a drawbar of the stored
+/// registration is a click on that card, and picks it.
+fn clicked_in(ui: &egui::Ui, card: egui::Rect) -> bool {
+    ui.rect_contains_pointer(card) && ui.input(|input| input.pointer.primary_clicked())
 }
 
 /// A card's own head. With `playing` it is the selector as well, and returns whether it
@@ -1078,8 +1103,8 @@ fn shown<'a>(part: &Part<'a>, lens: Option<usize>) -> Option<&'a Field> {
     lens.and_then(|slot| part.morphs[slot])
 }
 
-/// One parameter as a cell: the control, its name underneath, and the morph handles
-/// under that.
+/// One parameter as a cell: its name, the control under it, and the morph handles under
+/// that.
 fn one(
     ui: &mut egui::Ui,
     ctx: &Ctx,
@@ -1106,13 +1131,13 @@ fn one(
             if dim {
                 ui.set_opacity(0.45);
             }
-            ui.vertical_centered(|ui| {
+            ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
+                // The name is the parameter's; the dot is the slot the cell writes.
+                caption(ui, part.field, state.pending.contains(&drawn.path));
                 if let Some(value) = control(ui, drawn, &legal, rows, named) {
                     sets.push((drawn.path.clone(), value));
                 }
-                // The name is the parameter's; the dot is the slot the cell writes.
-                caption(ui, part.field, state.pending.contains(&drawn.path));
                 if state.lens.is_none() {
                     dots(ui, &part.morphs);
                 }
@@ -1138,7 +1163,7 @@ fn outline(ui: &egui::Ui, rect: egui::Rect, neutral: bool) {
     );
 }
 
-/// The name under a control: the app's word for it, or the prettified path in mono where
+/// The name over a control: the app's word for it, or the prettified path in mono where
 /// the table has no word yet.
 fn caption(ui: &mut egui::Ui, field: &Field, edited: bool) {
     named_caption(ui, &field.path, edited, note(field));
@@ -1147,24 +1172,24 @@ fn caption(ui: &mut egui::Ui, field: &Field, edited: bool) {
 /// The same caption over a path, for the register nine fields are drawn as.
 fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
     let known = strings::known(path);
-    let quiet = ui.visuals().weak_text_color();
+    let quiet = app::caption(ui.visuals());
     let response = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if edited {
-                app::dot(ui, app::warn(ui.visuals()), DOT);
-            }
-            if !known {
-                icon(ui, Glyph::Tag, 9.0, app::caption(ui.visuals()));
-            }
             ui.add(egui::Label::new(
-                egui::RichText::new(strings::label(path))
+                egui::RichText::new(strings::label(path).to_uppercase())
                     .font(match known {
                         true => egui::FontId::proportional(LABEL),
                         false => egui::FontId::monospace(LABEL),
                     })
                     .color(quiet),
             ));
+            if edited {
+                app::dot(ui, app::warn(ui.visuals()), DOT);
+            }
+            if !known {
+                icon(ui, Glyph::Tag, 9.0, quiet);
+            }
         })
         .response;
     let mut hint = path.to_string();
@@ -1407,44 +1432,49 @@ fn turned(
     };
     let value: i64 = field.value.trim_start_matches('+').parse().ok()?;
     let mut moved = None;
-    let dial = ui
-        .scope(|ui| moved = knob::ui(ui, &field.path, value, min, max))
-        .response;
-    if centred {
-        detent(ui, dial.rect);
-    }
-    // What was typed may be no number at all, and the field is what refuses it; until it
-    // does, the reading stands on the value the file holds.
-    let shown = moved
-        .as_deref()
-        .and_then(|spelled| spelled.parse().ok())
-        .unwrap_or(value);
-    match reading(unit, centred, shown, min, max) {
-        Some(text) => {
-            ui.label(
-                egui::RichText::new(text)
-                    .font(egui::FontId::monospace(READING))
-                    .color(ui.visuals().weak_text_color()),
-            );
+    // The panel reading stands beside the dial and the stored number under it: one is
+    // what the operator is setting, the other what the file holds.
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let dial = ui
+            .scope(|ui| moved = knob::ui(ui, &field.path, value, min, max))
+            .response;
+        if centred {
+            detent(ui, dial.rect);
         }
-        None => {
-            if let Some(word) = scale(unit) {
-                let hint = clocked(field, rows);
-                let drawn = ui.label(
-                    egui::RichText::new(word)
-                        .font(egui::FontId::proportional(READING))
-                        .color(app::warn(ui.visuals())),
+        // What was typed may be no number at all, and the field is what refuses it;
+        // until it does, the reading stands on the value the file holds.
+        let shown = moved
+            .as_deref()
+            .and_then(|spelled| spelled.parse().ok())
+            .unwrap_or(value);
+        match reading(unit, centred, shown, min, max) {
+            Some(text) => {
+                ui.label(
+                    egui::RichText::new(text)
+                        .font(egui::FontId::monospace(READING))
+                        .color(ui.visuals().text_color()),
                 );
-                match hint {
-                    Some(sibling) => drawn.on_hover_text(sibling),
-                    None => drawn.on_hover_text(
-                        "the panel's curve for this unit is not published, so the stored value \
-                         is what is shown",
-                    ),
-                };
+            }
+            None => {
+                if let Some(word) = scale(unit) {
+                    let hint = clocked(field, rows);
+                    let drawn = ui.label(
+                        egui::RichText::new(word)
+                            .font(egui::FontId::proportional(READING))
+                            .color(app::warn(ui.visuals())),
+                    );
+                    match hint {
+                        Some(sibling) => drawn.on_hover_text(sibling),
+                        None => drawn.on_hover_text(
+                            "the panel's curve for this unit is not published, so the stored \
+                             value is what is shown",
+                        ),
+                    };
+                }
             }
         }
-    }
+    });
     moved
 }
 
@@ -1522,32 +1552,59 @@ fn shift(ui: &mut egui::Ui, field: &Field, legal: &[String], unit: Unit) -> Opti
     let mut moved = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        if ui
-            .add_enabled(value > min, egui::Button::new("−").small())
-            .clicked()
-        {
+        if nudge(ui, "−", value > min) {
             moved = Some(value - 1);
         }
-        ui.label(
-            egui::RichText::new(format!("{value:+}"))
-                .font(egui::FontId::monospace(11.5))
-                .color(ui.visuals().text_color()),
-        );
-        if ui
-            .add_enabled(value < max, egui::Button::new("+").small())
-            .clicked()
-        {
+        counted(ui, value, word);
+        if nudge(ui, "+", value < max) {
             moved = Some(value + 1);
-        }
-        if !word.is_empty() {
-            ui.label(
-                egui::RichText::new(word)
-                    .font(egui::FontId::proportional(READING))
-                    .color(app::caption(ui.visuals())),
-            );
         }
     });
     moved.map(|moved| moved.to_string())
+}
+
+/// One end of a counter: a square button, the same size whichever way it steps.
+fn nudge(ui: &mut egui::Ui, sign: &str, within: bool) -> bool {
+    ui.add_enabled(
+        within,
+        egui::Button::new(egui::RichText::new(sign).font(egui::FontId::proportional(COUNTER_TEXT)))
+            .min_size(egui::Vec2::splat(NUDGE)),
+    )
+    .clicked()
+}
+
+/// Where a counter stands: its own inset box, with the unit it counts in beside the
+/// number.
+///
+/// The box holds a fixed width for the number, so stepping one does not walk the buttons
+/// either side of it across the panel.
+fn counted(ui: &mut egui::Ui, value: i64, unit: &str) {
+    let spelled = match value {
+        0 => "0".to_string(),
+        _ => format!("{value:+}"),
+    };
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .corner_radius(RADIUS)
+        .inner_margin(egui::Margin::symmetric(5, 2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.add_sized(
+                egui::vec2(COUNTER, NUDGE),
+                egui::Label::new(
+                    egui::RichText::new(spelled)
+                        .font(egui::FontId::monospace(COUNTER_TEXT))
+                        .color(ui.visuals().text_color()),
+                ),
+            );
+            if !unit.is_empty() {
+                ui.label(
+                    egui::RichText::new(unit)
+                        .font(egui::FontId::proportional(LABEL))
+                        .color(app::caption(ui.visuals())),
+                );
+            }
+        });
 }
 
 /// One drawbar, for the bodies that give each bar its own field.
@@ -1616,22 +1673,22 @@ fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets:
             let legal = ctx.legal(target);
             let at = ui
                 .allocate_ui(egui::vec2(64.0, 0.0), |ui| {
-                    ui.vertical_centered(|ui| {
+                    ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 3.0;
-                        if let Some(value) = plain(ui, target, &legal) {
-                            sets.push((target.path.clone(), value));
-                        }
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(
+                                egui::RichText::new(format!("BAR {}", nth + 1))
+                                    .font(egui::FontId::proportional(LABEL))
+                                    .color(app::caption(ui.visuals())),
+                            );
                             if state.pending.contains(&target.path) {
                                 app::dot(ui, app::warn(ui.visuals()), DOT);
                             }
-                            ui.label(
-                                egui::RichText::new(format!("bar {}", nth + 1))
-                                    .font(egui::FontId::proportional(LABEL))
-                                    .color(ui.visuals().weak_text_color()),
-                            );
                         });
+                        if let Some(value) = plain(ui, target, &legal) {
+                            sets.push((target.path.clone(), value));
+                        }
                     });
                 })
                 .response;
@@ -1649,13 +1706,13 @@ fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets:
         .iter()
         .any(|part| state.pending.contains(&part.field.path));
     ui.allocate_ui(egui::vec2(220.0, 0.0), |ui| {
-        ui.vertical_centered(|ui| {
+        ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
+            let stem = ranked(run[0].field).map_or(run[0].field.path.as_str(), |(stem, _)| stem);
+            named_caption(ui, stem, edited, "rank is a position, not a pitch");
             if let Some(moved) = bars(ui, positions) {
                 sets.extend(bar_sets(run, &positions, &moved));
             }
-            let stem = ranked(run[0].field).map_or(run[0].field.path.as_str(), |(stem, _)| stem);
-            named_caption(ui, stem, edited, "rank is a position, not a pitch");
             let any: [Option<&Field>; SLOTS.len()] = std::array::from_fn(|slot| {
                 run.iter()
                     .find_map(|part| part.morphs[slot].filter(|slot| !is_neutral(slot)))
@@ -1854,14 +1911,14 @@ fn transpose(ui: &mut egui::Ui, ctx: &Ctx, state: &State, rows: &[&Field], sets:
     let mut switched = None;
     let mut moved = None;
     ui.allocate_ui(egui::vec2(120.0, 0.0), |ui| {
-        ui.vertical_centered(|ui| {
+        ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
+            caption(ui, lamp, edited);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 switched = led::ui(ui, on, "");
                 moved = knob::ui(ui, TRANSPOSE, semitones, least, most);
             });
-            caption(ui, lamp, edited);
         });
     })
     .response
@@ -2266,6 +2323,105 @@ mod tests {
         assert_eq!(all, fields.len());
         assert!(slots > 300, "{slots} morph slots");
         assert!(ns4::program::PANEL.resolve(&fields).sections.len() > 1);
+    }
+
+    /// ⚠️ A stored alternative is picked by a click anywhere in its card, not by the
+    /// label alone: an operator who reaches for its drawbars has said which registration
+    /// they mean, and a card that answered only its own title would take the pull and go
+    /// on playing the other one.
+    #[test]
+    fn a_click_anywhere_in_a_stored_alternative_picks_it() {
+        /// The stroked card of the alternative that is not the one playing.
+        fn kept_card(output: &egui::FullOutput, stroke: egui::Color32) -> Option<egui::Rect> {
+            fn walk(shape: &egui::Shape, stroke: egui::Color32, found: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Rect(drawn) if drawn.stroke.color == stroke => {
+                        found.push(drawn.rect)
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        shapes.iter().for_each(|shape| walk(shape, stroke, found))
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, stroke, &mut found);
+            }
+            found
+                .into_iter()
+                .find(|rect| rect.width() > 120.0 && rect.height() > 120.0)
+        }
+
+        let (bytes, fields) = electro5();
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let doc = of(&decoded, &fields);
+        let alternatives: Vec<&Sect> = doc
+            .sections
+            .iter()
+            .flat_map(|section| &section.nested)
+            .filter(|nested| nested.pick.is_some())
+            .collect();
+        assert!(
+            alternatives.iter().filter(|kept| !kept.selected).count() > 0,
+            "the Electro 5 stores a preset it is not playing",
+        );
+        let kept = alternatives
+            .iter()
+            .find(|kept| !kept.selected)
+            .expect("a stored alternative");
+        let wanted = kept.pick.expect("a card is picked by its own selector");
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
+        ctx.all_styles_mut(crate::app::metrics);
+        let screen = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let quiet = ctx.style().visuals.widgets.noninteractive.bg_stroke.color;
+        let read = Ctx::default();
+        let state = State::default();
+        let mut sets = Sets::new();
+        let mut body = egui::Rect::NOTHING;
+        // The first pass lays the cards out; the second clicks the middle of the one
+        // that is kept, which is a control of its own rather than its title.
+        for pass in 0..2 {
+            let mut piano = lookup();
+            sets.clear();
+            let input = egui::RawInput {
+                events: match pass {
+                    0 => Vec::new(),
+                    _ => click(body.center()),
+                },
+                ..screen.clone()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    side_by_side(
+                        ui,
+                        &read,
+                        &state,
+                        &doc,
+                        &alternatives,
+                        &mut piano,
+                        &mut sets,
+                    );
+                });
+            });
+            if pass == 0 {
+                body = kept_card(&output, quiet).expect("the kept card is stroked");
+            }
+        }
+        assert!(
+            sets.contains(&(wanted.field.to_string(), wanted.value.to_string())),
+            "a click at {:?} left {sets:?}",
+            body.center(),
+        );
     }
 
     /// Which kind a field is, for a sweep that has to see every one of them drawn.

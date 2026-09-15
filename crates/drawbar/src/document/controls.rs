@@ -131,7 +131,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, 
     ui.add_space(4.0);
 }
 
-/// A cell whose control is the caller's, with the panel's name for it underneath.
+/// A cell whose control is the caller's, with the panel's name for it over the top.
 ///
 /// `path` names the caption; an unmapped one still gets the prettified fallback, so a
 /// field the strings table has not caught up with reads as a rough name rather than as a
@@ -143,18 +143,20 @@ pub fn named_cell(
     body: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
-        ui.vertical_centered(|ui| {
+        ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
-            body(ui);
             let rough = !strings::known(path);
-            let mut text = egui::RichText::new(strings::label(path)).small();
+            let mut text = egui::RichText::new(strings::label(path).to_uppercase()).small();
             if rough {
                 text = text.italics();
             }
-            let response = ui.add(egui::Label::new(text.color(ui.visuals().weak_text_color())));
+            let response = ui.add(egui::Label::new(
+                text.color(crate::app::caption(ui.visuals())),
+            ));
             if rough {
                 response.on_hover_text(format!("{path} — this app has no name for it yet"));
             }
+            body(ui);
         });
     })
     .response
