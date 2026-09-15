@@ -295,6 +295,8 @@ pub fn map(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mut
         SPAN,
         keys::Edges::Both,
         Sounds::NotUntilBuilt,
+        // A project's zones cannot be heard, so a controller has nothing to play here.
+        None,
     ) else {
         return;
     };

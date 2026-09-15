@@ -14,6 +14,11 @@ The v3 and v4 layouts let you pull zones apart and leave keys silent.
 Click a key to hear it. The line under the keyboard says which zone answered and
 by how much it was shifted, or why the key is silent.
 
+**MIDI**, above the map, listens to every controller on this computer, so you can
+play the zones from a keyboard instead of clicking them. A key sounds at the
+velocity you played it, which is the velocity a zone's window is tested against.
+Nothing is sent to your instrument: a controller plays drawbar's own audition.
+
 ## Zones
 
 One row per zone: the keys it answers, its length and channels, and its size.
