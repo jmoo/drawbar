@@ -13,6 +13,7 @@ sample files. Connecting other instruments over USB has not been tried.
 | Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, audition, transfer | Playback of v2 files. Files encoded as v3 or v4 have not been played |
 | Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs, transfer | Trimmed, built and re-encoded libraries play, mono and stereo, across every key they cover. Renames, retunes, remaps and a narrowed key range have not been played |
 | Other Nord files | Recognised and kept byte for byte, without editing | |
+| Text files | Edit, keep beside your files | Never sent to an instrument |
 
 ## USB
 
