@@ -43,11 +43,54 @@
         font-size: 0.95rem;
         letter-spacing: 0.02em;
       }
+
+      /* Over the canvas, so the page answers a screen the shell cannot lay out in
+         before the module that would answer has loaded. */
+      #toosmall {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        box-sizing: border-box;
+        padding: 0 16px;
+        background: #161719;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+      }
+
+      #toosmall p {
+        margin: 0 0 8px;
+        max-width: 32rem;
+      }
+
+      #toosmall .head {
+        font-size: 1.15rem;
+        font-weight: 600;
+      }
+
+      #toosmall a {
+        color: #e05040;
+      }
+
+      /* `drawbar::shell::LEAST`, which a test holds these two numbers to. A CSS pixel
+         is the point the app lays itself out in. */
+      @media (width < 660px), (height < 430px) {
+        #toosmall {
+          display: flex;
+        }
+      }
     </style>
   </head>
   <body>
     <canvas id="drawbar"></canvas>
     <div id="status">loading drawbar…</div>
+    <div id="toosmall">
+      <p class="head">drawbar needs a larger screen</p>
+      <p>It is a desktop application: its panels need more room than a phone or a narrow window has. Open it on a larger screen, or make this window wider.</p>
+      <p><a href="docs/">User guide</a></p>
+    </div>
     <script type="module">
       import init, { start } from "./pkg/drawbar.js";
 
