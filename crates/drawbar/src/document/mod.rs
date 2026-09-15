@@ -420,38 +420,18 @@ impl Document {
                                 asked = Some(from_body);
                             }
                         }
+                        // What the file says about itself, the record of the bytes
+                        // it is, then the body itself — the longest of the three last.
                         Face::Advanced => {
-                            match shape {
-                                Shape::Fields => {
-                                    if let (Some(doc), Some(open)) =
-                                        (doc.as_ref(), self.open.as_ref())
-                                    {
-                                        Advanced::about(ui, &field::about(doc, entity));
-                                        let table = advanced::Table {
-                                            fields: registry.as_deref().unwrap_or_default(),
-                                            saved: open.fields.settled(),
-                                            changed: open.fields.pending(),
-                                            doc: Some(doc),
-                                        };
-                                        self.advanced.table(ui, &table, &mut sets);
-                                        typed = !sets.is_empty();
-                                    }
-                                }
-                                Shape::Piano => {
-                                    self.piano.meta(ui);
-                                    self.piano.advanced(ui);
-                                }
-                                Shape::SetList
-                                | Shape::Sample
-                                | Shape::Project
-                                | Shape::Verbatim
-                                | Shape::Wav
-                                | Shape::Undecoded => {
-                                    record(ui, asset);
-                                    capabilities(ui, asset);
-                                }
-                            }
-                            details = self.advanced.meta(ui, entity, device)
+                            self.states(ui, asset, doc.as_ref());
+                            details = self.advanced.meta(ui, entity, device);
+                            typed = self.deep(
+                                ui,
+                                asset,
+                                doc.as_ref(),
+                                registry.as_deref().unwrap_or_default(),
+                                &mut sets,
+                            );
                         }
                     });
                 });
@@ -756,6 +736,65 @@ impl Document {
             .collect();
         let open = self.open.as_mut()?;
         sample::ui(ui, &mut open.sample, &snapshot, &sounds, sets)
+    }
+
+    /// What the file says about itself, which is where the Advanced face opens.
+    fn states(&mut self, ui: &mut egui::Ui, asset: Asset<'_>, doc: Option<&field::Doc<'_>>) {
+        match asset.shape {
+            Shape::Fields => {
+                if let Some(doc) = doc {
+                    Advanced::about(ui, &field::about(doc, asset.entity));
+                }
+            }
+            Shape::Piano => self.piano.meta(ui),
+            Shape::SetList
+            | Shape::Sample
+            | Shape::Project
+            | Shape::Verbatim
+            | Shape::Wav
+            | Shape::Undecoded => record(ui, asset),
+        }
+    }
+
+    /// The body itself, under the record: the field table where a registry describes the
+    /// bytes, and what the format holds where none does. Answers whether a cell of the
+    /// table is being typed in.
+    fn deep(
+        &mut self,
+        ui: &mut egui::Ui,
+        asset: Asset<'_>,
+        doc: Option<&field::Doc<'_>>,
+        registry: &[Field],
+        sets: &mut Sets,
+    ) -> bool {
+        match asset.shape {
+            Shape::Fields => {
+                let (Some(doc), Some(open)) = (doc, self.open.as_ref()) else {
+                    return false;
+                };
+                let table = advanced::Table {
+                    fields: registry,
+                    saved: open.fields.settled(),
+                    changed: open.fields.pending(),
+                    doc: Some(doc),
+                };
+                self.advanced.table(ui, &table, sets);
+                !sets.is_empty()
+            }
+            Shape::Piano => {
+                self.piano.advanced(ui);
+                false
+            }
+            Shape::SetList
+            | Shape::Sample
+            | Shape::Project
+            | Shape::Verbatim
+            | Shape::Wav
+            | Shape::Undecoded => {
+                capabilities(ui, asset);
+                false
+            }
+        }
     }
 
     /// What an editor keeps in front of the body: above the scroll region, on the panel
@@ -1453,6 +1492,25 @@ mod tests {
         }
     }
 
+    /// Every word a frame painted, with the rect it was painted in.
+    fn placed(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => into.push((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut found);
+        }
+        found
+    }
+
     fn words(shape: &egui::Shape, into: &mut Vec<String>) {
         match shape {
             egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
@@ -1890,6 +1948,40 @@ mod tests {
         }
     }
 
+    /// The Advanced face reads in one order: what the file says it is, the record of
+    /// the bytes it holds, then the body itself — the longest block last, because a
+    /// reader who has to scroll past ninety rows to reach the record does not.
+    #[test]
+    fn the_advanced_face_reads_from_the_record_down_to_the_body() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.document.views.insert(open.id, Face::Advanced);
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
+        let placed = placed(&output);
+        let top = |word: &str| -> f32 {
+            placed
+                .iter()
+                .find(|(text, _)| text == word)
+                .unwrap_or_else(|| panic!("{word} was never painted: {placed:?}"))
+                .1
+                .top()
+        };
+
+        let order = ["About this file", "Container", "Changes", "Every field"];
+        for pair in order.windows(2) {
+            assert!(
+                top(pair[0]) < top(pair[1]),
+                "{} stands under {}",
+                pair[0],
+                pair[1],
+            );
+        }
+        assert!(
+            !placed.iter().any(|(text, _)| text == "Show the decode"),
+            "the decode dump is gone: {placed:?}",
+        );
+    }
+
     /// ⚠️ Every column of the Advanced face reads down from its own heading. A cell
     /// centred in the space its column keeps has no edge for the eye to follow, and a
     /// record read that way is read a row at a time.
@@ -1899,21 +1991,7 @@ mod tests {
         open.document.views.insert(open.id, Face::Advanced);
         open.frame(Vec::new());
         let output = open.output(Vec::new());
-
-        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-            match shape {
-                egui::Shape::Text(text) => into.push((
-                    text.galley.text().to_string(),
-                    egui::Rect::from_min_size(text.pos, text.galley.size()),
-                )),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut placed = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut placed);
-        }
+        let placed = placed(&output);
         let left = |word: &str| -> f32 {
             placed
                 .iter()
@@ -2467,8 +2545,9 @@ mod tests {
     }
 
     /// A body no registry describes says which of the two silences it is — nothing to
-    /// draw, rather than nothing read — states what the container does say, and shows
-    /// the bytes it is keeping.
+    /// draw, rather than nothing read — and states what the container does say. The
+    /// bytes it is keeping are on the Advanced face, which is the one page that shows
+    /// them.
     #[test]
     fn a_body_with_no_registry_says_why_and_shows_its_bytes() {
         let bytes = crate::fields::blank::stage3_song();
@@ -2493,7 +2572,10 @@ mod tests {
             has("Send as-is"),
             "the loud action is the same send in this body's words: {said:?}"
         );
-        assert!(has("0000") && has("0020"), "the body as hex: {said:?}");
+        assert!(
+            !has("0000"),
+            "the hex is the Advanced face's, not this one: {said:?}"
+        );
 
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
@@ -2502,6 +2584,10 @@ mod tests {
             "the whole body has a face of its own: {said:?}"
         );
         assert!(said.iter().any(|word| word == "3 rows"), "{said:?}");
+        assert!(
+            said.iter().any(|word| word == "0000"),
+            "the bytes: {said:?}"
+        );
     }
 
     /// A Stage Classic piano library (`nsp`): a container over a body nothing here
@@ -2900,8 +2986,8 @@ mod tests {
                 match face {
                     Face::Basic => assert!(has("Trim to fit"), "{said:?}"),
                     Face::Advanced => {
-                        assert!(has("About this file"), "{said:?}");
-                        assert!(has("What this format holds") && has("Offsets"), "{said:?}");
+                        assert!(has("About this file") && has("Container"), "{said:?}");
+                        assert!(has("What this format holds"), "{said:?}");
                         assert!(!has("Key map"), "the map is the Basic face's: {said:?}");
                     }
                 }
