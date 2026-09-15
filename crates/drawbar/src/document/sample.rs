@@ -7,8 +7,8 @@
 //! from the zones as they move.
 //!
 //! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
-//! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when the
-//! operator asks for it, and kept in a [`Cache`] until the bytes under it change.
+//! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when a
+//! row that shows it is opened, and kept in a [`Cache`] until the bytes under it change.
 //!
 //! The chrome the project editor shares — the key map, the zone rows, the cells of an
 //! open row — lives here rather than being written twice: an `.nsmpproj` is the same
@@ -378,7 +378,7 @@ fn bottom(zones: &[Zone], index: usize) -> Option<u8> {
 /// What the sample view asked the document to do about one zone's audio.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ask {
-    /// Decode this zone, because the operator opened it.
+    /// Decode this zone, because an open row is drawing its waveform.
     Decode(usize),
     /// Start it, or stop it if it is the one sounding.
     Play(usize),
@@ -412,7 +412,7 @@ pub struct Decoded {
 
 /// Columns an envelope is reduced to. Wide enough that a wide panel has no gaps in it,
 /// small enough that the whole thing is a few kilobytes whatever the zone holds.
-const COLUMNS: usize = 512;
+pub(super) const COLUMNS: usize = 512;
 
 impl Cache {
     /// Drop everything decoded from bytes that are no longer what `id` holds.
@@ -1397,7 +1397,10 @@ pub(super) fn decibels(db: f64) -> String {
     }
 }
 
-/// The actions of an open zone, and the envelope once it is decoded.
+/// The envelope of an open zone, and the actions over it.
+///
+/// An open row shows its waveform, so the decode is asked for rather than offered. The
+/// [`Cache`] remembers a refusal like a success, which is what keeps that to one ask.
 fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     let mut ask = None;
     ui.horizontal_wrapped(|ui| {
@@ -1411,9 +1414,15 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
                 }
             }
             (false, None) => {
-                if action(ui, "Show audio", Glyph::AudioLines, true) {
-                    ask = Some(Ask::Decode(index));
-                }
+                ask = Some(Ask::Decode(index));
+                // The decode lands after this frame, and nothing else would bring the
+                // one that draws it.
+                ui.ctx().request_repaint();
+                ui.label(
+                    egui::RichText::new("reading the stroke…")
+                        .size(FACTS_TEXT)
+                        .color(app::caption(ui.visuals())),
+                );
             }
             (false, Some(Err(why))) => {
                 ui.label(
@@ -1739,7 +1748,7 @@ pub fn stated(entity: &Entity) -> Option<Cell> {
 pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     controls::heading(
         ui,
-        "Metadata",
+        "About this file",
         "what the file says about itself — read here, never written differently",
         None,
     );
@@ -1794,7 +1803,7 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
 /// The nineteen capabilities of the instrument editor, as this generation stands in
 /// them.
 ///
-/// `Editable` is a field a control on the Edit face writes or an act it performs,
+/// `Editable` is a field a control on the Basic face writes or an act it performs,
 /// `ReadOnly` a field the format states and nothing here writes, `Absent` a field the
 /// format does not have at all. The table is checked against the paths [`set`] accepts —
 /// see the tests.
@@ -1934,7 +1943,7 @@ pub fn capabilities(generation: &str) -> Vec<Row> {
     ]
 }
 
-/// Where each field the Edit face reads or writes lands in the file.
+/// Where each field the Basic face reads or writes lands in the file.
 ///
 /// Every figure is one of `nord_format`'s own declarations rather than a measurement.
 pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
@@ -2330,7 +2339,7 @@ mod tests {
         ("name", Some("name")),
         ("key zones: root / top / low", Some("zone1.top_note")),
         ("per-key table", Some("key60.gain")),
-        // The two the Edit face performs as acts rather than field writes.
+        // The two the Basic face performs as acts rather than field writes.
         ("decode / audition", None),
         ("write to the instrument", None),
         // Named here so the wide generations' table is covered by the same check.
@@ -2710,16 +2719,14 @@ mod tests {
         let (_, ask) = actions(&ctx, &sounding, press(stop.center()));
         assert_eq!(ask, Some(Ask::Play(0)));
 
-        // Silent and undecoded, the row offers the decode instead.
+        // Silent and undecoded, the row asks for the decode itself: an open row shows
+        // its waveform rather than offering to read one.
         let quiet = Sound {
             decoded: None,
             playing: false,
         };
-        let (said, _) = actions(&ctx, &quiet, Vec::new());
-        assert!(
-            said.iter().any(|(text, _)| text == "Show audio"),
-            "{said:?}"
-        );
+        let (_, ask) = actions(&ctx, &quiet, Vec::new());
+        assert_eq!(ask, Some(Ask::Decode(0)));
     }
 
     /// ⚠️ A paint mark is the difference between what is held and what was saved, and

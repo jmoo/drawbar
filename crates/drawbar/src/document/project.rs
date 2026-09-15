@@ -629,7 +629,7 @@ fn parameters(ui: &mut egui::Ui, snapshot: &Snapshot, sets: &mut Sets) {
 pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     controls::heading(
         ui,
-        "Metadata",
+        "About this file",
         "what the file says about itself — read here, never written differently",
         None,
     );
@@ -762,7 +762,7 @@ pub fn capabilities() -> Vec<Row> {
     ]
 }
 
-/// Where each field the Edit face writes lands in the file.
+/// Where each field the Basic face writes lands in the file.
 ///
 /// A project is text, so these are the keys `nord_format` writes rather than offsets.
 pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {

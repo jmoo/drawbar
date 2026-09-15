@@ -18,11 +18,12 @@ over` when the send cannot happen yet.
 
 ## The faces
 
-- **Edit** is the sound's controls, in the instrument's own words.
-- **Metadata** is what the file says about itself, and changes nothing.
-- **Advanced** is every field in the file as a table, for when you need a value
-  the Edit face does not draw. Type into the **Writes** column to set one. A
-  value the field cannot hold is refused, with the reason.
+- **Basic** is the sound's controls, in the instrument's own words.
+- **Advanced** reads in one order: **About this file**, the **Container** the
+  bytes came in, the **Changes** they have made since the file was last saved,
+  and then the body itself — every field as a table, for when you need a value
+  the Basic face does not draw. Type into the **Writes** column to set a field.
+  A value the field cannot hold is refused, with the reason.
 
 ## Programs, live slots, settings and presets
 
@@ -53,9 +54,9 @@ rows to reorder them.
 
 ## Files with nothing to edit
 
-A file drawbar recognises but cannot yet edit opens with what the container says
-and a look at its bytes. It can still be sent, copied and tagged, and goes up
-byte for byte as it came down.
+A file drawbar recognises but cannot yet edit opens with what the container
+says; its bytes are under **Body bytes** on the Advanced face. It can still be
+sent, copied and tagged, and goes up byte for byte as it came down.
 
 Sample instruments and piano libraries have editors of their own. See
 [Samples](samples.md) and [Pianos](pianos.md).

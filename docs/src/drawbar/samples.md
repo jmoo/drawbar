@@ -17,9 +17,8 @@ by how much it was shifted, or why the key is silent.
 ## Zones
 
 One row per zone: the keys it answers, its length and channels, and its size.
-Open a row to edit its root and top note, see its waveform with **Show audio**,
-play it, or **Save WAV…**. Velocity windows are shown but cannot be edited in an
-instrument.
+Open a row for its waveform, to edit its root and top note, to play it, or to
+**Save WAV…**. Velocity windows are shown but cannot be edited in an instrument.
 
 A v2 instrument also has a gain and a detune for every key. **Per key** draws
 them as two lanes you paint across, or as a table for one key at a time.

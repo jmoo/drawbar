@@ -3,7 +3,8 @@
 //! The container is read — format, version, checksum, where the body starts and how long
 //! it is — and the body itself is carried untouched. There is nothing to draw as a
 //! control and nothing that could be written differently, so the page says which of those
-//! two it is, states what the container does say, and shows the bytes.
+//! two it is and states what the container does say. The bytes themselves are on the
+//! Advanced face.
 
 use eframe::egui;
 use nord_format::accept::Family;
@@ -18,9 +19,8 @@ use crate::room;
 use crate::strings::kind_word;
 use crate::workspace::LocalEntity;
 
-/// How many bytes of the body the page shows, which is enough to recognise a header and
-/// no more. The whole of it is on the Advanced face.
-const SHOWN: usize = 192;
+/// How many bytes of the body a dump row holds. The body itself is on the Advanced
+/// face, which is the one page that shows it.
 const PER_ROW: usize = 16;
 
 const PAD: f32 = 12.0;
@@ -118,7 +118,7 @@ pub fn ui(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
     );
     let rows = stated(entity);
     let wide = ui.available_width() >= COLUMN_MIN * 2.0;
-    let saved = match wide {
+    match wide {
         true => {
             // ⚠️ Two children with their own rects, not `allocate_ui(vec2(w, 0.0))`: a
             // zero-height allocation inside a row lets a label wrap at the row's whole
@@ -151,21 +151,7 @@ pub fn ui(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
             ui.add_space(8.0);
             sentence(ui)
         }
-    };
-
-    let body = body(entity);
-    let shown = body.len().min(SHOWN);
-    controls::heading(
-        ui,
-        "Body",
-        &format!(
-            "{} kept verbatim — the first {shown} shown",
-            room::measure(body.len() as u64)
-        ),
-        None,
-    );
-    hex(ui, body, 0..shown.div_ceil(PER_ROW));
-    saved
+    }
 }
 
 /// Why the page is empty, and the one thing to do about it.
