@@ -21,6 +21,7 @@ cargo install drawbar
   listen to either before you send it.
 - Queue your changes and send them in one go, with a review of what each one
   replaces.
+- Keep a text note beside the sounds for the set list and the cues.
 
 Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before

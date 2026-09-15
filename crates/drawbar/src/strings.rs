@@ -655,6 +655,19 @@ pub fn carries_tag(name: &str) -> bool {
     })
 }
 
+/// What a name becomes when the words in front of the tag are replaced: `typed`, under
+/// the format tag `stored` carries.
+///
+/// The glyph beside a name already says what kind of file it is, so the tag is never in
+/// the box — and it must not be lost by typing in one, or by a duplicate being named
+/// after the thing it was copied from.
+pub fn tagged(stored: &str, typed: &str) -> String {
+    match stored.rsplit_once('.').filter(|_| carries_tag(stored)) {
+        Some((_, tag)) => format!("{typed}.{tag}"),
+        None => typed.to_string(),
+    }
+}
+
 /// A name as a reader sees it: without the format tag, which the kind glyph beside it
 /// already says.
 ///

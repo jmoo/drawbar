@@ -51,6 +51,18 @@ A set list opens as the programs it plays, one row each, with its bank and slot,
 the program's name where drawbar knows it, and whether the entry resolves. Drag
 rows to reorder them.
 
+## Notes
+
+A text file opens as a box you type in: the set list, the cues, what the desk
+needs. drawbar has no format for one and needs none. A file it cannot decode is
+a note when its bytes are words, so a `.txt`, a `.md` or anything else written
+in UTF-8 opens the same way, and **New ▸ Text note** starts an empty one.
+
+A note is saved, reverted, renamed, filed, tagged and exported like anything
+else on the list. The header counts its lines where another document's header
+gives its size. No instrument has a folder for a note, so it is never queued or
+sent.
+
 ## Files with nothing to edit
 
 A file drawbar recognises but cannot yet edit opens with what the container says
