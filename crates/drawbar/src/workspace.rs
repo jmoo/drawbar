@@ -309,10 +309,16 @@ impl LocalEntity {
     }
 
     /// The format tag, from the decode where there is one and the container otherwise.
+    ///
+    /// A note has neither: its bytes are what say what it is, so it is the one asset
+    /// answering from them — see [`crate::document::text::is_text`].
     pub fn tag(&self) -> String {
         match (&self.entity, &self.container) {
             (Some(entity), _) => entity.identity().format.to_string(),
             (None, Some(container)) => container.tag(),
+            (None, None) if crate::document::text::is_text(&self.bytes) => {
+                crate::document::text::EXTENSION.to_string()
+            }
             (None, None) => "?".into(),
         }
     }
@@ -417,6 +423,10 @@ fn format_tag(bytes: &[u8]) -> String {
     }
     if bytes.starts_with(nsmpproj::MAGIC) {
         return nsmpproj::FORMAT.to_string();
+    }
+    // Words carry no magic at all, which is what makes them words.
+    if crate::document::text::is_text(bytes) {
+        return crate::document::text::EXTENSION.to_string();
     }
     "bin".to_string()
 }
@@ -869,6 +879,16 @@ impl Workspace {
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
         let arrival = match (&entity.parse_error, &entity.verify) {
+            // A note is bytes this app has no format for and needs none: the words are
+            // the whole of it, so nothing here failed to read them.
+            (Some(_), _) if crate::browser::Kind::of(&entity) == crate::browser::Kind::Text => {
+                log.info(format!(
+                    "{}: text ({} bytes)",
+                    entity.name,
+                    entity.bytes.len()
+                ));
+                Arrival::Read
+            }
             (Some(e), _) => {
                 log.error(format!("{}: {e}", entity.name));
                 Arrival::Unreadable
@@ -1752,8 +1772,13 @@ mod tests {
         assert_eq!(file("../../etc/passwd"), "etc-passwd.ne5p");
         assert_eq!(file("  "), "unnamed.ne5p");
         assert_eq!(
-            export_filename("Big strings", b"no header"),
+            export_filename("Big strings", &[0x00, 0xff, 0x01, 0xfe]),
             "Big-strings.bin",
+        );
+        assert_eq!(
+            export_filename("Set 1", b"Set 1\n"),
+            "Set-1.txt",
+            "words are a note, and a note is exported as one"
         );
     }
 
@@ -1905,7 +1930,7 @@ mod tests {
     /// A file that does not decode is still a row: the error is the report.
     #[test]
     fn bytes_that_do_not_decode_are_kept_with_their_error() {
-        let entity = ingest("junk.bin", b"not a nord file at all".to_vec());
+        let entity = ingest("junk.bin", vec![0x00, 0xff, 0x01, 0xfe]);
         assert!(entity.entity.is_none());
         assert!(entity.parse_error.is_some());
         assert!(entity.container.is_none());

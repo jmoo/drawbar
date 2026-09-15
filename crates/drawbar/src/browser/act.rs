@@ -661,7 +661,7 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
     if let Some((class, at)) = owed(entity) {
         return Bound::At(class, at);
     }
-    let home = Kind::of(entity.entity.as_ref()).home();
+    let home = Kind::of(entity).home();
     let Some(class) = home.filter(|class| !read_only(*class) && state.classes().contains(class))
     else {
         return Bound::Nowhere;
@@ -1119,9 +1119,9 @@ mod tests {
             &mut log,
         );
         let nowhere = workspace.ingest(
-            "notes.txt".to_string(),
+            "mystery.dat".to_string(),
             Origin::Fresh,
-            b"not a Nord file at all".to_vec(),
+            vec![0x00, 0xff, 0x01, 0xfe],
             &mut log,
         );
 
@@ -1375,6 +1375,47 @@ mod tests {
         );
         assert_eq!(queue.ids(), vec![id], "one entry, moved");
         assert_eq!(queue.entry(id).map(|held| held.at), Some(at(3)));
+    }
+
+    /// A note belongs in no folder the instrument has, so it is never a candidate for a
+    /// send.
+    ///
+    /// ⚠️ Nothing turns it away by name. It carries no object class, so `bound_for` —
+    /// the one question asked of everything checked — answers `Nowhere`, the same answer
+    /// every other homeless kind gets.
+    #[test]
+    fn a_note_is_never_queued_because_it_belongs_in_no_folder() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
+        let note = workspace.ingest(
+            "Set 1.txt".to_string(),
+            Origin::Fresh,
+            b"Set 1\n".to_vec(),
+            &mut log,
+        );
+        let program = workspace.create(Fresh::Program, &mut log).unwrap();
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SendChecked(vec![note, program])],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert_eq!(
+            queue.ids(),
+            vec![program],
+            "the program is bound for a free slot and the note is bound for nowhere"
+        );
+        assert_eq!(
+            bound_for(workspace.get(note).unwrap(), &device.state, &queue),
+            Bound::Nowhere
+        );
     }
 
     /// One entry leaves the queue on its own, and the whole queue empties — and neither

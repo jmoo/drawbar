@@ -45,6 +45,9 @@ pub enum Kind {
     /// A Nord Sample Editor project (`.nsmpproj`) — a text file that generates a sample,
     /// and the one kind with no folder on the instrument to send it to.
     Project,
+    /// A text file: the words about a set rather than a sound. No instrument holds
+    /// one, so it has no folder and nothing sends it.
+    Text,
     /// Bytes that did not decode.
     Other,
 }
@@ -64,7 +67,7 @@ const HOMES: [(Kind, ObjectClass); 6] = [
 
 impl Kind {
     /// Every kind, in the order anything showing a set of them shows them.
-    pub const ALL: [Kind; 16] = [
+    pub const ALL: [Kind; 17] = [
         Kind::Program,
         Kind::SetList,
         Kind::Sample,
@@ -80,29 +83,40 @@ impl Kind {
         Kind::PipeLibrary,
         Kind::Bundle,
         Kind::Project,
+        Kind::Text,
         Kind::Other,
     ];
 
-    /// What a decoded file is. ⚠️ Exhaustive over [`Entity`], so a family the library
-    /// adds is a compile error here rather than another nameless row.
-    pub fn of(entity: Option<&Entity>) -> Kind {
-        match entity {
-            Some(Entity::Program(_)) => Kind::Program,
-            Some(Entity::Song(_)) => Kind::SetList,
-            Some(Entity::Sample(_)) => Kind::Sample,
-            Some(Entity::Piano(_) | Entity::PianoLibrary(_)) => Kind::Piano,
-            Some(Entity::Live(_)) => Kind::Live,
-            Some(Entity::Settings(_)) => Kind::Settings,
-            Some(Entity::Synth(_)) => Kind::Synth,
-            Some(Entity::OrganPreset(_)) => Kind::OrganPreset,
-            Some(Entity::PianoPreset(_)) => Kind::PianoPreset,
-            Some(Entity::Performance(_)) => Kind::Performance,
-            Some(Entity::Midi(_) | Entity::Sysex(_)) => Kind::LeadBank,
-            Some(Entity::Cne3(_)) => Kind::SampleLibrary,
-            Some(Entity::PipeLibrary(_)) => Kind::PipeLibrary,
-            Some(Entity::Bundle(_)) => Kind::Bundle,
-            Some(Entity::SampleProject(_)) => Kind::Project,
-            None => Kind::Other,
+    /// What an asset is. ⚠️ Exhaustive over [`Entity`], so a family the library adds is
+    /// a compile error here rather than another nameless row.
+    ///
+    /// Bytes that decoded into nothing are asked one more question, by
+    /// [`is_text`](crate::document::text::is_text): a file this app has no format for is
+    /// a note when it is words. That is the one kind the bytes decide rather than the
+    /// decode.
+    pub fn of(entity: &LocalEntity) -> Kind {
+        let Some(decoded) = entity.entity.as_ref() else {
+            return match crate::document::text::is_text(&entity.bytes) {
+                true => Kind::Text,
+                false => Kind::Other,
+            };
+        };
+        match decoded {
+            Entity::Program(_) => Kind::Program,
+            Entity::Song(_) => Kind::SetList,
+            Entity::Sample(_) => Kind::Sample,
+            Entity::Piano(_) | Entity::PianoLibrary(_) => Kind::Piano,
+            Entity::Live(_) => Kind::Live,
+            Entity::Settings(_) => Kind::Settings,
+            Entity::Synth(_) => Kind::Synth,
+            Entity::OrganPreset(_) => Kind::OrganPreset,
+            Entity::PianoPreset(_) => Kind::PianoPreset,
+            Entity::Performance(_) => Kind::Performance,
+            Entity::Midi(_) | Entity::Sysex(_) => Kind::LeadBank,
+            Entity::Cne3(_) => Kind::SampleLibrary,
+            Entity::PipeLibrary(_) => Kind::PipeLibrary,
+            Entity::Bundle(_) => Kind::Bundle,
+            Entity::SampleProject(_) => Kind::Project,
         }
     }
 
@@ -139,6 +153,7 @@ impl Kind {
             Kind::PipeLibrary => "pipe library",
             Kind::Bundle => "bundle",
             Kind::Project => "project",
+            Kind::Text => "note",
             Kind::Other => "file",
         }
     }
@@ -157,6 +172,7 @@ impl Kind {
                 Kind::PipeLibrary => "Pipe organ libraries",
                 Kind::Bundle => "Bundles",
                 Kind::Project => "Sample Editor projects",
+                Kind::Text => "Notes",
                 _ => "Other",
             },
         }
@@ -181,6 +197,7 @@ impl Kind {
             Kind::PipeLibrary => Glyph::SlidersVertical,
             Kind::Bundle => Glyph::Folder,
             Kind::Project => Glyph::FolderGit2,
+            Kind::Text => Glyph::FilePlus2,
             Kind::Other => Glyph::HardDrive,
         }
     }
@@ -195,7 +212,7 @@ impl Kind {
 pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
     let here: Vec<Kind> = workspace
         .listed()
-        .map(|entity| Kind::of(entity.entity.as_ref()))
+        .map(Kind::of)
         .chain(device.classes().into_iter().map(Kind::from_class))
         .collect();
     Kind::ALL
@@ -734,11 +751,25 @@ mod tests {
         }
     }
 
-    /// Every family the library decodes is a kind of its own. Only bytes that did not
-    /// decode are a file.
+    /// Every family the library decodes is a kind of its own, and bytes that decoded
+    /// into nothing are a note where they are words and a file where they are not.
     #[test]
-    fn only_what_did_not_decode_is_called_a_file() {
-        assert_eq!(Kind::of(None), Kind::Other);
+    fn what_did_not_decode_is_a_note_or_a_file() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = crate::log::Log::default();
+        let mut held = |bytes: Vec<u8>| {
+            let id = workspace.ingest(
+                "held".to_string(),
+                crate::workspace::Origin::Fresh,
+                bytes,
+                &mut log,
+            );
+            Kind::of(workspace.get(id).expect("it is on the list"))
+        };
+        assert_eq!(held(b"Set 1\n".to_vec()), Kind::Text);
+        assert_eq!(held(Vec::new()), Kind::Text, "a new note holds nothing yet");
+        assert_eq!(held(vec![0x00, 0xff]), Kind::Other);
+
         for kind in Kind::ALL.iter().filter(|kind| **kind != Kind::Other) {
             assert_ne!(kind.chip(), Kind::Other.chip(), "{kind:?}");
             assert_ne!(kind.plural(), Kind::Other.plural(), "{kind:?}");

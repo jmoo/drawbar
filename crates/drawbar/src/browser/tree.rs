@@ -533,7 +533,7 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Local(entity.id);
-        let kind = Kind::of(entity.entity.as_ref());
+        let kind = Kind::of(entity);
         let selected = self.selection.holds(item);
         let depth = match folder {
             Some(_) => 2,
@@ -1219,8 +1219,7 @@ impl Browser {
             if drawn.response.clicked() {
                 narrow(acts, asked);
             }
-            let of_it =
-                Browser::standing_for(workspace, |entity| Kind::of(entity.entity.as_ref()) == kind);
+            let of_it = Browser::standing_for(workspace, |entity| Kind::of(entity) == kind);
             drawn.response.context_menu(|ui| {
                 self.set_menu(ui, &of_it, workspace, device, acts, |_, _, _| {});
             });

@@ -919,7 +919,7 @@ fn item(
     let left = rect.left() + PAD;
     painted(
         ui,
-        Kind::of(entity.entity.as_ref()).glyph(),
+        Kind::of(entity).glyph(),
         egui::Rect::from_center_size(
             egui::pos2(left + GLYPH / 2.0, rect.center().y),
             egui::Vec2::splat(GLYPH),
@@ -953,7 +953,7 @@ fn item(
             Carried {
                 head: Held {
                     what: Item::Local(entity.id),
-                    kind: Kind::of(entity.entity.as_ref()),
+                    kind: Kind::of(entity),
                     filed: None,
                     // Nothing the instrument refuses ever reaches the queue.
                     fits: true,

@@ -741,7 +741,7 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
     let Some(product) = state.product() else {
         return Fit::Unattached;
     };
-    let Some(class) = crate::browser::Kind::of(entity.entity.as_ref()).home() else {
+    let Some(class) = crate::browser::Kind::of(entity).home() else {
         return Fit::Takes;
     };
     let tag = entity.tag();
@@ -818,7 +818,7 @@ pub fn also_holding(state: &DeviceState, entity: &LocalEntity) -> usize {
 fn home(entity: &LocalEntity) -> Option<ObjectClass> {
     entity
         .kept
-        .then(|| crate::browser::Kind::of(entity.entity.as_ref()).home())
+        .then(|| crate::browser::Kind::of(entity).home())
         .flatten()
 }
 

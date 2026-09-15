@@ -312,7 +312,7 @@ fn local(
 ) -> Row {
     Row {
         item: Item::Local(entity.id),
-        kind: Kind::of(entity.entity.as_ref()),
+        kind: Kind::of(entity),
         family: qualifier(entity, kept, instrument),
         name: entity.name.clone(),
         tags,
