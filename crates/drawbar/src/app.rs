@@ -818,49 +818,53 @@ pub fn bold() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
 
-/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces, with
-/// drawbar's own glyphs under every family.
+/// Ubuntu Regular for the body and Ubuntu Bold beside it, Hack for the monospace runs,
+/// and drawbar's own glyphs under every family.
 ///
 /// The Ubuntu files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu
-/// Font Licence 1.0 beside them. egui bundles only Ubuntu Light, so without these there
-/// is no bold weight and no regular (400) weight for body text. `drawbar-glyphs.ttf`
-/// draws the characters drawbar's text uses that no other face has; `scripts/glyphs.py`
-/// generates it.
+/// Font Licence 1.0 beside them. Hack comes from egui's `epaint_default_fonts`.
+/// `drawbar-glyphs.ttf` draws the characters drawbar's text uses that no other face has;
+/// `scripts/glyphs.py` generates it.
+///
+/// ⚠️ These four faces are all the app ships. egui's default set would add Ubuntu Light
+/// and two emoji faces, a megabyte of glyphs, so a character none of these covers draws
+/// as Hack's `◻`, emoji included.
 pub(crate) fn fonts() -> egui::FontDefinitions {
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "drawbar-glyphs".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/drawbar-glyphs.ttf"
-        ))),
-    );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("drawbar-glyphs".to_owned());
-    }
-    let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
-    for (family, face, ttf) in [
+    const UBUNTU: &str = "Ubuntu";
+    const UBUNTU_BOLD: &str = "Ubuntu-Bold";
+    const HACK: &str = "Hack";
+    const GLYPHS: &str = "drawbar-glyphs";
+    let mut fonts = egui::FontDefinitions::empty();
+    for (face, ttf) in [
         (
-            egui::FontFamily::Proportional,
-            "Ubuntu",
+            UBUNTU,
             include_bytes!("../assets/fonts/Ubuntu-R.ttf").as_slice(),
         ),
         (
-            bold(),
-            "Ubuntu-Bold",
+            UBUNTU_BOLD,
             include_bytes!("../assets/fonts/Ubuntu-B.ttf").as_slice(),
+        ),
+        (HACK, epaint_default_fonts::HACK_REGULAR),
+        (
+            GLYPHS,
+            include_bytes!("../assets/fonts/drawbar-glyphs.ttf").as_slice(),
         ),
     ] {
         fonts.font_data.insert(
             face.to_owned(),
             std::sync::Arc::new(egui::FontData::from_static(ttf)),
         );
-        let mut faces = bundled.clone();
-        faces.insert(0, face.to_owned());
-        fonts.families.insert(family, faces);
+    }
+    // drawbar's glyphs come before Hack in the body families, so its arrows and key
+    // symbols keep Ubuntu's size and weight. Hack covers what other text brings, like `─`.
+    for (family, faces) in [
+        (egui::FontFamily::Proportional, [UBUNTU, GLYPHS, HACK]),
+        (bold(), [UBUNTU_BOLD, GLYPHS, HACK]),
+        (egui::FontFamily::Monospace, [HACK, UBUNTU, GLYPHS]),
+    ] {
+        fonts
+            .families
+            .insert(family, faces.map(str::to_owned).to_vec());
     }
     fonts
 }
@@ -1149,29 +1153,14 @@ mod tests {
     }
 
     #[test]
-    fn each_family_leads_with_its_ubuntu_face_over_the_same_fallbacks() {
-        let fonts = fonts();
-        assert!(fonts.font_data.contains_key("Ubuntu"));
-        assert!(fonts.font_data.contains_key("Ubuntu-Bold"));
-        let body = &fonts.families[&egui::FontFamily::Proportional];
-        let mark = &fonts.families[&bold()];
-        assert_eq!(body.first().map(String::as_str), Some("Ubuntu"));
-        assert_eq!(mark.first().map(String::as_str), Some("Ubuntu-Bold"));
-        assert_eq!(body[1..], mark[1..]);
-        assert!(
-            !body[1..].is_empty(),
-            "a glyph Ubuntu lacks would draw as an empty box"
-        );
-    }
-
-    #[test]
-    fn every_character_in_drawbar_text_has_a_glyph_in_both_families() {
+    fn every_character_in_drawbar_text_has_a_glyph_in_every_family() {
         let faces = egui::epaint::text::Fonts::new(1.0, 2048, Default::default(), fonts());
         let written = written();
         assert!(written.contains_key(&'→'), "{written:?}");
         for (char, at) in written {
             for font in [
                 egui::FontId::proportional(12.0),
+                egui::FontId::new(12.0, bold()),
                 egui::FontId::monospace(12.0),
             ] {
                 assert!(
