@@ -621,6 +621,7 @@ mod tests {
     #[test]
     fn dragging_a_tab_across_its_neighbour_swaps_them() {
         let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
         ctx.all_styles_mut(crate::app::metrics);
         let mut ws = Workspace::new(ctx.clone());
         let mut log = crate::log::Log::default();

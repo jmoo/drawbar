@@ -285,6 +285,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::bench::context;
 
     #[test]
     fn a_coloured_cell_keeps_its_colour_until_its_row_is_selected() {
@@ -347,7 +348,7 @@ mod tests {
     /// it, and the whole of it is what the row's own hover then carries.
     #[test]
     fn a_name_too_long_for_its_row_is_cut_to_the_room_left() {
-        let ctx = egui::Context::default();
+        let ctx = context();
         let long = "Africa Split, the one with the long tail and the second manual";
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("places")

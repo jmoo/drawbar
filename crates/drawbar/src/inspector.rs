@@ -445,6 +445,7 @@ mod tests {
 
     fn context() -> egui::Context {
         let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::fonts());
         ctx.all_styles_mut(crate::app::metrics);
         ctx
     }

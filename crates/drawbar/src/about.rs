@@ -74,12 +74,6 @@ const NOTICES: &[Notice] = &[
         text: include_str!("../assets/LICENSE"),
     },
     Notice {
-        covers: "emoji-icon-font",
-        source: Some("egui's epaint_default_fonts 0.32.3"),
-        licence: "MIT",
-        text: include_str!("../assets/fonts/egui/emoji-icon-font-mit-license.txt"),
-    },
-    Notice {
         covers: "Hack Regular",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "MIT and Bitstream Vera",
@@ -92,14 +86,8 @@ const NOTICES: &[Notice] = &[
         text: include_str!("../assets/icons/LICENSE"),
     },
     Notice {
-        covers: "Noto Emoji Regular",
-        source: Some("egui's epaint_default_fonts 0.32.3"),
-        licence: "SIL Open Font License 1.1",
-        text: include_str!("../assets/fonts/egui/OFL.txt"),
-    },
-    Notice {
-        covers: "Ubuntu Regular, Bold and Light",
-        source: Some("Ubuntu font family 0.83; Light from egui's epaint_default_fonts 0.32.3"),
+        covers: "Ubuntu Regular and Bold",
+        source: Some("Ubuntu font family 0.83"),
         licence: "Ubuntu Font Licence 1.0",
         text: include_str!("../assets/fonts/LICENCE.txt"),
     },
@@ -277,10 +265,6 @@ mod tests {
                     "Permission is hereby granted",
                     "BITSTREAM VERA LICENSE",
                 ],
-            ),
-            (
-                "SIL Open Font License 1.1",
-                &["SIL OPEN FONT LICENSE Version 1.1"],
             ),
             (
                 "Ubuntu Font Licence 1.0",
