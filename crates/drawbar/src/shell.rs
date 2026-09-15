@@ -1362,6 +1362,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_favicon_is_the_titlebar_mark_in_both_accents() {
+        let favicon = include_str!("../favicon.svg");
+        let mark = include_str!("../assets/icons/sliders-vertical.svg");
+        for line in mark.lines().filter(|l| l.trim_start().starts_with("<line")) {
+            assert!(
+                favicon.contains(line),
+                "favicon.svg lacks `{}`",
+                line.trim()
+            );
+        }
+        let hex = |visuals: egui::Visuals| {
+            let [r, g, b, _] = accent(&visuals).to_array();
+            format!("#{r:02x}{g:02x}{b:02x}")
+        };
+        let light = format!("stroke=\"{}\"", hex(egui::Visuals::light()));
+        let dark = format!("stroke: {};", hex(egui::Visuals::dark()));
+        assert!(favicon.contains(&light), "favicon.svg lacks `{light}`");
+        assert!(favicon.contains(&dark), "favicon.svg lacks `{dark}`");
+    }
+
     /// The notice is the whole of what a gated frame draws: what is wrong, and the
     /// guide to read while the reader finds a bigger screen.
     #[test]
