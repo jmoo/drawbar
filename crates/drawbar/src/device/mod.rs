@@ -414,13 +414,7 @@ pub struct DeviceState {
     pub inventory: Vec<Status>,
     /// The background read of every class.
     pub scan: Scan,
-    /// The slot this app last asked the instrument to load, per class.
-    ///
-    /// ⚠️ Only what **this app** selected, and kept for the reselect a write owes. What
-    /// the panel is actually on is [`DeviceState::focused`], which is a device answer
-    /// rather than a record of our own commands.
-    selected: HashMap<u32, Location>,
-    /// The slot the panel had loaded when the class was last read, per class.
+    /// The slot the panel has loaded in a class, as the instrument last reported it.
     focus: HashMap<u32, Option<Location>>,
     /// The device's own banks, per class: their names and their capacities.
     geometry: HashMap<u32, Vec<Bank>>,
@@ -428,6 +422,13 @@ pub struct DeviceState {
     /// which is *not known* rather than *an instrument with no folders*.
     partitions: Vec<Partition>,
     banks: HashMap<(u32, u32), Vec<Option<ProgramInfo>>>,
+    /// What the instrument called a library object, by class and id, from every
+    /// dependency list it has answered with.
+    ///
+    /// ⚠️ An id names one object of one class on the instrument attached now, so this
+    /// goes when that instrument does. A slot's list is where the pair comes from, but
+    /// the name belongs to the object rather than to the slot that referenced it.
+    named: HashMap<(u32, u32), String>,
     pub detail: Detail,
 }
 
@@ -472,35 +473,41 @@ impl DeviceState {
         (!name.is_empty()).then_some(name)
     }
 
-    /// The slot the panel had loaded in a class when it was last read.
+    /// The slot the panel has loaded in a class, as the instrument last said: at the
+    /// head of a walk, and after a select this app asked for.
     ///
-    /// ⚠️ Read once per walk, so a selection made on the panel afterwards is not in here
-    /// until the class is read again.
+    /// ⚠️ A selection made on the panel itself is not in here until the class is read
+    /// again.
     pub fn focused(&self, class: ObjectClass) -> Option<Location> {
         self.focus.get(&class.to_raw()).copied().flatten()
     }
 
-    /// What the last dependency list called a library id.
+    /// Take in what a slot said it depends on: the list stands for that slot, and every
+    /// name in it stands for its object wherever that object is referenced.
+    fn depends(&mut self, class: ObjectClass, at: Location, deps: Vec<Dependency>) {
+        if self.detail.at != Some((class, at)) {
+            self.detail = Detail {
+                at: Some((class, at)),
+                ..Detail::default()
+            };
+        }
+        for dep in &deps {
+            let name = dep.name.trim();
+            if !name.is_empty() {
+                self.named
+                    .insert((dep.class.to_raw(), dep.id), name.to_string());
+            }
+        }
+        self.detail.deps = Some(deps);
+    }
+
+    /// What the instrument called a library object, by class and id.
     ///
     /// ⚠️ Only the wire carries these names — a program's file stores its piano and
-    /// sample as bare ids. The cache holds one slot's list, so this answers for the slot
-    /// that was last asked about and for no other; `None` means *not asked*, never
+    /// sample as bare ids. `None` means *no dependency list has named it*, never
     /// *nameless*.
-    pub fn dependency_name(
-        &self,
-        slot: Option<(ObjectClass, Location)>,
-        class: ObjectClass,
-        id: u32,
-    ) -> Option<&str> {
-        if self.detail.at != Some(slot?) {
-            return None;
-        }
-        self.detail
-            .deps
-            .as_ref()?
-            .iter()
-            .find(|dep| dep.class == class && dep.id == id)
-            .map(|dep| dep.name.trim())
+    pub fn dependency_name(&self, class: ObjectClass, id: u32) -> Option<&str> {
+        self.named.get(&(class.to_raw(), id)).map(String::as_str)
     }
 
     /// A scanned bank's slots, or `None` if it has not been scanned.
@@ -643,9 +650,9 @@ impl DeviceState {
         self.geometry.clear();
         self.partitions.clear();
         self.inventory.clear();
+        self.named.clear();
         self.detail = Detail::default();
         self.scan.clear();
-        self.selected.clear();
     }
 }
 
@@ -975,6 +982,9 @@ pub struct Device {
     /// The class the running command writes into, so a refusal can be put against the
     /// entry of the queue it stopped on.
     writing: Option<ObjectClass>,
+    /// The slot [`Device::read_deps`] last asked about, so a document wanting the name
+    /// of what it references every frame costs one read.
+    asked_deps: Option<(ObjectClass, Location)>,
     /// The list revision every link was last derived from. A link answers about both
     /// sides, so it is re-made when either has moved and not once a frame besides.
     linked: u64,
@@ -994,6 +1004,7 @@ impl Device {
             rescan: Vec::new(),
             reselect: Vec::new(),
             writing: None,
+            asked_deps: None,
             linked: 0,
         }
     }
@@ -1042,6 +1053,21 @@ impl Device {
             return;
         }
         self.pending.push_back(cmd);
+    }
+
+    /// Ask what a slot depends on, where this instrument has not been asked about that
+    /// slot already.
+    ///
+    /// The reply is the only place a library object's name comes from, and the document
+    /// showing one wants it on every frame it is open. The names it carries are kept
+    /// until the instrument goes, so the read is owed once — and again for the next
+    /// instrument, which names its own library.
+    pub fn read_deps(&mut self, class: ObjectClass, at: Location, log: &mut Log) {
+        if self.asked_deps == Some((class, at)) {
+            return;
+        }
+        self.asked_deps = Some((class, at));
+        self.send(DeviceCmd::Deps { class, at }, log);
     }
 
     /// Walk `class` again, in one session.
@@ -1115,11 +1141,7 @@ impl Device {
         // Confirmed on hardware.
         // Writing the loaded slot requires SELECT to reload it.
         let loaded = |state: &DeviceState, class: &ObjectClass, at: &Location| {
-            state
-                .selected
-                .get(&class.to_raw())
-                .filter(|held| *held == at)
-                .map(|at| (*class, *at))
+            (state.focused(*class) == Some(*at)).then_some((*class, *at))
         };
         self.reselect = match &cmd {
             DeviceCmd::Put { class, at, .. } | DeviceCmd::Rename { class, at, .. } => {
@@ -1135,9 +1157,6 @@ impl Device {
             DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
             _ => None,
         };
-        if let DeviceCmd::Select { class, at } = &cmd {
-            self.state.selected.insert(class.to_raw(), *at);
-        }
         self.state.in_flight = Some(cmd.words());
         self.link.send(cmd);
     }
@@ -1258,6 +1277,12 @@ impl Device {
         self.state.geometry.insert(class.to_raw(), banks);
     }
 
+    /// Answer for a slot's dependencies, as a `DEPENDENCIES` read would have.
+    #[cfg(test)]
+    pub fn pretend_deps(&mut self, class: ObjectClass, at: Location, deps: Vec<Dependency>) {
+        self.state.depends(class, at, deps);
+    }
+
     /// Put the panel on a slot, as a walk's `FOCUS` read would have.
     #[cfg(test)]
     pub fn pretend_focused(&mut self, class: ObjectClass, at: Location) {
@@ -1282,6 +1307,7 @@ impl Device {
     /// wrote.
     fn forget(&mut self, workspace: &mut Workspace) {
         self.state.forget_everything();
+        self.asked_deps = None;
         workspace.relink(|_| None);
         workspace.forget_writes();
     }
@@ -1421,15 +1447,7 @@ impl Device {
                         deps: None,
                     };
                 }
-                DeviceEvent::Deps { class, at, deps } => {
-                    if self.state.detail.at != Some((class, at)) {
-                        self.state.detail = Detail {
-                            at: Some((class, at)),
-                            ..Detail::default()
-                        };
-                    }
-                    self.state.detail.deps = Some(deps);
-                }
+                DeviceEvent::Deps { class, at, deps } => self.state.depends(class, at, deps),
                 // A view belongs to its tab, a copied read becomes a local entity, and
                 // an occupant read for a diff belongs to the queue and to nothing else.
                 DeviceEvent::Got {
@@ -2421,57 +2439,125 @@ mod tests {
         assert!(!queue.holds(id), "it landed");
     }
 
-    /// A library id resolves to a name only where the instrument has actually said so:
-    /// for the slot that was asked about, for the class asked for, and for that id.
-    /// Anything else is *not asked*, which is not the same as nameless.
+    /// ⚠️ The panel goes on playing what it read before a write, so a write into the
+    /// slot it has loaded is followed by a select that makes it read the new bytes. The
+    /// panel's own focus is what says which slot that is, however it got there.
     #[test]
-    fn a_dependency_name_answers_only_for_what_was_asked() {
+    fn writing_the_slot_the_panel_has_loaded_reloads_it() {
+        let class = ObjectClass::Program;
+        let at = Location { bank: 4, slot: 2 };
+        let elsewhere = Location { bank: 4, slot: 3 };
+
+        let reloaded = |focused: Location, written: Location| {
+            let ctx = egui::Context::default();
+            let mut workspace = Workspace::new(ctx.clone());
+            let mut device = Device::new(ctx);
+            let mut log = Log::default();
+            device.pretend_attached();
+            device.pretend_focused(class, focused);
+            device.send(
+                DeviceCmd::Put {
+                    id: 1,
+                    class,
+                    at: written,
+                    name: "Africa Split".into(),
+                    bytes: vec![0; 4],
+                },
+                &mut log,
+            );
+            device.pump();
+            device.pretend(DeviceEvent::Finished);
+            device.poll(
+                &mut log,
+                &mut workspace,
+                &mut Tabs::default(),
+                &mut Queue::default(),
+            );
+            device
+                .queued()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    DeviceCmd::Select { at, .. } => Some(*at),
+                    _ => None,
+                })
+                .map(|at| (at.bank, at.slot))
+        };
+
+        assert_eq!(reloaded(at, at), Some((at.bank, at.slot)));
+        assert_eq!(
+            reloaded(elsewhere, at),
+            None,
+            "the panel is playing another slot, and a select would take it off it"
+        );
+    }
+
+    /// A library id resolves to a name only where the instrument has actually said so,
+    /// and then for that id and that class alone. Anything else is *nothing has named
+    /// it*, which is not the same as nameless.
+    ///
+    /// ⚠️ The name belongs to the object, not to the slot whose list carried it: the
+    /// program at 7:4 naming a piano names that piano for every program that plays it.
+    /// It belongs to the instrument that said it, so it goes when that instrument does.
+    #[test]
+    fn a_name_the_instrument_gave_a_library_id_stands_wherever_that_id_does() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let class = ObjectClass::Program;
         let at = Location { bank: 6, slot: 3 };
-        let elsewhere = Location { bank: 0, slot: 0 };
-        let detail = Detail {
-            at: Some((ObjectClass::Program, at)),
-            info: Some(None),
-            deps: Some(vec![Dependency {
-                flag: 0,
+
+        device.pretend_deps(
+            class,
+            at,
+            vec![Dependency {
+                flag: 1,
                 class: ObjectClass::Piano,
                 id: 0x0102_0304,
                 name: "Royal Grand 3D ".into(),
                 location: None,
-            }]),
-        };
-        let state = DeviceState {
-            detail,
-            ..DeviceState::default()
-        };
-
-        let piano = |slot, id| {
-            state
-                .dependency_name(Some((ObjectClass::Program, slot)), ObjectClass::Piano, id)
+            }],
+        );
+        let piano = |device: &Device, id| {
+            device
+                .state
+                .dependency_name(ObjectClass::Piano, id)
                 .map(str::to_string)
         };
-        assert_eq!(piano(at, 0x0102_0304).as_deref(), Some("Royal Grand 3D"));
-        assert_eq!(piano(elsewhere, 0x0102_0304), None, "another slot's list");
-        assert_eq!(piano(at, 0x0999_0999), None, "an id it did not report");
         assert_eq!(
-            state.dependency_name(
-                Some((ObjectClass::Sample, at)),
-                ObjectClass::Piano,
-                0x0102_0304
-            ),
-            None,
-            "another class at the same address",
+            piano(&device, 0x0102_0304).as_deref(),
+            Some("Royal Grand 3D")
         );
+        assert_eq!(piano(&device, 0x0999_0999), None, "an id nothing has named");
         assert_eq!(
-            state.dependency_name(
-                Some((ObjectClass::Program, at)),
-                ObjectClass::Sample,
-                0x0102_0304
-            ),
+            device
+                .state
+                .dependency_name(ObjectClass::Sample, 0x0102_0304),
             None,
             "a piano is not a sample"
         );
-        // Nothing to ask about: a document that never came off an instrument.
-        assert_eq!(state.dependency_name(None, ObjectClass::Piano, 1), None);
+
+        // Another slot's list takes the place of this one's, and the names it carried
+        // stand: a document showing one is not left with a bare id behind a read it
+        // never made.
+        device.pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
+        assert_eq!(
+            piano(&device, 0x0102_0304).as_deref(),
+            Some("Royal Grand 3D")
+        );
+
+        device.pretend(DeviceEvent::Disconnected { lost: false });
+        device.poll(
+            &mut log,
+            &mut workspace,
+            &mut Tabs::default(),
+            &mut Queue::default(),
+        );
+        assert_eq!(
+            piano(&device, 0x0102_0304),
+            None,
+            "another instrument names its own"
+        );
     }
 
     /// The status strip names places and things; the protocol line keeps the verbs.
