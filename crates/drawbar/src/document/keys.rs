@@ -281,6 +281,16 @@ fn key_rect(rect: egui::Rect, span: Span, note: u8) -> egui::Rect {
     )
 }
 
+/// The keys of `span` in the order the keyboard paints them: the blacks last, so the
+/// white drawn on either side of a black key does not take back the half of the black
+/// key that hangs over it.
+fn layered(span: Span) -> impl Iterator<Item = u8> {
+    let (low, high) = span.ends();
+    (low..=high)
+        .filter(|note| !is_black(*note))
+        .chain((low..=high).filter(|note| is_black(*note)))
+}
+
 /// The key under `at`. Black keys are drawn over the whites, so they are tested first —
 /// on the keyboard a white key is still its own below the black keys' depth.
 fn key_at(rect: egui::Rect, span: Span, at: egui::Pos2) -> Option<u8> {
@@ -308,8 +318,7 @@ pub fn keyboard(ui: &mut egui::Ui, span: Span, lit: Option<u8>, marks: &[Mark]) 
     let painter = ui.painter().clone();
     let hovered = response.hover_pos().and_then(|at| key_at(rect, span, at));
 
-    let (low, high) = span.ends();
-    for note in low..=high {
+    for note in layered(span) {
         let key = key_rect(rect, span, note);
         let black = is_black(note);
         let fill = match (black, lit == Some(note) || hovered == Some(note)) {
@@ -1732,33 +1741,32 @@ mod tests {
         }
     }
 
+    /// The key rects a keyboard frame painted, in the order it painted them.
+    fn key_shapes(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(drawn)
+                    if drawn.rect.top() == rect.top()
+                        && (drawn.rect.height() == KEYBOARD_H
+                            || drawn.rect.height() == BLACK_H) =>
+                {
+                    into.push(drawn.rect)
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, rect, into)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, rect, &mut found);
+        }
+        found
+    }
+
     /// The one geometry: the cell a lane gives a key is the rect the keyboard paints it
     /// at. Two of these that drift leave every band a key away from the key it names.
     #[test]
     fn a_keys_cell_is_the_key_the_keyboard_paints() {
-        fn key_shapes(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Rect> {
-            fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Rect>) {
-                match shape {
-                    egui::Shape::Rect(drawn)
-                        if drawn.rect.top() == rect.top()
-                            && (drawn.rect.height() == KEYBOARD_H
-                                || drawn.rect.height() == BLACK_H) =>
-                    {
-                        into.push(drawn.rect)
-                    }
-                    egui::Shape::Vec(shapes) => {
-                        shapes.iter().for_each(|shape| walk(shape, rect, into))
-                    }
-                    _ => {}
-                }
-            }
-            let mut found = Vec::new();
-            for clipped in &output.shapes {
-                walk(&clipped.shape, rect, &mut found);
-            }
-            found
-        }
-
         let ctx = dressed();
         for span in [NSMP, NPNO] {
             let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
@@ -1766,7 +1774,7 @@ mod tests {
             });
             let painted = key_shapes(&output, rect);
             assert_eq!(painted.len(), span.keys(), "one rect per key");
-            for (note, key) in (span.low..=span.high).zip(painted) {
+            for (note, key) in layered(span).zip(painted) {
                 assert_eq!(
                     (key.left(), key.right()),
                     (span.x_of(rect, note), span.x_after(rect, note)),
@@ -1778,6 +1786,43 @@ mod tests {
                     false => KEYBOARD_H,
                 };
                 assert_eq!(key.height(), deep);
+            }
+        }
+    }
+
+    /// ⚠️ A black key belongs to the boundary between two white keys rather than to
+    /// either of them: C#4's centre is where C4's cell ends and D4's begins. The
+    /// keyboard paints it after both, or the white beside it takes back the half of the
+    /// black key that hangs over it.
+    #[test]
+    fn a_black_key_is_centred_on_the_boundary_and_painted_over_the_whites_it_hangs_between() {
+        let ctx = dressed();
+        for span in [NSMP, NPNO] {
+            let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
+                keyboard(ui, span, None, &[])
+            });
+            let painted = key_shapes(&output, rect);
+            for black in (span.low..=span.high).filter(|note| is_black(*note)) {
+                let off = span.centre(rect, black) - span.x_of(rect, black + 1);
+                assert!(
+                    off.abs() < 0.001,
+                    "{} sits {off} from the boundary between {} and {}",
+                    note::name(black),
+                    note::name(black - 1),
+                    note::name(black + 1),
+                );
+                let cell = key_rect(rect, span, black);
+                let covered = painted
+                    .iter()
+                    .skip_while(|drawn| **drawn != cell)
+                    .skip(1)
+                    .find(|drawn| drawn.intersects(cell));
+                assert!(
+                    covered.is_none(),
+                    "{} is painted under {covered:?}, which takes back the half of it \
+                     that hangs over that key",
+                    note::name(black),
+                );
             }
         }
     }
