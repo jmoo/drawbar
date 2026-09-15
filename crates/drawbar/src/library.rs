@@ -2020,6 +2020,44 @@ mod tests {
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(false))));
     }
 
+    /// An edit an editor has not laid over the bytes yet wears the same star as any
+    /// other: a piano library's plan moves no byte, and the star is the only thing on a
+    /// row saying the file is not what the operator has been editing. The dot is the
+    /// slot's own claim and still answers for the saved bytes.
+    #[test]
+    fn a_row_wears_the_star_for_an_edit_that_is_still_an_editors_plan() {
+        let ctx = context();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let (queue, tags) = (Queue::default(), Tags::default());
+
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let saved_as = workspace
+            .get(id)
+            .and_then(|entity| entity.saved.crc32)
+            .expect("every CBIN container has one");
+        device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", saved_as))]);
+        device.relink(&mut workspace);
+
+        let starred = |workspace: &Workspace| {
+            rows(workspace, &device.state, &queue, &tags, &Filter::default())
+                .into_iter()
+                .find(|row| matches!(row.item, Item::Local(_)))
+                .expect("the asset is listed")
+                .unsaved
+        };
+        assert!(!starred(&workspace));
+
+        workspace.mark_pending(id, true);
+        assert!(starred(&workspace), "the plan is an edit the row shows");
+        assert_eq!(
+            keyboard_mark(workspace.get(id).unwrap(), &device.state, &queue),
+            Some(Mark::Agrees),
+            "and the slot still holds what this was saved as",
+        );
+    }
+
     /// The state axis narrows the library to what wants doing about it — and a write
     /// already waiting takes its row out of "differs" and into "waiting", so one thing
     /// to do is asked for once.

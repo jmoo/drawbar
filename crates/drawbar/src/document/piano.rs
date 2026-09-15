@@ -1323,11 +1323,7 @@ fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Ex
                 None => "the instrument has not reported its free piano memory".to_string(),
             },
         }),
-        // ⚠️ Both slots, because a pending plan is not unsaved bytes: the strip reads
-        // `edited` where the asset holds something other than what it was saved as, and
-        // `state` where it does not — and a plan is an edit either way.
-        edited: claim.clone(),
-        state: claim,
+        edited: claim,
         loud: match standing {
             Standing::Applying => Some(Loud {
                 label: "Applying…".to_string(),
@@ -1346,6 +1342,7 @@ fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Ex
                 send: None,
             }),
         },
+        ..Extras::default()
     }
 }
 
@@ -4307,9 +4304,9 @@ mod tests {
             .contains("not reported"));
     }
 
-    /// A plan that has not reached the bytes yet is still an edit, and the header says
-    /// so on a document the workspace reads as saved — and says what it is doing while
-    /// the library is being laid out.
+    /// A plan that has not reached the bytes yet is still an edit, and the header claims
+    /// it in the editor's own word — and says what it is doing while the library is
+    /// being laid out.
     #[test]
     fn the_header_claims_a_plan_the_bytes_do_not_hold_yet() {
         let facts = facts();
@@ -4325,31 +4322,26 @@ mod tests {
             free,
             Standing::Pending,
         );
-        let claim = pending.state.expect("the bytes are the saved ones");
+        let claim = pending.edited.expect("a plan is an edit");
         assert_eq!(claim.words, "edited");
         assert_eq!(claim.ink, Ink::Warn);
-        assert_eq!(
-            pending.edited.map(|line| line.words),
-            Some("edited".to_string()),
-            "the same claim in whichever slot the strip reads",
-        );
 
         let mut dropped = plan();
         dropped.switch_bank(Bank::Release, false);
         let dropping = kept_bytes(&facts, &dropped);
         let trimming = extras(&facts, dropping, free, Standing::Pending);
         assert_eq!(
-            trimming.state.map(|line| line.words),
+            trimming.edited.map(|line| line.words),
             Some("trimmed".to_string()),
             "a plan that drops strokes keeps its own word",
         );
 
         let applying = extras(&facts, dropping, free, Standing::Applying);
         assert_eq!(
-            applying.state.as_ref().map(|line| line.words.as_str()),
+            applying.edited.as_ref().map(|line| line.words.as_str()),
             Some("applying…")
         );
-        assert_eq!(applying.state.map(|line| line.ink), Some(Ink::Quiet));
+        assert_eq!(applying.edited.map(|line| line.ink), Some(Ink::Quiet));
         let loud = applying.loud.expect("the write waits for the apply");
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.hint, "wait for the apply");
@@ -4817,8 +4809,8 @@ mod tests {
     }
 
     /// ⚠️ Throwing a switch copies nothing: the working bytes are the ones the library
-    /// was saved as until something has to carry them. The header is what says an edit
-    /// is standing, because the workspace reads the document as saved.
+    /// was saved as until something has to carry them. The plan is the whole of the
+    /// edit, and the header is what claims it.
     #[test]
     fn a_switch_thrown_leaves_the_bytes_alone_and_the_header_says_so() {
         let mut editor = Editor::new(facts().total * 2);
@@ -4827,13 +4819,12 @@ mod tests {
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         let held = editor.workspace.get(editor.id).unwrap();
         assert_eq!(held.bytes, saved, "no body was copied for a switch");
-        assert!(!held.is_unsaved(), "and the workspace reads it as saved");
         assert!(editor.state.pending(editor.id));
 
         let said = editor
             .state
             .begin(editor.id, held, &editor.device.state)
-            .state
+            .edited
             .expect("the header claims the plan");
         assert_eq!(said.words, "trimmed");
         assert_eq!(said.hint, "applied when this is saved, sent or exported");

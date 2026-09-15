@@ -369,12 +369,8 @@ impl eframe::App for DrawbarApp {
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.
-        self.workspace.close_views(
-            |id| self.tabs.holds(id),
-            |id| self.document.pends(id),
-            &self.queue,
-            &mut self.log,
-        );
+        self.workspace
+            .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
         self.take_dropped_files(ctx);
         drop_hint(ctx);
         // Raised by a New pick of WAVs, and answered before anything else this frame
