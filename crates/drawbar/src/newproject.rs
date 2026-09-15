@@ -60,8 +60,20 @@ pub enum Making {
 }
 
 impl Making {
-    /// Everything a pick of WAVs makes, in the order the New menu offers them.
+    /// Everything a pick of WAVs makes.
     pub const FROM_WAVS: [Making; 3] = [Making::Project, Making::Instrument, Making::Piano];
+
+    /// Whether what this makes is a file an instrument holds, which is the side of the
+    /// New menu's rule it belongs on.
+    ///
+    /// A project is the Sample Editor's own save file. It builds an instrument, and no
+    /// instrument has a folder for the project itself.
+    pub fn instrument_file(self) -> bool {
+        match self {
+            Making::Instrument | Making::Piano => true,
+            Making::Project => false,
+        }
+    }
 
     /// What it makes, as the dialog, the file picker and the log name it.
     pub fn label(self) -> &'static str {

@@ -478,10 +478,11 @@ macro_rules! zeroed {
 /// The objects the New menu offers, across every format this app can build from
 /// nothing.
 ///
-/// ⚠️ Only bodies that **decode** are here. A stub format — the Stage 3's song, the
-/// settings of any Stage — round-trips its container and nothing more, so a zeroed one
-/// is 45 bytes of nothing under a tag rather than an object, and offering it would put a
-/// file in front of the operator that this app cannot say a single true thing about.
+/// ⚠️ Only bodies that **decode** are here, and the one kind with no body at all. A
+/// stub format — the Stage 3's song, the settings of any Stage — round-trips its
+/// container and nothing more, so a zeroed one is 45 bytes of nothing under a tag rather
+/// than an object, and offering it would put a file in front of the operator that this
+/// app cannot say a single true thing about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fresh {
     /// The Electro 5's four, each from the library's own constructor.
@@ -496,10 +497,13 @@ pub enum Fresh {
     Stage4Organ,
     Stage4Piano,
     Stage4Synth,
+    /// An empty note. No instrument holds one; it is here for the words about a set
+    /// rather than the sounds in it.
+    Text,
 }
 
 impl Fresh {
-    pub const ALL: [Fresh; 11] = [
+    pub const ALL: [Fresh; 12] = [
         Fresh::Program,
         Fresh::Live,
         Fresh::SetList,
@@ -511,7 +515,12 @@ impl Fresh {
         Fresh::Stage4Organ,
         Fresh::Stage4Piano,
         Fresh::Stage4Synth,
+        Fresh::Text,
     ];
+
+    /// The kinds no product family makes, which the New menu offers under its rule.
+    /// Together with [`Fresh::FAMILIES`] this is every kind, each offered once.
+    pub const LOOSE: [Fresh; 1] = [Fresh::Text];
 
     pub const FAMILIES: [Family; 4] = [
         Family {
@@ -549,6 +558,7 @@ impl Fresh {
             Fresh::Stage3Synth | Fresh::Stage4Synth => "Synth preset",
             Fresh::Stage4Organ => "Organ preset",
             Fresh::Stage4Piano => "Piano preset",
+            Fresh::Text => "Text note",
         }
     }
 
@@ -565,6 +575,7 @@ impl Fresh {
             Fresh::Stage4Organ => ns4::organ_preset::FORMAT,
             Fresh::Stage4Piano => ns4::piano_preset::FORMAT,
             Fresh::Stage4Synth => ns4::synth::FORMAT,
+            Fresh::Text => crate::document::text::EXTENSION,
         }
     }
 
@@ -575,13 +586,19 @@ impl Fresh {
     pub fn zeroed(self) -> bool {
         !matches!(
             self,
-            Fresh::Program | Fresh::Live | Fresh::SetList | Fresh::Settings
+            Fresh::Program | Fresh::Live | Fresh::SetList | Fresh::Settings | Fresh::Text
         )
     }
 
     /// The sentence a hover puts on the menu entry, where there is something the
     /// operator would otherwise have to find out by opening the file.
     pub fn note(self) -> Option<&'static str> {
+        if matches!(self, Fresh::Text) {
+            return Some(
+                "A text file. It stays on this computer — no instrument has a folder \
+                 for one.",
+            );
+        }
         self.zeroed().then_some(
             "Every control at zero. The file decodes and re-saves byte for byte, but it \
              is not a factory program — nothing here knows what one would hold.",
@@ -658,6 +675,9 @@ impl Fresh {
                 ns4::synth::KNOWN_VERSIONS,
                 |f| Entity::Synth(Synth::Stage4(f))
             ),
+            // A note is its own bytes: an empty file, with nothing to encode and
+            // nothing that could refuse.
+            Fresh::Text => return Ok(Vec::new()),
         };
         nord_format::to_bytes(&entity).map_err(|e| e.to_string())
     }
@@ -1430,9 +1450,9 @@ mod tests {
     /// re-saves byte for byte.
     #[test]
     fn every_fresh_default_round_trips_under_its_own_tag() {
-        for kind in Fresh::ALL {
+        for kind in Fresh::ALL.iter().filter(|kind| **kind != Fresh::Text) {
             let entity = ingest("untitled", kind.bytes().unwrap());
-            assert!(entity.parse_error.is_none(), "{:?}", kind);
+            assert!(entity.parse_error.is_none(), "{kind:?}");
             assert_eq!(entity.tag(), kind.tag(), "{kind:?}");
             assert!(matches!(entity.verify, VerifyState::Ok), "{kind:?}");
             assert!(
@@ -1442,18 +1462,35 @@ mod tests {
         }
     }
 
-    /// The menu is the families, and the families are the menu: a kind reachable from
-    /// neither or from two places is one nobody can find or one offered twice.
+    /// A new note is an empty file, and it is a note the moment it is on the list.
+    ///
+    /// ⚠️ Nothing decodes one, so its bytes are the only thing saying what it is — see
+    /// [`crate::document::text::is_text`]. A file with nothing in it has to count.
     #[test]
-    fn every_kind_sits_in_exactly_one_family() {
+    fn a_new_note_is_an_empty_file_that_is_already_a_note() {
+        let entity = ingest("untitled.txt", Fresh::Text.bytes().unwrap());
+        assert!(entity.bytes.is_empty());
+        assert!(entity.container.is_none(), "a note is under no container");
+        assert_eq!(entity.tag(), Fresh::Text.tag());
+        assert_eq!(
+            crate::browser::Kind::of(&entity),
+            crate::browser::Kind::Text
+        );
+    }
+
+    /// The menu is the kinds and the kinds are the menu: one reachable from nowhere or
+    /// from two places is one nobody can find or one offered twice.
+    #[test]
+    fn every_kind_is_offered_exactly_once() {
         let mut seen: Vec<Fresh> = Fresh::FAMILIES
             .iter()
             .flat_map(|family| family.kinds.iter().copied())
+            .chain(Fresh::LOOSE)
             .collect();
         assert_eq!(seen.len(), Fresh::ALL.len());
         for kind in Fresh::ALL {
             let at = seen.iter().position(|held| *held == kind);
-            seen.remove(at.unwrap_or_else(|| panic!("{kind:?} is in no family")));
+            seen.remove(at.unwrap_or_else(|| panic!("{kind:?} is on no menu")));
         }
         assert!(seen.is_empty());
     }
