@@ -464,6 +464,14 @@ let
 
         # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
         touch "$out/.nojekyll"
+
+        # The page's metadata names files by absolute URL, some of them the guide's.
+        for url in $(grep -o 'https://drawbar\.app/[^"]*' "$out/index.html" | sort -u); do
+          [ -e "$out/''${url#https://drawbar.app/}" ] || {
+            echo "index.html names $url, which the site lacks" >&2
+            exit 1
+          }
+        done
       ''
   ) { web = drawbar-web; };
 

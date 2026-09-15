@@ -2,11 +2,53 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>drawbar</title>
+    <title>drawbar: edit the sounds on your Nord keyboard</title>
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, user-scalable=no"
     />
+    <meta
+      name="description"
+      content="An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome or Edge or on the desktop."
+    />
+    <link rel="canonical" href="https://drawbar.app/" />
+    <meta name="theme-color" content="#161719" />
+    <meta name="color-scheme" content="dark" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="drawbar" />
+    <meta property="og:url" content="https://drawbar.app/" />
+    <meta property="og:title" content="drawbar: edit the sounds on your Nord keyboard" />
+    <meta
+      property="og:description"
+      content="An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome or Edge or on the desktop."
+    />
+    <meta property="og:image" content="https://drawbar.app/docs/assets/screenshot.png" />
+    <meta property="og:image:width" content="2000" />
+    <meta property="og:image:height" content="1331" />
+    <meta
+      property="og:image:alt"
+      content="drawbar with an instrument attached and a piano library open in its editor"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "drawbar",
+        "url": "https://drawbar.app/",
+        "description": "An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome or Edge or on the desktop.",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Windows, macOS, Linux",
+        "browserRequirements": "Requires WebUSB and WebAssembly: Chrome or Edge.",
+        "screenshot": "https://drawbar.app/docs/assets/screenshot.png",
+        "license": "https://opensource.org/license/bsd-3-clause",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "sameAs": ["https://github.com/jmoo/drawbar"]
+      }
+    </script>
     <style>
       html,
       body {
@@ -42,6 +84,10 @@
         transform: translateY(-50%);
         font-size: 0.95rem;
         letter-spacing: 0.02em;
+      }
+
+      noscript p {
+        padding: 0 16px;
       }
 
       /* Over the canvas, so the page answers a screen the shell cannot lay out in
@@ -86,6 +132,9 @@
   <body>
     <canvas id="drawbar"></canvas>
     <div id="status">loading drawbar…</div>
+    <noscript>
+      <p>drawbar is an unofficial editor for Nord keyboards. It needs JavaScript and WebAssembly to run. Read the <a href="docs/">user guide</a>.</p>
+    </noscript>
     <div id="toosmall">
       <p class="head">drawbar needs a larger screen</p>
       <p>It is a desktop application: its panels need more room than a phone or a narrow window has. Open it on a larger screen, or make this window wider.</p>
