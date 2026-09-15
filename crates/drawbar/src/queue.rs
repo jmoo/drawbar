@@ -290,18 +290,6 @@ impl Behind {
         }
     }
 
-    /// The one line it is said in, for somewhere that can only take words.
-    ///
-    /// ⚠️ All three counts, whatever they come to. A part left out at zero hides the
-    /// relation the line is for: two changed assets beside an empty queue is exactly
-    /// what a reader has to see.
-    pub fn said(self) -> String {
-        format!(
-            "{} queued · {} changed · {} unsaved",
-            self.queued, self.changed, self.unsaved
-        )
-    }
-
     /// The toolbar's offer to close the gap [`Behind::changed`] names: what the button
     /// says, and what it says on hover. Nothing has changed is no button at all.
     ///
@@ -1548,30 +1536,21 @@ mod tests {
         );
     }
 
-    /// The line says all three counts whatever they come to: a part left out at zero
-    /// would hide the relation between them. The button is the changed count alone, and
-    /// there is no button without one.
+    /// The button offers the changed count alone, and there is no button without one:
+    /// what is waiting is on Send already, and an unsaved edit is nobody's to queue.
     #[test]
-    fn the_line_counts_all_three_however_many_each_comes_to() {
-        assert_eq!(
-            Behind {
-                queued: 0,
-                changed: 2,
-                unsaved: 1
-            }
-            .said(),
-            "0 queued · 2 changed · 1 unsaved"
-        );
+    fn the_button_offers_the_changed_count_and_nothing_else() {
+        assert_eq!(Behind::default().offer(), None, "nothing to close");
         assert_eq!(
             Behind {
                 queued: 3,
                 changed: 0,
-                unsaved: 0
+                unsaved: 1
             }
-            .said(),
-            "3 queued · 0 changed · 0 unsaved"
+            .offer(),
+            None,
+            "neither is a gap this closes"
         );
-        assert_eq!(Behind::default().offer(), None, "nothing to close");
         assert_eq!(
             Behind {
                 queued: 0,
