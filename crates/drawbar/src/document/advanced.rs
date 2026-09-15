@@ -47,6 +47,9 @@ const HEAD_ROW: f32 = 14.0;
 /// The room a typed value keeps inside its box, which is what a `TextEdit` leaves.
 const BOX_PAD: f32 = 4.0;
 
+/// How much of the page the byte diff takes before it scrolls inside itself.
+const DIFF_HEIGHT: f32 = 220.0;
+
 /// A cell being typed into, and what the library said about it last.
 #[derive(Default)]
 struct Cell {
@@ -63,12 +66,6 @@ pub struct Advanced {
     /// Narrows the table by path or label. A body has ninety fields.
     filter: String,
     cell: Cell,
-    /// The id and the [`LocalEntity::stamp`] the cached dump was laid out from.
-    ///
-    /// ⚠️ `{:#?}` over an undecoded body prints every byte, and a piano library is
-    /// hundreds of megabytes — it is rendered once per set of bytes, never per frame.
-    dump_for: Option<(u64, u64)>,
-    dump: String,
     /// The asset and the two sets of bytes the cached diff is a comparison of.
     ///
     /// ⚠️ `byte_diff` walks both bodies. The Advanced face asks for it on every frame
@@ -358,33 +355,48 @@ impl Advanced {
         }
     }
 
-    /// The record, section by section: where it came from and what it is, what the bytes
-    /// have done since it was last saved, what the instrument says about its slot, and
-    /// the decode in full.
+    /// The record, block by block: what the container states, what the bytes have done
+    /// since the asset was last saved, and what the instrument says about the slot it
+    /// came off. Every one of them reads like [`Advanced::about`], because every one of
+    /// them is a fact about the file rather than a control.
     pub fn meta(
         &mut self,
         ui: &mut egui::Ui,
         entity: &LocalEntity,
         device: &Device,
     ) -> Option<SlotDetails> {
-        let mut asked = None;
-        controls::section(ui, "Container", |ui| {
-            verify(ui, entity);
-            container(ui, entity);
-        });
+        controls::heading(
+            ui,
+            "Container",
+            "what the header states — read, checked and written back unchanged",
+            None,
+        );
+        verify(ui, entity);
+        facts(ui, &container(entity));
+
+        let quiet = app::caption(ui.visuals());
         let rows = self.changes(entity);
-        let title = match rows.len() {
-            0 => "Changes".to_string(),
-            n => format!("Changes ({n} bytes)"),
+        let moved = match rows.len() {
+            0 => "none".to_string(),
+            n => format!("{n} bytes"),
         };
-        controls::section(ui, &title, |ui| diff(ui, entity, rows));
+        controls::heading(
+            ui,
+            "Changes",
+            "the bytes that have moved since this was last saved",
+            Some((&moved, quiet)),
+        );
+        diff(ui, entity, rows);
+
+        let mut asked = None;
         if entity.origin.slot().is_some() {
-            controls::section(ui, "On the instrument", |ui| {
-                asked = slot(ui, entity, device);
-            });
-        }
-        if entity.entity.is_some() {
-            controls::section(ui, "Raw", |ui| self.dump(ui, entity));
+            controls::heading(
+                ui,
+                "On the instrument",
+                "what the slot these bytes came off reports",
+                None,
+            );
+            asked = slot(ui, entity, device);
         }
         asked
     }
@@ -397,38 +409,6 @@ impl Advanced {
             self.diff_for = Some(against);
         }
         &self.diff
-    }
-
-    fn dump(&mut self, ui: &mut egui::Ui, entity: &LocalEntity) {
-        if entity.entity.is_none() {
-            return;
-        }
-        // ⚠️ Formatting is synchronous; keep large library bodies folded until requested.
-        egui::CollapsingHeader::new("Show the decode")
-            .id_salt("raw_debug")
-            .show(ui, |ui| {
-                let dump = self.decoded(entity);
-                egui::ScrollArea::both()
-                    .max_height(360.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(dump).monospace().small());
-                    });
-            });
-    }
-
-    /// The decode as text, laid out once per set of bytes: an edit is a new set of
-    /// bytes and a dump of the old ones is a dump of something nothing holds.
-    fn decoded(&mut self, entity: &LocalEntity) -> &str {
-        let laid = (entity.id, entity.stamp);
-        if self.dump_for != Some(laid) {
-            self.dump = match &entity.entity {
-                Some(decoded) => format!("{decoded:#?}"),
-                None => String::new(),
-            };
-            self.dump_for = Some(laid);
-        }
-        &self.dump
     }
 }
 
@@ -477,40 +457,46 @@ fn cell(ui: &mut egui::Ui, text: &str, size: egui::Vec2, font: egui::FontId, ink
 
 /// A record block: one row per fact, the label in its own column and the value with the
 /// note after it.
-pub fn facts(ui: &mut egui::Ui, rows: &[(&'static str, String, String)]) {
-    let quiet = app::caption(ui.visuals());
+pub fn facts(ui: &mut egui::Ui, rows: &[(&str, String, String)]) {
+    let ink = ui.visuals().text_color();
     for (label, value, note) in rows {
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
-            ui.spacing_mut().item_spacing.x = 10.0;
-            cell(
-                ui,
-                label,
-                egui::vec2(LABEL, ROW),
-                egui::FontId::proportional(11.0),
-                ui.visuals().weak_text_color(),
-            );
-            ui.label(
-                egui::RichText::new(value)
-                    .font(egui::FontId::monospace(11.0))
-                    .color(ui.visuals().text_color()),
-            );
-            if !note.is_empty() {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(note)
-                            .font(egui::FontId::proportional(10.0))
-                            .color(quiet),
-                    )
-                    .truncate(),
-                );
-            }
-        });
+        fact(ui, label, value, note, ink);
     }
 }
 
-/// The Writes column as it stands before it is typed in: the value in the box the box
-/// it opens will be, and left where the box puts it.
+/// One row of a record block, the value in whatever ink its own state calls for.
+fn fact(ui: &mut egui::Ui, label: &str, value: &str, note: &str, ink: egui::Color32) {
+    let quiet = app::caption(ui.visuals());
+    ui.horizontal(|ui| {
+        ui.add_space(PAD);
+        ui.spacing_mut().item_spacing.x = 10.0;
+        cell(
+            ui,
+            label,
+            egui::vec2(LABEL, ROW),
+            egui::FontId::proportional(11.0),
+            ui.visuals().weak_text_color(),
+        );
+        ui.label(
+            egui::RichText::new(value)
+                .font(egui::FontId::monospace(11.0))
+                .color(ink),
+        );
+        if !note.is_empty() {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(note)
+                        .font(egui::FontId::proportional(10.0))
+                        .color(quiet),
+                )
+                .truncate(),
+            );
+        }
+    });
+}
+
+/// The Writes column before anything is typed in it: the value standing where the box
+/// that opens on a click will stand it.
 fn held(ui: &mut egui::Ui, value: &str, width: f32) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, ROW - 4.0), egui::Sense::click());
@@ -556,56 +542,67 @@ fn flag(
     }
 }
 
+/// Whether the bytes this app would write are the bytes it read, which is the one row
+/// of the record that is a claim rather than a reading.
 fn verify(ui: &mut egui::Ui, entity: &LocalEntity) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new("verify").weak());
-        ui.label(
-            egui::RichText::new(entity.verify.badge())
-                .strong()
-                .color(entity.verify.color(ui.visuals())),
-        );
-        ui.label(egui::RichText::new(entity.verify.detail()).weak());
-    });
+    let ink = entity.verify.color(ui.visuals());
+    fact(
+        ui,
+        "Verify",
+        entity.verify.badge(),
+        &entity.verify.detail(),
+        ink,
+    );
     if let Some(e) = &entity.parse_error {
         ui.label(egui::RichText::new(e).color(crate::app::bad(ui.visuals())));
     }
 }
 
-fn row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
-    ui.label(egui::RichText::new(label).weak());
-    ui.label(egui::RichText::new(value.into()).monospace());
-    ui.end_row();
-}
-
-fn container(ui: &mut egui::Ui, entity: &LocalEntity) {
+/// What the container states about these bytes.
+fn container(entity: &LocalEntity) -> Vec<(&str, String, String)> {
     let Some(container) = &entity.container else {
-        ui.label(
-            egui::RichText::new("these bytes carry no CBIN header, so there is nothing to read")
-                .weak()
-                .small(),
-        );
-        return;
+        return vec![(
+            "Container",
+            "none".to_string(),
+            "these bytes carry no CBIN header, so there is nothing to read".to_string(),
+        )];
     };
-    egui::Grid::new("cbin_grid").num_columns(2).show(ui, |ui| {
-        row(
-            ui,
-            "generation",
+    vec![
+        (
+            "Generation",
             format!("{:?}", container.header.generation),
-        );
-        row(ui, "format", container.tag());
-        row(ui, "version", container.header.version.to_string());
-        row(ui, "slot", stored_slot(container.header.slot()));
-        row(ui, "body", format!("{} bytes", container.body_len()));
-        row(ui, "file", format!("{} bytes", entity.bytes.len()));
-        row(
-            ui,
+            String::new(),
+        ),
+        ("Format", container.tag(), String::new()),
+        (
+            "Version",
+            container.header.version.to_string(),
+            String::new(),
+        ),
+        (
+            "Stored slot",
+            stored_slot(container.header.slot()),
+            String::new(),
+        ),
+        (
+            "Body",
+            format!("{} bytes", container.body_len()),
+            String::new(),
+        ),
+        (
+            "File",
+            format!("{} bytes", entity.bytes.len()),
+            String::new(),
+        ),
+        (
             container.checksum_label.trim_end_matches(':'),
+            container.checksum.clone(),
             match container.checksum_ok {
-                true => container.checksum.clone(),
-                false => format!("{} (does not match the bytes)", container.checksum),
+                true => "matches the bytes".to_string(),
+                false => "does not match the bytes".to_string(),
             },
-        );
-    });
+        ),
+    ]
 }
 
 /// What a stored half carries where it names no position.
@@ -644,20 +641,19 @@ fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
         );
         return;
     }
+    // ⚠️ A re-laid body moves thousands of bytes; only the rows on screen are drawn.
     egui::ScrollArea::vertical()
         .id_salt("bytediff")
-        .max_height(220.0)
+        .max_height(DIFF_HEIGHT)
         .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for row in rows {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "byte {:#06x}  {:#04x} -> {:#04x}{}",
-                        row.at, row.before, row.after, row.note,
-                    ))
-                    .monospace()
-                    .small()
-                    .weak(),
+        .show_rows(ui, ROW, rows.len(), |ui, range| {
+            for row in &rows[range] {
+                fact(
+                    ui,
+                    &format!("byte {:#06x}", row.at),
+                    &format!("{:#04x} → {:#04x}", row.before, row.after),
+                    row.note.trim(),
+                    ui.visuals().text_color(),
                 );
             }
         });
@@ -667,11 +663,7 @@ fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
 fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<SlotDetails> {
     let (class, at) = entity.origin.slot()?;
     let mut asked = None;
-    ui.label(
-        egui::RichText::new(strings::place(class, at))
-            .monospace()
-            .small(),
-    );
+    facts(ui, &[("Slot", strings::place(class, at), String::new())]);
     let busy = device.state.in_flight.is_some();
     if ui
         .add_enabled(
@@ -687,26 +679,28 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
         return asked;
     }
     match &device.state.detail.info {
-        Some(Some(info)) => {
-            egui::Grid::new("slot_detail")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    row(ui, "name", format!("{:?}", info.name));
-                    row(ui, "format", info.format.clone());
-                    row(ui, "version", info.version.to_string());
-                    row(ui, "body", format!("{} bytes", info.body_len));
-                    row(
-                        ui,
-                        "crc32",
-                        match info.crc32 {
-                            Some(crc) => format!("{crc:#010x}"),
-                            // Library content reports 0xffffffff: no checksum is kept for
-                            // objects this large.
-                            None => "none (not checksummed for this class)".into(),
-                        },
-                    );
-                });
-        }
+        Some(Some(info)) => facts(
+            ui,
+            &[
+                ("Name", format!("{:?}", info.name), String::new()),
+                ("Format", info.format.clone(), String::new()),
+                ("Version", info.version.to_string(), String::new()),
+                ("Body", format!("{} bytes", info.body_len), String::new()),
+                (
+                    "crc32",
+                    match info.crc32 {
+                        Some(crc) => format!("{crc:#010x}"),
+                        None => "none".to_string(),
+                    },
+                    match info.crc32 {
+                        // Library content reports 0xffffffff: no checksum is kept for
+                        // objects this large.
+                        Some(_) => String::new(),
+                        None => "not checksummed for this class".to_string(),
+                    },
+                ),
+            ],
+        ),
         Some(None) => {
             ui.label(egui::RichText::new("the slot is empty").weak());
         }
@@ -743,40 +737,6 @@ pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
 mod tests {
     use super::*;
     use crate::workspace::{Fresh, Workspace};
-
-    /// The Raw section shows the decode of the bytes the document holds. An edit is a
-    /// new set of bytes, and a dump kept by id alone would go on describing the old
-    /// ones for as long as the tab stayed open.
-    #[test]
-    fn the_raw_decode_follows_an_edit_to_the_bytes() {
-        let ctx = eframe::egui::Context::default();
-        let mut workspace = Workspace::new(ctx);
-        let mut log = crate::log::Log::default();
-        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
-        let mut advanced = Advanced::default();
-
-        let before = advanced
-            .decoded(workspace.get(id).expect("it is open"))
-            .to_string();
-        assert!(
-            before.contains("organ_type"),
-            "it is the decode: {before:.200}"
-        );
-
-        let bytes = workspace.get(id).expect("it is open").bytes.clone();
-        let (_, edited) = crate::fields::apply(
-            &bytes,
-            &[("center_panel.organ_type".to_string(), "Vox".to_string())],
-        )
-        .expect("the set is legal");
-        workspace.replace_bytes(id, edited, &mut log);
-
-        let after = advanced.decoded(workspace.get(id).expect("it is open"));
-        assert_ne!(
-            before, after,
-            "the dump is of the bytes in front of the reader"
-        );
-    }
 
     /// The Changes section is what the asset holds against what it was last saved as,
     /// and it follows both ends of that: an edit moves the bytes, and saving moves the

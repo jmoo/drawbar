@@ -1,5 +1,5 @@
 //! The pieces every face of a document is built out of: the per-field cache a cell reads
-//! through, the sets a frame collects, and the two containers a page is divided by.
+//! through, the sets a frame collects, and the heading a page is divided by.
 //!
 //! Nothing here writes: a control hands back a `path = value` set, the document collects
 //! every set the frame produced and applies them together, so a control that owns two
@@ -59,19 +59,6 @@ pub fn fits(text: &mut String, limit: usize) {
         .last()
         .unwrap_or(0);
     text.truncate(end);
-}
-
-/// A titled panel.
-///
-/// The instrument's front panel does not fold its sections away, and neither does this.
-pub fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(egui::RichText::new(title).strong());
-        ui.separator();
-        body(ui);
-    });
-    ui.add_space(2.0);
 }
 
 /// A section of a page: a sentence-case title, a note beside it, and an optional reading
