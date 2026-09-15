@@ -222,6 +222,13 @@ pub struct LocalEntity {
     pub entity: Option<Entity>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
+    /// Whether the bytes are words rather than a format, from
+    /// [`crate::document::text::is_text`] — which is what makes an asset that decoded
+    /// into nothing a note.
+    ///
+    /// ⚠️ Read when the bytes land and never per frame: deciding it walks every one of
+    /// them, and every listed row asks what kind it is twice a frame.
+    pub is_text: bool,
     pub verify: VerifyState,
     /// What this asset was last saved as. Unsaved is not a flag: it is bytes that are
     /// not these — see [`LocalEntity::is_unsaved`].
@@ -265,6 +272,7 @@ impl LocalEntity {
             Some(entity) => verify(entity, &bytes),
             None => VerifyState::NotApplicable("the file did not decode"),
         };
+        let is_text = crate::document::text::is_text(&bytes);
         let mut held = LocalEntity {
             id,
             name,
@@ -273,6 +281,7 @@ impl LocalEntity {
             entity,
             parse_error,
             container,
+            is_text,
             verify,
             saved: Baseline::default(),
             kept: true,
@@ -316,9 +325,7 @@ impl LocalEntity {
         match (&self.entity, &self.container) {
             (Some(entity), _) => entity.identity().format.to_string(),
             (None, Some(container)) => container.tag(),
-            (None, None) if crate::document::text::is_text(&self.bytes) => {
-                crate::document::text::EXTENSION.to_string()
-            }
+            (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
             (None, None) => "?".into(),
         }
     }
@@ -901,7 +908,7 @@ impl Workspace {
         let arrival = match (&entity.parse_error, &entity.verify) {
             // A note is bytes this app has no format for and needs none: the words are
             // the whole of it, so nothing here failed to read them.
-            (Some(_), _) if crate::browser::Kind::of(&entity) == crate::browser::Kind::Text => {
+            (Some(_), _) if entity.is_text => {
                 log.info(format!(
                     "{}: text ({} bytes)",
                     entity.name,
@@ -1560,6 +1567,27 @@ mod tests {
                 "and an export does not stack a second tag on it"
             );
         }
+    }
+
+    /// Whether an asset is words is read from the bytes it holds, so it follows them.
+    ///
+    /// ⚠️ It is read once, when they land. A cache that outlived the bytes it was taken
+    /// from would leave a document editing a file that is no longer there.
+    #[test]
+    fn whether_an_asset_is_words_follows_its_bytes() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let id = workspace.ingest("held".into(), Origin::Fresh, b"Set 1\n".to_vec(), &mut log);
+        assert!(workspace.get(id).expect("held").is_text);
+
+        workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], &mut log);
+        let held = workspace.get(id).expect("held");
+        assert!(!held.is_text, "these bytes are no longer words");
+        assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
+
+        workspace.revert(id, &mut log);
+        assert!(workspace.get(id).expect("held").is_text, "and back again");
     }
 
     /// A slot opened for a look is a working copy that nothing lists, and it goes when

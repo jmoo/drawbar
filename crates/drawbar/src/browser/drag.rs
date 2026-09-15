@@ -91,12 +91,12 @@ impl Kind {
     /// a compile error here rather than another nameless row.
     ///
     /// Bytes that decoded into nothing are asked one more question, by
-    /// [`is_text`](crate::document::text::is_text): a file this app has no format for is
-    /// a note when it is words. That is the one kind the bytes decide rather than the
-    /// decode.
+    /// [`is_text`](crate::document::text::is_text) when they landed: a file this app has
+    /// no format for is a note when it is words. That is the one kind the bytes decide
+    /// rather than the decode.
     pub fn of(entity: &LocalEntity) -> Kind {
         let Some(decoded) = entity.entity.as_ref() else {
-            return match crate::document::text::is_text(&entity.bytes) {
+            return match entity.is_text {
                 true => Kind::Text,
                 false => Kind::Other,
             };

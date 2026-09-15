@@ -108,7 +108,7 @@ fn shape(entity: &LocalEntity) -> Shape {
         if encode::is_wav(&entity.bytes) {
             return Shape::Wav;
         }
-        return match text::is_text(&entity.bytes) {
+        return match entity.is_text {
             true => Shape::Text,
             false => Shape::Undecoded,
         };
