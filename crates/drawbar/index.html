@@ -76,15 +76,199 @@
         display: block;
       }
 
-      #status {
+      #splash {
         position: absolute;
-        top: 50%;
-        left: 0;
-        width: 100%;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 26px;
+      }
+
+      #bars {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+      }
+
+      #splash.failed #bars {
+        opacity: 0.45;
+      }
+
+      .bar {
+        position: relative;
+        width: 21px;
+        height: 104px;
+        border-radius: 3px;
+        background: #111113;
+      }
+
+      .stop {
+        position: absolute;
+        left: 1px;
+        top: 0;
+        width: 19px;
+        height: 15px;
+        border-radius: 2px;
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 10px;
+        line-height: 15px;
         text-align: center;
-        transform: translateY(-50%);
-        font-size: 0.95rem;
-        letter-spacing: 0.02em;
+      }
+
+      #caption {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #ident {
+        display: flex;
+        align-items: baseline;
+        gap: 9px;
+      }
+
+      #name {
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        color: #ffffff;
+      }
+
+      #version {
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: #8c8c8c;
+      }
+
+      #stage {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 18px;
+        font-size: 12px;
+        color: #b4b4b4;
+      }
+
+      #splash.failed #stage {
+        color: #e05040;
+      }
+
+      #figure {
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 11.5px;
+        color: #8c8c8c;
+      }
+
+      #note {
+        max-width: 420px;
+        font-size: 11px;
+        line-height: 1.55;
+        color: #8c8c8c;
+        text-align: center;
+      }
+
+      #note:empty,
+      #foot:empty {
+        display: none;
+      }
+
+      #actions {
+        display: none;
+        gap: 8px;
+        margin-top: 4px;
+      }
+
+      #splash.failed #actions {
+        display: flex;
+      }
+
+      #actions a,
+      #actions button {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 24px;
+        padding: 0 12px;
+        border-radius: 2px;
+        font-family: inherit;
+        font-size: 11.5px;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      #retry {
+        border: 1px solid #d6463a;
+        background: #373737;
+        color: #ffffff;
+      }
+
+      #retry:hover {
+        background: #464646;
+      }
+
+      #wrong {
+        border: 1px solid #3c3c3c;
+        background: transparent;
+        color: #b4b4b4;
+      }
+
+      #wrong:hover {
+        background: #464646;
+        color: #ffffff;
+      }
+
+      #footer {
+        position: absolute;
+        bottom: 16px;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
+      }
+
+      #guide {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10.5px;
+        color: #e05040;
+        text-decoration: none;
+      }
+
+      #guide:hover {
+        color: #d6463a;
+      }
+
+      #splash.failed #guide {
+        display: none;
+      }
+
+      #foot {
+        font-size: 10.5px;
+        color: #8c8c8c;
+      }
+
+      .icon {
+        width: 13px;
+        height: 13px;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .icon.small {
+        width: 12px;
+        height: 12px;
+      }
+
+      #glyphs {
+        display: none;
       }
 
       noscript p {
@@ -132,7 +316,38 @@
   </head>
   <body>
     <canvas id="drawbar"></canvas>
-    <div id="status">loading drawbar…</div>
+    <div id="splash">
+      <div id="bars"></div>
+      <div id="caption">
+        <div id="ident">
+          <span id="name">drawbar</span>
+          <span id="version">@version@</span>
+        </div>
+        <div id="stage">
+          <svg class="icon"><use id="glyph" href="#arrow-down-to-line" /></svg>
+          <span id="label">Fetching drawbar</span>
+          <span id="figure"></span>
+        </div>
+        <div id="note"></div>
+        <div id="actions">
+          <button id="retry" type="button">
+            <svg class="icon small"><use href="#rotate-ccw" /></svg>
+            <span>Try again</span>
+          </button>
+          <a id="wrong" href="docs/getting-started/install.html#if-drawbar-does-not-load" target="_blank" rel="noopener">
+            <svg class="icon small"><use href="#book-open" /></svg>
+            <span>What can go wrong here</span>
+          </a>
+        </div>
+      </div>
+      <div id="footer">
+        <a id="guide" href="docs/" target="_blank" rel="noopener" title="Opens the user guide in a new tab — it does not wait for drawbar to finish loading">
+          <svg class="icon small"><use href="#book-open" /></svg>
+          <span>Read the user guide</span>
+        </a>
+        <span id="foot"></span>
+      </div>
+    </div>
     <noscript>
       <p>drawbar is an unofficial editor for Nord keyboards. It needs JavaScript and WebAssembly to run. Read the <a href="docs/">user guide</a>.</p>
     </noscript>
@@ -141,16 +356,199 @@
       <p>It is a desktop application: its panels need more room than a phone or a narrow window has. Open it on a larger screen, or make this window wider.</p>
       <p><a href="docs/">User guide</a></p>
     </div>
+
+    <!-- Icons: Lucide 0.469.0, ISC; see crates/drawbar/assets/icons/LICENSE -->
+    <svg id="glyphs" xmlns="http://www.w3.org/2000/svg">
+      <symbol id="arrow-down-to-line" viewBox="0 0 24 24">
+        <path d="M12 17V3" />
+        <path d="m6 11 6 6 6-6" />
+        <path d="M19 21H5" />
+      </symbol>
+      <symbol id="cpu" viewBox="0 0 24 24">
+        <rect width="16" height="16" x="4" y="4" rx="2" />
+        <rect width="6" height="6" x="9" y="9" rx="1" />
+        <path d="M15 2v2" />
+        <path d="M15 20v2" />
+        <path d="M2 15h2" />
+        <path d="M2 9h2" />
+        <path d="M20 15h2" />
+        <path d="M20 9h2" />
+        <path d="M9 2v2" />
+        <path d="M9 20v2" />
+      </symbol>
+      <symbol id="check" viewBox="0 0 24 24">
+        <path d="M20 6 9 17l-5-5" />
+      </symbol>
+      <symbol id="circle-alert" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" x2="12" y1="8" y2="12" />
+        <line x1="12" x2="12.01" y1="16" y2="16" />
+      </symbol>
+      <symbol id="rotate-ccw" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+        <path d="M3 3v5h5" />
+      </symbol>
+      <symbol id="book-open" viewBox="0 0 24 24">
+        <path d="M12 7v14" />
+        <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" />
+      </symbol>
+    </svg>
+
     <script type="module">
       import init, { start } from "./pkg/drawbar.js";
 
-      const status = document.getElementById("status");
+      const WASM = "./pkg/drawbar_bg.wasm";
+      const MB = 1024 * 1024;
+
+      const FOOTAGE = ["16", "5⅓", "8", "4", "2⅔", "2", "1⅗", "1⅓", "1"];
+      const RANK = [
+        "brown",
+        "brown",
+        "white",
+        "white",
+        "black",
+        "white",
+        "black",
+        "black",
+        "white",
+      ];
+      const STOP = {
+        black: { fill: "#2a2a2e", ink: "#ffffff" },
+        brown: { fill: "#6b4a33", ink: "#ffffff" },
+        white: { fill: "#d8d6d0", ink: "#000000" },
+      };
+
+      /* A stop slides 89px down its 104px track, and the panel reads its pull 0..8. */
+      const TRAVEL = 89;
+      const PULL = 8;
+
+      /* How far the bars are out once each step is done. */
+      const SHARE = { fetched: 0.82, started: 0.95 };
+
+      const NOTE = {
+        download:
+          "The download stopped partway. Your files on this computer are untouched — drawbar has not started, so nothing has been read or written.",
+        start:
+          "drawbar arrived but could not start in this browser. Your files on this computer are untouched: nothing has been read or written.",
+      };
+
+      let total = Number("@wasmBytes@");
+      let received = 0;
+
+      const size = () =>
+        total
+          ? `${(received / MB).toFixed(1)} of ${(total / MB).toFixed(1)} MB`
+          : "";
+
+      const STAGE = {
+        fetching: {
+          glyph: "arrow-down-to-line",
+          text: "Fetching drawbar",
+          figure: size,
+          progress: () => (total ? (received / total) * SHARE.fetched : 0),
+        },
+        compiling: {
+          glyph: "cpu",
+          text: "Compiling",
+          progress: () => SHARE.fetched,
+        },
+        starting: {
+          glyph: "check",
+          text: "Starting",
+          progress: () => SHARE.started,
+        },
+      };
+
+      const splash = document.getElementById("splash");
+      const glyph = document.getElementById("glyph");
+      const label = document.getElementById("label");
+      const figure = document.getElementById("figure");
+      const note = document.getElementById("note");
+      const foot = document.getElementById("foot");
+      const version = document.getElementById("version");
+
+      if (version.textContent.startsWith("@")) {
+        version.remove();
+      }
+
+      const bars = FOOTAGE.map((footage, i) => {
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        const stop = document.createElement("div");
+        stop.className = "stop";
+        stop.textContent = footage;
+        stop.style.background = STOP[RANK[i]].fill;
+        stop.style.color = STOP[RANK[i]].ink;
+        bar.append(stop);
+        return bar;
+      });
+      document.getElementById("bars").append(...bars);
+
+      function pull(progress) {
+        bars.forEach((bar, i) => {
+          const out = Math.min(1, Math.max(0, progress * bars.length - i));
+          bar.firstElementChild.style.top = `${Math.round(out * TRAVEL)}px`;
+          bar.title = `${FOOTAGE[i]}′ — ${Math.round(out * PULL)}`;
+        });
+      }
+
+      function show(name) {
+        const stage = STAGE[name];
+        glyph.setAttribute("href", `#${stage.glyph}`);
+        label.textContent = stage.text;
+        figure.textContent = stage.figure ? stage.figure() : "";
+        pull(stage.progress());
+      }
+
+      function fail(step, error) {
+        splash.classList.add("failed");
+        glyph.setAttribute("href", "#circle-alert");
+        label.textContent = "drawbar could not start";
+        figure.textContent = "";
+        note.textContent = NOTE[step];
+        foot.textContent = [size(), error.message || String(error)]
+          .filter(Boolean)
+          .join(" · ");
+      }
+
+      document
+        .getElementById("retry")
+        .addEventListener("click", () => location.reload());
+
+      let step = "download";
       try {
-        await init();
+        show("fetching");
+        const response = await fetch(WASM);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        if (!Number.isFinite(total)) {
+          total = Number(response.headers.get("content-length")) || 0;
+        }
+
+        const reader = response.body.getReader();
+        const chunks = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          chunks.push(value);
+          received += value.length;
+          show("fetching");
+        }
+
+        step = "start";
+        show("compiling");
+        const module = await WebAssembly.compile(
+          await new Blob(chunks).arrayBuffer(),
+        );
+        show("starting");
+        await init({ module_or_path: module });
         await start(document.getElementById("drawbar"));
-        status.remove();
+        splash.remove();
       } catch (e) {
-        status.textContent = `drawbar failed to start: ${e}`;
+        fail(step, e);
         throw e;
       }
     </script>

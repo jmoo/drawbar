@@ -50,6 +50,10 @@ module import both fail from `file://`. This plain server has no guide beside th
 app, so Help ▸ User guide finds nothing there. `nix run .#drawbar-web` serves
 both.
 
+`nix build .#drawbar-web` also writes the version and the module's byte count
+into the page. Built by hand it has neither, so the loading screen shows no
+version and measures the download against the server's `Content-Length`.
+
 ## Checks
 
 `nix flake check` runs formatting, Clippy with warnings denied, and the version
