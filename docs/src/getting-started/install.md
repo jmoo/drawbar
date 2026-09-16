@@ -40,5 +40,3 @@ offers to try again.
   current browser has them.
 - An extension or a content blocker refused the module. Allow this site and
   reload.
-- A private window blocks or clears the browser's storage, so drawbar keeps
-  nothing between visits.
