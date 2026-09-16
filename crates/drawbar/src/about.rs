@@ -6,16 +6,14 @@
 
 use eframe::egui;
 
+use crate::sheet::{link, GAP};
 use crate::shell::GUIDE;
-use crate::splash::{link, title, GAP, WIDTH};
+use crate::splash::{title, WIDTH};
 
 mod crates;
 
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
-
-const WHAT: &str = "Your Nord's sounds, in a window: browse what is on your computer and on your \
-                    instrument, edit programs, samples and pianos, and send them back.";
 
 /// What one licence covers in the app, and its terms.
 struct Notice {
@@ -156,7 +154,7 @@ fn body(ui: &mut egui::Ui) -> bool {
     ui.set_width(WIDTH);
     title(ui);
     ui.add_space(GAP);
-    ui.label(WHAT);
+    ui.label(crate::sheet::WHAT);
     ui.add_space(GAP * 2.0);
     ui.horizontal(|ui| {
         link(ui, "Source on GitHub", REPO);

@@ -1205,7 +1205,7 @@ pub fn too_small_notice(ctx: &egui::Context) {
                 ui.add_space(GAP);
                 ui.label(TOO_SMALL_WHY);
                 ui.add_space(GAP * 2.0);
-                crate::splash::link(ui, "User guide", GUIDE);
+                crate::sheet::link(ui, "User guide", GUIDE);
             });
         });
 }

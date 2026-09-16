@@ -7,12 +7,11 @@ use eframe::egui;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use super::{
-    classify, https, link, plain, title, Commit, Line, Standing, EXPECTATIONS, GAP, VERSION, WIDTH,
-};
+use super::{classify, https, plain, title, Commit, Line, Standing, EXPECTATIONS, VERSION, WIDTH};
 use crate::about::RELEASES;
 use crate::app::{bad, good, warn};
 use crate::icon::{icon, Glyph};
+use crate::sheet::{link, GAP};
 
 /// Which version's notes have already been read.
 ///
@@ -234,7 +233,9 @@ fn paint(ui: &mut egui::Ui, line: Line<'_>) {
             text,
             commit,
         } => bullet(ui, scope, text, commit),
-        Line::Changelog(url) => link(ui, "Full changelog", url),
+        Line::Changelog(url) => {
+            link(ui, "Full changelog", url);
+        }
         Line::Text(text) => {
             ui.label(text);
         }

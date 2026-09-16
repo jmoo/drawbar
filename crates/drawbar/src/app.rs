@@ -282,7 +282,7 @@ impl DrawbarApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
-        let page = crate::about::release_page(crate::splash::VERSION);
+        let page = crate::about::release_page(crate::sheet::VERSION);
         ctx.open_url(egui::OpenUrl::new_tab(page));
     }
 
