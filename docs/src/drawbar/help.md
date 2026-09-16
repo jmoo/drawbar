@@ -2,10 +2,17 @@
 
 **Help ▸ User guide** opens this guide.
 
-**Help ▸ What's new** shows, in the browser, the notice that opens on the first
-run of each version: the alpha warning, what to expect of this build, and the
-release notes. drawbar remembers which version you have dismissed. On the
-desktop, the item opens the release page instead.
+**Help ▸ What's new** lists what changed in the version you are running, grouped
+into breaking changes, new features, fixes and the rest, each line linking to the
+commit behind it. In the browser it opens by itself on the first launch after an
+update, and drawbar remembers which version you have dismissed. On the desktop,
+the item opens the release page instead.
+
+**Help ▸ Welcome** shows what works today, instrument by instrument, and three
+places to start: connect an instrument, open files, or read this guide. In the
+browser it opens by itself the first time you ever run drawbar there.
+[What is supported](../getting-started/support.md) argues the same claims at
+length.
 
 **Help ▸ Copy activity log** puts the whole log on the clipboard, for a bug
 report.
