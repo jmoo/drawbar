@@ -5,11 +5,8 @@
 //! `scripts/release.bash` writes in a fixed shape. [`classify`] reads that shape back so
 //! the modal can paint it without a markdown parser, and anything it does not recognise
 //! stays the plain line it was.
-//!
-//! The shape a modal wears — its width, its spacing, its title line, its links — is here
-//! rather than in the browser-only half, because [`crate::about`] wears the same one on
-//! every target.
 
+#[cfg(target_arch = "wasm32")]
 use eframe::egui;
 
 #[cfg(target_arch = "wasm32")]
@@ -17,12 +14,15 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::Splash;
 
+#[cfg(target_arch = "wasm32")]
 pub(crate) use crate::sheet::VERSION;
 
-/// How wide a modal is.
+/// How wide the notice is.
+#[cfg(target_arch = "wasm32")]
 pub(crate) const WIDTH: f32 = 560.0;
 
-/// The line a modal opens with: the app, and the version of it running.
+/// The line the notice opens with: the app, and the version of it running.
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn title(ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(format!("drawbar {VERSION}"))
