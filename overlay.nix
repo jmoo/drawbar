@@ -123,6 +123,15 @@ let
     ]
   );
 
+  # What drawbar's About box reports about this build. flake.nix supplies both; a
+  # checkout without them builds a drawbar that says the commit was not recorded.
+  #
+  # ⚠️ Only drawbar's own derivations take these. A crate whose environment carried the
+  # rev would be rebuilt by every commit, dependency builds included.
+  revEnv =
+    optionalAttrs (final.nord.rev or null != null) { DRAWBAR_COMMIT = final.nord.rev; }
+    // optionalAttrs (final.nord.revDate or null != null) { DRAWBAR_COMMIT_DATE = final.nord.revDate; };
+
   audioArgs = optionalAttrs final.stdenv.hostPlatform.isLinux {
     buildInputs = [ final.alsa-lib ];
     nativeBuildInputs = [ final.pkg-config ];
@@ -150,6 +159,7 @@ let
             meta.mainProgram = "drawbar";
           }
           // audioArgs
+          // revEnv
         );
       in
       if guiLibs == [ ] then
@@ -373,7 +383,10 @@ let
       };
     in
     crane.buildPackage (
+      # ⚠️ After `args`, not in it: the dependency build reads `args`, and a rev in its
+      # environment would rebuild the whole GUI stack on every commit.
       args
+      // revEnv
       // {
         cargoArtifacts = crane.buildDepsOnly args;
 
