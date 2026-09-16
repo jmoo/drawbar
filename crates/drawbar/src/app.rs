@@ -165,8 +165,7 @@ pub struct DrawbarApp {
     pub(crate) document: Document,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
-    #[cfg(target_arch = "wasm32")]
-    splash: crate::splash::Splash,
+    pub(crate) splash: crate::splash::Splash,
     /// Whether the About box is showing. Not kept between sessions.
     pub(crate) about_open: bool,
     /// The list's revision as the store last saw it.
@@ -207,7 +206,6 @@ impl DrawbarApp {
             document: Document::default(),
             log: Log::default(),
             theme,
-            #[cfg(target_arch = "wasm32")]
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about_open: false,
             saved: 0,
@@ -273,11 +271,11 @@ impl DrawbarApp {
         }
     }
 
-    /// What changed in the version running: the notice again in a tab, where the notes
+    /// What changed in the version running: the change list in a tab, where the notes
     /// can be fetched; the release they were published on in a window, where they cannot.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
-        self.splash.open(ctx);
+        self.splash.open_news(ctx);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -390,8 +388,7 @@ impl eframe::App for DrawbarApp {
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
-        #[cfg(target_arch = "wasm32")]
-        self.splash.show(ctx);
+        let asked = self.splash.show(ctx);
         crate::about::dialog(ctx, &mut self.about_open);
 
         // Before the panels, so an editor open in this frame still has the focus Escape
@@ -402,6 +399,7 @@ impl eframe::App for DrawbarApp {
         let mut acts = self
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
+        acts.extend(asked);
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
         self.status_bar(ctx, &mut acts);

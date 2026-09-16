@@ -654,6 +654,9 @@ impl DrawbarApp {
             if item(ui, "What's new", None) {
                 self.whats_new(ui.ctx());
             }
+            if item(ui, "Welcome", None) {
+                self.splash.open_welcome();
+            }
             ui.separator();
             if item(ui, "Copy activity log", None) {
                 acts.push(Act::CopyLog);
