@@ -1,19 +1,25 @@
-//! About drawbar: what it is, where it lives, the licences of what is compiled into it,
-//! and whose trademarks the names in it are.
+//! About drawbar: what it is, where it lives, what this build is, the licences of what is
+//! compiled into it, and whose trademarks the names in it are.
 //!
 //! The same box on every target. The licences are compiled in, so a binary handed to
 //! someone carries the text of the terms it is under.
 
 use eframe::egui;
 
-use crate::sheet::{link, GAP};
+use crate::device::DeviceState;
+use crate::icon::{sized, Glyph};
+use crate::log::Log;
+use crate::sheet::{self, GAP};
 use crate::shell::GUIDE;
-use crate::splash::{title, WIDTH};
+use crate::workspace::Workspace;
 
 mod crates;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
+const ISSUES: &str = "https://github.com/jmoo/drawbar/issues";
 
 /// What one licence covers in the app, and its terms.
 struct Notice {
@@ -22,6 +28,21 @@ struct Notice {
     source: Option<&'static str>,
     licence: &'static str,
     text: &'static str,
+}
+
+impl Notice {
+    /// Whose copyright travels with it: where the material came from, or — for drawbar,
+    /// which came from nowhere — the copyright line of its own licence.
+    fn held(&self) -> &'static str {
+        match self.source {
+            Some(source) => source,
+            None => self
+                .text
+                .lines()
+                .find(|line| line.starts_with("Copyright"))
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// The Rust crates under one licence: its text once, and who holds copyright in what.
@@ -37,13 +58,18 @@ struct Group {
 }
 
 impl Group {
-    /// The licence and how many crates are under it, e.g. `MIT · 2 crates`.
-    fn summary(&self) -> String {
+    /// How many crates are under the licence.
+    fn count(&self) -> usize {
         let held: usize = self.holders.iter().map(|holder| holder.crates.len()).sum();
         let varied: usize = self.variants.iter().map(|text| text.crates.len()).sum();
-        match self.unattributed + held + varied {
-            1 => format!("{} · 1 crate", self.licence),
-            count => format!("{} · {count} crates", self.licence),
+        self.unattributed + held + varied
+    }
+
+    /// Who holds copyright in them, which is nobody this project can name.
+    fn held(&self) -> String {
+        match self.count() {
+            1 => "1 dependency · its own authors".to_string(),
+            count => format!("{count} dependencies · each crate's own authors"),
         }
     }
 }
@@ -120,81 +146,354 @@ const DISCLAIMER: &str = "Not affiliated with, authorized, or endorsed by Clavia
                           \"Nord\", \"Clavia\" and \"Electro\" are trademarks of Clavia DMI AB, \
                           used here only to identify the hardware these formats come from.";
 
-/// The height the modal needs around the list — title, links, disclaimer and Close — so
-/// an open licence scrolls inside the list rather than pushing Close off-screen.
-const AROUND: f32 = 320.0;
+/// What the reader is told the build lines are for.
+const WHY: &str = "paste this into a bug report and we know what you were running";
 
-/// The list is never shorter than this, however short the window.
-const LICENCES: f32 = 160.0;
+/// What Copy diagnostics says it takes, on hover.
+const COPIES: &str = "Copies the lines below, plus the activity log's last 200 entries";
+
+/// The widest the sheet is drawn.
+const WIDE: f32 = 760.0;
+
+/// The height the sheet needs around its scrolling middle — masthead, links and foot — so
+/// an open licence scrolls inside the middle rather than pushing Close off-screen.
+const AROUND: f32 = 300.0;
+
+/// The middle is never shorter than this, however short the window.
+const FEWEST: f32 = 140.0;
+
+/// The room above the masthead. Every other edge is [`sheet::PAD`] or the foot's own.
+const TOP: f32 = 18.0;
 
 /// 10 px: the widest hard-wrapped text is 78 columns, and this is the size that fits them
-/// in [`WIDTH`] without wrapping them a second time. Texts with longer lines wrap to it.
+/// in [`WIDE`] without wrapping them a second time. Texts with longer lines wrap to it.
 const MONO: f32 = 10.0;
+
+/// A build line: the key's column, the row it sits on, and the room between two columns
+/// of them.
+const KEY: f32 = 92.0;
+const LINE: f32 = 22.0;
+const GUTTER: f32 = 24.0;
+
+/// The least room one column of build lines is given; two of them side by side need
+/// twice this and a [`GUTTER`].
+const COLUMN: f32 = 330.0;
+
+/// The room the foot's Close button is left at the right of the disclaimer.
+const CLOSE: f32 = 90.0;
+
+/// A licence row, and the chevron that opens it.
+const ROW: f32 = 26.0;
+const CHEVRON: f32 = 12.0;
+
+/// How long the button says "Copied", in seconds.
+const SAID: f64 = 1.6;
+
+/// The most log entries [`diagnostics`] carries.
+const ENTRIES: usize = 200;
 
 /// The release a version's notes were published on.
 pub fn release_page(version: &str) -> String {
     format!("{RELEASES}/tag/drawbar-v{version}")
 }
 
-/// Draw the box while it is open, and close it once the reader is done.
-pub fn dialog(ctx: &egui::Context, open: &mut bool) {
-    if !*open {
-        return;
-    }
-    if egui::Modal::new(egui::Id::new("about"))
-        .show(ctx, body)
-        .inner
-    {
-        *open = false;
+/// One line of what this build is: what it is called, what it says, and the aside after it.
+struct Line {
+    key: &'static str,
+    value: String,
+    note: String,
+}
+
+impl Line {
+    fn new(key: &'static str, value: impl Into<String>, note: impl Into<String>) -> Line {
+        Line {
+            key,
+            value: value.into(),
+            note: note.into(),
+        }
     }
 }
 
-/// Returns whether the reader is done with it.
-fn body(ui: &mut egui::Ui) -> bool {
-    ui.set_width(WIDTH);
-    title(ui);
-    ui.add_space(GAP);
-    ui.label(crate::sheet::WHAT);
-    ui.add_space(GAP * 2.0);
-    ui.horizontal(|ui| {
-        link(ui, "Source on GitHub", REPO);
-        link(ui, "User guide", GUIDE);
-        link(ui, "Releases", RELEASES);
+/// What this build is: read when the box opens, not while it is drawn.
+struct Build {
+    lines: Vec<Line>,
+}
+
+impl Build {
+    fn new(device: &DeviceState, workspace: &Workspace) -> Build {
+        let mut lines = vec![
+            Line::new("Version", sheet::VERSION, "alpha"),
+            commit(),
+            target(),
+        ];
+        #[cfg(target_arch = "wasm32")]
+        lines.push(Line::new("Browser", web::agent(), ""));
+        lines.push(usb(device));
+        lines.push(files(workspace));
+        Build { lines }
+    }
+}
+
+/// The commit this build came from. Nix supplies both; a plain cargo build has neither.
+fn commit() -> Line {
+    match option_env!("DRAWBAR_COMMIT") {
+        Some(sha) => Line::new(
+            "Commit",
+            sha,
+            option_env!("DRAWBAR_COMMIT_DATE").unwrap_or(""),
+        ),
+        None => Line::new("Commit", "not recorded", "built outside Nix"),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn target() -> Line {
+    Line::new("Target", "wasm32-unknown-unknown", "in the browser")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn target() -> Line {
+    let (arch, os) = (std::env::consts::ARCH, std::env::consts::OS);
+    Line::new("Target", format!("{arch} {os}"), "on the desktop")
+}
+
+/// The instrument on the other end of the cable, where there is one.
+fn instrument(device: &DeviceState) -> &str {
+    device.product().unwrap_or("no instrument connected")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn usb(device: &DeviceState) -> Line {
+    match web::has_usb() {
+        true => Line::new("Web USB", "available", instrument(device)),
+        false => Line::new(
+            "Web USB",
+            "unavailable",
+            "Chrome or Edge connect an instrument",
+        ),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn usb(device: &DeviceState) -> Line {
+    Line::new("USB", "available", instrument(device))
+}
+
+/// How many files this computer is holding. Their bytes are not counted: nothing in the
+/// store tracks how much room they take.
+fn files(workspace: &Workspace) -> Line {
+    let key = match cfg!(target_arch = "wasm32") {
+        true => "Local storage",
+        false => "Files",
+    };
+    match workspace.listed().count() {
+        1 => Line::new(key, "1 file", ""),
+        held => Line::new(key, format!("{held} files"), ""),
+    }
+}
+
+/// What Copy diagnostics puts on the clipboard: what this build is, then the tail of the
+/// activity log.
+fn diagnostics(build: &Build, log: &Log) -> String {
+    let mut out = String::new();
+    for line in &build.lines {
+        match line.note.is_empty() {
+            true => out.push_str(&format!("{}: {}\n", line.key, line.value)),
+            false => out.push_str(&format!("{}: {} ({})\n", line.key, line.value, line.note)),
+        }
+    }
+    out.push('\n');
+    out.push_str(&log.tail(ENTRIES));
+    out
+}
+
+/// The About sheet while it is open.
+pub struct About {
+    build: Build,
+    /// When the diagnostics were last copied, on egui's clock.
+    copied: Option<f64>,
+}
+
+impl About {
+    /// Read what this build is. Called when the box opens.
+    pub fn new(device: &DeviceState, workspace: &Workspace) -> About {
+        About {
+            build: Build::new(device, workspace),
+            copied: None,
+        }
+    }
+
+    /// Returns whether the reader is done with it.
+    fn body(&mut self, ui: &mut egui::Ui, log: &Log) -> bool {
+        ui.set_width(sheet::width(ui.ctx(), WIDE));
+        ui.add_space(TOP);
+        sheet::section(ui, |ui| {
+            sheet::masthead(ui, true);
+            ui.add_space(GAP * 2.0);
+            links(ui);
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("about")
+            .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+            .show(ui, |ui| {
+                // The scrollbar floats over the content; keep the rows out from under it.
+                let scroll = ui.spacing().scroll;
+                ui.set_width(ui.available_width() - scroll.bar_width - scroll.bar_outer_margin);
+                sheet::section(ui, |ui| {
+                    self.this_build(ui, log);
+                    sheet::heading(ui, "Licences", Some(&inventory()));
+                    licences(ui);
+                });
+            });
+        let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let mut closed = false;
+        sheet::foot(
+            ui,
+            |ui| {
+                // The foot lays the buttons out after this; leave them their room.
+                let room = egui::vec2((ui.available_width() - CLOSE).max(0.0), 0.0);
+                ui.allocate_ui(room, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(DISCLAIMER).small().weak()).wrap());
+                });
+            },
+            |ui| closed = sheet::secondary(ui, None, "Close").clicked(),
+        );
+        closed || escaped
+    }
+
+    /// The heading, the button that copies what is under it, and the build lines.
+    fn this_build(&mut self, ui: &mut egui::Ui, log: &Log) {
+        let head = ui
+            .scope(|ui| sheet::heading(ui, "This build", Some(WHY)))
+            .response
+            .rect;
+        // A child over the heading's band, claiming no room of its own: the button sits
+        // on a line whose place is known only once that line has been drawn.
+        let band = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), head.y_range());
+        let mut beside = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(band)
+                .layout(egui::Layout::right_to_left(egui::Align::Max)),
+        );
+        self.copy(&mut beside, log);
+        grid(ui, &self.build.lines);
+    }
+
+    /// Put the diagnostics on the clipboard, and say so until [`SAID`] has passed.
+    fn copy(&mut self, ui: &mut egui::Ui, log: &Log) {
+        let now = ui.input(|input| input.time);
+        let since = self.copied.map(|at| now - at).filter(|since| *since < SAID);
+        let (glyph, label) = match since {
+            Some(_) => (Glyph::Check, "Copied"),
+            None => (Glyph::Clipboard, "Copy diagnostics"),
+        };
+        if let Some(since) = since {
+            // egui repaints on demand, and an idle window would leave "Copied" standing
+            // until something else asked for a frame.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(SAID - since));
+        }
+        if sheet::secondary(ui, Some(glyph), label)
+            .on_hover_text(COPIES)
+            .clicked()
+        {
+            ui.ctx().copy_text(diagnostics(&self.build, log));
+            self.copied = Some(now);
+        }
+    }
+}
+
+/// Draw the box while it is open, and close it once the reader is done.
+pub fn dialog(ctx: &egui::Context, open: &mut Option<About>, log: &Log) {
+    let Some(about) = open.as_mut() else {
+        return;
+    };
+    if egui::Modal::new(egui::Id::new("about"))
+        .frame(sheet::frame(&ctx.style().visuals))
+        .show(ctx, |ui| about.body(ui, log))
+        .inner
+    {
+        *open = None;
+    }
+}
+
+/// Where the rest of the project is.
+fn links(ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP * 3.5;
+        sheet::glyph_link(ui, Glyph::Github, "Source on GitHub", REPO);
+        sheet::glyph_link(ui, Glyph::BookOpen, "User guide", GUIDE);
+        sheet::glyph_link(ui, Glyph::Tag, "Releases", RELEASES);
+        sheet::glyph_link(ui, Glyph::MessageSquareWarning, "Report a problem", ISSUES);
     });
-    ui.add_space(GAP * 2.0);
-    ui.separator();
-    ui.add_space(GAP);
-    ui.label(egui::RichText::new("Licences").strong());
-    ui.add_space(GAP);
-    egui::ScrollArea::vertical()
-        .id_salt("licences")
-        .max_height((ui.ctx().screen_rect().height() - AROUND).max(LICENCES))
-        .show(ui, licences);
-    ui.add_space(GAP);
-    ui.separator();
-    ui.add_space(GAP);
-    ui.label(egui::RichText::new(DISCLAIMER).small().weak());
-    ui.add_space(GAP * 2.0);
-    let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
-    let closed = ui
-        .horizontal(|ui| {
-            ui.add(egui::Button::new(egui::RichText::new("Close").strong()))
-                .clicked()
+}
+
+/// How many columns of build lines `room` holds.
+fn columns(room: f32) -> usize {
+    match room >= 2.0 * COLUMN + GUTTER {
+        true => 2,
+        false => 1,
+    }
+}
+
+/// The build lines, two columns wide where the sheet has the room and one where it has not.
+fn grid(ui: &mut egui::Ui, lines: &[Line]) {
+    let room = ui.available_width();
+    let columns = columns(room);
+    let width = (room - GUTTER * (columns - 1) as f32) / columns as f32;
+    for row in lines.chunks(columns) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GUTTER;
+            for line in row {
+                cell(ui, line, width);
+            }
+        });
+    }
+}
+
+/// One build line, on a ruled row: its key, what it says, and the aside after it.
+fn cell(ui: &mut egui::Ui, line: &Line, width: f32) {
+    let row = egui::vec2(width, LINE);
+    let laid = egui::Layout::left_to_right(egui::Align::Center);
+    let rect = ui
+        .allocate_ui_with_layout(row, laid, |ui| {
+            ui.set_min_size(row);
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.allocate_ui_with_layout(egui::vec2(KEY, LINE), laid, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(line.key).size(11.0)).truncate());
+            });
+            ui.spacing_mut().item_spacing.x = 7.0;
+            let value = egui::RichText::new(&line.value)
+                .font(egui::FontId::monospace(11.0))
+                .strong();
+            ui.add(egui::Label::new(value).truncate());
+            if !line.note.is_empty() {
+                let note = egui::RichText::new(&line.note).small().weak();
+                ui.add(egui::Label::new(note).truncate());
+            }
         })
-        .inner;
-    closed || escaped
+        .response
+        .rect;
+    let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
+    ui.painter().hline(rect.x_range(), rect.bottom(), hairline);
+}
+
+/// How much there is to read: the notices, and the crates behind them.
+fn inventory() -> String {
+    let crates: usize = crates::GROUPS.iter().map(Group::count).sum();
+    format!("{} entries · {crates} crates", NOTICES.len())
 }
 
 /// Every licence whose terms require its notice to travel with a copy of the app: the
 /// [`NOTICES`], then the Rust crates by licence.
 fn licences(ui: &mut egui::Ui) {
     for notice in NOTICES {
-        row(ui, notice.covers, notice.licence, |ui| {
+        row(ui, notice.covers, notice.held(), notice.licence, |ui| {
             terms(ui, notice.source, notice.text);
         });
     }
     for group in crates::GROUPS {
-        row(ui, "Rust crates", &group.summary(), |ui| {
+        row(ui, "Rust crates", &group.held(), group.licence, |ui| {
             for holder in group.holders {
                 credit(ui, holder.notice, holder.crates);
             }
@@ -218,20 +517,86 @@ fn credit(ui: &mut egui::Ui, notice: &str, crates: &[&str]) {
     ui.add_space(GAP);
 }
 
-/// Collapsed, what a licence covers and its name; open, the terms.
-fn row(ui: &mut egui::Ui, covers: &str, licence: &str, body: impl FnOnce(&mut egui::Ui)) {
+/// Collapsed, what a licence covers, whose it is and its name; open, the terms in a box.
+fn row(
+    ui: &mut egui::Ui,
+    covers: &str,
+    held: &str,
+    licence: &str,
+    body: impl FnOnce(&mut egui::Ui),
+) {
     let id = ui.make_persistent_id((covers, licence));
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-        .show_header(ui, |ui| {
-            ui.label(covers);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // The list's scrollbar floats over its content; keep the name out from under it.
-                let scroll = ui.spacing().scroll;
-                ui.add_space(scroll.bar_width + scroll.bar_outer_margin);
-                ui.label(egui::RichText::new(licence).weak());
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if header(ui, covers, held, licence, state.is_open()).clicked() {
+        state.toggle(ui);
+    }
+    state.show_body_unindented(ui, |ui| {
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .inner_margin(egui::Margin::symmetric(9, 7))
+            .show(ui, body);
+        ui.add_space(GAP);
+    });
+}
+
+/// The row itself: a chevron that says which way it goes, what it covers, whose it is, and
+/// the licence at the right.
+fn header(
+    ui: &mut egui::Ui,
+    covers: &str,
+    held: &str,
+    licence: &str,
+    open: bool,
+) -> egui::Response {
+    let laid = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        let backdrop = ui.painter().add(egui::Shape::Noop);
+        let ink = ui.visuals().text_color();
+        ui.horizontal(|ui| {
+            ui.set_min_height(ROW);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let chevron = match open {
+                true => Glyph::ChevronDown,
+                false => Glyph::ChevronRight,
+            };
+            ui.add(sized(chevron, CHEVRON, ui.visuals().weak_text_color()));
+            ui.add(egui::Label::new(
+                egui::RichText::new(covers).size(11.5).strong(),
+            ));
+            // The licence name is never cut, so the holder takes what it leaves.
+            let named = egui::FontId::monospace(10.5);
+            let width = ui
+                .fonts(|fonts| fonts.layout_no_wrap(licence.to_string(), named.clone(), ink))
+                .size()
+                .x;
+            let room = egui::vec2((ui.available_width() - width - 8.0).max(0.0), ROW);
+            ui.allocate_ui_with_layout(room, *ui.layout(), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(held)
+                            .font(egui::FontId::monospace(9.5))
+                            .weak(),
+                    )
+                    .truncate(),
+                );
             });
-        })
-        .body(body);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(licence).font(named).color(ink));
+            });
+        });
+        backdrop
+    });
+    let response = laid.response;
+    if response.hovered() {
+        let fill = ui.visuals().widgets.hovered.weak_bg_fill;
+        ui.painter()
+            .set(laid.inner, egui::Shape::rect_filled(response.rect, 2, fill));
+    }
+    let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
+    ui.painter()
+        .hline(response.rect.x_range(), response.rect.bottom(), hairline);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A licence text, under what it applies to where that needs saying.
@@ -258,6 +623,136 @@ mod tests {
         assert_eq!(
             release_page("0.5.0"),
             "https://github.com/jmoo/drawbar/releases/tag/drawbar-v0.5.0"
+        );
+    }
+
+    fn build() -> Build {
+        Build {
+            lines: vec![
+                Line::new("Version", "0.7.1", "alpha"),
+                Line::new("Commit", "not recorded", "built outside Nix"),
+                Line::new("Files", "2 files", ""),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_diagnostics_carry_every_build_line_and_its_aside() {
+        let text = diagnostics(&build(), &Log::default());
+        assert!(text.contains("Version: 0.7.1 (alpha)"), "{text}");
+        assert!(
+            text.contains("Commit: not recorded (built outside Nix)"),
+            "{text}"
+        );
+        assert!(text.contains("Files: 2 files\n"), "{text}");
+    }
+
+    #[test]
+    fn the_diagnostics_carry_the_log_after_the_build_and_cap_it() {
+        let mut log = Log::default();
+        for n in 0..250 {
+            log.info(format!("line {n}"));
+        }
+        let text = diagnostics(&build(), &log);
+        let (build, tail) = text
+            .split_once("\n\n")
+            .expect("a blank line between the two");
+        assert_eq!(build.lines().count(), 3);
+        assert_eq!(tail.lines().count(), ENTRIES);
+        assert!(!tail.contains("line 49"), "the log was not capped");
+        assert!(
+            tail.contains("line 50") && tail.contains("line 249"),
+            "{tail}"
+        );
+    }
+
+    #[test]
+    fn the_diagnostics_of_a_silent_session_are_the_build_alone() {
+        let text = diagnostics(&build(), &Log::default());
+        assert!(text.ends_with("Files: 2 files\n\n"), "{text:?}");
+    }
+
+    fn headless() -> egui::Context {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        ctx.set_fonts(crate::app::fonts());
+        ctx.all_styles_mut(crate::app::metrics);
+        ctx
+    }
+
+    /// Draw the sheet in a window of `size`, and answer with the room it took.
+    fn drawn_at(ctx: &egui::Context, size: egui::Vec2) -> egui::Rect {
+        let mut about = About {
+            build: build(),
+            copied: None,
+        };
+        let log = Log::default();
+        let mut rect = egui::Rect::ZERO;
+        // Twice: a scrolling middle knows what it holds only once it has held it.
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                rect = egui::Modal::new(egui::Id::new("about"))
+                    .frame(sheet::frame(&ctx.style().visuals))
+                    .show(ctx, |ui| {
+                        about.body(ui, &log);
+                    })
+                    .response
+                    .rect;
+            });
+        }
+        rect
+    }
+
+    /// The shell refuses a window smaller than this, so the box has to fit one.
+    #[test]
+    fn the_sheet_fits_the_smallest_window_the_shell_allows() {
+        let least = crate::shell::LEAST;
+        let took = drawn_at(&headless(), least);
+        assert!(
+            took.height() <= least.y && took.width() <= least.x,
+            "the sheet took {} x {} in a window of {} x {}",
+            took.width(),
+            took.height(),
+            least.x,
+            least.y
+        );
+    }
+
+    /// Two columns of build lines need room the smallest window does not have.
+    #[test]
+    fn the_build_lines_stand_in_two_columns_only_where_the_sheet_is_wide() {
+        let ctx = headless();
+        let room = |sheet: f32| sheet - 2.0 * sheet::PAD;
+        drawn_at(&ctx, crate::shell::LEAST);
+        assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 1);
+        drawn_at(&ctx, egui::vec2(1400.0, 980.0));
+        assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 2);
+    }
+
+    #[test]
+    fn a_notice_of_bundled_material_is_held_by_whoever_it_came_from() {
+        let lucide = NOTICES
+            .iter()
+            .find(|notice| notice.covers == "Lucide icons")
+            .expect("the vendored glyphs are listed");
+        assert_eq!(lucide.held(), "Lucide 0.469.0");
+    }
+
+    /// drawbar's own row has no source to name, so it names the copyright instead.
+    #[test]
+    fn drawbars_own_notice_is_held_by_the_copyright_in_its_licence() {
+        let drawbar = NOTICES
+            .iter()
+            .find(|notice| notice.covers == "drawbar")
+            .expect("drawbar lists its own licence");
+        assert!(
+            drawbar.held().starts_with("Copyright (c)"),
+            "{:?}",
+            drawbar.held()
         );
     }
 
@@ -392,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn a_group_summary_counts_every_crate_under_its_licence() {
+    fn a_group_counts_every_crate_under_its_licence() {
         let one = Group {
             licence: "ISC",
             text: "",
@@ -416,11 +911,13 @@ mod tests {
                 text: "",
             }],
         };
-        assert_eq!(one.summary(), "ISC · 1 crate");
-        assert_eq!(four.summary(), "MIT · 4 crates");
+        assert_eq!(one.count(), 1);
+        assert_eq!(one.held(), "1 dependency · its own authors");
+        assert_eq!(four.count(), 4);
+        assert_eq!(four.held(), "4 dependencies · each crate's own authors");
     }
 
-    /// A summary sums each holder's and each variant's crates, so a repeat inflates it.
+    /// A count sums each holder's and each variant's crates, so a repeat inflates it.
     #[test]
     fn no_crate_is_listed_twice_under_one_licence() {
         for group in crates::GROUPS {

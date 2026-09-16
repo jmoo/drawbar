@@ -10,7 +10,17 @@ desktop, the item opens the release page instead.
 **Help ▸ Copy activity log** puts the whole log on the clipboard, for a bug
 report.
 
-**Help ▸ About drawbar** shows the version, links to the source, the guide and
-the releases, the trademark disclaimer, and every licence a copy of drawbar has
-to carry: drawbar's own, the bundled fonts and icons, the Stage field maps it
-decodes with, and the Rust crates compiled in. Click a row to read it.
+**Help ▸ About drawbar** opens the About box, which links to the source, this
+guide, the releases and the issue tracker.
+
+**This build** is what you are running: the version, the commit it was built
+from, the target, the browser when drawbar is in one, whether USB is available
+and which instrument is connected, and how many files this computer is holding.
+**Copy diagnostics** puts those lines and the activity log's last 200 entries on
+the clipboard. Paste them into a bug report and the report says what you were
+running.
+
+**Licences** is every licence a copy of drawbar has to carry: drawbar's own, the
+bundled fonts and icons, the Stage field maps it decodes with, and the Rust
+crates compiled in. Click a row to read it. The trademark disclaimer is at the
+foot of the box.
