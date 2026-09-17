@@ -210,7 +210,7 @@ impl Start {
             },
             Start::Guide => Card {
                 glyph: Glyph::BookOpen,
-                label: "Read the guide first",
+                label: "Read the guide",
                 sub: "",
                 hint: "",
                 lead: false,
@@ -457,7 +457,8 @@ fn legend(ui: &mut egui::Ui) {
 /// inside one.
 const CARD_LEAST: f32 = 210.0;
 const CARD_GAP: f32 = 10.0;
-const CARD_PAD: i8 = 13;
+const CARD_PAD: egui::Vec2 = egui::vec2(13.0, 11.0);
+const CARD_STROKE: f32 = 1.0;
 
 /// A card's title and its sub-line.
 const CARD_TITLE: f32 = 12.0;
@@ -469,17 +470,19 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
     let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, STARTS.len());
     let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
     let mut wanted = None;
-    for row in STARTS.chunks(across) {
-        // One height for the row, so a card without a sub-line stands as tall as its
-        // neighbours.
-        let height = row
-            .iter()
-            .map(|start| card_height(ui, start.card(), inner(width)))
-            .fold(0.0, f32::max);
+    for (n, row) in STARTS.chunks(across).enumerate() {
+        // The row's height is what its tallest card took, so a card without a sub-line
+        // stands as tall as its neighbours. A row that finds itself taller than it was
+        // told asks for the frame again.
+        let told = ui.id().with(("starts", n));
+        let height: f32 = ui.data(|data| data.get_temp(told)).unwrap_or(0.0);
+        let mut tallest: f32 = 0.0;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
             for start in row {
-                if !card(ui, start.card(), width, height).clicked() {
+                let drawn = card(ui, start.card(), width, height);
+                tallest = tallest.max(drawn.rect.height());
+                if !drawn.clicked() {
                     continue;
                 }
                 match start {
@@ -489,6 +492,10 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
                 }
             }
         });
+        if tallest != height {
+            ui.data_mut(|data| data.insert_temp(told, tallest));
+            ui.ctx().request_discard("start cards");
+        }
         ui.add_space(CARD_GAP);
     }
     wanted
@@ -496,33 +503,15 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
 
 /// The room a card `width` wide leaves for its text.
 fn inner(width: f32) -> f32 {
-    width - 2.0 * f32::from(CARD_PAD) - 2.0
+    width - 2.0 * (CARD_PAD.x + CARD_STROKE)
 }
 
-/// The height a card's text takes at `inner` width.
-fn card_height(ui: &egui::Ui, card: Card, inner: f32) -> f32 {
-    let title = ui
-        .fonts(|fonts| fonts.row_height(&egui::FontId::proportional(CARD_TITLE)))
-        .max(14.0);
-    if card.sub.is_empty() {
-        return title;
-    }
-    let sub = ui.fonts(|fonts| {
-        fonts.layout(
-            card.sub.to_owned(),
-            egui::FontId::proportional(CARD_SUB),
-            egui::Color32::PLACEHOLDER,
-            inner,
-        )
-    });
-    title + GAP + sub.size().y
-}
-
+/// A card `width` wide and at least `height` tall, the card's own frame included.
 fn card(ui: &mut egui::Ui, card: Card, width: f32, height: f32) -> egui::Response {
     let accent = accent(ui.visuals());
     let (stroke, fill, tint) = match card.lead {
         true => (
-            egui::Stroke::new(1.0_f32, accent),
+            egui::Stroke::new(CARD_STROKE, accent),
             ui.visuals().widgets.active.bg_fill,
             accent,
         ),
@@ -536,13 +525,13 @@ fn card(ui: &mut egui::Ui, card: Card, width: f32, height: f32) -> egui::Respons
         .stroke(stroke)
         .fill(fill)
         .corner_radius(egui::CornerRadius::same(2))
-        .inner_margin(egui::Margin::symmetric(CARD_PAD, 11))
+        .inner_margin(egui::Margin::symmetric(CARD_PAD.x as i8, CARD_PAD.y as i8))
         .show(ui, |ui| {
             // ⚠️ A frame's content inherits the layout it was opened in, and the cards
             // are laid out in a row.
             ui.vertical(|ui| {
                 ui.set_width(inner(width));
-                ui.set_min_height(height);
+                ui.set_min_height((height - 2.0 * (CARD_PAD.y + CARD_STROKE)).max(0.0));
                 ui.spacing_mut().item_spacing.y = GAP;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;

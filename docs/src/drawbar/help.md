@@ -30,5 +30,5 @@ running.
 
 **Licences** is every licence a copy of drawbar has to carry: drawbar's own, the
 bundled fonts and icons, the Stage field maps it decodes with, and the Rust
-crates compiled in. Click a row to read it. The trademark disclaimer is at the
+crates compiled in. Click a row to read it and to reach the project it covers. The trademark disclaimer is at the
 foot of the box.

@@ -26,6 +26,8 @@ struct Notice {
     covers: &'static str,
     /// The copyright line, as the licence text or the font's own name table gives it.
     holder: &'static str,
+    /// Where the project lives.
+    page: &'static str,
     /// Where bundled material came from; `None` for drawbar itself.
     source: Option<&'static str>,
     licence: &'static str,
@@ -38,8 +40,8 @@ struct Group {
     /// The licence, from `crates/drawbar/licences/<id>.txt`.
     text: &'static str,
     holders: &'static [Holder],
-    /// How many crates under the licence have a file that names no copyright holder.
-    unattributed: usize,
+    /// Crates, as `name version`, whose licence file names no copyright holder.
+    unattributed: &'static [&'static str],
     /// Crates whose licence file says more than [`Group::text`] does.
     variants: &'static [Text],
 }
@@ -49,7 +51,7 @@ impl Group {
     fn count(&self) -> usize {
         let held: usize = self.holders.iter().map(|holder| holder.crates.len()).sum();
         let varied: usize = self.variants.iter().map(|text| text.crates.len()).sum();
-        self.unattributed + held + varied
+        self.unattributed.len() + held + varied
     }
 
     fn held(&self) -> String {
@@ -78,6 +80,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "drawbar",
         holder: "Copyright (c) 2023-2026, John Moore",
+        page: REPO,
         source: None,
         licence: "BSD 3-Clause",
         // A copy of `crates/LICENSE`: a packaged crate cannot reach outside its own root,
@@ -87,6 +90,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "emoji-icon-font",
         holder: "Copyright (c) 2014 John Slegers",
+        page: "https://github.com/jslegers/emoji-icon-font",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "MIT",
         text: include_str!("../assets/fonts/egui/emoji-icon-font-mit-license.txt"),
@@ -94,6 +98,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "Hack Regular",
         holder: "Copyright (c) 2018 Source Foundry Authors",
+        page: "https://github.com/source-foundry/Hack",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "MIT and Bitstream Vera",
         text: include_str!("../assets/fonts/egui/Hack-Regular.txt"),
@@ -101,6 +106,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "Lucide icons",
         holder: "Copyright (c) 2022 Lucide Contributors, 2013-2022 Cole Bemis",
+        page: "https://github.com/lucide-icons/lucide",
         source: Some("Lucide 0.469.0"),
         licence: "ISC",
         text: include_str!("../assets/icons/LICENSE"),
@@ -108,6 +114,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "Noto Emoji Regular",
         holder: "Copyright 2013 Google Inc.",
+        page: "https://github.com/googlefonts/noto-emoji",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "SIL Open Font License 1.1",
         text: include_str!("../assets/fonts/egui/OFL.txt"),
@@ -115,6 +122,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "Ubuntu Regular, Bold and Light",
         holder: "Copyright 2011 Canonical Ltd.",
+        page: "https://design.ubuntu.com/font",
         source: Some("Ubuntu font family 0.83; Light from egui's epaint_default_fonts 0.32.3"),
         licence: "Ubuntu Font Licence 1.0",
         text: include_str!("../assets/fonts/LICENCE.txt"),
@@ -122,6 +130,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "Stage 2 and 3 field maps",
         holder: "Copyright (c) 2020, Christian Florentz",
+        page: "https://github.com/Chris55/nord-documentation",
         source: Some("nord-documentation by Christian Florentz"),
         licence: "BSD 3-Clause",
         text: include_str!("../licences/nord-documentation.txt"),
@@ -129,6 +138,7 @@ const NOTICES: &[Notice] = &[
     Notice {
         covers: "Stage 4 field tables",
         holder: "Copyright (c) 2024 Randy",
+        page: "https://ns4decode.netlify.app",
         source: Some("ns4decode by Randy"),
         licence: "MIT",
         text: include_str!("../licences/ns4decode.txt"),
@@ -137,6 +147,9 @@ const NOTICES: &[Notice] = &[
 
 /// What the reader is told the build lines are for.
 const WHY: &str = "paste this into a bug report and we know what you were running";
+
+/// What a crate group says over the crates whose licence file names nobody.
+const UNATTRIBUTED: &str = "no copyright line in the licence file";
 
 /// What Copy diagnostics says it takes, on hover.
 const COPIES: &str = "Copies the lines below, plus the activity log's last 200 entries";
@@ -472,6 +485,7 @@ fn inventory() -> String {
 fn licences(ui: &mut egui::Ui) {
     for notice in NOTICES {
         row(ui, notice.covers, notice.holder, notice.licence, |ui| {
+            page(ui, notice.page);
             terms(ui, notice.source, notice.text);
         });
     }
@@ -480,13 +494,24 @@ fn licences(ui: &mut egui::Ui) {
             for holder in group.holders {
                 credit(ui, holder.notice, holder.crates);
             }
+            if !group.unattributed.is_empty() {
+                credit(ui, UNATTRIBUTED, group.unattributed);
+            }
             terms(ui, None, group.text);
             for variant in group.variants {
                 ui.add_space(GAP);
-                terms(ui, Some(&variant.crates.join(", ")), variant.text);
+                packages(ui, variant.crates);
+                terms(ui, None, variant.text);
             }
         });
     }
+}
+
+/// Where a project lives, as a link that reads as its address.
+fn page(ui: &mut egui::Ui, url: &str) {
+    let shown = url.strip_prefix("https://").unwrap_or(url);
+    sheet::glyph_link(ui, Glyph::ArrowUpRight, shown, url);
+    ui.add_space(GAP);
 }
 
 /// A copyright notice and the crates whose licence file carries it.
@@ -496,8 +521,26 @@ fn credit(ui: &mut egui::Ui, notice: &str, crates: &[&str]) {
             .font(egui::FontId::monospace(MONO))
             .weak(),
     );
-    ui.label(egui::RichText::new(crates.join(", ")).small().weak());
+    packages(ui, crates);
     ui.add_space(GAP);
+}
+
+/// The crates.io page of a `name version`.
+fn crate_url(package: &str) -> String {
+    match package.split_once(' ') {
+        Some((name, version)) => format!("https://crates.io/crates/{name}/{version}"),
+        None => format!("https://crates.io/crates/{package}"),
+    }
+}
+
+/// Crates as `name version`, each a link to that version on crates.io.
+fn packages(ui: &mut egui::Ui, crates: &[&str]) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP * 2.0;
+        for package in crates {
+            sheet::link(ui, package, &crate_url(package));
+        }
+    });
 }
 
 /// Collapsed, what a licence covers, whose it is and its name; open, the terms in a box.
@@ -886,7 +929,7 @@ mod tests {
                 notice: "Copyright (c) 2015, Simonas Kazlauskas",
                 crates: &["libloading 0.8.9"],
             }],
-            unattributed: 0,
+            unattributed: &[],
             variants: &[],
         };
         let four = Group {
@@ -896,7 +939,7 @@ mod tests {
                 notice: "Copyright (c) 2015 nwin",
                 crates: &["png 0.17.16", "png 0.18.1"],
             }],
-            unattributed: 1,
+            unattributed: &["adler2 2.0.1"],
             variants: &[Text {
                 crates: &["zip 2.4.2"],
                 text: "",
@@ -916,6 +959,7 @@ mod tests {
                 .holders
                 .iter()
                 .flat_map(|holder| holder.crates)
+                .chain(group.unattributed)
                 .chain(group.variants.iter().flat_map(|variant| variant.crates))
                 .collect();
             crates.sort_unstable();
@@ -980,6 +1024,26 @@ source = "git+https://example.com/forked#0000"
         assert_eq!(
             registry_packages(lock),
             BTreeSet::from([("egui", "0.32.3")])
+        );
+    }
+
+    #[test]
+    fn every_notice_points_at_its_project_over_https() {
+        for notice in NOTICES {
+            assert!(
+                notice.page.starts_with("https://"),
+                "{}: {:?}",
+                notice.covers,
+                notice.page
+            );
+        }
+    }
+
+    #[test]
+    fn a_crate_link_names_the_version_that_is_compiled_in() {
+        assert_eq!(
+            crate_url("png 0.17.16"),
+            "https://crates.io/crates/png/0.17.16"
         );
     }
 
