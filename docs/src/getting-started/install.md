@@ -36,5 +36,5 @@ The page says which step failed. The usual causes:
 - The connection dropped, or the download stopped partway. Reload the page.
 - The browser has no WebAssembly or WebGL2. drawbar needs both, and every
   current browser has them.
-- An extension or a content blocker refused the module. Allow this site and
-  reload.
+- An extension or a content blocker refused the startup script or WebAssembly
+  module. Allow this site and reload.

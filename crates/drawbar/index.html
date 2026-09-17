@@ -395,8 +395,6 @@
     </svg>
 
     <script type="module">
-      import init, { start } from "./pkg/drawbar.js";
-
       const WASM = "./pkg/drawbar_bg.wasm";
       const MB = 1024 * 1024;
 
@@ -427,7 +425,7 @@
 
       const NOTE = {
         download:
-          "The download stopped partway. Your files on this computer are untouched — drawbar has not started, so nothing has been read or written.",
+          "A file drawbar needs could not be downloaded. Your files on this computer are untouched — drawbar has not started, so nothing has been read or written.",
         start:
           "drawbar arrived but could not start in this browser. Your files on this computer are untouched: nothing has been read or written.",
       };
@@ -519,6 +517,7 @@
       let step = "download";
       try {
         show("fetching");
+        const { default: init, start } = await import("./pkg/drawbar.js");
         const response = await fetch(WASM);
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);

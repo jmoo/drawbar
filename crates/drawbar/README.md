@@ -26,6 +26,9 @@ Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before
 trusting alpha software with sounds you cannot re-create.
 
+If the browser app cannot start, its loading page offers a retry and a link to
+[loading help](../../docs/src/getting-started/install.md#if-drawbar-does-not-load).
+
 ## Building
 
 `nix develop`, then from `crates/`: `cargo run -p drawbar` and `cargo test -p
