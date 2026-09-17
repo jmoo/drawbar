@@ -31,9 +31,7 @@ There are no packaged downloads yet. To build either from a source checkout, see
 
 ## If drawbar does not load
 
-While it loads, the page pulls nine drawbars out and names each step: fetching
-drawbar, compiling it, then starting it. If a step fails the page says so and
-offers to try again.
+The page says which step failed. The usual causes:
 
 - The connection dropped, or the download stopped partway. Reload the page.
 - The browser has no WebAssembly or WebGL2. drawbar needs both, and every

@@ -65,11 +65,10 @@ impl Group {
         self.unattributed + held + varied
     }
 
-    /// Who holds copyright in them, which is nobody this project can name.
     fn held(&self) -> String {
         match self.count() {
-            1 => "1 dependency · its own authors".to_string(),
-            count => format!("{count} dependencies · each crate's own authors"),
+            1 => "1 dependency".to_string(),
+            count => format!("{count} dependencies"),
         }
     }
 }
@@ -140,11 +139,6 @@ const NOTICES: &[Notice] = &[
         text: include_str!("../licences/ns4decode.txt"),
     },
 ];
-
-/// Required of every public face of the project — see `CONTRIBUTING.md`.
-const DISCLAIMER: &str = "Not affiliated with, authorized, or endorsed by Clavia DMI AB. \
-                          \"Nord\", \"Clavia\" and \"Electro\" are trademarks of Clavia DMI AB, \
-                          used here only to identify the hardware these formats come from.";
 
 /// What the reader is told the build lines are for.
 const WHY: &str = "paste this into a bug report and we know what you were running";
@@ -349,13 +343,7 @@ impl About {
         let mut closed = false;
         sheet::foot(
             ui,
-            |ui| {
-                // The foot lays the buttons out after this; leave them their room.
-                let room = egui::vec2((ui.available_width() - CLOSE).max(0.0), 0.0);
-                ui.allocate_ui(room, |ui| {
-                    ui.add(egui::Label::new(egui::RichText::new(DISCLAIMER).small().weak()).wrap());
-                });
-            },
+            |ui| sheet::disclaimer(ui, CLOSE),
             |ui| closed = sheet::secondary(ui, None, "Close").clicked(),
         );
         closed || escaped
@@ -536,7 +524,10 @@ fn row(
             .fill(ui.visuals().extreme_bg_color)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
             .inner_margin(egui::Margin::symmetric(9, 7))
-            .show(ui, body);
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                body(ui);
+            });
         ui.add_space(GAP);
     });
 }
@@ -912,9 +903,9 @@ mod tests {
             }],
         };
         assert_eq!(one.count(), 1);
-        assert_eq!(one.held(), "1 dependency · its own authors");
+        assert_eq!(one.held(), "1 dependency");
         assert_eq!(four.count(), 4);
-        assert_eq!(four.held(), "4 dependencies · each crate's own authors");
+        assert_eq!(four.held(), "4 dependencies");
     }
 
     /// A count sums each holder's and each variant's crates, so a repeat inflates it.
@@ -1035,7 +1026,7 @@ source = "git+https://example.com/forked#0000"
             "Not affiliated with, authorized, or endorsed by Clavia DMI AB",
             "trademarks of Clavia DMI AB",
         ] {
-            assert!(DISCLAIMER.contains(required), "missing: {required}");
+            assert!(sheet::DISCLAIMER.contains(required), "missing: {required}");
         }
     }
 }

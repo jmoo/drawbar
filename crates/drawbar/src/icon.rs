@@ -87,7 +87,6 @@ glyphs! {
     RotateCcw => "rotate-ccw.svg",
     Save => "save.svg",
     ScanEye => "scan-eye.svg",
-    ScrollText => "scroll-text.svg",
     SlidersHorizontal => "sliders-horizontal.svg",
     SlidersVertical => "sliders-vertical.svg",
     Sparkles => "sparkles.svg",

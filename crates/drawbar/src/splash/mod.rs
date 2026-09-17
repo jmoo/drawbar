@@ -42,6 +42,9 @@ const AROUND: f32 = 96.0;
 /// The middle is never shorter than this, however short the window.
 const FEWEST: f32 = 120.0;
 
+/// The room the welcome's foot keeps for its one button, at the right of the disclaimer.
+const LET_IN: f32 = 200.0;
+
 /// Which sheet a session opens on, given the version whose sheet was last dismissed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Opening {
@@ -66,8 +69,6 @@ pub fn opening(seen: Option<&str>) -> Opening {
 pub enum Wanted {
     /// Close, and record this version as read.
     Done,
-    /// Leave for the change list. Nothing is recorded until that sheet is dismissed.
-    News,
     /// Close, record this version, and run this.
     Act(Act),
 }
@@ -248,19 +249,14 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
         });
     sheet::foot(
         ui,
-        |_| {},
+        |ui| sheet::disclaimer(ui, LET_IN),
         |ui| {
             let done = sheet::primary(ui, Some(Glyph::Check), "I understand — let me in")
                 .on_hover_text("You can read all of this again from the Help menu")
                 .clicked();
-            let read =
-                glyph_click(ui, Glyph::ScrollText, &format!("What changed in {VERSION}")).clicked();
-            wanted = match (wanted.take(), done, read) {
-                (Some(wanted), _, _) => Some(wanted),
-                (None, true, _) => Some(Wanted::Done),
-                (None, false, true) => Some(Wanted::News),
-                (None, false, false) => None,
-            };
+            if done && wanted.is_none() {
+                wanted = Some(Wanted::Done);
+            }
         },
     );
     match escaped(ui) {
@@ -540,25 +536,6 @@ fn card(ui: &mut egui::Ui, card: Card, width: f32) -> egui::Response {
         true => response,
         false => response.on_hover_text(card.hint),
     }
-}
-
-/// A [`sheet::glyph_link`] that does something in the app rather than opening a page.
-///
-/// Laid right to left, beside the button in a [`sheet::foot`], so it claims the room it
-/// needs rather than the whole of what is left.
-fn glyph_click(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
-    let tint = ui.visuals().hyperlink_color;
-    let drawn = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
-        ui.label(egui::RichText::new(label).color(tint).size(11.0));
-        ui.add(sized(glyph, 12.0, tint));
-    });
-    ui.interact(
-        drawn.response.rect,
-        ui.id().with(label),
-        egui::Sense::click(),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn escaped(ui: &egui::Ui) -> bool {

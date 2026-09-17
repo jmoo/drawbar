@@ -418,7 +418,7 @@
         white: { fill: "#d8d6d0", ink: "#000000" },
       };
 
-      /* A stop slides 89px down its 104px track, and the panel reads its pull 0..8. */
+      /* A stop slides 89px down its 104px track in the eight clicks a drawbar has. */
       const TRAVEL = 89;
       const PULL = 8;
 
@@ -487,8 +487,9 @@
       function pull(progress) {
         bars.forEach((bar, i) => {
           const out = Math.min(1, Math.max(0, progress * bars.length - i));
-          bar.firstElementChild.style.top = `${Math.round(out * TRAVEL)}px`;
-          bar.title = `${FOOTAGE[i]}′ — ${Math.round(out * PULL)}`;
+          const step = Math.round(out * PULL);
+          bar.firstElementChild.style.top = `${Math.round((step / PULL) * TRAVEL)}px`;
+          bar.title = `${FOOTAGE[i]}′ — ${step}`;
         });
       }
 

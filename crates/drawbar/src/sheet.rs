@@ -13,6 +13,11 @@ pub(crate) const WHAT: &str =
     "Your Nord's sounds, in a window: browse what is on your computer and on your \
                                instrument, edit programs, samples and pianos, and send them back.";
 
+/// Required of every public face of the project — see `CONTRIBUTING.md`.
+pub(crate) const DISCLAIMER: &str = "Not affiliated with, authorized, or endorsed by Clavia DMI AB. \
+                                     \"Nord\", \"Clavia\" and \"Electro\" are trademarks of Clavia DMI AB, \
+                                     used here only to identify the hardware these formats come from.";
+
 /// The room between two lines of a sheet.
 pub(crate) const GAP: f32 = 4.0;
 
@@ -141,6 +146,15 @@ pub(crate) fn foot(
         });
 }
 
+/// The [`DISCLAIMER`] at the left of a foot, wrapping in the room the buttons after it
+/// leave, which is everything but `keep`.
+pub(crate) fn disclaimer(ui: &mut egui::Ui, keep: f32) {
+    let room = egui::vec2((ui.available_width() - keep).max(0.0), 0.0);
+    ui.allocate_ui(room, |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(DISCLAIMER).small().weak()).wrap());
+    });
+}
+
 /// The one button a sheet is dismissed with: the accent around it, on the active fill.
 pub(crate) fn primary(ui: &mut egui::Ui, glyph: Option<Glyph>, label: &str) -> egui::Response {
     let accent = crate::app::accent(ui.visuals());
@@ -264,6 +278,7 @@ mod tests {
             foot(
                 ui,
                 |ui| {
+                    disclaimer(ui, 90.0);
                     glyph_link(ui, Glyph::HardDrive, "a link", "https://drawbar.app/");
                 },
                 |ui| {

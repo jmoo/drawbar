@@ -8,9 +8,10 @@ commit behind it. In the browser it opens by itself on the first launch after an
 update, and drawbar remembers which version you have dismissed. On the desktop,
 the item opens the release page instead.
 
-**Help ▸ Welcome** shows what works today, instrument by instrument, and three
-places to start: connect an instrument, open files, or read this guide. In the
-browser it opens by itself the first time you ever run drawbar there.
+**Help ▸ Welcome** shows what works today, instrument by instrument, three
+places to start (connect an instrument, open files, or read this guide) and the
+trademark disclaimer. In the browser it opens by itself the first time you ever
+run drawbar there.
 [What is supported](../getting-started/support.md) argues the same claims at
 length.
 

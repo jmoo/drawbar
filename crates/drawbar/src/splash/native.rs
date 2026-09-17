@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use super::{welcome, Wanted, VERSION};
+use super::{welcome, Wanted};
 use crate::browser::Act;
 
 pub struct Splash {
@@ -26,11 +26,6 @@ impl Splash {
         }
         match welcome(ctx)? {
             Wanted::Done => self.showing = false,
-            // Nothing here can fetch the notes, so this goes where Help ▸ What's new goes.
-            Wanted::News => {
-                let page = crate::about::release_page(VERSION);
-                ctx.open_url(egui::OpenUrl::new_tab(page));
-            }
             Wanted::Act(act) => {
                 self.showing = false;
                 return Some(act);

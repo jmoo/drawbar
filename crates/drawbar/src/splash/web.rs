@@ -86,11 +86,6 @@ impl Splash {
                     self.dismiss();
                     None
                 }
-                // Nothing is recorded yet: the change list is what gets dismissed.
-                Wanted::News => {
-                    self.open_news(ctx);
-                    None
-                }
                 Wanted::Act(act) => {
                     self.dismiss();
                     Some(act)
