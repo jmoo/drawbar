@@ -654,12 +654,18 @@ impl DrawbarApp {
             if item(ui, "What's new", None) {
                 self.whats_new(ui.ctx());
             }
+            if item(ui, "Welcome", None) {
+                self.splash.open_welcome();
+            }
             ui.separator();
             if item(ui, "Copy activity log", None) {
                 acts.push(Act::CopyLog);
             }
             if item(ui, "About drawbar", None) {
-                self.about_open = true;
+                self.about = Some(crate::about::About::new(
+                    &self.device.state,
+                    &self.workspace,
+                ));
             }
         });
     }
@@ -1205,7 +1211,7 @@ pub fn too_small_notice(ctx: &egui::Context) {
                 ui.add_space(GAP);
                 ui.label(TOO_SMALL_WHY);
                 ui.add_space(GAP * 2.0);
-                crate::splash::link(ui, "User guide", GUIDE);
+                crate::sheet::link(ui, "User guide", GUIDE);
             });
         });
 }

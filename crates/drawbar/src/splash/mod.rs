@@ -1,88 +1,880 @@
-//! The opening notice the browser build shows once per version: what this software still
-//! is, and what changed in the version now running.
+//! The two sheets a session can open on: the welcome a first run shows, and what
+//! changed since the version last read.
 //!
 //! The notes are GitHub's release body for `drawbar-v<version>`, which
 //! `scripts/release.bash` writes in a fixed shape. [`classify`] reads that shape back so
-//! the modal can paint it without a markdown parser, and anything it does not recognise
+//! the sheet can paint it without a markdown parser, and anything it does not recognise
 //! stays the plain line it was.
 //!
-//! The shape a modal wears — its width, its spacing, its title line, its links — is here
-//! rather than in the browser-only half, because [`crate::about`] wears the same one on
-//! every target.
+//! Both sheets are painted here, on every target, because Help opens the welcome in a
+//! window as well as in a tab. Only the rule that opens one unasked and the fetch behind
+//! the notes are the browser's.
 
 use eframe::egui;
+
+use crate::app::{accent, bold, caption, good, unlit, warn};
+use crate::browser::Act;
+use crate::icon::{sized, Glyph};
+use crate::panel::caps;
+use crate::sheet::{self, GAP};
+use crate::shell::GUIDE;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::Splash;
 
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::Splash;
 
-pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) use crate::sheet::VERSION;
 
-/// How wide a modal is, and the room between two of its lines.
-pub(crate) const WIDTH: f32 = 560.0;
-pub(crate) const GAP: f32 = 4.0;
+/// The most each sheet is allowed to be wide.
+const WELCOME_WIDTH: f32 = 940.0;
+const NEWS_WIDTH: f32 = 700.0;
 
-/// The line a modal opens with: the app, and the version of it running.
-pub(crate) fn title(ui: &mut egui::Ui) {
-    ui.label(
-        egui::RichText::new(format!("drawbar {VERSION}"))
-            .font(egui::FontId::new(18.0, crate::app::bold())),
-    );
-}
+/// The room a sheet keeps for its foot, so a short window scrolls the middle rather than
+/// pushing the one button that dismisses it off screen.
+const AROUND: f32 = 96.0;
 
-/// ⚠️ Always a new tab: in a browser the app *is* the page, and following a link in
-/// place ends the session and everything unsaved in it.
-pub(crate) fn link(ui: &mut egui::Ui, label: &str, url: &str) {
-    ui.add(egui::Hyperlink::from_label_and_url(label, url).open_in_new_tab(true));
-}
+/// The middle is never shorter than this, however short the window.
+const FEWEST: f32 = 120.0;
 
-/// How far a claim about this build has been borne out.
+/// The room the welcome's foot keeps for its one button, at the right of the disclaimer.
+const LET_IN: f32 = 200.0;
+
+/// Which sheet a session opens on, given the version whose sheet was last dismissed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Standing {
-    Supported,
-    /// Implemented, but not yet tried on a real instrument.
-    Untested,
-    Unsupported,
+pub enum Opening {
+    /// Nobody has run drawbar here before.
+    Welcome,
+    /// A version was read, and it is not the one running.
+    News,
+    Nothing,
 }
 
-/// What to expect of this build, shown beneath the alpha notice.
-pub const EXPECTATIONS: &[(Standing, &str)] = &[
-    (
-        Standing::Supported,
-        "Piano (npno) and sample (nsmp) files can be created, trimmed, modified, encoded, \
-         decoded, auditioned and transferred.",
-    ),
-    (
-        Standing::Supported,
-        "All Nord Electro 5 files can be viewed, edited and transferred: programs, live, \
-         settings, and set lists or songs.",
-    ),
-    (
-        Standing::Supported,
-        "The Nord Electro 5 has full USB support.",
-    ),
-    (
-        Standing::Untested,
-        "nsmp3 and nsmp4 files are fully supported, but playback of files drawbar has edited \
-         or modified has not been tested on a real instrument.",
-    ),
-    (
-        Standing::Untested,
-        "Nord Stage 2, 3 and 4 programs and presets are supported, but not tested on real \
-         instruments.",
-    ),
-    (
-        Standing::Unsupported,
-        "Instruments other than the Nord Electro 5 have not been tested with Connect an \
-         instrument…, so USB support for other models cannot be guaranteed.",
-    ),
-    (
-        Standing::Unsupported,
-        "Long-term storage in drawbar is not guaranteed while it is in alpha. Back up your \
-         files elsewhere.",
-    ),
+/// The opening rule: a first run is welcomed, an update says what changed, and a version
+/// already read opens on the app itself.
+pub fn opening(seen: Option<&str>) -> Opening {
+    match seen {
+        None => Opening::Welcome,
+        Some(seen) if seen == VERSION => Opening::Nothing,
+        Some(_) => Opening::News,
+    }
+}
+
+/// What a click on the welcome sheet asks of the app.
+pub enum Wanted {
+    /// Close, and record this version as read.
+    Done,
+    /// Close, record this version, and run this.
+    Act(Act),
+}
+
+/// How far one column's claim has been borne out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    Yes,
+    /// Implemented, or implemented in part, but not borne out on an instrument.
+    Partly,
+    No,
+}
+
+/// One column of a [`Row`], and what it claims in the words the pointer shows.
+pub struct Claim {
+    pub mark: Mark,
+    pub hint: &'static str,
+}
+
+const fn claim(mark: Mark, hint: &'static str) -> Claim {
+    Claim { mark, hint }
+}
+
+/// One line of [`SUPPORT`]: what the files are, the four columns, and what the row means
+/// in a sentence.
+pub struct Row {
+    pub instrument: &'static str,
+    pub kinds: &'static str,
+    /// In the order of [`COLUMNS`].
+    pub marks: [Claim; 4],
+    pub note: &'static str,
+}
+
+/// The columns [`Row::marks`] answers.
+pub const COLUMNS: [&str; 4] = ["Read", "Edit", "Send", "Tested"];
+
+/// What works today. Every claim here is one `docs/src/getting-started/support.md` makes:
+/// that page is where a claim is argued, and this is where it is shown.
+pub const SUPPORT: &[Row] = &[
+    Row {
+        instrument: "Nord Electro 5",
+        kinds: "programs · live · settings · set lists",
+        marks: [
+            claim(Mark::Yes, "Reads every Electro 5 file"),
+            claim(Mark::Yes, "Edits every Electro 5 file"),
+            claim(Mark::Yes, "Full USB support"),
+            claim(Mark::Yes, "Used against a real Electro 5"),
+        ],
+        note: "Full support.",
+    },
+    Row {
+        instrument: "Piano and sample files",
+        kinds: "npno · nsmp · nsmp3 · nsmp4",
+        marks: [
+            claim(Mark::Yes, "Decodes all four"),
+            claim(Mark::Yes, "Create, trim, modify, encode, audition"),
+            claim(Mark::Yes, "Transfers over USB"),
+            claim(
+                Mark::Partly,
+                "Samples encoded as v3 or v4, and pianos renamed, retuned, remapped or \
+                 narrowed, have not been played",
+            ),
+        ],
+        note: "Sample files encoded as v3 or v4, and pianos that were renamed, retuned, \
+               remapped or narrowed, have not been played on an instrument.",
+    },
+    Row {
+        instrument: "Nord Stage 2 · 3 · 4",
+        kinds: "programs · presets",
+        marks: [
+            claim(Mark::Yes, "Reads programs and presets"),
+            claim(Mark::Yes, "Edits every decoded field"),
+            claim(
+                Mark::Partly,
+                "No Stage has been connected, so a transfer is unverified",
+            ),
+            claim(Mark::No, "Never tried on a Stage"),
+        ],
+        note: "Untested on real keyboards.",
+    },
+    Row {
+        instrument: "Every other Nord",
+        kinds: "any file it recognises",
+        marks: [
+            claim(
+                Mark::Partly,
+                "drawbar can tell what the file is, but not what is inside it",
+            ),
+            claim(Mark::No, "Nothing is decoded for these models yet"),
+            claim(Mark::No, "USB beyond the Electro 5 cannot be guaranteed"),
+            claim(Mark::No, "Never tried"),
+        ],
+        note: "Opens and keeps the file exactly as it is. It cannot edit it.",
+    },
 ];
+
+/// The lead of the risk box, in bold, and the rest of it.
+const RISK_LEAD: &str = "Keep your own backups.";
+const RISK_REST: &str =
+    " This is alpha — treat what is in drawbar as a working copy, not an archive.";
+
+/// The three ways in, in the order the sheet offers them.
+const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Guide];
+
+#[derive(Clone, Copy)]
+enum Start {
+    Connect,
+    Open,
+    Guide,
+}
+
+/// How one [`Start`] reads on the sheet.
+struct Card {
+    glyph: Glyph,
+    label: &'static str,
+    sub: &'static str,
+    hint: &'static str,
+    /// The tested path, drawn in the accent.
+    lead: bool,
+}
+
+impl Start {
+    const fn card(self) -> Card {
+        match self {
+            Start::Connect => Card {
+                glyph: Glyph::Usb,
+                label: "Connect an instrument…",
+                sub: "See every slot, pull sounds off to keep or edit, and put them back \
+                      where you want them.",
+                hint: "Electro 5 over USB is the tested path",
+                lead: true,
+            },
+            Start::Open => Card {
+                glyph: Glyph::FolderOpen,
+                label: "Open files…",
+                sub: "Programs, samples, pianos and set lists already on this computer.",
+                hint: "",
+                lead: false,
+            },
+            Start::Guide => Card {
+                glyph: Glyph::BookOpen,
+                label: "Read the guide",
+                sub: "",
+                hint: "",
+                lead: false,
+            },
+        }
+    }
+}
+
+/// The welcome sheet. `Some` once the reader has asked for something.
+pub fn welcome(ctx: &egui::Context) -> Option<Wanted> {
+    egui::Modal::new(egui::Id::new("welcome"))
+        .frame(sheet::frame(&ctx.style().visuals))
+        .show(ctx, welcome_body)
+        .inner
+}
+
+fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
+    ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
+    let mut wanted = None;
+    egui::ScrollArea::vertical()
+        .id_salt("welcome")
+        .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+        .show(ui, |ui| {
+            ui.add_space(GAP * 4.5);
+            sheet::section(ui, |ui| {
+                sheet::masthead(ui, true);
+                ui.add_space(GAP * 3.5);
+                risk(ui);
+                sheet::heading(ui, "What works today", None);
+                support(ui);
+                ui.add_space(GAP * 2.0);
+                legend(ui);
+                sheet::heading(ui, "Start here", None);
+                wanted = starts(ui);
+            });
+        });
+    sheet::foot(
+        ui,
+        |ui| sheet::disclaimer(ui, LET_IN),
+        |ui| {
+            let done = sheet::primary(ui, Some(Glyph::Check), "I understand — let me in")
+                .on_hover_text("You can read all of this again from the Help menu")
+                .clicked();
+            if done && wanted.is_none() {
+                wanted = Some(Wanted::Done);
+            }
+        },
+    );
+    match escaped(ui) {
+        true => Some(Wanted::Done),
+        false => wanted,
+    }
+}
+
+/// What this build is, before anything it can do.
+fn risk(ui: &mut egui::Ui) {
+    let tint = warn(ui.visuals());
+    let ink = ui.visuals().strong_text_color();
+    let faint = ui.visuals().faint_bg_color;
+    let mut job = egui::text::LayoutJob::default();
+    for (text, family) in [
+        (RISK_LEAD, bold()),
+        (RISK_REST, egui::FontFamily::Proportional),
+    ] {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::new(12.0, family),
+                color: ink,
+                ..Default::default()
+            },
+        );
+    }
+    egui::Frame::new()
+        .fill(faint)
+        .stroke(egui::Stroke::new(1.0_f32, tint))
+        .corner_radius(egui::CornerRadius::same(2))
+        .inner_margin(egui::Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.add_space(-2.0);
+                ui.add(sized(Glyph::TriangleAlert, 14.0, tint));
+                ui.add(egui::Label::new(job).wrap());
+            });
+        });
+}
+
+/// The room a cell keeps from the table's edge, and the room between two columns.
+const CELL: f32 = 12.0;
+const COLGAP: f32 = 10.0;
+
+/// The three mark columns, and the wider one that says whether a row was tried on
+/// hardware.
+const DOT: f32 = 52.0;
+const TESTED: f32 = 82.0;
+
+/// The mark itself.
+const MARK: f32 = 9.0;
+
+/// Neither prose column is squeezed past this, whatever the window does.
+const LEAST_PROSE: f32 = 88.0;
+
+/// The instrument column and the note column, at the room the table has left for them.
+fn prose(full: f32) -> (f32, f32) {
+    let fixed = DOT * 3.0 + TESTED + COLGAP * 5.0 + CELL * 2.0;
+    let free = (full - fixed).max(2.0 * LEAST_PROSE);
+    (free * 1.5 / 3.2, free * 1.7 / 3.2)
+}
+
+/// [`SUPPORT`] as a table: a head, then one row per line of it, hairlines between.
+fn support(ui: &mut egui::Ui) {
+    let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
+    let faint = ui.visuals().faint_bg_color;
+    egui::Frame::new()
+        .stroke(hairline)
+        .corner_radius(egui::CornerRadius::same(2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let widths = prose(ui.available_width());
+            egui::Frame::new()
+                .fill(faint)
+                .inner_margin(egui::Margin::symmetric(CELL as i8, 5))
+                .show(ui, |ui| head(ui, widths));
+            for row in SUPPORT {
+                rule(ui, hairline);
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(CELL as i8, 7))
+                    .show(ui, |ui| support_row(ui, widths, row));
+            }
+        });
+}
+
+/// The column heads, in MICRO-caps over the cells they name.
+fn head(ui: &mut egui::Ui, widths: (f32, f32)) {
+    let ink = caption(ui.visuals());
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = COLGAP;
+        cell(ui, widths.0, down(), |ui| {
+            ui.label(caps("Instrument").color(ink));
+        });
+        for (column, width) in COLUMNS.iter().zip([DOT, DOT, DOT, TESTED]) {
+            cell(ui, width, middle(), |ui| {
+                ui.label(caps(column).color(ink));
+            });
+        }
+        cell(ui, widths.1, down(), |ui| {
+            ui.label(caps("What that means").color(ink));
+        });
+    });
+}
+
+fn support_row(ui: &mut egui::Ui, widths: (f32, f32), row: &Row) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = COLGAP;
+        cell(ui, widths.0, down(), |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(
+                egui::Label::new(egui::RichText::new(row.instrument).strong().size(12.0)).wrap(),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(row.kinds)
+                        .font(egui::FontId::monospace(10.0))
+                        .weak(),
+                )
+                .wrap(),
+            );
+        });
+        for (claim, width) in row.marks.iter().zip([DOT, DOT, DOT, TESTED]) {
+            cell(ui, width, middle(), |ui| {
+                ui.add_space(3.0);
+                mark(ui, claim.mark).on_hover_text(claim.hint);
+            });
+        }
+        cell(ui, widths.1, down(), |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(row.note).size(11.0)).wrap());
+        });
+    });
+}
+
+/// A hairline across a boxed list, where the next row is about to start.
+fn rule(ui: &mut egui::Ui, hairline: egui::Stroke) {
+    let y = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), y, hairline);
+}
+
+/// One column of a row: `width` wide, its content laid out by `layout`.
+fn cell(ui: &mut egui::Ui, width: f32, layout: egui::Layout, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), layout, |ui| {
+        // ⚠️ A column narrower than the one asked for: an allocated ui gives its parent
+        // only the room its contents took, and the rest of the row would slide into it.
+        ui.set_min_width(width);
+        add(ui);
+    });
+}
+
+/// A column that reads down from its left edge, which is most of them.
+fn down() -> egui::Layout {
+    egui::Layout::top_down(egui::Align::LEFT)
+}
+
+/// A column whose one mark sits in the middle of it.
+fn middle() -> egui::Layout {
+    egui::Layout::top_down(egui::Align::Center)
+}
+
+/// A claim that holds is a lit dot; one that does not is the ring where a dot would be.
+fn mark(ui: &mut egui::Ui, mark: Mark) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(MARK), egui::Sense::hover());
+    let (fill, ring) = match mark {
+        Mark::Yes => (good(ui.visuals()), egui::Stroke::NONE),
+        Mark::Partly => (warn(ui.visuals()), egui::Stroke::NONE),
+        Mark::No => (
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0_f32, unlit(ui.visuals())),
+        ),
+    };
+    ui.painter()
+        .circle(rect.center(), MARK / 2.0 - 0.5, fill, ring);
+    response
+}
+
+/// What the three marks mean, under the table that uses them.
+fn legend(ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        for (shown, label) in [
+            (Mark::Yes, "works here"),
+            (Mark::Partly, "partly, or unverified"),
+            (Mark::No, "not yet"),
+        ] {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                mark(ui, shown);
+                ui.label(egui::RichText::new(label).size(10.5).weak());
+            });
+        }
+    });
+}
+
+/// The least room a start card is given, the room between two of them, and the room
+/// inside one.
+const CARD_LEAST: f32 = 210.0;
+const CARD_GAP: f32 = 10.0;
+const CARD_PAD: egui::Vec2 = egui::vec2(13.0, 11.0);
+const CARD_STROKE: f32 = 1.0;
+
+/// A card's title and its sub-line.
+const CARD_TITLE: f32 = 12.0;
+const CARD_SUB: f32 = 10.5;
+
+/// The cards, as many across as the sheet has room for.
+fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
+    let full = ui.available_width();
+    let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, STARTS.len());
+    let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
+    let mut wanted = None;
+    for (n, row) in STARTS.chunks(across).enumerate() {
+        // The row's height is what its tallest card took, so a card without a sub-line
+        // stands as tall as its neighbours. A row that finds itself taller than it was
+        // told asks for the frame again.
+        let told = ui.id().with(("starts", n));
+        let height: f32 = ui.data(|data| data.get_temp(told)).unwrap_or(0.0);
+        let mut tallest: f32 = 0.0;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = CARD_GAP;
+            for start in row {
+                let drawn = card(ui, start.card(), width, height);
+                tallest = tallest.max(drawn.rect.height());
+                if !drawn.clicked() {
+                    continue;
+                }
+                match start {
+                    Start::Connect => wanted = Some(Wanted::Act(Act::Connect)),
+                    Start::Open => wanted = Some(Wanted::Act(Act::OpenFiles)),
+                    Start::Guide => ui.ctx().open_url(egui::OpenUrl::new_tab(GUIDE)),
+                }
+            }
+        });
+        if tallest != height {
+            ui.data_mut(|data| data.insert_temp(told, tallest));
+            ui.ctx().request_discard("start cards");
+        }
+        ui.add_space(CARD_GAP);
+    }
+    wanted
+}
+
+/// The room a card `width` wide leaves for its text.
+fn inner(width: f32) -> f32 {
+    width - 2.0 * (CARD_PAD.x + CARD_STROKE)
+}
+
+/// A card `width` wide and at least `height` tall, the card's own frame included.
+fn card(ui: &mut egui::Ui, card: Card, width: f32, height: f32) -> egui::Response {
+    let accent = accent(ui.visuals());
+    let (stroke, fill, tint) = match card.lead {
+        true => (
+            egui::Stroke::new(CARD_STROKE, accent),
+            ui.visuals().widgets.active.bg_fill,
+            accent,
+        ),
+        false => (
+            ui.visuals().widgets.noninteractive.bg_stroke,
+            egui::Color32::TRANSPARENT,
+            ui.visuals().weak_text_color(),
+        ),
+    };
+    let drawn = egui::Frame::new()
+        .stroke(stroke)
+        .fill(fill)
+        .corner_radius(egui::CornerRadius::same(2))
+        .inner_margin(egui::Margin::symmetric(CARD_PAD.x as i8, CARD_PAD.y as i8))
+        .show(ui, |ui| {
+            // ⚠️ A frame's content inherits the layout it was opened in, and the cards
+            // are laid out in a row.
+            ui.vertical(|ui| {
+                ui.set_width(inner(width));
+                ui.set_min_height((height - 2.0 * (CARD_PAD.y + CARD_STROKE)).max(0.0));
+                ui.spacing_mut().item_spacing.y = GAP;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.add(sized(card.glyph, 14.0, tint));
+                    ui.label(egui::RichText::new(card.label).strong().size(CARD_TITLE));
+                });
+                if !card.sub.is_empty() {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(card.sub).size(CARD_SUB).weak())
+                            .wrap(),
+                    );
+                }
+            });
+        });
+    let rect = drawn.response.rect;
+    let response = ui
+        .interact(rect, ui.id().with(card.label), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.0_f32, accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    match card.hint.is_empty() {
+        true => response,
+        false => response.on_hover_text(card.hint),
+    }
+}
+
+fn escaped(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.key_pressed(egui::Key::Escape))
+}
+
+/// The release notes, as far as they have been read.
+pub enum Notes {
+    /// Nobody has asked for them yet.
+    Unasked,
+    Loading,
+    Read {
+        body: String,
+        page: String,
+    },
+    /// No network, no such tag yet, a rate limit, or a body too long to be shown.
+    Unavailable,
+}
+
+/// What a release body's heading says the section under it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Change<'a> {
+    Breaking,
+    New,
+    Fixed,
+    Faster,
+    Other,
+    /// A heading `scripts/release.bash` does not write: kept as it reads.
+    Unknown(&'a str),
+}
+
+impl<'a> Change<'a> {
+    /// Read a heading, spelt either way: [`plain`] takes the variation selector out of a
+    /// fetched body, and a body read from anywhere else still carries it.
+    pub fn read(heading: &'a str) -> Change<'a> {
+        match heading.trim() {
+            "\u{26a0} Breaking changes" | "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
+            "Features" => Change::New,
+            "Bug fixes" => Change::Fixed,
+            "Performance" => Change::Faster,
+            "Other changes" => Change::Other,
+            heading => Change::Unknown(heading),
+        }
+    }
+
+    /// What the sheet calls this section.
+    pub fn title(self) -> &'a str {
+        match self {
+            Change::Breaking => "Breaking",
+            Change::New => "New",
+            Change::Fixed => "Fixed",
+            Change::Faster => "Faster",
+            Change::Other => "Other",
+            Change::Unknown(heading) => heading,
+        }
+    }
+
+    /// The mark every row of this section wears.
+    fn badge(self, visuals: &egui::Visuals) -> (Glyph, egui::Color32) {
+        match self {
+            Change::Breaking => (Glyph::TriangleAlert, warn(visuals)),
+            Change::New => (Glyph::Sparkles, good(visuals)),
+            Change::Fixed => (Glyph::Wrench, good(visuals)),
+            Change::Faster => (Glyph::Gauge, good(visuals)),
+            Change::Other => (Glyph::CircleDot, good(visuals)),
+            Change::Unknown(_) => (Glyph::CircleDot, visuals.weak_text_color()),
+        }
+    }
+}
+
+/// One heading of the notes and the lines beneath it; `None` before the first heading.
+struct Section<'a> {
+    change: Option<Change<'a>>,
+    lines: Vec<Line<'a>>,
+}
+
+/// The body grouped under its headings, in the order it was written.
+fn sections(body: &str) -> Vec<Section<'_>> {
+    let mut sections = vec![Section {
+        change: None,
+        lines: Vec::new(),
+    }];
+    for line in body.lines().map(classify) {
+        match line {
+            Line::Heading(heading) => sections.push(Section {
+                change: Some(Change::read(heading)),
+                lines: Vec::new(),
+            }),
+            // The compare link is the foot's, and a blank line is the markdown's own air.
+            Line::Changelog(_) | Line::Blank => {}
+            line => {
+                if let Some(section) = sections.last_mut() {
+                    section.lines.push(line);
+                }
+            }
+        }
+    }
+    sections.retain(|section| !section.lines.is_empty());
+    sections
+}
+
+/// The compare link a release body ends with.
+fn changelog(body: &str) -> Option<&str> {
+    body.lines().find_map(|line| match classify(line) {
+        Line::Changelog(url) => Some(url),
+        _ => None,
+    })
+}
+
+/// How many changes a section holds, in the words the aside reads.
+fn tally(count: usize, breaking: bool) -> String {
+    const WORDS: [&str; 10] = [
+        "no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+
+    let many = WORDS
+        .get(count)
+        .map_or_else(|| count.to_string(), |word| (*word).to_owned());
+    match (count == 1, breaking) {
+        (true, false) => format!("{many} change"),
+        (false, false) => format!("{many} changes"),
+        (true, true) => format!("{many} change that needs your attention"),
+        (false, true) => format!("{many} changes that need your attention"),
+    }
+}
+
+/// The change list. Returns whether the reader is done with it.
+pub fn news(ctx: &egui::Context, notes: &Notes) -> bool {
+    egui::Modal::new(egui::Id::new("news"))
+        .frame(sheet::frame(&ctx.style().visuals))
+        .show(ctx, |ui| news_body(ui, notes))
+        .inner
+}
+
+fn news_body(ui: &mut egui::Ui, notes: &Notes) -> bool {
+    ui.set_width(sheet::width(ui.ctx(), NEWS_WIDTH));
+    egui::ScrollArea::vertical()
+        .id_salt("news")
+        .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+        .show(ui, |ui| {
+            ui.add_space(GAP * 4.0);
+            sheet::section(ui, |ui| {
+                headline(ui);
+                notes_body(ui, notes);
+            });
+            ui.add_space(GAP * 2.0);
+        });
+    let mut done = false;
+    sheet::foot(
+        ui,
+        |ui| {
+            let quiet = ui.visuals().weak_text_color();
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add(sized(Glyph::HardDriveDownload, 12.0, quiet));
+                ui.label(
+                    egui::RichText::new("Still alpha — keep your own backups.")
+                        .size(10.5)
+                        .weak(),
+                );
+            });
+        },
+        |ui| {
+            done = sheet::primary(ui, None, "Continue").clicked();
+            if let Notes::Read { body, page } = notes {
+                sheet::link(ui, "Release page", page);
+                if let Some(url) = changelog(body) {
+                    sheet::link(ui, "Full changelog", url);
+                }
+            }
+        },
+    );
+    done || escaped(ui)
+}
+
+/// What changed, and in which version.
+fn headline(ui: &mut egui::Ui) {
+    let accent = accent(ui.visuals());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 9.0;
+        ui.label(egui::RichText::new("What changed").font(egui::FontId::new(14.0, bold())));
+        ui.label(
+            egui::RichText::new(VERSION)
+                .font(egui::FontId::monospace(12.0))
+                .color(accent),
+        );
+    });
+}
+
+fn notes_body(ui: &mut egui::Ui, notes: &Notes) {
+    match notes {
+        Notes::Unasked | Notes::Loading => {
+            ui.add_space(GAP * 3.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new("Reading the release notes…").weak());
+            });
+        }
+        Notes::Read { body, .. } => {
+            let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
+            for section in sections(body) {
+                section_head(ui, section.change, &section.lines);
+                for line in section.lines {
+                    change_row(ui, section.change, line);
+                    rule(ui, hairline);
+                }
+            }
+        }
+        Notes::Unavailable => {
+            ui.add_space(GAP * 3.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Release notes are unavailable.").weak());
+                sheet::link(ui, "Releases", crate::about::RELEASES);
+            });
+        }
+    }
+}
+
+fn section_head(ui: &mut egui::Ui, change: Option<Change<'_>>, lines: &[Line<'_>]) {
+    let breaking = change == Some(Change::Breaking);
+    let ink = match breaking {
+        true => warn(ui.visuals()),
+        false => ui.visuals().strong_text_color(),
+    };
+    let count = lines
+        .iter()
+        .filter(|line| matches!(line, Line::Item { .. }))
+        .count();
+    ui.add_space(GAP * 4.0);
+    ui.horizontal(|ui| {
+        if let Some(change) = change {
+            ui.label(
+                egui::RichText::new(change.title())
+                    .font(egui::FontId::new(12.0, bold()))
+                    .color(ink),
+            );
+        }
+        ui.label(
+            egui::RichText::new(tally(count, breaking))
+                .size(10.5)
+                .weak(),
+        );
+    });
+    ui.add_space(GAP * 1.5);
+}
+
+/// The column an item's pull request and commit sit in.
+const REF: f32 = 88.0;
+
+/// The column its glyph sits in.
+const BADGE: f32 = 14.0;
+
+fn change_row(ui: &mut egui::Ui, change: Option<Change<'_>>, line: Line<'_>) {
+    let (scope, text, commit) = match line {
+        Line::Item {
+            scope,
+            text,
+            commit,
+        } => (scope, text, commit),
+        Line::Text(text) => (None, text, None),
+        Line::Blank | Line::Heading(_) | Line::Changelog(_) => return,
+    };
+    let (glyph, tint) = match change {
+        Some(change) => change.badge(ui.visuals()),
+        None => (Glyph::CircleDot, ui.visuals().weak_text_color()),
+    };
+    let (text, pr) = split_pr(text);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 9.0;
+        cell(ui, BADGE, down(), |ui| {
+            ui.add_space(2.0);
+            ui.add(sized(glyph, 12.0, tint));
+        });
+        let rest = (ui.available_width() - REF - 9.0).max(LEAST_PROSE);
+        cell(ui, rest, down(), |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(egui::Label::new(egui::RichText::new(text).size(11.5)).wrap());
+            if let Some(scope) = scope {
+                ui.add(egui::Label::new(egui::RichText::new(scope).size(10.5).weak()).wrap());
+            }
+        });
+        cell(
+            ui,
+            REF,
+            egui::Layout::right_to_left(egui::Align::TOP),
+            |ui| reference(ui, pr, commit),
+        );
+    });
+    ui.add_space(GAP);
+}
+
+/// `#NN · sha`, the sha standing for the commit it links to. Laid right to left, so the
+/// column ends flush however much of it there is.
+fn reference(ui: &mut egui::Ui, pr: Option<&str>, commit: Option<Commit<'_>>) {
+    let mono = egui::FontId::monospace(10.0);
+    ui.spacing_mut().item_spacing.x = 4.0;
+    if let Some(commit) = commit {
+        ui.add(
+            egui::Hyperlink::from_label_and_url(
+                egui::RichText::new(commit.sha).font(mono.clone()).weak(),
+                commit.url,
+            )
+            .open_in_new_tab(true),
+        );
+    }
+    if let Some(pr) = pr {
+        let said = match commit.is_some() {
+            true => format!("{pr} ·"),
+            false => pr.to_owned(),
+        };
+        ui.label(egui::RichText::new(said).font(mono).weak());
+    }
+}
 
 /// One line of the notes, in the terms the modal paints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -177,6 +969,25 @@ fn split_commit(item: &str) -> (&str, Option<Commit<'_>>) {
     (&item[..at], Some(Commit { sha, url }))
 }
 
+/// The `(#NN)` a squashed pull request leaves at the end of a subject, and the text
+/// without it. A `#NN` anywhere else is part of what the item says.
+pub fn split_pr(text: &str) -> (&str, Option<&str>) {
+    const OPEN: &str = " (#";
+
+    let Some(rest) = text.strip_suffix(')') else {
+        return (text, None);
+    };
+    let Some(at) = rest.rfind(OPEN) else {
+        return (text, None);
+    };
+    let number = &rest[at + OPEN.len()..];
+    match !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+        // From the `#`, so the column reads as the reference GitHub shows.
+        true => (&rest[..at], Some(&rest[at + OPEN.len() - 1..])),
+        false => (text, None),
+    }
+}
+
 /// The `**scope:**` an item may open with, and the description after it.
 fn split_scope(item: &str) -> (Option<&str>, &str) {
     let Some(rest) = item.strip_prefix("**") else {
@@ -205,6 +1016,201 @@ mod tests {
 - name every write drawbar sends, and read settings from nord-cli (#71) ([3029a35](https://github.com/jmoo/drawbar/commit/3029a35ff1b0f812ccb21cb1a86fbaf0ae5e0256))
 
 **Full changelog**: https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0";
+
+    fn headless() -> egui::Context {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        ctx.set_fonts(crate::app::fonts());
+        ctx.all_styles_mut(crate::app::metrics);
+        ctx
+    }
+
+    /// Every word painted in a frame, with the box it was painted in.
+    fn painted(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    into.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// Draw `add` on a screen this size and report what it painted, and where.
+    fn drawn_at(
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        add: impl FnMut(&egui::Context),
+    ) -> Vec<(String, egui::Rect)> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        painted(&ctx.run(input, add))
+    }
+
+    /// Where a word landed, or nothing when it was never painted.
+    fn box_of(said: &[(String, egui::Rect)], word: &str) -> Option<egui::Rect> {
+        said.iter()
+            .find(|(text, _)| text == word)
+            .map(|(_, rect)| *rect)
+    }
+
+    #[test]
+    fn a_first_run_is_welcomed_an_update_says_what_changed_and_a_read_version_opens_nothing() {
+        assert_eq!(opening(None), Opening::Welcome);
+        assert_eq!(opening(Some("0.0.1")), Opening::News);
+        assert_eq!(opening(Some(VERSION)), Opening::Nothing);
+    }
+
+    #[test]
+    fn a_squashed_pull_request_number_leaves_the_text_and_a_mention_of_one_stays_in_it() {
+        assert_eq!(
+            split_pr("ship the v2 sample encoder (#83)"),
+            ("ship the v2 sample encoder", Some("#83"))
+        );
+        assert_eq!(
+            split_pr("ship the v2 sample encoder"),
+            ("ship the v2 sample encoder", None)
+        );
+        assert_eq!(
+            split_pr("undo the truncation #12 introduced"),
+            ("undo the truncation #12 introduced", None)
+        );
+        assert_eq!(
+            split_pr("a trailer with no number (#)"),
+            ("a trailer with no number (#)", None)
+        );
+    }
+
+    #[test]
+    fn a_breaking_heading_is_named_with_or_without_the_warning_sign() {
+        assert_eq!(
+            Change::read("\u{26a0} Breaking changes"),
+            Change::Breaking,
+            "the heading a fetched body carries once `plain` has run"
+        );
+        assert_eq!(
+            Change::read("\u{26a0}\u{fe0f} Breaking changes"),
+            Change::Breaking
+        );
+        assert_eq!(Change::Breaking.title(), "Breaking");
+    }
+
+    #[test]
+    fn every_heading_the_release_script_writes_has_a_name_and_an_unknown_one_keeps_its_own() {
+        for (heading, title) in [
+            ("Features", "New"),
+            ("Bug fixes", "Fixed"),
+            ("Performance", "Faster"),
+            ("Other changes", "Other"),
+        ] {
+            assert_eq!(Change::read(heading).title(), title, "### {heading}");
+        }
+        let odd = "Acknowledgements";
+        assert_eq!(Change::read(odd), Change::Unknown(odd));
+        assert_eq!(Change::read(odd).title(), odd);
+    }
+
+    #[test]
+    fn a_section_says_how_many_changes_it_holds_and_breaking_says_what_that_asks_of_you() {
+        assert_eq!(tally(1, false), "one change");
+        assert_eq!(tally(3, false), "three changes");
+        assert_eq!(tally(12, false), "12 changes");
+        assert_eq!(tally(3, true), "three changes that need your attention");
+        assert_eq!(tally(1, true), "one change that needs your attention");
+    }
+
+    #[test]
+    fn the_notes_group_under_their_headings_and_the_compare_link_is_left_for_the_foot() {
+        let body = plain(RELEASED);
+        let read = sections(&body);
+        let named: Vec<&str> = read
+            .iter()
+            .map(|section| section.change.map_or("", Change::title))
+            .collect();
+        assert_eq!(named, vec!["Breaking", "New"]);
+        assert!(read.iter().all(|section| section.lines.len() == 1));
+        assert_eq!(
+            changelog(&body),
+            Some("https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0")
+        );
+    }
+
+    /// Every row answers every column, and neither the note nor a hover text is blank: a
+    /// mark nobody can read is a claim nobody can check.
+    #[test]
+    fn every_supported_row_answers_every_column_and_says_what_each_mark_claims() {
+        assert!(!SUPPORT.is_empty());
+        for row in SUPPORT {
+            assert_eq!(row.marks.len(), COLUMNS.len(), "{}", row.instrument);
+            assert!(!row.note.is_empty(), "{}: no note", row.instrument);
+            assert!(!row.kinds.is_empty(), "{}: no kinds", row.instrument);
+            for (claim, column) in row.marks.iter().zip(COLUMNS) {
+                assert!(
+                    !claim.hint.is_empty(),
+                    "{} has no hover text under {column}",
+                    row.instrument
+                );
+            }
+        }
+    }
+
+    /// The shell refuses a smaller screen than this, so both sheets have to lay out in it
+    /// with the one button that dismisses them still on it.
+    #[test]
+    fn the_welcome_sheet_keeps_its_button_on_the_smallest_screen_the_shell_allows() {
+        let ctx = headless();
+        let size = crate::shell::LEAST;
+        // Twice: the first frame is what the second lays itself out against.
+        let _ = drawn_at(&ctx, size, |ctx| {
+            welcome(ctx);
+        });
+        let said = drawn_at(&ctx, size, |ctx| {
+            welcome(ctx);
+        });
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let button = box_of(&said, "I understand — let me in")
+            .unwrap_or_else(|| panic!("the button was never painted: {said:?}"));
+        assert!(
+            screen.contains_rect(button.expand(6.0)),
+            "the button is off a {size:?} screen: {button:?}"
+        );
+        assert!(box_of(&said, "Nord Electro 5").is_some(), "{said:?}");
+    }
+
+    #[test]
+    fn the_news_sheet_keeps_its_button_on_the_smallest_screen_the_shell_allows() {
+        let ctx = headless();
+        let size = crate::shell::LEAST;
+        let notes = Notes::Read {
+            body: plain(RELEASED),
+            page: "https://github.com/jmoo/drawbar/releases/tag/drawbar-v0.5.0".to_owned(),
+        };
+        let _ = drawn_at(&ctx, size, |ctx| {
+            news(ctx, &notes);
+        });
+        let said = drawn_at(&ctx, size, |ctx| {
+            news(ctx, &notes);
+        });
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let button =
+            box_of(&said, "Continue").unwrap_or_else(|| panic!("no Continue button: {said:?}"));
+        assert!(
+            screen.contains_rect(button.expand(6.0)),
+            "the button is off a {size:?} screen: {button:?}"
+        );
+        assert!(box_of(&said, "Breaking").is_some(), "{said:?}");
+    }
 
     #[test]
     fn a_heading_keeps_its_title_alone() {

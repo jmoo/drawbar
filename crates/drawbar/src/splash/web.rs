@@ -1,5 +1,5 @@
-//! The modal itself: the notice, the notes fetched from GitHub, and the version already
-//! read.
+//! The browser's half: which sheet a session opens on unasked, and the notes behind the
+//! change list.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -7,14 +7,11 @@ use eframe::egui;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use super::{
-    classify, https, link, plain, title, Commit, Line, Standing, EXPECTATIONS, GAP, VERSION, WIDTH,
-};
+use super::{https, news, opening, plain, welcome, Notes, Opening, Wanted, VERSION};
 use crate::about::RELEASES;
-use crate::app::{bad, good, warn};
-use crate::icon::{icon, Glyph};
+use crate::browser::Act;
 
-/// Which version's notes have already been read.
+/// Which version's sheet has already been dismissed.
 ///
 /// ⚠️ Written straight to `localStorage` rather than through [`eframe::Storage`]. eframe
 /// 0.32's web runner saves on its auto-save timer and on focus loss, and subscribes its
@@ -31,69 +28,45 @@ const TAG: &str = concat!(
 /// note reads as a whole one.
 const MOST: usize = 64 * 1024;
 
-/// The most of the modal the notes may claim.
-const NOTES: f32 = 440.0;
-
-/// The notices' column beside the notes, and the narrowest window the two fit side by side
-/// in; a narrower one stacks the notes beneath.
-const NOTICES: f32 = 380.0;
-const BESIDE: f32 = 1040.0;
-
-/// The height the modal needs around the notes, so on a short window they scroll rather
-/// than push Continue off-screen: title and Continue beside the notices, and the notices
-/// too when stacked.
-const AROUND_BESIDE: f32 = 200.0;
-const AROUND: f32 = 380.0;
-
-/// The notes are never shorter than this, however short the window.
-const FEWEST: f32 = 120.0;
-
-/// The alert beside the notice.
-const GLYPH: f32 = 14.0;
-
-enum Notes {
-    /// Nobody has asked for them: this version's notice was read in an earlier session
-    /// and Help has not reopened it.
-    Unasked,
-    Loading,
-    Read {
-        body: String,
-        page: String,
-    },
-    /// No network, no such tag yet, a rate limit, or a body past [`MOST`].
-    Unavailable,
+/// Which sheet is up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sheet {
+    Welcome,
+    News,
 }
 
 pub struct Splash {
-    showing: bool,
+    showing: Option<Sheet>,
     notes: Notes,
     inbox: Receiver<Notes>,
     outbox: Sender<Notes>,
 }
 
 impl Splash {
-    /// Open on the notice unless this version's notes have already been read.
+    /// Open on whichever sheet the version already read calls for.
     pub fn new(ctx: &egui::Context) -> Splash {
-        let showing = seen().as_deref() != Some(VERSION);
         let (outbox, inbox) = channel();
-        let notes = match showing {
-            true => {
-                fetch(ctx.clone(), outbox.clone());
-                Notes::Loading
-            }
-            false => Notes::Unasked,
-        };
-        Splash {
-            showing,
-            notes,
+        let mut splash = Splash {
+            showing: None,
+            notes: Notes::Unasked,
             inbox,
             outbox,
+        };
+        match opening(seen().as_deref()) {
+            Opening::Welcome => splash.open_welcome(),
+            Opening::News => splash.open_news(ctx),
+            Opening::Nothing => {}
         }
+        splash
     }
 
-    /// Show the notice again, reading the notes unless they are in hand or on the way.
-    pub fn open(&mut self, ctx: &egui::Context) {
-        self.showing = true;
+    pub fn open_welcome(&mut self) {
+        self.showing = Some(Sheet::Welcome);
+    }
+
+    /// Show the change list, reading the notes unless they are in hand or on the way.
+    pub fn open_news(&mut self, ctx: &egui::Context) {
+        self.showing = Some(Sheet::News);
         if matches!(self.notes, Notes::Loading | Notes::Read { .. }) {
             return;
         }
@@ -101,164 +74,36 @@ impl Splash {
         fetch(ctx.clone(), self.outbox.clone());
     }
 
-    /// Draw the notice, if it is owed, and record the version once it is dismissed.
-    pub fn show(&mut self, ctx: &egui::Context) {
-        if !self.showing {
-            return;
-        }
+    /// Draw whichever sheet is up, record the version once one is dismissed, and hand on
+    /// what the reader asked for.
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<Act> {
         while let Ok(notes) = self.inbox.try_recv() {
             self.notes = notes;
         }
-        if egui::Modal::new(egui::Id::new("splash"))
-            .show(ctx, |ui| self.body(ui))
-            .inner
-        {
-            self.showing = false;
-            remember();
+        match self.showing? {
+            Sheet::Welcome => match welcome(ctx)? {
+                Wanted::Done => {
+                    self.dismiss();
+                    None
+                }
+                Wanted::Act(act) => {
+                    self.dismiss();
+                    Some(act)
+                }
+            },
+            Sheet::News => {
+                if news(ctx, &self.notes) {
+                    self.dismiss();
+                }
+                None
+            }
         }
     }
 
-    /// Returns whether the reader is done with it.
-    fn body(&self, ui: &mut egui::Ui) -> bool {
-        let screen = ui.ctx().screen_rect();
-        let beside = screen.width() >= BESIDE;
-        let around = match beside {
-            true => AROUND_BESIDE,
-            false => AROUND,
-        };
-        let height = (screen.height() - around).clamp(FEWEST, NOTES);
-        title(ui);
-        ui.add_space(GAP);
-        match beside {
-            true => {
-                ui.horizontal_top(|ui| {
-                    let left = ui.vertical(|ui| {
-                        ui.set_width(NOTICES);
-                        notices(ui);
-                    });
-                    ui.add_space(GAP * 4.0);
-                    let right = ui.vertical(|ui| {
-                        ui.set_width(WIDTH);
-                        self.paint_notes(ui, height);
-                    });
-                    // ⚠️ Not a `Separator`: in a row it grows to all the height below it.
-                    let (left, right) = (left.response.rect, right.response.rect);
-                    ui.painter().vline(
-                        (left.right() + right.left()) / 2.0,
-                        left.top()..=left.bottom().max(right.bottom()),
-                        ui.visuals().widgets.noninteractive.bg_stroke,
-                    );
-                });
-            }
-            false => {
-                ui.set_width(WIDTH);
-                notices(ui);
-                ui.separator();
-                self.paint_notes(ui, height);
-            }
-        }
-        ui.separator();
-        ui.add_space(GAP);
-        let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
-        let continued = ui
-            .horizontal(|ui| {
-                ui.add(egui::Button::new(egui::RichText::new("Continue").strong()))
-                    .clicked()
-            })
-            .inner;
-        continued || escaped
+    fn dismiss(&mut self) {
+        self.showing = None;
+        remember();
     }
-
-    fn paint_notes(&self, ui: &mut egui::Ui, height: f32) {
-        ui.add_space(GAP);
-        match &self.notes {
-            Notes::Unasked | Notes::Loading => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("Reading the release notes…").weak());
-                });
-            }
-            Notes::Read { body, page } => {
-                egui::ScrollArea::vertical()
-                    .max_height(height)
-                    .show(ui, |ui| {
-                        for line in body.lines() {
-                            paint(ui, classify(line));
-                        }
-                        ui.add_space(GAP);
-                        link(ui, "Release page", page);
-                    });
-            }
-            Notes::Unavailable => {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Release notes are unavailable.").weak());
-                    link(ui, "Releases", RELEASES);
-                });
-            }
-        }
-        ui.add_space(GAP * 2.0);
-    }
-}
-
-/// The alpha notice, and what to expect of this build.
-fn notices(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        let tint = warn(ui.visuals());
-        icon(ui, Glyph::CircleAlert, GLYPH, tint);
-        ui.label(egui::RichText::new("Use at your own risk, this is alpha software.").color(tint));
-    });
-    ui.add_space(GAP * 2.0);
-    for (standing, claim) in EXPECTATIONS {
-        let (glyph, tint) = match standing {
-            Standing::Supported => (Glyph::CircleCheck, good(ui.visuals())),
-            Standing::Untested => (Glyph::CircleAlert, warn(ui.visuals())),
-            Standing::Unsupported => (Glyph::CircleX, bad(ui.visuals())),
-        };
-        ui.horizontal_top(|ui| {
-            icon(ui, glyph, GLYPH, tint);
-            ui.add(egui::Label::new(*claim).wrap());
-        });
-        ui.add_space(GAP);
-    }
-}
-
-fn paint(ui: &mut egui::Ui, line: Line<'_>) {
-    match line {
-        Line::Blank => ui.add_space(GAP),
-        Line::Heading(title) => {
-            ui.add_space(GAP);
-            ui.label(egui::RichText::new(title).strong());
-        }
-        Line::Item {
-            scope,
-            text,
-            commit,
-        } => bullet(ui, scope, text, commit),
-        Line::Changelog(url) => link(ui, "Full changelog", url),
-        Line::Text(text) => {
-            ui.label(text);
-        }
-    }
-}
-
-fn bullet(ui: &mut egui::Ui, scope: Option<&str>, text: &str, commit: Option<Commit<'_>>) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
-        ui.label("•");
-        if let Some(scope) = scope {
-            ui.label(egui::RichText::new(format!("{scope}:")).strong());
-        }
-        ui.label(text);
-        if let Some(commit) = commit {
-            ui.add(
-                egui::Hyperlink::from_label_and_url(
-                    egui::RichText::new(commit.sha).weak(),
-                    commit.url,
-                )
-                .open_in_new_tab(true),
-            );
-        }
-    });
 }
 
 /// Read the notes off GitHub and hand them to whichever frame draws next.

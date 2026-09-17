@@ -30,6 +30,22 @@
         flake.overlays.default = lib.composeManyExtensions [
           (final: prev: { lib = prev.lib.extend (_: _: { crane = inputs.crane.mkLib final; }); })
           (import ./overlay.nix)
+          # The commit drawbar's About box reports. Only drawbar's derivations read it;
+          # see `revEnv` in overlay.nix.
+          (_: prev: {
+            nord = prev.nord // {
+              rev = inputs.self.shortRev or inputs.self.dirtyShortRev or null;
+              revDate =
+                let
+                  stamp = inputs.self.lastModifiedDate or null;
+                in
+                # `lastModifiedDate` is YYYYMMDDHHMMSS.
+                if stamp == null then
+                  null
+                else
+                  "${builtins.substring 0 4 stamp}-${builtins.substring 4 2 stamp}-${builtins.substring 6 2 stamp}";
+            };
+          })
         ];
 
         perSystem =

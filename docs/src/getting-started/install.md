@@ -28,3 +28,13 @@ nix run github:jmoo/drawbar#nord-cli -- --help   # or run it with Nix
 
 There are no packaged downloads yet. To build either from a source checkout, see
 [Building from source](../reference/building.md).
+
+## If drawbar does not load
+
+The page says which step failed. The usual causes:
+
+- The connection dropped, or the download stopped partway. Reload the page.
+- The browser has no WebAssembly or WebGL2. drawbar needs both, and every
+  current browser has them.
+- An extension or a content blocker refused the startup script or WebAssembly
+  module. Allow this site and reload.

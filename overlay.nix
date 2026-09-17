@@ -123,6 +123,15 @@ let
     ]
   );
 
+  # What drawbar's About box reports about this build. flake.nix supplies both; a
+  # checkout without them builds a drawbar that says the commit was not recorded.
+  #
+  # ⚠️ Only drawbar's own derivations take these. A crate whose environment carried the
+  # rev would be rebuilt by every commit, dependency builds included.
+  revEnv =
+    optionalAttrs (final.nord.rev or null != null) { DRAWBAR_COMMIT = final.nord.rev; }
+    // optionalAttrs (final.nord.revDate or null != null) { DRAWBAR_COMMIT_DATE = final.nord.revDate; };
+
   audioArgs = optionalAttrs final.stdenv.hostPlatform.isLinux {
     buildInputs = [ final.alsa-lib ];
     nativeBuildInputs = [ final.pkg-config ];
@@ -150,6 +159,7 @@ let
             meta.mainProgram = "drawbar";
           }
           // audioArgs
+          // revEnv
         );
       in
       if guiLibs == [ ] then
@@ -373,7 +383,10 @@ let
       };
     in
     crane.buildPackage (
+      # ⚠️ After `args`, not in it: the dependency build reads `args`, and a rev in its
+      # environment would rebuild the whole GUI stack on every commit.
       args
+      // revEnv
       // {
         cargoArtifacts = crane.buildDepsOnly args;
 
@@ -390,14 +403,27 @@ let
 
           js="drawbar-$(sha256sum "$out/pkg/drawbar.js" | cut -c-16).js"
           mv "$out/pkg/drawbar.js" "$out/pkg/$js"
+
+          # The page fetches the module itself to report progress, so it needs the
+          # hashed name and the byte count the renamed file actually has.
           substitute ${./crates/drawbar/index.html} "$out/index.html" \
-            --replace-fail pkg/drawbar.js "pkg/$js"
+            --replace-fail pkg/drawbar.js "pkg/$js" \
+            --replace-fail pkg/drawbar_bg.wasm "pkg/$wasm" \
+            --replace-fail @version@ "${manifests.drawbar.version}" \
+            --replace-fail @wasmBytes@ "$(stat -c %s "$out/pkg/$wasm")"
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
 
-          if grep -qF drawbar_bg.wasm "$out/pkg/$js" || grep -qF pkg/drawbar.js "$out/index.html"; then
+          if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2
             exit 1
           fi
+
+          for stale in pkg/drawbar.js pkg/drawbar_bg.wasm @version@ @wasmBytes@; do
+            if grep -qF "$stale" "$out/index.html"; then
+              echo "index.html still holds $stale after the rewrite" >&2
+              exit 1
+            fi
+          done
 
           # The page imports `start` from the module; a bundle without it loads
           # and does nothing.
