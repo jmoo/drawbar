@@ -27,6 +27,9 @@ pub(crate) const PAD: f32 = 20.0;
 /// The least room a sheet keeps from the window's edge.
 const MARGIN: f32 = 24.0;
 
+/// The room inside a sheet's buttons, wider than the shell's own.
+const PADDING: egui::Vec2 = egui::vec2(12.0, 4.0);
+
 /// The glyph beside a sheet's title.
 const MARK: f32 = 22.0;
 
@@ -189,7 +192,11 @@ fn button(
         Some(glyph) => egui::Button::image_and_text(sized(glyph, 13.0, tint), text),
         None => egui::Button::new(text),
     };
-    ui.add(button.fill(fill).stroke(stroke))
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = PADDING;
+        ui.add(button.fill(fill).stroke(stroke))
+    })
+    .inner
 }
 
 /// ⚠️ Always a new tab: in a browser the app *is* the page, and following a link in

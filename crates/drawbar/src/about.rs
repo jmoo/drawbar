@@ -24,25 +24,12 @@ const ISSUES: &str = "https://github.com/jmoo/drawbar/issues";
 /// What one licence covers in the app, and its terms.
 struct Notice {
     covers: &'static str,
+    /// The copyright line, as the licence text or the font's own name table gives it.
+    holder: &'static str,
     /// Where bundled material came from; `None` for drawbar itself.
     source: Option<&'static str>,
     licence: &'static str,
     text: &'static str,
-}
-
-impl Notice {
-    /// Whose copyright travels with it: where the material came from, or — for drawbar,
-    /// which came from nowhere — the copyright line of its own licence.
-    fn held(&self) -> &'static str {
-        match self.source {
-            Some(source) => source,
-            None => self
-                .text
-                .lines()
-                .find(|line| line.starts_with("Copyright"))
-                .unwrap_or_default(),
-        }
-    }
 }
 
 /// The Rust crates under one licence: its text once, and who holds copyright in what.
@@ -90,6 +77,7 @@ struct Text {
 const NOTICES: &[Notice] = &[
     Notice {
         covers: "drawbar",
+        holder: "Copyright (c) 2023-2026, John Moore",
         source: None,
         licence: "BSD 3-Clause",
         // A copy of `crates/LICENSE`: a packaged crate cannot reach outside its own root,
@@ -98,42 +86,49 @@ const NOTICES: &[Notice] = &[
     },
     Notice {
         covers: "emoji-icon-font",
+        holder: "Copyright (c) 2014 John Slegers",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "MIT",
         text: include_str!("../assets/fonts/egui/emoji-icon-font-mit-license.txt"),
     },
     Notice {
         covers: "Hack Regular",
+        holder: "Copyright (c) 2018 Source Foundry Authors",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "MIT and Bitstream Vera",
         text: include_str!("../assets/fonts/egui/Hack-Regular.txt"),
     },
     Notice {
         covers: "Lucide icons",
+        holder: "Copyright (c) 2022 Lucide Contributors, 2013-2022 Cole Bemis",
         source: Some("Lucide 0.469.0"),
         licence: "ISC",
         text: include_str!("../assets/icons/LICENSE"),
     },
     Notice {
         covers: "Noto Emoji Regular",
+        holder: "Copyright 2013 Google Inc.",
         source: Some("egui's epaint_default_fonts 0.32.3"),
         licence: "SIL Open Font License 1.1",
         text: include_str!("../assets/fonts/egui/OFL.txt"),
     },
     Notice {
         covers: "Ubuntu Regular, Bold and Light",
+        holder: "Copyright 2011 Canonical Ltd.",
         source: Some("Ubuntu font family 0.83; Light from egui's epaint_default_fonts 0.32.3"),
         licence: "Ubuntu Font Licence 1.0",
         text: include_str!("../assets/fonts/LICENCE.txt"),
     },
     Notice {
         covers: "Stage 2 and 3 field maps",
+        holder: "Copyright (c) 2020, Christian Florentz",
         source: Some("nord-documentation by Christian Florentz"),
         licence: "BSD 3-Clause",
         text: include_str!("../licences/nord-documentation.txt"),
     },
     Notice {
         covers: "Stage 4 field tables",
+        holder: "Copyright (c) 2024 Randy",
         source: Some("ns4decode by Randy"),
         licence: "MIT",
         text: include_str!("../licences/ns4decode.txt"),
@@ -476,7 +471,7 @@ fn inventory() -> String {
 /// [`NOTICES`], then the Rust crates by licence.
 fn licences(ui: &mut egui::Ui) {
     for notice in NOTICES {
-        row(ui, notice.covers, notice.held(), notice.licence, |ui| {
+        row(ui, notice.covers, notice.holder, notice.licence, |ui| {
             terms(ui, notice.source, notice.text);
         });
     }
@@ -724,27 +719,32 @@ mod tests {
         assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 2);
     }
 
+    /// A holder is a copyright line, and every name in it is one the licence text
+    /// carries — unless the text names nobody and the holder came off the font itself.
     #[test]
-    fn a_notice_of_bundled_material_is_held_by_whoever_it_came_from() {
-        let lucide = NOTICES
-            .iter()
-            .find(|notice| notice.covers == "Lucide icons")
-            .expect("the vendored glyphs are listed");
-        assert_eq!(lucide.held(), "Lucide 0.469.0");
-    }
-
-    /// drawbar's own row has no source to name, so it names the copyright instead.
-    #[test]
-    fn drawbars_own_notice_is_held_by_the_copyright_in_its_licence() {
-        let drawbar = NOTICES
-            .iter()
-            .find(|notice| notice.covers == "drawbar")
-            .expect("drawbar lists its own licence");
-        assert!(
-            drawbar.held().starts_with("Copyright (c)"),
-            "{:?}",
-            drawbar.held()
-        );
+    fn every_notice_names_a_copyright_holder_its_licence_agrees_with() {
+        for notice in NOTICES {
+            assert!(
+                notice.holder.starts_with("Copyright"),
+                "{}: {:?} is not a copyright line",
+                notice.covers,
+                notice.holder
+            );
+            if !notice.text.contains("Copyright (c)") {
+                continue;
+            }
+            let names = notice
+                .holder
+                .split(|c: char| !c.is_alphabetic())
+                .filter(|word| word.len() > 3 && *word != "Copyright");
+            for name in names {
+                assert!(
+                    notice.text.contains(name),
+                    "{}: the licence text never names {name:?}",
+                    notice.covers
+                );
+            }
+        }
     }
 
     /// `include_str!` accepts whatever file it is pointed at, licence or not.

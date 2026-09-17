@@ -291,6 +291,7 @@ fn risk(ui: &mut egui::Ui) {
         .corner_radius(egui::CornerRadius::same(2))
         .inner_margin(egui::Margin::symmetric(12, 9))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.add_space(-2.0);
                 ui.add(sized(Glyph::TriangleAlert, 14.0, tint));
@@ -452,9 +453,15 @@ fn legend(ui: &mut egui::Ui) {
     });
 }
 
-/// The least room a start card is given, and the room between two of them.
+/// The least room a start card is given, the room between two of them, and the room
+/// inside one.
 const CARD_LEAST: f32 = 210.0;
 const CARD_GAP: f32 = 10.0;
+const CARD_PAD: i8 = 13;
+
+/// A card's title and its sub-line.
+const CARD_TITLE: f32 = 12.0;
+const CARD_SUB: f32 = 10.5;
 
 /// The cards, as many across as the sheet has room for.
 fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
@@ -463,10 +470,16 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
     let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
     let mut wanted = None;
     for row in STARTS.chunks(across) {
+        // One height for the row, so a card without a sub-line stands as tall as its
+        // neighbours.
+        let height = row
+            .iter()
+            .map(|start| card_height(ui, start.card(), inner(width)))
+            .fold(0.0, f32::max);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
             for start in row {
-                if !card(ui, start.card(), width).clicked() {
+                if !card(ui, start.card(), width, height).clicked() {
                     continue;
                 }
                 match start {
@@ -481,9 +494,31 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
     wanted
 }
 
-fn card(ui: &mut egui::Ui, card: Card, width: f32) -> egui::Response {
-    const PAD: i8 = 13;
+/// The room a card `width` wide leaves for its text.
+fn inner(width: f32) -> f32 {
+    width - 2.0 * f32::from(CARD_PAD) - 2.0
+}
 
+/// The height a card's text takes at `inner` width.
+fn card_height(ui: &egui::Ui, card: Card, inner: f32) -> f32 {
+    let title = ui
+        .fonts(|fonts| fonts.row_height(&egui::FontId::proportional(CARD_TITLE)))
+        .max(14.0);
+    if card.sub.is_empty() {
+        return title;
+    }
+    let sub = ui.fonts(|fonts| {
+        fonts.layout(
+            card.sub.to_owned(),
+            egui::FontId::proportional(CARD_SUB),
+            egui::Color32::PLACEHOLDER,
+            inner,
+        )
+    });
+    title + GAP + sub.size().y
+}
+
+fn card(ui: &mut egui::Ui, card: Card, width: f32, height: f32) -> egui::Response {
     let accent = accent(ui.visuals());
     let (stroke, fill, tint) = match card.lead {
         true => (
@@ -501,21 +536,23 @@ fn card(ui: &mut egui::Ui, card: Card, width: f32) -> egui::Response {
         .stroke(stroke)
         .fill(fill)
         .corner_radius(egui::CornerRadius::same(2))
-        .inner_margin(egui::Margin::symmetric(PAD, 11))
+        .inner_margin(egui::Margin::symmetric(CARD_PAD, 11))
         .show(ui, |ui| {
             // ⚠️ A frame's content inherits the layout it was opened in, and the cards
             // are laid out in a row.
             ui.vertical(|ui| {
-                ui.set_width(width - 2.0 * f32::from(PAD) - 2.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.set_width(inner(width));
+                ui.set_min_height(height);
+                ui.spacing_mut().item_spacing.y = GAP;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.add(sized(card.glyph, 14.0, tint));
-                    ui.label(egui::RichText::new(card.label).strong().size(12.0));
+                    ui.label(egui::RichText::new(card.label).strong().size(CARD_TITLE));
                 });
                 if !card.sub.is_empty() {
                     ui.add(
-                        egui::Label::new(egui::RichText::new(card.sub).size(10.5).weak()).wrap(),
+                        egui::Label::new(egui::RichText::new(card.sub).size(CARD_SUB).weak())
+                            .wrap(),
                     );
                 }
             });
