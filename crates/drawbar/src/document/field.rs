@@ -556,9 +556,7 @@ fn paths<'a>(section: &Sect<'a>) -> Vec<&'a str> {
 /// The row above the scroll region: one chip per section, and the morph lens where the
 /// body has morph slots.
 ///
-/// ⚠️ Every chip is in the one wrapping flow, the lens included. A row that clipped
-/// would put the last sections out of reach on a narrow window, and a lens laid out
-/// from the right edge of a row the chips have filled is drawn over them.
+/// ⚠️ Every chip is in the one wrapping flow, the lens included.
 pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
     if doc.sections.is_empty() {
         return;
@@ -568,32 +566,48 @@ pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
         for section in &doc.sections {
             let active = state.active.as_deref() == Some(section.key.as_str());
-            if nav_chip(ui, &section.title, &section.count.to_string(), active).clicked() {
+            let chip = Chip::new(ui, &section.title, &section.count.to_string(), active);
+            if chip.show(ui).clicked() {
                 state.jump = Some(section.key.clone());
             }
         }
         if doc.slots == 0 {
             return;
         }
-        // ⚠️ A label left to wrap lays its text out across the whole row rather than
-        // taking a place in it, which puts the word over the chips already there.
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new("MORPH")
-                    .font(egui::FontId::proportional(COUNT_TEXT))
-                    .color(quiet),
-            )
-            .wrap_mode(egui::TextWrapMode::Extend),
+        let caption = ui.painter().layout_no_wrap(
+            "MORPH".to_string(),
+            egui::FontId::proportional(COUNT_TEXT),
+            quiet,
         );
-        if nav_chip(ui, "Panel", "", state.lens.is_none()).clicked() {
-            state.lens = None;
-        }
-        for (nth, (_, word, _)) in SLOTS.iter().enumerate() {
-            let count = stored_targets(doc, nth);
-            if nav_chip(ui, word, &count.to_string(), state.lens == Some(nth)).clicked() {
-                state.lens = Some(nth);
-            }
-        }
+        let lenses: Vec<(Option<usize>, Chip)> =
+            std::iter::once((None, Chip::new(ui, "Panel", "", state.lens.is_none())))
+                .chain(SLOTS.iter().enumerate().map(|(nth, (_, word, _))| {
+                    let count = stored_targets(doc, nth).to_string();
+                    (
+                        Some(nth),
+                        Chip::new(ui, word, &count, state.lens == Some(nth)),
+                    )
+                }))
+                .collect();
+        let gap = ui.spacing().item_spacing.x;
+        let width = caption.size().x
+            + lenses
+                .iter()
+                .map(|(_, chip)| gap + chip.width())
+                .sum::<f32>();
+        // One unit in the flow, so the caption never ends a row its chips do not.
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, CHIP),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(caption);
+                for (lens, chip) in lenses {
+                    if chip.show(ui).clicked() {
+                        state.lens = lens;
+                    }
+                }
+            },
+        );
     });
 }
 
@@ -605,52 +619,78 @@ fn stored_targets(doc: &Doc<'_>, slot: usize) -> usize {
         .count()
 }
 
-fn nav_chip(ui: &mut egui::Ui, title: &str, count: &str, active: bool) -> egui::Response {
-    let visuals = ui.visuals().clone();
-    let painter = ui.painter().clone();
-    let ink = match active {
-        true => visuals.text_color(),
-        false => visuals.weak_text_color(),
-    };
-    let word = painter.layout_no_wrap(
-        title.to_string(),
-        egui::FontId::proportional(CHIP_TEXT),
-        ink,
-    );
-    let tail = (!count.is_empty()).then(|| {
-        painter.layout_no_wrap(
-            count.to_string(),
-            egui::FontId::monospace(COUNT_TEXT),
-            match active {
-                true => app::accent(&visuals),
-                false => app::caption(&visuals),
-            },
-        )
-    });
-    let width = 16.0 + word.size().x + tail.as_ref().map_or(0.0, |laid| 5.0 + laid.size().x);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CHIP), egui::Sense::click());
-    if active || response.hovered() {
-        let fill = match active {
-            true => visuals.widgets.active.weak_bg_fill,
-            false => visuals.widgets.hovered.weak_bg_fill,
+/// A nav chip laid out and not yet placed, so a row can be measured before it is drawn.
+struct Chip {
+    word: std::sync::Arc<egui::Galley>,
+    tail: Option<std::sync::Arc<egui::Galley>>,
+    ink: egui::Color32,
+    active: bool,
+}
+
+impl Chip {
+    fn new(ui: &egui::Ui, title: &str, count: &str, active: bool) -> Self {
+        let visuals = ui.visuals();
+        let painter = ui.painter();
+        let ink = match active {
+            true => visuals.text_color(),
+            false => visuals.weak_text_color(),
         };
-        painter.rect_filled(rect, RADIUS, fill);
-    }
-    let mut x = rect.left() + 8.0;
-    painter.galley(
-        egui::pos2(x, rect.center().y - word.size().y / 2.0),
-        word.clone(),
-        ink,
-    );
-    x += word.size().x + 5.0;
-    if let Some(tail) = tail {
-        painter.galley(
-            egui::pos2(x, rect.center().y - tail.size().y / 2.0),
-            tail,
+        let word = painter.layout_no_wrap(
+            title.to_string(),
+            egui::FontId::proportional(CHIP_TEXT),
             ink,
         );
+        let tail = (!count.is_empty()).then(|| {
+            painter.layout_no_wrap(
+                count.to_string(),
+                egui::FontId::monospace(COUNT_TEXT),
+                match active {
+                    true => app::accent(visuals),
+                    false => app::caption(visuals),
+                },
+            )
+        });
+        Self {
+            word,
+            tail,
+            ink,
+            active,
+        }
     }
-    response
+
+    fn width(&self) -> f32 {
+        16.0 + self.word.size().x + self.tail.as_ref().map_or(0.0, |laid| 5.0 + laid.size().x)
+    }
+
+    fn show(self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(self.width(), CHIP), egui::Sense::click());
+        let visuals = ui.visuals();
+        let painter = ui.painter();
+        if self.active || response.hovered() {
+            let fill = match self.active {
+                true => visuals.widgets.active.weak_bg_fill,
+                false => visuals.widgets.hovered.weak_bg_fill,
+            };
+            painter.rect_filled(rect, RADIUS, fill);
+        }
+        let mut x = rect.left() + 8.0;
+        let word_width = self.word.size().x;
+        painter.galley(
+            egui::pos2(x, rect.center().y - self.word.size().y / 2.0),
+            self.word,
+            self.ink,
+        );
+        x += word_width + 5.0;
+        if let Some(tail) = self.tail {
+            painter.galley(
+                egui::pos2(x, rect.center().y - tail.size().y / 2.0),
+                tail,
+                self.ink,
+            );
+        }
+        response
+    }
 }
 
 /// Draw the whole document. Returns whether something asked for the Advanced face.
@@ -3000,6 +3040,22 @@ mod tests {
                 assert!(
                     painted.iter().any(|(text, _)| text == wanted),
                     "{wanted} is not on a {width} wide nav row",
+                );
+            }
+            let row = |wanted: &str| {
+                painted
+                    .iter()
+                    .find(|(text, _)| text == wanted)
+                    .map(|(_, rect)| rect.y_range())
+                    .expect("painted above")
+            };
+            let caption = row("MORPH");
+            for chip in std::iter::once("Panel").chain(SLOTS.iter().map(|(_, word, _)| *word)) {
+                let on = row(chip);
+                assert!(
+                    on.intersects(caption),
+                    "{chip} is on the row at {on:?}, apart from MORPH at {caption:?}, \
+                     at {width} wide",
                 );
             }
             for (nth, (word, rect)) in painted.iter().enumerate() {
