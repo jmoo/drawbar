@@ -1286,8 +1286,7 @@ mod tests {
     /// into the log — on every Enter the operator pressed anywhere.
     #[test]
     fn a_name_box_settles_on_its_own_enter_rather_than_the_windows() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         let mut text = "Marimba".to_string();
         let key = |key| egui::Event::Key {
             key,

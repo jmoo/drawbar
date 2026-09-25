@@ -1351,12 +1351,11 @@ mod tests {
         }
 
         fn empty() -> Open {
-            let ctx = egui::Context::default();
             // Both faces, the way the app dresses them: a named text style the header
             // asks for and nothing registered is a panic mid-frame, and so is the
             // semibold family a section heading and a zone row are set in.
+            let ctx = crate::app::test_context();
             ctx.all_styles_mut(crate::app::metrics);
-            ctx.set_fonts(crate::app::fonts());
             Open {
                 workspace: Workspace::new(ctx.clone()),
                 device: Device::new(ctx.clone()),
@@ -2146,9 +2145,8 @@ mod tests {
     /// document moves the tab strip.
     #[test]
     fn the_tab_strip_and_the_document_body_scroll_on_their_own() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.style_mut(crate::app::metrics);
-        ctx.set_fonts(crate::app::fonts());
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();
@@ -2294,9 +2292,8 @@ mod tests {
     /// following them into the next tab and landing there on Enter.
     #[test]
     fn a_half_typed_cell_does_not_follow_the_operator_into_the_next_document() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
-        ctx.set_fonts(crate::app::fonts());
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
         let mut log = Log::default();

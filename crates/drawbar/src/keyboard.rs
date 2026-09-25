@@ -1044,7 +1044,7 @@ mod tests {
     /// A context dressed the way `DrawbarApp::new` dresses one: the named text styles a
     /// band resolves are installed there, on both faces.
     fn context() -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         ctx
     }

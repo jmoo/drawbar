@@ -1608,8 +1608,7 @@ mod tests {
     /// A context dressed as the app dresses it: without the bold face bound, laying out
     /// a band's name panics.
     fn dressed() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         ctx.set_visuals(egui::Visuals::dark());
         ctx
     }

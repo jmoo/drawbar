@@ -461,7 +461,7 @@ mod tests {
     /// star, which is what it wears in the tree and the table as well.
     #[test]
     fn a_tab_over_an_unsaved_document_wears_a_star() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let mut ws = Workspace::new(ctx.clone());
         let mut log = crate::log::Log::default();
@@ -620,8 +620,7 @@ mod tests {
     /// activated by it: a release that moved is a drop, not a click.
     #[test]
     fn dragging_a_tab_across_its_neighbour_swaps_them() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let mut ws = Workspace::new(ctx.clone());
         let mut log = crate::log::Log::default();

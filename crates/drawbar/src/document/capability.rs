@@ -307,8 +307,7 @@ mod tests {
                 note: "",
             },
         ];
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| table(ui, &rows));
         });

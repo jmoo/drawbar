@@ -1321,7 +1321,7 @@ mod tests {
 
     /// A workspace, and one program's bytes to make assets out of.
     fn bench() -> (Workspace, Log, Vec<u8>) {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut workspace = Workspace::new(ctx);
         let mut log = Log::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -2299,7 +2299,7 @@ mod tests {
     /// bank's slots means the picker survives the chip that got there.
     #[test]
     fn a_click_on_a_bank_chip_leaves_the_picker_open_on_that_bank() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
         let mut log = Log::default();
@@ -2399,7 +2399,7 @@ mod tests {
     /// bank chips over it happened to land.
     #[test]
     fn a_click_on_the_pickers_cell_answers_with_that_slot() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
         let mut log = Log::default();
@@ -2469,7 +2469,7 @@ mod tests {
     /// rules would see.
     #[test]
     fn the_dock_page_paints_every_shape_a_diff_comes_in() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
         let mut log = Log::default();

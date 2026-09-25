@@ -2524,8 +2524,7 @@ mod tests {
     /// A context dressed as the app dresses it: the semibold family a band and a row
     /// are set in is not bound by default, and laying one out without it panics.
     fn dressed() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         ctx.set_visuals(egui::Visuals::dark());
         ctx
     }

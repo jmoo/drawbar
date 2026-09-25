@@ -444,8 +444,7 @@ mod tests {
     use nord_usb::wire::{Dependency, Status};
 
     fn context() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         ctx
     }

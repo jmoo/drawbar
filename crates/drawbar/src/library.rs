@@ -1445,7 +1445,7 @@ mod tests {
     /// A context dressed the way `DrawbarApp::new` dresses one: the named text styles a
     /// panel resolves are installed there, on both faces.
     fn context() -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         ctx
     }
@@ -1686,7 +1686,7 @@ mod tests {
     /// stays where it was.
     #[test]
     fn a_linked_asset_is_in_both_places_and_says_when_the_two_stop_agreeing() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx);
         let mut log = Log::default();
@@ -2178,7 +2178,7 @@ mod tests {
     /// are taken, what is already waiting, and what nothing has named.
     #[test]
     fn the_footer_says_where_a_selection_goes_and_what_it_would_replace() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut device = Device::new(ctx.clone());
         let mut workspace = Workspace::new(ctx);
         let mut log = crate::log::Log::default();
