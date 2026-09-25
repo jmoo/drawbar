@@ -19,11 +19,21 @@ over` when the send cannot happen yet.
 ## The faces
 
 - **Basic** is the sound's controls, in the instrument's own words.
-- **Advanced** reads in one order: **About this file**, the **Container** the
-  bytes came in, the **Changes** they have made since the file was last saved,
-  and then the body itself — every field as a table, for when you need a value
-  the Basic face does not draw. Type into the **Writes** column to set a field.
-  A value the field cannot hold is refused, with the reason.
+- **Advanced** is the record of the bytes, top to bottom:
+  - **About this file**: what the file says about itself. Set lists, WAVs,
+    files with nothing to edit and bytes drawbar could not read have none.
+  - **Container**: what the file's header states, and whether its checksum
+    matches.
+  - **Changes**: the bytes that have moved since the file was last saved.
+  - **On the instrument**, for a document read from a slot: what the
+    instrument reports about that slot.
+  - The body. For a program, live slot, setting or preset this is every field
+    as a table, for a value the Basic face does not draw. Type into the
+    **Writes** column to set a field. A value the field cannot hold is refused,
+    with the reason. Samples and pianos list what drawbar can edit in them and
+    where it lands in the file, a set list shows its four stored slots, and a
+    file with nothing to edit shows its **Body bytes**. A WAV and bytes drawbar
+    could not read have no body to show.
 
 ## Programs, live slots, settings and presets
 

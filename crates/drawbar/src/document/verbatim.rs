@@ -33,8 +33,9 @@ const COLUMN_MIN: f32 = 300.0;
 
 /// The one sentence this page exists to say.
 const WHY: &str = "No registry declares this model's fields yet, so there is nothing to draw \
-                   and nothing to write differently. The file can still be sent, copied, \
-                   tagged and placed; every byte goes up exactly as it came down.";
+                   and nothing to write differently. The bytes are under Body bytes on the \
+                   Advanced face. The file can still be sent, copied, tagged and placed; \
+                   every byte goes up exactly as it came down.";
 
 /// Where the body sits in the file: the range the container settled on the way in, so
 /// nothing is copied to show it and nothing works the range out a second time.
