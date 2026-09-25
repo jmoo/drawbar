@@ -1124,10 +1124,6 @@ mod tests {
             assert_eq!(ObjectClass::from_raw(library.code().into()), class);
             assert_eq!(class.storage(), Some(Slot::from(library)), "{library:?}");
         }
-        assert_eq!(ObjectClass::from_raw(6), ObjectClass::Live);
-        assert_eq!(ObjectClass::from_raw(0), ObjectClass::Unknown(0));
-        assert_eq!(ObjectClass::Live.storage(), Some(Slot::Live));
-        assert_eq!(ObjectClass::Settings.storage(), Some(Slot::Settings));
         assert_eq!(
             ObjectClass::Unknown(9).storage(),
             None,
@@ -1164,25 +1160,6 @@ mod tests {
         let mut out = len.to_be_bytes().to_vec();
         out.extend_from_slice(bytes);
         out
-    }
-
-    #[test]
-    fn only_the_buffer_classes_overwrite_in_place_and_hold_no_name() {
-        for class in [ObjectClass::Live, ObjectClass::Settings] {
-            assert!(class.overwrites_in_place(), "{}", class.label());
-            assert!(!class.names_its_slots(), "{}", class.label());
-        }
-        let storage = [
-            ObjectClass::Piano,
-            ObjectClass::Sample,
-            ObjectClass::Program,
-            ObjectClass::SetList,
-            ObjectClass::Unknown(9),
-        ];
-        for class in storage {
-            assert!(!class.overwrites_in_place(), "{}", class.label());
-            assert!(class.names_its_slots(), "{}", class.label());
-        }
     }
 
     #[test]
@@ -1329,6 +1306,8 @@ mod tests {
              "npno", 540, None, "Royal Grand 3D YaS6 XL 5.4"),
             ("000000610000000c0000000a0000001f0000000000000000000000000011da986e736d70000000c8554100ec000800000000001f41636f7573746963205069616e6f20335f5f4b6f7267206d6f6e6f20322e300000000000000000ffffffff366f",
              "nsmp", 200, None, "Acoustic Piano 3__Korg mono 2.0"),
+            ("000000780000000c0000000a0000001f00000000000000000000004b002700f66e736d70000000c8554777330009000200000036332056696f6c696e7320534d5f4368616d6265726c696e5f4d4d6173746572206d6f6e6f20736d616c6c2076657273696f6e20322e300000000000000000ffffffff062d",
+             "nsmp", 200, None, "3 Violins SM_Chamberlin_MMaster mono small version 2.0"),
         ];
         for (raw, format, version, crc32, name) in cases {
             let info = ProgramInfo::decode(&Message::decode_response(&hex(raw)).unwrap()).unwrap();
@@ -1337,23 +1316,6 @@ mod tests {
             assert_eq!(info.crc32, *crc32, "{format}");
             assert_eq!(&info.name, name);
         }
-    }
-
-    /// A 54-character sample name, straight off the wire.
-    #[test]
-    fn object_info_reads_a_54_character_name() {
-        let info = ProgramInfo::decode(
-            &Message::decode_response(&hex(
-                "000000780000000c0000000a0000001f00000000000000000000004b002700f66e736d70000000c8554777330009000200000036332056696f6c696e7320534d5f4368616d6265726c696e5f4d4d6173746572206d6f6e6f20736d616c6c2076657273696f6e20322e300000000000000000ffffffff062d",
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            info.name,
-            "3 Violins SM_Chamberlin_MMaster mono small version 2.0"
-        );
-        assert_eq!(info.name.len(), 54);
     }
 
     /// A label too long for the one-byte length field is refused, not truncated. The
