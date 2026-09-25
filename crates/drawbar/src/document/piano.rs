@@ -981,6 +981,12 @@ impl Ask {
     }
 }
 
+impl super::Unasked for Ask {
+    fn unasked(&self) -> bool {
+        matches!(self, Ask::Show(_))
+    }
+}
+
 /// One root's decoded stroke, ready to play or to write.
 pub struct Sound<'a> {
     pub samples: &'a [i16],
@@ -3143,9 +3149,8 @@ fn open_row(
                     asked = Some(Opened::Drop);
                 }
             });
-            if let Some(asked_for) = wave(ui, audio, root.note, sounding == Some(root.note)) {
-                asked = Some(Opened::Audio(asked_for));
-            }
+            let shown = wave(ui, audio, root.note, sounding == Some(root.note));
+            asked = asked.take().or(shown.map(Opened::Audio));
         });
     asked
 }
@@ -4639,6 +4644,8 @@ mod tests {
     /// What one frame put on screen, and what it asked for.
     struct Painted {
         words: Vec<String>,
+        /// Where each of `words` was painted.
+        rects: Vec<egui::Rect>,
         /// The white keys of the keyboard, in ascending order.
         whites: Vec<egui::Rect>,
         /// Every lamp, in the order they were drawn: the trim switches, then one per
@@ -4648,6 +4655,14 @@ mod tests {
     }
 
     impl Painted {
+        /// Where `word` was first painted.
+        fn at(&self, word: &str) -> egui::Rect {
+            let found = self.words.iter().position(|said| said == word);
+            let found =
+                found.unwrap_or_else(|| panic!("{word} was never painted: {:?}", self.words));
+            self.rects[found]
+        }
+
         fn said(&self, wanted: &str) -> bool {
             self.words.iter().any(|word| word.contains(wanted))
         }
@@ -4750,8 +4765,8 @@ mod tests {
                     if let Some(edit) = edit.take() {
                         edit(&mut self.state.draft);
                     }
-                    asked = self.state.map(ui);
-                    asked = self.state.ui(ui, None).or(asked);
+                    let pinned = self.state.map(ui);
+                    asked = super::super::prefer(pinned, self.state.ui(ui, None));
                 });
             });
             // What [`Document::replan`] does with the plan a frame left behind: try it
@@ -4765,13 +4780,19 @@ mod tests {
             }
             let mut painted = Painted {
                 words: Vec::new(),
+                rects: Vec::new(),
                 whites: Vec::new(),
                 lamps: Vec::new(),
                 asked,
             };
             for (_, shape) in super::super::leaves(&output) {
                 match shape {
-                    egui::Shape::Text(text) => painted.words.push(text.galley.text().to_string()),
+                    egui::Shape::Text(text) => {
+                        painted.words.push(text.galley.text().to_string());
+                        painted
+                            .rects
+                            .push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                    }
                     egui::Shape::Rect(drawn) if drawn.rect.height() == keys::KEYBOARD_H => {
                         painted.whites.push(drawn.rect)
                     }
@@ -5384,6 +5405,22 @@ mod tests {
             Some(Ask::Show(ROOTS[0])),
             "the loudest layer it was drawn from is gone",
         );
+    }
+
+    /// A click on an open row's action is what the frame answers while the row is
+    /// still waiting on its waveform.
+    #[test]
+    fn an_open_rows_action_goes_before_its_request_for_a_waveform() {
+        let mut editor = Editor::of(coded(), u64::from(u32::MAX));
+        editor.frame(Vec::new());
+        editor.state.view.picked = Some(0);
+        editor.state.view.open_rows.insert(0);
+        let waiting = editor.frame(Vec::new());
+        assert!(waiting.said("reading the stroke…"), "{:?}", waiting.words);
+        assert_eq!(waiting.asked, Some(Ask::Show(ROOTS[0])));
+
+        let clicked = editor.frame(press(waiting.at("Audition").center()));
+        assert_eq!(clicked.asked, Some(Ask::Play(ROOTS[0])));
     }
 
     /// Checking a plan and laying it out are the same edit: the body the borrowed

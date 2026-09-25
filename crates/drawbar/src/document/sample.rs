@@ -389,6 +389,12 @@ pub enum Ask {
     },
 }
 
+impl super::Unasked for Ask {
+    fn unasked(&self) -> bool {
+        matches!(self, Ask::Decode(_))
+    }
+}
+
 /// Decoded zone audio, kept only while the strokes it came from are the current ones.
 ///
 /// ⚠️ Keyed by the asset's [`stamp`](crate::workspace::LocalEntity::stamp) as well as

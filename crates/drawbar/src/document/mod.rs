@@ -174,6 +174,31 @@ enum Asked {
     Advanced,
 }
 
+/// Whether an ask is a row's own request to draw its audio rather than an act of the
+/// operator's.
+trait Unasked {
+    fn unasked(&self) -> bool;
+}
+
+impl Unasked for Asked {
+    fn unasked(&self) -> bool {
+        match self {
+            Asked::Zone(ask) => ask.unasked(),
+            Asked::Root(ask) => ask.unasked(),
+            Asked::Encode | Asked::Export | Asked::Open(_) | Asked::Advanced => false,
+        }
+    }
+}
+
+/// The one of two asks a frame answers: the operator's act before a row's own request,
+/// which the row makes again next frame. Otherwise the first.
+fn prefer<T: Unasked>(first: Option<T>, then: Option<T>) -> Option<T> {
+    match (first, then) {
+        (Some(first), Some(then)) if first.unasked() && !then.unasked() => Some(then),
+        (first, then) => first.or(then),
+    }
+}
+
 /// What one open document keeps between frames.
 ///
 /// ⚠️ None of it outlives the target it was opened on, so a switch replaces the whole of
@@ -401,7 +426,7 @@ impl Document {
                     // the same format, so every control also answers to the document id.
                     ui.push_id(id, |ui| match face {
                         Face::Basic => {
-                            if let Some(from_body) = self.body(
+                            let from_body = self.body(
                                 ui,
                                 asset,
                                 doc.as_ref(),
@@ -411,9 +436,8 @@ impl Document {
                                     workspace,
                                 },
                                 &mut sets,
-                            ) {
-                                asked = Some(from_body);
-                            }
+                            );
+                            asked = prefer(asked.take(), from_body);
                         }
                         // What the file says about itself, the record of the bytes
                         // it is, then the body itself — the longest of the three last.
@@ -3019,6 +3043,33 @@ mod tests {
             .as_ref()
             .expect("the zone decodes");
         assert!(std::ptr::eq(before, after), "the zone was decoded again");
+    }
+
+    /// A struck key or a clicked control goes before an open row's own request for its
+    /// waveform, which the row makes again the next frame.
+    #[test]
+    fn an_act_goes_before_a_rows_request_for_its_waveform() {
+        let struck = sample::Ask::Strike {
+            zone: 1,
+            semitones: 2,
+        };
+        let asked = prefer(
+            Some(Asked::Zone(struck)),
+            Some(Asked::Zone(sample::Ask::Decode(0))),
+        );
+        assert!(matches!(asked, Some(Asked::Zone(ask)) if ask == struck));
+
+        let asked = prefer(
+            Some(Asked::Root(piano::Ask::Show(60))),
+            Some(Asked::Root(piano::Ask::Play(48))),
+        );
+        assert!(matches!(asked, Some(Asked::Root(piano::Ask::Play(48)))));
+
+        let asked = prefer(
+            Some(Asked::Zone(sample::Ask::Decode(0))),
+            Some(Asked::Zone(sample::Ask::Decode(1))),
+        );
+        assert!(matches!(asked, Some(Asked::Zone(sample::Ask::Decode(0)))));
     }
 
     /// ⚠️ A zone index belongs to the instrument it was opened on. Leaving the tab
