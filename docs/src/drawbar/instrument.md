@@ -22,7 +22,9 @@ are listed too, as places to drop things.
 ## Slots
 
 Right-click a slot to **Open**, **Copy to this computer**, **Load on instrument**,
-**Rename**, **Duplicate** or **Delete…**. Rename happens straight away, because
+**Rename**, **Duplicate** or **Delete…**. Load on instrument makes the panel play
+that slot, and a document that belongs to a slot has the same button in its
+[header](editing.md#the-document-header). Rename happens straight away, because
 renaming back is its own undo. Delete asks first.
 
 Drag to move things:
