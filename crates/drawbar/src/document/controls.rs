@@ -181,8 +181,7 @@ mod tests {
             }
         }
 
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         let warn = crate::app::warn(&ctx.style().visuals);
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             ctx.style_mut(crate::app::metrics);

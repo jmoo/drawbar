@@ -300,8 +300,7 @@ mod tests {
     #[test]
     fn the_dump_lays_out_only_the_rows_it_was_asked_for() {
         let body: Vec<u8> = (0..64 * 1024).map(|byte| byte as u8).collect();
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| hex(ui, &body, 100..103));
         });

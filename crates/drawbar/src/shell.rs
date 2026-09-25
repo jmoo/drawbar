@@ -365,9 +365,29 @@ fn searched(before: &str, after: &str) -> bool {
     before != after
 }
 
+/// [`egui::Ui::menu_button`], marking a submenu with an arrow the app's faces have.
+///
+/// egui's own arrow is `⏵`, which none of them covers.
+pub fn menu<'a, R>(
+    ui: &mut egui::Ui,
+    atoms: impl egui::IntoAtoms<'a>,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    use egui::containers::menu::{is_in_menu, MenuButton, SubMenuButton};
+    let (response, inner) = match is_in_menu(ui) {
+        true => SubMenuButton::from_button(egui::Button::new(atoms).right_text(SUBMENU))
+            .ui(ui, contents),
+        false => MenuButton::new(atoms).ui(ui, contents),
+    };
+    egui::InnerResponse::new(inner.map(|inner| inner.inner), response)
+}
+
+/// The mark at the right of an item that opens a submenu.
+pub(crate) const SUBMENU: &str = "▸";
+
 /// One of the title bar's drop-downs, no narrower than [`MENU`] however little is in it.
 fn drop_down(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
-    ui.menu_button(title, |ui| {
+    menu(ui, title, |ui| {
         ui.set_min_width(MENU);
         contents(ui);
     });
@@ -668,7 +688,7 @@ impl DrawbarApp {
         if item(ui, "Open…", Some(key::OPEN)) {
             acts.push(Act::OpenFiles);
         }
-        ui.menu_button("New", |ui| new_menu(ui, acts));
+        menu(ui, "New", |ui| new_menu(ui, acts));
         ui.separator();
         if let Some(id) = self.tabs.active() {
             if item(ui, "Save", Some(key::SAVE)) {
@@ -733,7 +753,7 @@ impl DrawbarApp {
             }
         }
         ui.separator();
-        ui.menu_button("Theme", |ui| {
+        menu(ui, "Theme", |ui| {
             for choice in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
                 if marked(ui, choice.label(), self.theme == choice, None) {
                     self.pick_theme(ui.ctx(), frame, choice);
@@ -1327,7 +1347,7 @@ mod tests {
     /// fit, and the centre keeps the room no dock may take from it.
     #[test]
     fn at_the_least_room_it_claims_every_region_fits_and_the_centre_keeps_its_own() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         attach(&mut app);
@@ -1387,7 +1407,7 @@ mod tests {
     /// guide to read while the reader finds a bigger screen.
     #[test]
     fn the_notice_says_what_is_wrong_and_offers_the_guide() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1407,7 +1427,7 @@ mod tests {
     /// still has room left after all of them have taken theirs.
     #[test]
     fn at_900_by_540_every_region_fits_and_the_centre_survives() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         attach(&mut app);
@@ -1443,7 +1463,7 @@ mod tests {
     /// both faces share, so every region lands in the same place.
     #[test]
     fn flipping_the_theme_leaves_every_region_where_it_was() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         attach(&mut app);
@@ -1469,7 +1489,7 @@ mod tests {
         const ONLY_WITH_ONE: [&str; 6] =
             ["Read", "Send", "SEND QUEUE", "INSTRUMENT", "ROOM", "INFO"];
 
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         let _ = drawn(&ctx, &mut app);
@@ -1520,7 +1540,7 @@ mod tests {
     /// document in front would otherwise search where nobody can see the result.
     #[test]
     fn typing_a_search_with_a_document_in_front_brings_the_library_forward() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         let id = app
             .workspace
@@ -1553,7 +1573,7 @@ mod tests {
     /// still had with it.
     #[test]
     fn the_send_queue_shortcut_never_falls_through_to_save() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         let id = app
             .workspace
@@ -1596,7 +1616,7 @@ mod tests {
     /// there is an instrument to read again.
     #[test]
     fn the_read_everything_shortcut_is_taken_with_nothing_attached() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         let pressed = || egui::Event::Key {
             key: egui::Key::R,
@@ -1627,13 +1647,13 @@ mod tests {
     fn the_docks_come_back_where_the_last_session_left_them() {
         let mut store = Fake::default();
         {
-            let ctx = egui::Context::default();
+            let ctx = crate::app::test_context();
             let mut before = app(&ctx, None);
             before.shell.browser_open = false;
             before.shell.show_page(Page::Log);
             before.save(&mut store);
         }
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let after = app(&ctx, Some(&store));
         assert!(!after.shell.browser_open);
         assert!(after.shell.inspector_open);
@@ -1726,7 +1746,7 @@ mod tests {
     /// most a dock may claim is read off the window every frame.
     #[test]
     fn docks_wider_than_the_window_still_leave_the_centre_its_room() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         app.shell.browser_width = 5_000.0;
@@ -1754,7 +1774,7 @@ mod tests {
     /// what the window actually showed rather than the design's default.
     #[test]
     fn a_dock_drawn_narrower_writes_the_size_it_was_drawn_at() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         app.shell.browser_width = 190.0;

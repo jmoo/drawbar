@@ -93,7 +93,7 @@ mod tests {
     /// Driving one lamp through a click and through the keyboard, the way both an
     /// operator and a screen reader reach it.
     fn press(events: Vec<egui::Event>, focus: bool) -> Option<bool> {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut answer = None;
         // Two passes: the first lays the lamp out, the second delivers the input to the
         // rect the first one claimed.

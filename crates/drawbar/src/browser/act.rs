@@ -601,7 +601,7 @@ pub fn foreign_format(outgoing: &str, resident: &[String]) -> Option<String> {
     }
     let held: Vec<&str> = resident.iter().map(|held| held.trim()).collect();
     Some(format!(
-        "⚠️ This file is {outgoing}; everything read in that folder is {}. Sending it \
+        "This file is {outgoing}; everything read in that folder is {}. Sending it \
          replaces what is there.",
         held.join(" or "),
     ))

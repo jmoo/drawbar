@@ -2373,8 +2373,7 @@ mod tests {
             .expect("a stored alternative");
         let wanted = kept.pick.expect("a card is picked by its own selector");
 
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let screen = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2500,8 +2499,7 @@ mod tests {
                 _ => 1,
             }
         }
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = crate::app::test_context();
         ctx.all_styles_mut(crate::app::metrics);
         let legal = (field.spec.legal)();
         let output = ctx.run(headless(), |ctx| {
@@ -2677,8 +2675,7 @@ mod tests {
         };
 
         let dots = |pending: &str, lens: Option<usize>| -> usize {
-            let ctx = egui::Context::default();
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = crate::app::test_context();
             ctx.all_styles_mut(crate::app::metrics);
             let mut state = State {
                 pending: vec![pending.to_string()],
@@ -2729,8 +2726,7 @@ mod tests {
 
         /// What the last frame committed, and whether the typed text is still held.
         fn exit(field: &Field, focused: bool, events: Vec<egui::Event>) -> (Option<String>, bool) {
-            let ctx = egui::Context::default();
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = crate::app::test_context();
             let mut got = None;
             let mut held = false;
             // The first frame opens the box; the second delivers the way out of it.
@@ -2796,8 +2792,7 @@ mod tests {
             .expect("a stage 4 program has switches");
 
         let switched = |legal: &[String]| -> Option<String> {
-            let ctx = egui::Context::default();
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = crate::app::test_context();
             ctx.all_styles_mut(crate::app::metrics);
             let mut got = None;
             let mut at = egui::Pos2::ZERO;

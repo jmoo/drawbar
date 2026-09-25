@@ -382,6 +382,15 @@ let
           wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" \
             target/wasm32-unknown-unknown/web/drawbar.wasm
 
+          # ⚠️ `-O1`, not `-Oz`: Pages serves this gzipped, and every level above `-O1`
+          # trades away the repetition gzip lives on, so what the browser downloads grows
+          # even as the file shrinks. rustc emits no `target_features` section, so the two
+          # features its output uses are named here.
+          wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int \
+            -O1 --converge --strip-producers \
+            -o optimised.wasm "$out/pkg/drawbar_bg.wasm"
+          mv optimised.wasm "$out/pkg/drawbar_bg.wasm"
+
           # Pages caches for ten minutes, so a cached glue file can meet a freshly
           # fetched module; the content hash in each name keeps that pair unreachable.
           wasm="drawbar_bg-$(sha256sum "$out/pkg/drawbar_bg.wasm" | cut -c-16).wasm"
@@ -408,7 +417,10 @@ let
         '';
 
         meta.description = "drawbar built for the browser";
-        nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+        nativeBuildInputs = args.nativeBuildInputs ++ [
+          final.binaryen
+          final.wasm-bindgen-cli
+        ];
 
         # ⚠️ Dependency artifacts contain a dummy `drawbar.wasm`; clear it before
         # binding so only the real module can satisfy the install.

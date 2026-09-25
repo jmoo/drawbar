@@ -273,7 +273,7 @@ mod tests {
     /// is a slot that would fill.
     #[test]
     fn a_slot_folder_meters_items_and_counts_only_what_would_fill_a_slot() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx);
         let mut log = Log::default();
@@ -322,7 +322,7 @@ mod tests {
     /// has arrived nothing can say how much of a block anything occupies.
     #[test]
     fn a_library_meters_blocks_and_has_no_meter_at_all_without_its_unit() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx);
         let mut log = Log::default();
@@ -358,7 +358,7 @@ mod tests {
     /// than an empty one.
     #[test]
     fn a_partition_that_counts_nothing_at_all_has_no_meter() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let workspace = Workspace::new(ctx);
         let queue = Queue::default();
         let class = ObjectClass::Piano;
@@ -378,7 +378,7 @@ mod tests {
     /// already says the count, and nothing there runs out but slots.
     #[test]
     fn only_a_partition_that_can_fill_gets_a_meter() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut device = Device::new(ctx.clone());
         let workspace = Workspace::new(ctx);
         let queue = Queue::default();
@@ -437,7 +437,7 @@ mod tests {
     /// whether one goes into the other — and says nothing at all with an empty queue.
     #[test]
     fn the_binding_constraint_is_the_largest_thing_waiting_against_the_room_left() {
-        let ctx = egui::Context::default();
+        let ctx = crate::app::test_context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx);
         let mut log = Log::default();

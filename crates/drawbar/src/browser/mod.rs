@@ -543,7 +543,7 @@ impl Browser {
         if action == Bulk::Tag {
             let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
             ui.add_enabled_ui(!locals.is_empty(), |ui| {
-                ui.menu_button(action.label(), |ui| self.tag_items(ui, &locals, acts))
+                crate::shell::menu(ui, action.label(), |ui| self.tag_items(ui, &locals, acts))
                     .response
                     .on_disabled_hover_text(action.nothing());
             });

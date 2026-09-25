@@ -914,9 +914,8 @@ mod tests {
 
     impl Shown {
         fn new() -> Shown {
-            let ctx = egui::Context::default();
+            let ctx = crate::app::test_context();
             ctx.all_styles_mut(crate::app::metrics);
-            ctx.set_fonts(crate::app::fonts());
             let mut workspace = Workspace::new(ctx.clone());
             let mut log = Log::default();
             let id = workspace.ingest(

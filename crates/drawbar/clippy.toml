@@ -1,0 +1,3 @@
+disallowed-methods = [
+  { path = "egui::Ui::menu_button", reason = "its submenu arrow is in no face drawbar ships; use `shell::menu`" },
+]

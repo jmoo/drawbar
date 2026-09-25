@@ -46,7 +46,7 @@ pub(in crate::browser) fn onto(class: ObjectClass, bank: u32, at: u32) -> Onto {
 /// ⚠️ The named text styles a panel header resolves are installed there, on both faces.
 /// A face that never learned them panics the frame that resolves one.
 pub(in crate::browser) fn context() -> egui::Context {
-    let ctx = egui::Context::default();
+    let ctx = crate::app::test_context();
     ctx.all_styles_mut(crate::app::metrics);
     ctx
 }

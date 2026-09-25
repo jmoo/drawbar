@@ -29,7 +29,8 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licences/Apache-
     "Unlicense", # dedicates the work to the public domain
     "Zlib"       # clause 1: acknowledgment "is not required"; clause 3 binds source only
   ];
-  # The hand-written font rows of the About box carry these for epaint_default_fonts.
+  # epaint_default_fonts declares these for faces drawbar does not ship. Hack, the
+  # face it does ship, has a hand-written About row.
   def fonts: ["OFL-1.1", "Ubuntu-font-1.0"];
   # The SPDX template of a notice, whose copyright line names no one.
   def unfilled: ascii_downcase | test("<year>|<owner>|<copyright holder");

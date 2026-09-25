@@ -4544,10 +4544,9 @@ mod tests {
         }
 
         fn of(saved: Vec<u8>, free: u64) -> Editor {
-            let ctx = egui::Context::default();
             // Dressed the way the app dresses it: without the bold face bound, laying
             // out a root's name panics mid-frame.
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = crate::app::test_context();
             ctx.all_styles_mut(crate::app::metrics);
             let mut workspace = Workspace::new(ctx.clone());
             let mut log = Log::default();
