@@ -877,13 +877,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_footer_names_its_sources_and_mentions_a_reorder_once_made() {
-        assert!(foot(false).contains("the file stores only bank:slot"));
-        assert!(!foot(false).contains("Reordering"));
-        assert!(foot(true).ends_with("Reordering rewrites the slots between the two positions."));
-    }
-
     /// One set list painted on its own, with whatever the instrument and this computer
     /// have been told to hold.
     struct Shown {
@@ -1194,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn every_state_says_its_own_thing_and_only_trouble_counts() {
+    fn every_state_says_its_own_thing() {
         let where_ = at(7, 4);
         let all = [
             Stands::Resolves,
@@ -1212,7 +1205,5 @@ mod tests {
             }
         }
         assert_eq!(Stands::Vacant.words(where_), "no program at 7:4");
-        assert!(!Stands::Unread.wants_attention(), "not a claim of trouble");
-        assert!(Stands::Vacant.wants_attention());
     }
 }

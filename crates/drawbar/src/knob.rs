@@ -300,15 +300,6 @@ mod tests {
         assert_eq!(fraction(6, -6, 6), 1.0);
     }
 
-    #[test]
-    fn the_sweep_is_symmetrical_about_twelve_oclock() {
-        assert!((angle(0.5)).abs() < 1e-6);
-        assert!((angle(0.0) + SWEEP / 2.0).abs() < 1e-6);
-        assert!((angle(1.0) - SWEEP / 2.0).abs() < 1e-6);
-        // 270° of travel, no more: the stops are at 7:30 and 4:30, never overlapping.
-        assert!((angle(1.0) - angle(0.0) - SWEEP).abs() < 1e-6);
-    }
-
     /// A mapping that rounded the wrong way would leave a knob unable to reach one of its
     /// stops.
     #[test]

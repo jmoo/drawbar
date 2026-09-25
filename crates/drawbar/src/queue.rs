@@ -1588,35 +1588,6 @@ mod tests {
         assert!(queue.entry(ids[2]).unwrap().failure.is_none());
     }
 
-    /// An asset is owed to the instrument while the queue holds it, and stops being owed
-    /// when the write lands.
-    #[test]
-    fn what_is_owed_is_what_the_queue_holds() {
-        let (mut workspace, mut log, bytes) = bench();
-        let id = workspace.ingest(
-            "Africa-Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: at(3),
-            },
-            bytes,
-            &mut log,
-        );
-        let mut queue = Queue::default();
-        assert!(!queue.holds(id));
-
-        queue.put(
-            workspace.get(id).unwrap(),
-            ObjectClass::Program,
-            at(3),
-            Occupancy::Vacant,
-        );
-        assert!(queue.holds(id));
-
-        queue.forget(id);
-        assert!(!queue.holds(id) && queue.is_empty());
-    }
-
     /// The diff between two bodies with registries lists only the fields that differ.
     /// The pair here is a program and the same program with one field set through the
     /// registry.

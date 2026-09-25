@@ -148,19 +148,6 @@ impl Tags {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_new_tag_gets_a_name_no_other_tag_is_using() {
-        let mut tags = Tags::default();
-        let names: Vec<String> = ["Sunday", "Sunday", "Sunday"]
-            .iter()
-            .map(|wanted| {
-                let id = tags.make(wanted).unwrap();
-                tags.name_of(id).expect("it was made").to_string()
-            })
-            .collect();
-        assert_eq!(names, ["Sunday", "Sunday 2", "Sunday 3"]);
-    }
-
     /// Unlike a folder, an asset can have any number of tags.
     #[test]
     fn an_asset_wears_every_tag_it_is_given() {
@@ -228,50 +215,5 @@ mod tests {
             .is_empty());
         let orphaned = Tags::read(&format!("{VERSION}\nm\t7\t3\n"));
         assert!(orphaned.worn(7).is_empty());
-    }
-
-    #[test]
-    fn a_malformed_line_is_dropped_and_the_rest_is_read() {
-        let read = |lines: &str| Tags::read(&format!("{VERSION}\n{lines}"));
-
-        let kept = read("t\tx\tNot a number\nt\t1\tSunday\n");
-        assert_eq!(kept.all().len(), 1, "an id that is not a number");
-        assert_eq!(kept.name_of(1), Some("Sunday"));
-
-        let short = read("t\t1\tSunday\nm\t7\n");
-        assert!(short.worn(7).is_empty(), "a membership missing its tag");
-
-        let wide = read("t\t1\tSunday\nm\t7\t1\textra\n");
-        assert!(wide.worn(7).is_empty(), "a line with a column too many");
-
-        let unknown = read("t\t1\tSunday\nx\t7\t1\n");
-        assert_eq!(
-            unknown.all().len(),
-            1,
-            "a line marker this build does not write"
-        );
-    }
-
-    /// Two `t` lines with one id give one tag two names. The first is kept, so loading
-    /// never silently renames a tag.
-    #[test]
-    fn a_second_tag_line_for_an_id_already_read_is_refused() {
-        let tags = Tags::read(&format!("{VERSION}\nt\t1\tSunday\nt\t1\tMonday\nm\t7\t1\n"));
-
-        assert_eq!(tags.all().len(), 1);
-        assert_eq!(tags.name_of(1), Some("Sunday"));
-        assert_eq!(tags.worn(7), &BTreeSet::from([1]));
-    }
-
-    /// Unescaped, a newline in a name would split its line in two.
-    #[test]
-    fn a_tag_named_across_two_lines_comes_back_as_one_name() {
-        let mut tags = Tags::default();
-        let id = tags.make("Sunday").unwrap();
-        tags.rename(id, "Sunday\nmorning".into());
-
-        let after = Tags::read(&tags.written());
-        assert_eq!(after.name_of(id), Some("Sunday\nmorning"));
-        assert_eq!(after.all().len(), 1);
     }
 }

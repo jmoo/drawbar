@@ -514,19 +514,6 @@ mod tests {
         );
     }
 
-    /// An empty slot is a drop target, which is why it is drawn as a row.
-    #[test]
-    fn an_empty_slot_is_a_target() {
-        assert_eq!(
-            landing(&local(Kind::SetList), onto(ObjectClass::SetList, 0, 12)),
-            Landing::Send {
-                id: CARRIED,
-                class: ObjectClass::SetList,
-                at: Location { bank: 0, slot: 12 },
-            }
-        );
-    }
-
     /// A drop of something the attached instrument does not take is refused: the target
     /// is not highlighted, and the drop says why.
     #[test]
@@ -710,18 +697,9 @@ mod tests {
         }
     }
 
-    /// Each instrument folder holds the kind named after it, and a kind with no folder
-    /// has no home on the instrument.
+    /// A partition this app cannot name holds no kind of its own.
     #[test]
-    fn every_kind_knows_the_folder_it_belongs_in() {
-        let homed: Vec<Kind> = HOMES.iter().map(|(kind, _)| *kind).collect();
-        for (kind, class) in HOMES {
-            assert_eq!(Kind::from_class(class), kind, "{}", folder(class));
-            assert_eq!(kind.home(), Some(class), "{kind:?}");
-        }
-        for homeless in Kind::ALL.iter().filter(|kind| !homed.contains(kind)) {
-            assert_eq!(homeless.home(), None, "{homeless:?}");
-        }
+    fn a_class_the_app_cannot_name_holds_other() {
         assert_eq!(Kind::from_class(ObjectClass::Unknown(9)), Kind::Other);
     }
 

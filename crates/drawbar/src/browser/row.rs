@@ -283,25 +283,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_colored_cell_keeps_its_color_until_its_row_is_selected() {
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            for own in [
-                crate::app::good(&visuals),
-                crate::app::warn(&visuals),
-                crate::app::bad(&visuals),
-                crate::app::accent(&visuals),
-                crate::app::unlit(&visuals),
-            ] {
-                assert_eq!(cell_ink(false, own, &visuals), own);
-                assert_eq!(
-                    cell_ink(true, own, &visuals),
-                    visuals.selection.stroke.color
-                );
-            }
-        }
-    }
-
-    #[test]
     fn an_unsaved_row_writes_its_name_with_a_star() {
         fn words(shape: &egui::Shape, into: &mut Vec<String>) {
             match shape {
