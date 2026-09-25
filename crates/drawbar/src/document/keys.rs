@@ -1774,18 +1774,22 @@ mod tests {
             });
             let painted = key_shapes(&output, rect);
             assert_eq!(painted.len(), span.keys(), "one rect per key");
-            for (note, key) in layered(span).zip(painted) {
-                assert_eq!(
-                    (key.left(), key.right()),
-                    (span.x_of(rect, note), span.x_after(rect, note)),
-                    "{} sits somewhere else on the keyboard",
-                    note::name(note),
-                );
+            for note in span.low..=span.high {
                 let deep = match is_black(note) {
                     true => BLACK_H,
                     false => KEYBOARD_H,
                 };
-                assert_eq!(key.height(), deep);
+                let cell = egui::Rect::from_min_max(
+                    egui::pos2(span.x_of(rect, note), rect.top()),
+                    egui::pos2(span.x_after(rect, note), rect.top() + deep),
+                );
+                let at = painted.iter().filter(|drawn| **drawn == cell).count();
+                assert_eq!(
+                    at,
+                    1,
+                    "{} is painted {at} times at its cell {cell:?}",
+                    note::name(note),
+                );
             }
         }
     }
@@ -1812,10 +1816,11 @@ mod tests {
                     note::name(black + 1),
                 );
                 let cell = key_rect(rect, span, black);
-                let covered = painted
+                let Some(at) = painted.iter().position(|drawn| *drawn == cell) else {
+                    panic!("{} is not painted at {cell:?}", note::name(black));
+                };
+                let covered = painted[at + 1..]
                     .iter()
-                    .skip_while(|drawn| **drawn != cell)
-                    .skip(1)
                     .find(|drawn| drawn.intersects(cell));
                 assert!(
                     covered.is_none(),
