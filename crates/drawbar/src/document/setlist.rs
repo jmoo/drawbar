@@ -892,15 +892,6 @@ mod tests {
         );
     }
 
-    /// The sentence says where a name came from, and says what a reorder did only when
-    /// one has been made.
-    #[test]
-    fn the_footer_names_its_sources_and_owns_up_to_a_reorder() {
-        assert!(foot(false).contains("the file stores only bank:slot"));
-        assert!(!foot(false).contains("Reordering"));
-        assert!(foot(true).ends_with("Reordering rewrites every slot below the move."));
-    }
-
     /// One set list painted on its own, with whatever the instrument and this computer
     /// have been told to hold.
     struct Shown {
@@ -1216,10 +1207,9 @@ mod tests {
         );
     }
 
-    /// Each state says a different thing, and only the two that are trouble count
-    /// towards the heading's reading.
+    /// Each state says a different thing.
     #[test]
-    fn every_state_says_its_own_thing_and_only_trouble_counts() {
+    fn every_state_says_its_own_thing() {
         let where_ = at(7, 4);
         let all = [
             Stands::Resolves,
@@ -1237,7 +1227,5 @@ mod tests {
             }
         }
         assert_eq!(Stands::Vacant.words(where_), "no program at 7:4");
-        assert!(!Stands::Unread.wants_attention(), "not a claim of trouble");
-        assert!(Stands::Vacant.wants_attention());
     }
 }

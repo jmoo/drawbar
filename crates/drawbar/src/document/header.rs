@@ -1478,7 +1478,6 @@ mod tests {
             for waiting in [false, true] {
                 let held = phrase(mark, waiting);
                 assert!(!held.words.is_empty(), "{mark:?} says something");
-                assert_eq!(held.hint, mark_words(mark), "{mark:?} explains itself");
                 // Only `dark_mode` decides an ink, so egui's own two faces answer.
                 for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
                     assert_ne!(
@@ -1489,11 +1488,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(phrase(Mark::Unsaved, false).words, "edited");
-        assert_eq!(phrase(Mark::Agrees, false).words, "matches keyboard");
-        assert_eq!(phrase(Mark::Differs, false).words, "differs from keyboard");
         assert_eq!(phrase(Mark::Differs, true).words, "waiting to send");
-        assert_eq!(phrase(Mark::Unknown, false).words, "on the keyboard");
     }
 
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {

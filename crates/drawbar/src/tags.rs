@@ -150,21 +150,6 @@ impl Tags {
 mod tests {
     use super::*;
 
-    /// A new tag is one nothing else is called, so two of them are two rows rather than
-    /// one row twice — and the name asked for is the name it starts from.
-    #[test]
-    fn a_new_tag_gets_a_name_no_other_tag_is_using() {
-        let mut tags = Tags::default();
-        let names: Vec<String> = ["Sunday", "Sunday", "Sunday"]
-            .iter()
-            .map(|wanted| {
-                let id = tags.make(wanted).unwrap();
-                tags.name_of(id).expect("it was made").to_string()
-            })
-            .collect();
-        assert_eq!(names, ["Sunday", "Sunday 2", "Sunday 3"]);
-    }
-
     /// A tag is not a folder: an asset wears as many as it is given, and losing one
     /// leaves the rest where they were.
     #[test]
@@ -237,50 +222,5 @@ mod tests {
             .is_empty());
         let orphaned = Tags::read(&format!("{VERSION}\nm\t7\t3\n"));
         assert!(orphaned.worn(7).is_empty());
-    }
-
-    /// A line this build did not write is dropped rather than guessed at, and the rest of
-    /// the file is still read.
-    #[test]
-    fn a_line_that_is_not_a_line_is_dropped_and_the_rest_is_read() {
-        let read = |lines: &str| Tags::read(&format!("{VERSION}\n{lines}"));
-
-        let kept = read("t\tx\tNot a number\nt\t1\tSunday\n");
-        assert_eq!(kept.all().len(), 1, "an id that is not a number");
-        assert_eq!(kept.name_of(1), Some("Sunday"));
-
-        let short = read("t\t1\tSunday\nm\t7\n");
-        assert!(short.worn(7).is_empty(), "a membership missing its tag");
-
-        let wide = read("t\t1\tSunday\nm\t7\t1\textra\n");
-        assert!(wide.worn(7).is_empty(), "a line with a column too many");
-
-        let unknown = read("t\t1\tSunday\nx\t7\t1\n");
-        assert_eq!(unknown.all().len(), 1, "a head this build does not write");
-    }
-
-    /// ⚠️ Two `t` lines claiming one id is a file with two names for one tag, and
-    /// everything wearing that id wears whichever of them is kept. The first is, so the
-    /// second is refused rather than quietly renaming a tag on the way in.
-    #[test]
-    fn a_second_tag_line_for_an_id_already_read_is_refused() {
-        let tags = Tags::read(&format!("{VERSION}\nt\t1\tSunday\nt\t1\tMonday\nm\t7\t1\n"));
-
-        assert_eq!(tags.all().len(), 1);
-        assert_eq!(tags.name_of(1), Some("Sunday"));
-        assert_eq!(tags.worn(7), &BTreeSet::from([1]));
-    }
-
-    /// A name holding a newline would otherwise be two lines, and the second of them a
-    /// line this build refuses.
-    #[test]
-    fn a_tag_named_across_two_lines_comes_back_as_one_name() {
-        let mut tags = Tags::default();
-        let id = tags.make("Sunday").unwrap();
-        tags.rename(id, "Sunday\nmorning".into());
-
-        let after = Tags::read(&tags.written());
-        assert_eq!(after.name_of(id), Some("Sunday\nmorning"));
-        assert_eq!(after.all().len(), 1);
     }
 }

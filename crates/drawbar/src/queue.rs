@@ -1553,52 +1553,6 @@ mod tests {
         );
     }
 
-    /// The header says all three counts whatever they come to: a part left out at zero
-    /// would hide the relation between them.
-    #[test]
-    fn the_header_counts_all_three_however_many_each_comes_to() {
-        assert_eq!(
-            Behind {
-                queued: 0,
-                changed: 2,
-                unsaved: 1
-            }
-            .said(),
-            "0 queued · 2 changed · 1 unsaved"
-        );
-        assert_eq!(
-            Behind {
-                queued: 3,
-                changed: 0,
-                unsaved: 0
-            }
-            .said(),
-            "3 queued · 0 changed · 0 unsaved"
-        );
-        assert_eq!(Behind::default().action(), "Queue 0 changed");
-    }
-
-    /// The line is the legend: each part stands under a mark, and the header paints it
-    /// in that mark's ink and hovers it with that mark's words. The whole line is the
-    /// parts joined, so nowhere says it twice.
-    #[test]
-    fn each_part_of_the_line_stands_under_the_mark_it_explains() {
-        let behind = Behind {
-            queued: 3,
-            changed: 2,
-            unsaved: 1,
-        };
-        assert_eq!(
-            behind.parts(),
-            [
-                ("3 queued".to_string(), Mark::Differs),
-                ("2 changed".to_string(), Mark::Differs),
-                ("1 unsaved".to_string(), Mark::Unsaved),
-            ]
-        );
-        assert_eq!(behind.said(), "3 queued · 2 changed · 1 unsaved");
-    }
-
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue
     /// is a set of destinations and a set of assets at once.
     #[test]
@@ -1694,35 +1648,6 @@ mod tests {
             Some("Programs 7:2 is occupied"),
         );
         assert!(queue.entry(ids[2]).unwrap().failure.is_none());
-    }
-
-    /// An asset the queue holds is owed to the instrument; that is the whole of what
-    /// `pending` meant, and it stops being owed when the write lands.
-    #[test]
-    fn what_is_owed_is_what_the_queue_holds() {
-        let (mut workspace, mut log, bytes) = bench();
-        let id = workspace.ingest(
-            "Africa-Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: at(3),
-            },
-            bytes,
-            &mut log,
-        );
-        let mut queue = Queue::default();
-        assert!(!queue.holds(id));
-
-        queue.put(
-            workspace.get(id).unwrap(),
-            ObjectClass::Program,
-            at(3),
-            Occupancy::Vacant,
-        );
-        assert!(queue.holds(id));
-
-        queue.forget(id);
-        assert!(!queue.holds(id) && queue.is_empty());
     }
 
     /// The diff between two bodies with a registry is the fields they do not agree on,

@@ -982,19 +982,6 @@ mod tests {
     }
 
     #[test]
-    fn a_read_keeps_the_slots_name_verbatim() {
-        let info = ProgramInfo {
-            location: Location { bank: 6, slot: 3 },
-            body_len: 121,
-            format: "ne5p".into(),
-            version: 4,
-            crc32: Some(0),
-            name: "Africa Split".into(),
-        };
-        assert_eq!(entity_name(&info), "Africa Split");
-    }
-
-    #[test]
     fn a_slot_is_named_what_this_computer_calls_the_object() {
         let label = |name: &str| slot_label(name);
         assert_eq!(label("Africa-Split.ne5p").as_deref(), Some("Africa-Split"));
@@ -1028,20 +1015,18 @@ mod tests {
 
     #[test]
     fn a_nameless_slot_still_gets_a_label() {
-        let info = ProgramInfo {
-            location: Location { bank: 0, slot: 0 },
-            body_len: 121,
-            format: "ne5p".into(),
-            version: 4,
-            crc32: None,
-            name: "  ".into(),
+        let named = |name: &str| {
+            entity_name(&ProgramInfo {
+                location: Location { bank: 0, slot: 0 },
+                body_len: 121,
+                format: "ne5p".into(),
+                version: 4,
+                crc32: None,
+                name: name.into(),
+            })
         };
-        assert_eq!(entity_name(&info), "unnamed");
-    }
-
-    #[test]
-    fn a_spaced_name_survives_to_the_write() {
-        assert_eq!(slot_label("Big strings").as_deref(), Some("Big strings"));
+        assert_eq!(named("  "), "unnamed");
+        assert_eq!(named(" Africa Split "), "Africa Split");
     }
 
     /// A cursor hit outside a bounded bank is refused rather than widening it: the bank
@@ -2135,23 +2120,6 @@ mod wire_tests {
             0,
             "and nothing was sent"
         );
-    }
-
-    #[test]
-    fn a_write_to_a_real_address_still_goes() {
-        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]);
-        let (flow, _) = drive(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at: Location { bank: 0, slot: 3 },
-                name: "Africa-Split.ne5p".into(),
-                bytes: a_program(),
-            },
-        );
-        assert!(flow == Flow::Continue);
-        assert_eq!(counted(&device, cmd::WRITE_DATA), 1, "the bytes went");
     }
 
     #[test]

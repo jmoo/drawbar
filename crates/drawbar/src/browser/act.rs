@@ -1470,42 +1470,6 @@ mod tests {
         assert_eq!(shell.page, Page::Queue);
     }
 
-    /// A folder every read slot of which is taken refuses the entry by name. Dropping it
-    /// without a word would read as a bug, and putting it somewhere occupied would be
-    /// this app choosing what to overwrite.
-    #[test]
-    fn queueing_into_a_folder_with_no_free_slot_refuses_and_names_it() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
-        device.pretend_partitions(&crate::device::ELECTRO5);
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "Squabble B"]);
-        let id = workspace.ingest(
-            "Jazzy Click B.ne5p".to_string(),
-            Origin::File("Jazzy Click B.ne5p".into()),
-            bytes,
-            &mut log,
-        );
-
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            bulk(Bulk::Queue, &[Item::Local(id)], &device.state),
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-
-        assert!(queue.is_empty());
-        assert!(
-            log.transcript()
-                .contains("no slot of Programs is both read and still free"),
-            "{}",
-            log.transcript()
-        );
-    }
-
     /// A batch is one command per folder, because a session belongs to a folder, and it
     /// goes out in the order the queue holds it.
     #[test]

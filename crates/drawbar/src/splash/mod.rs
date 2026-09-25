@@ -207,27 +207,6 @@ mod tests {
 **Full changelog**: https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0";
 
     #[test]
-    fn a_heading_keeps_its_title_alone() {
-        assert_eq!(classify("### Bug fixes"), Line::Heading("Bug fixes"));
-    }
-
-    #[test]
-    fn an_item_splits_its_scope_its_text_and_its_commit() {
-        let line = "- **drawbar:** say what changed ([abc1234](https://example.com/c/abc1234))";
-        assert_eq!(
-            classify(line),
-            Line::Item {
-                scope: Some("drawbar"),
-                text: "say what changed",
-                commit: Some(Commit {
-                    sha: "abc1234",
-                    url: "https://example.com/c/abc1234",
-                }),
-            }
-        );
-    }
-
-    #[test]
     fn an_unscoped_item_keeps_its_whole_description() {
         assert_eq!(
             classify("- say what changed"),

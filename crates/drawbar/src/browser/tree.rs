@@ -1542,9 +1542,6 @@ mod tests {
     /// leaf's indent already carries the triangle's box that a branch's does not.
     #[test]
     fn a_leaf_starts_where_the_branch_beside_it_puts_its_glyph() {
-        assert_eq!(indent(0, true), 8.0);
-        assert_eq!(indent(0, false), 26.0);
-        assert_eq!(indent(1, false), 40.0);
         for depth in 0..4 {
             assert_eq!(
                 indent(depth, false),

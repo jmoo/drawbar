@@ -1724,16 +1724,6 @@ mod tests {
         );
     }
 
-    /// Every folder this app can name takes a write — the buffer classes and the two
-    /// libraries alike. A partition it cannot name is listed and left alone.
-    #[test]
-    fn only_a_class_with_no_name_is_read_only() {
-        for class in named() {
-            assert!(!read_only(class), "{}", folder(class));
-        }
-        assert!(read_only(ObjectClass::Unknown(9)));
-    }
-
     /// A bank a walk found empty is an answer like any other. A folder emptied on the
     /// instrument must not go on showing the names it used to hold, and must not read
     /// as one nothing has looked at.

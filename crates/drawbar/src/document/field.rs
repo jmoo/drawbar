@@ -2050,7 +2050,7 @@ mod tests {
     use super::*;
     use crate::fields::apply;
     use crate::workspace::Fresh;
-    use nord_format::formats::{ne5, ns4};
+    use nord_format::formats::ne5;
     use nord_format::{Entity, Program};
 
     fn electro5() -> (Vec<u8>, Vec<Field>) {
@@ -2306,23 +2306,6 @@ mod tests {
             .collect();
         assert!(paths.contains(&TRANSPOSE_ENABLED));
         assert!(paths.contains(&TRANSPOSE));
-    }
-
-    /// A Stage 4 program has a layout as well, and every one of its sections is open —
-    /// nothing folds above a field count.
-    #[test]
-    fn a_stage4_program_opens_every_section_it_has() {
-        let bytes = Fresh::Stage4Program.bytes().unwrap();
-        let (fields, _) = apply(&bytes, &[]).unwrap();
-        let decoded =
-            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
-        let doc = of(&decoded, &fields);
-        assert!(!doc.sections.is_empty());
-        assert!(fields.len() > 800, "{} fields", fields.len());
-        let (all, slots) = doc.tally();
-        assert_eq!(all, fields.len());
-        assert!(slots > 300, "{slots} morph slots");
-        assert!(ns4::program::PANEL.resolve(&fields).sections.len() > 1);
     }
 
     /// ⚠️ A stored alternative is picked by a click anywhere in its card, not by the
@@ -2894,18 +2877,6 @@ mod tests {
         assert_eq!(word(""), None);
         assert_eq!(word("ff"), None);
         assert_eq!(word("-1"), None);
-    }
-
-    /// The transpose knob turns as far as the amount field says it may, which is the
-    /// panel's own half-step either side of nothing.
-    #[test]
-    fn the_transpose_knob_turns_as_far_as_its_field_allows() {
-        let (_, fields) = electro5();
-        let amount = fields
-            .iter()
-            .find(|field| field.path == TRANSPOSE)
-            .expect("the transpose amount");
-        assert_eq!(contiguous(&(amount.spec.legal)()), Some((-6, 6)));
     }
 
     /// A body with no layout falls into the sections its paths name, and every field

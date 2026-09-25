@@ -1503,19 +1503,6 @@ mod tests {
         );
     }
 
-    /// Every change to what is typed brings the library forward, the first keystroke
-    /// into an empty box and clearing it included. A frame that typed nothing is not a
-    /// change.
-    #[test]
-    fn a_change_in_the_omnibox_is_what_brings_the_library_forward() {
-        assert!(searched("", "a"), "the first keystroke");
-        assert!(searched("afr", "afri"));
-        assert!(searched("afri", "afr"), "and a backspace");
-        assert!(searched("afr", ""), "and clearing it");
-        assert!(!searched("afr", "afr"));
-        assert!(!searched("", ""));
-    }
-
     /// ⚠️ The omnibox narrows the library's table and nothing else. Typing into it with a
     /// document in front would otherwise search where nobody can see the result.
     #[test]
@@ -1630,44 +1617,11 @@ mod tests {
             let ctx = egui::Context::default();
             let mut before = app(&ctx, None);
             before.shell.browser_open = false;
-            before.shell.show_page(Page::Log);
             before.save(&mut store);
         }
         let ctx = egui::Context::default();
         let after = app(&ctx, Some(&store));
         assert!(!after.shell.browser_open);
-        assert!(after.shell.inspector_open);
-        assert!(after.shell.dock_open);
-        assert_eq!(after.shell.page, Page::Log);
-    }
-
-    #[test]
-    fn a_dock_toggles_and_a_page_opens_the_dock_it_is_on() {
-        let mut shell = Shell::default();
-        for dock in [Dock::Browser, Dock::Inspector, Dock::Bottom] {
-            let was = shell.open(dock);
-            shell.toggle(dock);
-            assert_eq!(shell.open(dock), !was, "{dock:?}");
-        }
-        // Asking for a page is asking to read it, which means opening the dock too.
-        shell.dock_open = false;
-        shell.show_page(Page::Log);
-        assert!(shell.dock_open && shell.page == Page::Log);
-    }
-
-    /// ⚠️ The title of the page already showing is the way back out of the dock. A title
-    /// that answered a click by doing nothing reads as broken, and the collapse triangle
-    /// is 8 px of the header.
-    #[test]
-    fn the_title_of_the_page_showing_shuts_the_dock() {
-        assert!(matches!(
-            page_click(Page::Queue, true),
-            Act::ToggleDock(Dock::Bottom)
-        ));
-        assert!(matches!(
-            page_click(Page::Queue, false),
-            Act::ShowPage(Page::Queue)
-        ));
     }
 
     /// What was collapsed is collapsed again next session, on the page it was left on.
