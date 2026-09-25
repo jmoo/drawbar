@@ -851,10 +851,10 @@ impl DrawbarApp {
         if action(ui, Glyph::Upload, &label, waiting > 0).clicked() && waiting > 0 {
             acts.push(Act::AskSendAll);
         }
-        // An edit does not queue itself, so what a send would walk past stands here as
-        // an offer to queue it. Nothing changed is nothing to offer, and no button.
-        let behind = crate::queue::Behind::of(&self.workspace, &self.device.state, &self.queue);
-        if let Some((label, hint)) = behind.offer() {
+        // A saved edit does not queue itself, so what a send would walk past is offered
+        // here.
+        let offer = crate::queue::offer(&self.workspace, &self.device.state, &self.queue);
+        if let Some((label, hint)) = offer {
             if action(ui, Glyph::Plus, &label, false)
                 .on_hover_text(hint)
                 .clicked()

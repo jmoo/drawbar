@@ -268,41 +268,20 @@ pub fn changed(
         .collect()
 }
 
-/// What a send would carry and what it would walk past: what is waiting, assets the
-/// instrument no longer agrees with, and documents holding edits nothing has saved.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Behind {
-    pub queued: usize,
-    pub changed: usize,
-    pub unsaved: usize,
-}
-
-impl Behind {
-    pub fn of(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> Behind {
-        Behind {
-            queued: queue.len(),
-            changed: changed(workspace, device, queue).len(),
-            unsaved: workspace
-                .entities()
-                .iter()
-                .filter(|entity| entity.is_unsaved())
-                .count(),
-        }
-    }
-
-    /// The toolbar's offer to close the gap [`Behind::changed`] names: what the button
-    /// says, and what it says on hover. Nothing has changed is no button at all.
-    ///
-    /// The count is [`changed`]'s own, which is the set [`queue_changed`] queues, so
-    /// the button never offers a number the queue would not make.
-    pub fn offer(self) -> Option<(String, String)> {
-        (self.changed > 0).then(|| {
-            (
-                format!("Queue {}", self.changed),
-                format!("queue {} changed to send to the keyboard", self.changed),
-            )
-        })
-    }
+/// The toolbar's offer to queue what [`changed`] finds: the button's label and its
+/// hover text. `None` where nothing has changed.
+pub fn offer(
+    workspace: &Workspace,
+    device: &DeviceState,
+    queue: &Queue,
+) -> Option<(String, String)> {
+    let changed = changed(workspace, device, queue).len();
+    (changed > 0).then(|| {
+        (
+            format!("Queue {changed}"),
+            format!("queue {changed} changed to send to the keyboard"),
+        )
+    })
 }
 
 /// Re-check everything waiting against the instrument attached now, and say what it
@@ -1412,11 +1391,10 @@ mod tests {
             .expect("every CBIN container has one")
     }
 
-    /// An edit queues nothing and neither does saving one the instrument already agrees
-    /// with. The two counts a send walks past are separate facts: a slot holding
-    /// something other than what was saved, and an edit nothing has saved at all.
+    /// An asset has changed once it is saved over what its slot holds, and stops
+    /// counting once it is queued. An edit nothing has saved has not changed.
     #[test]
-    fn the_counts_separate_what_the_instrument_lacks_from_what_nothing_saved() {
+    fn an_asset_has_changed_once_saved_over_its_slot_and_until_queued() {
         let (mut workspace, mut log, bytes) = bench();
         let class = ObjectClass::Program;
         let (mut device, _) = attached(&workspace);
@@ -1447,9 +1425,13 @@ mod tests {
             ],
         );
 
-        let counts =
-            |workspace: &Workspace, queue: &Queue| Behind::of(workspace, &device.state, queue);
-        assert_eq!(counts(&workspace, &queue), Behind::default());
+        let ids = |workspace: &Workspace, device: &Device, queue: &Queue| {
+            changed(workspace, &device.state, queue)
+                .iter()
+                .map(|(id, ..)| *id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&workspace, &device, &queue), Vec::<u64>::new());
 
         // Edited and saved: the slot no longer holds what this is.
         for id in [saved, queued] {
@@ -1460,16 +1442,8 @@ mod tests {
         edit(&mut workspace, unsaved, &mut log);
         device.relink(&mut workspace);
 
-        assert_eq!(
-            counts(&workspace, &queue),
-            Behind {
-                queued: 0,
-                changed: 2,
-                unsaved: 1
-            }
-        );
+        assert_eq!(ids(&workspace, &device, &queue), vec![saved, queued]);
 
-        // What is already waiting is not what a send would walk past.
         enqueue(
             &workspace,
             &mut device,
@@ -1479,17 +1453,11 @@ mod tests {
             class,
             at(1),
         );
-        assert_eq!(
-            changed(&workspace, &device.state, &queue)
-                .iter()
-                .map(|(id, ..)| *id)
-                .collect::<Vec<_>>(),
-            vec![saved],
-        );
+        assert_eq!(ids(&workspace, &device, &queue), vec![saved]);
     }
 
-    /// The action closes the gap the line describes: one entry per changed asset, each
-    /// for the slot it stands for.
+    /// Each changed asset is queued for the slot it stands on, and one that stands on
+    /// no slot is not.
     #[test]
     fn queueing_what_changed_makes_one_entry_each() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1525,43 +1493,7 @@ mod tests {
         assert_eq!(queue.entry(ids[0]).map(|held| held.at), Some(at(0)));
         assert_eq!(queue.entry(ids[1]).map(|held| held.at), Some(at(1)));
         assert!(!queue.holds(homeless), "it stands for no slot");
-        assert_eq!(
-            Behind::of(&workspace, &device.state, &queue),
-            Behind {
-                queued: 2,
-                changed: 0,
-                unsaved: 0
-            },
-            "the gap is closed, and what closed it is waiting"
-        );
-    }
-
-    /// The button offers the changed count alone, and there is no button without one:
-    /// what is waiting is on Send already, and an unsaved edit is nobody's to queue.
-    #[test]
-    fn the_button_offers_the_changed_count_and_nothing_else() {
-        assert_eq!(Behind::default().offer(), None, "nothing to close");
-        assert_eq!(
-            Behind {
-                queued: 3,
-                changed: 0,
-                unsaved: 1
-            }
-            .offer(),
-            None,
-            "neither is a gap this closes"
-        );
-        assert_eq!(
-            Behind {
-                queued: 0,
-                changed: 4,
-                unsaved: 0
-            }
-            .offer()
-            .map(|(label, _)| label)
-            .as_deref(),
-            Some("Queue 4")
-        );
+        assert!(changed(&workspace, &device.state, &queue).is_empty());
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue
