@@ -669,10 +669,8 @@ mod tests {
     }
 
     fn headless() -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = crate::testing::context();
         egui_extras::install_image_loaders(&ctx);
-        ctx.set_fonts(crate::app::fonts());
-        ctx.all_styles_mut(crate::app::metrics);
         ctx
     }
 

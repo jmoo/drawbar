@@ -1732,7 +1732,7 @@ mod tests {
     fn the_notice_says_what_is_wrong_and_offers_a_smaller_zoom_and_the_guide() {
         let said = |smaller: Option<Zoom>| {
             let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
-            let output = testing::run(&egui::Context::default(), input, |ctx| {
+            let output = testing::run(&testing::context(), input, |ctx| {
                 too_small_notice(ctx, smaller);
             });
             testing::words(&output)
