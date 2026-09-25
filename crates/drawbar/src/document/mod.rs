@@ -271,8 +271,8 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
-    /// The engineering table's filter and cell, and the decode it last laid out. One
-    /// table serves every tab — see [`Advanced::leave`].
+    /// The engineering table's filter and cell, and the byte diff it last worked out.
+    /// One table serves every tab — see [`Advanced::leave`].
     advanced: Advanced,
     /// The audio of the zones open rows have shown, dropped when their strokes change.
     audio: sample::Cache,
@@ -1970,8 +1970,7 @@ mod tests {
     }
 
     /// The Advanced face reads in one order: what the file says it is, the record of
-    /// the bytes it holds, then the body itself — the longest block last, because a
-    /// reader who has to scroll past ninety rows to reach the record does not.
+    /// the bytes it holds, then the body itself, the longest block last.
     #[test]
     fn the_advanced_face_reads_from_the_record_down_to_the_body() {
         let mut open = Open::fresh(Fresh::Program);
@@ -1997,15 +1996,10 @@ mod tests {
                 pair[1],
             );
         }
-        assert!(
-            !placed.iter().any(|(text, _)| text == "Show the decode"),
-            "the decode dump is gone: {placed:?}",
-        );
     }
 
-    /// ⚠️ Every column of the Advanced face reads down from its own heading. A cell
-    /// centred in the space its column keeps has no edge for the eye to follow, and a
-    /// record read that way is read a row at a time.
+    /// Every column of the Advanced face reads down from its own heading, so the eye
+    /// has one edge to follow.
     #[test]
     fn every_column_of_the_advanced_face_reads_down_from_its_heading() {
         let mut open = Open::fresh(Fresh::Program);
@@ -2785,8 +2779,7 @@ mod tests {
     }
 
     /// A WAV has no field table and no capabilities to list, so its Advanced face is
-    /// the record every asset has — which is the one page the merged face must not have
-    /// dropped.
+    /// the record every asset has.
     #[test]
     fn the_advanced_face_of_a_wav_is_the_record() {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
