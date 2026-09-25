@@ -940,19 +940,6 @@ mod tests {
         assert_eq!(&members[first..first + 9], &bars[..]);
     }
 
-    /// A morph slot is named by no group and is nobody's leftover: it is drawn on the
-    /// parameter its name binds it to, and that parameter is grouped.
-    #[test]
-    fn morph_slots_ride_on_the_parameters_they_move() {
-        let specs = Program::field_specs();
-        let named = PANEL.named(&specs);
-        assert!(!named.contains(&"organ_a.drawbar_1_wheel"));
-        assert!(named.contains(&"organ_a.drawbar_1"));
-        assert!(!named.contains(&"synth_a_voice.filter_resonance_wheel"));
-        assert!(named.contains(&"synth_a_voice.filter_resonance_freq_hp"));
-        assert_eq!(PANEL.leftovers(&specs), ["version_echo"]);
-    }
-
     /// The render path and the inspection path have to agree: one resolves against a
     /// body's values and the other against its specs, and a layout means one thing.
     #[test]

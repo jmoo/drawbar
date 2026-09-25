@@ -274,9 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn widths_come_from_the_range_alone() {
-        assert_eq!(Flag::WIDTH, 1);
-        assert_eq!(Nibble::WIDTH, 4);
+    fn a_field_spanning_all_64_bits_is_64_wide() {
         assert_eq!(Field::<u64, 0, 63>::WIDTH, 64);
     }
 

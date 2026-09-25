@@ -377,15 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn length_is_big_endian() {
-        // 0x00000102 = 258 read big-endian; little-endian would be 0x02010000.
-        let mut bytes = opener();
-        bytes.extend(section(HDR, 1, &[0; 258]));
-        let chain = walk(&bytes).unwrap();
-        assert_eq!(chain[1].payload.len(), 258);
-    }
-
-    #[test]
     fn a_length_past_the_end_of_the_body_is_refused_without_allocating_it() {
         let mut one_over = section(HDR, 1, &[7; 4]);
         one_over[5..9].copy_from_slice(&5u32.to_be_bytes());

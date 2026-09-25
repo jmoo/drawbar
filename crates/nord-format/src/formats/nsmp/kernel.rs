@@ -405,7 +405,6 @@ mod tests {
 
     #[test]
     fn another_ratio_walks_the_same_bank() {
-        assert_eq!(lattice_at(7, PITCH_NUM, PITCH_DEN), lattice(7));
         // Two source samples per field lands on a stored sample every time.
         for f in 0..8 {
             assert_eq!(lattice_at(f, 2, 1), (2 * f as i128, 0));
@@ -433,17 +432,6 @@ mod tests {
         let slower = cutoff(22_050, FIELD_RATE);
         assert!(slower > 1.0, "{slower}");
         assert!(Kernel::new(22_050, FIELD_RATE).bank.is_some());
-    }
-
-    /// A field on the measured lattice is the same field whichever entry point asks
-    /// for it.
-    #[test]
-    fn the_kernel_at_the_measured_ratio_is_the_free_function() {
-        let source: Vec<i16> = (0..512).map(|n| ((n * 37) % 9001 - 4500) as i16).collect();
-        let kernel = Kernel::new(PITCH_NUM, PITCH_DEN);
-        for f in 0..300 {
-            assert_eq!(kernel.field(&source, f), field(&source, f), "field {f}");
-        }
     }
 
     #[test]

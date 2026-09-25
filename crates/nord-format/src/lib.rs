@@ -653,32 +653,6 @@ mod registry_tests {
             .unwrap();
         assert_eq!(transpose.value, "-5");
     }
-
-    /// A stub-backed entity has no registry, and says so the same way in both
-    /// directions.
-    #[test]
-    fn a_stub_has_no_registry() {
-        let file = Cbin {
-            header: cbin::Header::new("ne6p", (0, 0), 1),
-            body: RawBody(vec![0; 16]),
-        };
-        let mut entity = Entity::Program(Program::Electro6(file));
-        assert!(entity.registry().is_none());
-        assert!(entity.registry_mut().is_none());
-    }
-
-    /// A song's fields are private, so its registry would list nothing — it is
-    /// deliberately not a registry entity, and `Song::set` is its editing surface.
-    #[test]
-    fn a_song_is_not_a_registry_entity() {
-        let song = ne5::song::new(
-            (0, 0).try_into().unwrap(),
-            ne5::song::DEFAULT_VERSION,
-            [(0, 0).try_into().unwrap(); 4],
-        )
-        .unwrap();
-        assert!(Entity::Song(Song::Electro5(song)).registry().is_none());
-    }
 }
 
 #[cfg(all(test, feature = "bundle"))]

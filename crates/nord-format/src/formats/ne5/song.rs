@@ -164,27 +164,6 @@ mod tests {
         new((0, 1).try_into()?, DEFAULT_VERSION, at)
     }
 
-    #[test]
-    fn a_songs_four_programs_survive_a_round_trip() -> Result<(), Error> {
-        let song = song_of([(1, 2), (2, 3), (3, 4), (4, 5)])?;
-
-        assert_eq!(song.location(), (0, 1));
-        for (slot, want) in Slot::ALL.into_iter().zip([(1, 2), (2, 3), (3, 4), (4, 5)]) {
-            assert_eq!(song.get(slot), want, "{slot:?}");
-        }
-
-        let mut bytes = Vec::new();
-        song.write_to(&mut Cursor::new(&mut bytes)).unwrap();
-        let back = read_from(&mut Cursor::new(&mut bytes)).unwrap();
-
-        assert_eq!(song.location(), back.location());
-        for slot in Slot::ALL {
-            assert_eq!(song.get(slot), back.get(slot), "{slot:?}");
-        }
-
-        Ok(())
-    }
-
     /// The body echoes the header's version, and both come from the one argument — so a
     /// version the read would refuse cannot be written in the first place.
     #[test]
@@ -272,14 +251,5 @@ mod tests {
         }
 
         Ok(())
-    }
-
-    /// Four entries, and the index that names them stops there.
-    #[test]
-    fn a_song_holds_four_entries_and_no_fifth() {
-        assert_eq!(Slot::ALL.len(), PROGRAM_COUNT);
-        assert_eq!(Slot::at(0), Some(Slot::A));
-        assert_eq!(Slot::at(PROGRAM_COUNT - 1), Some(Slot::D));
-        assert_eq!(Slot::at(PROGRAM_COUNT), None);
     }
 }

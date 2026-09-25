@@ -1716,6 +1716,7 @@ mod tests {
         assert!(library.cut_range(0..=last).is_ok());
         assert!(library.split_at(last).is_ok());
 
+        let before = library.to_body().unwrap();
         assert!(library.fine_tune(past).is_err());
         assert!(library.key_root(past).is_err());
         assert!(library.set_fine_tune(past, 1).is_err());
@@ -1724,15 +1725,11 @@ mod tests {
         assert!(library.cut_range(0..=past).is_err());
         assert!(library.cut_range(past..=past).is_err());
         assert!(library.split_at(past).is_err());
-    }
-
-    #[test]
-    fn a_key_past_the_tune_table_is_refused_rather_than_written_to_the_next_table() {
-        let piano = Build::new().piano();
-        let mut library = piano.library().unwrap();
-        let before = library.to_body().unwrap();
-        assert!(library.set_fine_tune(NOTES as u8, 32).is_err());
-        assert_eq!(library.to_body().unwrap(), before);
+        assert_eq!(
+            library.to_body().unwrap(),
+            before,
+            "a refused key wrote to the body"
+        );
     }
 
     #[test]

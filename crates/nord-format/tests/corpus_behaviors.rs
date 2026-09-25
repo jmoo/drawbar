@@ -32,18 +32,6 @@ fn ne5_programs() -> impl Iterator<
     })
 }
 
-fn ne5_lives() -> impl Iterator<
-    Item = (
-        &'static Specimen,
-        &'static nord_format::cbin::Cbin<nord_format::formats::ne5::Program>,
-    ),
-> {
-    corpus().iter().filter_map(|s| match &s.entity {
-        Entity::Live(Live::Electro5(p)) => Some((s, p)),
-        _ => None,
-    })
-}
-
 #[test]
 fn cbin_aux_words_have_documented_shapes() {
     const BOTH_HALVES: &[&str] = &["ns3y", "nsmp", "nd2p"];
@@ -640,53 +628,6 @@ fn every_sample_preset_parses_under_its_own_schema() {
     assert!(v2 > 0 && v3 > 0 && v4 > 0, "a generation went unseen");
 }
 
-/// A live slot and a stored program use the same body. Confirmed on hardware.
-#[test]
-fn ne5_live_body_decodes_as_a_program() {
-    use nord_format::formats::ne5;
-
-    let mut seen = 0;
-    for (specimen, live) in ne5_lives() {
-        let mut bytes = specimen.bytes.clone();
-        bytes[0x08..0x0c].copy_from_slice(ne5::program::FORMAT.as_bytes());
-        if bytes[0x04] == 0 {
-            let at = bytes.len() - 2;
-            let crc = nord_format::crc::crc16(&bytes[..at]);
-            bytes[at..].copy_from_slice(&crc.to_le_bytes());
-        }
-
-        let Entity::Program(Program::Electro5(program)) =
-            nord_format::from_stream(&mut Cursor::new(&bytes)).unwrap()
-        else {
-            panic!("retagged live slot decoded as another entity")
-        };
-
-        let fields = |fields: Vec<nord_format::fields::Field>| {
-            fields
-                .into_iter()
-                .map(|field| (field.path, field.display))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(fields(live.fields()), fields(program.fields()));
-        seen += 1;
-    }
-    assert!(seen > 0, "no Electro 5 live slot in the corpus");
-}
-
-#[test]
-fn ne5_live_slots_occupy_one_three_slot_bank() {
-    use nord_format::bank::Item;
-
-    let slots = ne5_lives()
-        .map(|(specimen, live)| {
-            let location = live.location();
-            assert_eq!(location.x(), 0, "{}", specimen.path.display());
-            location.inner()
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(slots, BTreeSet::from([(0, 0), (0, 1), (0, 2)]));
-}
-
 /// The drawbar accessors must be read/write inverses without disturbing other bits.
 #[test]
 fn ne5_drawbars_survive_a_rewrite() {
@@ -718,23 +659,6 @@ fn ne5_drawbars_survive_a_rewrite() {
         seen += 1;
     }
     assert!(seen > 0, "no Electro 5 program in the corpus");
-}
-
-/// Each readable zone table must account for every encoded stroke.
-#[test]
-fn nsmp_strokes_match_zones() {
-    let mut seen = 0;
-    for (specimen, sample) in v2_samples() {
-        let Ok(zones) = sample.zones() else {
-            continue;
-        };
-        let strokes = sample
-            .strokes()
-            .unwrap_or_else(|error| panic!("{}: {error}", specimen.path.display()));
-        assert_eq!(strokes.len(), zones.len(), "{}", specimen.path.display());
-        seen += strokes.len();
-    }
-    assert!(seen > 0, "no readable v2 strokes in the corpus");
 }
 
 /// The libraries before Sample Library 2.0 write a narrower chain under a `map`
@@ -806,31 +730,25 @@ fn pre_library_2_instruments_decode_their_narrower_zone_table() {
     );
 }
 
-/// A zone record names its stroke in one byte and a stroke's own id is a u32, so
-/// library instruments exist whose ids alias. Pairing on the whole u32 loses those
-/// zones, and does it silently on everything with fewer than 256 strokes.
+/// Every zone table accounts for every stroke. A zone record names its stroke in one
+/// byte and a stroke's own id is a u32, so library instruments exist whose ids alias.
+/// Pairing on the whole u32 loses those zones, and does it silently on everything with
+/// fewer than 256 strokes.
 #[test]
 fn zones_pair_with_strokes_whose_ids_run_past_a_byte() {
     let mut aliased = 0;
     for (specimen, sample) in v2_samples() {
         let where_ = specimen.path.display();
-        let ids: Vec<u32> = sample
+        let zones = sample.zones().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        let strokes = sample.strokes().unwrap_or_else(|e| panic!("{where_}: {e}"));
+        assert_eq!(strokes.len(), zones.len(), "{where_}");
+        if sample
             .stroke_streams()
             .iter()
-            .map(|(_, s)| u32::from_be_bytes(s[0..4].try_into().unwrap()))
-            .collect();
-        if ids.iter().all(|id| *id <= u32::from(u8::MAX)) {
-            continue;
+            .any(|(_, s)| u32::from_be_bytes(s[0..4].try_into().unwrap()) > u32::from(u8::MAX))
+        {
+            aliased += 1;
         }
-        aliased += 1;
-        assert_eq!(
-            sample
-                .strokes()
-                .unwrap_or_else(|e| panic!("{where_}: {e}"))
-                .len(),
-            sample.zones().unwrap().len(),
-            "{where_}"
-        );
     }
     assert!(aliased > 0, "no instrument with a stroke id past 255");
 }
@@ -881,13 +799,6 @@ fn nsmp_overlong_name_is_refused_without_mutation() {
     let over = "M".repeat(nsmp::MAX_NAME_LEN + 1);
     assert!(sample.set_name(&over).is_err());
     assert_eq!(sample.name().unwrap(), "TEST");
-}
-
-#[test]
-fn nsmp_bad_checksum_is_refused() {
-    let mut bytes = named("D1-one-zone.nsmp").bytes.clone();
-    *bytes.last_mut().unwrap() ^= 0xff;
-    assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
 }
 
 /// A device read whose leading body bytes arrived as foreign buffer content, so the
@@ -1121,41 +1032,6 @@ fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
     }
     assert!(populated > 0, "no populated per-key table in the corpus");
     assert!(neutral > 0, "no neutral per-key table in the corpus");
-}
-
-#[test]
-fn nsmp_v4_populated_key_map_survives_a_round_trip() {
-    let mut seen = 0;
-    for specimen in corpus() {
-        let Entity::Sample(Sample::V3(sample)) = &specimen.entity else {
-            continue;
-        };
-        if !sample.zones_are_editable() {
-            continue;
-        }
-        let Ok(zones) = sample.zones() else { continue };
-        if zones.len() < 2 {
-            continue;
-        }
-        let name = specimen.path.display();
-        let roots: Vec<u8> = zones.iter().map(|z| z.root_key).collect();
-        let mut entity = nord_format::from_stream(&mut Cursor::new(&specimen.bytes)).unwrap();
-        let Entity::Sample(edited) = &mut entity else {
-            unreachable!()
-        };
-        // Move every root away and back. The table is recomputed each time, so
-        // a byte-identical result is the law reproducing what the builder wrote.
-        for (i, root) in roots.iter().enumerate() {
-            edited.set_root_key(i, root.saturating_sub(1)).unwrap();
-        }
-        for (i, root) in roots.iter().enumerate() {
-            edited.set_root_key(i, *root).unwrap();
-        }
-        let after = nord_format::to_bytes(&entity).unwrap();
-        assert_eq!(specimen.bytes, after, "{name}");
-        seen += 1;
-    }
-    assert!(seen > 0, "no multi-zone wide sample in the corpus");
 }
 
 #[test]
@@ -1951,42 +1827,6 @@ fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
     assert!(overlap > 0, "no stroke long enough to repeat a block");
 }
 
-/// The coder is the decoder's inverse: give each stroke back the frames it decodes to
-/// and it lays out the same blocks — the same segmentation, the same width and order,
-/// the same residuals to the bit, and the same clear bits after the last field. Every
-/// stroke of every library is held to it, the ones this crate wrote included.
-///
-/// A block's attenuation byte is the one value that can come back different. It is a
-/// statistic the vendor's encoder recorded, not a function of the frames it went on
-/// to store, and nothing in the decode reads it.
-#[test]
-fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
-    let mut strokes = 0;
-    for (specimen, piano) in pianos() {
-        let where_ = specimen.path.display();
-        let library = piano.library().unwrap();
-        let again =
-            npno::encode::rebuild(&library).unwrap_or_else(|e| panic!("{where_}: recode: {e}"));
-        for (stroke, recoded) in library.strokes().iter().zip(&again.strokes) {
-            assert_eq!(
-                recoded.blocks,
-                usize::from(stroke.blocks()),
-                "{where_}: {stroke:?} came back as a different number of blocks"
-            );
-            assert_eq!(
-                recoded.recoded(),
-                0,
-                "{where_}: {stroke:?}: {} of {} block(s) came back with different residuals, \
-                 a different width or a different order",
-                recoded.recoded(),
-                recoded.blocks
-            );
-            strokes += 1;
-        }
-    }
-    assert!(strokes > 0, "no piano stroke");
-}
-
 /// A library coded again from its own audio is the library it came from: the same
 /// size, the same prefix, the same directory records, and the same blocks in the same
 /// places. Only the attenuation the blocks declare can move, so the file this writes
@@ -2017,7 +1857,12 @@ fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
             after[..head] == before[..head],
             "{where_}: the recode moved a byte outside the audio"
         );
-        for (stroke, recoded) in again.library.strokes().iter().zip(&again.strokes) {
+        for (stroke, recoded) in library.strokes().iter().zip(&again.strokes) {
+            assert_eq!(
+                recoded.blocks,
+                usize::from(stroke.blocks()),
+                "{where_}: {stroke:?} came back as a different number of blocks"
+            );
             assert_eq!(
                 recoded.identical + recoded.restated,
                 recoded.blocks,

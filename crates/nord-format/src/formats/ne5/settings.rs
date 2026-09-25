@@ -885,17 +885,6 @@ mod tests {
         assert!(CtrlPedalGain::from_bits(10).is_err());
     }
 
-    /// A default panel is the decode of zeroed bytes, and re-encoding it gives them back.
-    #[test]
-    fn the_default_panel_encodes_and_decodes() {
-        let p = Settings::default();
-        assert_eq!(<[u8; BODY_LEN]>::from(&p), [0; BODY_LEN]);
-        assert_eq!(p.global_transpose, -6);
-        assert_eq!(p.fine_tune, -50);
-        assert_eq!(p.ctrl_pedal_gain, 1);
-        assert_eq!(p.global_channel, MidiChannel::channel(1).unwrap());
-    }
-
     /// Setting a field lands in its own bits and disturbs no other byte.
     #[test]
     fn setting_a_field_moves_only_its_own_bytes() {

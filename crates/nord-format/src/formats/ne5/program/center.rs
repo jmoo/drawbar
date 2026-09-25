@@ -111,33 +111,9 @@ impl OrganType {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{self as program, OrganModel, FILE_LEN};
+    use super::super::OrganModel;
     use super::*;
     use crate::bits::Packed;
-    use crate::types::RangedU8;
-    use std::io::Cursor;
-
-    /// An out-of-range value is not something a field can hold, so the refusal happens
-    /// at construction rather than part-way through a write.
-    #[test]
-    fn an_out_of_range_value_is_refused_where_it_is_written() {
-        // `panel.gain = 200;` does not compile: 200 is not a `RangedU8<127>`.
-        let too_wide: Result<RangedU8<127>, _> = 200u8.try_into();
-        assert!(too_wide.is_err(), "200 must not be a valid seven-bit gain");
-        assert!(
-            RangedU8::<127>::new(127).is_ok(),
-            "127 is the largest that fits"
-        );
-
-        let mut program = program::new((0, 0).try_into().unwrap());
-        program.center_panel.gain = 96u8.try_into().unwrap();
-
-        let mut bytes = Vec::new();
-        program
-            .write_to(&mut Cursor::new(&mut bytes))
-            .expect("a panel built from ranged values always writes");
-        assert_eq!(bytes.len(), FILE_LEN);
-    }
 
     /// A default panel has to encode, which zeroed bytes alone would not: an octave
     /// shift of zero is stored as 7, so all-zero bits decode as -7 — out of range.

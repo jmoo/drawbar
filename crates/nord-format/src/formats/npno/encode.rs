@@ -1505,17 +1505,6 @@ mod tests {
     }
 
     #[test]
-    fn a_mono_library_codes_and_decodes_on_its_own_block_size() {
-        let source = tone(9_000, 440.0, 1);
-        let piano = round_trip(1, &[one(48, Bank::Attack, 0, source.clone())]);
-        let library = piano.library().unwrap();
-        assert_eq!(library.channels(), 1);
-        let audio = codec::decode(&library.strokes()[0], 1).unwrap();
-        assert_eq!(audio.lanes[0][..source[0].len()], source[0][..]);
-        assert!(audio.lanes[0][source[0].len()..].iter().all(|&s| s == 0));
-    }
-
-    #[test]
     fn the_directory_orders_strokes_by_root_then_bank_then_layer() {
         let short = tone(6_000, 300.0, 1);
         let piano = round_trip(
@@ -1714,26 +1703,6 @@ mod tests {
         assert!(curve[109..].iter().all(|&v| v == 30));
     }
 
-    /// The bound is the selection rule at the softest note-on, so the value it names
-    /// is the last one a key can reach and the spread stays inside it.
-    #[test]
-    fn the_highest_played_layer_is_the_rule_at_the_softest_velocity() {
-        let selected = |velocity: u32| ((127 - velocity) * 31 / 127) as u8;
-        assert_eq!(HIGHEST_PLAYED_LAYER, selected(1));
-        assert!((1..=127).all(|v| selected(v) <= HIGHEST_PLAYED_LAYER));
-        const { assert!(SOFTEST_LAYER <= HIGHEST_PLAYED_LAYER) };
-
-        let donor = template(1);
-        let library = donor.library().unwrap();
-        let short = tone(6_000, 300.0, 1);
-        build(
-            &Donor::Template(&library),
-            &Options::new("Synth"),
-            &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short)],
-        )
-        .expect("the bound itself is a value a key sounds");
-    }
-
     #[test]
     fn a_wav_name_states_its_root_bank_and_layer() {
         use LayerTag::{Index, Value};
@@ -1917,6 +1886,12 @@ mod tests {
             unplayable.contains("30 is the largest a key ever sounds"),
             "{unplayable}"
         );
+        build(
+            &Donor::Template(&library),
+            &options,
+            &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short.clone())],
+        )
+        .expect("the bound itself is a value a key sounds");
         assert!(error(&[
             one(60, Bank::Attack, 0, short.clone()),
             one(

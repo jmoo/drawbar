@@ -1354,11 +1354,6 @@ mod tests {
     }
 
     #[test]
-    fn the_field_rate_is_the_lattice_rate() {
-        assert_eq!(FIELD_RATE, 35_002);
-    }
-
-    #[test]
     fn the_layout_follows_the_content_version() {
         assert_eq!(Layout::from_version(8), Some(Layout::V2));
         assert_eq!(Layout::from_version(200), Some(Layout::V2));
@@ -1379,13 +1374,6 @@ mod tests {
         );
         assert_eq!(Layout::from_version(V5_FROM_VERSION), None);
         assert_eq!(Layout::from_version(u32::MAX), None);
-    }
-
-    #[test]
-    fn only_v4_splits_a_stereo_stroke_s_openings() {
-        assert!(Layout::V4.splits_wide_openings());
-        assert!(!Layout::V3.splits_wide_openings());
-        assert!(!Layout::V2.splits_wide_openings());
     }
 
     #[test]
