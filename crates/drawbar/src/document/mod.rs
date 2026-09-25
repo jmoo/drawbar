@@ -2929,7 +2929,16 @@ mod tests {
         );
         assert!(!open.document.pends(open.id), "the plan is gone with it");
 
-        open.workspace.revert(open.id, &mut open.log);
+        crate::browser::apply(
+            &mut crate::browser::Browser::default(),
+            &mut crate::shell::Shell::default(),
+            acts,
+            &mut open.workspace,
+            &mut open.device,
+            &mut crate::tabs::Tabs::default(),
+            &mut open.queue,
+            &mut open.log,
+        );
         assert!(
             !open.entity().is_unsaved(),
             "and what is left is what it was saved as",
