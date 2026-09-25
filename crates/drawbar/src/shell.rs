@@ -365,9 +365,29 @@ fn searched(before: &str, after: &str) -> bool {
     before != after
 }
 
+/// [`egui::Ui::menu_button`], marking a submenu with an arrow the app's faces have.
+///
+/// egui's own arrow is `⏵`, which none of them covers.
+pub fn menu<'a, R>(
+    ui: &mut egui::Ui,
+    atoms: impl egui::IntoAtoms<'a>,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    use egui::containers::menu::{is_in_menu, MenuButton, SubMenuButton};
+    let (response, inner) = match is_in_menu(ui) {
+        true => SubMenuButton::from_button(egui::Button::new(atoms).right_text(SUBMENU))
+            .ui(ui, contents),
+        false => MenuButton::new(atoms).ui(ui, contents),
+    };
+    egui::InnerResponse::new(inner.map(|inner| inner.inner), response)
+}
+
+/// The mark at the right of an item that opens a submenu.
+pub(crate) const SUBMENU: &str = "▸";
+
 /// One of the title bar's drop-downs, no narrower than [`MENU`] however little is in it.
 fn drop_down(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
-    ui.menu_button(title, |ui| {
+    menu(ui, title, |ui| {
         ui.set_min_width(MENU);
         contents(ui);
     });
@@ -668,7 +688,7 @@ impl DrawbarApp {
         if item(ui, "Open…", Some(key::OPEN)) {
             acts.push(Act::OpenFiles);
         }
-        ui.menu_button("New", |ui| new_menu(ui, acts));
+        menu(ui, "New", |ui| new_menu(ui, acts));
         ui.separator();
         if let Some(id) = self.tabs.active() {
             if item(ui, "Save", Some(key::SAVE)) {
@@ -733,7 +753,7 @@ impl DrawbarApp {
             }
         }
         ui.separator();
-        ui.menu_button("Theme", |ui| {
+        menu(ui, "Theme", |ui| {
             for choice in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
                 if marked(ui, choice.label(), self.theme == choice, None) {
                     self.pick_theme(ui.ctx(), frame, choice);

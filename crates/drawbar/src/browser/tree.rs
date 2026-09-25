@@ -19,7 +19,7 @@ use crate::icon::Glyph;
 use crate::newproject::Making;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
-use crate::shell::marked;
+use crate::shell::{marked, menu};
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -34,7 +34,7 @@ use crate::workspace::{Fresh, LocalEntity, Workspace};
 /// nothing on this computer — and lives on the tree's own instrument row.
 pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     for family in &Fresh::FAMILIES {
-        ui.menu_button(family.label, |ui| {
+        menu(ui, family.label, |ui| {
             for kind in family.kinds {
                 let mut entry = ui.button(kind.label());
                 if let Some(note) = kind.note() {
@@ -380,7 +380,7 @@ impl Browser {
                     acts.push(Act::OpenFiles);
                     ui.close();
                 }
-                ui.menu_button("New", |ui| new_menu(ui, acts));
+                menu(ui, "New", |ui| new_menu(ui, acts));
             });
         });
     }
@@ -691,7 +691,7 @@ impl Browser {
             ui.close();
         }
         self.filing_menu(ui, id, self.folders.holding(id), acts);
-        ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
+        menu(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
         if ui
             .button("Save as gig…")
             .on_hover_text("what is picked, under a tag of its own")
@@ -712,7 +712,7 @@ impl Browser {
         if self.folders.all().is_empty() {
             return;
         }
-        ui.menu_button("Move to folder", |ui| {
+        menu(ui, "Move to folder", |ui| {
             for folder in self.folders.all() {
                 if marked(ui, &folder.name, filed == Some(folder.id), None) {
                     acts.push(Act::File {
