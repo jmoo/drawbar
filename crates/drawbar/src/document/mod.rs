@@ -2235,13 +2235,8 @@ mod tests {
         assert_eq!(copied.id, None);
     }
 
-    /// A document opened off a slot asks the instrument what that slot plays, because
-    /// the name of the piano is the one thing the file cannot answer — and it asks once,
-    /// however many frames it is drawn for.
-    ///
-    /// ⚠️ The reply is a one-slot cache that the next read of any slot displaces. The
-    /// name has to outlive that: nothing on the page asks a second time, so a reader
-    /// left with a bare id would have no way to get the name back.
+    /// A document opened off a slot asks once what that slot plays, and keeps the
+    /// piano's name after another slot is read.
     #[test]
     fn a_document_asks_what_its_slot_plays_and_keeps_the_answer() {
         use nord_usb::wire::Dependency;
@@ -2304,7 +2299,6 @@ mod tests {
         );
         assert_eq!(named(&open).as_deref(), Some("Royal Grand 3D"));
 
-        // Another slot is read, and the one-slot cache now stands for that one.
         open.device
             .pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
         assert_eq!(

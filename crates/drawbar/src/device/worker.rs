@@ -1520,8 +1520,7 @@ mod wire_tests {
         }
     }
 
-    /// A select leaves the panel on the slot it names, so the app hears where the panel
-    /// is from the select itself rather than waiting for the next walk of the class.
+    /// A select reports the slot it left the panel on.
     #[test]
     fn a_select_reports_where_it_left_the_panel() {
         let at = Location { bank: 6, slot: 3 };

@@ -478,8 +478,7 @@ impl Browser {
         if lines.is_empty() {
             return;
         }
-        // The warnings first: they are the reason to say no, and a blank line sets them
-        // apart from what the send would carry.
+        // The warnings first: they are the reason to say no.
         let mut note = warnings;
         if !note.is_empty() {
             note.push(String::new());

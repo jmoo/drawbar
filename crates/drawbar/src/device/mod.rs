@@ -136,8 +136,8 @@ pub enum DeviceCmd {
     /// Select again whichever of `written` the panel is on when this runs, so it plays
     /// what was just written there.
     ///
-    /// ⚠️ The panel is read first rather than trusted from a walk: a select moves a
-    /// panel that has been turned since and discards the edits made there.
+    /// ⚠️ The panel is read when this runs. A select would move a panel turned since
+    /// the last walk, and discard the edits made there.
     Reload {
         class: ObjectClass,
         written: Vec<Location>,
