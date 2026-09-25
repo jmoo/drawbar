@@ -205,10 +205,7 @@ pub struct Loud {
 pub struct Extras {
     pub size: Option<SizeLine>,
     /// The claim an unsaved document makes, where the editor has a better one than
-    /// `edited` — the field document's `N pending`.
-    ///
-    /// ⚠️ Its ink is the strip's, not the editor's: an unsaved document is a warning
-    /// whatever counted it.
+    /// `edited` — the field document's `N pending`. It stands in its own ink.
     pub edited: Option<StateLine>,
     /// What a saved document claims instead of what the strip works out — a set list
     /// naming programs the instrument does not have where it says.
@@ -1111,11 +1108,7 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
         return Some(match &facts.extras.edited {
-            Some(line) => StateLine {
-                words: line.words.clone(),
-                ink: Ink::Warn,
-                hint: line.hint.clone(),
-            },
+            Some(line) => line.clone(),
             None => phrase(Mark::Unsaved, waiting),
         });
     }
@@ -1510,10 +1503,10 @@ mod tests {
         }
     }
 
-    /// An editor's own word for an unsaved document stands in the strip, and it is warn
-    /// ink whatever the editor called it — the header has no red to reach for.
+    /// An editor's own word for an unsaved document stands in the strip in the editor's
+    /// own ink: a piano library being laid out is unsaved, and says so quietly.
     #[test]
-    fn an_editors_own_state_phrase_keeps_the_strips_ink() {
+    fn an_editors_own_state_phrase_stands_in_its_own_ink() {
         let (queue, tags) = (Queue::default(), Tags::default());
         let device = crate::device::Device::new(egui::Context::default());
         let (mut workspace, mut log) = workspace();
@@ -1524,20 +1517,20 @@ mod tests {
 
         let mut facts = facts(&device.state, &queue, &tags);
         let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
-        assert_eq!(held.words, "edited");
+        assert_eq!((held.words.as_str(), held.ink), ("edited", Ink::Warn));
 
         facts.extras.edited = Some(StateLine {
-            words: "6 pending".to_string(),
-            ink: Ink::Good,
-            hint: "raw ≠ bits on 6 fields".to_string(),
+            words: "applying…".to_string(),
+            ink: Ink::Quiet,
+            hint: "laying the plan out over the library".to_string(),
         });
         let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
-        assert_eq!(held.words, "6 pending");
-        assert_eq!(held.hint, "raw ≠ bits on 6 fields");
+        assert_eq!(held.words, "applying…");
+        assert_eq!(held.hint, "laying the plan out over the library");
         assert_eq!(
             held.ink,
-            Ink::Warn,
-            "the strip decides the ink, not the editor"
+            Ink::Quiet,
+            "the editor's ink, not the strip's warn"
         );
     }
 
