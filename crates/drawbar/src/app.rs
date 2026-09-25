@@ -570,13 +570,10 @@ pub fn bold() -> egui::FontFamily {
 /// Ubuntu Regular for the body, Ubuntu Bold beside it, and Hack for the monospace runs.
 ///
 /// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
-/// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
-/// heavier weight to ask for and no 400 to set the body in.
+/// Licence 1.0 beside them. Hack comes from egui's `epaint_default_fonts`.
 ///
-/// ⚠️ Every face is named here rather than added to [`egui::FontDefinitions::default`],
-/// which carries Ubuntu Light and two emoji faces as well — a megabyte of glyphs nothing
-/// here asks for by name. Text none of these three faces covers draws as the replacement
-/// box, emoji included.
+/// ⚠️ These three faces are all the app ships. A character none of them covers draws as
+/// Hack's `◻`, so a test checks every character the app types against them.
 pub(crate) fn fonts() -> egui::FontDefinitions {
     const UBUNTU: &str = "Ubuntu";
     const UBUNTU_BOLD: &str = "Ubuntu-Bold";
@@ -598,19 +595,25 @@ pub(crate) fn fonts() -> egui::FontDefinitions {
             std::sync::Arc::new(egui::FontData::from_static(ttf)),
         );
     }
-    // Ubuntu behind the other two for what they do not cover, as egui's own monospace
-    // family keeps Ubuntu Light behind Hack.
+    // Ubuntu and Hack each cover characters the other lacks, such as `→` and `ǅ`.
     for (family, faces) in [
-        (egui::FontFamily::Proportional, vec![UBUNTU.to_owned()]),
-        (bold(), vec![UBUNTU_BOLD.to_owned(), UBUNTU.to_owned()]),
-        (
-            egui::FontFamily::Monospace,
-            vec![HACK.to_owned(), UBUNTU.to_owned()],
-        ),
+        (egui::FontFamily::Proportional, [UBUNTU, HACK]),
+        (bold(), [UBUNTU_BOLD, HACK]),
+        (egui::FontFamily::Monospace, [HACK, UBUNTU]),
     ] {
-        fonts.families.insert(family, faces);
+        fonts
+            .families
+            .insert(family, faces.map(str::to_owned).to_vec());
     }
     fonts
+}
+
+/// A context that lays text out in the app's own faces.
+#[cfg(test)]
+pub(crate) fn test_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(fonts());
+    ctx
 }
 
 /// The text of the shell itself: menus, tabs, rail rows and cells.
@@ -819,25 +822,56 @@ mod tests {
         }
     }
 
+    /// Each non-ASCII character outside comments and test modules, with its file.
+    fn typed() -> std::collections::BTreeSet<(char, String)> {
+        let mut paths = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        let mut typed = std::collections::BTreeSet::new();
+        while let Some(path) = paths.pop() {
+            if path.is_dir() {
+                let entries = std::fs::read_dir(&path).expect("the source tree is readable");
+                paths.extend(entries.map(|entry| entry.expect("a readable entry").path()));
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("source is UTF-8");
+            let shipped = source.split("\n#[cfg(test)]\nmod tests").next();
+            let lines = shipped.into_iter().flat_map(str::lines);
+            for line in lines.filter(|line| !line.trim_start().starts_with("//")) {
+                for c in line.chars().filter(|c| !c.is_ascii()) {
+                    let file = path
+                        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap_or(&path);
+                    typed.insert((c, file.display().to_string()));
+                }
+            }
+        }
+        typed
+    }
+
     #[test]
-    fn each_family_leads_with_its_own_face_and_ends_at_ubuntu() {
-        let fonts = fonts();
-        for (family, lead) in [
-            (egui::FontFamily::Proportional, "Ubuntu"),
-            (bold(), "Ubuntu-Bold"),
-            (egui::FontFamily::Monospace, "Hack"),
+    fn every_family_draws_every_character_the_app_types() {
+        let ctx = test_context();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let typed = typed();
+        assert!(
+            typed
+                .iter()
+                .any(|(c, _)| crate::shell::SUBMENU.contains(*c)),
+            "the scan missed the submenu arrow in shell.rs"
+        );
+        for family in [
+            egui::FontFamily::Proportional,
+            bold(),
+            egui::FontFamily::Monospace,
         ] {
-            let faces = &fonts.families[&family];
-            assert_eq!(faces.first().map(String::as_str), Some(lead), "{family:?}");
-            assert_eq!(
-                faces.last().map(String::as_str),
-                Some("Ubuntu"),
-                "{family:?} has nothing behind it"
-            );
-            for face in faces {
+            let font = egui::FontId::new(14.0, family.clone());
+            for (c, file) in &typed {
                 assert!(
-                    fonts.font_data.contains_key(face),
-                    "{family:?} names {face}, which carries no bytes"
+                    ctx.fonts(|fonts| fonts.has_glyph(&font, *c)),
+                    "{file} types {c:?} (U+{:04X}), which {family:?} cannot draw",
+                    u32::from(*c)
                 );
             }
         }
