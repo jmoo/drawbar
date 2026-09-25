@@ -108,12 +108,10 @@ pub struct Commit<'a> {
     pub url: &'a str,
 }
 
-/// A release body with the emoji variation selector taken out.
-///
-/// ⚠️ No bundled font has a glyph for U+FE0F, and a missing one renders as an empty box
-/// — so `### ⚠️ Breaking changes` would read as a warning sign beside a blank tile.
+/// A release body without the warning emoji `scripts/release.bash` puts before its
+/// breaking changes, which no face the app ships can draw.
 pub fn plain(body: &str) -> String {
-    body.replace('\u{fe0f}', "")
+    body.replace("\u{26a0}\u{fe0f} ", "")
 }
 
 /// Read one line of a release body.
@@ -270,10 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn a_heading_keeps_its_warning_sign_without_the_variation_selector() {
+    fn the_breaking_changes_heading_loses_its_warning_emoji() {
         assert_eq!(
             plain("### \u{26a0}\u{fe0f} Breaking changes"),
-            "### \u{26a0} Breaking changes"
+            "### Breaking changes"
         );
     }
 
