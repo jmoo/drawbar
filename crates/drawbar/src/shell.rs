@@ -12,7 +12,7 @@ use nord_usb::ObjectClass;
 
 use crate::app::{accent, bold, ui as ui_text, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
-use crate::device::occupancy;
+use crate::device::{occupancy, NO_USB_BRIEF};
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
@@ -347,6 +347,13 @@ const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 pub(crate) const GUIDE: &str = "docs/";
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const GUIDE: &str = "https://drawbar.app/docs/";
+
+/// The guide's word on which browsers can connect, under [`GUIDE`].
+#[cfg(target_arch = "wasm32")]
+pub(crate) const BROWSERS: &str = "docs/getting-started/install.html#in-the-browser";
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const BROWSERS: &str =
+    "https://drawbar.app/docs/getting-started/install.html#in-the-browser";
 
 /// The key text beside a menu label — a window's, never a tab's.
 fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
@@ -868,6 +875,12 @@ impl DrawbarApp {
     /// ⚠️ Nothing but Connect… until one answers. Every other item here acts on an
     /// instrument, and the send queue is only ever owed to one.
     fn usb_items(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        if !self.device.usb() {
+            if item(ui, NO_USB_BRIEF, None) {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(BROWSERS));
+            }
+            return;
+        }
         if !self.attached() {
             if item(ui, "Connect…", None) {
                 acts.push(Act::Connect);
@@ -1410,6 +1423,27 @@ mod tests {
             panels,
             words: crate::tabs::words(&output),
         }
+    }
+
+    #[test]
+    fn a_browser_without_usb_is_told_why_where_connect_would_be() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let _ = drawn(&ctx, &mut app);
+        assert!(drawn(&ctx, &mut app).wrote("Connect an instrument…"));
+
+        app.device.pretend_no_usb();
+        let painted = drawn(&ctx, &mut app);
+        assert!(
+            painted.wrote(crate::device::NO_USB_BRIEF),
+            "{:?}",
+            painted.words
+        );
+        assert!(
+            !painted.wrote("Connect an instrument…"),
+            "{:?}",
+            painted.words
+        );
     }
 
     /// The gate is the screen and the metrics alone: what the reader has shut, and what

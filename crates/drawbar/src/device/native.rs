@@ -37,6 +37,10 @@ impl Link {
         }
     }
 
+    pub fn available() -> bool {
+        true
+    }
+
     pub fn connect(&mut self) {
         let (tx, rx) = mpsc::channel::<DeviceCmd>();
         self.commands = Some(tx);
