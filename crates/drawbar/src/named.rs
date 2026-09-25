@@ -157,4 +157,61 @@ mod tests {
         assert_eq!(list.all().len(), 1, "and nothing was added");
         assert_eq!(list.name_of(u64::MAX), Some("Sunday"));
     }
+
+    /// A new one is called what nothing else is, so two of them are two rows rather
+    /// than one row twice, and the name asked for is the name it starts from.
+    #[test]
+    fn a_new_one_gets_a_name_nothing_else_is_using() {
+        let mut list = List::default();
+        let ids: Vec<u64> = (0..3).map(|_| list.make("Sunday").unwrap()).collect();
+        assert_eq!(ids, [1, 2, 3]);
+        let names: Vec<&str> = ids.iter().map(|id| list.name_of(*id).unwrap()).collect();
+        assert_eq!(names, ["Sunday", "Sunday 2", "Sunday 3"]);
+    }
+
+    /// ⚠️ Two rows claiming one id is a file with two names for one thing, and every
+    /// membership naming that id means whichever of them is kept. The first is, so the
+    /// second is refused rather than quietly renaming it on the way in.
+    #[test]
+    fn a_second_row_for_an_id_already_read_is_refused() {
+        let mut list = List::default();
+        list.restore(1, "Sunday".into());
+        list.restore(1, "Monday".into());
+        assert_eq!(list.all().len(), 1);
+        assert_eq!(list.name_of(1), Some("Sunday"));
+    }
+
+    /// A line this build did not write is dropped rather than guessed at, and the rest of
+    /// the file is still read.
+    #[test]
+    fn a_line_that_is_not_a_line_is_dropped_and_the_rest_is_read() {
+        for (line, why) in [
+            ("t\tx\tNot a number", "an id that is not a number"),
+            ("m\t7", "a membership missing its group"),
+            ("m\t7\t1\textra", "a line with a column too many"),
+            ("x\t7\t1", "a head this build does not write"),
+        ] {
+            let read = read(&format!("v\n{line}\nt\t1\tSunday\n"), "v", "t");
+            assert!(
+                matches!(read.as_slice(), [Line::Named { id: 1, name }] if name == "Sunday"),
+                "{why}"
+            );
+        }
+    }
+
+    /// A name holding a newline would otherwise be two lines, and the second of them a
+    /// line this build refuses.
+    #[test]
+    fn a_name_across_two_lines_comes_back_as_one_name() {
+        let mut list = List::default();
+        let id = list.make("Sunday").unwrap();
+        list.rename(id, "Sunday\nmorning".into());
+
+        let read = read(&written("v", "t", &list), "v", "t");
+        assert!(
+            matches!(read.as_slice(), [Line::Named { id: 1, name }] if name == "Sunday\nmorning"),
+            "{}",
+            read.len()
+        );
+    }
 }

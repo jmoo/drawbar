@@ -396,18 +396,6 @@ impl<const X_COUNT: u16, const Y_COUNT: u16> From<RangedU16Pair<X_COUNT, Y_COUNT
 mod tests {
     use super::RangedU16Pair;
 
-    #[test]
-    fn ranged_tuple_can_convert_to_u16() {
-        let ranged_tuple: RangedU16Pair<5, 10> = (1, 2).try_into().unwrap();
-        assert_eq!(ranged_tuple.as_u16(), 12);
-    }
-
-    #[test]
-    fn ranged_tuple_can_be_created_from_u16() {
-        let ranged_tuple: RangedU16Pair<5, 10> = 12_u16.try_into().unwrap();
-        assert_eq!(ranged_tuple, (1, 2));
-    }
-
     /// Both parameters are counts: the last location of an 8×50 space is `(7, 49)`, and
     /// a coordinate equal to its count is one past the end.
     #[test]

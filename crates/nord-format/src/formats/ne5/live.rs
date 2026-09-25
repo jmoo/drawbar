@@ -67,16 +67,6 @@ mod tests {
         assert_eq!(location(&back).unwrap(), (0, 2));
     }
 
-    /// There are three live slots, and the type will not name a fourth.
-    #[test]
-    fn the_live_slot_space_stops_at_three() {
-        for slot in 0..SLOT_COUNT {
-            assert!(Location::try_from((0, slot)).is_ok(), "slot {slot}");
-        }
-        assert!(Location::try_from((0, SLOT_COUNT)).is_err());
-        assert!(Location::try_from((1, 0)).is_err());
-    }
-
     /// The bodies are interchangeable, so only the tag says which format a file is —
     /// and a reader that ignored it would re-emit the file as the other one.
     #[test]

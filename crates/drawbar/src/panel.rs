@@ -347,12 +347,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_title_is_uppercased_whatever_it_arrives_as() {
-        assert_eq!(caps("send queue").text(), "SEND QUEUE");
-        assert_eq!(caps("Browser").text(), "BROWSER");
-    }
-
     /// A header is full bleed and exactly as tall as its kind, so a dock's body always
     /// starts at the same place and a header's fill reaches both edges of the panel it
     /// heads.

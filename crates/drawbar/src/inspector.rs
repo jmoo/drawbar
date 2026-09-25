@@ -555,7 +555,11 @@ mod tests {
             info_open: false,
             ..Shell::default()
         };
-        paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
+        let shut = paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
+        for header in ["ROOM", "INFO"] {
+            assert!(shut.iter().any(|word| word == header), "{header}: {shut:?}");
+        }
+        assert!(shut.len() < held.len(), "{shut:?}");
     }
 
     /// The facts about one picked asset are the ones its library row already carries,

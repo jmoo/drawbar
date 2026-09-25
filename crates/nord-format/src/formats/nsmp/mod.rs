@@ -851,12 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn a_name_field_holds_its_whole_span_less_the_terminator() {
-        assert_eq!(MAX_NAME_LEN, 31);
-        assert_eq!(MAX_NAME_V3_LEN, 65);
-    }
-
-    #[test]
     fn a_rename_leaves_nothing_of_the_name_it_replaced() {
         for field in [StringField::NAME, StringField::NAME_V3] {
             let mut payload = vec![0u8; field.next];
@@ -870,14 +864,18 @@ mod tests {
 
     #[test]
     fn a_name_one_byte_past_the_field_is_refused() {
-        let field = StringField::NAME;
-        let mut payload = vec![0xffu8; field.next + 8];
-        let error = field
-            .write(&mut payload, &"M".repeat(field.capacity() + 1))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("at most 31 bytes"), "{error}");
-        assert!(payload[field.at..].iter().all(|&b| b == 0xff));
+        for (field, capacity) in [(StringField::NAME, 31), (StringField::NAME_V3, 65)] {
+            let mut payload = vec![0xffu8; field.next + 8];
+            let error = field
+                .write(&mut payload, &"M".repeat(capacity + 1))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("at most {capacity} bytes")),
+                "{error}"
+            );
+            assert!(payload[field.at..].iter().all(|&b| b == 0xff));
+        }
     }
 
     #[test]

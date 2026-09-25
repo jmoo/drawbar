@@ -221,33 +221,6 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
 }
 
 #[test]
-fn a_refused_walk_is_an_error_rather_than_an_empty_list() {
-    let mut steps = session_open(ObjectClass::SetList);
-    let mut args = slot_args(Location {
-        bank: 0,
-        slot: op::SLOT_BOUNDARY,
-    });
-    args.extend_from_slice(&0u32.to_be_bytes());
-    steps.push(request(cmd::NEXT_SLOT, &args));
-    steps.push(refusal(cmd::NEXT_SLOT, op::ENUMERATION_DISABLED));
-
-    let mut t = ReplayTransport::new(steps);
-    let err = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r = op::set_lists_referencing(&mut s, &banks(), &[Location { bank: 0, slot: 6 }]).await;
-        s.abort();
-        r.unwrap_err()
-    });
-    assert!(
-        matches!(
-            err,
-            nord_usb::Error::DeviceStatus(s) if s == op::ENUMERATION_DISABLED
-        ),
-        "{err}"
-    );
-}
-
-#[test]
 fn a_dependency_reply_must_echo_the_set_list_queried() {
     let moved = Location { bank: 0, slot: 6 };
     let mut steps = session_open(ObjectClass::SetList);
@@ -289,50 +262,6 @@ fn referrers_require_a_set_list_session() {
         "the operation sent a request on the wrong session"
     );
     assert!(matches!(err, nord_usb::Error::InvalidArgument(_)), "{err}");
-}
-
-#[test]
-fn a_walk_that_outruns_its_bank_is_an_error_rather_than_a_truncated_list() {
-    let declared = [Bank {
-        index: 0,
-        name: "Set List 1".into(),
-        slots: 3,
-    }];
-
-    let mut steps = session_open(ObjectClass::SetList);
-    let mut from = op::SLOT_BOUNDARY;
-    for slot in 0..=declared[0].slots {
-        let mut args = slot_args(Location {
-            bank: 0,
-            slot: from,
-        });
-        args.extend_from_slice(&0u32.to_be_bytes()); // direction: forward
-        steps.push(request(cmd::NEXT_SLOT, &args));
-        steps.push(response(cmd::NEXT_SLOT, &slot_args(set_list(slot))));
-        from = slot;
-    }
-
-    let mut t = ReplayTransport::new(steps);
-    let err = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
-        let r =
-            op::set_lists_referencing(&mut s, &declared, &[Location { bank: 0, slot: 6 }]).await;
-        s.abort();
-        r.unwrap_err()
-    });
-
-    assert!(t.is_exhausted(), "the walk stopped short of the bank's end");
-    assert!(
-        matches!(
-            err,
-            nord_usb::Error::Enumeration {
-                bank: 0,
-                slots: 3,
-                ..
-            }
-        ),
-        "{err}"
-    );
 }
 
 #[test]

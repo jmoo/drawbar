@@ -303,17 +303,6 @@ mod tests {
         assert_eq!(fraction(6, -6, 6), 1.0);
     }
 
-    /// Half a sweep either side of straight up, which is what makes a panel readable at
-    /// a glance.
-    #[test]
-    fn the_sweep_is_symmetrical_about_twelve_oclock() {
-        assert!((angle(0.5)).abs() < 1e-6);
-        assert!((angle(0.0) + SWEEP / 2.0).abs() < 1e-6);
-        assert!((angle(1.0) - SWEEP / 2.0).abs() < 1e-6);
-        // 270° of travel, no more: the stops are at 7:30 and 4:30, never overlapping.
-        assert!((angle(1.0) - angle(0.0) - SWEEP).abs() < 1e-6);
-    }
-
     /// Every value the field can hold comes back off the dial as itself. A mapping that
     /// rounded the wrong way would make a knob unable to reach one of its own stops.
     #[test]

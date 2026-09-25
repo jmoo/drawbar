@@ -1348,41 +1348,25 @@ mod tests {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes, 0)
     }
 
-    #[test]
-    fn a_fresh_program_decodes_and_verifies() {
-        let entity = ingest("untitled.ne5p", Fresh::Program.bytes().unwrap());
-        assert!(entity.parse_error.is_none());
-        assert_eq!(entity.tag(), "ne5p");
-        assert!(
-            matches!(entity.verify, VerifyState::Ok),
-            "{}",
-            entity.verify.detail()
-        );
-
-        let container = entity.container.expect("a fresh program is a CBIN file");
-        assert!(container.checksum_ok);
-        assert_eq!(container.header.generation, Generation::V1);
-        assert_eq!(container.body.len(), ne5::program::BODY_LEN);
-        assert_eq!(container.checksum_label, "crc32:");
-    }
-
     /// The number a file and a slot are compared on is the CRC-32 of the wire body, and
     /// the word a type-1 header stores at `0x18` is that same number.
     #[test]
     fn the_body_checksum_is_the_word_a_type_1_header_stores() {
         let bytes = Fresh::Program.bytes().unwrap();
         let entity = ingest("untitled.ne5p", bytes.clone());
-        let container = entity.container.expect("a fresh program is a CBIN file");
+        let container = entity
+            .container
+            .as_ref()
+            .expect("a fresh program is a CBIN file");
         assert_eq!(container.header.generation, Generation::V1);
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
-        assert_eq!(
-            container.body_crc32,
-            nord_usb::envelope::crc32(&body.body.0)
-        );
+        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        assert_eq!(container.body_crc32, hashed);
         assert_eq!(
             container.body_crc32,
             u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap()),
         );
+        assert_eq!(entity.saved.crc32, Some(hashed));
     }
 
     /// ⚠️ A type-0 container stores no body checksum — its own is a CRC-16 over the
@@ -1862,18 +1846,6 @@ mod tests {
         assert!(
             !workspace.get(id).unwrap().is_unsaved(),
             "a write of what it holds leaves nothing owed"
-        );
-    }
-
-    /// The baseline's checksum is the one a slot holding those bytes reports, so a saved
-    /// asset and its slot are compared without either body being hashed again.
-    #[test]
-    fn the_baseline_carries_the_checksum_a_slot_holding_it_reports() {
-        let entity = ingest("untitled.ne5p", Fresh::Program.bytes().unwrap());
-        let body = nord_usb::envelope::unwrap(&entity.bytes).expect("a file the wire takes");
-        assert_eq!(
-            entity.saved.crc32,
-            Some(nord_usb::envelope::crc32(&body.body.0))
         );
     }
 

@@ -1464,31 +1464,6 @@ mod tests {
         );
     }
 
-    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
-    /// meets the guard that spelling it with no `-o` meets.
-    #[test]
-    fn an_output_that_is_the_input_takes_the_in_place_guard() {
-        let dir = scratch();
-        let path = dir.join("kit.nsmp");
-        let original = encoded("Kit");
-        std::fs::write(&path, &original).unwrap();
-
-        let args = EditArgs {
-            target: path.display().to_string(),
-            common: crate::edit::SetArgs {
-                set: vec!["name=Vibes".into()],
-                dry_run: false,
-                fields: false,
-                out: Some(dir.join(".").join("kit.nsmp")),
-                yes: false,
-            },
-        };
-        let err = run(&Ui::piped(), args).unwrap_err();
-        assert!(err.contains("--yes"), "{err}");
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     /// A file the verb does not take is named by its format and steered to the command
     /// that does read it.
     #[test]

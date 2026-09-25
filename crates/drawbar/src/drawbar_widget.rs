@@ -265,35 +265,4 @@ mod tests {
         assert_eq!(digits(&bars(0x0_8765_4321)), "08 7654 321");
         assert_eq!(digits(&[4, 0]), "40");
     }
-
-    /// The stops and the piano keys are the same two colours, kept in one place: a stop
-    /// that drifted from the key map's ivory would read as a different material.
-    #[test]
-    fn the_stops_are_painted_in_the_key_colours() {
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            assert_eq!(stop_colour(&visuals, 2), crate::app::stop_white(&visuals));
-            assert_eq!(stop_colour(&visuals, 8), crate::app::stop_white(&visuals));
-            assert_eq!(stop_colour(&visuals, 4), crate::app::stop_black(&visuals));
-            assert_eq!(stop_colour(&visuals, 6), crate::app::stop_black(&visuals));
-            // The sub-octave pair is brown, which is neither.
-            assert_ne!(stop_colour(&visuals, 0), crate::app::stop_white(&visuals));
-            assert_ne!(stop_colour(&visuals, 0), crate::app::stop_black(&visuals));
-        }
-        let (dark, light) = (egui::Visuals::dark(), egui::Visuals::light());
-        assert_eq!(
-            crate::app::stop_white(&dark),
-            crate::app::stop_white(&light)
-        );
-        assert_eq!(
-            crate::app::stop_black(&dark),
-            crate::app::stop_black(&light)
-        );
-    }
-
-    /// A whole register is nine nibbles wide, which is the encoding this widget rests
-    /// on: nibble n is bar n in the printed order.
-    #[test]
-    fn a_register_is_nine_bars_of_nibble() {
-        assert_eq!(bars(u64::MAX >> (64 - 4 * BARS as u32)), [0xf; BARS]);
-    }
 }

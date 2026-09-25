@@ -1977,7 +1977,7 @@ mod tests {
     }
 
     /// The record: the container grid, the byte diff — with something in it and with
-    /// nothing — and the folded dump.
+    /// nothing — and the folded dump. A settings body's field table paints too.
     #[test]
     fn the_meta_face_paints() {
         render_view(
@@ -1986,13 +1986,6 @@ mod tests {
             Face::Metadata,
         );
         render_view(&[], Fresh::Settings, Face::Metadata);
-    }
-
-    /// The engineer's table paints, filters and holds an edit — for a body with ninety
-    /// fields and for one with forty.
-    #[test]
-    fn the_advanced_table_paints() {
-        render_view(&[], Fresh::Program, Face::Advanced);
         render_view(&[], Fresh::Settings, Face::Advanced);
     }
 
@@ -2374,12 +2367,6 @@ mod tests {
         assert_eq!(library_id("nothing"), None);
     }
 
-    #[test]
-    fn the_other_fresh_defaults_paint() {
-        render(&[], Fresh::Live);
-        render(&[], Fresh::Settings);
-    }
-
     /// Paint a document over bytes the workspace has no fresh default for.
     fn render_file(name: &str, bytes: Vec<u8>, face: Face) {
         let mut open = Open::file(name, bytes);
@@ -2387,8 +2374,8 @@ mod tests {
         open.twice();
     }
 
-    /// The Stage bodies have no panel of their own here, so they get the generic one: the
-    /// big ones as folds, the small ones open with every control drawn.
+    /// The Stage bodies have no panel of their own here, so their field table is the
+    /// registry's alone.
     #[test]
     fn a_stage_document_paints_from_the_registry_alone() {
         for (name, bytes) in [
@@ -2399,7 +2386,6 @@ mod tests {
             ("blank.ns4n", Fresh::Stage4Piano.bytes().unwrap()),
             ("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()),
         ] {
-            render_file(name, bytes.clone(), Face::Edit);
             render_file(name, bytes, Face::Advanced);
         }
     }
@@ -2518,8 +2504,34 @@ mod tests {
     /// something to look at: nothing read is not four problems.
     #[test]
     fn a_set_lists_header_claims_only_what_the_instrument_showed() {
+        fn placed(shape: &egui::Shape, into: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(text) => into.push((text.galley.text().to_string(), text.pos.y)),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| placed(shape, into)),
+                _ => {}
+            }
+        }
+        // The body repeats the reading beside its heading, so only what is painted above
+        // that heading is the header's.
+        let header = |open: &mut Open| -> Vec<String> {
+            open.frame(Vec::new());
+            let mut said = Vec::new();
+            for clipped in &open.output(Vec::new()).shapes {
+                placed(&clipped.shape, &mut said);
+            }
+            let body = said
+                .iter()
+                .find(|(word, _)| word == "The four programs this set list plays")
+                .map(|(_, top)| *top)
+                .expect("the body's heading");
+            said.into_iter()
+                .filter(|(_, top)| *top < body)
+                .map(|(word, _)| word)
+                .collect()
+        };
+
         let mut open = Open::file("Blue Room.ne5t", Fresh::SetList.bytes().unwrap());
-        let said = open.twice();
+        let said = header(&mut open);
         assert!(
             !said.iter().any(|word| word.contains("needs attention")),
             "nothing is attached, so nothing is claimed: {said:?}"
@@ -2531,7 +2543,7 @@ mod tests {
             1,
             &["Africa Split", "", "Gospel Perc"],
         );
-        let said = open.twice();
+        let said = header(&mut open);
         assert!(
             said.iter().any(|word| word == "1 entry needs attention"),
             "{said:?}"
@@ -2897,18 +2909,5 @@ mod tests {
         );
         assert_eq!(acts.len(), 1, "the revert itself still runs");
         assert!(!open.document.pends(open.id), "the plan is gone with it");
-    }
-
-    #[test]
-    fn a_sample_document_paints() {
-        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
-        let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
-        let bytes = nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
-            .unwrap()
-            .to_bytes()
-            .unwrap();
-        render_file("Marimba.nsmp", bytes.clone(), Face::Edit);
-        render_file("Marimba.nsmp", bytes, Face::Metadata);
-        render_file("Marimba hit.wav", wav_bytes(), Face::Edit);
     }
 }

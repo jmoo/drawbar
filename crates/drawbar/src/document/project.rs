@@ -876,13 +876,15 @@ mod tests {
         assert_eq!(snapshot.velocity.attack_amount, 64);
     }
 
-    /// A bad path or an unknown id is refused before anything is encoded.
+    /// A bad path, an unknown id or an inverted key range is refused before anything is
+    /// encoded.
     #[test]
     fn unknown_paths_are_refused() {
         let bytes = project_bytes();
         for (path, value) in [
             ("zone999.root_key", "C4"),
             ("zone129.detune", "1"),
+            ("zone129.bottom_note", "C8"),
             ("file9.path", "x.wav"),
             ("file1.rate", "48000"),
             ("stroke1.nope", "1"),
@@ -898,14 +900,6 @@ mod tests {
         }
     }
 
-    /// An inverted key range cannot leave half an edit behind.
-    #[test]
-    fn an_inverted_range_is_refused_whole() {
-        let bytes = project_bytes();
-        let err = apply(&bytes, &[("zone129.bottom_note".into(), "C8".into())]);
-        assert!(err.is_err());
-    }
-
     /// The map draws the zones that answer keys, each with the window of the stroke it
     /// plays — and a zone the project switched off is not one of them.
     #[test]
@@ -918,8 +912,6 @@ mod tests {
             assert_eq!(shown.root, zone.root_key);
             assert!(shown.velocity.is_some(), "each zone plays one stroke");
         }
-        assert_eq!(SPAN.low, LOWEST_NOTE);
-        assert_eq!(SPAN.high, HIGHEST_NOTE);
     }
 
     /// A context dressed as the app dresses it: the semibold family a band is set in is

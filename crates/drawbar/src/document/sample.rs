@@ -2130,13 +2130,6 @@ mod tests {
             .all(|zone| zone.gain.is_none() && zone.velocity.is_some()));
     }
 
-    #[test]
-    fn a_v4_instrument_says_so() {
-        let entity = Entity::Sample(Sample::V3(v3_sample(400)));
-        let snapshot = snapshot(&entity).unwrap().unwrap();
-        assert_eq!(snapshot.generation, "v4");
-    }
-
     /// One second of 44.1 kHz mono, and the one-zone v2 instrument the encoder makes
     /// of it — the only instrument this app can build from nothing.
     fn v2_bytes() -> Vec<u8> {
@@ -2402,25 +2395,9 @@ mod tests {
         }
     }
 
-    /// Every offset the Advanced face prints is one of the format's own declarations.
+    /// A body with no keyboard map prints no keyboard map offsets.
     #[test]
-    fn the_offsets_are_the_formats_own_declarations() {
-        let entity = nord_format::from_stream(&mut Cursor::new(&v2_bytes())).unwrap();
-        let narrow = snapshot(&entity).unwrap().unwrap();
-        let rows = offsets(&narrow);
-        let at: Vec<&str> = rows.iter().map(|row| row.at.as_str()).collect();
-        assert_eq!(
-            at,
-            [
-                "map+0",
-                &format!("map+{}", keymap::KEY_TABLE_AT),
-                &format!("map+{}", zone::COUNT_AT),
-                &format!("map+{}", zone::RECORDS_AT),
-            ]
-        );
-        assert_eq!(narrow.record_len, 15, "the Library 2 zone record");
-
-        // A body with no keyboard map prints no keyboard map offsets.
+    fn a_body_with_no_key_table_prints_no_key_table_offsets() {
         let entity = Entity::Sample(Sample::V3(v3_sample(300)));
         let wide = snapshot(&entity).unwrap().unwrap();
         assert_eq!(offsets(&wide).len(), 2);

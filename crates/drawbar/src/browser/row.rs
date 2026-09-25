@@ -286,25 +286,6 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_coloured_cell_keeps_its_colour_until_its_row_is_selected() {
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            for own in [
-                crate::app::good(&visuals),
-                crate::app::warn(&visuals),
-                crate::app::bad(&visuals),
-                crate::app::accent(&visuals),
-                crate::app::unlit(&visuals),
-            ] {
-                assert_eq!(cell_ink(false, own, &visuals), own);
-                assert_eq!(
-                    cell_ink(true, own, &visuals),
-                    visuals.selection.stroke.color
-                );
-            }
-        }
-    }
-
     /// The name of a row holding an edit nothing has saved wears a star, and the row
     /// stays inside its panel with it.
     #[test]

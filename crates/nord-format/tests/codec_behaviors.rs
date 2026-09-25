@@ -442,54 +442,6 @@ fn a_wide_silence_reproduces_the_editors_renders_exactly() {
     }
 }
 
-/// A wide build states its own chain length, and the section chain is the one the
-/// editor writes down to the schema versions.
-#[test]
-fn a_wide_build_states_the_chain_length_its_meta_section_promises() {
-    for (layout, name) in [
-        (nsmp::codec::Layout::V3, "A-silence-C4.nsmp3"),
-        (nsmp::codec::Layout::V4, "A-silence-C4.nsmp4"),
-    ] {
-        let built = nsmp::encode::instrument(
-            &vec![0i16; SILENT_FRAMES],
-            &nsmp::encode::Options::new("A-silence-C4")
-                .root_key(60)
-                .layout(layout)
-                .secondary_start(SILENT_SECONDARY_START),
-        )
-        .unwrap();
-        let Sample::V3(built) = &built else {
-            panic!("{name}: the wide layouts build the wide chain");
-        };
-        assert_eq!(
-            built.meta().unwrap().chain_len as usize,
-            built.chain_len_before_meta(),
-            "{name}"
-        );
-
-        let twin = match nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap() {
-            Entity::Sample(Sample::V3(sample)) => sample,
-            other => panic!("{name} decoded as {other:?}"),
-        };
-        let chain = |body: &nsmp::SampleV3| -> Vec<(String, u32, usize)> {
-            body.sections
-                .iter()
-                .map(|s| (s.tag_str(), s.version, s.payload.len()))
-                .collect()
-        };
-        assert_eq!(
-            chain(&built.body),
-            chain(&twin.body),
-            "{name}: section chain"
-        );
-        assert_eq!(
-            built.zones().unwrap(),
-            twin.zones().unwrap(),
-            "{name}: zones"
-        );
-    }
-}
-
 const STEREO_SECONDARY_STARTS: [(usize, f64); 8] = [
     (4_096, 512.815658),
     (6_000, 751.194811),

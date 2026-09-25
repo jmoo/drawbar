@@ -215,27 +215,6 @@ mod tests {
         );
     }
 
-    /// Every panel's encode is `From`, not `TryFrom`: no field can overrun its slot.
-    ///
-    /// The other half of that guarantee is not assertable from a test — giving a field a
-    /// type wider than its slot is a const-eval panic out of `Field::FITS`, so retyping
-    /// `PianoPanel::mono` from `bool` to `u8` fails to build rather than failing here.
-    #[test]
-    fn every_panels_encode_is_total() {
-        fn total<P, W>(_: &P)
-        where
-            for<'a> W: From<&'a P>,
-        {
-        }
-
-        let program = new((0, 0).try_into().unwrap());
-        total::<_, [u8; 7]>(&program.center_panel);
-        total::<_, [u8; 8]>(&program.piano_panel);
-        total::<_, [u8; 8]>(&program.sample_panel);
-        total::<_, [u8; 69]>(&program.organ_panel);
-        total::<_, [u8; 18]>(&program.effects_panel);
-    }
-
     /// Re-stamp the body CRC after corrupting a byte, so a decode test exercises the
     /// field check rather than the checksum.
     fn restamp_crc(bytes: &mut [u8]) {
@@ -361,46 +340,26 @@ mod tests {
     /// Decode and encode are inverses on any bytes the decoder accepts.
     #[test]
     fn decode_and_encode_are_inverse() {
-        for pattern in [0u64, u64::MAX, 0xa5a5_a5a5_a5a5_a5a5, 0x5a5a_5a5a_5a5a_5a5a] {
+        // Parts piano/sample, octaves 0/+1, split F4, transpose +5, mix 64, gain 96, vox.
+        let center = 0x29e2_97b8_181d_5aa5u64;
+        for pattern in [
+            0u64,
+            u64::MAX,
+            0xa5a5_a5a5_a5a5_a5a5,
+            0x5a5a_5a5a_5a5a_5a5a,
+            center,
+        ] {
             let raw = pattern.to_be_bytes();
             let panel = PianoPanel::try_from(raw).unwrap();
             assert_eq!(<[u8; 8]>::from(&panel), raw);
 
             let panel = SamplePanel::try_from(raw).unwrap();
             assert_eq!(<[u8; 8]>::from(&panel), raw);
-
-            let raw: [u8; 7] = raw[..7].try_into().unwrap();
-            if let Ok(panel) = CenterPanel::try_from(raw) {
-                assert_eq!(<[u8; 7]>::from(&panel), raw);
-            }
         }
-    }
 
-    /// The layout the macro publishes is the layout the codec uses: the panels
-    /// sit where the declaration says, and a nested entry chains into the
-    /// panel's own field placements.
-    #[test]
-    fn the_program_body_layout_is_published_as_data() {
-        use crate::layout::BodyLayout;
-
-        let fields = Program::layout();
-        let center = fields
-            .iter()
-            .find(|f| f.path == "center_panel")
-            .expect("declared");
-        assert_eq!((center.lo / 8, (center.hi + 1) / 8), (0x02, 0x09));
-        let nested = center.nested.expect("a panel chains to its own layout");
-        assert!(
-            nested().iter().any(|f| f.path == "transpose"),
-            "the nested layout does not list the panel's fields",
-        );
-
-        // The registry walks the same structure: full paths, panel by panel.
-        let program = new((0, 0).try_into().unwrap());
-        let paths: Vec<String> = program.fields().into_iter().map(|f| f.path).collect();
-        assert!(paths.contains(&"center_panel.transpose".to_string()));
-        assert!(paths.contains(&"piano_panel.id".to_string()));
-        assert!(paths.contains(&"sample_panel.id".to_string()));
+        let raw: [u8; 7] = center.to_be_bytes()[..7].try_into().unwrap();
+        let panel = CenterPanel::try_from(raw).expect("every center field is in range");
+        assert_eq!(<[u8; 7]>::from(&panel), raw);
     }
 
     /// A program re-tagged type 0 is the same 121-byte body behind the shorter

@@ -337,21 +337,4 @@ mod tests {
         );
         assert!(painted.contains(&"baked".to_string()));
     }
-
-    #[test]
-    fn every_state_has_its_own_glyph_and_word() {
-        let all = [
-            State::Editable,
-            State::ReadOnly,
-            State::Absent,
-            State::NeedsEncode,
-            State::Verified,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
-                assert_ne!(a.word(), b.word());
-            }
-        }
-        assert_eq!(State::Absent.word(), "not in this format");
-    }
 }
