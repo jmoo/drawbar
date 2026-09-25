@@ -560,7 +560,7 @@ impl Browser {
                         .on_disabled_hover_text(action.nothing());
                 }
                 false => {
-                    ui.menu_button(action.label(), |ui| self.tag_items(ui, &locals, acts));
+                    crate::menu::button(ui, action.label(), |ui| self.tag_items(ui, &locals, acts));
                 }
             }
             return;

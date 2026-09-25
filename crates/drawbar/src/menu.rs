@@ -636,7 +636,7 @@ impl DrawbarApp {
             egui::containers::menu::MenuBar::new().ui(ui, |ui| {
                 for menu in &menus {
                     title_style(ui);
-                    ui.menu_button(menu.title, |ui| {
+                    button(ui, menu.title, |ui| {
                         drop_down_style(ui);
                         self.entries(ui, frame, &menu.entries, acts);
                     });
@@ -656,13 +656,13 @@ impl DrawbarApp {
     ) {
         let menus = menus(self.platform);
         let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-        let button = egui::Button::image(sized(Glyph::Menu, 16.0, ink))
+        let glyph = egui::Button::image(sized(Glyph::Menu, 16.0, ink))
             .image_tint_follows_text_color(false)
             .frame(false)
             .min_size(egui::Vec2::splat(30.0));
         // F10 opens it, as it opens a GTK app's primary menu.
         let f10 = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F10));
-        let response = egui::containers::menu::MenuButton::from_button(button)
+        let response = egui::containers::menu::MenuButton::from_button(glyph)
             .ui(ui, |ui| {
                 drop_down_style(ui);
                 let flat = egui::Id::new("menu_flat_height");
@@ -670,7 +670,7 @@ impl DrawbarApp {
                 let tall = ui.ctx().data(|data| data.get_temp::<f32>(flat));
                 if tall.is_some_and(|tall| tall > room) {
                     for menu in &menus {
-                        ui.menu_button(menu.title, |ui| {
+                        button(ui, menu.title, |ui| {
                             drop_down_style(ui);
                             self.entries(ui, frame, &menu.entries, acts);
                         });
@@ -749,6 +749,26 @@ impl DrawbarApp {
     }
 }
 
+/// [`egui::Ui::menu_button`], marking a submenu with an arrow the app's faces have.
+///
+/// egui's own arrow is `⏵`, which none of them covers.
+pub fn button<'a, R>(
+    ui: &mut egui::Ui,
+    atoms: impl egui::IntoAtoms<'a>,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    use egui::containers::menu::{is_in_menu, MenuButton, SubMenuButton};
+    let (response, inner) = match is_in_menu(ui) {
+        true => SubMenuButton::from_button(egui::Button::new(atoms).right_text(SUBMENU))
+            .ui(ui, contents),
+        false => MenuButton::new(atoms).ui(ui, contents),
+    };
+    egui::InnerResponse::new(inner.map(|inner| inner.inner), response)
+}
+
+/// The mark at the right of an item that opens a submenu.
+pub(crate) const SUBMENU: &str = "▸";
+
 /// One menu item: the check column, the label, and `keys` at the right. Its hint shows
 /// on hover, enabled or not.
 fn item_button(ui: &mut egui::Ui, offer: &Offer, keys: Option<String>) -> bool {
@@ -783,7 +803,7 @@ pub fn marked(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
 /// start at, past the empty check column, and the arrow at the right.
 fn submenu(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
     let button =
-        check(ui, title, false).right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW);
+        check(ui, title, false).right_text(SUBMENU);
     egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| {
         drop_down_style(ui);
         content(ui);
