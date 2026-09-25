@@ -4719,25 +4719,22 @@ mod tests {
                 lamps: Vec::new(),
                 asked,
             };
-            for clipped in &output.shapes {
-                walk(&clipped.shape, &mut painted);
+            for (_, shape) in super::super::leaves(&output) {
+                match shape {
+                    egui::Shape::Text(text) => painted.words.push(text.galley.text().to_string()),
+                    egui::Shape::Rect(drawn) if drawn.rect.height() == keys::KEYBOARD_H => {
+                        painted.whites.push(drawn.rect)
+                    }
+                    // A lamp is the one thing drawn at its own fixed width; it is painted
+                    // filled and then stroked, so the pair is deduplicated after the walk.
+                    egui::Shape::Rect(drawn) if drawn.rect.width() == LAMP.x => {
+                        painted.lamps.push(drawn.rect)
+                    }
+                    _ => {}
+                }
             }
             painted.lamps.dedup();
             painted
-        }
-    }
-
-    fn walk(shape: &egui::Shape, into: &mut Painted) {
-        match shape {
-            egui::Shape::Text(text) => into.words.push(text.galley.text().to_string()),
-            egui::Shape::Rect(drawn) if drawn.rect.height() == keys::KEYBOARD_H => {
-                into.whites.push(drawn.rect)
-            }
-            // A lamp is the one thing drawn at its own fixed width; it is painted
-            // filled and then stroked, so the pair is deduplicated after the walk.
-            egui::Shape::Rect(drawn) if drawn.rect.width() == LAMP.x => into.lamps.push(drawn.rect),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-            _ => {}
         }
     }
 

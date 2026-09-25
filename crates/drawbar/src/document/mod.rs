@@ -1328,6 +1328,26 @@ pub(crate) fn library_id(value: &str) -> Option<u32> {
     }
 }
 
+/// Every shape a frame painted, with the clip it was painted under, lists opened.
+#[cfg(test)]
+fn leaves(output: &egui::FullOutput) -> Vec<(egui::Rect, &egui::Shape)> {
+    fn open<'a>(
+        clip: egui::Rect,
+        shape: &'a egui::Shape,
+        into: &mut Vec<(egui::Rect, &'a egui::Shape)>,
+    ) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| open(clip, shape, into)),
+            shape => into.push((clip, shape)),
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        open(clipped.clip_rect, &clipped.shape, &mut found);
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,11 +1457,7 @@ mod tests {
                     );
                 });
             });
-            let mut said = Vec::new();
-            for clipped in &output.shapes {
-                words(&clipped.shape, &mut said);
-            }
-            said
+            placed(&output).into_iter().map(|(word, _)| word).collect()
         }
 
         /// One frame, and every shape it painted — for what a word says and where.
@@ -1481,29 +1497,16 @@ mod tests {
 
     /// Every word a frame painted, with the rect it was painted in.
     fn placed(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
-        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-            match shape {
-                egui::Shape::Text(text) => into.push((
+        leaves(output)
+            .into_iter()
+            .filter_map(|(_, shape)| match shape {
+                egui::Shape::Text(text) => Some((
                     text.galley.text().to_string(),
                     egui::Rect::from_min_size(text.pos, text.galley.size()),
                 )),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut found = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut found);
-        }
-        found
-    }
-
-    fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-        match shape {
-            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-            _ => {}
-        }
+                _ => None,
+            })
+            .collect()
     }
 
     fn render(sets: &[(&str, &str)], kind: Fresh) {
@@ -1552,23 +1555,19 @@ mod tests {
         open.frame(Vec::new());
         let output = open.output(Vec::new());
 
-        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-            match shape {
-                egui::Shape::Text(text) => into.push((
+        let words: Vec<(String, egui::Rect)> = leaves(&output)
+            .into_iter()
+            .filter_map(|(_, shape)| match shape {
+                egui::Shape::Text(text) => Some((
                     match text.galley.rows.len() {
                         1 => text.galley.text().to_string(),
                         rows => format!("{} (in {rows} rows)", text.galley.text()),
                     },
                     egui::Rect::from_min_size(text.pos, text.galley.size()),
                 )),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut words = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut words);
-        }
+                _ => None,
+            })
+            .collect();
         let header: Vec<&(String, egui::Rect)> =
             words.iter().filter(|(_, rect)| rect.top() < 70.0).collect();
         for (word, _) in &header {
@@ -2909,29 +2908,15 @@ mod tests {
         let output = open.output(Vec::new());
 
         let placed = |word: &str| -> (egui::Rect, egui::Rect) {
-            fn walk(
-                shape: &egui::Shape,
-                clip: egui::Rect,
-                word: &str,
-                into: &mut Vec<(egui::Rect, egui::Rect)>,
-            ) {
-                match shape {
-                    egui::Shape::Text(text) if text.galley.text() == word => into.push((
+            leaves(&output)
+                .into_iter()
+                .find_map(|(clip, shape)| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == word => Some((
                         egui::Rect::from_min_size(text.pos, text.galley.size()),
                         clip,
                     )),
-                    egui::Shape::Vec(shapes) => shapes
-                        .iter()
-                        .for_each(|shape| walk(shape, clip, word, into)),
-                    _ => {}
-                }
-            }
-            let mut found = Vec::new();
-            for clipped in &output.shapes {
-                walk(&clipped.shape, clipped.clip_rect, word, &mut found);
-            }
-            *found
-                .first()
+                    _ => None,
+                })
                 .unwrap_or_else(|| panic!("{word} was never painted"))
         };
 
