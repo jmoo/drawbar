@@ -473,8 +473,10 @@ impl Document {
             None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            if lookup.wants_a_name() {
-                device.read_deps(class, at, log);
+            match lookup.asked {
+                true => device.ask_deps_again(class, at, log),
+                false if lookup.wants_a_name() => device.read_deps(class, at, log),
+                false => {}
             }
         }
         if let Some(name) = act.rename {
@@ -1229,6 +1231,8 @@ fn piano_lookup(
         id,
         name,
         can_ask: slot.is_some() && device.state.connected(),
+        refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
+        asked: false,
         models,
         scan_disagrees,
     }

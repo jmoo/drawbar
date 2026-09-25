@@ -28,6 +28,10 @@ pub struct PianoLookup {
     pub name: Option<String>,
     /// Whether asking is possible: an attached instrument, and a slot to ask about.
     pub can_ask: bool,
+    /// Whether the instrument refused the last read of the slot's dependencies.
+    pub refused: bool,
+    /// Set when the operator asks again after a refusal.
+    pub asked: bool,
     /// The Pianos folder's names for the current category, by Model dial position.
     /// Empty when the scan cannot answer, and the Model dial stays numeric.
     pub models: Vec<(u32, String)>,
@@ -92,7 +96,20 @@ impl PianoLookup {
     /// ⚠️ The dependency reply is the instrument's own answer about the piano this
     /// program plays; the model list is the scan's reading of a dial position. Where
     /// the two disagree the position mapping is wrong, and the reader has to know it.
-    pub(super) fn ui(&self, ui: &mut egui::Ui) {
+    pub(super) fn ui(&mut self, ui: &mut egui::Ui) {
+        if self.refused && self.wants_a_name() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("the instrument did not say which piano this plays")
+                        .small()
+                        .weak(),
+                );
+                self.asked |= ui
+                    .small_button("Ask again")
+                    .on_hover_text("read this program's dependencies again")
+                    .clicked();
+            });
+        }
         let Some(scanned) = &self.scan_disagrees else {
             return;
         };

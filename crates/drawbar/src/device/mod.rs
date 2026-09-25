@@ -980,6 +980,13 @@ pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
     }
 }
 
+/// What came of the last ask about a slot's dependencies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Asked {
+    Sent,
+    Refused,
+}
+
 pub struct Device {
     pub state: DeviceState,
     events: Receiver<DeviceEvent>,
@@ -1000,9 +1007,10 @@ pub struct Device {
     /// The class the running command writes into, so a refusal can be put against the
     /// entry of the queue it stopped on.
     writing: Option<ObjectClass>,
-    /// The slot [`Device::read_deps`] last asked about, so a document wanting the name
-    /// of what it references every frame costs one read.
-    asked_deps: Option<(ObjectClass, Location)>,
+    /// The one slot [`Device::read_deps`] last asked about, and what came of it.
+    asked_deps: Option<((ObjectClass, Location), Asked)>,
+    /// The slot the running `DEPENDENCIES` read is about, so a refusal is put against it.
+    reading_deps: Option<(ObjectClass, Location)>,
     /// The list revision every link was last derived from. A link answers about both
     /// sides, so it is re-made when either has moved and not once a frame besides.
     linked: u64,
@@ -1023,6 +1031,7 @@ impl Device {
             reload: None,
             writing: None,
             asked_deps: None,
+            reading_deps: None,
             linked: 0,
         }
     }
@@ -1073,19 +1082,29 @@ impl Device {
         self.pending.push_back(cmd);
     }
 
-    /// Ask what a slot depends on, where this instrument has not been asked about that
-    /// slot already.
+    /// Ask what a slot depends on, unless it is the slot last asked about.
     ///
-    /// The reply is the only place a library object's name comes from, and the document
-    /// showing one wants it on every frame it is open. The names it carries are kept
-    /// until the instrument goes, so the read is owed once — and again for the next
-    /// instrument, which names its own library.
+    /// A document wanting a library object's name calls this every frame, and the
+    /// memo of one slot makes that one read. It is dropped when the instrument changes
+    /// or goes, and when a write touches the slot's bank. A refused read stays refused
+    /// until [`Device::ask_deps_again`].
     pub fn read_deps(&mut self, class: ObjectClass, at: Location, log: &mut Log) {
-        if self.asked_deps == Some((class, at)) {
+        if self.asked_deps.is_some_and(|(held, _)| held == (class, at)) {
             return;
         }
-        self.asked_deps = Some((class, at));
+        self.asked_deps = Some(((class, at), Asked::Sent));
         self.send(DeviceCmd::Deps { class, at }, log);
+    }
+
+    /// Ask what a slot depends on, whatever came of asking before.
+    pub fn ask_deps_again(&mut self, class: ObjectClass, at: Location, log: &mut Log) {
+        self.asked_deps = None;
+        self.read_deps(class, at, log);
+    }
+
+    /// Whether the instrument refused the last read of this slot's dependencies.
+    pub fn deps_refused(&self, class: ObjectClass, at: Location) -> bool {
+        self.asked_deps == Some(((class, at), Asked::Refused))
     }
 
     /// Walk `class` again, in one session.
@@ -1156,6 +1175,16 @@ impl Device {
         for (class, bank) in &self.rescan {
             self.state.forget_bank(*class, *bank);
         }
+        let rewritten = |((class, at), _): &((ObjectClass, Location), Asked)| {
+            user_bank(at.bank).is_some_and(|bank| self.rescan.contains(&(*class, bank)))
+        };
+        if self.asked_deps.as_ref().is_some_and(rewritten) {
+            self.asked_deps = None;
+        }
+        self.reading_deps = match &cmd {
+            DeviceCmd::Deps { class, at } => Some((*class, *at)),
+            _ => None,
+        };
         // Confirmed on hardware.
         // Writing the loaded slot requires SELECT to reload it.
         let written = match &cmd {
@@ -1325,6 +1354,7 @@ impl Device {
     fn forget(&mut self, workspace: &mut Workspace) {
         self.state.forget_everything();
         self.asked_deps = None;
+        self.reading_deps = None;
         workspace.relink(|_| None);
         workspace.forget_writes();
     }
@@ -1414,6 +1444,7 @@ impl Device {
                     }
                     // The panel is still playing what it read before the write.
                     self.pending.extend(self.reload.take());
+                    self.reading_deps = None;
                     for (class, bank) in std::mem::take(&mut self.rescan) {
                         self.pending.push_back(DeviceCmd::ScanBank { class, bank });
                     }
@@ -1526,6 +1557,11 @@ impl Device {
                 // the panel has nothing new to play there.
                 DeviceEvent::OpFailed(text) => {
                     self.reload = None;
+                    if let Some(slot) = self.reading_deps.take() {
+                        if self.asked_deps == Some((slot, Asked::Sent)) {
+                            self.asked_deps = Some((slot, Asked::Refused));
+                        }
+                    }
                     if let Some(class) = self.writing {
                         queue.stumbled(class, &text);
                     }
@@ -1541,6 +1577,7 @@ impl Device {
                 // External changes invalidate every cached name used by later dialogs.
                 DeviceEvent::InstrumentChanged => {
                     log.warn("the instrument changed under us — every cached name is dropped");
+                    self.asked_deps = None;
                     log.say("Something changed on the instrument. Reading it again…");
                     self.resync();
                 }
@@ -2503,6 +2540,105 @@ mod tests {
         assert_eq!(owed(true, false), Some((class, vec![at])));
         assert_eq!(owed(true, true), None, "the refused write changed nothing");
         assert_eq!(owed(false, false), None, "this panel loads no programs");
+    }
+
+    /// A slot's dependencies are read once however often they are wanted. A refused
+    /// read is not repeated until asked again, and a write into the slot's bank or a
+    /// change on the instrument makes the slot worth reading again.
+    #[test]
+    fn a_dependency_read_is_repeated_after_a_refusal_a_write_or_a_change() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        let class = ObjectClass::Program;
+        let at = Location { bank: 6, slot: 3 };
+        device.pretend_attached();
+
+        let asks = |device: &mut Device, log: &mut Log| {
+            device.read_deps(class, at, log);
+            let asked = device
+                .queued()
+                .iter()
+                .filter(|cmd| matches!(cmd, DeviceCmd::Deps { at: held, .. } if *held == at))
+                .count();
+            device.pump();
+            asked
+        };
+        let answer = |device: &mut Device, log: &mut Log, workspace: &mut Workspace, event| {
+            device.pretend(event);
+            device.pretend(DeviceEvent::Finished);
+            device.poll(log, workspace, &mut Tabs::default(), &mut Queue::default());
+        };
+
+        assert_eq!(asks(&mut device, &mut log), 1);
+        answer(
+            &mut device,
+            &mut log,
+            &mut workspace,
+            DeviceEvent::OpFailed("deps 6:3: timed out".into()),
+        );
+        assert!(device.deps_refused(class, at));
+        assert_eq!(
+            asks(&mut device, &mut log),
+            0,
+            "a refusal is not retried every frame"
+        );
+
+        device.ask_deps_again(class, at, &mut log);
+        assert!(!device.deps_refused(class, at));
+        device.pump();
+        answer(
+            &mut device,
+            &mut log,
+            &mut workspace,
+            DeviceEvent::Deps {
+                class,
+                at,
+                deps: Vec::new(),
+            },
+        );
+        assert_eq!(asks(&mut device, &mut log), 0, "answered");
+
+        device.send(
+            DeviceCmd::Put {
+                id: 1,
+                class,
+                at: Location { bank: 6, slot: 9 },
+                name: "Africa Split".into(),
+                bytes: vec![0; 4],
+            },
+            &mut log,
+        );
+        device.pump();
+        answer(
+            &mut device,
+            &mut log,
+            &mut workspace,
+            DeviceEvent::OpOk("put".into()),
+        );
+        assert_eq!(
+            asks(&mut device, &mut log),
+            1,
+            "a write into the slot's bank"
+        );
+        while device.state.in_flight.is_some() {
+            answer(
+                &mut device,
+                &mut log,
+                &mut workspace,
+                DeviceEvent::Note("done".into()),
+            );
+            device.pump();
+        }
+
+        answer(
+            &mut device,
+            &mut log,
+            &mut workspace,
+            DeviceEvent::InstrumentChanged,
+        );
+        assert_eq!(asks(&mut device, &mut log), 1, "a change on the instrument");
     }
 
     /// A library id resolves to a name only where the instrument has actually said so,
