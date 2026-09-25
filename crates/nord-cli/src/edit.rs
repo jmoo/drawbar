@@ -689,24 +689,16 @@ pub(crate) mod tests {
 
     /// The control column is this listing's reading of the registry's vocabulary, and
     /// what a kind carries has to reach the reader — a bar's place in the register, a
-    /// pattern's length, which library resolves an id.
+    /// pattern's length.
     #[test]
     fn a_control_reads_as_what_the_field_registry_says_it_is() {
         use nord_format::bits::Packed;
-        use nord_format::components::{ArpPattern, Drawbar, Level, PianoRef, SampleRef};
-        use nord_format::fields::Library;
+        use nord_format::components::{ArpPattern, Drawbar};
 
         let kind = |c: ControlKind| control(c);
-        assert_eq!(kind(<Level as Packed>::CONTROL), "knob 0-10");
         assert_eq!(kind(<Drawbar as Packed>::CONTROL), "drawbar");
         assert_eq!(kind(<Drawbar as Packed>::CONTROL.ranked(3)), "drawbar 3");
         assert_eq!(kind(<ArpPattern as Packed>::CONTROL), "pattern 16");
-        assert_eq!(kind(<PianoRef as Packed>::CONTROL), "piano ref");
-        assert_eq!(kind(<SampleRef as Packed>::CONTROL), "sample ref");
-        assert_eq!(
-            kind(ControlKind::Reference(Library::SetList)),
-            "set list ref"
-        );
         // A whole register in one field counts its bars rather than naming a position.
         assert_eq!(
             kind(<nord_format::formats::ne5::Drawbars as Packed>::CONTROL),

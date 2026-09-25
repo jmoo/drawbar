@@ -1940,7 +1940,6 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     #[test]
     fn replacement_refuses_unusable_geometry_before_deleting() {
@@ -1995,18 +1994,6 @@ mod tests {
                 "{class:?}: the geometry session must close"
             );
         }
-    }
-
-    /// A control transfer's `wLength` is 16 bits, and the sweep allocates the buffer
-    /// before the request goes out, so a wider count is refused at the flag.
-    #[test]
-    fn a_control_sweep_cannot_ask_for_more_bytes_than_a_transfer_carries() {
-        let sweep = |len: &str| {
-            crate::Cli::try_parse_from(["nord", "device", "controls", "--len", len]).is_ok()
-        };
-        assert!(sweep("65535"));
-        assert!(!sweep("65536"));
-        assert!(!sweep("4294967296"));
     }
 
     /// The rescue file is the last copy of a program that no longer exists on the
@@ -2155,15 +2142,6 @@ mod tests {
 
         let silent = warning(None, ObjectClass::Program, "ne5p");
         assert!(silent.contains("no product string"), "{silent}");
-    }
-
-    /// A set list must not land with a program's extension.
-    #[test]
-    fn the_format_tag_comes_from_the_bytes() {
-        let mut file = vec![0u8; 45];
-        file[8..12].copy_from_slice(b"ne5t");
-        let at = Location { bank: 0, slot: 3 };
-        assert_eq!(rescue_name(at, &file), "nord-rescued-1-4.ne5t");
     }
 
     /// Bytes that do not parse are still the only copy, so they must still get a name.

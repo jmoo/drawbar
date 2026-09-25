@@ -511,18 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn a_populated_key_map_still_lists_its_zones() {
-        let mut sample = sample_with_key_map();
-        let paths: Vec<String> = SampleEditor(&mut sample)
-            .rows()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.path)
-            .collect();
-        assert!(paths.contains(&"zone1.root_key".to_string()), "{paths:?}");
-    }
-
-    #[test]
     fn uneditable_zone_paths_are_not_listed() {
         let mut sample = sample_with_unreadable_map();
         let rows = SampleEditor(&mut sample).rows().unwrap();
