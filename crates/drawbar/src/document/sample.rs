@@ -8,13 +8,12 @@
 //!
 //! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
 //! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when a
-//! row that shows it is opened, and kept in a [`Cache`] until the bytes under it change.
+//! row that shows it is opened, and kept in a [`Cache`] while its stroke is unchanged.
 //!
 //! The chrome the project editor shares — the key map, the zone rows, the cells of an
 //! open row — lives here rather than being written twice: an `.nsmpproj` is the same
 //! object seen from the source side.
 
-use std::collections::HashMap;
 use std::io::Cursor;
 
 use eframe::egui;
@@ -390,16 +389,32 @@ pub enum Ask {
     },
 }
 
-/// Decoded zone audio, kept only while the bytes it came from are the current ones.
+/// Decoded zone audio, kept only while the strokes it came from are the current ones.
 ///
 /// ⚠️ Keyed by the asset's [`stamp`](crate::workspace::LocalEntity::stamp) as well as
-/// its id: an edit re-encodes the whole file, and audio decoded from what it held
-/// before is audio from another instrument.
+/// its id: bytes put under the asset from elsewhere may hold other strokes, and audio
+/// decoded from what it held before is audio from another instrument. The editor's own
+/// sets are carried across instead: see [`Cache::carry`].
 #[derive(Default)]
 pub struct Cache {
     of: Option<(u64, u64)>,
-    zones: HashMap<usize, Result<Decoded, String>>,
+    /// Most recently decoded or heard first, at most [`KEPT_ZONES`].
+    zones: Vec<Held>,
+    /// The zone an open row has already had a frame to say it is reading.
+    wanted: Option<usize>,
 }
+
+struct Held {
+    zone: usize,
+    /// Where the stroke sat in the body and how long it was, which is what an in-place
+    /// set could have moved.
+    placed: Option<(usize, usize)>,
+    decoded: Result<Decoded, String>,
+}
+
+/// How many zones' audio are kept. A library zone is seconds of PCM, and browsing the
+/// bands opens one after another.
+const KEPT_ZONES: usize = 8;
 
 /// One zone's audio, and the envelope drawn from it.
 pub struct Decoded {
@@ -420,21 +435,62 @@ impl Cache {
         if self.of != Some((id, stamp)) {
             self.of = Some((id, stamp));
             self.zones.clear();
+            self.wanted = None;
         }
     }
 
+    /// Keep what was decoded across a set this editor made, from `from` to the bytes
+    /// `entity` now holds at `to`.
+    ///
+    /// ⚠️ Only for [`apply`]'s sets, which patch in place without touching a stroke. A
+    /// zone whose stroke the set moved is dropped all the same.
+    pub fn carry(&mut self, id: u64, (from, to): (u64, u64), entity: &Entity) {
+        if self.of != Some((id, from)) {
+            return;
+        }
+        self.of = Some((id, to));
+        self.zones
+            .retain(|held| held.placed == placed(entity, held.zone));
+    }
+
     pub fn get(&self, zone: usize) -> Option<&Result<Decoded, String>> {
-        self.zones.get(&zone)
+        self.zones
+            .iter()
+            .find(|held| held.zone == zone)
+            .map(|held| &held.decoded)
+    }
+
+    /// Whether the row asking for `zone` has already been drawn saying it is reading
+    /// it. The decode holds the frame it runs in, so the frame that asks first only
+    /// paints.
+    pub fn due(&mut self, zone: usize) -> bool {
+        let due = self.wanted == Some(zone);
+        self.wanted = Some(zone);
+        due
     }
 
     /// Decode one zone, once. A refusal is remembered like a success: the operator gets
     /// the codec's own reason, and clicking again would only produce it a second time.
     pub fn decode(&mut self, entity: &Entity, zone: usize) {
-        if self.zones.contains_key(&zone) {
-            return;
-        }
-        self.zones.insert(zone, decode(entity, zone));
+        self.wanted = None;
+        let held = match self.zones.iter().position(|held| held.zone == zone) {
+            Some(at) => self.zones.remove(at),
+            None => Held {
+                zone,
+                placed: placed(entity, zone),
+                decoded: decode(entity, zone),
+            },
+        };
+        self.zones.insert(0, held);
+        self.zones.truncate(KEPT_ZONES);
     }
+}
+
+/// Where a zone's stroke sits in the body, and its length.
+fn placed(entity: &Entity, index: usize) -> Option<(usize, usize)> {
+    let zones = sample(entity)?.zones().ok()?;
+    let zone = zones.get(index)?;
+    Some((zone.at, zone.stream.len()))
 }
 
 fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
@@ -1418,11 +1474,6 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
                 // The decode lands after this frame, and nothing else would bring the
                 // one that draws it.
                 ui.ctx().request_repaint();
-                ui.label(
-                    egui::RichText::new("reading the stroke…")
-                        .size(FACTS_TEXT)
-                        .color(app::caption(ui.visuals())),
-                );
             }
             (false, Some(Err(why))) => {
                 ui.label(
@@ -1444,6 +1495,10 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     if let Some(Ok(decoded)) = sound.decoded {
         ui.add_space(8.0);
         waveform(ui, &decoded.envelope, sound.playing);
+    }
+    if ask == Some(Ask::Decode(index)) {
+        ui.add_space(8.0);
+        reading(ui, "reading the zone…");
     }
     ask
 }
@@ -1987,17 +2042,10 @@ const WAVE_HEIGHT: f32 = 44.0;
 /// extreme fill, the wave is the instrument's red while it is sounding and the body text
 /// colour when it is not, so both themes stay legible.
 pub fn waveform(ui: &mut egui::Ui, envelope: &[(f32, f32)], playing: bool) {
-    let width = ui.available_width().max(64.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, WAVE_HEIGHT), egui::Sense::hover());
+    let rect = wave_ground(ui);
     let visuals = ui.visuals();
     let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
     let middle = rect.center().y;
-    painter.hline(
-        rect.x_range(),
-        middle,
-        egui::Stroke::new(1.0_f32, crate::app::unlit(visuals)),
-    );
     if envelope.is_empty() {
         return;
     }
@@ -2022,6 +2070,33 @@ pub fn waveform(ui: &mut egui::Ui, envelope: &[(f32, f32)], playing: bool) {
             ink,
         );
     }
+}
+
+/// The room a waveform takes, holding what is being read until the decode lands.
+pub fn reading(ui: &mut egui::Ui, caption: &str) {
+    let rect = wave_ground(ui);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        caption,
+        egui::FontId::proportional(FACTS_TEXT),
+        app::caption(ui.visuals()),
+    );
+}
+
+/// The panel a waveform is drawn on, with its zero line.
+fn wave_ground(ui: &mut egui::Ui) -> egui::Rect {
+    let width = ui.available_width().max(64.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, WAVE_HEIGHT), egui::Sense::hover());
+    let visuals = ui.visuals();
+    ui.painter()
+        .rect_filled(rect, 2.0, visuals.extreme_bg_color);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0_f32, crate::app::unlit(visuals)),
+    );
+    rect
 }
 
 /// A MIDI note as a name: `C4` is middle C. Typing a number works too.

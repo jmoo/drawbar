@@ -249,7 +249,7 @@ pub struct Document {
     /// The engineering table's filter and cell, and the decode it last laid out. One
     /// table serves every tab — see [`Advanced::leave`].
     advanced: Advanced,
-    /// Zone audio decoded on request, dropped when the bytes under it change.
+    /// The audio of the zones open rows have shown, dropped when their strokes change.
     audio: sample::Cache,
     /// Which zone is sounding, and the one backend that makes it sound.
     player: crate::audio::Player,
@@ -293,7 +293,6 @@ impl Document {
             self.player.stop();
             self.piano.leave();
         }
-        // Decoded audio belongs to one set of bytes; an edit re-encodes all of them.
         self.audio.follow(id, entity.stamp);
         // Paint marks are measured against the bytes the asset was last saved as.
         if let Some(open) = &mut self.open {
@@ -822,6 +821,9 @@ impl Document {
     fn answer(&mut self, id: u64, asked: Asked, workspace: &mut Workspace, log: &mut Log) {
         match asked {
             Asked::Zone(sample::Ask::Decode(zone)) => {
+                if !self.audio.due(zone) {
+                    return;
+                }
                 if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
                     self.audio.decode(decoded, zone);
                 }
@@ -1010,10 +1012,11 @@ impl Document {
         let Some(entity) = workspace.get(id) else {
             return Ok(());
         };
+        let (before, edited) = (entity.stamp, shape(entity));
         // ⚠️ Over the asset's own bytes, never a copy of them. A piano library is
         // hundreds of megabytes and every set of every frame comes through here; the
         // piano arm makes no bytes at all, because its sets land in a plan.
-        let made = match shape(entity) {
+        let made = match edited {
             Shape::Sample => sample::apply(&entity.bytes, &sets).map(Some),
             Shape::Project => project::apply(&entity.bytes, &sets).map(Some),
             // A piano's sets land in its plan, and the plan is what makes its bytes —
@@ -1037,6 +1040,11 @@ impl Document {
         // what decides — and that is the one comparison of two bodies there is.
         if let Some(out) = made {
             workspace.replace_bytes(id, out, log);
+        }
+        if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
+            if let Some(decoded) = &held.entity {
+                self.audio.carry(id, (before, held.stamp), decoded);
+            }
         }
         Ok(())
     }
@@ -2819,12 +2827,14 @@ mod tests {
             open.document.audio.get(0).is_none(),
             "nothing decodes unasked"
         );
-        open.document.answer(
-            id,
-            Asked::Zone(sample::Ask::Decode(0)),
-            &mut open.workspace,
-            &mut open.log,
-        );
+        for _ in 0..2 {
+            open.document.answer(
+                id,
+                Asked::Zone(sample::Ask::Decode(0)),
+                &mut open.workspace,
+                &mut open.log,
+            );
+        }
         {
             let decoded = open.document.audio.get(0).expect("asked for");
             let decoded = decoded.as_ref().unwrap();
@@ -2844,8 +2854,8 @@ mod tests {
             "Marimba-zone1.wav",
         );
 
-        // Editing the instrument replaces its bytes, so what was decoded from the old
-        // ones is dropped rather than kept beside a file it no longer describes.
+        // Bytes put under the asset from outside the editor may hold other strokes, so
+        // what was decoded from the old ones is dropped.
         let edited =
             sample::apply(&open.entity().bytes, &[("name".into(), "Vibes".into())]).unwrap();
         open.workspace.replace_bytes(id, edited, &mut open.log);
@@ -2929,9 +2939,9 @@ mod tests {
         );
     }
 
-    /// ⚠️ An open zone shows what its stroke sounds like, so the row asks for the
-    /// decode itself. Nothing decodes while every row is closed, and the cache is what
-    /// keeps a frame from decoding again.
+    /// An open zone shows what it sounds like, so the row asks for the decode itself:
+    /// one frame says it is reading, the next decodes. Nothing decodes while every row
+    /// is closed, and the cache keeps a frame from decoding again.
     #[test]
     fn an_open_zone_draws_its_own_waveform() {
         let mut open = Open::file("Marimba.nsmp", sample_bytes());
@@ -2942,7 +2952,13 @@ mod tests {
         );
 
         sample::pick_row(&mut open.state().sample, 0);
-        let said = open.twice();
+        let said = open.frame(Vec::new());
+        assert!(
+            said.iter().any(|word| word == "reading the zone…"),
+            "the row says what it is waiting on: {said:?}"
+        );
+        assert!(open.document.audio.get(0).is_none(), "{said:?}");
+        open.frame(Vec::new());
         let decoded = open
             .document
             .audio
@@ -2951,10 +2967,55 @@ mod tests {
             .as_ref()
             .expect("the zone decodes");
         assert!(!decoded.envelope.is_empty());
+        let said = open.frame(Vec::new());
         assert!(
             said.iter().any(|word| word == "Save WAV…"),
-            "the second frame drew the audio the first asked for: {said:?}"
+            "the frame after the decode draws the audio: {said:?}"
         );
+    }
+
+    /// Moving a zone's keys leaves its stroke alone, so a drag across the key map or a
+    /// stepped root note keeps the open row's waveform rather than decoding per step.
+    #[test]
+    fn an_edit_that_leaves_the_strokes_alone_keeps_the_zones_audio() {
+        let mut open = Open::file("Marimba.nsmp", sample_bytes());
+        open.frame(Vec::new());
+        sample::pick_row(&mut open.state().sample, 0);
+        open.twice();
+        let before: *const sample::Decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the open row decoded")
+            .as_ref()
+            .expect("the zone decodes");
+
+        let stamp = open.entity().stamp;
+        let id = open.id;
+        for root in ["D4", "E4"] {
+            open.document
+                .apply(
+                    id,
+                    vec![("zone1.root_key".into(), root.into())],
+                    &mut open.workspace,
+                    &mut open.log,
+                )
+                .expect("the root key is settable");
+            let said = open.frame(Vec::new());
+            assert!(
+                !said.iter().any(|word| word == "reading the zone…"),
+                "root {root}: {said:?}"
+            );
+        }
+        assert_ne!(open.entity().stamp, stamp, "the edits made new bytes");
+        let after: *const sample::Decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the audio outlived the edits")
+            .as_ref()
+            .expect("the zone decodes");
+        assert!(std::ptr::eq(before, after), "the zone was decoded again");
     }
 
     /// ⚠️ A zone index belongs to the instrument it was opened on. Leaving the tab
