@@ -133,6 +133,15 @@ pub enum DeviceCmd {
         class: ObjectClass,
         at: Location,
     },
+    /// Select again whichever of `written` the panel is on when this runs, so it plays
+    /// what was just written there.
+    ///
+    /// ⚠️ The panel is read first rather than trusted from a walk: a select moves a
+    /// panel that has been turned since and discards the edits made there.
+    Reload {
+        class: ObjectClass,
+        written: Vec<Location>,
+    },
     Disconnect,
 }
 
@@ -207,6 +216,7 @@ impl DeviceCmd {
             DeviceCmd::Delete { at, .. } => format!("delete {}", shown(*at)),
             DeviceCmd::Rename { at, name, .. } => format!("rename {} to {name:?}", shown(*at)),
             DeviceCmd::Select { at, .. } => format!("select {}", shown(*at)),
+            DeviceCmd::Reload { class, .. } => format!("reload the {} panel", class.label()),
             DeviceCmd::Disconnect => "disconnect".into(),
         }
     }
@@ -263,6 +273,10 @@ impl DeviceCmd {
                 ("Loading", "Loaded", "load"),
                 format!("{} on the instrument", place(*class, *at)),
             ),
+            DeviceCmd::Reload { .. } => words(
+                ("Reloading", "Reloaded", "reload"),
+                "what the panel plays".into(),
+            ),
             DeviceCmd::Disconnect => words(
                 ("Releasing", "Released", "release"),
                 "the instrument".into(),
@@ -297,8 +311,9 @@ pub enum DeviceEvent {
         class: ObjectClass,
         banks: Vec<Bank>,
     },
-    /// The slot the panel has loaded in a class; `None` when focus is supported but
-    /// nothing is loaded. Never sent for a class that answers `0x15` (focus n/a).
+    /// The slot the panel has loaded in a class, from a `FOCUS` read or from the select
+    /// that put it there; `None` when focus is supported but nothing is loaded. A class
+    /// whose `FOCUS` answers `0x15` (focus n/a) sends none from a read.
     Focus {
         class: ObjectClass,
         at: Option<Location>,
@@ -474,12 +489,16 @@ impl DeviceState {
     }
 
     /// The slot the panel has loaded in a class, as the instrument last said: at the
-    /// head of a walk, and after a select this app asked for.
+    /// head of a walk, and after a select or reload this app asked for.
     ///
-    /// ⚠️ A selection made on the panel itself is not in here until the class is read
-    /// again.
+    /// ⚠️ A selection made on the panel itself is not in here until one of those.
     pub fn focused(&self, class: ObjectClass) -> Option<Location> {
         self.focus.get(&class.to_raw()).copied().flatten()
+    }
+
+    /// Whether the panel loads slots of this class, as far as its reads have said.
+    fn has_focus(&self, class: ObjectClass) -> bool {
+        self.focus.contains_key(&class.to_raw())
     }
 
     /// Take in what a slot said it depends on: the list stands for that slot, and every
@@ -976,9 +995,8 @@ pub struct Device {
     reading: Option<ObjectClass>,
     /// The banks the running mutation touches, to be read again once it finishes.
     rescan: Vec<(ObjectClass, u32)>,
-    /// The loaded slots the running command overwrites. A batch can touch one per
-    /// class, so this is a list rather than a single slot.
-    reselect: Vec<(ObjectClass, Location)>,
+    /// The [`DeviceCmd::Reload`] the running write owes once it has landed.
+    reload: Option<DeviceCmd>,
     /// The class the running command writes into, so a refusal can be put against the
     /// entry of the queue it stopped on.
     writing: Option<ObjectClass>,
@@ -1002,7 +1020,7 @@ impl Device {
             pending: VecDeque::new(),
             reading: None,
             rescan: Vec::new(),
-            reselect: Vec::new(),
+            reload: None,
             writing: None,
             asked_deps: None,
             linked: 0,
@@ -1140,19 +1158,18 @@ impl Device {
         }
         // Confirmed on hardware.
         // Writing the loaded slot requires SELECT to reload it.
-        let loaded = |state: &DeviceState, class: &ObjectClass, at: &Location| {
-            (state.focused(*class) == Some(*at)).then_some((*class, *at))
-        };
-        self.reselect = match &cmd {
+        let written = match &cmd {
             DeviceCmd::Put { class, at, .. } | DeviceCmd::Rename { class, at, .. } => {
-                loaded(&self.state, class, at).into_iter().collect()
+                Some((*class, vec![*at]))
             }
-            DeviceCmd::SendAll { class, items } => items
-                .iter()
-                .filter_map(|item| loaded(&self.state, class, &item.at))
-                .collect(),
-            _ => Vec::new(),
+            DeviceCmd::SendAll { class, items } => {
+                Some((*class, items.iter().map(|item| item.at).collect()))
+            }
+            _ => None,
         };
+        self.reload = written
+            .filter(|(class, _)| self.state.has_focus(*class))
+            .map(|(class, written)| DeviceCmd::Reload { class, written });
         self.writing = match &cmd {
             DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
             _ => None,
@@ -1386,7 +1403,7 @@ impl Device {
                     self.pending.clear();
                     self.reading = None;
                     self.rescan.clear();
-                    self.reselect.clear();
+                    self.reload = None;
                     self.writing = None;
                 }
                 DeviceEvent::Started(what) => log.info(what),
@@ -1395,11 +1412,8 @@ impl Device {
                         self.state.scan.finished(class);
                         self.state.scan.heard(class, now);
                     }
-                    // The panel is still playing what it read before the write, so it is
-                    // asked to load the slot again. `select` is read-only.
-                    for (class, at) in std::mem::take(&mut self.reselect) {
-                        self.pending.push_back(DeviceCmd::Select { class, at });
-                    }
+                    // The panel is still playing what it read before the write.
+                    self.pending.extend(self.reload.take());
                     for (class, bank) in std::mem::take(&mut self.rescan) {
                         self.pending.push_back(DeviceCmd::ScanBank { class, bank });
                     }
@@ -1508,7 +1522,10 @@ impl Device {
                         log.say(format!("{}.", words.done));
                     }
                 }
+                // A refused write left its slot as it was, or empty after a rescue, so
+                // the panel has nothing new to play there.
                 DeviceEvent::OpFailed(text) => {
+                    self.reload = None;
                     if let Some(class) = self.writing {
                         queue.stumbled(class, &text);
                     }
@@ -2439,33 +2456,37 @@ mod tests {
         assert!(!queue.holds(id), "it landed");
     }
 
-    /// ⚠️ The panel goes on playing what it read before a write, so a write into the
-    /// slot it has loaded is followed by a select that makes it read the new bytes. The
-    /// panel's own focus is what says which slot that is, however it got there.
+    /// A write that lands owes the panel a reload of the slots it wrote, which the
+    /// worker checks against where the panel is when it runs. A refused write owes
+    /// nothing, and neither does a class whose panel loads no slots.
     #[test]
-    fn writing_the_slot_the_panel_has_loaded_reloads_it() {
+    fn a_write_that_lands_owes_the_panel_a_reload_and_a_refused_one_does_not() {
         let class = ObjectClass::Program;
         let at = Location { bank: 4, slot: 2 };
-        let elsewhere = Location { bank: 4, slot: 3 };
 
-        let reloaded = |focused: Location, written: Location| {
+        let owed = |focus: bool, refused: bool| {
             let ctx = egui::Context::default();
             let mut workspace = Workspace::new(ctx.clone());
             let mut device = Device::new(ctx);
             let mut log = Log::default();
             device.pretend_attached();
-            device.pretend_focused(class, focused);
+            if focus {
+                device.pretend_focused(class, Location { bank: 0, slot: 0 });
+            }
             device.send(
                 DeviceCmd::Put {
                     id: 1,
                     class,
-                    at: written,
+                    at,
                     name: "Africa Split".into(),
                     bytes: vec![0; 4],
                 },
                 &mut log,
             );
             device.pump();
+            if refused {
+                device.pretend(DeviceEvent::OpFailed("put: refused".into()));
+            }
             device.pretend(DeviceEvent::Finished);
             device.poll(
                 &mut log,
@@ -2473,22 +2494,15 @@ mod tests {
                 &mut Tabs::default(),
                 &mut Queue::default(),
             );
-            device
-                .queued()
-                .iter()
-                .find_map(|cmd| match cmd {
-                    DeviceCmd::Select { at, .. } => Some(*at),
-                    _ => None,
-                })
-                .map(|at| (at.bank, at.slot))
+            device.queued().iter().find_map(|cmd| match cmd {
+                DeviceCmd::Reload { class, written } => Some((*class, written.clone())),
+                _ => None,
+            })
         };
 
-        assert_eq!(reloaded(at, at), Some((at.bank, at.slot)));
-        assert_eq!(
-            reloaded(elsewhere, at),
-            None,
-            "the panel is playing another slot, and a select would take it off it"
-        );
+        assert_eq!(owed(true, false), Some((class, vec![at])));
+        assert_eq!(owed(true, true), None, "the refused write changed nothing");
+        assert_eq!(owed(false, false), None, "this panel loads no programs");
     }
 
     /// A library id resolves to a name only where the instrument has actually said so,

@@ -66,8 +66,10 @@ this computer becomes `Africa-Split` on the panel.
 - Live slots and Settings are overwritten in place. Writing Settings reloads the
   selected program, so unsaved panel changes are lost. drawbar warns before it does
   this.
-- Writing to the slot the panel is playing reloads it, so the keyboard plays what
-  was just written.
+- When a write or rename succeeds, drawbar asks the panel which slot it is
+  playing. If that slot was just written, drawbar loads it again so the keyboard
+  plays the new sound, and unsaved panel changes to it are lost. A panel on any
+  other slot is left alone, and nothing is reloaded after a failed write.
 
 These behaviours have been confirmed on an instrument. Progress shows on the
 instrument's own display; drawbar shows a spinner and cannot know a percentage.
