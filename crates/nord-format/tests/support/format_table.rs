@@ -1,7 +1,5 @@
-//! `(tag, corpus body length, a version the reader accepts)` for every CBIN
-//! format except the Electro 5 formats, `nsmp`, and `npno`. The lengths are the
-//! format modules' constants, so a swapped pair of tags fails the corpus check
-//! of body lengths.
+//! `(tag, body length, a version the reader accepts)` for every CBIN format except
+//! the Electro 5 formats, `nsmp`, and `npno`, each length taken from its format module.
 //!
 //! ⚠️ Not a test target. Each test target that includes this module compiles its
 //! own copy.

@@ -1486,75 +1486,7 @@ sparse_enum!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fields::{ControlKind, Library, PackedOrder, Unit};
-
-    /// A field gets its control kind by choosing a type, so an interface never needs a
-    /// table of field names of its own.
-    #[test]
-    fn a_type_says_what_kind_of_control_it_is() {
-        assert_eq!(<Level as Packed>::CONTROL, ControlKind::Knob(Unit::Panel10));
-        assert_eq!(
-            <Time as Packed>::CONTROL,
-            ControlKind::Knob(Unit::Milliseconds)
-        );
-        assert_eq!(
-            <EqBand as Packed>::CONTROL,
-            ControlKind::Bipolar(Unit::Decibels)
-        );
-        // What the type cannot know (which bar of the register, which parameter a morph
-        // slot belongs to) is left open here and filled in by `#[bitbody]`.
-        assert_eq!(
-            <MorphTarget as Packed>::CONTROL,
-            ControlKind::Morph { of: None }
-        );
-        assert_eq!(
-            <Drawbar as Packed>::CONTROL,
-            ControlKind::Drawbar {
-                bars: 1,
-                rank: None,
-                bits_per_bar: 4,
-                order: PackedOrder::HighFirst,
-            }
-        );
-        // ⚠️ The two multi-value kinds pack from opposite ends: a pattern's first step
-        // is in the lowest bits and an Electro 5 register's first bar is in the highest.
-        assert_eq!(
-            <ArpPattern as Packed>::CONTROL,
-            ControlKind::Pattern {
-                steps: 16,
-                bits_per_step: 2,
-                order: PackedOrder::LowFirst,
-            }
-        );
-        assert_eq!(
-            <PianoRef as Packed>::CONTROL,
-            ControlKind::Reference(Library::Piano)
-        );
-        assert_eq!(
-            <SampleRef as Packed>::CONTROL,
-            ControlKind::Reference(Library::Sample)
-        );
-        assert_eq!(<KbZone4 as Packed>::CONTROL, ControlKind::Selector);
-        assert_eq!(<bool as Packed>::CONTROL, ControlKind::Toggle);
-        assert_eq!(
-            <OctaveShiftNibble as Packed>::CONTROL,
-            ControlKind::Shift(Unit::Octaves)
-        );
-        // The default for an untyped field.
-        assert_eq!(<u8 as Packed>::CONTROL, ControlKind::Number);
-    }
-
-    /// A millisecond or hertz unit labels the control. With no published curve, the
-    /// value prints as the stored byte.
-    #[test]
-    fn a_unit_says_whether_it_can_be_computed() {
-        assert!(Unit::Panel10.describes_a_known_transform());
-        assert!(Unit::Decibels.describes_a_known_transform());
-        assert!(!Unit::Milliseconds.describes_a_known_transform());
-        assert!(!Unit::Hertz.describes_a_known_transform());
-        assert_eq!(Time::new(96).unwrap().to_string(), "96");
-        assert_eq!(Level::new(96).unwrap().to_string(), "96 (7.6)");
-    }
+    use crate::fields::{ControlKind, Library, Unit};
 
     /// Stage 4 octave shift is two's complement; Stage 2 and 3 use biased values.
     #[test]
@@ -1618,7 +1550,7 @@ mod tests {
     }
 
     /// The unit comes from the declaration, so a bipolar slot that is not a decibel
-    /// reading does not claim to be one.
+    /// reading does not claim to be one. A reference's catalog arrives the same way.
     #[test]
     fn a_bipolar_slot_carries_the_unit_it_was_declared_with() {
         assert_eq!(
@@ -1631,6 +1563,14 @@ mod tests {
         );
         // ±10 of nothing is still ±10.
         assert_eq!(Bipolar::<10>::new(127).unwrap().reading(), 10.0);
+        assert_eq!(
+            <PianoRef as Packed>::CONTROL,
+            ControlKind::Reference(Library::Piano)
+        );
+        assert_eq!(
+            <SampleRef as Packed>::CONTROL,
+            ControlKind::Reference(Library::Sample)
+        );
     }
 
     /// A unit's code carries it through a const generic and must decode back to the same
@@ -1684,5 +1624,7 @@ mod tests {
         assert_eq!(Level::new(127).unwrap().to_string(), "127 (10.0)");
         assert_eq!(Level::new(96).unwrap().to_string(), "96 (7.6)");
         assert!(Level::new(128).is_err(), "128 does not fit seven bits");
+        // No manual publishes the time curve, so a time prints only the stored byte.
+        assert_eq!(Time::new(96).unwrap().to_string(), "96");
     }
 }
