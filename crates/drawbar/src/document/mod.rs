@@ -894,6 +894,9 @@ impl Document {
     /// way, once, because every answer needs it.
     fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
         let root = ask.root();
+        if ask == piano::Ask::Show(root) && !self.piano.due(root) {
+            return;
+        }
         let Some(entity) = workspace.get(id) else {
             return;
         };
