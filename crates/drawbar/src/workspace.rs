@@ -227,12 +227,8 @@ pub struct LocalEntity {
     /// editor holding an edit that has not reached them — see
     /// [`LocalEntity::is_unsaved`].
     pub saved: Baseline,
-    /// Whether an editor holds an edit of this asset its bytes do not.
-    ///
-    /// A piano library is hundreds of megabytes, so an edit of one is a plan and the
-    /// bytes are laid out only when something has to carry them. The plan lives in
-    /// [`crate::document::piano::State`], which says so here — see
-    /// [`Workspace::mark_pending`].
+    /// Whether an editor holds an edit of this asset its bytes do not. The editor
+    /// holding it keeps this current — see [`Workspace::mark_pending`].
     pending: bool,
     /// Whether this is on this computer, as opposed to a view of a slot.
     ///
@@ -295,10 +291,6 @@ impl LocalEntity {
 
     /// Whether it holds something other than what it was last saved as, an editor's
     /// pending edit included.
-    ///
-    /// The one question every unsaved reading asks: the star on a row and on a tab, the
-    /// header's claim, the File menu's revert, the queue's counts, and what the store
-    /// keeps between sessions.
     ///
     /// ⚠️ Two stamps, not two bodies: every listed row and every frame of the header
     /// ask this, and a piano library is hundreds of megabytes. The stamps are settled
