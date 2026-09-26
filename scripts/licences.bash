@@ -164,7 +164,7 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
             | map({notice: .[0].notice, crates: crates})
             | sort_by(.notice)
           ),
-          unattributed: ($shared | map(select(.notice == "")) | length),
+          unattributed: ($shared | map(select(.notice == "")) | crates),
           variants: (
             map(select(.variant))
             | group_by(.text)
@@ -195,7 +195,7 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
            "            },"),
          "        ],"
        end),
-      "        unattributed: \(.unattributed),",
+      list("unattributed"; "        "; .unattributed),
       (if .variants == [] then "        variants: &[],"
        else "        variants: &[",
          (.variants[] |
