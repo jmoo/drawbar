@@ -17,7 +17,6 @@ use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
 use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, Glyph};
-use crate::library::Mark;
 use crate::log::Log;
 use crate::panel::Track;
 use crate::strings::{label, place};
@@ -269,52 +268,20 @@ pub fn changed(
         .collect()
 }
 
-/// What a send would carry and what it would walk past: what is waiting, assets the
-/// instrument no longer agrees with, and documents holding edits nothing has saved.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Behind {
-    pub queued: usize,
-    pub changed: usize,
-    pub unsaved: usize,
-}
-
-impl Behind {
-    pub fn of(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> Behind {
-        Behind {
-            queued: queue.len(),
-            changed: changed(workspace, device, queue).len(),
-            unsaved: workspace
-                .entities()
-                .iter()
-                .filter(|entity| entity.is_unsaved())
-                .count(),
-        }
-    }
-
-    /// The three parts of the line, each under the [`Mark`] its ink and its words come
-    /// from — so a header painting them part by part is the legend for every mark in
-    /// the window.
-    ///
-    /// ⚠️ All three counts, whatever they come to. A part left out at zero hides the
-    /// relation the line is for: two changed assets beside an empty queue is exactly
-    /// what a reader has to see.
-    pub fn parts(self) -> [(String, Mark); 3] {
-        [
-            (format!("{} queued", self.queued), Mark::Differs),
-            (format!("{} changed", self.changed), Mark::Differs),
-            (format!("{} unsaved", self.unsaved), Mark::Unsaved),
-        ]
-    }
-
-    /// The one line every header says it in, for somewhere that can only take words.
-    pub fn said(self) -> String {
-        self.parts().map(|(said, _)| said).join(" · ")
-    }
-
-    /// The action beside the line, which closes the gap the middle count names.
-    pub fn action(self) -> String {
-        format!("Queue {} changed", self.changed)
-    }
+/// The toolbar's offer to queue what [`changed`] finds: the button's label and its
+/// hover text. `None` where nothing has changed.
+pub fn offer(
+    workspace: &Workspace,
+    device: &DeviceState,
+    queue: &Queue,
+) -> Option<(String, String)> {
+    let changed = changed(workspace, device, queue).len();
+    (changed > 0).then(|| {
+        (
+            format!("Queue {changed}"),
+            format!("queue {changed} changed to send to the keyboard"),
+        )
+    })
 }
 
 /// Re-check everything waiting against the instrument attached now, and say what it
@@ -1306,11 +1273,6 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
     }
 }
 
-/// Anything else the header sets beside the title, in the header's own face.
-pub fn aside(said: &str, tint: egui::Color32) -> egui::RichText {
-    egui::RichText::new(said).monospace().size(9.5).color(tint)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,11 +1391,10 @@ mod tests {
             .expect("every CBIN container has one")
     }
 
-    /// An edit queues nothing and neither does saving one the instrument already agrees
-    /// with. The two counts a send walks past are separate facts: a slot holding
-    /// something other than what was saved, and an edit nothing has saved at all.
+    /// An asset has changed once it is saved over what its slot holds, and stops
+    /// counting once it is queued. An edit nothing has saved has not changed.
     #[test]
-    fn the_counts_separate_what_the_instrument_lacks_from_what_nothing_saved() {
+    fn an_asset_has_changed_once_saved_over_its_slot_and_until_queued() {
         let (mut workspace, mut log, bytes) = bench();
         let class = ObjectClass::Program;
         let (mut device, _) = attached(&workspace);
@@ -1464,9 +1425,13 @@ mod tests {
             ],
         );
 
-        let counts =
-            |workspace: &Workspace, queue: &Queue| Behind::of(workspace, &device.state, queue);
-        assert_eq!(counts(&workspace, &queue), Behind::default());
+        let ids = |workspace: &Workspace, device: &Device, queue: &Queue| {
+            changed(workspace, &device.state, queue)
+                .iter()
+                .map(|(id, ..)| *id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&workspace, &device, &queue), Vec::<u64>::new());
 
         // Edited and saved: the slot no longer holds what this is.
         for id in [saved, queued] {
@@ -1477,16 +1442,8 @@ mod tests {
         edit(&mut workspace, unsaved, &mut log);
         device.relink(&mut workspace);
 
-        assert_eq!(
-            counts(&workspace, &queue),
-            Behind {
-                queued: 0,
-                changed: 2,
-                unsaved: 1
-            }
-        );
+        assert_eq!(ids(&workspace, &device, &queue), vec![saved, queued]);
 
-        // What is already waiting is not what a send would walk past.
         enqueue(
             &workspace,
             &mut device,
@@ -1496,17 +1453,11 @@ mod tests {
             class,
             at(1),
         );
-        assert_eq!(
-            changed(&workspace, &device.state, &queue)
-                .iter()
-                .map(|(id, ..)| *id)
-                .collect::<Vec<_>>(),
-            vec![saved],
-        );
+        assert_eq!(ids(&workspace, &device, &queue), vec![saved]);
     }
 
-    /// The action closes the gap the line describes: one entry per changed asset, each
-    /// for the slot it stands for.
+    /// Each changed asset is queued for the slot it stands on, and one that stands on
+    /// no slot is not.
     #[test]
     fn queueing_what_changed_makes_one_entry_each() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1542,61 +1493,7 @@ mod tests {
         assert_eq!(queue.entry(ids[0]).map(|held| held.at), Some(at(0)));
         assert_eq!(queue.entry(ids[1]).map(|held| held.at), Some(at(1)));
         assert!(!queue.holds(homeless), "it stands for no slot");
-        assert_eq!(
-            Behind::of(&workspace, &device.state, &queue),
-            Behind {
-                queued: 2,
-                changed: 0,
-                unsaved: 0
-            },
-            "the gap is closed, and what closed it is waiting"
-        );
-    }
-
-    /// The header says all three counts whatever they come to: a part left out at zero
-    /// would hide the relation between them.
-    #[test]
-    fn the_header_counts_all_three_however_many_each_comes_to() {
-        assert_eq!(
-            Behind {
-                queued: 0,
-                changed: 2,
-                unsaved: 1
-            }
-            .said(),
-            "0 queued · 2 changed · 1 unsaved"
-        );
-        assert_eq!(
-            Behind {
-                queued: 3,
-                changed: 0,
-                unsaved: 0
-            }
-            .said(),
-            "3 queued · 0 changed · 0 unsaved"
-        );
-        assert_eq!(Behind::default().action(), "Queue 0 changed");
-    }
-
-    /// The line is the legend: each part stands under a mark, and the header paints it
-    /// in that mark's ink and hovers it with that mark's words. The whole line is the
-    /// parts joined, so nowhere says it twice.
-    #[test]
-    fn each_part_of_the_line_stands_under_the_mark_it_explains() {
-        let behind = Behind {
-            queued: 3,
-            changed: 2,
-            unsaved: 1,
-        };
-        assert_eq!(
-            behind.parts(),
-            [
-                ("3 queued".to_string(), Mark::Differs),
-                ("2 changed".to_string(), Mark::Differs),
-                ("1 unsaved".to_string(), Mark::Unsaved),
-            ]
-        );
-        assert_eq!(behind.said(), "3 queued · 2 changed · 1 unsaved");
+        assert!(changed(&workspace, &device.state, &queue).is_empty());
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue

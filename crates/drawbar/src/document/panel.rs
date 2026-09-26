@@ -14,7 +14,7 @@ use super::controls::{self, Sets};
 /// The field the piano lookup decorates, and so the section it belongs in.
 pub const PIANO_MODEL: &str = "piano_panel.piano_model";
 
-/// What is known about the piano a program plays, and the way to ask for the rest.
+/// What is known about the piano a program plays, and what it would take to know more.
 ///
 /// ⚠️ The file stores an **id** for the piano and, separately, the panel's category and
 /// Model dial position. The id is the identity; the dial position is a coordinate whose
@@ -24,11 +24,13 @@ pub const PIANO_MODEL: &str = "piano_panel.piano_model";
 pub struct PianoLookup {
     /// The id the file names, or `None` where it references no piano at all.
     pub id: Option<u32>,
-    /// What the instrument called that id, once it has been asked.
+    /// What the instrument called that id, where it has named it.
     pub name: Option<String>,
     /// Whether asking is possible: an attached instrument, and a slot to ask about.
     pub can_ask: bool,
-    /// Set when the operator asks. The document turns it into one `DEPENDENCIES` read.
+    /// Whether the instrument refused the last read of the slot's dependencies.
+    pub refused: bool,
+    /// Set when the operator asks again after a refusal.
     pub asked: bool,
     /// The Pianos folder's names for the current category, by Model dial position.
     /// Empty when the scan cannot answer, and the Model dial stays numeric.
@@ -39,10 +41,16 @@ pub struct PianoLookup {
 }
 
 impl PianoLookup {
+    /// Whether the instrument could put a name to the piano this program references and
+    /// has not done so yet.
+    pub(super) fn wants_a_name(&self) -> bool {
+        self.can_ask && self.id.is_some() && self.name.is_none()
+    }
+
     /// The catalogue's name for a library reference, where this lookup resolves it.
     ///
     /// Only the piano library has a catalogue here, and only for the id the instrument
-    /// was asked about — every other reference shows the id the file stores.
+    /// has named — every other reference shows the id the file stores.
     pub(super) fn names(&self, field: &Field) -> Option<&str> {
         if field.spec.control != ControlKind::Reference(Library::Piano) {
             return None;
@@ -85,57 +93,32 @@ impl PianoLookup {
         true
     }
 
+    /// ⚠️ The dependency reply is the instrument's own answer about the piano this
+    /// program plays; the model list is the scan's reading of a dial position. Where
+    /// the two disagree the position mapping is wrong, and the reader has to know it.
     pub(super) fn ui(&mut self, ui: &mut egui::Ui) {
-        if let Some(scanned) = &self.scan_disagrees {
-            ui.colored_label(
-                crate::app::warn(ui.visuals()),
-                format!(
-                    "the model list calls this position {scanned:?}, but the instrument's \
-                     dependency reply names the piano below — trust the instrument",
-                ),
-            );
+        if self.refused && self.wants_a_name() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("the instrument did not say which piano this plays")
+                        .small()
+                        .weak(),
+                );
+                self.asked |= ui
+                    .small_button("Ask again")
+                    .on_hover_text("read this program's dependencies again")
+                    .clicked();
+            });
         }
-        let Some(id) = self.id else {
+        let Some(scanned) = &self.scan_disagrees else {
             return;
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("currently").small().weak());
-            match &self.name {
-                Some(name) => {
-                    ui.label(egui::RichText::new(name).strong());
-                    ui.label(
-                        egui::RichText::new("— named by the instrument")
-                            .small()
-                            .weak(),
-                    );
-                    if self.can_ask {
-                        self.asked |= ui
-                            .small_button("Ask again")
-                            .on_hover_text("read this program's dependencies again")
-                            .clicked();
-                    }
-                }
-                None => {
-                    ui.label(egui::RichText::new(format!("piano {id:#010x}")).monospace());
-                    match self.can_ask {
-                        true => {
-                            self.asked |= ui
-                                .small_button("Ask the instrument")
-                                .on_hover_text("read this program's dependencies for the name")
-                                .clicked();
-                        }
-                        false => {
-                            ui.label(
-                                egui::RichText::new(
-                                    "— the file stores the id; only the instrument knows the name",
-                                )
-                                .small()
-                                .weak(),
-                            );
-                        }
-                    }
-                }
-            }
-        });
+        ui.colored_label(
+            crate::app::warn(ui.visuals()),
+            format!(
+                "the model list calls this position {scanned:?}, but the instrument's \
+                 dependency reply names the piano below — trust the instrument",
+            ),
+        );
     }
 }

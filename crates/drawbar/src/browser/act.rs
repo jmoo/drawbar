@@ -1608,7 +1608,8 @@ mod tests {
     }
 
     /// The question before a write says what is known about each slot it is about to
-    /// land in, and a bank nothing has read is not an empty one.
+    /// land in, and a bank nothing has read is not an empty one. It says that and the
+    /// warnings, and nothing over them.
     #[test]
     fn the_send_question_says_what_is_known_about_each_slot() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1657,6 +1658,10 @@ mod tests {
         ] {
             assert!(note.contains(said), "{note}");
         }
+        assert!(
+            note.starts_with("“sound"),
+            "nothing is written above the destinations:\n{note}"
+        );
     }
 
     /// ⚠️ The question counts and names what the batch would write. An entry the

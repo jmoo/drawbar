@@ -192,9 +192,6 @@ struct Opened {
     paths: std::collections::HashMap<u32, String>,
     /// The last refusal, and what caused it.
     error: Option<String>,
-    /// Whether this document has already had its dependencies read without being asked.
-    /// One read per document: the button is what asks for another.
-    fetched_deps: bool,
     /// The encode panel over a WAV, and the read of the WAV it works from.
     wav: Option<(encode::Draft, encode::Source)>,
     /// What the instrument editor keeps between frames: the open zone, the struck key,
@@ -223,7 +220,6 @@ impl Opened {
             variant,
             paths: std::collections::HashMap::new(),
             error: None,
-            fetched_deps: false,
             wav: match asset.shape {
                 Shape::Wav => Some((
                     encode::Draft::new(&entity.name),
@@ -477,11 +473,10 @@ impl Document {
             None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            if lookup.asked || self.owes_deps(&lookup, (class, at), device) {
-                if let Some(open) = &mut self.open {
-                    open.fetched_deps = true;
-                }
-                device.send(crate::device::DeviceCmd::Deps { class, at }, log);
+            match lookup.asked {
+                true => device.ask_deps_again(class, at, log),
+                false if lookup.wants_a_name() => device.read_deps(class, at, log),
+                false => {}
             }
         }
         if let Some(name) = act.rename {
@@ -665,27 +660,6 @@ impl Document {
         let (id, root) = self.player.playing()?;
         (Some(id) == self.opened()).then_some(())?;
         u8::try_from(root).ok()
-    }
-
-    /// Whether this frame should read the slot's dependencies without being asked to.
-    ///
-    /// The piano's name is the one thing about a program that no file carries, so a
-    /// document opened off a slot with an instrument attached reads it straight away
-    /// rather than sitting on an id until someone clicks. Once per document, and never
-    /// with nothing to learn: no instrument, no piano named, a name already in hand, or a
-    /// list the instrument has already given for this slot and simply did not name it in.
-    fn owes_deps(
-        &self,
-        lookup: &panel::PianoLookup,
-        slot: (ObjectClass, Location),
-        device: &Device,
-    ) -> bool {
-        let fetched = self.open.as_ref().is_none_or(|open| open.fetched_deps);
-        if fetched || !lookup.can_ask || lookup.id.is_none() || lookup.name.is_some() {
-            return false;
-        }
-        let detail = &device.state.detail;
-        !(detail.at == Some(slot) && detail.deps.is_some())
     }
 
     /// Nothing is open any more.
@@ -1238,7 +1212,7 @@ fn piano_lookup(
         .filter(|id| *id != 0);
     let slot = entity.origin.slot();
     let name = id
-        .and_then(|id| device.state.dependency_name(slot, ObjectClass::Piano, id))
+        .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
         .map(str::to_string);
     let models = registry
         .map(|fields| piano_models(fields, device))
@@ -1257,6 +1231,7 @@ fn piano_lookup(
         id,
         name,
         can_ask: slot.is_some() && device.state.connected(),
+        refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
         asked: false,
         models,
         scan_disagrees,
@@ -2258,6 +2233,79 @@ mod tests {
         assert!(copied.name.is_none(), "still nothing has been asked");
         // A fresh program references no piano at all, and zero is not an id to hunt for.
         assert_eq!(copied.id, None);
+    }
+
+    /// A document opened off a slot asks once what that slot plays, and keeps the
+    /// piano's name after another slot is read.
+    #[test]
+    fn a_document_asks_what_its_slot_plays_and_keeps_the_answer() {
+        use nord_usb::wire::Dependency;
+
+        let class = ObjectClass::Program;
+        let at = Location { bank: 6, slot: 3 };
+        let piano = 0x0102_0304;
+
+        let mut open = Open::empty();
+        open.device.pretend_attached();
+        let fresh = open
+            .workspace
+            .create(Fresh::Program, &mut open.log)
+            .expect("a fresh default");
+        let bytes = open.workspace.get(fresh).expect("just made").bytes.clone();
+        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
+            .expect("a program can name a piano");
+        open.id = open.workspace.ingest(
+            "Africa-Split.ne5p".into(),
+            Origin::Device { class, at },
+            plays,
+            &mut open.log,
+        );
+
+        let reads = |open: &Open| {
+            open.device
+                .queued()
+                .iter()
+                .filter(|cmd| {
+                    matches!(cmd, crate::device::DeviceCmd::Deps { at: asked, .. }
+                    if *asked == at)
+                })
+                .count()
+        };
+        open.frame(Vec::new());
+        assert_eq!(reads(&open), 1, "the document asked what the slot plays");
+        open.frame(Vec::new());
+        assert_eq!(reads(&open), 1, "and asked once, not once a frame");
+
+        let named = |open: &Open| {
+            let registry = fields::apply(&open.entity().bytes, &[])
+                .expect("the registry reads it")
+                .0;
+            piano_lookup(open.entity(), Some(&registry), &open.device)
+                .name
+                .clone()
+        };
+        assert_eq!(named(&open), None, "nothing has answered yet");
+
+        open.device.pretend_deps(
+            class,
+            at,
+            vec![Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id: piano,
+                name: "Royal Grand 3D".into(),
+                location: None,
+            }],
+        );
+        assert_eq!(named(&open).as_deref(), Some("Royal Grand 3D"));
+
+        open.device
+            .pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
+        assert_eq!(
+            named(&open).as_deref(),
+            Some("Royal Grand 3D"),
+            "the name stands after another slot's read"
+        );
     }
 
     /// The Model dial lists the scanned pianos of the document's category — and only
