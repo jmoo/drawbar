@@ -12,7 +12,7 @@ desktop app.
 | **Keyboard** (centre) | The instrument's folders drawn as banks of slots, once connected. |
 | **Inspector** (right) | What is picked, and while connected, how full each folder is. |
 | **Bottom dock** | The **send queue** and the **activity log**. |
-| **Status bar** | The last thing that happened. Click it to open the log. |
+| **Status bar** | The last thing that happened. Click it to open the log. The zoom is at the right. |
 
 The toolbar holds Open, New and Save, and once connected, **Read** and **Send**.
 Each dock collapses and resizes, and the layout is kept between sessions.
@@ -64,3 +64,13 @@ close that program and turn listening off and on again.
 
 The button at the top right cycles between following your system, light, and
 dark.
+
+## Size
+
+The **−** and **+** at the bottom right make the whole window smaller or larger,
+from 80% to 200%. Click the figure between them to return to 110%, where drawbar
+starts. **View** has the same three commands, and the desktop app also takes ⌘+,
+⌘− and ⌘0. In a browser those keys zoom the page instead. The zoom is kept
+between sessions.
+
+If the window is too small for the zoom, drawbar offers to zoom out.
