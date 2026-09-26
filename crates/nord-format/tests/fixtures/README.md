@@ -15,9 +15,9 @@ what was set.
 - `nsmpproj/`: Sample Editor projects from `nsmpproj::Project::new`: one zone,
   three zones, and three zones with the middle one retuned and its range moved.
   A sidecar pins each one.
-- `demo/`: two instruments small enough for drawbar to ship as a demo: a looped
-  pad as a v4 sample instrument from `nord sample encode`, and a three-root tine
-  piano library from `nord piano build`, both from synthesized WAVs.
+- `demo/`: instruments small enough for drawbar to ship as a demo: a looped pad
+  as v2 and v4 sample instruments from `nord sample encode`, and a three-root tine
+  piano library from `nord piano build`, all from synthesized WAVs.
 
 The corpus sweep checks their checksums, decoding, exact round trips, field
 isolation, and oracle sidecars.
