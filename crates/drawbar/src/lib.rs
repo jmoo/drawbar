@@ -26,6 +26,7 @@ pub mod newproject;
 pub mod panel;
 pub mod queue;
 pub mod room;
+pub mod sheet;
 pub mod shell;
 pub mod splash;
 pub mod store;
