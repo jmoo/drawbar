@@ -26,9 +26,8 @@ has been connected, so USB support for other models cannot be guaranteed.
 
 The sample and piano key maps can be played from a MIDI controller. The desktop
 app listens on every MIDI input the computer has. In the browser, Chrome, Edge
-and Firefox can hear a controller. Safari cannot, and there the menu item reads
-**MIDI in Chrome, Edge or Firefox** and opens this page. Firefox asks you to allow
-MIDI access for the site first.
+and Firefox can hear a controller. Safari cannot, so drawbar greys out the menu
+item there. Firefox asks you to allow MIDI access for the site first.
 
 ## What "tested" means
 

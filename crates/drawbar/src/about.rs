@@ -250,7 +250,11 @@ fn usb(device: &Device) -> Line {
     let instrument = device.state.product().unwrap_or("no instrument connected");
     match device.usb() {
         true => Line::new("Web USB", "available", instrument),
-        false => Line::new("Web USB", "unavailable", crate::device::NO_USB_BRIEF),
+        false => Line::new(
+            "Web USB",
+            "unavailable",
+            "Chrome or Edge connect an instrument",
+        ),
     }
 }
 

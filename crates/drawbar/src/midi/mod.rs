@@ -29,10 +29,9 @@ use eframe::egui;
 use crate::document::keys::Struck;
 use crate::log::Log;
 
-/// Why no controller can be heard, in a browser with no Web MIDI.
-pub const NO_MIDI: &str = "This browser cannot use MIDI controllers; use Chrome, Edge or Firefox.";
-/// [`NO_MIDI`] where there is room for a few words.
-pub const NO_MIDI_BRIEF: &str = "MIDI in Chrome, Edge or Firefox";
+/// What the Instrument menu says where the browser has no Web MIDI.
+pub const UNSUPPORTED: &str =
+    "This browser cannot use MIDI controllers; use Chrome, Edge or Firefox.";
 
 /// How many note messages wait for a frame to take them. A full queue lets go of its
 /// oldest.

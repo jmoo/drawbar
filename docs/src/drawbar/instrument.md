@@ -11,9 +11,10 @@ click **Connect an instrument…** in the browser, or **Instrument ▸ Connect�
 browser asks you to pick the device. The desktop app takes the first Nord it
 finds.
 
-In a browser that cannot connect, these and the welcome sheet's first card read
-**Connect in Chrome or Edge** and open
-[Install](../getting-started/install.md#in-the-browser).
+In a browser that cannot connect, these and the welcome sheet's first card are
+greyed out, and hovering one says why.
+[Install](../getting-started/install.md#in-the-browser) lists the browsers that
+can.
 
 Once connected, drawbar reads every folder the instrument declares, a bank at a
 time, and the instrument's controls appear: **Read** and **Send** in the toolbar,

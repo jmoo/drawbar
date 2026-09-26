@@ -13,13 +13,13 @@ use super::act::{will_write, Act, Bulk};
 use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
-use crate::device::{occupancy, read_only, Connection, Device, DeviceState, NO_USB, NO_USB_BRIEF};
+use crate::device::{occupancy, read_only, Connection, Device, DeviceState, NO_USB};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
 use crate::newproject::Making;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
-use crate::shell::{marked, BROWSERS};
+use crate::shell::marked;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -408,44 +408,32 @@ impl Browser {
     /// ⚠️ The click reaches `requestDevice()` inside the frame it landed in, which is
     /// what keeps the browser's transient user activation alive for it.
     fn connect_row(&mut self, ui: &mut egui::Ui, device: &Device, acts: &mut Vec<Act>) {
-        if !device.usb() {
-            let drawn = row(
-                ui,
-                false,
-                &Cells {
-                    indent: indent(0, false),
-                    glyph: Some(Glyph::Keyboard),
-                    name: NO_USB_BRIEF,
-                    faint: true,
-                    ..Cells::default()
-                },
-            );
-            if drawn.response.on_hover_text(NO_USB).clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(BROWSERS));
-            }
-            return;
-        }
         if matches!(device.state.connection, Connection::Connecting) {
             nothing(ui, 0, "Looking for an instrument…");
             return;
         }
-        let drawn = row(
-            ui,
-            false,
-            &Cells {
-                indent: indent(0, false),
-                glyph: Some(Glyph::Keyboard),
-                name: "Connect an instrument…",
-                faint: true,
-                ..Cells::default()
-            },
-        );
+        let drawn = ui
+            .add_enabled_ui(device.usb(), |ui| {
+                row(
+                    ui,
+                    false,
+                    &Cells {
+                        indent: indent(0, false),
+                        glyph: Some(Glyph::Keyboard),
+                        name: "Connect an instrument…",
+                        faint: true,
+                        ..Cells::default()
+                    },
+                )
+            })
+            .inner;
         if drawn
             .response
             .on_hover_text(
                 "Close Nord Sound Manager first — it holds the instrument on its own, and \
                  nothing else can reach it alongside.",
             )
+            .on_disabled_hover_text(NO_USB)
             .clicked()
         {
             acts.push(Act::Connect);

@@ -989,8 +989,6 @@ enum Asked {
 /// Why nothing can be connected, in a browser with no WebUSB.
 pub const NO_USB: &str =
     "This browser can't reach an instrument over USB. Open drawbar in Chrome or Edge to connect.";
-/// [`NO_USB`] where there is room for a few words.
-pub const NO_USB_BRIEF: &str = "Connect in Chrome or Edge";
 
 pub struct Device {
     pub state: DeviceState,
@@ -1046,7 +1044,7 @@ impl Device {
     }
 
     /// Whether an instrument can be reached from here at all. Anything that offers to
-    /// connect asks this first, and offers [`NO_USB_BRIEF`] in its place when it cannot.
+    /// connect asks this first, and is greyed out with [`NO_USB`] on hover when it cannot.
     pub fn usb(&self) -> bool {
         self.usb
     }

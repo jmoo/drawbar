@@ -362,9 +362,17 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
 /// Every string a frame painted, headers and button labels included.
 #[cfg(test)]
 pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
-    fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+    said(output).into_iter().map(|(word, _)| word).collect()
+}
+
+/// Every string a frame painted, with the box it was painted in.
+#[cfg(test)]
+pub(crate) fn said(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
         match shape {
-            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+            egui::Shape::Text(text) => {
+                into.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+            }
             egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
             _ => {}
         }
