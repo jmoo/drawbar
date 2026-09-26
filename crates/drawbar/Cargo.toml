@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
-version = "0.8.0"
+version = "0.9.0"
 
 [lib]
 # `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
@@ -28,7 +28,7 @@ eframe = { version = "0.32", default-features = false, features = [
   "x11",
 ] }
 egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
-nord-format = { path = "../nord-format", version = "0.6.0", features = [
+nord-format = { path = "../nord-format", version = "0.7.0", features = [
   "bundle",
 ] }
 rfd = "0.15"
@@ -36,14 +36,14 @@ rfd = "0.15"
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests
 # need a `.npno` and nothing else in the workspace builds one without a template.
-nord-format = { path = "../nord-format", version = "0.6.0", features = [
+nord-format = { path = "../nord-format", version = "0.7.0", features = [
   "synthetic",
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # MIDI input only. drawbar opens no output port.
 midir = "0.11"
-nord-usb = { path = "../nord-usb", version = "0.6.0", features = [
+nord-usb = { path = "../nord-usb", version = "0.7.0", features = [
   "blocking",
   "nusb",
 ] }
@@ -91,6 +91,6 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceRequestOptions",
   "Window",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.6.0", default-features = false, features = [
+nord-usb = { path = "../nord-usb", version = "0.7.0", default-features = false, features = [
   "web",
 ] }
