@@ -1088,7 +1088,7 @@ impl Browser {
         }
         if viewing {
             response = response
-                .on_hover_text("open in a tab as a view of this slot; it is not on this computer");
+                .on_hover_text("open in a tab as a view of this slot — it is not on this computer");
         }
         // A jump can scroll only after the branches holding this row have opened.
         if self.jump == Some((class, at)) {

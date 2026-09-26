@@ -364,7 +364,7 @@ impl Advanced {
         controls::heading(
             ui,
             "Container",
-            "what the header states; read, checked and written back unchanged",
+            "what the header states — read, checked and written back unchanged",
             None,
         );
         verify(ui, entity);

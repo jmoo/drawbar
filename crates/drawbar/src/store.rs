@@ -72,14 +72,14 @@ impl Left {
     pub fn report(self, log: &mut Log) {
         match (self.skipped, self.dropped) {
             (0, 0) => {}
-            (skipped, 0) => log.say(plural(skipped, "too big to keep between sessions")),
+            (skipped, 0) => log.say(plural(skipped, "too big to save for the next session")),
             (0, dropped) => log.trouble(plural(
                 dropped,
-                "not kept between sessions: there is no room left",
+                "not saved for the next session because the storage limit was reached",
             )),
             (skipped, dropped) => log.trouble(plural(
                 skipped + dropped,
-                "not kept between sessions: too big, or no room left",
+                "not saved for the next session because of size or the storage limit",
             )),
         }
     }

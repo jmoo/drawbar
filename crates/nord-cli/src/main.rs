@@ -310,8 +310,8 @@ enum SampleAction {
     /// The project supplies the zones, their root keys, top notes and trim points,
     /// and the WAVs they play. Paths in the project are relative to its own directory.
     /// Unsupported layer, detune, velocity and enabled EQ settings are refused by name.
-    /// Settings the instrument has no place for are ignored, with a note. The notes on
-    /// fidelity and `--unverified` under `encode` apply here too.
+    /// Settings with no instrument representation are ignored and reported. See `encode`
+    /// for fidelity limits and the `--unverified` requirement.
     Build(sample::BuildArgs),
 
     /// Round-trip a sample instrument from a file or a slot, and with `--deep` also
@@ -383,8 +383,8 @@ enum PianoAction {
     /// range.
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
-    /// stereo, on every key it covers, and one built without a template sounds the same
-    /// as the same audio built with one.
+    /// stereo, on every key it covers. With the same source audio, libraries built with
+    /// and without a template sound the same.
     Build(piano::BuildArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each

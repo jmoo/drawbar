@@ -190,10 +190,10 @@ pub(crate) fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
 /// the message never points at a command that does not exist.
 fn steer(entity: &mut Entity) -> String {
     match crate::file::noun(crate::file::entity_tag(entity)) {
-        Some(noun) => format!("; try `nord {noun} edit`"),
+        Some(noun) => format!(" — try `nord {noun} edit`"),
         // Everything else editable (the Stage bodies, the Sample Editor project)
         // has no noun and is edited with the file verb.
-        None if editable(entity) => "; try `nord edit`".to_string(),
+        None if editable(entity) => " — try `nord edit`".to_string(),
         None => String::new(),
     }
 }

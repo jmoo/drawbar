@@ -125,9 +125,9 @@ impl ThemeChoice {
 
     pub(crate) fn hint(self) -> &'static str {
         match self {
-            ThemeChoice::System => "following the system; click for light",
-            ThemeChoice::Light => "always light; click for dark",
-            ThemeChoice::Dark => "always dark; click to follow the system again",
+            ThemeChoice::System => "following the system — click for light",
+            ThemeChoice::Light => "always light — click for dark",
+            ThemeChoice::Dark => "always dark — click to follow the system again",
         }
     }
 

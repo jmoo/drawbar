@@ -509,8 +509,8 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
     }
     if !views.is_empty() {
         log.say(match views.len() {
-            1 => "The view was kept on this computer first, so its tag lasts.".to_string(),
-            n => format!("{n} views were kept on this computer first, so their tags last."),
+            1 => "Kept a copy on this computer to preserve its tag.".to_string(),
+            n => format!("Kept copies of {n} views on this computer to preserve their tags."),
         });
     }
     for id in ids {

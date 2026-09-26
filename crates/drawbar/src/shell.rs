@@ -428,8 +428,7 @@ fn listening(
         (true, _) | (false, false) => crate::app::warn(visuals),
     };
     let heard = match ports.is_empty() {
-        true => "Listening, but no MIDI input is open. A controller is heard once plugged in."
-            .to_string(),
+        true => "No MIDI input is open. Plug in a controller to start playing.".to_string(),
         false => format!("Listening to {}.", ports.join(", ")),
     };
     let busy = match refused.is_empty() {

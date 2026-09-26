@@ -573,7 +573,7 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
     let rows: Vec<usize> = playing.iter().map(|(row, _, _)| *row).collect();
     let asked = sample::velocity_field(
         ui,
-        "one window per zone; drag the top or bottom edge",
+        "one window per zone — drag the top or bottom edge",
         SPAN,
         &blocks,
         &rows,
@@ -607,7 +607,7 @@ fn parameters(ui: &mut egui::Ui, snapshot: &Snapshot, sets: &mut Sets) {
     controls::heading(
         ui,
         "Sound parameters",
-        "all samplib_attrs; the project is the source",
+        "all samplib_attrs — the project is the source",
         None,
     );
     ui.horizontal(|ui| {
@@ -723,7 +723,7 @@ pub fn capabilities() -> Vec<Row> {
         row(
             "loop decay / detune",
             Cap::ReadOnly,
-            "m_loopDecay, which no control on this face writes; nord-cli does",
+            "m_loopDecay, which no control on this face writes — nord-cli does",
         ),
         row("release samples", Cap::Absent, "a piano library's bank 2"),
         row(

@@ -81,7 +81,7 @@ fn stated(entity: &LocalEntity) -> Vec<Fact> {
     rows.push(Fact {
         key: "Body",
         value: format!("{} · verbatim", room::measure(container.body_len())),
-        note: "kept byte for byte; no registry for this model",
+        note: "kept byte for byte — no registry for this model",
     });
     rows.push(Fact {
         key: "Version",

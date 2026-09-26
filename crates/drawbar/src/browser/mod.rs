@@ -1054,7 +1054,7 @@ mod tests {
         assert!(!workspace.is_view(id), "it is kept on this computer");
         assert!(browser.tags.worn(id).contains(&tag));
         let said = log.transcript();
-        assert!(said.contains("kept on this computer first"), "{said}");
+        assert!(said.contains("Kept a copy on this computer"), "{said}");
     }
 
     /// The warning appears in the batch's modal once per format, however many items carry

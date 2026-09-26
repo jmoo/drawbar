@@ -1287,7 +1287,7 @@ fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud>
     Some(Loud {
         label: format!("Queue send · {pending}"),
         short: format!("Send {pending}"),
-        hint: format!("{pending} pending sets, applied as one batch: all or none"),
+        hint: format!("{pending} pending edits. All are applied together, or none are applied."),
         ..loud
     })
 }

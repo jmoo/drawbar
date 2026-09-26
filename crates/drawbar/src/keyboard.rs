@@ -830,7 +830,7 @@ fn hint(view: &View, at: Location, info: Option<&ProgramInfo>, state: State) -> 
     };
     match state {
         State::Loaded => said.push_str(", loaded on the instrument now"),
-        State::Incoming => said.push_str(", with a write to it waiting"),
+        State::Incoming => said.push_str("; a write to this slot is queued"),
         State::Empty | State::Held => {}
     }
     let fact = fourth(view, at, info);

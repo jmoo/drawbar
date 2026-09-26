@@ -1420,7 +1420,7 @@ fn nothing(ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(
-            "Nothing here. Drop Nord files in, attach an instrument, or ask for less.",
+            "Nothing to show. Open Nord files, connect an instrument, or clear the search and filters.",
         )
         .text_style(micro())
         .weak()

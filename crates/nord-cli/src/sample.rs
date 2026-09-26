@@ -794,8 +794,7 @@ fn project_zones(
             let at = format!("zone{}", index + 1);
             if !zone.enabled {
                 return Err(format!(
-                    "{at} is switched off in the project; turn it on or remove it, since \
-                     an instrument cannot hold a zone that does not sound"
+                    "{at} is disabled in the project. Enable or remove it before building."
                 ));
             }
             let [layer] = zone.strokes.as_slice() else {

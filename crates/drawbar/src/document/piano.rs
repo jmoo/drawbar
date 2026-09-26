@@ -3701,7 +3701,7 @@ fn offsets() -> Vec<Offset> {
         Offset {
             at: "body 0x04".to_string(),
             holds: "u16".to_string(),
-            note: "stream version; the offsets below are pinned to it",
+            note: "stream version — the offsets below are pinned to it",
         },
         Offset {
             at: "body 0x1c".to_string(),

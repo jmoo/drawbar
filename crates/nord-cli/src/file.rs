@@ -56,7 +56,7 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     match tag(class) {
         Some(want) if want != format => {
             let steer = match noun(format) {
-                Some(n) => format!("; try `nord {n}`"),
+                Some(n) => format!(" — try `nord {n}`"),
                 None => String::new(),
             };
             Err(format!(
