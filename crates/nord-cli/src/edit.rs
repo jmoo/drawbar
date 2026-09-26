@@ -1,16 +1,16 @@
 //! `nord program edit`, `nord live edit`, `nord setlist edit` and `nord
-//! settings edit` — change fields inside an Electro 5 body.
+//! settings edit`: change fields in an Electro 5 body.
 //!
-//! Field paths and values come straight from `#[bitpanel]`, so `--fields`
-//! cannot go stale and a field becomes settable by being declared. The live
-//! buffer is the program body under another tag, so both nouns run this one
-//! command with the class fixed. The set list has no registry — its four slots
-//! are set through [`editors::SongEditor`], in the same `--set` vocabulary.
+//! Field paths and values come from the registry `#[bitbody]` generates, so
+//! `--fields` cannot go stale and a field becomes settable by being declared.
+//! The live buffer is the program body under another tag, so both nouns run
+//! this command with the class fixed. The set list has no registry; its four
+//! slots are set through [`editors::SongEditor`], with the same `--set` syntax.
 //!
-//! A file and a slot are the same command. The slot form is a read-modify-write
-//! over USB, so it obeys the rule every mutation obeys — describe the target,
-//! then refuse without `--yes`. Editing a file in place takes the same guard;
-//! `-o` avoids it.
+//! A file and a slot are the same command. The slot form reads, changes and
+//! writes back over USB, so it follows the rule for every mutation: describe the
+//! target, then refuse without `--yes`. Editing a file in place takes the same
+//! guard, and `-o` avoids it.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +26,7 @@ use crate::ui::Ui;
 use crate::EditArgs;
 
 pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
-    // No target is `--fields` or `-o` with nothing to read: a fresh default object.
+    // With no target, `--fields` and `-o` start from a default object.
     let target = args
         .target
         .as_deref()
@@ -95,11 +95,11 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
 /// and the accessor-backed editors under both.
 #[derive(clap::Args)]
 pub struct SetArgs {
-    /// `path=value`, repeatable. Paths are what `--fields` lists.
+    /// Set a field, repeatable. `--fields` lists the paths.
     #[arg(long = "set", value_name = "PATH=VALUE")]
     pub set: Vec<String>,
 
-    /// Report what would change — including which bytes — and write nothing.
+    /// Report what would change, including which bytes, and write nothing.
     #[arg(long)]
     pub dry_run: bool,
 
@@ -116,10 +116,10 @@ pub struct SetArgs {
     pub yes: bool,
 }
 
-/// What sets this entity's fields, or `None` where nothing in it is settable.
+/// The editor for this entity's fields, or `None` when nothing in it is settable.
 ///
-/// The one dispatch: [`editable`], the noun edits and the file verb all read it, so a
-/// body cannot be editable under one and not the other.
+/// [`editable`], the noun edits and the file verb all use this dispatch, so a body
+/// cannot be editable under one and not another.
 pub(crate) fn editor(entity: &mut Entity) -> Option<Box<dyn Fields + '_>> {
     if entity.registry().is_some() {
         return entity
@@ -139,7 +139,7 @@ pub(crate) fn editable(entity: &mut Entity) -> bool {
     editor(entity).is_some()
 }
 
-/// [`editor`], with the refusal a caller with nothing to edit has to print.
+/// [`editor`], or the error to print when nothing is settable.
 pub(crate) fn editor_for(entity: &mut Entity) -> Result<Box<dyn Fields + '_>, String> {
     let id = entity.identity();
     editor(entity).ok_or_else(|| {
@@ -150,8 +150,8 @@ pub(crate) fn editor_for(entity: &mut Entity) -> Result<Box<dyn Fields + '_>, St
     })
 }
 
-/// The bytes of a fresh default object: what a target-less `--fields` lists and a
-/// target-less `-o` starts from.
+/// The bytes of a default object, which `--fields` and `-o` use when no target is
+/// given.
 fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
     let first = |e| format!("{e}");
     let entity = match class {
@@ -186,14 +186,14 @@ pub(crate) fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
     )
 }
 
-/// The `edit` that reads this entity's files — empty for something nothing
-/// edits, so the message never points at a command that does not exist.
+/// The `edit` command for this entity's files, or empty when nothing edits it, so
+/// the message never points at a command that does not exist.
 fn steer(entity: &mut Entity) -> String {
     match crate::file::noun(crate::file::entity_tag(entity)) {
-        Some(noun) => format!(" — try `nord {noun} edit`"),
-        // Everything else editable — the Stage bodies, the Sample Editor
-        // project — has no noun of its own and lives under the file verb.
-        None if editable(entity) => " — try `nord edit`".to_string(),
+        Some(noun) => format!("; try `nord {noun} edit`"),
+        // Everything else editable (the Stage bodies, the Sample Editor project)
+        // has no noun and is edited with the file verb.
+        None if editable(entity) => "; try `nord edit`".to_string(),
         None => String::new(),
     }
 }
@@ -204,8 +204,8 @@ pub(crate) struct Registered<'a>(pub &'a mut dyn Registry);
 
 impl Registered<'_> {
     fn row(f: &Field) -> Row {
-        // A field too wide to enumerate lists no values; its stored bits are the
-        // spelling, and the current one is already in the value column.
+        // A field too wide to enumerate lists no values: it takes its stored bits,
+        // and the current bits are already in the value column.
         let accepts = match (f.spec.legal)() {
             v if v.is_empty() => "stored bits, decimal or 0x…".to_string(),
             v if v.len() > 12 => format!("{} .. {}", v.first().unwrap(), v.last().unwrap()),
@@ -254,8 +254,8 @@ impl Fields for Registered<'_> {
 
 /// Write an edit of `path`: to `out`, or over `path` itself.
 ///
-/// ⚠️ `-o` naming the file being edited is an in-place overwrite however it is
-/// spelled, so it takes the in-place guard rather than the unguarded write.
+/// ⚠️ `-o` naming the file being edited, however it is spelled, is an in-place
+/// overwrite and takes the in-place guard.
 pub(crate) fn write_edit(
     ui: &Ui,
     path: &Path,
@@ -279,8 +279,8 @@ pub(crate) fn write_edit(
 
 /// Whether two paths name one file on disk, with links and `..` resolved.
 ///
-/// Only a path that exists canonicalizes, which is the answer wanted here: a
-/// destination that is not there yet cannot be the file being edited.
+/// Only a path that exists canonicalizes, which is correct here: a destination
+/// that does not exist yet cannot be the file being edited.
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -288,8 +288,8 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Now, as the 32-bit Unix seconds count the wire protocol and the Sample Editor's
-/// `m_modifyDate` both stamp a write with.
+/// The current time as 32-bit Unix seconds, which the wire protocol and the Sample
+/// Editor's `m_modifyDate` both use to stamp a write.
 pub(crate) fn unix_seconds_now() -> Result<u32, String> {
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -304,20 +304,19 @@ pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), Strin
     Ok(())
 }
 
-/// Put `bytes` at `path`, leaving whatever was there untouched if that cannot be done.
+/// Write `bytes` to `path`, leaving whatever was there untouched if that fails.
 ///
-/// Every write this CLI makes goes through here, so a destination under a directory that
-/// does not exist yet is created rather than refused, wherever the bytes came from.
+/// Every write this CLI makes goes through here, so every verb creates a missing
+/// destination directory.
 ///
-/// ⚠️ The bytes land in a sibling file that is then renamed over the target, because an
-/// edit reads its own destination: a write that truncates first and fails part way
-/// through leaves neither the original nor the edit. The temporary is a sibling so the
-/// rename stays inside one filesystem, where it replaces the target in one step.
+/// ⚠️ The bytes go to a sibling file that is then renamed over the target, because an
+/// edit's destination is often its source: a write that truncated first and failed
+/// partway would leave neither the original nor the edit. The temporary is a sibling so
+/// the rename stays within one filesystem and replaces the target in one step.
 ///
-/// ⚠️ A rename replaces the name it is given, so a destination that exists is resolved
-/// first: editing through a symlink rewrites the file it points at and leaves the link,
-/// and the replacement carries the permissions the target already had rather than the
-/// umask default a new file would get.
+/// ⚠️ A rename replaces the name it is given, so an existing destination is resolved
+/// first. Editing through a symlink rewrites the file it points at and keeps the link,
+/// and the replacement keeps the target's permissions instead of the umask default.
 pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let name = target
@@ -342,13 +341,13 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&temp, &target).map_err(failed)
 }
 
-/// ⚠️ Fields that do nothing without a companion. The pairing is a fact about the
-/// instrument, not something the declaration carries.
+/// ⚠️ Fields that do nothing without a companion. The field declarations do not
+/// record the pairing.
 ///
-/// Transpose: neither half answers on its own, and the enable is sticky once set — see
-/// `ne5::program::center::CenterPanel::transpose_enabled`, which carries the evidence.
-/// So `--set center_panel.transpose=0` alone leaves a program the panel still calls
-/// transposed. Warn rather than refuse — setting one half deliberately is legitimate.
+/// Transpose: neither half works alone, and the enable is sticky once set (see
+/// `ne5::program::CenterPanel::transpose_enabled` for the evidence). So
+/// `--set center_panel.transpose=-5` alone can leave a program untransposed. This warns
+/// instead of refusing, because setting one half alone can be intended.
 const STICKY_PAIRS: [(&str, &str); 1] =
     [("center_panel.transpose", "center_panel.transpose_enabled")];
 
@@ -360,8 +359,8 @@ pub(crate) fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
     for (field, companion) in STICKY_PAIRS {
         if paths.contains(&field) && !paths.contains(&companion) {
             ui.warn(format!(
-                "{field} was set but {companion} was not; the instrument reads the pair, not \
-                 either half alone",
+                "{field} was set but {companion} was not; the instrument reads the two \
+                 together",
             ));
         }
     }
@@ -370,9 +369,9 @@ pub(crate) fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
 /// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
 /// are not a CBIN file.
 ///
-/// The generation comes from the header parser rather than a second reading of the
-/// word at `0x04`, and the range from [`crate::file::checksum_range`], so the CLI holds
-/// one account of where a checksum sits.
+/// The generation comes from the header parser and the range from
+/// [`crate::file::checksum_range`], so the CLI has one definition of where a checksum
+/// sits.
 fn checksum_bytes(file: &[u8]) -> Option<(std::ops::Range<usize>, &'static str)> {
     let header = nord_usb::envelope::unwrap(file).ok()?.header;
     let at = crate::file::checksum_range(header.generation, file.len())?;
@@ -382,10 +381,10 @@ fn checksum_bytes(file: &[u8]) -> Option<(std::ops::Range<usize>, &'static str)>
     })
 }
 
-/// The bytes that moved.
+/// Print the bytes that changed.
 ///
-/// The CRC moves with any body change; the row is annotated so it does not read as a
-/// second unexplained edit.
+/// The checksum changes with any body edit, so its rows are labeled to keep them from
+/// reading as unexplained edits.
 pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
     if before.len() != after.len() {
         ui.warn(format!(
@@ -446,8 +445,8 @@ fn control(kind: ControlKind) -> String {
 pub(crate) mod tests {
     use super::*;
 
-    /// A wrong-format target must steer to the noun whose `edit` reads it — and for a
-    /// format with no noun, to the file verb — never to a command that does not exist.
+    /// A wrong-format target points to the noun whose `edit` reads it, or to the file
+    /// verb for a format with no noun, and never to a command that does not exist.
     #[test]
     fn a_mismatched_target_steers_to_the_command_that_edits_it() {
         let mut live = Entity::Live(Live::Electro5(ne5::live::new((0, 0).try_into().unwrap())));
@@ -483,13 +482,11 @@ pub(crate) mod tests {
         let err = mismatch(&mut stage, ObjectClass::Program);
         assert!(err.contains("nord edit"), "{err}");
 
-        // A piano library has no edit anywhere, so no steer may be invented.
+        // A pipe-organ library has no edit anywhere, so no steer may be invented.
         let mut pipe = nord_format::from_stream(&mut std::io::Cursor::new(pipe_library())).unwrap();
         assert_eq!(steer(&mut pipe), "");
     }
 
-    /// Every editable shape answers, and the stubs say no — the one dispatch the
-    /// file verb, the noun edits and the steers all rest on.
     #[test]
     fn editable_knows_every_shape() {
         let mut stage3 = nord_format::from_stream(&mut std::io::Cursor::new(
@@ -537,9 +534,8 @@ pub(crate) mod tests {
         dir
     }
 
-    /// An edit's destination is usually its own source, so a write that cannot
-    /// finish has to leave that file as it was rather than truncated — and must not
-    /// leave its own temporary behind either.
+    /// An edit's destination is often its own source, so a write that cannot finish
+    /// must leave that file as it was, and must not leave its temporary file behind.
     #[test]
     fn a_write_that_cannot_finish_leaves_its_directory_as_it_was() {
         let dir = scratch("write-fails");
@@ -555,8 +551,6 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
-    /// A destination under a directory that is not there yet is made, not refused:
-    /// every verb that writes reaches this, and they used to disagree about it.
     #[test]
     fn a_write_makes_the_directory_its_destination_names() {
         let dir = scratch("write-makes-dirs");
@@ -629,8 +623,8 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(&held).unwrap().count(), 1);
     }
 
-    /// `-o` pointing back at the input is an overwrite of the file being edited, so
-    /// it has to meet the guard that spelling it with no `-o` meets.
+    /// `-o` naming the input overwrites the file being edited, so it needs `--yes` as
+    /// an in-place edit does.
     #[test]
     fn an_output_that_is_the_input_takes_the_in_place_guard() {
         let dir = scratch("edit-in-place");
@@ -687,9 +681,8 @@ pub(crate) mod tests {
         out.into_inner()
     }
 
-    /// The control column is this listing's reading of the registry's vocabulary, and
-    /// what a kind carries has to reach the reader — a bar's place in the register, a
-    /// pattern's length, which library resolves an id.
+    /// What a control kind carries must reach the listing: a bar's place in the
+    /// register, a pattern's length, and which library resolves an id.
     #[test]
     fn a_control_reads_as_what_the_field_registry_says_it_is() {
         use nord_format::bits::Packed;

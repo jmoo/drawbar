@@ -7,30 +7,28 @@ license.workspace = true
 repository.workspace = true
 version = "0.6.0"
 
-# The binary is just `nord`; the crate/package is `nord-cli`.
+# The binary is `nord`; the package is `nord-cli`.
 [[bin]]
 name = "nord"
 path = "src/main.rs"
 
 [features]
-# `nord device wedge`, which deliberately puts the instrument into its known-bad state so
-# that recovery can be tested against a *known* wedge rather than an accidental one. Off
-# by default: it breaks the attached instrument on purpose, and that does not belong in a
-# binary someone might reach for casually. `nord device recover` is the cure and always
-# ships.
+# `nord device wedge`, which puts the instrument into its known-bad state so recovery
+# can be tested against it. Off by default, because it breaks the attached instrument.
+# `nord device recover` undoes it and always ships.
 wedge = []
 
-# `NORD_FAIL_AFTER_DELETE`, which makes a replace fail with the slot already deleted and
-# the backup in hand — the state the restore and rescue paths exist for, and otherwise
-# reachable only by pulling the cable inside a window a few milliseconds wide. Off by
-# default and gated for the same reason as `wedge`: it deletes a slot on purpose.
+# `NORD_FAIL_AFTER_DELETE`, which makes a replace fail after the slot is deleted and the
+# backup is in hand. The restore and rescue paths exist for that state, which is otherwise
+# reachable only by pulling the cable within a few milliseconds. Off by default, like
+# `wedge`, because it deletes a slot.
 fault-injection = ["nord-usb/fault-injection"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-# Line editing for `--sweep`, which prefills each prompt with the previous answer — the
-# terminal's own line discipline cannot be handed a starting buffer. Defaults off: the
-# password/editor/fuzzy prompts are all unused.
+# Line editing for `--sweep`, which prefills each prompt with the previous answer. The
+# terminal's own line discipline cannot be given a starting buffer. Default features are
+# off because the password, editor and fuzzy prompts are unused.
 dialoguer = { version = "0.12", default-features = false }
 # Pull in the `bundle` feature so `nord inspect` can also open ZIP backup bundles.
 nord-format = { path = "../nord-format", version = "0.6.0", features = [

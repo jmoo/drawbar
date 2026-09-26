@@ -1,9 +1,8 @@
-//! The WAVs the encoders take, refused where the file is named.
+//! Reading the WAVs the encoders take, and refusing a bad one by name.
 //!
 //! `sample encode`, `sample build` and `piano build` all turn recordings into encoded
-//! strokes, and what a stroke can carry is a property of the formats rather than of a
-//! verb. Reading them here refuses the file that is wrong by name, rather than inside a
-//! build that has already read every other one.
+//! strokes, and the formats set what a stroke can hold. Checking each file as it is read
+//! names the one that is wrong.
 
 use std::path::Path;
 
@@ -11,15 +10,15 @@ use nord_format::wav::Pcm16;
 
 /// One WAV as an encoder takes it: 16-bit PCM, mono or stereo.
 ///
-/// ⚠️ A stereo file becomes a stereo stroke — both channels under one header — and
-/// neither format has a stroke that holds more than two.
+/// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
+/// Neither format has a stroke that holds more than two channels.
 pub fn pcm16(path: &Path) -> Result<Pcm16, String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let bytes = std::fs::read(path).map_err(|e| named(&e))?;
     let source = nord_format::wav::read_pcm16(&bytes).map_err(|e| named(&e))?;
     if source.channels != 1 && source.channels != 2 {
         return Err(named(&format!(
-            "{} channels — a stroke holds one channel or two and nothing else",
+            "{} channels, but a stroke holds one or two",
             source.channels
         )));
     }

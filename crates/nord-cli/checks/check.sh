@@ -16,18 +16,17 @@ export POC_PROJECT
 
 run() { ${NORD_RUNNER:-} "$bin" "$@"; }
 
-# The scratch files are the check's own; the directory it was invoked from is
-# not.
+# Work in a scratch directory so the caller's directory is left alone.
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 cd "$scratch"
 
-# Emulators want a writable HOME; wine additionally refuses a prefix it does
-# not own, so point both at the scratch space. Harmless for a native binary.
+# Emulators need a writable HOME, and Wine refuses a prefix it does not own, so
+# both point into the scratch directory. A native binary ignores them.
 export HOME=$PWD/home
 export WINEPREFIX=$HOME/.wine
 export WINEDEBUG=-all
-# No network in the nix sandbox — stop wineboot reaching for gecko/mono.
+# The Nix sandbox has no network, so keep wineboot from fetching Gecko and Mono.
 export WINEDLLOVERRIDES="mscoree,mshtml="
 mkdir -p "$HOME"
 
@@ -41,12 +40,11 @@ run --help >help.txt 2>err.txt || {
 }
 cat help.txt
 grep -q "Usage: $name" help.txt || {
-  echo "unexpected output — wanted 'Usage: $name'"
+  echo "unexpected output: wanted 'Usage: $name'"
   exit 1
 }
 
-# A replayed inventory exercises transport → wire → session → op → CLI, proving
-# the target behaves rather than merely starts.
+# A replayed inventory exercises every layer from the transport up to the CLI.
 echo
 echo "== $name device status --replay =="
 run device status --replay "$POC_SCRIPT" >poc.txt 2>err.txt || {

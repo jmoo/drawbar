@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# The command tree, asserted rather than described: every noun's verb list is
-# pinned exactly against surface.txt.
+# Checks every noun's verb list against surface.txt.
 #
 #   checks/surface.sh path/to/nord
 #
@@ -23,13 +22,13 @@ cd "$scratch"
 echo
 echo "== the command surface =="
 # Clap commands have exactly two leading spaces; continuation lines have more.
-# Use POSIX BRE: macOS BSD sed treats `\+` as a literal and silently finds nothing.
+# Use POSIX BRE: BSD sed on macOS treats `\+` as a literal and silently matches nothing.
 commands() { sed -n 's/^  \([a-z][a-z-]*\)  .*/\1/p' "$1" | tr '\n' ' '; }
 
 while IFS=: read -r noun want; do
   [ -n "$want" ] || continue
   want=${want# }
-  # A noun may be nested (`sample project`), so it is a word list, not a word.
+  # A noun may be nested (`sample project`), so split it into words.
   read -r -a path <<<"$noun"
   out=surface-${noun:-top}.txt
   out=${out// /-}
@@ -47,7 +46,7 @@ while IFS=: read -r noun want; do
   }
 done < <(grep -v '^#' "$here/surface.txt")
 
-# The raw escape hatch must remain reachable but absent from advertised commands.
+# `nord raw` stays callable but must not appear in the top-level help.
 if grep -q ' raw ' surface-top.txt; then
   echo "nord raw is meant to be hidden from the top-level help"
   exit 1
