@@ -27,6 +27,7 @@ use nord_usb::ObjectClass;
 use super::capability::{self, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
 use super::keys::{self, Audition, Scale, SizeCell, Span};
+use super::sample;
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::browser::Act;
@@ -788,7 +789,8 @@ type Pick = (u8, u8, u8);
 /// is small and the least recently heard one goes.
 const KEPT_STROKES: usize = 8;
 
-/// Strokes decoded on request, most recently used first.
+/// The strokes decoded for an open row or a struck key, most recently used first, and
+/// the waveform of each root an open row has shown.
 ///
 /// ⚠️ Keyed by the asset's [`stamp`](LocalEntity::stamp) as well as its id, the way the
 /// sample editor's cache is: a trim re-lays the file, and what was decoded from what it
@@ -797,6 +799,21 @@ const KEPT_STROKES: usize = 8;
 struct Cache {
     of: Option<(u64, u64)>,
     strokes: Vec<(Pick, Result<Played, String>)>,
+    /// One waveform per root, kept whether the decode answered or refused, so an open
+    /// row asks for it once. A picture is four kilobytes, so it outlives the strokes
+    /// themselves.
+    shapes: HashMap<u8, Drawn>,
+    /// The plan the waveforms were last checked against.
+    under: Plan,
+    /// The root an open row has already had a frame to say it is reading.
+    wanted: Option<u8>,
+}
+
+/// One root's waveform, and the stroke it is the picture of.
+struct Drawn {
+    /// `None` where the plan left the root no stroke to draw.
+    from: Option<Pick>,
+    shape: Result<Vec<(f32, f32)>, String>,
 }
 
 impl Cache {
@@ -804,7 +821,42 @@ impl Cache {
         if self.of != Some((id, stamp)) {
             self.of = Some((id, stamp));
             self.strokes.clear();
+            self.shapes.clear();
+            self.wanted = None;
         }
+    }
+
+    /// Drop the waveforms of the roots a moved plan leaves another loudest stroke. A
+    /// rename, a tune or a trim leaves every picture as it was.
+    fn replan(&mut self, bytes: &[u8], plan: &Plan) {
+        if self.under == *plan {
+            return;
+        }
+        self.under = plan.clone();
+        if self.shapes.is_empty() {
+            return;
+        }
+        let library = npno::Library::borrow(bytes).ok();
+        self.shapes.retain(|root, drawn| {
+            drawn.from
+                == library
+                    .as_ref()
+                    .and_then(|library| pick(library, plan, *root))
+        });
+    }
+
+    /// Whether the row asking for `root` has already been drawn saying it is reading
+    /// it. The decode holds the frame it runs in, so the frame that asks first only
+    /// paints.
+    fn due(&mut self, root: u8) -> bool {
+        let due = self.wanted == Some(root);
+        self.wanted = Some(root);
+        due
+    }
+
+    /// The waveform of this root's loudest kept stroke, where one was asked for.
+    fn shape(&self, root: u8) -> Option<&Result<Vec<(f32, f32)>, String>> {
+        self.shapes.get(&root).map(|drawn| &drawn.shape)
     }
 
     /// The newest decode of this root, which is the one a decode of it just made or
@@ -824,15 +876,38 @@ impl Cache {
         self.strokes.first().map(|(_, played)| played)
     }
 
-    /// Decode one root's loudest kept attack stroke, once. A refusal by the codec is
-    /// remembered like a success: asking again would only produce it a second time.
+    /// Decode one root's loudest kept attack stroke and draw its waveform, once. A
+    /// refusal is remembered like a success: asking again would only produce it a
+    /// second time.
+    fn decode(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
+        self.wanted = None;
+        let answer = self.stroke(bytes, plan, root);
+        if !self.shapes.contains_key(&root) {
+            let shape = match (&answer, self.newest(root)) {
+                (Ok(()), Some((_, played))) => Ok(sample::envelope(
+                    &played.samples,
+                    played.channels,
+                    sample::COLUMNS,
+                )),
+                (Ok(()), None) => Err("the stroke decoded into nothing".to_string()),
+                (Err(why), _) => Err(why.clone()),
+            };
+            let from = npno::Library::borrow(bytes)
+                .ok()
+                .and_then(|library| pick(&library, plan, root));
+            self.shapes.insert(root, Drawn { from, shape });
+        }
+        answer
+    }
+
+    /// The decode itself: the audio the player takes and the WAV is written from.
     ///
     /// ⚠️ One stroke, whatever else the library holds: the audio of a whole root is more
     /// than this app ever has a use for at once.
-    fn decode(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
+    fn stroke(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
         let library = npno::Library::borrow(bytes).map_err(|e| e.to_string())?;
         let stroke = loudest(&library, plan, root)?;
-        let key = (root, Bank::Attack.code(), stroke.layer());
+        let key = picked(root, stroke);
         if let Some(held) = self.touch(key) {
             return held.as_ref().map(|_| ()).map_err(String::clone);
         }
@@ -871,10 +946,23 @@ fn loudest<'a>(
         })
 }
 
-/// What a piano document's frame asked the app to do about one root's audio. The root
-/// has to be decoded either way, so there is no separate ask for that.
+/// The stroke [`loudest`] names, where the plan leaves the root one.
+fn pick(library: &npno::Library<'_>, plan: &Plan, root: u8) -> Option<Pick> {
+    loudest(library, plan, root)
+        .ok()
+        .map(|stroke| picked(root, stroke))
+}
+
+fn picked(root: u8, stroke: &npno::Stroke<'_>) -> Pick {
+    (root, Bank::Attack.code(), stroke.layer())
+}
+
+/// What a piano document's frame asked the app to do about one root's audio. Every one
+/// of them needs the root decoded, which is the whole of what the first asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ask {
+    /// Draw this root, because an open row is showing its waveform.
+    Show(u8),
     /// Start this root, or stop it if it is the one sounding.
     Play(u8),
     /// Sound this root for a struck key, `semitones` from the root it was recorded at.
@@ -888,8 +976,14 @@ pub enum Ask {
 impl Ask {
     pub fn root(self) -> u8 {
         match self {
-            Ask::Play(root) | Ask::Save(root) | Ask::Strike { root, .. } => root,
+            Ask::Show(root) | Ask::Play(root) | Ask::Save(root) | Ask::Strike { root, .. } => root,
         }
+    }
+}
+
+impl super::Unasked for Ask {
+    fn unasked(&self) -> bool {
+        matches!(self, Ask::Show(_))
     }
 }
 
@@ -1017,6 +1111,7 @@ impl State {
         }
         self.draft = plan.clone();
         self.audio.follow(id, entity.stamp);
+        self.audio.replan(&entity.bytes, plan);
         self.free = room::free_bytes(ObjectClass::Piano, device);
         self.summarise();
         let standing = self.standing(id);
@@ -1275,6 +1370,12 @@ impl State {
         let held = self.plans.get(&entity.id);
         self.audio
             .decode(&entity.bytes, held.unwrap_or(&Plan::default()), root)
+    }
+
+    /// Whether an open row asking for `root` has had a frame to say it is reading it:
+    /// see [`Cache::due`].
+    pub fn due(&mut self, root: u8) -> bool {
+        self.audio.due(root)
     }
 
     /// What the newest decode of this root holds.
@@ -2692,6 +2793,7 @@ fn roots(
     plan: &mut Plan,
     summary: &Summary,
     view: &mut View,
+    audio: &Cache,
     sounding: Option<u8>,
 ) -> Option<Ask> {
     const COL_A: f32 = 56.0;
@@ -2882,7 +2984,7 @@ fn roots(
         }
 
         if open {
-            if let Some(asked) = open_row(ui, facts, plan, index, &line.runs, sounding) {
+            if let Some(asked) = open_row(ui, facts, plan, index, &line.runs, audio, sounding) {
                 match asked {
                     Opened::Audio(asked) => ask = Some(asked),
                     Opened::Drop => dropped = Some(index),
@@ -2917,14 +3019,16 @@ enum Opened {
     Drop,
 }
 
-/// The facts and the actions under an open root: what the file says about it, and the
-/// three things that can be done to it.
+/// The facts, the waveform and the actions under an open root: what the file says about
+/// it, what its loudest kept stroke looks like, and the three things that can be done to
+/// it.
 fn open_row(
     ui: &mut egui::Ui,
     facts: &Facts,
     plan: &mut Plan,
     index: usize,
     runs: &[(u8, u8)],
+    audio: &Cache,
     sounding: Option<u8>,
 ) -> Option<Opened> {
     let mut asked = None;
@@ -3045,8 +3149,37 @@ fn open_row(
                     asked = Some(Opened::Drop);
                 }
             });
+            let shown = wave(ui, audio, root.note, sounding == Some(root.note));
+            asked = asked.take().or(shown.map(Opened::Audio));
         });
     asked
+}
+
+/// The waveform of an open root's loudest kept stroke. An open row shows one, so the
+/// decode is asked for rather than offered, and the cache keeping a refusal keeps that
+/// to once per stroke.
+fn wave(ui: &mut egui::Ui, audio: &Cache, root: u8, playing: bool) -> Option<Ask> {
+    match audio.shape(root) {
+        Some(Ok(envelope)) => {
+            sample::waveform(ui, envelope, playing);
+            None
+        }
+        Some(Err(why)) => {
+            ui.label(
+                egui::RichText::new(format!("not decoded: {why}"))
+                    .size(NAME)
+                    .color(app::bad(ui.visuals())),
+            );
+            None
+        }
+        None => {
+            // The decode lands after this frame, and nothing else would bring the one
+            // that draws it.
+            ui.ctx().request_repaint();
+            sample::reading(ui, "reading the stroke…");
+            Some(Ask::Show(root))
+        }
+    }
 }
 
 /// What the lane draws a key's tune at, where full deflection is [`TUNE_CENTS`].
@@ -3203,7 +3336,7 @@ fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
 }
 
 impl State {
-    /// The Edit face under the key map: what is kept, which layers, which roots, and
+    /// The Basic face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
         self.summarise();
@@ -3221,6 +3354,7 @@ impl State {
             draft,
             summary,
             view,
+            audio,
             free,
             ..
         } = self;
@@ -3320,7 +3454,7 @@ impl State {
                 app::caption(ui.visuals()),
             )),
         );
-        let ask = roots(ui, facts, draft, summary, view, sounding);
+        let ask = roots(ui, facts, draft, summary, view, audio, sounding);
         ui.add_space(12.0);
 
         controls::heading(
@@ -3344,7 +3478,7 @@ impl State {
         };
         controls::heading(
             ui,
-            "Metadata",
+            "About this file",
             "what the file says about itself — read here, never written differently",
             None,
         );
@@ -4510,6 +4644,8 @@ mod tests {
     /// What one frame put on screen, and what it asked for.
     struct Painted {
         words: Vec<String>,
+        /// Where each of `words` was painted.
+        rects: Vec<egui::Rect>,
         /// The white keys of the keyboard, in ascending order.
         whites: Vec<egui::Rect>,
         /// Every lamp, in the order they were drawn: the trim switches, then one per
@@ -4519,6 +4655,14 @@ mod tests {
     }
 
     impl Painted {
+        /// Where `word` was first painted.
+        fn at(&self, word: &str) -> egui::Rect {
+            let found = self.words.iter().position(|said| said == word);
+            let found =
+                found.unwrap_or_else(|| panic!("{word} was never painted: {:?}", self.words));
+            self.rects[found]
+        }
+
         fn said(&self, wanted: &str) -> bool {
             self.words.iter().any(|word| word.contains(wanted))
         }
@@ -4621,8 +4765,8 @@ mod tests {
                     if let Some(edit) = edit.take() {
                         edit(&mut self.state.draft);
                     }
-                    asked = self.state.map(ui);
-                    asked = self.state.ui(ui, None).or(asked);
+                    let pinned = self.state.map(ui);
+                    asked = super::super::prefer(pinned, self.state.ui(ui, None));
                 });
             });
             // What [`Document::replan`] does with the plan a frame left behind: try it
@@ -4636,29 +4780,32 @@ mod tests {
             }
             let mut painted = Painted {
                 words: Vec::new(),
+                rects: Vec::new(),
                 whites: Vec::new(),
                 lamps: Vec::new(),
                 asked,
             };
-            for clipped in &output.shapes {
-                walk(&clipped.shape, &mut painted);
+            for (_, shape) in super::super::leaves(&output) {
+                match shape {
+                    egui::Shape::Text(text) => {
+                        painted.words.push(text.galley.text().to_string());
+                        painted
+                            .rects
+                            .push(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                    }
+                    egui::Shape::Rect(drawn) if drawn.rect.height() == keys::KEYBOARD_H => {
+                        painted.whites.push(drawn.rect)
+                    }
+                    // A lamp is the one thing drawn at its own fixed width; it is painted
+                    // filled and then stroked, so the pair is deduplicated after the walk.
+                    egui::Shape::Rect(drawn) if drawn.rect.width() == LAMP.x => {
+                        painted.lamps.push(drawn.rect)
+                    }
+                    _ => {}
+                }
             }
             painted.lamps.dedup();
             painted
-        }
-    }
-
-    fn walk(shape: &egui::Shape, into: &mut Painted) {
-        match shape {
-            egui::Shape::Text(text) => into.words.push(text.galley.text().to_string()),
-            egui::Shape::Rect(drawn) if drawn.rect.height() == keys::KEYBOARD_H => {
-                into.whites.push(drawn.rect)
-            }
-            // A lamp is the one thing drawn at its own fixed width; it is painted
-            // filled and then stroked, so the pair is deduplicated after the walk.
-            egui::Shape::Rect(drawn) if drawn.rect.width() == LAMP.x => into.lamps.push(drawn.rect),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-            _ => {}
         }
     }
 
@@ -5205,6 +5352,75 @@ mod tests {
             !state.audio.strokes.iter().any(|(held, _)| *held == loudest),
             "the first stroke asked for is the first to go",
         );
+    }
+
+    /// An open row draws the waveform of the root's loudest kept stroke and asks for
+    /// the decode itself, once. An edit that leaves the root that stroke keeps the
+    /// picture; one that takes the stroke away asks for the next.
+    #[test]
+    fn an_open_root_asks_for_its_waveform_once_and_again_when_its_stroke_changes() {
+        let mut editor = Editor::of(coded(), u64::from(u32::MAX));
+        editor.frame(Vec::new());
+        editor.state.view.picked = Some(0);
+        editor.state.view.open_rows.insert(0);
+        assert_eq!(
+            editor.frame(Vec::new()).asked,
+            Some(Ask::Show(ROOTS[0])),
+            "the open row asks for its own stroke",
+        );
+
+        let entity = editor.workspace.get(editor.id).expect("it is open");
+        editor.state.decode(entity, ROOTS[0]).expect("it decodes");
+        let drawn = editor
+            .state
+            .audio
+            .shape(ROOTS[0])
+            .expect("the decode drew it")
+            .as_ref()
+            .expect("the stroke decoded");
+        assert_eq!(drawn.len(), sample::COLUMNS);
+        assert!(
+            editor.frame(Vec::new()).asked.is_none(),
+            "the picture is drawn from the cache rather than asked for again",
+        );
+
+        editor.driven(Vec::new(), |plan| {
+            plan.name = Some("Renamed".to_string());
+            plan.fine_tune.insert(ROOTS[0], 4);
+            plan.trims
+                .insert((ROOTS[0], Bank::Attack.code(), LAYERS[0]), 6);
+        });
+        let kept = editor.frame(Vec::new());
+        assert!(
+            kept.asked.is_none() && !kept.said("reading the stroke…"),
+            "a rename, a retune and a trim leave the stroke it was drawn from: {:?}",
+            kept.asked,
+        );
+
+        editor.driven(Vec::new(), |plan| {
+            plan.roots.insert((ROOTS[0], LAYERS[0]), false);
+        });
+        assert_eq!(
+            editor.frame(Vec::new()).asked,
+            Some(Ask::Show(ROOTS[0])),
+            "the loudest layer it was drawn from is gone",
+        );
+    }
+
+    /// A click on an open row's action is what the frame answers while the row is
+    /// still waiting on its waveform.
+    #[test]
+    fn an_open_rows_action_goes_before_its_request_for_a_waveform() {
+        let mut editor = Editor::of(coded(), u64::from(u32::MAX));
+        editor.frame(Vec::new());
+        editor.state.view.picked = Some(0);
+        editor.state.view.open_rows.insert(0);
+        let waiting = editor.frame(Vec::new());
+        assert!(waiting.said("reading the stroke…"), "{:?}", waiting.words);
+        assert_eq!(waiting.asked, Some(Ask::Show(ROOTS[0])));
+
+        let clicked = editor.frame(press(waiting.at("Audition").center()));
+        assert_eq!(clicked.asked, Some(Ask::Play(ROOTS[0])));
     }
 
     /// Checking a plan and laying it out are the same edit: the body the borrowed

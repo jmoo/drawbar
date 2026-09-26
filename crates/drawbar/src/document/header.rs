@@ -70,43 +70,38 @@ const CHIP: f32 = 18.0;
 
 /// Which face of a document is showing.
 ///
-/// Three files rather than three modes: Edit is the sound, Metadata is what the file
-/// says about itself, and Advanced is the engineering. Which of them a document has is
+/// Two files rather than two modes: Basic is the sound, and Advanced is what the file
+/// says about itself and the engineering under it. Which of them a document has is
 /// [`super::faces`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Face {
     /// The panel, in the instrument's own words. Happy-path edits.
     #[default]
-    Edit,
-    /// The record: the container, the bytes that moved, and what the instrument says
-    /// about the slot. Nothing here is a control.
-    Metadata,
-    /// The whole body as a table. Nothing hidden.
+    Basic,
+    /// What the file says about itself, the whole body as a table, and the record the
+    /// container keeps. Nothing hidden.
     Advanced,
 }
 
 impl Face {
     pub fn label(self) -> &'static str {
         match self {
-            Face::Edit => "Edit",
-            Face::Metadata => "Metadata",
+            Face::Basic => "Basic",
             Face::Advanced => "Advanced",
         }
     }
 
     fn glyph(self) -> Glyph {
         match self {
-            Face::Edit => Glyph::Pencil,
-            Face::Metadata => Glyph::Info,
+            Face::Basic => Glyph::Pencil,
             Face::Advanced => Glyph::Wrench,
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
-            Face::Edit => "the fields that change the sound",
-            Face::Metadata => "what the file says about itself — read only",
-            Face::Advanced => "capabilities, offsets, raw values — engineering",
+            Face::Basic => "the fields that change the sound",
+            Face::Advanced => "the record, the offsets, the raw values — engineering",
         }
     }
 }
@@ -1491,8 +1486,8 @@ mod tests {
 
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
         Facts {
-            faces: &[Face::Edit],
-            showing: Face::Edit,
+            faces: &[Face::Basic],
+            showing: Face::Basic,
             device,
             queue,
             tags,

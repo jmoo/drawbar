@@ -18,11 +18,22 @@ over` when the send cannot happen yet.
 
 ## The faces
 
-- **Edit** is the sound's controls, in the instrument's own words.
-- **Metadata** is what the file says about itself, and changes nothing.
-- **Advanced** is every field in the file as a table, for when you need a value
-  the Edit face does not draw. Type into the **Writes** column to set one. A
-  value the field cannot hold is refused, with the reason.
+- **Basic** is the sound's controls, in the instrument's own words.
+- **Advanced** is the record of the bytes, top to bottom:
+  - **About this file**: what the file says about itself. Set lists, WAVs,
+    files with nothing to edit and bytes drawbar could not read have none.
+  - **Container**: what the file's header states, and whether its checksum
+    matches.
+  - **Changes**: the bytes that have moved since the file was last saved.
+  - **On the instrument**, for a document read from a slot: what the
+    instrument reports about that slot.
+  - The body. For a program, live slot, setting or preset this is every field
+    as a table, for a value the Basic face does not draw. Type into the
+    **Writes** column to set a field. A value the field cannot hold is refused,
+    with the reason. Samples and pianos list what drawbar can edit in them and
+    where it lands in the file, a set list shows its four stored slots, and a
+    file with nothing to edit shows its **Body bytes**. A WAV and bytes drawbar
+    could not read have no body to show.
 
 ## Programs, live slots, settings and presets
 
@@ -53,9 +64,9 @@ rows to reorder them.
 
 ## Files with nothing to edit
 
-A file drawbar recognises but cannot yet edit opens with what the container says
-and a look at its bytes. It can still be sent, copied and tagged, and goes up
-byte for byte as it came down.
+A file drawbar recognises but cannot yet edit opens with what the container
+says; its bytes are under **Body bytes** on the Advanced face. It can still be
+sent, copied and tagged, and goes up byte for byte as it came down.
 
 Sample instruments and piano libraries have editors of their own. See
 [Samples](samples.md) and [Pianos](pianos.md).

@@ -1,7 +1,7 @@
 //! What a format holds, as the Advanced face states it: one row per capability the
 //! instrument editors know, each in the state this format puts it in.
 //!
-//! A field the format lacks is absent from the Edit face; this table is the one place
+//! A field the format lacks is absent from the Basic face; this table is the one place
 //! that absence is written down, so the reader can tell a missing knob from a bug.
 
 use eframe::egui;
