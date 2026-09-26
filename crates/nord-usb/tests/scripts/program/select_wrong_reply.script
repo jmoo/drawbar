@@ -1,8 +1,8 @@
 # source: synthetic
-# note: a mid-session reply answering the wrong command is a desync - nothing read
-#   after it pairs with its request - so the transaction ends. The script carries
-#   the GOODBYE exchange and no more, which is what proves the bail said it and
-#   that the caller's commit stayed off the wire.
+# note: a mid-session reply to the wrong command is a desync, because nothing read
+#   after it pairs with its request, so the transaction ends. The script ends with
+#   the GOODBYE exchange, which proves the release sent it and the caller's commit
+#   sent nothing.
 # intent: program select 2:12
 # expect: err unexpected-response
 O 0000001200000006000000010000000006a1

@@ -1,8 +1,7 @@
 # source: synthetic
 # note: 0x11 is the instrument refusing a cursor request. A walk that treated it
-#   like the end-of-walk status would return an inventory that looks complete,
-#   which is the one result worse than none. The closing exchanges are here, so
-#   the refusal must still run them.
+#   as the end-of-walk status would return an inventory that looks complete but is
+#   not. The closing exchanges are here, so the refusal must still run them.
 # intent: program walk
 # expect: err device-status 0x11
 O 0000001200000006000000010000000006a1

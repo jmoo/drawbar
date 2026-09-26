@@ -1,6 +1,6 @@
 # source: nord
 # device: Nord Electro 5, firmware v2.04 build 592
-# note: the read half of select - what the panel currently has loaded.
+# note: the read half of select, reporting what the panel has loaded.
 # intent: program focus
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

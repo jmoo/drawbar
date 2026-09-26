@@ -1,7 +1,7 @@
 # source: nsm
 # device: Nord Electro 5, firmware v2.04
 # trimmed: ui-refresh
-# note: the dependency read from the duplicate capture - a piano and a sample, each
+# note: the dependency read from the duplicate capture: a piano and a sample, each
 #   carrying the content id its own file header also holds.
 # intent: program deps 7:3
 O 0000001200000006000000010000000006a1

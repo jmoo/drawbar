@@ -50,13 +50,13 @@ pub enum Error {
     #[error("bank {bank} cannot be scanned completely within {limit} slots")]
     ScanLimit { bank: u32, limit: u32 },
 
-    /// The byte pipe itself failed — a USB transfer error, a missing device, a claim
-    /// refusal. Nothing about message *content* belongs here.
+    /// The byte pipe failed: a USB transfer error, a missing device, a refused claim.
+    /// Errors about message content do not belong here.
     #[error("transport: {0}")]
     Transport(String),
 
-    /// The `CBIN` header around an entity body is wrong: bad magic, a checksum that
-    /// does not match the body, a malformed format tag.
+    /// The `CBIN` file around an entity body is wrong: bad magic, a checksum that does
+    /// not match the body, a malformed format tag, or no body.
     #[error("envelope: {0}")]
     Envelope(String),
 
@@ -75,14 +75,13 @@ pub enum Error {
 impl Error {
     /// This failure's kind in a replay script's `expect: err <kind>` header.
     ///
-    /// The vocabulary is short on purpose — it exists to tell one *expected* refusal
-    /// from another — so a failure it does not name is reported as the nearest kind
-    /// rather than left out, where the script would claim the operation succeeded. A
-    /// script that names the wrong kind fails the sweep, which is the report; a script
-    /// that names none passes silently, which is not.
+    /// The vocabulary only tells one expected refusal from another, so a failure it
+    /// does not name maps to the nearest kind. Leaving it out would let the script
+    /// claim the operation succeeded. A script that names the wrong kind fails the
+    /// sweep; a script that names none would pass silently.
     ///
-    /// The match is exhaustive so that a new variant is given a kind rather than
-    /// defaulting into one, and [`ErrKind::matches`] is its inverse.
+    /// The match is exhaustive so that every new variant must be given a kind.
+    /// [`ErrKind::matches`] is its inverse.
     pub fn expect_kind(&self) -> ErrKind {
         match self {
             Error::DeviceStatus(code) => ErrKind::DeviceStatus(*code),
@@ -106,13 +105,12 @@ impl Error {
 /// The failures a replay script may name, spelled in kebab-case after the [`Error`]
 /// variant.
 ///
-/// Deliberately a short list: it exists to tell one *expected* refusal from another, not
-/// to mirror the error type. A device refusal carries its status code, because the code
-/// is the finding — `0x15` (the library classes refusing a rename) and `0x1` (nothing
-/// loaded) are different results, not two spellings of one.
+/// The list tells one expected refusal from another and does not mirror [`Error`]. A
+/// device refusal carries its status code because the code is the finding: `0x15` (the
+/// library classes refusing a rename) and `0x1` (nothing loaded) are different results.
 ///
-/// [`Error::expect_kind`] is the one table: what a recorder writes, what a script
-/// parses, and what the sweep judges are the same value.
+/// [`Error::expect_kind`] is the only mapping, so the recorder, the script parser, and
+/// the sweep all use the same value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrKind {
     DeviceStatus(u32),
@@ -182,7 +180,7 @@ impl std::fmt::Display for ErrKind {
     }
 }
 
-/// `0x`-prefixed hex or decimal — status codes are quoted both ways.
+/// `0x`-prefixed hex or decimal, since status codes are written both ways.
 #[cfg(feature = "replay")]
 fn parse_u32(s: &str) -> Option<u32> {
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {

@@ -1,11 +1,10 @@
 //! A recording tap over a live transport: every frame in either direction is appended
 //! to a script file in the format [`crate::transport::replay`] reads back.
 //!
-//! Frames are written byte-exactly in wire order. Bulk reads contribute one line per
-//! chunk.
+//! Frames are written in wire order, byte for byte. Each bulk read adds one line.
 //!
-//! Writes are unbuffered: a session that wedges or is killed still leaves everything
-//! that reached the wire on disk, which is the case the recording usually exists for.
+//! Writes are unbuffered, so a session that wedges or is killed still leaves everything
+//! that reached the wire on disk. That is usually the case a recording is for.
 
 use std::fs::File;
 use std::io::Write;
@@ -15,10 +14,10 @@ use crate::error::Result;
 
 /// Appends directed frames to a replay script.
 ///
-/// An I/O failure part-way through is held rather than raised: aborting a live session
-/// mid-transaction leaves the instrument with an open session, which is worse than a
-/// short script. [`Recorder::check`], reached through
-/// [`UsbTransport::finish_recording`](super::UsbTransport::finish_recording), surfaces it
+/// An I/O failure partway through is held, not raised, because aborting mid-transaction
+/// leaves the instrument with an open session, which is worse than a short script.
+/// [`Recorder::check`], reached through
+/// [`UsbTransport::finish_recording`](super::UsbTransport::finish_recording), reports it
 /// once the operation is done.
 pub struct Recorder {
     file: File,
@@ -28,12 +27,12 @@ pub struct Recorder {
 impl Recorder {
     /// Create `path`, truncating it, and write the script header.
     ///
-    /// The header says where the frames came from, which is what a reader needs to know
-    /// whether they are an oracle: `source: nord` is this project's own traffic, a
-    /// regression baseline rather than a match against the vendor application.
+    /// The header says where the frames came from, so a reader knows whether they are
+    /// an oracle: `source: nord` is this project's own traffic, a regression baseline
+    /// and not evidence of what the vendor application sends.
     ///
-    /// Fails immediately if the path is not writable — the point at which a caller can
-    /// still do something about it.
+    /// Fails immediately if the path is not writable, while the caller can still act on
+    /// it.
     pub fn create(path: &Path, device: Option<&str>) -> Result<Self> {
         let mut file = File::create(path)?;
         writeln!(
@@ -51,9 +50,9 @@ impl Recorder {
     /// Declare what the frames that follow are doing: `<class> <verb> <args…>`, in the
     /// CLI's own spellings.
     ///
-    /// One command opens several transactions — a move names both slots before moving
-    /// anything — so this is written per transaction, not per file, and each one opens a
-    /// section the replay sweep drives on its own.
+    /// One command can open several transactions (a move describes both slots before
+    /// moving anything), so this is written per transaction. Each one opens a section
+    /// the replay sweep drives on its own.
     pub fn intent(&mut self, intent: &str) {
         if self.failed.is_some() {
             return;
@@ -75,8 +74,8 @@ impl Recorder {
 
     /// Declare that the transaction just recorded failed, and how.
     ///
-    /// Written after its frames rather than with its intent: the outcome is only known
-    /// once the operation is over, and a script that says nothing claims it succeeded.
+    /// Written after its frames, because the outcome is only known once the operation is
+    /// over. A script that says nothing claims the operation succeeded.
     pub fn expect(&mut self, e: &crate::error::Error) {
         if self.failed.is_some() {
             return;
@@ -86,7 +85,8 @@ impl Recorder {
         }
     }
 
-    /// The first I/O error the recorder hit, if any. Recording stops at that point.
+    /// The first I/O error the recorder hit, if any. Recording pauses from that error
+    /// until this is called.
     pub fn check(&mut self) -> Result<()> {
         match self.failed.take() {
             Some(e) => Err(e.into()),
@@ -112,8 +112,7 @@ impl Recorder {
 mod tests {
     use super::*;
 
-    /// A frame the recorder could not write must reach the caller: a script short of
-    /// the frames it claims replays as a different exchange.
+    /// A script missing frames replays as a different exchange.
     #[test]
     fn a_frame_that_could_not_be_written_is_reported_by_the_check() {
         let path = std::env::temp_dir().join(format!("nord-record-{}.script", std::process::id()));

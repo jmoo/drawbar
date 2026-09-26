@@ -1,7 +1,7 @@
 # source: nsm
 # device: Nord Electro 5, firmware v2.04
 # trimmed: ui-refresh
-# note: SELECT is the one request with inverted parity - 0x2f answered by 0x30.
+# note: SELECT is the only request with inverted parity: 0x2f is answered by 0x30.
 # intent: program select 2:12
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

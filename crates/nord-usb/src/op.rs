@@ -1,8 +1,8 @@
 //! Typed operations.
 //!
 //! Each primitive runs inside a [`Session`]; callers can batch by opening one
-//! session and applying the primitive repeatedly. Operations include device-side
-//! progress messages but omit reads used only to refresh a host UI.
+//! session and applying primitives repeatedly. Operations send the progress labels the
+//! instrument displays but omit reads that only refresh a host UI.
 
 use nord_format::cbin::{Cbin, RawBody};
 
@@ -18,9 +18,8 @@ use crate::wire::{
 
 /// Query the inventory for the class the session was opened with.
 ///
-/// **Read-only.** It sends one request and reads counters back; nothing on the
-/// instrument changes. That makes it the safe way to prove the whole stack works
-/// against real hardware.
+/// **Read-only.** It sends one request and reads counters back, so it is a safe way to
+/// check the whole stack against real hardware.
 pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Status> {
     let class = session.class();
     let resp = session
@@ -37,9 +36,9 @@ pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<
 /// Query every class worth reporting, one transaction each.
 ///
 /// Each class needs its own session because the class is fixed at `SESSION_OPEN`.
-/// Two refusals are skipped rather than failing the sweep, because instruments differ
-/// in which classes they answer for: a refused `SESSION_OPEN` ([`Error::ClassRefused`])
-/// and a refused `STATUS`. Every other error, a refused `HELLO` included, propagates.
+/// Instruments differ in which classes they answer for, so two refusals skip the class:
+/// a refused `SESSION_OPEN` ([`Error::ClassRefused`]) and a refused `STATUS`. Every
+/// other error, including a refused `HELLO`, propagates.
 pub async fn inventory<T: Transport>(transport: &mut T) -> Result<Vec<Status>> {
     let mut out = Vec::new();
     for class in ObjectClass::INVENTORY {
@@ -83,9 +82,8 @@ pub async fn info<T: Transport, C>(
 
 /// Read one program off the instrument, returning the bytes of a `.ne5p` file.
 ///
-/// **Read-only.** The body is wrapped in a `CBIN` header ([`envelope`]) so the result
-/// is a real file, and the device's own CRC-32 is checked against it when the device
-/// supplies one.
+/// **Read-only.** The body is wrapped in a `CBIN` header ([`envelope`]) to make a file.
+/// When the device reports a CRC-32, the body is checked against it.
 pub async fn read_program<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
@@ -104,11 +102,11 @@ pub async fn read_program<T: Transport, C>(
     Ok(file)
 }
 
-/// Read an entity's body off the instrument **without** wrapping it in a CBIN header.
+/// Read an entity's body off the instrument without wrapping it in a CBIN header.
 ///
-/// For formats whose header layout is not yet known — notably CBIN **type-0**, the
-/// legacy no-CRC variant — wrapping would fabricate a header rather than reproduce one.
-/// This returns exactly the bytes the device sent, which is the safe thing to archive.
+/// For formats whose header layout is unknown, such as CBIN type-0 (the legacy variant
+/// without a CRC), wrapping would invent a header. This returns the bytes the device
+/// sent, which are safe to archive.
 pub async fn read_body<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
@@ -116,18 +114,19 @@ pub async fn read_body<T: Transport, C>(
     Ok(transfer_out(session, at).await?.1)
 }
 
-/// Body bytes to ask for in one `READ`. A body larger than this arrives across several
-/// requests with the offset advancing by exactly this much and a short final chunk.
+/// Body bytes to ask for in one `READ`. A larger body arrives across several requests,
+/// the offset advancing by this much each time, with a short final chunk.
 ///
-/// NSM asks for `32720`. Inferred from specimens; not confirmed on hardware.
+/// Nord Sound Manager asks for `32720`. Inferred from specimens; not confirmed on
+/// hardware.
 ///
-/// Unexplained: some objects are read at `32726` throughout — a fixed 6-byte difference
-/// that is per object, not per chunk. Both fit inside one `READ_BUFFER`, and the host
-/// chooses the number, so the smaller is used uniformly.
+/// Unexplained: for some objects it asks for `32726` throughout, a 6-byte difference
+/// that is per object, not per chunk. Both sizes fit in one `READ_BUFFER` and the host
+/// chooses the size, so the smaller is always used.
 const READ_CHUNK: u32 = 32720;
 
 /// Body bytes per `WRITE_DATA` frame. The whole frame must stay under the device's
-/// max transfer; an oversized frame wedges the instrument until a power cycle.
+/// maximum transfer; an oversized frame wedges the instrument until a power cycle.
 const WRITE_CHUNK: usize = 32720;
 
 /// Fault-injection overrides; absent variables keep captured sizes, invalid values fail.
@@ -250,7 +249,7 @@ fn read_payload(payload: &[u8], at: Location, offset: u32, length: u32) -> Resul
     Ok(body)
 }
 
-/// Bound on polling `0x26` for the cleaning pass, which normally finishes within a
+/// Bound on polling `0x26` for the cleaning pass. The pass normally finishes within a
 /// second; the headroom is for a heavily churned library.
 const CLEANING_POLLS: u32 = 120;
 const CLEANING_POLL_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
@@ -314,12 +313,12 @@ fn cleaning_progress(payload: &[u8]) -> Result<(u32, u32, u32)> {
 /// about to write. Requires a [`ReadWrite`] session.
 ///
 /// A library write is refused `0x16` unless a prepared block exists per storage block of
-/// body, so this reads [`status`] and, where `blocks` exceeds what is free, reclaims
-/// exactly the shortfall out of `dirty` and waits for the pass to finish. Under what is
-/// already free it sends nothing but the `STATUS` request.
+/// body. This reads [`status`] and, when `blocks` exceeds what is free, reclaims the
+/// shortfall from `dirty` and waits for the pass to finish. Otherwise it sends only the
+/// `STATUS` request.
 ///
-/// `blocks` is the body's length in units of the partition's [`AllocationUnit`]; a count
-/// from anywhere else sizes the reclaim wrongly. [`write`] does this for its caller.
+/// `blocks` is the body's length in units of the partition's [`AllocationUnit`]; any
+/// other count sizes the reclaim wrongly. [`write()`] computes it for its caller.
 pub async fn reserve<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     blocks: u32,
@@ -331,15 +330,15 @@ pub async fn reserve<T: Transport>(
     Ok(())
 }
 
-/// Write an entity into a slot. `name` is what the slot ends up called — the file
-/// carries none, and a placeholder becomes the slot's name.
+/// Write an entity into a slot. The file carries no name, so `name` becomes the slot's
+/// name, even when it is a placeholder.
 ///
-/// A library write is refused `0x16` without a prepared block per storage block of body,
-/// so where `unit` counts blocks the [`reserve`] and the transfer share one transaction;
-/// a byte-granular partition sends the transfer alone. `unit` is the partition's own
-/// [`AllocationUnit`] — [`Geometry::allocation_unit`](crate::device::Geometry::allocation_unit)
-/// is where one comes from — and it sizes the reclaim from the CBIN body the file
-/// carries, which is shorter than the file by its header.
+/// A library write is refused `0x16` without a prepared block per storage block of body.
+/// When `unit` counts blocks, [`reserve`] and the transfer share one transaction; a
+/// byte-granular partition sends the transfer alone. `unit` is the partition's
+/// [`AllocationUnit`], from
+/// [`Geometry::allocation_unit`](crate::device::Geometry::allocation_unit). It sizes the
+/// reclaim from the file's CBIN body, which is shorter than the file by its header.
 pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
@@ -364,7 +363,8 @@ pub async fn write<T: Transport>(
 /// A [`cmd::BEGIN_WRITE`] argument block: the address, the body's length, the format
 /// tag, the timestamp, the `0xffffffff` word, and the slot's name, length-prefixed.
 ///
-/// `BEGIN_WRITE` is the only frame of a write that carries a name; it becomes the slot's.
+/// `BEGIN_WRITE` is the only frame of a write that carries a name, and it becomes the
+/// slot's name.
 pub fn begin_write_args(
     at: Location,
     body_len: usize,
@@ -455,11 +455,11 @@ async fn transfer_in<T: Transport>(
     Ok(())
 }
 
-/// Load a stored object live on the instrument ("open on device" / double-click in
-/// NSM). The device switches to it immediately.
+/// Load a stored object live on the instrument, as "open on device" or a double-click
+/// does in Nord Sound Manager. The device switches to it immediately.
 ///
-/// **Non-destructive** — nothing stored changes, so this needs no [`ReadWrite`] session.
-/// This is the one command with inverted parity (`0x2f` request, `0x30` response).
+/// **Non-destructive.** Nothing stored changes, so this needs no [`ReadWrite`] session.
+/// This is the only command with inverted parity (`0x2f` request, `0x30` response).
 pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Location) -> Result<()> {
     let mut args = Vec::new();
     at.write_to(&mut args);
@@ -486,13 +486,13 @@ async fn drain<T: Transport>(transport: &mut T) -> Result<()> {
 /// How long to wait for a straggler before deciding the stream is quiet.
 const RECOVER_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// Upper bound on stragglers, so a device that will not stop talking cannot hang this.
+/// Upper bound on stragglers, so a device that keeps talking cannot hang this.
 const RECOVER_DRAIN_CAP: usize = 16;
 
 /// Send one frame of the recovery sequence, naming the endpoint when it is not accepted.
 ///
-/// ⚠️ An unbounded write here blocks forever on the very instrument this exists for: a
-/// stalled bulk OUT endpoint never accepts the frame and never fails either.
+/// ⚠️ An unbounded write blocks forever on the instrument this exists for: a stalled
+/// bulk OUT endpoint neither accepts the frame nor fails.
 async fn send_recovery<T: Transport>(transport: &mut T, msg: &Message, what: &str) -> Result<()> {
     if transport.write_timeout(&msg.encode(), WRITE_LIMIT).await? {
         return Ok(());
@@ -510,11 +510,11 @@ async fn send_recovery<T: Transport>(transport: &mut T, msg: &Message, what: &st
 /// A bare `GOODBYE` clears the UI state that makes every slot appear empty; a bare
 /// `SESSION_CLOSE` clears class status `0x12`. Queued replies are drained first.
 pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
-    // An unread reply leaves every subsequent request paired with its predecessor.
+    // An unread reply would pair every later request with the previous request's reply.
     drain(transport).await?;
 
-    // ⚠️ Bounded reads: the instrument this is for is the one that has stopped
-    // answering, and no reply to either frame is the expected outcome, not a failure.
+    // ⚠️ Bounded reads: the instrument this is for has stopped answering, so no reply
+    // to either frame is expected and is not a failure.
     let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
     send_recovery(transport, &goodbye, "GOODBYE").await?;
     let _ = transport
@@ -531,9 +531,9 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
 
 /// Every storage partition the device reports. **Read-only.**
 ///
-/// The index of each entry is its object class code, so this is also the authoritative
-/// answer to "what classes does this instrument have" — including the `(Native)` library
-/// views that have no [`ObjectClass`] name.
+/// The index of each entry is its object class code, so this also lists the classes the
+/// instrument has, including the `(Native)` library views that have no [`ObjectClass`]
+/// name.
 pub async fn partitions<T: Transport, C>(
     session: &mut Session<'_, T, C>,
 ) -> Result<Vec<Partition>> {
@@ -570,11 +570,10 @@ pub async fn banks<T: Transport, C>(
 
 /// Whether an address exists on this instrument, per the device's own geometry.
 ///
-/// **Read-only**, and the point is that it answers *before* anything is attempted: a write
-/// to a bad address otherwise fails only once the transfer is under way, and a write to an
-/// occupied one is refused with status `0x4` after the caller has committed to it.
+/// **Read-only.** It answers before anything is attempted; otherwise a write to a bad
+/// address fails only once the transfer is under way. It does not check occupancy.
 ///
-/// `Ok(None)` means the address is fine. `Ok(Some(reason))` explains why it is not.
+/// `Ok(None)` means the address exists. `Ok(Some(reason))` explains why it does not.
 ///
 /// [`Geometry::check_address`](crate::device::Geometry::check_address) asks the same of
 /// geometry already read, and sends nothing.
@@ -588,9 +587,8 @@ pub async fn check_address<T: Transport, C>(
 
 /// Why `at` is not an address among `banks`, or `None` where it is.
 ///
-/// The reason is in the bank names the instrument itself uses — which for pianos are
-/// categories, so "no bank 7 (this class has 6: Grand, Upright, …)" is a far better
-/// error than a status code.
+/// The reason uses the instrument's own bank names, which for pianos are categories
+/// such as "Grand" and "Upright".
 pub(crate) fn address_refusal(banks: &[Bank], at: Location) -> Option<String> {
     let Some(bank) = banks.get(at.bank as usize) else {
         let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
@@ -601,8 +599,7 @@ pub(crate) fn address_refusal(banks: &[Bank], at: Location) -> Option<String> {
             names.join(", ")
         ));
     };
-    // The `(Native)` partitions report a sentinel rather than a capacity, so there is
-    // nothing to check against there.
+    // The `(Native)` partitions report a sentinel in place of a capacity.
     (bank.is_bounded() && at.slot >= bank.slots).then(|| {
         format!(
             "\"{}\" holds {} slots, so slot {} is out of range",
@@ -615,7 +612,7 @@ pub(crate) fn address_refusal(banks: &[Bank], at: Location) -> Option<String> {
 
 /// The object the panel currently has loaded, for the session's class. **Read-only.**
 ///
-/// The read half of [`select`]: together they make the player's own position addressable.
+/// The read half of [`select`].
 pub async fn focus<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Location> {
     let resp = session
         .request(Service::Program, 10, cmd::FOCUS, &[])
@@ -633,31 +630,29 @@ pub async fn focus<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<L
     })
 }
 
-/// Device status refusing a [`cmd::NEXT_SLOT`] without the direction word. Surfaced
-/// rather than swallowed: a refused walk must not pass off a partial list.
+/// Device status refusing a [`cmd::NEXT_SLOT`] without the direction word. It is
+/// reported as an error so a refused walk cannot return a partial list.
 pub const ENUMERATION_DISABLED: u32 = 0x11;
 
 /// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
 /// walking forward, its last when walking backward.
 pub const SLOT_BOUNDARY: u32 = 0xffff_ffff;
 
-/// Host safety budget for one occupied-slot walk. Exceeding it is an error, not a
-/// truncated inventory.
+/// Host limit on the slots one occupied-slot walk may return. Exceeding it is an error.
 pub const ENUMERATION_LIMIT: usize = 4096;
 
 /// The next occupied slot after `at`, or `None` once the walk runs off the end.
 ///
 /// **Read-only.** Positions inside a gap are safe to pass: the device answers with the
-/// next real object rather than an error, which is what makes this an iterator over
-/// content instead of over addresses. `at.slot == SLOT_BOUNDARY` starts from before
-/// the bank's first slot.
+/// next occupied slot, so this walks content and skips empty addresses.
+/// `at.slot == SLOT_BOUNDARY` starts before the bank's first slot.
 pub async fn next_occupied<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Option<Location>> {
     let mut args = Vec::new();
     at.write_to(&mut args);
-    // Direction, 0 = forward; omitting it is refused after any write since power-up.
+    // Direction, 0 = forward. Omitting it is refused after any write since power-up.
     args.extend_from_slice(&0u32.to_be_bytes());
     match session
         .request(Service::Program, 10, cmd::NEXT_SLOT, &args)
@@ -676,8 +671,8 @@ pub async fn next_occupied<T: Transport, C>(
                 slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
             }))
         }
-        // Not a fault: the position asked about is past the end, which is how the walk
-        // terminates. A refusal leaves the session in step, so the caller may continue.
+        // Status 1 means the position is past the end, which ends the walk. A refusal
+        // leaves the session in step, so the caller may continue.
         Err(Error::DeviceStatus(1)) => Ok(None),
         Err(e) => Err(e),
     }
@@ -685,24 +680,22 @@ pub async fn next_occupied<T: Transport, C>(
 
 /// Every occupied slot in the session's class, in address order.
 ///
-/// **Read-only.** [`next_occupied`] walks *within* one bank and stops at its end, so this
-/// drives it over `banks` in table order, each from [`SLOT_BOUNDARY`]. Pianos span
-/// several banks and programs fill eight of them; only the sample library is flat, and
-/// walking bank 0 alone silently reports a fraction of the class.
+/// **Read-only.** [`next_occupied`] walks within one bank and stops at its end, so this
+/// drives it over `banks` in table order, each from [`SLOT_BOUNDARY`]. Pianos and
+/// programs span several banks, and walking bank 0 alone would silently report part of
+/// the class.
 ///
-/// `banks` is the instrument's own answer for this class — [`banks`] on the partition
+/// `banks` is the instrument's own answer for this class: [`banks`] on the partition
 /// whose index is the class code, or [`Geometry::banks`](crate::device::Geometry::banks).
-/// Nothing here guesses how many banks a class has or how far one runs: a bank ends where
-/// the device ends it (status `1` to a cursor request), and its declared capacity bounds
-/// how many objects it may yield.
+/// A bank ends where the device ends it (status `1` to a cursor request), and its
+/// declared capacity bounds how many objects it may yield.
 ///
-/// A cursor answer that leaves the bank, repeats, goes backwards, or exceeds the declared
-/// capacity is [`Error::Enumeration`]. [`ENUMERATION_LIMIT`] bounds the complete walk;
-/// exhausting it is an error rather than a truncated inventory.
+/// A cursor answer that leaves the bank, repeats, goes backward, or exceeds the declared
+/// capacity is [`Error::Enumeration`]. A walk longer than [`ENUMERATION_LIMIT`] is
+/// [`Error::ScanLimit`].
 ///
-/// A refusal mid-walk — [`ENUMERATION_DISABLED`] above all — propagates as its error
-/// rather than truncating the list: a partial inventory that looks complete is the one
-/// result worse than none.
+/// A refusal mid-walk, such as [`ENUMERATION_DISABLED`], propagates as its error. A
+/// partial inventory that looks complete would be worse than none.
 pub async fn occupied_slots<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     banks: &[Bank],
@@ -744,11 +737,11 @@ pub async fn occupied_slots<T: Transport, C>(
     Ok(found)
 }
 
-/// List the piano/sample library objects an entity depends on, as the device reports
-/// them — including rows that are not dependencies at all.
+/// List the piano and sample library objects an entity depends on, as the device
+/// reports them, including rows that are not dependencies.
 ///
 /// **Read-only.** The returned [`Dependency`] ids match the ids the objects carry in
-/// their own files, which is the bridge between wire content and file bytes.
+/// their own files, which links wire content to file bytes.
 pub async fn dependencies<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
@@ -780,9 +773,10 @@ pub struct Referrer {
     pub at: Location,
     /// The set list's name, as the instrument shows it.
     pub name: String,
-    /// The set list's schema version *now*. ⚠️ `0` is the one worth stopping for: the
-    /// device rewrites a referring set list in the current format, so a version-0 object
-    /// is migrated to version 1 and there is no route back to what it was.
+    /// The set list's current schema version.
+    ///
+    /// ⚠️ The device rewrites a referring set list in the current format, so a version-0
+    /// set list is migrated to version 1 and cannot be restored.
     pub version: u32,
     /// Which of the queried program slots this set list points at.
     pub programs: Vec<Location>,
@@ -791,19 +785,18 @@ pub struct Referrer {
 /// Every set list that references one of `targets`. **Read-only.**
 ///
 /// The session must be open on [`ObjectClass::SetList`]; the walk and every read run
-/// inside it, over the `banks` [`occupied_slots`] documents.
+/// inside it, over `banks` as [`occupied_slots`] describes.
 ///
-/// This is what makes a program `move` describable. The instrument maintains referential
-/// integrity itself: moving a program rewrites the body of **every** set list pointing at
-/// it, so a move touches objects in another class that the caller never named, and one of
-/// those rewrites is irreversible where [`Referrer::version`] is `0`. Nothing in the move
-/// request says so, and no reply reports it afterwards — the only way to know is to ask
-/// every set list first.
+/// Use this to describe what a program move will do. The instrument maintains
+/// referential integrity itself: moving a program rewrites the body of every set list
+/// pointing at it, so a move changes objects in another class that the caller never
+/// named. Where [`Referrer::version`] is `0`, that rewrite is irreversible. Neither the
+/// move request nor its reply reports this, so the only way to know is to ask every set
+/// list first.
 ///
 /// Cost is one `DEPENDENCIES` per occupied set list, plus one `INFO` per match. A
-/// refusal mid-scan propagates rather than truncating, and so does a walk that
-/// contradicts the declared geometry, for the same reason: a short list here reads as
-/// "no set list is affected", which is the wrong answer to act on.
+/// refusal mid-scan propagates, as does a walk that contradicts the declared geometry,
+/// because a short list would read as "no set list is affected".
 ///
 /// Confirmed on hardware.
 pub async fn set_lists_referencing<T: Transport, C>(
@@ -847,22 +840,22 @@ pub async fn set_lists_referencing<T: Transport, C>(
     Ok(out)
 }
 
-/// Move an object from one slot to another. The device relocates it internally — no
+/// Move an object from one slot to another. The device relocates it internally, and no
 /// body crosses the wire.
 ///
-/// An occupied destination is **swapped, not overwritten**: its occupant ends up in the
-/// source slot, byte-identical. Nothing is destroyed, and no delete-first step is needed
-/// (unlike a write, which the device refuses into an occupied slot with status `0x4`).
-/// Confirmed on hardware.
+/// An occupied destination is swapped: its occupant ends up in the source slot,
+/// byte-identical. Nothing is destroyed and no delete is needed first, as it is for a
+/// write, which the device refuses into an occupied slot with status `0x4`. Confirmed
+/// on hardware.
 ///
-/// ⚠️ **Moving a program is not a local operation.** The device rewrites every set list
-/// referencing either slot so no reference is left dangling, changing bodies the caller
-/// never named — and a version-0 set list is migrated to version 1 in the process, which
-/// cannot be undone by moving the program back. [`set_lists_referencing`] names them
-/// before the fact; nothing in the request or the reply mentions them.
+/// ⚠️ Moving a program also changes set lists. The device rewrites every set list
+/// referencing either slot so no reference is left dangling, and migrates a version-0
+/// set list to version 1, which moving the program back cannot undo.
+/// [`set_lists_referencing`] names them beforehand; neither the request nor the reply
+/// mentions them.
 ///
-/// Requires a [`ReadWrite`] session. Class-generalised: works for whichever object
-/// class the session opened (programs, set lists).
+/// Requires a [`ReadWrite`] session. Works for whichever object class the session
+/// opened (programs, set lists).
 pub async fn move_object<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     from: Location,
@@ -879,8 +872,8 @@ pub async fn move_object<T: Transport>(
 
 /// Delete the object in a slot. Requires a [`ReadWrite`] session.
 ///
-/// Sends the `"Deleting..."` progress label the instrument paints, then the delete —
-/// exactly the two OUT frames NSM sends (the `O36 O26 I30` shape).
+/// Sends the `"Deleting..."` progress label, then the delete: the two OUT frames Nord
+/// Sound Manager sends (`O36 O26 I30`).
 pub async fn delete<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -896,8 +889,8 @@ pub async fn delete<T: Transport>(
 
 /// Rename the object in a slot. Requires a [`ReadWrite`] session.
 ///
-/// The name is sent big-endian length-prefixed and unpadded — the same encoding
-/// strings use everywhere on the wire.
+/// The name is sent with a big-endian length prefix and no padding, like every string on
+/// the wire.
 pub async fn rename<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
@@ -917,10 +910,9 @@ pub async fn rename<T: Transport>(
 
 /// Duplicate the object at `from` into `to`. Requires a [`ReadWrite`] session.
 ///
-/// A deep copy the device performs internally: the arguments are just the two
-/// addresses, and no body crosses the wire. (NSM follows a copy with `INFO`/`DEPENDENCIES`
-/// reads to repaint its browser; those are UI bookkeeping and are not sent here — see
-/// the module-level note.)
+/// The device performs a deep copy internally: the arguments are the two addresses, and
+/// no body crosses the wire. Nord Sound Manager follows a copy with `INFO` and
+/// `DEPENDENCIES` reads to refresh its browser; those are not sent here.
 pub async fn duplicate<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     from: Location,
@@ -969,8 +961,8 @@ mod tests {
         assert!(matches!(err, Error::Truncated { got: 11, need: 12 }));
     }
 
-    /// A transport that never accepts a frame and never says so, which is the state a
-    /// stalled bulk OUT endpoint leaves the instrument in.
+    /// A transport that never accepts a frame and never fails, like an instrument with a
+    /// stalled bulk OUT endpoint.
     struct Stalled;
 
     impl Transport for Stalled {

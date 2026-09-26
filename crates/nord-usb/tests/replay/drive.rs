@@ -1,14 +1,16 @@
-//! The intent table: one row per verb, from the declared intent to the call that
-//! produces those frames.
+//! The intent table: one row per verb, mapping a declared intent to the call that
+//! produces its frames.
 //!
-//! The vocabulary is the CLI's — `<class> <verb> <args…>`, slots spelled `BANK:SLOT` as
-//! the panel labels them — plus the primitives the CLI performs on its own where no
-//! command names them (`check-address`, `read`, `read-body`). A new operation is a row
-//! here, never a test of its own.
+//! The vocabulary is the CLI's (`<class> <verb> <args…>`, slots spelled `BANK:SLOT` as
+//! the panel labels them), plus the primitives the CLI performs inside other commands
+//! (`check-address`, `read`, `read-body`). A new operation gets a row here, not a test
+//! of its own.
 //!
-//! An intent that does not parse fails its trial whatever the script declared:
-//! [`Error::InvalidArgument`] is deliberately outside the `expect` vocabulary, so a
-//! misspelled verb cannot be swallowed by a script that expected a failure.
+//! An intent that does not parse fails its trial whatever the script declared. An
+//! unknown class or an unterminated quote fails before anything is driven. An unknown
+//! verb or a bad argument is an [`Error::InvalidArgument`], which `expect` spells
+//! `transport`, so `err transport` accepts it; the trial still fails on the frames the
+//! section leaves unconsumed.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +25,8 @@ pub struct Produced {
     pub expected: PathBuf,
 }
 
-/// Run one transaction and close it, whatever the operation did — an abandoned session
-/// leaves the instrument mid-transaction, and the closing exchanges are part of what
-/// every script pins.
+/// Run one transaction and close it whatever the operation did. An abandoned session
+/// leaves the instrument mid-transaction, and every script pins the closing exchanges.
 macro_rules! session {
     ($t:expr, $class:expr, |$s:ident| $body:expr) => {{
         let mut $s = Session::open($t, $class).await?;
@@ -45,8 +46,8 @@ macro_rules! rw_session {
 
 /// Drive one section's intent through the transport its frames came from.
 ///
-/// `dir` is the script's own directory: a file an intent names travels beside it.
-/// `geometry` is the script's own, once one of its sections has read it.
+/// `dir` is the script's directory, where any file an intent names sits. `geometry` is
+/// set once one of the script's sections has read it.
 pub async fn drive(
     t: &mut ReplayTransport,
     geometry: &mut Option<Geometry>,
@@ -73,7 +74,7 @@ pub async fn drive(
     }
 }
 
-/// Older recordings use the committed hardware geometry when they carry none.
+/// A recording without its own geometry uses the committed one.
 async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Result<Vec<Bank>> {
     match geometry {
         Some(read) => read.banks(class).map(<[Bank]>::to_vec),
@@ -101,8 +102,8 @@ async fn drive_query(
     match verb {
         "status" => session!(t, need_class(class)?, |s| op::status(&mut s)).map(|_| None),
         "focus" => session!(t, need_class(class)?, |s| async {
-            // Whatever the panel has loaded is then named, as the CLI names it. An
-            // empty focused slot answers status 1, which is not a fault to report.
+            // The CLI follows focus with an `info` on the loaded slot. An empty focused
+            // slot answers status 1, which is not a fault.
             let at = op::focus(&mut s).await?;
             match op::info(&mut s, at).await {
                 Ok(_) | Err(Error::DeviceStatus(1)) => Ok(()),
@@ -256,8 +257,8 @@ pub fn class_of(token: &str) -> Result<Option<ObjectClass>> {
     }))
 }
 
-/// Split an intent into its words, keeping a `"quoted string"` whole — a name is one
-/// argument however many spaces it holds.
+/// Split an intent into words, keeping a `"quoted string"` whole so a name with spaces
+/// is one argument.
 pub fn words(intent: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut chars = intent.chars().peekable();

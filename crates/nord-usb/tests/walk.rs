@@ -1,5 +1,5 @@
-//! Recordings of `nord <noun> list` from the private corpus, hence `corpus`-gated: the
-//! scripts carry slot names.
+//! Recordings of `nord <noun> list` from the private corpus, gated on `corpus` because
+//! the scripts carry slot names.
 //!
 //! Each test states the slot count its walk must find; `tests/replay` drives the same
 //! files for their bytes.
@@ -39,7 +39,7 @@ fn banks(class: ObjectClass) -> Vec<Bank> {
 /// Replay one recorded listing and return the slots it found.
 ///
 /// The recordings are of `nord <noun> list`, which is the walk followed by an `info`
-/// per slot found, all inside one session — so the replay has to do both to consume the
+/// per slot found, all inside one session, so the replay does both to consume the
 /// script. Reading `info` for every result makes an invented address fail the replay.
 fn walk(name: &str, class: ObjectClass) -> Vec<nord_usb::Location> {
     let banks = banks(class);
@@ -55,7 +55,7 @@ fn walk(name: &str, class: ObjectClass) -> Vec<nord_usb::Location> {
     })
 }
 
-/// Eight banks of 50, 385 occupied — the walk that crosses the most boundaries.
+/// Eight banks of 50, 385 occupied: the walk that crosses the most boundaries.
 #[test]
 fn program_walk_finds_every_occupied_slot() {
     let found = walk("walk-program.script", ObjectClass::Program);
@@ -64,14 +64,11 @@ fn program_walk_finds_every_occupied_slot() {
     let banks: Vec<u32> = found.iter().map(|l| l.bank).collect();
     assert_eq!(*banks.first().unwrap(), 0);
     assert_eq!(*banks.last().unwrap(), 7);
-    assert!(
-        banks.windows(2).all(|w| w[0] <= w[1]),
-        "walk went backwards"
-    );
+    assert!(banks.windows(2).all(|w| w[0] <= w[1]), "walk went backward");
 }
 
-/// Four banks of 50, sparsely filled — the class where a walk meets empty banks between
-/// populated ones rather than only at the end.
+/// Four banks of 50, sparsely filled, so the walk meets empty banks between populated
+/// ones and not only at the end.
 #[test]
 fn setlist_walk_finds_every_occupied_slot() {
     let found = walk("walk-setlist.script", ObjectClass::SetList);
@@ -86,8 +83,7 @@ fn sample_walk_finds_every_occupied_slot() {
     assert!(found.iter().all(|l| l.bank == 0), "samples are one bank");
 }
 
-/// Six banks of 20 — the library class whose banks are named categories rather than
-/// numbered slots.
+/// Six banks of 20, named by category.
 #[test]
 fn piano_walk_finds_every_occupied_slot() {
     let found = walk("walk-piano.script", ObjectClass::Piano);
