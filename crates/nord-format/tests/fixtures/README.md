@@ -13,6 +13,9 @@ being readable, and `<file>.oracle.json` beside one says what was set.
 - `nsmpproj/` — Sample Editor projects from `nsmpproj::Project::new`: one
   zone, three, and three with the middle zone retuned and its range moved,
   each pinned by its sidecar.
+- `demo/` — two instruments small enough for drawbar to ship as a demo: a looped
+  pad as a v4 sample instrument from `nord sample encode`, and a three-root tine
+  piano library from `nord piano build`, both from synthesised WAVs.
 
 The corpus sweep checks their checksums, decoding, exact round trips, field
 isolation, and oracle sidecars.
