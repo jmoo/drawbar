@@ -138,7 +138,9 @@ pub struct EncodeArgs {
     pub top_note: Option<String>,
 
     /// Loop over `START:END`, in frames of the WAV. The audio after END is not
-    /// encoded, and the loop's crossfade is applied to the samples themselves.
+    /// stored, but its first few frames shape the loop's last ones: END at the end of
+    /// the WAV reads the loop's start there instead. The loop's crossfade is applied
+    /// to the samples themselves.
     #[arg(long = "loop", value_name = "START:END")]
     pub loop_points: Option<String>,
 
