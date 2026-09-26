@@ -13,7 +13,7 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::controls::{self, Sets};
-use super::{encode, piano, project, sample, setlist, SendBack, Shape};
+use super::{encode, piano, project, sample, setlist, text, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
 use crate::device::{read_only, DeviceState};
@@ -22,7 +22,7 @@ use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
 use crate::queue::Queue;
 use crate::room;
-use crate::strings::{carries_tag, display_name, folder, kind_word, place, shown};
+use crate::strings::{display_name, folder, kind_word, place, shown, tagged};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Origin};
 
@@ -70,43 +70,38 @@ const CHIP: f32 = 18.0;
 
 /// Which face of a document is showing.
 ///
-/// Three files rather than three modes: Edit is the sound, Metadata is what the file
-/// says about itself, and Advanced is the engineering. Which of them a document has is
+/// Two files rather than two modes: Basic is the sound, and Advanced is what the file
+/// says about itself and the engineering under it. Which of them a document has is
 /// [`super::faces`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Face {
     /// The panel, in the instrument's own words. Happy-path edits.
     #[default]
-    Edit,
-    /// The record: the container, the bytes that moved, and what the instrument says
-    /// about the slot. Nothing here is a control.
-    Metadata,
-    /// The whole body as a table. Nothing hidden.
+    Basic,
+    /// What the file says about itself, the whole body as a table, and the record the
+    /// container keeps. Nothing hidden.
     Advanced,
 }
 
 impl Face {
     pub fn label(self) -> &'static str {
         match self {
-            Face::Edit => "Edit",
-            Face::Metadata => "Metadata",
+            Face::Basic => "Basic",
             Face::Advanced => "Advanced",
         }
     }
 
     fn glyph(self) -> Glyph {
         match self {
-            Face::Edit => Glyph::Pencil,
-            Face::Metadata => Glyph::Info,
+            Face::Basic => Glyph::Pencil,
             Face::Advanced => Glyph::Wrench,
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
-            Face::Edit => "the fields that change the sound",
-            Face::Metadata => "what the file says about itself — read only",
-            Face::Advanced => "capabilities, offsets, raw values — engineering",
+            Face::Basic => "the fields that change the sound",
+            Face::Advanced => "the record, the offsets, the raw values — engineering",
         }
     }
 }
@@ -205,10 +200,7 @@ pub struct Loud {
 pub struct Extras {
     pub size: Option<SizeLine>,
     /// The claim an unsaved document makes, where the editor has a better one than
-    /// `edited` — the field document's `N pending`.
-    ///
-    /// ⚠️ Its ink is the strip's, not the editor's: an unsaved document is a warning
-    /// whatever counted it.
+    /// `edited` — the field document's `N pending`. It stands in its own ink.
     pub edited: Option<StateLine>,
     /// What a saved document claims instead of what the strip works out — a set list
     /// naming programs the instrument does not have where it says.
@@ -359,7 +351,7 @@ fn left(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
-    let glyph = Kind::of(entity.entity.as_ref()).glyph();
+    let glyph = Kind::of(entity).glyph();
     icon(ui, glyph, KIND, accent(&visuals));
 
     let (held, stored) = named(entity, facts.shape, facts.view, facts.renaming.clone());
@@ -843,7 +835,12 @@ fn stored_name(
                 name.unwrap_or(held.name),
             ))
         }
-        Shape::Fields | Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+        Shape::Fields
+        | Shape::SetList
+        | Shape::Text
+        | Shape::Verbatim
+        | Shape::Wav
+        | Shape::Undecoded => None,
     }
 }
 
@@ -857,7 +854,7 @@ fn named(
     if let Some(held) = stored_name(entity, shape, renaming) {
         return held;
     }
-    let settings = Kind::of(entity.entity.as_ref()) == Kind::Settings;
+    let settings = Kind::of(entity) == Kind::Settings;
     match view && settings {
         true => (Named::Device, display_name(&entity.name).to_string()),
         false => (Named::Asset, display_name(&entity.name).to_string()),
@@ -955,28 +952,13 @@ fn settled(
     response.lost_focus()
 }
 
-/// What a typed name is stored as: the words that were typed, under the format tag the
-/// stored name carries.
-///
-/// The glyph beside the box already says what kind of file it is, so the tag is never in
-/// the box — and it must not be lost by typing in one.
-fn tagged(stored: &str, typed: &str) -> String {
-    match carries_tag(stored) {
-        true => match stored.rsplit_once('.') {
-            Some((_, tag)) => format!("{typed}.{tag}"),
-            None => typed.to_string(),
-        },
-        false => typed.to_string(),
-    }
-}
-
 /// The mono badge over a document, and the sentence behind it.
 ///
 /// ⚠️ Exhaustive over [`Kind`], so a kind the browser learns is a badge decided here
 /// rather than a blank one.
 pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     let tag = entity.tag();
-    let kind = Kind::of(entity.entity.as_ref());
+    let kind = Kind::of(entity);
     let word = kind_word(kind, Family::of_tag(&tag));
     let version = entity.container.as_ref().map(|held| held.header.version);
     let sentence = match version {
@@ -1021,6 +1003,7 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
             false => (tag, "these bytes did not decode".to_string()),
         },
         Kind::Live
+        | Kind::Text
         | Kind::Synth
         | Kind::OrganPreset
         | Kind::PianoPreset
@@ -1079,9 +1062,26 @@ fn folder_of(path: &str, home: Option<String>) -> String {
 /// How big the document is, in whatever it is that a document of this kind has: bytes,
 /// or the entries a set list orders. Settings are one block and there is nothing to say.
 fn sized(entity: &LocalEntity) -> Option<SizeLine> {
-    let kind = Kind::of(entity.entity.as_ref());
+    let kind = Kind::of(entity);
     if kind == Kind::Settings {
         return None;
+    }
+    if kind == Kind::Text {
+        return Some(match text::read(&entity.bytes).map(text::lines) {
+            Ok(lines) => SizeLine {
+                text: match lines {
+                    1 => "1 line".to_string(),
+                    lines => format!("{lines} lines"),
+                },
+                warn: false,
+                hint: format!("{} bytes", entity.bytes.len()),
+            },
+            Err(why) => SizeLine {
+                text: "not text".to_string(),
+                warn: true,
+                hint: why.to_string(),
+            },
+        });
     }
     if kind == Kind::SetList {
         let entries = setlist::entries(entity.entity.as_ref()?)?;
@@ -1111,11 +1111,7 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
         return Some(match &facts.extras.edited {
-            Some(line) => StateLine {
-                words: line.words.clone(),
-                ink: Ink::Warn,
-                hint: line.hint.clone(),
-            },
+            Some(line) => line.clone(),
             None => phrase(Mark::Unsaved, waiting),
         });
     }
@@ -1162,8 +1158,9 @@ fn phrase(mark: Mark, waiting: bool) -> StateLine {
 /// The one loud action, and which of its three states it is in.
 ///
 /// ⚠️ Ordered, and the order is what makes the label honest: a project has nothing to
-/// send whatever is attached, an unattached instrument cannot be written to whatever the
-/// asset is, and a class this app does not write into is never a question of room.
+/// send whatever is attached, nor has a kind no folder holds that stands on no slot, an
+/// unattached instrument cannot be written to whatever the asset is, and a class this
+/// app does not write into is never a question of room.
 pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let send = |hint: String| Loud {
         label: "Queue send".to_string(),
@@ -1179,7 +1176,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
         ..send(hint)
     };
 
-    if Kind::of(entity.entity.as_ref()) == Kind::Project {
+    if Kind::of(entity) == Kind::Project {
         return Loud {
             label: "Build → .nsmp".to_string(),
             short: "Build".to_string(),
@@ -1188,6 +1185,13 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
             hint: "the codec is not understood yet".to_string(),
             send: None,
         };
+    }
+    let kind = Kind::of(entity);
+    if entity.spot().is_none() && kind.home().is_none() {
+        return idle(format!(
+            "no instrument has a folder for this {}",
+            kind.chip()
+        ));
     }
     if !device.connected() {
         return idle("no instrument attached — nothing to send to".to_string());
@@ -1236,7 +1240,7 @@ fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Optio
 /// an indented empty line under the name reads as a field that failed to draw.
 fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
     let mut cells = Vec::new();
-    if Kind::of(entity.entity.as_ref()) == Kind::Program {
+    if Kind::of(entity) == Kind::Program {
         let worn: Vec<String> = tags
             .worn(entity.id)
             .iter()
@@ -1417,10 +1421,17 @@ mod tests {
             )
         );
 
-        let (held, id) = opened("junk.bin", b"not a nord file".to_vec());
+        let (held, id) = opened("junk.bin", vec![0x00, 0xff, 0x01, 0xfe]);
         assert_eq!(
             badge(held.get(id).unwrap()),
             ("?".to_string(), "these bytes did not decode".to_string())
+        );
+
+        let (held, id) = opened("Set 1.txt", b"Set 1\n".to_vec());
+        assert_eq!(
+            badge(held.get(id).unwrap()),
+            ("txt".to_string(), "note".to_string()),
+            "a note is the one badge the bytes decide rather than a container"
         );
 
         let (held, id) = opened("Marimba.nsmp", sample_bytes());
@@ -1498,8 +1509,8 @@ mod tests {
 
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
         Facts {
-            faces: &[Face::Edit],
-            showing: Face::Edit,
+            faces: &[Face::Basic],
+            showing: Face::Basic,
             device,
             queue,
             tags,
@@ -1510,10 +1521,10 @@ mod tests {
         }
     }
 
-    /// An editor's own word for an unsaved document stands in the strip, and it is warn
-    /// ink whatever the editor called it — the header has no red to reach for.
+    /// An editor's own word for an unsaved document stands in the strip in the editor's
+    /// own ink: a piano library being laid out is unsaved, and says so quietly.
     #[test]
-    fn an_editors_own_state_phrase_keeps_the_strips_ink() {
+    fn an_editors_own_state_phrase_stands_in_its_own_ink() {
         let (queue, tags) = (Queue::default(), Tags::default());
         let device = crate::device::Device::new(egui::Context::default());
         let (mut workspace, mut log) = workspace();
@@ -1524,20 +1535,20 @@ mod tests {
 
         let mut facts = facts(&device.state, &queue, &tags);
         let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
-        assert_eq!(held.words, "edited");
+        assert_eq!((held.words.as_str(), held.ink), ("edited", Ink::Warn));
 
         facts.extras.edited = Some(StateLine {
-            words: "6 pending".to_string(),
-            ink: Ink::Good,
-            hint: "raw ≠ bits on 6 fields".to_string(),
+            words: "applying…".to_string(),
+            ink: Ink::Quiet,
+            hint: "laying the plan out over the library".to_string(),
         });
         let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
-        assert_eq!(held.words, "6 pending");
-        assert_eq!(held.hint, "raw ≠ bits on 6 fields");
+        assert_eq!(held.words, "applying…");
+        assert_eq!(held.hint, "laying the plan out over the library");
         assert_eq!(
             held.ink,
-            Ink::Warn,
-            "the strip decides the ink, not the editor"
+            Ink::Quiet,
+            "the editor's ink, not the strip's warn"
         );
     }
 
@@ -1631,6 +1642,17 @@ mod tests {
         assert_eq!(loud.label, "Build → .nsmp");
         assert_eq!(loud.short, "Build");
         assert_eq!(loud.send, None);
+    }
+
+    #[test]
+    fn a_note_says_no_instrument_has_a_folder_for_it() {
+        let mut device = crate::device::Device::new(egui::Context::default());
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        let (held, id) = opened("Set 1.txt", b"Set 1\n".to_vec());
+        let loud = action(held.get(id).unwrap(), &device.state);
+        assert_eq!(loud.tone, Tone::Idle);
+        assert_eq!(loud.send, None);
+        assert_eq!(loud.hint, "no instrument has a folder for this note");
     }
 
     fn wav_bytes() -> Vec<u8> {

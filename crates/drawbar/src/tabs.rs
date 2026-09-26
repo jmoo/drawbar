@@ -272,7 +272,7 @@ fn face(spot: Spot, workspace: &Workspace) -> Option<Face> {
         Spot::Document(id) => {
             let entity = workspace.get(id)?;
             Some(Face {
-                glyph: Kind::of(entity.entity.as_ref()).glyph(),
+                glyph: Kind::of(entity).glyph(),
                 name: entity.name.clone(),
                 unsaved: entity.is_unsaved(),
                 hint: Some(match workspace.is_view(id) {

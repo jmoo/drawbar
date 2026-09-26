@@ -301,7 +301,7 @@ impl Browser {
                 let entity = workspace.get(id)?;
                 Some(Held {
                     what: item,
-                    kind: Kind::of(entity.entity.as_ref()),
+                    kind: Kind::of(entity),
                     filed: self.folders.holding(id),
                     fits: crate::device::fit(device, entity).allowed(),
                 })
@@ -478,11 +478,11 @@ impl Browser {
         if lines.is_empty() {
             return;
         }
-        // The warnings first: they are the reason to say no. Then the header's own
-        // line, which sets what this send carries against what it walks past.
+        // The warnings first: they are the reason to say no.
         let mut note = warnings;
-        note.push(crate::queue::Behind::of(workspace, &device.state, queue).said());
-        note.push(String::new());
+        if !note.is_empty() {
+            note.push(String::new());
+        }
         note.extend(lines);
         self.ask = Some(Ask {
             title,

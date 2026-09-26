@@ -661,7 +661,7 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
     if let Some((class, at)) = owed(entity) {
         return Bound::At(class, at);
     }
-    let home = Kind::of(entity.entity.as_ref()).home();
+    let home = Kind::of(entity).home();
     let Some(class) = home.filter(|class| !read_only(*class) && state.classes().contains(class))
     else {
         return Bound::Nowhere;
@@ -1119,9 +1119,9 @@ mod tests {
             &mut log,
         );
         let nowhere = workspace.ingest(
-            "notes.txt".to_string(),
+            "mystery.dat".to_string(),
             Origin::Fresh,
-            b"not a Nord file at all".to_vec(),
+            vec![0x00, 0xff, 0x01, 0xfe],
             &mut log,
         );
 
@@ -1377,6 +1377,44 @@ mod tests {
         assert_eq!(queue.entry(id).map(|held| held.at), Some(at(3)));
     }
 
+    /// ⚠️ Nothing turns it away by name. It carries no object class, so `bound_for` —
+    /// the one question asked of everything checked — answers `Nowhere`, the same answer
+    /// every other homeless kind gets.
+    #[test]
+    fn a_note_is_never_queued_because_it_belongs_in_no_folder() {
+        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
+        let note = workspace.ingest(
+            "Set 1.txt".to_string(),
+            Origin::Fresh,
+            b"Set 1\n".to_vec(),
+            &mut log,
+        );
+        let program = workspace.create(Fresh::Program, &mut log).unwrap();
+
+        apply(
+            &mut browser,
+            &mut Shell::default(),
+            vec![Act::SendChecked(vec![note, program])],
+            &mut workspace,
+            &mut device,
+            &mut tabs,
+            &mut queue,
+            &mut log,
+        );
+
+        assert_eq!(
+            queue.ids(),
+            vec![program],
+            "the program is bound for a free slot and the note is bound for nowhere"
+        );
+        assert_eq!(
+            bound_for(workspace.get(note).unwrap(), &device.state, &queue),
+            Bound::Nowhere
+        );
+    }
+
     /// One entry leaves the queue on its own, and the whole queue empties — and neither
     /// takes anything off this computer with it.
     #[test]
@@ -1608,7 +1646,8 @@ mod tests {
     }
 
     /// The question before a write says what is known about each slot it is about to
-    /// land in, and a bank nothing has read is not an empty one.
+    /// land in, and a bank nothing has read is not an empty one. It says that and the
+    /// warnings, and nothing over them.
     #[test]
     fn the_send_question_says_what_is_known_about_each_slot() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1657,6 +1696,10 @@ mod tests {
         ] {
             assert!(note.contains(said), "{note}");
         }
+        assert!(
+            note.starts_with("“sound"),
+            "nothing is written above the destinations:\n{note}"
+        );
     }
 
     /// ⚠️ The question counts and names what the batch would write. An entry the

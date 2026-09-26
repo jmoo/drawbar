@@ -11,15 +11,17 @@ keys nothing answers are hatched. Drag a band's edge to move it. The older v2
 layout stores only each zone's top note, so dragging one moves its neighbour too.
 The v3 and v4 layouts let you pull zones apart and leave keys silent.
 
-Click a key to hear it. The line under the keyboard says which zone answered and
-by how much it was shifted, or why the key is silent.
+Click a key to hear it, or play the keys on a
+[MIDI controller](overview.md#midi-controllers). The line under the keyboard says
+which zone answered the last key and by how much it was shifted, or why the key
+is silent. A played key sounds at the velocity you played it, which is the
+velocity a zone's window is tested against.
 
 ## Zones
 
 One row per zone: the keys it answers, its length and channels, and its size.
-Open a row to edit its root and top note, see its waveform with **Show audio**,
-play it, or **Save WAV…**. Velocity windows are shown but cannot be edited in an
-instrument.
+Open a row for its waveform, to edit its root and top note, to play it, or to
+**Save WAV…**. Velocity windows are shown but cannot be edited in an instrument.
 
 A v2 instrument also has a gain and a detune for every key. **Per key** draws
 them as two lanes you paint across, or as a table for one key at a time.

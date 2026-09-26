@@ -12,12 +12,16 @@ once, and every switch can be turned back on. The file is laid out only when it
 has to be: on Save, Export, or Queue send. The header reads `applying…` while
 that runs, and the action waits for it.
 
+A plan is an unsaved edit like any other: the name is starred until it is saved,
+and **Revert** drops it.
+
 ## The key map
 
 Each root has a cell over the keys it answers, showing the megabytes it keeps.
 Drag the boundary between two roots to move keys, and the outer ends to cover or
-uncover keys. Click a key to hear which root answers it. Keys above the damper
-limit are shaded.
+uncover keys. Click a key to hear which root answers it, or play the keys on a
+[MIDI controller](overview.md#midi-controllers). A key sounds the loudest layer
+the plan keeps, however hard you play it. Keys above the damper limit are shaded.
 
 ## Trim to fit
 
@@ -36,9 +40,9 @@ segment to drop that layer for that root only.
 which is what the instrument files the library under. Kind changes nothing about
 the sound.
 
-**Roots** lists each root with its strokes. There you can trim a stroke in dB,
-audition the root, save it as a WAV, or drop it. **Per key** paints a fine tune
-across the keyboard.
+**Roots** lists each root with its strokes. Open one for the waveform of its
+loudest kept stroke. There you can trim a stroke in dB, audition the root, save
+it as a WAV, or drop it. **Per key** paints a fine tune across the keyboard.
 
 ## A new library
 

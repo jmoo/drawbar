@@ -238,7 +238,23 @@ async fn execute<T: Transport>(
             select(device, class, at)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
+            // `select` is what puts the panel on a slot, so this is the answer a
+            // `FOCUS` read would give, without walking the class for it.
+            emit.send(DeviceEvent::Focus {
+                class,
+                at: Some(at),
+            });
             Ok(Some(format!("selected {} on the instrument", shown(at))))
+        }
+
+        DeviceCmd::Reload { class, written } => {
+            let focus = reload(device, class, &written)
+                .await
+                .map_err(spoil(gone, None))?;
+            emit.send(DeviceEvent::Focus { class, at: focus });
+            Ok(focus
+                .filter(|at| written.contains(at))
+                .map(|at| format!("selected {} again to play what was written", shown(at))))
         }
 
         DeviceCmd::Rename { class, at, name } => {
@@ -869,6 +885,29 @@ async fn select<T: Transport>(
     device.read(class, async |s| op::select(s, at).await).await
 }
 
+/// Select the panel's slot again where it is one of `written`, and say where the
+/// panel is.
+async fn reload<T: Transport>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+    written: &[Location],
+) -> Result<Option<Location>, Error> {
+    device
+        .read(class, async |s| {
+            // Status 1 means supported but empty.
+            let focus = match op::focus(s).await {
+                Ok(at) => Some(at),
+                Err(Error::DeviceStatus(1)) => None,
+                Err(e) => return Err(e),
+            };
+            if let Some(at) = focus.filter(|at| written.contains(at)) {
+                op::select(s, at).await?;
+            }
+            Ok(focus)
+        })
+        .await
+}
+
 async fn rename<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -1479,6 +1518,79 @@ mod wire_tests {
                 class.label()
             );
         }
+    }
+
+    /// A select reports the slot it left the panel on.
+    #[test]
+    fn a_select_reports_where_it_left_the_panel() {
+        let at = Location { bank: 6, slot: 3 };
+        let mut device = Puppet::new(1);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::Select {
+                class: ObjectClass::Program,
+                at,
+            },
+        );
+
+        assert!(flow == Flow::Continue, "the instrument is still there");
+        assert!(
+            events.try_iter().any(|event| matches!(
+                event,
+                DeviceEvent::Focus {
+                    class: ObjectClass::Program,
+                    at: Some(loaded)
+                } if loaded == at
+            )),
+            "the select said nothing about the panel"
+        );
+    }
+
+    /// A reload selects the written slot only where the panel is still on it. A panel
+    /// turned elsewhere since the last walk keeps its slot and the edits made there.
+    #[test]
+    fn a_reload_selects_only_the_written_slot_the_panel_is_on() {
+        let written = Location { bank: 6, slot: 3 };
+        let turned = Location { bank: 2, slot: 1 };
+
+        let reloaded = |panel: Option<Location>| {
+            let mut device = Puppet::new(1);
+            if let Some(panel) = panel {
+                device = device.focused_on(panel);
+            }
+            let (flow, events) = drive(
+                &mut device,
+                DeviceCmd::Reload {
+                    class: ObjectClass::Program,
+                    written: vec![Location { bank: 0, slot: 0 }, written],
+                },
+            );
+            assert!(flow == Flow::Continue, "the instrument is still there");
+            let focus = events.try_iter().find_map(|event| match event {
+                DeviceEvent::Focus { at, .. } => Some(at),
+                _ => None,
+            });
+            let selected = device.first(cmd::SELECT).map(|msg| Location {
+                bank: u32::from_be_bytes(msg.args[0..4].try_into().unwrap()),
+                slot: u32::from_be_bytes(msg.args[4..8].try_into().unwrap()),
+            });
+            (selected, focus)
+        };
+
+        assert_eq!(
+            reloaded(Some(written)),
+            (Some(written), Some(Some(written)))
+        );
+        assert_eq!(
+            reloaded(Some(turned)),
+            (None, Some(Some(turned))),
+            "the panel was turned to another slot"
+        );
+        assert_eq!(
+            reloaded(None),
+            (None, Some(None)),
+            "the panel has nothing loaded"
+        );
     }
 
     #[test]

@@ -123,10 +123,16 @@ impl Log {
 
     /// The whole log as plain lines, for the clipboard.
     pub fn transcript(&self) -> String {
-        self.entries
-            .iter()
-            .map(|entry| format!("{:>8.1}s  {}\n", entry.at, entry.text))
-            .collect()
+        written(self.entries.iter())
+    }
+
+    /// The newest `most` entries, in the shape [`Log::transcript`] writes.
+    pub fn tail(&self, most: usize) -> String {
+        written(
+            self.entries
+                .iter()
+                .skip(self.entries.len() - most.min(self.len())),
+        )
     }
 
     /// The newest entry, for the collapsed header's one-line summary.
@@ -156,6 +162,12 @@ impl Log {
                 }
             });
     }
+}
+
+fn written<'a>(entries: impl Iterator<Item = &'a Entry>) -> String {
+    entries
+        .map(|entry| format!("{:>8.1}s  {}\n", entry.at, entry.text))
+        .collect()
 }
 
 #[cfg(test)]
@@ -189,6 +201,26 @@ mod tests {
         log.say("Reading Programs — bank 1…");
         log.info("bank 1: 43 of 50 slots hold something");
         assert_eq!(log.status().1, "Reading Programs — bank 1…");
+    }
+
+    #[test]
+    fn a_tail_carries_the_newest_entries_and_no_more_than_it_was_asked_for() {
+        let mut log = Log::default();
+        for n in 0..250 {
+            log.info(format!("line {n}"));
+        }
+        let tail: Vec<_> = log.tail(200).lines().map(str::to_string).collect();
+        assert_eq!(tail.len(), 200);
+        assert!(tail[0].ends_with("line 50"), "{:?}", tail[0]);
+        assert!(tail[199].ends_with("line 249"), "{:?}", tail[199]);
+    }
+
+    #[test]
+    fn a_tail_of_a_short_log_is_the_whole_log() {
+        let mut log = Log::default();
+        assert_eq!(log.tail(200), "");
+        log.info("only this");
+        assert_eq!(log.tail(200), log.transcript());
     }
 
     #[test]

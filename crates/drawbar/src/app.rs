@@ -12,6 +12,7 @@ use crate::document::Document;
 use crate::keyboard::Keyboard;
 use crate::library::Library;
 use crate::log::Log;
+use crate::midi::{Midi, Played};
 use crate::queue::Queue;
 use crate::shell::Shell;
 use crate::tabs::{Spot, Tabs};
@@ -165,10 +166,11 @@ pub struct DrawbarApp {
     pub(crate) document: Document,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
-    #[cfg(target_arch = "wasm32")]
-    splash: crate::splash::Splash,
-    /// Whether the About box is showing. Not kept between sessions.
-    pub(crate) about_open: bool,
+    /// The MIDI controllers listened to, whichever tab is in front.
+    pub(crate) midi: Midi,
+    pub(crate) splash: crate::splash::Splash,
+    /// The About box while it is showing. Not kept between sessions.
+    pub(crate) about: Option<crate::about::About>,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last caught up, on egui's own clock.
@@ -207,9 +209,9 @@ impl DrawbarApp {
             document: Document::default(),
             log: Log::default(),
             theme,
-            #[cfg(target_arch = "wasm32")]
+            midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
-            about_open: false,
+            about: None,
             saved: 0,
             saved_at: 0.0,
             left: crate::store::Left::default(),
@@ -218,6 +220,8 @@ impl DrawbarApp {
             crate::store::load(storage, &mut app.workspace, &mut app.log);
             app.browser.restore(storage);
             app.shell.restore(storage);
+            #[cfg(not(target_arch = "wasm32"))]
+            app.midi.restore(storage, &cc.egui_ctx);
             // Both stores are read; only now does the grouping know what survived.
             app.browser.settle(&app.workspace);
         }
@@ -273,16 +277,16 @@ impl DrawbarApp {
         }
     }
 
-    /// What changed in the version running: the notice again in a tab, where the notes
+    /// What changed in the version running: the change list in a tab, where the notes
     /// can be fetched; the release they were published on in a window, where they cannot.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
-        self.splash.open(ctx);
+        self.splash.open_news(ctx);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
-        let page = crate::about::release_page(crate::splash::VERSION);
+        let page = crate::about::release_page(crate::sheet::VERSION);
         ctx.open_url(egui::OpenUrl::new_tab(page));
     }
 
@@ -340,6 +344,8 @@ impl eframe::App for DrawbarApp {
         // moves on every frame of a drag, and the whole store is rewritten each time.
         self.browser.keep(storage);
         self.shell.keep(storage);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.midi.keep(storage);
         self.saved = self.workspace.revision();
     }
 
@@ -377,12 +383,12 @@ impl eframe::App for DrawbarApp {
         self.tabs.prune(&self.workspace);
         // Unedited views have no owner once their tab closes. An edited view is the only
         // copy of that edit and must survive.
-        self.workspace.close_views(
-            |id| self.tabs.holds(id),
-            |id| self.document.pends(id),
-            &self.queue,
-            &mut self.log,
-        );
+        self.workspace
+            .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
+        self.midi.report(&mut self.log);
+        // ⚠️ Taken every frame, whatever is in front: keys played over the library or the
+        // keyboard are dropped rather than left to sound when a document comes forward.
+        let played = self.midi.played(ctx.input(|input| input.time));
         self.take_dropped_files(ctx);
         drop_hint(ctx);
         // Raised by a New pick of WAVs, and answered before anything else this frame
@@ -390,9 +396,8 @@ impl eframe::App for DrawbarApp {
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
-        #[cfg(target_arch = "wasm32")]
-        self.splash.show(ctx);
-        crate::about::dialog(ctx, &mut self.about_open);
+        let asked = self.splash.show(ctx);
+        crate::about::dialog(ctx, &mut self.about, &self.log);
 
         // Before the panels, so an editor open in this frame still has the focus Escape
         // belongs to.
@@ -402,13 +407,14 @@ impl eframe::App for DrawbarApp {
         let mut acts = self
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
+        acts.extend(asked);
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
         self.status_bar(ctx, &mut acts);
         self.bottom_dock(ctx, &mut acts);
         self.browser_dock(ctx, &mut acts);
         self.inspector_dock(ctx, &mut acts);
-        self.centre(ctx, &mut acts);
+        self.centre(ctx, &played, &mut acts);
 
         // ⚠️ Between the panels and the acts they asked for: a piano library's plan is
         // not in its bytes yet, and whatever would carry those bytes waits here until it
@@ -436,7 +442,10 @@ impl eframe::App for DrawbarApp {
 
 impl DrawbarApp {
     /// The tab strip, and whatever the tab in front is a view of.
-    fn centre(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
+    ///
+    /// Keys `played` on a MIDI controller strike the key map of the document in front,
+    /// and nothing else.
+    fn centre(&mut self, ctx: &egui::Context, played: &Played, acts: &mut Vec<browser::Act>) {
         let fill = ctx.style().visuals.panel_fill;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(fill))
@@ -466,17 +475,24 @@ impl DrawbarApp {
                             &self.tabs,
                         ));
                     }
-                    Some(Spot::Document(id)) => self.open_document(ui, id, acts),
+                    Some(Spot::Document(id)) => self.open_document(ui, id, played, acts),
                 }
             });
     }
 
     /// A document owns its own room: the header is full bleed and the body inside it
     /// keeps the margin.
-    fn open_document(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<browser::Act>) {
+    fn open_document(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: u64,
+        played: &Played,
+        acts: &mut Vec<browser::Act>,
+    ) {
         let around = crate::document::Around {
             queue: &self.queue,
             tags: self.browser.tags(),
+            played,
         };
         let wants = self.document.ui(
             ui,

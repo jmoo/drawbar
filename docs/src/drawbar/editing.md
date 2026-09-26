@@ -18,11 +18,22 @@ over` when the send cannot happen yet.
 
 ## The faces
 
-- **Edit** is the sound's controls, in the instrument's own words.
-- **Metadata** is what the file says about itself, and changes nothing.
-- **Advanced** is every field in the file as a table, for when you need a value
-  the Edit face does not draw. Type into the **Writes** column to set one. A
-  value the field cannot hold is refused, with the reason.
+- **Basic** is the sound's controls, in the instrument's own words.
+- **Advanced** is the record of the bytes, top to bottom:
+  - **About this file**: what the file says about itself. Set lists, WAVs,
+    files with nothing to edit and bytes drawbar could not read have none.
+  - **Container**: what the file's header states, and whether its checksum
+    matches.
+  - **Changes**: the bytes that have moved since the file was last saved.
+  - **On the instrument**, for a document read from a slot: what the
+    instrument reports about that slot.
+  - The body. For a program, live slot, setting or preset this is every field
+    as a table, for a value the Basic face does not draw. Type into the
+    **Writes** column to set a field. A value the field cannot hold is refused,
+    with the reason. Samples and pianos list what drawbar can edit in them and
+    where it lands in the file, a set list shows its four stored slots, and a
+    file with nothing to edit shows its **Body bytes**. A WAV and bytes drawbar
+    could not read have no body to show.
 
 ## Programs, live slots, settings and presets
 
@@ -51,11 +62,25 @@ A set list opens as the programs it plays, one row each, with its bank and slot,
 the program's name where drawbar knows it, and whether the entry resolves. Drag
 rows to reorder them.
 
+## Notes
+
+A text file opens as a box you type in: the set list, the cues, what the desk
+needs. drawbar has no format for one and needs none. A file it cannot decode is
+a note when it is UTF-8 text of up to 256 KiB, so a `.txt`, a `.md` or any
+other plain text file opens the same way, and **New ▸ Text note** starts an
+empty one. Tab types a tab. Pasted control characters other than tab and line
+breaks are dropped.
+
+A note is saved, reverted, renamed, filed, tagged and exported like anything
+else on the list. The header counts its lines where another document's header
+gives its size. Notes stay on this computer; see
+[What is supported](../getting-started/support.md).
+
 ## Files with nothing to edit
 
-A file drawbar recognises but cannot yet edit opens with what the container says
-and a look at its bytes. It can still be sent, copied and tagged, and goes up
-byte for byte as it came down.
+A file drawbar recognises but cannot yet edit opens with what the container
+says; its bytes are under **Body bytes** on the Advanced face. It can still be
+sent, copied and tagged, and goes up byte for byte as it came down.
 
 Sample instruments and piano libraries have editors of their own. See
 [Samples](samples.md) and [Pianos](pianos.md).

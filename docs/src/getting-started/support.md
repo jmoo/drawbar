@@ -13,6 +13,7 @@ sample files. Connecting other instruments over USB has not been tried.
 | Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, audition, transfer | Playback of v2 files. Files encoded as v3 or v4 have not been played |
 | Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs, transfer | Trimmed, built and re-encoded libraries play, mono and stereo, across every key they cover. Renames, retunes, remaps and a narrowed key range have not been played |
 | Other Nord files | Recognised and kept byte for byte, without editing | |
+| Text files | Edit, keep beside your files | Never sent to an instrument |
 
 ## USB
 
@@ -20,6 +21,13 @@ Reading and writing programs, set lists, live slots, settings, samples and piano
 works on the Electro 5 from macOS, Linux and the browser. Windows builds pass the
 protocol tests but have not been run against an instrument. No other instrument
 has been connected, so USB support for other models cannot be guaranteed.
+
+## MIDI controllers
+
+The sample and piano key maps can be played from a MIDI controller. The desktop
+app listens on every MIDI input the computer has. In the browser, Chrome, Edge
+and Firefox can hear a controller. Safari cannot, so drawbar greys out the menu
+item there. Firefox asks you to allow MIDI access for the site first.
 
 ## What "tested" means
 

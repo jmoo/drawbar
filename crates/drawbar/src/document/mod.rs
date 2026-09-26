@@ -13,6 +13,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::Device;
 use crate::fields;
 use crate::log::Log;
+use crate::midi::Played;
 use crate::queue::Queue;
 use crate::strings;
 use crate::tags::Tags;
@@ -31,6 +32,7 @@ mod project;
 pub(crate) mod sample;
 mod setlist;
 mod table;
+pub(crate) mod text;
 mod verbatim;
 
 use advanced::Advanced;
@@ -66,6 +68,8 @@ pub(super) enum Shape {
     Project,
     /// An `npno` piano library, edited as a plan over bytes nothing copies.
     Piano,
+    /// Bytes that did not decode and are words, edited as the text they are.
+    Text,
     /// A body no registry describes, kept byte for byte.
     Verbatim,
     /// Bytes that did not decode, and are audio an instrument can be built from.
@@ -100,8 +104,13 @@ fn shape(entity: &LocalEntity) -> Shape {
     use nord_format::Entity as E;
 
     let Some(decoded) = &entity.entity else {
-        return match encode::is_wav(&entity.bytes) {
-            true => Shape::Wav,
+        // ⚠️ Ordered: a WAV is the one undecoded thing this app can make an instrument
+        // out of, and it is not text, so nothing here reads one as words.
+        if encode::is_wav(&entity.bytes) {
+            return Shape::Wav;
+        }
+        return match entity.is_text {
+            true => Shape::Text,
             false => Shape::Undecoded,
         };
     };
@@ -142,11 +151,14 @@ pub struct SendBack {
     pub at: Location,
 }
 
-/// The rest of the window a document reads: what is waiting to be sent, and what this
-/// computer's list labels things with.
+/// The rest of the window a document reads: what is waiting to be sent, what this
+/// computer's list labels things with, and what a MIDI controller played since the last
+/// frame.
 pub struct Around<'a> {
     pub queue: &'a Queue,
     pub tags: &'a Tags,
+    /// Its keys strike the key map, where this face of this document shows one.
+    pub played: &'a Played,
 }
 
 /// What a document's frame asked the app for.
@@ -161,7 +173,7 @@ pub struct Wants {
     pub open: Option<crate::browser::Item>,
 }
 
-/// What the Edit face asked for that cannot be done while the asset is borrowed to
+/// What the Basic face asked for that cannot be done while the asset is borrowed to
 /// draw it: audio, or a new asset made out of this one.
 enum Asked {
     Zone(sample::Ask),
@@ -192,9 +204,6 @@ struct Opened {
     paths: std::collections::HashMap<u32, String>,
     /// The last refusal, and what caused it.
     error: Option<String>,
-    /// Whether this document has already had its dependencies read without being asked.
-    /// One read per document: the button is what asks for another.
-    fetched_deps: bool,
     /// The encode panel over a WAV, and the read of the WAV it works from.
     wav: Option<(encode::Draft, encode::Source)>,
     /// What the instrument editor keeps between frames: the open zone, the struck key,
@@ -206,6 +215,8 @@ struct Opened {
     /// What the set list editor keeps: the half-typed address boxes and whether a
     /// reorder has been made.
     list: setlist::State,
+    /// What the note editor keeps between frames: the words in its box.
+    text: text::State,
 }
 
 impl Opened {
@@ -223,7 +234,6 @@ impl Opened {
             variant,
             paths: std::collections::HashMap::new(),
             error: None,
-            fetched_deps: false,
             wav: match asset.shape {
                 Shape::Wav => Some((
                     encode::Draft::new(&entity.name),
@@ -234,12 +244,14 @@ impl Opened {
                 | Shape::Sample
                 | Shape::Project
                 | Shape::Piano
+                | Shape::Text
                 | Shape::Verbatim
                 | Shape::Undecoded => None,
             },
             sample: sample::State::default(),
             fields: field::State::default(),
             list: setlist::State::default(),
+            text: text::State::default(),
         }
     }
 }
@@ -250,12 +262,12 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
-    /// The engineering table's filter and cell, and the decode it last laid out. One
-    /// table serves every tab — see [`Advanced::leave`].
+    /// The engineering table's filter and cell, and the byte diff it last worked out.
+    /// One table serves every tab — see [`Advanced::leave`].
     advanced: Advanced,
-    /// Zone audio decoded on request, dropped when the bytes under it change.
+    /// The audio of the zones open rows have shown, dropped when their strokes change.
     audio: sample::Cache,
-    /// Which zone is sounding, and the one backend that makes it sound.
+    /// Which zones are sounding, and the one backend that makes them sound.
     player: crate::audio::Player,
     /// The piano library's plan, the facts it is a plan over, and its decoded strokes.
     ///
@@ -275,6 +287,7 @@ impl Document {
         log: &mut Log,
         around: &Around<'_>,
     ) -> Wants {
+        let played = around.played;
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
@@ -297,18 +310,18 @@ impl Document {
             self.player.stop();
             self.piano.leave();
         }
-        // Decoded audio belongs to one set of bytes; an edit re-encodes all of them.
         self.audio.follow(id, entity.stamp);
         // Paint marks are measured against the bytes the asset was last saved as.
         if let Some(open) = &mut self.open {
             sample::follow(&mut open.sample, id, &entity.saved);
         }
-        self.player.settle();
-        if let Some(left) = self.piano.settle(ui.input(|input| input.time)) {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        // A release is heard whatever face is showing: the key it lets go of may have
+        // been struck on another.
+        for key in &played.released {
+            self.player.release(*key);
         }
-        if self.player.playing().is_some() {
+        self.player.settle();
+        if self.player.sounding().next().is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -341,6 +354,7 @@ impl Document {
             | Shape::SetList
             | Shape::Sample
             | Shape::Project
+            | Shape::Text
             | Shape::Verbatim
             | Shape::Wav
             | Shape::Undecoded => extras(asset, device, workspace, pending),
@@ -375,7 +389,7 @@ impl Document {
         };
         let mut details = None;
         let mut typed = false;
-        let mut asked = None;
+        let mut asked = Vec::new();
         let mut lookup = piano_lookup(entity, registry.as_deref(), device);
         // A `Ui` of its own rather than a `Frame`: the margin is the same, and the
         // salted id keeps the body's scroll state answering to one name whatever the
@@ -395,8 +409,8 @@ impl Document {
             if let Some(why) = self.open.as_ref().and_then(|open| open.error.as_ref()) {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
-            if face == Face::Edit {
-                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets);
+            if face == Face::Basic {
+                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets, played);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -405,8 +419,8 @@ impl Document {
                     // ⚠️ Widget state keyed only by field path leaks between tabs of
                     // the same format, so every control also answers to the document id.
                     ui.push_id(id, |ui| match face {
-                        Face::Edit => {
-                            if let Some(from_body) = self.body(
+                        Face::Basic => {
+                            let from_body = self.body(
                                 ui,
                                 asset,
                                 doc.as_ref(),
@@ -416,45 +430,21 @@ impl Document {
                                     workspace,
                                 },
                                 &mut sets,
-                            ) {
-                                asked = Some(from_body);
-                            }
+                            );
+                            asked.extend(from_body);
                         }
-                        Face::Advanced => match shape {
-                            Shape::Fields => {
-                                if let (Some(doc), Some(open)) = (doc.as_ref(), self.open.as_ref())
-                                {
-                                    Advanced::about(ui, &field::about(doc, entity));
-                                    let table = advanced::Table {
-                                        fields: registry.as_deref().unwrap_or_default(),
-                                        saved: open.fields.settled(),
-                                        changed: open.fields.pending(),
-                                        doc: Some(doc),
-                                    };
-                                    self.advanced.table(ui, &table, &mut sets);
-                                    typed = !sets.is_empty();
-                                }
-                            }
-                            Shape::Piano => self.piano.advanced(ui),
-                            Shape::SetList
-                            | Shape::Sample
-                            | Shape::Project
-                            | Shape::Verbatim
-                            | Shape::Wav
-                            | Shape::Undecoded => capabilities(ui, asset),
-                        },
-                        Face::Metadata => {
-                            match shape {
-                                Shape::Piano => self.piano.meta(ui),
-                                Shape::Fields
-                                | Shape::SetList
-                                | Shape::Sample
-                                | Shape::Project
-                                | Shape::Verbatim
-                                | Shape::Wav
-                                | Shape::Undecoded => record(ui, asset),
-                            }
-                            details = self.advanced.meta(ui, entity, device)
+                        // What the file says about itself, the record of the bytes
+                        // it is, then the body itself — the longest of the three last.
+                        Face::Advanced => {
+                            self.states(ui, asset, doc.as_ref());
+                            details = self.advanced.meta(ui, entity, device);
+                            typed = self.deep(
+                                ui,
+                                asset,
+                                doc.as_ref(),
+                                registry.as_deref().unwrap_or_default(),
+                                &mut sets,
+                            );
                         }
                     });
                 });
@@ -467,21 +457,21 @@ impl Document {
                 device.send(cmd, log);
             }
         }
-        match asked {
-            Some(Asked::Open(item)) => wants.open = Some(item),
-            Some(Asked::Advanced) => {
-                self.views.insert(id, Face::Advanced);
+        for asked in asked {
+            match asked {
+                Asked::Open(item) => wants.open = Some(item),
+                Asked::Advanced => {
+                    self.views.insert(id, Face::Advanced);
+                }
+                Asked::Export => self.export(ui.ctx(), id, workspace),
+                asked => self.answer(id, asked, workspace, log),
             }
-            Some(Asked::Export) => self.export(ui.ctx(), id, workspace),
-            Some(asked) => self.answer(id, asked, workspace, log),
-            None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            if lookup.asked || self.owes_deps(&lookup, (class, at), device) {
-                if let Some(open) = &mut self.open {
-                    open.fetched_deps = true;
-                }
-                device.send(crate::device::DeviceCmd::Deps { class, at }, log);
+            match lookup.asked {
+                true => device.ask_deps_again(class, at, log),
+                false if lookup.wants_a_name() => device.read_deps(class, at, log),
+                false => {}
             }
         }
         if let Some(name) = act.rename {
@@ -508,9 +498,11 @@ impl Document {
             }
         }
         self.replan(id, workspace, log);
-        if workspace.get(id).is_some_and(|held| held.stamp != stamp) {
-            // The strip was drawn from the bytes this frame then edited; one more frame
-            // shows what the edit made of them.
+        // The strip was drawn before this frame's edit reached the document; one more
+        // frame shows what the edit, or the plan it left standing, made of it.
+        let edited = self.note_pending(id, workspace)
+            || workspace.get(id).is_some_and(|held| held.stamp != stamp);
+        if edited {
             ui.ctx().request_repaint();
         }
         wants
@@ -545,8 +537,17 @@ impl Document {
     }
 
     /// Whether this document holds an edit its bytes do not.
-    pub fn pends(&self, id: u64) -> bool {
+    fn pends(&self, id: u64) -> bool {
         self.piano.pending(id)
+    }
+
+    /// Tell the workspace what this document is holding, and answer with whether that
+    /// moved.
+    ///
+    /// The plan lives here, but unsaved is asked of the asset — see
+    /// [`LocalEntity::is_unsaved`]. Run wherever a plan is taken up or laid out.
+    fn note_pending(&self, id: u64, workspace: &mut Workspace) -> bool {
+        workspace.mark_pending(id, self.pends(id))
     }
 
     /// Hold back the acts that would carry a piano library's bytes while its plan is
@@ -605,6 +606,7 @@ impl Document {
             Some(Ok(bytes)) => {
                 self.refused(None);
                 workspace.replace_bytes(applied.id, bytes, log);
+                self.note_pending(applied.id, workspace);
             }
             Some(Err(why)) => {
                 log.error(why.clone());
@@ -648,32 +650,14 @@ impl Document {
         }
     }
 
-    /// The root the speakers are on, where it is this document's.
-    fn sounding_root(&self) -> Option<u8> {
-        let (id, root) = self.player.playing()?;
-        (Some(id) == self.opened()).then_some(())?;
-        u8::try_from(root).ok()
-    }
-
-    /// Whether this frame should read the slot's dependencies without being asked to.
-    ///
-    /// The piano's name is the one thing about a program that no file carries, so a
-    /// document opened off a slot with an instrument attached reads it straight away
-    /// rather than sitting on an id until someone clicks. Once per document, and never
-    /// with nothing to learn: no instrument, no piano named, a name already in hand, or a
-    /// list the instrument has already given for this slot and simply did not name it in.
-    fn owes_deps(
-        &self,
-        lookup: &panel::PianoLookup,
-        slot: (ObjectClass, Location),
-        device: &Device,
-    ) -> bool {
-        let fetched = self.open.as_ref().is_none_or(|open| open.fetched_deps);
-        if fetched || !lookup.can_ask || lookup.id.is_none() || lookup.name.is_some() {
-            return false;
-        }
-        let detail = &device.state.detail;
-        !(detail.at == Some(slot) && detail.deps.is_some())
+    /// The roots sounding, where they are this document's.
+    fn sounding_roots(&self) -> Vec<u8> {
+        let opened = self.opened();
+        self.player
+            .sounding()
+            .filter(|(id, _)| Some(*id) == opened)
+            .filter_map(|(_, root)| u8::try_from(root).ok())
+            .collect()
     }
 
     /// Nothing is open any more.
@@ -709,13 +693,18 @@ impl Document {
                 setlist::ui(ui, &mut open.list, asset.entity, seen, sets).map(Asked::Open)
             }
             Shape::Piano => {
-                let sounding = self.sounding_root();
-                self.piano.ui(ui, sounding).map(Asked::Root)
+                let sounding = self.sounding_roots();
+                self.piano.ui(ui, &sounding).map(Asked::Root)
             }
             Shape::Fields => {
                 let open = self.open.as_mut()?;
                 field::body(ui, &open.ctx, &mut open.fields, doc?, piano, sets)
                     .then_some(Asked::Advanced)
+            }
+            Shape::Text => {
+                let open = self.open.as_mut()?;
+                open.text.ui(ui, asset.entity, sets);
+                None
             }
             Shape::Verbatim => verbatim::ui(ui, asset.entity).then_some(Asked::Export),
         }
@@ -749,16 +738,76 @@ impl Document {
                 return None;
             }
         };
-        let sounding = self.player.playing();
         let target = self.opened();
         let sounds: Vec<sample::Sound> = (0..snapshot.zones.len())
             .map(|index| sample::Sound {
                 decoded: self.audio.get(index),
-                playing: sounding == target.map(|id| (id, index)),
+                playing: target.is_some_and(|id| self.player.sounds((id, index))),
             })
             .collect();
         let open = self.open.as_mut()?;
         sample::ui(ui, &mut open.sample, &snapshot, &sounds, sets)
+    }
+
+    /// What the file says about itself, which is where the Advanced face opens.
+    fn states(&mut self, ui: &mut egui::Ui, asset: Asset<'_>, doc: Option<&field::Doc<'_>>) {
+        match asset.shape {
+            Shape::Fields => {
+                if let Some(doc) = doc {
+                    Advanced::about(ui, &field::about(doc, asset.entity));
+                }
+            }
+            Shape::Piano => self.piano.meta(ui),
+            Shape::SetList
+            | Shape::Sample
+            | Shape::Project
+            | Shape::Verbatim
+            | Shape::Text
+            | Shape::Wav
+            | Shape::Undecoded => record(ui, asset),
+        }
+    }
+
+    /// The body itself, under the record: the field table where a registry describes the
+    /// bytes, and what the format holds where none does. Answers whether a cell of the
+    /// table is being typed in.
+    fn deep(
+        &mut self,
+        ui: &mut egui::Ui,
+        asset: Asset<'_>,
+        doc: Option<&field::Doc<'_>>,
+        registry: &[Field],
+        sets: &mut Sets,
+    ) -> bool {
+        match asset.shape {
+            Shape::Fields => {
+                let (Some(doc), Some(open)) = (doc, self.open.as_ref()) else {
+                    return false;
+                };
+                let table = advanced::Table {
+                    fields: registry,
+                    saved: open.fields.settled(),
+                    changed: open.fields.pending(),
+                    doc: Some(doc),
+                };
+                self.advanced.table(ui, &table, sets);
+                !sets.is_empty()
+            }
+            Shape::Piano => {
+                self.piano.advanced(ui);
+                false
+            }
+            Shape::SetList
+            | Shape::Sample
+            | Shape::Project
+            | Shape::Text
+            | Shape::Verbatim
+            | Shape::Wav
+            | Shape::Undecoded => {
+                capabilities(ui, asset);
+                false
+            }
+        }
     }
 
     /// What an editor keeps in front of the body: above the scroll region, on the panel
@@ -772,39 +821,62 @@ impl Document {
         asset: Asset<'_>,
         doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
-    ) -> Option<Asked> {
+        played: &Played,
+    ) -> Vec<Asked> {
+        if asset.shape == Shape::Piano {
+            return self
+                .piano
+                .map(ui, played)
+                .into_iter()
+                .map(Asked::Root)
+                .collect();
+        }
+        let (Some(open), Some(decoded)) = (self.open.as_mut(), asset.decoded()) else {
+            return Vec::new();
+        };
         match asset.shape {
             Shape::Fields => {
-                field::nav(ui, &mut self.open.as_mut()?.fields, doc?);
-                None
-            }
-            Shape::Piano => self.piano.map(ui).map(Asked::Root),
-            Shape::Sample => match sample::snapshot(asset.decoded()?)? {
-                Ok(snapshot) => {
-                    let open = self.open.as_mut()?;
-                    sample::map(ui, &mut open.sample, &snapshot, sets).map(Asked::Zone)
+                if let Some(doc) = doc {
+                    field::nav(ui, &mut open.fields, doc);
                 }
-                Err(_) => None,
-            },
+            }
+            Shape::Sample => {
+                if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+                    let asks = sample::map(ui, &mut open.sample, &snapshot, sets, played);
+                    return asks.into_iter().map(Asked::Zone).collect();
+                }
+            }
             Shape::Project => {
-                if let Some(Ok(snapshot)) = project::snapshot(asset.decoded()?) {
-                    project::map(ui, &mut self.open.as_mut()?.sample, &snapshot, sets);
+                if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+                    project::map(ui, &mut open.sample, &snapshot, sets, played);
                 }
-                None
             }
-            Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+            Shape::Piano
+            | Shape::SetList
+            | Shape::Text
+            | Shape::Verbatim
+            | Shape::Wav
+            | Shape::Undecoded => {}
         }
+        Vec::new()
     }
 
     /// Do what the Basic view asked for, now that nothing is borrowing the asset.
     fn answer(&mut self, id: u64, asked: Asked, workspace: &mut Workspace, log: &mut Log) {
         match asked {
             Asked::Zone(sample::Ask::Decode(zone)) => {
+                if !self.audio.due(zone) {
+                    return;
+                }
                 if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
                     self.audio.decode(decoded, zone);
                 }
             }
-            Asked::Zone(sample::Ask::Strike { zone, semitones }) => {
+            Asked::Zone(sample::Ask::Strike {
+                zone,
+                semitones,
+                finger,
+            }) => {
                 if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
                     self.audio.decode(decoded, zone);
                 }
@@ -813,6 +885,7 @@ impl Document {
                 };
                 let rate = crate::audio::rate(semitones);
                 if let Err(why) = self.player.strike(
+                    finger,
                     (id, zone),
                     &decoded.audio.samples,
                     decoded.audio.channels,
@@ -825,8 +898,8 @@ impl Document {
             Asked::Zone(sample::Ask::Play(zone)) => {
                 // ⚠️ An edit drops the decode of a zone that goes on sounding, so
                 // stopping the one that is sounding cannot wait on audio in hand.
-                if self.player.playing() == Some((id, zone)) {
-                    self.player.stop();
+                if self.player.sounds((id, zone)) {
+                    self.player.silence((id, zone));
                 } else if let Some(Ok(decoded)) = self.audio.get(zone) {
                     if let Err(why) = self.player.toggle(
                         (id, zone),
@@ -866,22 +939,30 @@ impl Document {
         }
     }
 
-    /// Hear or write one root of a piano library. The stroke is decoded on the way,
-    /// once, because either answer needs it.
+    /// Draw, hear or write one root of a piano library. The stroke is decoded on the
+    /// way, once, because every answer needs it.
     fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
         let root = ask.root();
+        if ask == piano::Ask::Show(root) && !self.piano.due(root) {
+            return;
+        }
         let Some(entity) = workspace.get(id) else {
             return;
         };
         if let Err(why) = self.piano.decode(entity, root) {
-            log.error(why);
-            log.trouble("That root could not be decoded.");
+            // ⚠️ An open row asks for its own waveform: it says why it has none, and
+            // the log is for what the operator asked for.
+            if !matches!(ask, piano::Ask::Show(_)) {
+                log.error(why);
+                log.trouble("That root could not be decoded.");
+            }
             return;
         }
         let Some(sound) = self.piano.sound(root) else {
             return;
         };
         match ask {
+            piano::Ask::Show(_) => {}
             piano::Ask::Play(_) => {
                 if let Err(why) =
                     self.player
@@ -891,12 +972,17 @@ impl Document {
                     log.trouble("This computer would not play that root.");
                 }
             }
-            piano::Ask::Strike { semitones, .. } => {
+            piano::Ask::Strike {
+                semitones, finger, ..
+            } => {
                 let rate = crate::audio::rate(semitones);
-                if let Err(why) =
-                    self.player
-                        .strike((id, usize::from(root)), sound.samples, sound.channels, rate)
-                {
+                if let Err(why) = self.player.strike(
+                    finger,
+                    (id, usize::from(root)),
+                    sound.samples,
+                    sound.channels,
+                    rate,
+                ) {
                     log.error(why);
                     log.trouble("This computer would not play that root.");
                 }
@@ -983,16 +1069,18 @@ impl Document {
         let Some(entity) = workspace.get(id) else {
             return Ok(());
         };
+        let (before, edited) = (entity.stamp, shape(entity));
         // ⚠️ Over the asset's own bytes, never a copy of them. A piano library is
         // hundreds of megabytes and every set of every frame comes through here; the
         // piano arm makes no bytes at all, because its sets land in a plan.
-        let made = match shape(entity) {
+        let made = match edited {
             Shape::Sample => sample::apply(&entity.bytes, &sets).map(Some),
             Shape::Project => project::apply(&entity.bytes, &sets).map(Some),
             // A piano's sets land in its plan, and the plan is what makes its bytes —
             // see [`Document::replan`].
             Shape::Piano => self.piano.take(&sets).map(|()| None),
             Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
+            Shape::Text => text::apply(&entity.bytes, &sets).map(Some),
             Shape::Fields | Shape::Verbatim | Shape::Wav | Shape::Undecoded => {
                 fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
             }
@@ -1011,37 +1099,38 @@ impl Document {
         if let Some(out) = made {
             workspace.replace_bytes(id, out, log);
         }
+        if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
+            if let Some(decoded) = &held.entity {
+                self.audio.carry(id, (before, held.stamp), decoded);
+            }
+        }
         Ok(())
     }
 }
 
 /// The faces this document offers, in the order the control shows them.
 ///
-/// Metadata is always one of them — every asset has a record, even bytes that decoded
+/// Advanced is always one of them — every asset has a record, even bytes that decoded
 /// into nothing.
 fn faces(shape: Shape) -> Vec<Face> {
     // A WAV decodes into nothing, but it is the one thing this app can make an
-    // instrument out of, so it gets a panel rather than only a byte record. The deep
-    // face is whatever the panel left out: the field table, the capability table, the
-    // addresses a set list stores, or the body a verbatim document keeps.
-    let (panel, deep) = match shape {
+    // instrument out of, so it gets a panel rather than only a byte record.
+    let panel = match shape {
         Shape::Fields
         | Shape::SetList
         | Shape::Sample
         | Shape::Project
         | Shape::Piano
-        | Shape::Verbatim => (true, true),
-        Shape::Wav => (true, false),
-        Shape::Undecoded => (false, false),
+        | Shape::Text
+        | Shape::Verbatim
+        | Shape::Wav => true,
+        Shape::Undecoded => false,
     };
     let mut faces = Vec::new();
     if panel {
-        faces.push(Face::Edit);
+        faces.push(Face::Basic);
     }
-    faces.push(Face::Metadata);
-    if deep {
-        faces.push(Face::Advanced);
-    }
+    faces.push(Face::Advanced);
     faces
 }
 
@@ -1086,9 +1175,12 @@ fn extras(
                 ..header::Extras::default()
             }
         }
-        Shape::Sample | Shape::Project | Shape::Piano | Shape::Wav | Shape::Undecoded => {
-            header::Extras::default()
-        }
+        Shape::Sample
+        | Shape::Project
+        | Shape::Piano
+        | Shape::Text
+        | Shape::Wav
+        | Shape::Undecoded => header::Extras::default(),
     }
 }
 
@@ -1097,7 +1189,7 @@ fn extras(
 fn showing(faces: &[Face], remembered: Face) -> Face {
     match faces.contains(&remembered) {
         true => remembered,
-        false => faces.first().copied().unwrap_or(Face::Metadata),
+        false => faces.first().copied().unwrap_or(Face::Advanced),
     }
 }
 
@@ -1120,6 +1212,7 @@ fn record(ui: &mut egui::Ui, asset: Asset<'_>) {
         Shape::Fields
         | Shape::SetList
         | Shape::Piano
+        | Shape::Text
         | Shape::Verbatim
         | Shape::Wav
         | Shape::Undecoded => {}
@@ -1148,7 +1241,7 @@ fn capabilities(ui: &mut egui::Ui, asset: Asset<'_>) {
         }
         Shape::SetList => setlist::stored(ui, decoded),
         Shape::Verbatim => verbatim::bytes(ui, asset.entity),
-        Shape::Fields | Shape::Piano | Shape::Wav | Shape::Undecoded => {}
+        Shape::Fields | Shape::Piano | Shape::Text | Shape::Wav | Shape::Undecoded => {}
     }
 }
 
@@ -1226,7 +1319,7 @@ fn piano_lookup(
         .filter(|id| *id != 0);
     let slot = entity.origin.slot();
     let name = id
-        .and_then(|id| device.state.dependency_name(slot, ObjectClass::Piano, id))
+        .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
         .map(str::to_string);
     let models = registry
         .map(|fields| piano_models(fields, device))
@@ -1245,6 +1338,7 @@ fn piano_lookup(
         id,
         name,
         can_ask: slot.is_some() && device.state.connected(),
+        refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
         asked: false,
         models,
         scan_disagrees,
@@ -1303,6 +1397,26 @@ pub(crate) fn library_id(value: &str) -> Option<u32> {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
         None => text.parse().ok(),
     }
+}
+
+/// Every shape a frame painted, with the clip it was painted under, lists opened.
+#[cfg(test)]
+fn leaves(output: &egui::FullOutput) -> Vec<(egui::Rect, &egui::Shape)> {
+    fn open<'a>(
+        clip: egui::Rect,
+        shape: &'a egui::Shape,
+        into: &mut Vec<(egui::Rect, &'a egui::Shape)>,
+    ) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| open(clip, shape, into)),
+            shape => into.push((clip, shape)),
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        open(clipped.clip_rect, &clipped.shape, &mut found);
+    }
+    found
 }
 
 #[cfg(test)]
@@ -1410,15 +1524,12 @@ mod tests {
                         &Around {
                             queue: &self.queue,
                             tags: &self.tags,
+                            played: &Played::default(),
                         },
                     );
                 });
             });
-            let mut said = Vec::new();
-            for clipped in &output.shapes {
-                words(&clipped.shape, &mut said);
-            }
-            said
+            placed(&output).into_iter().map(|(word, _)| word).collect()
         }
 
         /// One frame, and every shape it painted — for what a word says and where.
@@ -1442,6 +1553,7 @@ mod tests {
                         &Around {
                             queue: &self.queue,
                             tags: &self.tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -1456,16 +1568,22 @@ mod tests {
         }
     }
 
-    fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-        match shape {
-            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-            _ => {}
-        }
+    /// Every word a frame painted, with the rect it was painted in.
+    fn placed(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        leaves(output)
+            .into_iter()
+            .filter_map(|(_, shape)| match shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     fn render(sets: &[(&str, &str)], kind: Fresh) {
-        render_view(sets, kind, Face::Edit);
+        render_view(sets, kind, Face::Basic);
     }
 
     /// Every kind gets the same strip, in both faces of the theme, and it names the
@@ -1482,8 +1600,8 @@ mod tests {
                 });
                 let said = open.twice();
                 let has = |word: &str| said.iter().any(|held| held == word);
-                assert!(has("Edit"), "{kind:?} in {dark}: {said:?}");
-                assert!(has("Metadata"), "{kind:?} in {dark}: {said:?}");
+                assert!(has("Basic"), "{kind:?} in {dark}: {said:?}");
+                assert!(has("Advanced"), "{kind:?} in {dark}: {said:?}");
                 assert!(has("Queue send"), "the loud action: {said:?}");
                 assert!(has("Revert") && has("Export…"), "the quiet ones: {said:?}");
             }
@@ -1510,23 +1628,19 @@ mod tests {
         open.frame(Vec::new());
         let output = open.output(Vec::new());
 
-        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-            match shape {
-                egui::Shape::Text(text) => into.push((
+        let words: Vec<(String, egui::Rect)> = leaves(&output)
+            .into_iter()
+            .filter_map(|(_, shape)| match shape {
+                egui::Shape::Text(text) => Some((
                     match text.galley.rows.len() {
                         1 => text.galley.text().to_string(),
                         rows => format!("{} (in {rows} rows)", text.galley.text()),
                     },
                     egui::Rect::from_min_size(text.pos, text.galley.size()),
                 )),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut words = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut words);
-        }
+                _ => None,
+            })
+            .collect();
         let header: Vec<&(String, egui::Rect)> =
             words.iter().filter(|(_, rect)| rect.top() < 70.0).collect();
         for (word, _) in &header {
@@ -1537,11 +1651,10 @@ mod tests {
         }
         // The controls, and the glyphs painted where their art would load. The kind
         // glyph at the far left is the one glyph that is not a control.
-        const CONTROLS: [&str; 7] = [
+        const CONTROLS: [&str; 6] = [
             "Send",
             "Queue send",
-            "Edit",
-            "Metadata",
+            "Basic",
             "Advanced",
             "Revert",
             "Export…",
@@ -1589,16 +1702,19 @@ mod tests {
 
         let full = at(1100.0);
         assert!(full.contains(&"Export…".to_string()), "{full:?}");
-        assert!(full.contains(&"Edit".to_string()));
+        assert!(full.contains(&"Basic".to_string()));
         assert!(full.contains(&"Queue send".to_string()));
 
         let quiet = at(900.0);
         assert!(!quiet.contains(&"Export…".to_string()), "{quiet:?}");
-        assert!(quiet.contains(&"Edit".to_string()), "the faces keep theirs");
+        assert!(
+            quiet.contains(&"Basic".to_string()),
+            "the faces keep theirs"
+        );
         assert!(quiet.contains(&"Queue send".to_string()));
 
         let faces = at(800.0);
-        assert!(!faces.contains(&"Edit".to_string()), "{faces:?}");
+        assert!(!faces.contains(&"Basic".to_string()), "{faces:?}");
         assert!(faces.contains(&"Queue send".to_string()));
 
         let narrow = at(700.0);
@@ -1733,6 +1849,10 @@ mod tests {
     /// A click inside the name box, which sits after the kind glyph at the left of the
     /// strip.
     const NAME_BOX: egui::Pos2 = egui::pos2(100.0, 19.0);
+
+    /// The bottom-right corner of the page a document draws in, which is inside a
+    /// note's box only if the box fills the page.
+    const PAGE_CORNER: egui::Pos2 = egui::pos2(SCREEN.x - 24.0, SCREEN.y - 24.0);
 
     fn click(at: egui::Pos2) -> egui::Event {
         egui::Event::PointerButton {
@@ -1870,23 +1990,97 @@ mod tests {
         );
     }
 
-    /// What the Edit face hides is a row in Advanced like any other, counted where the
-    /// reader can see how much of the body is not on the other face.
+    /// Advanced opens on what the file says about itself, and the table under it holds
+    /// every field — the ones Basic hides included, counted where the reader can see how
+    /// much of the body the other face leaves out.
     #[test]
-    fn the_fields_the_edit_face_hides_are_rows_under_advanced() {
+    fn the_advanced_face_holds_the_record_and_the_fields_basic_hides() {
         let mut open = Open::fresh(Fresh::Program);
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
         let reading = said
             .iter()
-            .find(|word| word.contains("hidden from Edit"))
-            .unwrap_or_else(|| panic!("the table counts what Edit does not draw: {said:?}"));
+            .find(|word| word.contains("hidden from Basic"))
+            .unwrap_or_else(|| panic!("the table counts what Basic does not draw: {said:?}"));
         assert!(!reading.contains("· 0 hidden"), "{reading}");
+        for section in ["About this file", "Every field"] {
+            assert!(
+                said.iter().any(|word| word == section),
+                "{section}: {said:?}"
+            );
+        }
+    }
+
+    /// The Advanced face reads in one order: what the file says it is, the record of
+    /// the bytes it holds, then the body itself, the longest block last.
+    #[test]
+    fn the_advanced_face_reads_from_the_record_down_to_the_body() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.document.views.insert(open.id, Face::Advanced);
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
+        let placed = placed(&output);
+        let top = |word: &str| -> f32 {
+            placed
+                .iter()
+                .find(|(text, _)| text == word)
+                .unwrap_or_else(|| panic!("{word} was never painted: {placed:?}"))
+                .1
+                .top()
+        };
+
+        let order = ["About this file", "Container", "Changes", "Every field"];
+        for pair in order.windows(2) {
+            assert!(
+                top(pair[0]) < top(pair[1]),
+                "{} stands under {}",
+                pair[0],
+                pair[1],
+            );
+        }
+    }
+
+    /// Every column of the Advanced face reads down from its own heading, so the eye
+    /// has one edge to follow.
+    #[test]
+    fn every_column_of_the_advanced_face_reads_down_from_its_heading() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.document.views.insert(open.id, Face::Advanced);
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
+        let placed = placed(&output);
+        let left = |word: &str| -> f32 {
+            placed
+                .iter()
+                .find(|(text, _)| text == word)
+                .unwrap_or_else(|| panic!("{word} was never painted: {placed:?}"))
+                .1
+                .left()
+        };
+
+        let edge = left("Format");
+        for word in ["Fields", "Layout", "Stored at", "Instrument", "PATH"] {
+            assert_eq!(left(word), edge, "{word} left the column its label starts");
+        }
         assert!(
-            said.iter().any(|word| word == "About this file"),
-            "{said:?}"
+            left("program v4") > edge,
+            "the value column stands clear of it"
         );
-        assert!(said.iter().any(|word| word == "Every field"), "{said:?}");
+
+        for (head, cell) in [
+            ("PATH", "center_panel.lower_part"),
+            ("BITS", "0..=2"),
+            ("CONTROL", "selector"),
+            ("RAW", "Organ"),
+        ] {
+            let under = left(head);
+            assert!(
+                placed
+                    .iter()
+                    .any(|(text, rect)| text == cell && rect.left() == under),
+                "no {cell} cell stands under {head} at {under}",
+            );
+        }
     }
 
     /// Both stored registrations stay on screen: the one the instrument plays says so,
@@ -1976,28 +2170,22 @@ mod tests {
         }
     }
 
-    /// The record: the container grid, the byte diff — with something in it and with
-    /// nothing — and the folded dump.
+    /// The engineer's face paints, filters and holds an edit — for a body with ninety
+    /// fields and for one with forty — and with it the record: the container grid, the
+    /// byte diff with something in it and with nothing, and the folded dump.
     #[test]
-    fn the_meta_face_paints() {
+    fn the_advanced_face_paints() {
         render_view(
             &[("center_panel.gain", "96")],
             Fresh::Program,
-            Face::Metadata,
+            Face::Advanced,
         );
-        render_view(&[], Fresh::Settings, Face::Metadata);
-    }
-
-    /// The engineer's table paints, filters and holds an edit — for a body with ninety
-    /// fields and for one with forty.
-    #[test]
-    fn the_advanced_table_paints() {
         render_view(&[], Fresh::Program, Face::Advanced);
         render_view(&[], Fresh::Settings, Face::Advanced);
     }
 
-    /// A body with a registry has all three faces; one with a view of its own but no
-    /// registry has no field table to offer; bytes with neither have only the record.
+    /// Anything with a panel offers both faces; bytes that decoded into nothing have
+    /// only the deep one, which is where their record is.
     #[test]
     fn the_faces_offered_are_the_ones_the_asset_has() {
         let ctx = egui::Context::default();
@@ -2012,10 +2200,7 @@ mod tests {
         };
 
         let program = workspace.create(Fresh::Program, &mut log).unwrap();
-        assert_eq!(
-            offered(&workspace, program),
-            ["Edit", "Metadata", "Advanced"]
-        );
+        assert_eq!(offered(&workspace, program), ["Basic", "Advanced"]);
 
         let song = workspace.ingest(
             "blank.ne5t".into(),
@@ -2025,8 +2210,8 @@ mod tests {
         );
         assert_eq!(
             offered(&workspace, song),
-            ["Edit", "Metadata", "Advanced"],
-            "the four entries, the record, and the addresses as stored"
+            ["Basic", "Advanced"],
+            "the four entries, and the record with the addresses as stored"
         );
 
         let stub = workspace.ingest(
@@ -2037,34 +2222,32 @@ mod tests {
         );
         assert_eq!(
             offered(&workspace, stub),
-            ["Edit", "Metadata", "Advanced"],
+            ["Basic", "Advanced"],
             "a body no registry describes still says so, and shows its bytes"
         );
 
         let junk = workspace.ingest(
             "junk.bin".into(),
             Origin::File("junk.bin".into()),
-            b"not a nord file".to_vec(),
+            junk_bytes(),
             &mut log,
         );
-        assert_eq!(offered(&workspace, junk), ["Metadata"]);
+        assert_eq!(offered(&workspace, junk), ["Advanced"]);
     }
 
-    /// A document opens on the face it was left on, and on something that has no such
-    /// face falls back rather than showing an empty page.
+    /// A document opens on the face it was left on — the panel where it has never been
+    /// left on one — and on something that has no such face falls back rather than
+    /// showing an empty page.
     #[test]
     fn a_document_falls_back_to_a_face_it_actually_has() {
-        let all = [Face::Edit, Face::Metadata, Face::Advanced];
-        assert_eq!(showing(&all, Face::Metadata), Face::Metadata);
-        assert_eq!(showing(&all[..2], Face::Advanced), Face::Edit);
+        let both = [Face::Basic, Face::Advanced];
+        assert_eq!(showing(&both, Face::default()), Face::Basic);
+        assert_eq!(showing(&both, Face::Advanced), Face::Advanced);
 
-        let record_only = [Face::Metadata];
-        for left_on in [Face::Edit, Face::Advanced, Face::Metadata] {
-            assert_eq!(showing(&record_only, left_on), Face::Metadata);
+        let record_only = [Face::Advanced];
+        for left_on in [Face::Basic, Face::Advanced] {
+            assert_eq!(showing(&record_only, left_on), Face::Advanced);
         }
-        // A set list has no field table: the table's operator lands on the panel.
-        let no_table = [Face::Edit, Face::Metadata];
-        assert_eq!(showing(&no_table, Face::Advanced), Face::Edit);
     }
 
     /// A cell the library refuses stays open with what was typed in it, because that is
@@ -2198,6 +2381,7 @@ mod tests {
                         &Around {
                             queue: &queue,
                             tags: &tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -2246,6 +2430,79 @@ mod tests {
         assert!(copied.name.is_none(), "still nothing has been asked");
         // A fresh program references no piano at all, and zero is not an id to hunt for.
         assert_eq!(copied.id, None);
+    }
+
+    /// A document opened off a slot asks once what that slot plays, and keeps the
+    /// piano's name after another slot is read.
+    #[test]
+    fn a_document_asks_what_its_slot_plays_and_keeps_the_answer() {
+        use nord_usb::wire::Dependency;
+
+        let class = ObjectClass::Program;
+        let at = Location { bank: 6, slot: 3 };
+        let piano = 0x0102_0304;
+
+        let mut open = Open::empty();
+        open.device.pretend_attached();
+        let fresh = open
+            .workspace
+            .create(Fresh::Program, &mut open.log)
+            .expect("a fresh default");
+        let bytes = open.workspace.get(fresh).expect("just made").bytes.clone();
+        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
+            .expect("a program can name a piano");
+        open.id = open.workspace.ingest(
+            "Africa-Split.ne5p".into(),
+            Origin::Device { class, at },
+            plays,
+            &mut open.log,
+        );
+
+        let reads = |open: &Open| {
+            open.device
+                .queued()
+                .iter()
+                .filter(|cmd| {
+                    matches!(cmd, crate::device::DeviceCmd::Deps { at: asked, .. }
+                    if *asked == at)
+                })
+                .count()
+        };
+        open.frame(Vec::new());
+        assert_eq!(reads(&open), 1, "the document asked what the slot plays");
+        open.frame(Vec::new());
+        assert_eq!(reads(&open), 1, "and asked once, not once a frame");
+
+        let named = |open: &Open| {
+            let registry = fields::apply(&open.entity().bytes, &[])
+                .expect("the registry reads it")
+                .0;
+            piano_lookup(open.entity(), Some(&registry), &open.device)
+                .name
+                .clone()
+        };
+        assert_eq!(named(&open), None, "nothing has answered yet");
+
+        open.device.pretend_deps(
+            class,
+            at,
+            vec![Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id: piano,
+                name: "Royal Grand 3D".into(),
+                location: None,
+            }],
+        );
+        assert_eq!(named(&open).as_deref(), Some("Royal Grand 3D"));
+
+        open.device
+            .pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
+        assert_eq!(
+            named(&open).as_deref(),
+            Some("Royal Grand 3D"),
+            "the name stands after another slot's read"
+        );
     }
 
     /// The Model dial lists the scanned pianos of the document's category — and only
@@ -2319,6 +2576,7 @@ mod tests {
                         &Around {
                             queue: &queue,
                             tags: &tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -2399,7 +2657,7 @@ mod tests {
             ("blank.ns4n", Fresh::Stage4Piano.bytes().unwrap()),
             ("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()),
         ] {
-            render_file(name, bytes.clone(), Face::Edit);
+            render_file(name, bytes.clone(), Face::Basic);
             render_file(name, bytes, Face::Advanced);
         }
     }
@@ -2413,14 +2671,15 @@ mod tests {
         let song = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert!(fields::is_set_list(&song));
         assert!(!fields::has_registry(&song));
-        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+        for face in [Face::Basic, Face::Advanced] {
             render_file("blank.ne5t", bytes.clone(), face);
         }
     }
 
     /// A body no registry describes says which of the two silences it is — nothing to
-    /// draw, rather than nothing read — states what the container does say, and shows
-    /// the bytes it is keeping.
+    /// draw, rather than nothing read — and states what the container does say. The
+    /// bytes it is keeping are on the Advanced face, which is the one page that shows
+    /// them.
     #[test]
     fn a_body_with_no_registry_says_why_and_shows_its_bytes() {
         let bytes = crate::fields::blank::stage3_song();
@@ -2445,7 +2704,10 @@ mod tests {
             has("Send as-is"),
             "the loud action is the same send in this body's words: {said:?}"
         );
-        assert!(has("0000") && has("0020"), "the body as hex: {said:?}");
+        assert!(
+            !has("0000"),
+            "the hex is the Advanced face's, not this one: {said:?}"
+        );
 
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
@@ -2454,6 +2716,10 @@ mod tests {
             "the whole body has a face of its own: {said:?}"
         );
         assert!(said.iter().any(|word| word == "3 rows"), "{said:?}");
+        assert!(
+            said.iter().any(|word| word == "0000"),
+            "the bytes: {said:?}"
+        );
     }
 
     /// A Stage Classic piano library (`nsp`): a container over a body nothing here
@@ -2492,7 +2758,92 @@ mod tests {
         assert_eq!(held(fields::blank::stage3_song()), Shape::Verbatim);
         assert_eq!(held(piano_library_bytes()), Shape::Verbatim);
         assert_eq!(held(wav_bytes()), Shape::Wav);
-        assert_eq!(held(b"not a nord file".to_vec()), Shape::Undecoded);
+        assert_eq!(held(junk_bytes()), Shape::Undecoded);
+        assert_eq!(
+            held(b"Set 1\n  1. One More Time\n".to_vec()),
+            Shape::Text,
+            "words are the one thing a file that decoded into nothing can still be"
+        );
+    }
+
+    #[test]
+    fn typing_in_a_note_lands_on_the_bytes_it_is_measured_against() {
+        let mut open = Open::file("Set 1.txt", b"Set 1\n".to_vec());
+        assert!(!open.entity().is_unsaved(), "as opened, it is what it was");
+        let said = open.twice();
+        assert_eq!(
+            faces(Shape::Text),
+            vec![Face::Basic, Face::Advanced],
+            "the box is the page, and the record is under Advanced"
+        );
+        assert!(
+            said.iter().any(|word| word == "1 line"),
+            "the strip counts the lines, and the page is only the words: {said:?}"
+        );
+        assert!(
+            said.iter().any(|word| word == "Set 1\n"),
+            "the words are what the page draws: {said:?}"
+        );
+
+        // ⚠️ The far corner of the page: a box that did not fill the room under the
+        // header would not have the caret here, and nothing would be typed.
+        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+
+        let written = String::from_utf8(open.entity().bytes.clone()).expect("still text");
+        assert!(written.contains('X'), "what was typed landed: {written:?}");
+        assert_eq!(
+            written.replace('X', ""),
+            "Set 1\n",
+            "and nothing else moved: {written:?}"
+        );
+        assert!(
+            open.entity().is_unsaved(),
+            "it holds what it was not saved as"
+        );
+        assert!(
+            open.log
+                .iter()
+                .all(|entry| entry.level == crate::log::Level::Info),
+            "a note has nothing to verify, and typing in one is not a warning: {}",
+            open.log.transcript()
+        );
+
+        open.workspace.mark_saved(open.id);
+        assert!(!open.entity().is_unsaved(), "a save settles it");
+    }
+
+    #[test]
+    fn an_unedited_note_keeps_its_bytes_exactly() {
+        let bytes = "\u{feff}Set 1\r\n\tcue\r\nlast line".as_bytes().to_vec();
+        let mut open = Open::file("Set 1.txt", bytes.clone());
+        open.twice();
+        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(Vec::new());
+        open.document.leave();
+        assert_eq!(open.entity().bytes, bytes);
+        assert!(!open.entity().is_unsaved());
+    }
+
+    #[test]
+    fn tab_in_a_note_types_a_tab() {
+        let mut open = Open::file("Set 1.txt", b"Set 1\n".to_vec());
+        open.twice();
+        open.frame(vec![click(PAGE_CORNER)]);
+        // The box takes the Tab key for itself only from the frame after it gains focus.
+        open.frame(Vec::new());
+        open.frame(vec![egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        open.frame(vec![egui::Event::Text("cue".to_string())]);
+        assert_eq!(
+            String::from_utf8_lossy(&open.entity().bytes),
+            "Set 1\n\tcue"
+        );
     }
 
     /// A piano library this app cannot decode is a document like any other body it can
@@ -2506,7 +2857,7 @@ mod tests {
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Edit", "Metadata", "Advanced"],
+            ["Basic", "Advanced"],
         );
         let said = open.twice();
         let has = |word: &str| said.iter().any(|held| held == word);
@@ -2541,11 +2892,16 @@ mod tests {
     /// Bytes that do not decode still have a document — it says so and shows the record.
     #[test]
     fn a_file_that_did_not_decode_still_paints() {
-        let said = Open::file("junk.bin", b"not a nord file".to_vec()).twice();
+        let said = Open::file("junk.bin", junk_bytes()).twice();
         assert!(
             said.iter().any(|word| word.contains("did not decode")),
             "the record is all these bytes have: {said:?}"
         );
+    }
+
+    /// Bytes that are neither a format this app reads nor a note.
+    fn junk_bytes() -> Vec<u8> {
+        vec![0x00, 0xff, 0x01, 0xfe]
     }
 
     /// One second of 44.1 kHz mono — long enough for the encoder's shortest stroke.
@@ -2554,6 +2910,21 @@ mod tests {
             .map(|i| ((i as f64 / 40.0).sin() * 12_000.0) as i16)
             .collect();
         nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
+    }
+
+    /// A WAV has no field table and no capabilities to list, so its Advanced face is
+    /// the record every asset has.
+    #[test]
+    fn the_advanced_face_of_a_wav_is_the_record() {
+        let mut open = Open::file("Marimba hit.wav", wav_bytes());
+        open.document.views.insert(open.id, Face::Advanced);
+        let said = open.twice();
+        for section in ["Container", "Changes"] {
+            assert!(
+                said.iter().any(|word| word == section),
+                "{section}: {said:?}"
+            );
+        }
     }
 
     #[test]
@@ -2565,7 +2936,7 @@ mod tests {
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Edit", "Metadata"],
+            ["Basic", "Advanced"],
         );
 
         open.frame(Vec::new());
@@ -2610,12 +2981,14 @@ mod tests {
             open.document.audio.get(0).is_none(),
             "nothing decodes unasked"
         );
-        open.document.answer(
-            id,
-            Asked::Zone(sample::Ask::Decode(0)),
-            &mut open.workspace,
-            &mut open.log,
-        );
+        for _ in 0..2 {
+            open.document.answer(
+                id,
+                Asked::Zone(sample::Ask::Decode(0)),
+                &mut open.workspace,
+                &mut open.log,
+            );
+        }
         {
             let decoded = open.document.audio.get(0).expect("asked for");
             let decoded = decoded.as_ref().unwrap();
@@ -2635,8 +3008,8 @@ mod tests {
             "Marimba-zone1.wav",
         );
 
-        // Editing the instrument replaces its bytes, so what was decoded from the old
-        // ones is dropped rather than kept beside a file it no longer describes.
+        // Bytes put under the asset from outside the editor may hold other strokes, so
+        // what was decoded from the old ones is dropped.
         let edited =
             sample::apply(&open.entity().bytes, &[("name".into(), "Vibes".into())]).unwrap();
         open.workspace.replace_bytes(id, edited, &mut open.log);
@@ -2657,10 +3030,10 @@ mod tests {
         include_bytes!("../../../nord-format/tests/fixtures/nsmpproj/three-zones.nsmpproj").to_vec()
     }
 
-    /// An instrument and the project it is built from each have all three faces: the
-    /// panel, the record, and the capability table that says what the format holds.
+    /// An instrument and the project it is built from each have both faces: the panel,
+    /// and the record with the capability table that says what the format holds.
     #[test]
-    fn an_instrument_and_a_project_offer_all_three_faces() {
+    fn an_instrument_and_a_project_offer_both_faces() {
         for (name, bytes) in [
             ("Marimba.nsmp", sample_bytes()),
             ("clarinet.nsmpproj", project_bytes()),
@@ -2674,7 +3047,7 @@ mod tests {
                     .iter()
                     .map(|face| face.label())
                     .collect::<Vec<_>>(),
-                ["Edit", "Metadata", "Advanced"],
+                ["Basic", "Advanced"],
                 "{name}",
             );
         }
@@ -2683,7 +3056,7 @@ mod tests {
     /// Every face of an instrument and of a project paints, twice over.
     #[test]
     fn a_project_document_paints_on_every_face() {
-        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+        for face in [Face::Basic, Face::Advanced] {
             render_file("clarinet.nsmpproj", project_bytes(), face);
             render_file("Marimba.nsmp", sample_bytes(), face);
         }
@@ -2699,29 +3072,15 @@ mod tests {
         let output = open.output(Vec::new());
 
         let placed = |word: &str| -> (egui::Rect, egui::Rect) {
-            fn walk(
-                shape: &egui::Shape,
-                clip: egui::Rect,
-                word: &str,
-                into: &mut Vec<(egui::Rect, egui::Rect)>,
-            ) {
-                match shape {
-                    egui::Shape::Text(text) if text.galley.text() == word => into.push((
+            leaves(&output)
+                .into_iter()
+                .find_map(|(clip, shape)| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == word => Some((
                         egui::Rect::from_min_size(text.pos, text.galley.size()),
                         clip,
                     )),
-                    egui::Shape::Vec(shapes) => shapes
-                        .iter()
-                        .for_each(|shape| walk(shape, clip, word, into)),
-                    _ => {}
-                }
-            }
-            let mut found = Vec::new();
-            for clipped in &output.shapes {
-                walk(&clipped.shape, clipped.clip_rect, word, &mut found);
-            }
-            *found
-                .first()
+                    _ => None,
+                })
                 .unwrap_or_else(|| panic!("{word} was never painted"))
         };
 
@@ -2732,6 +3091,85 @@ mod tests {
             map.bottom() <= scrolling.top(),
             "the map at {map:?} is inside the rows' own region {scrolling:?}",
         );
+    }
+
+    /// An open zone shows what it sounds like, so the row asks for the decode itself:
+    /// one frame says it is reading, the next decodes. Nothing decodes while every row
+    /// is closed, and the cache keeps a frame from decoding again.
+    #[test]
+    fn an_open_zone_draws_its_own_waveform() {
+        let mut open = Open::file("Marimba.nsmp", sample_bytes());
+        let said = open.twice();
+        assert!(
+            open.document.audio.get(0).is_none(),
+            "a closed row decodes nothing: {said:?}"
+        );
+
+        sample::pick_row(&mut open.state().sample, 0);
+        let said = open.frame(Vec::new());
+        assert!(
+            said.iter().any(|word| word == "reading the zone…"),
+            "the row says what it is waiting on: {said:?}"
+        );
+        assert!(open.document.audio.get(0).is_none(), "{said:?}");
+        open.frame(Vec::new());
+        let decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the open row asked for the decode")
+            .as_ref()
+            .expect("the zone decodes");
+        assert!(!decoded.envelope.is_empty());
+        let said = open.frame(Vec::new());
+        assert!(
+            said.iter().any(|word| word == "Save WAV…"),
+            "the frame after the decode draws the audio: {said:?}"
+        );
+    }
+
+    /// Moving a zone's keys leaves its stroke alone, so a drag across the key map or a
+    /// stepped root note keeps the open row's waveform rather than decoding per step.
+    #[test]
+    fn an_edit_that_leaves_the_strokes_alone_keeps_the_zones_audio() {
+        let mut open = Open::file("Marimba.nsmp", sample_bytes());
+        open.frame(Vec::new());
+        sample::pick_row(&mut open.state().sample, 0);
+        open.twice();
+        let before: *const sample::Decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the open row decoded")
+            .as_ref()
+            .expect("the zone decodes");
+
+        let stamp = open.entity().stamp;
+        let id = open.id;
+        for root in ["D4", "E4"] {
+            open.document
+                .apply(
+                    id,
+                    vec![("zone1.root_key".into(), root.into())],
+                    &mut open.workspace,
+                    &mut open.log,
+                )
+                .expect("the root key is settable");
+            let said = open.frame(Vec::new());
+            assert!(
+                !said.iter().any(|word| word == "reading the zone…"),
+                "root {root}: {said:?}"
+            );
+        }
+        assert_ne!(open.entity().stamp, stamp, "the edits made new bytes");
+        let after: *const sample::Decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the audio outlived the edits")
+            .as_ref()
+            .expect("the zone decodes");
+        assert!(std::ptr::eq(before, after), "the zone was decoded again");
     }
 
     /// ⚠️ A zone index belongs to the instrument it was opened on. Leaving the tab
@@ -2781,7 +3219,7 @@ mod tests {
             .expect("the builder lays out a library")
     }
 
-    /// A piano library is a document like any other: it offers all three faces, and the
+    /// A piano library is a document like any other: it offers both faces, and the
     /// panel that decides what goes on the instrument is one of them.
     #[test]
     fn a_piano_document_offers_every_face_and_paints_on_each_of_them() {
@@ -2791,10 +3229,10 @@ mod tests {
                 .iter()
                 .map(|face| face.label())
                 .collect::<Vec<_>>(),
-            ["Edit", "Metadata", "Advanced"],
+            ["Basic", "Advanced"],
         );
 
-        for face in [Face::Edit, Face::Metadata, Face::Advanced] {
+        for face in [Face::Basic, Face::Advanced] {
             for dark in [true, false] {
                 let mut open = Open::file("Test Piano.npno", piano_bytes());
                 open.ctx.set_theme(match dark {
@@ -2806,19 +3244,17 @@ mod tests {
                 let has = |word: &str| said.iter().any(|held| held == word);
                 assert!(has("Test Piano"), "{face:?} in {dark}: {said:?}");
                 match face {
-                    Face::Edit => assert!(has("Trim to fit"), "{said:?}"),
-                    Face::Metadata => {
-                        assert!(has("Metadata") && has("Container"), "{said:?}");
-                        assert!(!has("Key map"), "the map is the Edit face's: {said:?}");
-                    }
+                    Face::Basic => assert!(has("Trim to fit"), "{said:?}"),
                     Face::Advanced => {
-                        assert!(has("What this format holds") && has("Offsets"), "{said:?}")
+                        assert!(has("About this file") && has("Container"), "{said:?}");
+                        assert!(has("What this format holds"), "{said:?}");
+                        assert!(!has("Key map"), "the map is the Basic face's: {said:?}");
                     }
                 }
             }
         }
         // And the map is pinned above the body rather than drawn inside it.
-        open.document.views.insert(open.id, Face::Edit);
+        open.document.views.insert(open.id, Face::Basic);
         assert!(open.twice().iter().any(|word| word == "Key map"));
     }
 
@@ -2875,10 +3311,17 @@ mod tests {
         assert!(named(&open).contains('X'), "{}", named(&open));
         assert!(open.entity().is_unsaved(), "and it is the save's to settle");
         assert!(!open.document.pends(open.id));
+
+        open.workspace.mark_saved(open.id);
+        assert!(
+            !open.entity().is_unsaved(),
+            "which settles it: the plan is in the bytes the save wrote",
+        );
     }
 
-    /// A revert is the end of a plan wherever the gesture came from: the File menu
-    /// raises the same act the header's own control does.
+    /// A plan the bytes do not hold is what the asset is unsaved for, which is what
+    /// offers the revert — and a revert is the end of a plan wherever the gesture came
+    /// from: the File menu raises the same act the header's own control does.
     #[test]
     fn reverting_a_piano_from_the_menu_drops_the_plan_it_was_holding() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
@@ -2887,6 +3330,15 @@ mod tests {
         open.frame(vec![egui::Event::Text("X".to_string())]);
         open.frame(vec![enter()]);
         assert!(open.document.pends(open.id));
+        assert!(
+            open.entity().is_unsaved(),
+            "which is what puts Revert to saved in the menu",
+        );
+        assert_eq!(
+            open.entity().bytes,
+            open.entity().saved.bytes,
+            "though no body was copied for it",
+        );
 
         let ctx = open.ctx.clone();
         let acts = open.document.settle(
@@ -2895,8 +3347,31 @@ mod tests {
             &mut open.workspace,
             &mut open.log,
         );
-        assert_eq!(acts.len(), 1, "the revert itself still runs");
+        assert!(
+            matches!(acts.as_slice(), [crate::browser::Act::Revert(id)] if *id == open.id),
+            "the revert itself still runs",
+        );
         assert!(!open.document.pends(open.id), "the plan is gone with it");
+
+        crate::browser::apply(
+            &mut crate::browser::Browser::default(),
+            &mut crate::shell::Shell::default(),
+            acts,
+            &mut open.workspace,
+            &mut open.device,
+            &mut crate::tabs::Tabs::default(),
+            &mut open.queue,
+            &mut open.log,
+        );
+        assert!(
+            !open.entity().is_unsaved(),
+            "and what is left is what it was saved as",
+        );
+        assert!(
+            open.log.status().1.contains("back as it was last saved"),
+            "{}",
+            open.log.status().1,
+        );
     }
 
     #[test]
@@ -2907,8 +3382,8 @@ mod tests {
             .unwrap()
             .to_bytes()
             .unwrap();
-        render_file("Marimba.nsmp", bytes.clone(), Face::Edit);
-        render_file("Marimba.nsmp", bytes, Face::Metadata);
-        render_file("Marimba hit.wav", wav_bytes(), Face::Edit);
+        render_file("Marimba.nsmp", bytes.clone(), Face::Basic);
+        render_file("Marimba.nsmp", bytes, Face::Advanced);
+        render_file("Marimba hit.wav", wav_bytes(), Face::Basic);
     }
 }

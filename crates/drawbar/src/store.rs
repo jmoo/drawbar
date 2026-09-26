@@ -363,6 +363,33 @@ mod tests {
         assert_eq!(after.export_name(id).as_deref(), Some("Africa-Split.ne5p"));
     }
 
+    #[test]
+    fn a_restored_note_is_still_a_note() {
+        use crate::workspace::Fresh;
+
+        let (mut before, mut log) = workspace();
+        let id = before.create(Fresh::Text, &mut log).unwrap();
+        before.replace_bytes(id, b"Set 1\n".to_vec(), &mut log);
+
+        let mut store = Fake::default();
+        save(&mut store, &before, &Queue::default());
+
+        let (mut after, mut log) = workspace();
+        load(&store, &mut after, &mut log);
+
+        let restored = after.get(id).expect("kept its id");
+        assert_eq!(restored.name, "untitled.txt");
+        assert_eq!(restored.bytes, b"Set 1\n");
+        assert_eq!(
+            crate::browser::Kind::of(restored),
+            crate::browser::Kind::Text
+        );
+        assert!(
+            restored.is_unsaved(),
+            "it was not saved before it was stored"
+        );
+    }
+
     /// ⚠️ A view is the only copy of what it holds, so quitting with an edited one open
     /// must not be how it goes. An untouched view is the instrument's own bytes and is
     /// not written; an edited one is, and comes back as an asset on this computer,
