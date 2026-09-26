@@ -28,7 +28,7 @@ connected, and how many files this computer is holding.
 the clipboard. Paste them into a bug report and the report says what you were
 running.
 
-**Licences** is every licence a copy of drawbar has to carry: drawbar's own, the
+**Licenses** is every license a copy of drawbar has to carry: drawbar's own, the
 bundled fonts and icons, the Stage field maps it decodes with, and the Rust
 crates compiled in. Click a row to read it and to reach the project it covers.
 The trademark disclaimer is at the foot of the box.

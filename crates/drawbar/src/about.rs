@@ -1,7 +1,7 @@
-//! About drawbar: what it is, where it lives, what this build is, the licences of what is
+//! About drawbar: what it is, where it lives, what this build is, the licenses of what is
 //! compiled into it, and whose trademarks the names in it are.
 //!
-//! The same box on every target. The licences are compiled in, so a binary handed to
+//! The same box on every target. The licenses are compiled in, so a binary handed to
 //! someone carries the text of the terms it is under.
 
 use eframe::egui;
@@ -23,33 +23,33 @@ const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
 const ISSUES: &str = "https://github.com/jmoo/drawbar/issues";
 
-/// What one licence covers in the app, and its terms.
+/// What one license covers in the app, and its terms.
 struct Notice {
     covers: &'static str,
-    /// The copyright line, as the licence text or the font's own name table gives it.
+    /// The copyright line, as the license text or the font's own name table gives it.
     holder: &'static str,
     /// Where the project lives.
     page: &'static str,
     /// Where bundled material came from; `None` for drawbar itself.
     source: Option<&'static str>,
-    licence: &'static str,
+    license: &'static str,
     text: &'static str,
 }
 
-/// The Rust crates under one licence: its text once, and who holds copyright in what.
+/// The Rust crates under one license: its text once, and who holds copyright in what.
 struct Group {
-    licence: &'static str,
-    /// The licence, from `crates/drawbar/licences/<id>.txt`.
+    license: &'static str,
+    /// The license, from `crates/drawbar/licenses/<id>.txt`.
     text: &'static str,
     holders: &'static [Holder],
-    /// Crates, as `name version`, whose licence file names no copyright holder.
+    /// Crates, as `name version`, whose license file names no copyright holder.
     unattributed: &'static [&'static str],
-    /// Crates whose licence file says more than [`Group::text`] does.
+    /// Crates whose license file says more than [`Group::text`] does.
     variants: &'static [Text],
 }
 
 impl Group {
-    /// How many crates are under the licence.
+    /// How many crates are under the license.
     fn count(&self) -> usize {
         let held: usize = self.holders.iter().map(|holder| holder.crates.len()).sum();
         let varied: usize = self.variants.iter().map(|text| text.crates.len()).sum();
@@ -64,13 +64,13 @@ impl Group {
     }
 }
 
-/// One copyright notice and the crates, as `name version`, whose licence file carries it.
+/// One copyright notice and the crates, as `name version`, whose license file carries it.
 struct Holder {
     notice: &'static str,
     crates: &'static [&'static str],
 }
 
-/// One licence text and the crates, as `name version`, that carry it.
+/// One license text and the crates, as `name version`, that carry it.
 struct Text {
     crates: &'static [&'static str],
     text: &'static str,
@@ -84,7 +84,7 @@ const NOTICES: &[Notice] = &[
         holder: "Copyright (c) 2023-2026, John Moore",
         page: REPO,
         source: None,
-        licence: "BSD 3-Clause",
+        license: "BSD 3-Clause",
         // A copy of `crates/LICENSE`: a packaged crate cannot reach outside its own root,
         // and a test keeps the two the same.
         text: include_str!("../assets/LICENSE"),
@@ -94,23 +94,23 @@ const NOTICES: &[Notice] = &[
         holder: "Copyright (c) 2020, Christian Florentz",
         page: "https://github.com/Chris55/nord-documentation",
         source: Some("nord-documentation by Christian Florentz"),
-        licence: "BSD 3-Clause",
-        text: include_str!("../licences/nord-documentation.txt"),
+        license: "BSD 3-Clause",
+        text: include_str!("../licenses/nord-documentation.txt"),
     },
     Notice {
         covers: "Stage 4 field tables",
         holder: "Copyright (c) 2024 Randy",
         page: "https://ns4decode.netlify.app",
         source: Some("ns4decode by Randy"),
-        licence: "MIT",
-        text: include_str!("../licences/ns4decode.txt"),
+        license: "MIT",
+        text: include_str!("../licenses/ns4decode.txt"),
     },
     Notice {
         covers: "emoji-icon-font",
         holder: "Copyright (c) 2014 John Slegers",
         page: "https://github.com/jslegers/emoji-icon-font",
         source: Some("egui's epaint_default_fonts 0.32.3"),
-        licence: "MIT",
+        license: "MIT",
         text: include_str!("../assets/fonts/egui/emoji-icon-font-mit-license.txt"),
     },
     Notice {
@@ -118,7 +118,7 @@ const NOTICES: &[Notice] = &[
         holder: "Copyright (c) 2018 Source Foundry Authors",
         page: "https://github.com/source-foundry/Hack",
         source: Some("egui's epaint_default_fonts 0.32.3"),
-        licence: "MIT and Bitstream Vera",
+        license: "MIT and Bitstream Vera",
         text: include_str!("../assets/fonts/egui/Hack-Regular.txt"),
     },
     Notice {
@@ -126,7 +126,7 @@ const NOTICES: &[Notice] = &[
         holder: "Copyright (c) 2022 Lucide Contributors, 2013-2022 Cole Bemis",
         page: "https://github.com/lucide-icons/lucide",
         source: Some("Lucide 0.469.0"),
-        licence: "ISC",
+        license: "ISC",
         text: include_str!("../assets/icons/LICENSE"),
     },
     Notice {
@@ -134,7 +134,7 @@ const NOTICES: &[Notice] = &[
         holder: "Copyright 2013 Google Inc.",
         page: "https://github.com/googlefonts/noto-emoji",
         source: Some("egui's epaint_default_fonts 0.32.3"),
-        licence: "SIL Open Font License 1.1",
+        license: "SIL Open Font License 1.1",
         text: include_str!("../assets/fonts/egui/OFL.txt"),
     },
     Notice {
@@ -142,7 +142,7 @@ const NOTICES: &[Notice] = &[
         holder: "Copyright 2011 Canonical Ltd.",
         page: "https://design.ubuntu.com/font",
         source: Some("Ubuntu font family 0.83; Light from egui's epaint_default_fonts 0.32.3"),
-        licence: "Ubuntu Font Licence 1.0",
+        license: "Ubuntu Font Licence 1.0",
         text: include_str!("../assets/fonts/LICENCE.txt"),
     },
 ];
@@ -150,8 +150,8 @@ const NOTICES: &[Notice] = &[
 /// What the reader is told the build lines are for.
 const WHY: &str = "paste this into a bug report and we know what you were running";
 
-/// What a crate group says over the crates whose licence file names nobody.
-const UNATTRIBUTED: &str = "no copyright line in the licence file";
+/// What a crate group says over the crates whose license file names nobody.
+const UNATTRIBUTED: &str = "no copyright line in the license file";
 
 /// What Copy diagnostics says it takes, on hover.
 const COPIES: &str = "Copies the lines below, plus the activity log's last 200 entries";
@@ -160,7 +160,7 @@ const COPIES: &str = "Copies the lines below, plus the activity log's last 200 e
 const WIDE: f32 = 760.0;
 
 /// The height the sheet needs around its scrolling middle — masthead, links and foot — so
-/// an open licence scrolls inside the middle rather than pushing Close off-screen.
+/// an open license scrolls inside the middle rather than pushing Close off-screen.
 const AROUND: f32 = 300.0;
 
 /// The middle is never shorter than this, however short the window.
@@ -186,7 +186,7 @@ const COLUMN: f32 = 330.0;
 /// The room the foot's Close button is left at the right of the disclaimer.
 const CLOSE: f32 = 90.0;
 
-/// A licence row, and the chevron that opens it.
+/// A license row, and the chevron that opens it.
 const ROW: f32 = 26.0;
 const CHEVRON: f32 = 12.0;
 
@@ -330,8 +330,8 @@ impl About {
                 ui.set_width(ui.available_width() - scroll.bar_width - scroll.bar_outer_margin);
                 sheet::section(ui, |ui| {
                     self.this_build(ui, log);
-                    sheet::heading(ui, "Licences", Some(&inventory()));
-                    licences(ui);
+                    sheet::heading(ui, "Licenses", Some(&inventory()));
+                    licenses(ui);
                 });
             });
         let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
@@ -467,17 +467,17 @@ fn inventory() -> String {
     format!("{} entries · {crates} crates", NOTICES.len())
 }
 
-/// Every licence whose terms require its notice to travel with a copy of the app: the
-/// [`NOTICES`], then the Rust crates by licence.
-fn licences(ui: &mut egui::Ui) {
+/// Every license whose terms require its notice to travel with a copy of the app: the
+/// [`NOTICES`], then the Rust crates by license.
+fn licenses(ui: &mut egui::Ui) {
     for notice in NOTICES {
-        row(ui, notice.covers, notice.holder, notice.licence, |ui| {
+        row(ui, notice.covers, notice.holder, notice.license, |ui| {
             page(ui, notice.page);
             terms(ui, notice.source, notice.text);
         });
     }
     for group in crates::GROUPS {
-        row(ui, "Rust crates", &group.held(), group.licence, |ui| {
+        row(ui, "Rust crates", &group.held(), group.license, |ui| {
             for holder in group.holders {
                 credit(ui, holder.notice, holder.crates);
             }
@@ -501,7 +501,7 @@ fn page(ui: &mut egui::Ui, url: &str) {
     ui.add_space(GAP);
 }
 
-/// A copyright notice and the crates whose licence file carries it.
+/// A copyright notice and the crates whose license file carries it.
 fn credit(ui: &mut egui::Ui, notice: &str, crates: &[&str]) {
     ui.label(
         egui::RichText::new(notice)
@@ -530,18 +530,18 @@ fn packages(ui: &mut egui::Ui, crates: &[&str]) {
     });
 }
 
-/// Collapsed, what a licence covers, whose it is and its name; open, the terms in a box.
+/// Collapsed, what a license covers, whose it is and its name; open, the terms in a box.
 fn row(
     ui: &mut egui::Ui,
     covers: &str,
     held: &str,
-    licence: &str,
+    license: &str,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    let id = ui.make_persistent_id((covers, licence));
+    let id = ui.make_persistent_id((covers, license));
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-    if header(ui, covers, held, licence, state.is_open()).clicked() {
+    if header(ui, covers, held, license, state.is_open()).clicked() {
         state.toggle(ui);
     }
     state.show_body_unindented(ui, |ui| {
@@ -558,12 +558,12 @@ fn row(
 }
 
 /// The row itself: a chevron that says which way it goes, what it covers, whose it is, and
-/// the licence at the right.
+/// the license at the right.
 fn header(
     ui: &mut egui::Ui,
     covers: &str,
     held: &str,
-    licence: &str,
+    license: &str,
     open: bool,
 ) -> egui::Response {
     let laid = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
@@ -580,10 +580,10 @@ fn header(
             ui.add(egui::Label::new(
                 egui::RichText::new(covers).size(11.5).strong(),
             ));
-            // The licence name is never cut, so the holder takes what it leaves.
+            // The license name is never cut, so the holder takes what it leaves.
             let named = egui::FontId::monospace(10.5);
             let width = ui
-                .fonts(|fonts| fonts.layout_no_wrap(licence.to_string(), named.clone(), ink))
+                .fonts(|fonts| fonts.layout_no_wrap(license.to_string(), named.clone(), ink))
                 .size()
                 .x;
             let room = egui::vec2((ui.available_width() - width - 8.0).max(0.0), ROW);
@@ -598,7 +598,7 @@ fn header(
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(licence).font(named).color(ink));
+                ui.label(egui::RichText::new(license).font(named).color(ink));
             });
         });
         backdrop
@@ -615,7 +615,7 @@ fn header(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A licence text, under what it applies to where that needs saying.
+/// A license text, under what it applies to where that needs saying.
 fn terms(ui: &mut egui::Ui, applies_to: Option<&str>, text: &str) {
     if let Some(applies_to) = applies_to {
         ui.label(egui::RichText::new(applies_to).small().weak());
@@ -749,10 +749,10 @@ mod tests {
         assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 2);
     }
 
-    /// A holder is a copyright line, and every name in it is one the licence text
+    /// A holder is a copyright line, and every name in it is one the license text
     /// carries — unless the text names nobody and the holder came off the font itself.
     #[test]
-    fn every_notice_names_a_copyright_holder_its_licence_agrees_with() {
+    fn every_notice_names_a_copyright_holder_its_license_agrees_with() {
         for notice in NOTICES {
             assert!(
                 notice.holder.starts_with("Copyright"),
@@ -770,16 +770,16 @@ mod tests {
             for name in names {
                 assert!(
                     notice.text.contains(name),
-                    "{}: the licence text never names {name:?}",
+                    "{}: the license text never names {name:?}",
                     notice.covers
                 );
             }
         }
     }
 
-    /// `include_str!` accepts whatever file it is pointed at, licence or not.
+    /// `include_str!` accepts whatever file it is pointed at, license or not.
     #[test]
-    fn every_notice_carries_the_text_of_the_licence_it_names() {
+    fn every_notice_carries_the_text_of_the_license_it_names() {
         let titles: &[(&str, &[&str])] = &[
             ("BSD 3-Clause", &["BSD 3-Clause License"]),
             ("ISC", &["ISC License"]),
@@ -802,22 +802,22 @@ mod tests {
             ),
         ];
         for notice in NOTICES {
-            let Some((_, phrases)) = titles.iter().find(|(name, _)| *name == notice.licence) else {
-                panic!("{}: no title known for {:?}", notice.covers, notice.licence);
+            let Some((_, phrases)) = titles.iter().find(|(name, _)| *name == notice.license) else {
+                panic!("{}: no title known for {:?}", notice.covers, notice.license);
             };
             for phrase in *phrases {
                 assert!(
                     notice.text.contains(phrase),
                     "{}: the {:?} text lacks {phrase:?}",
                     notice.covers,
-                    notice.licence
+                    notice.license
                 );
             }
         }
     }
 
     #[test]
-    fn every_crate_text_carries_the_licence_its_group_names() {
+    fn every_crate_text_carries_the_license_its_group_names() {
         let phrases: &[(&str, &[&str])] = &[
             ("Apache-2.0", &["Apache License", "Version 2.0"]),
             (
@@ -839,23 +839,23 @@ mod tests {
             ("Unicode-3.0", &["UNICODE LICENSE V3"]),
         ];
         for group in crates::GROUPS {
-            let Some((_, required)) = phrases.iter().find(|(id, _)| *id == group.licence) else {
-                panic!("no phrases known for {:?}", group.licence);
+            let Some((_, required)) = phrases.iter().find(|(id, _)| *id == group.license) else {
+                panic!("no phrases known for {:?}", group.license);
             };
-            let texts = std::iter::once((group.licence, group.text)).chain(
+            let texts = std::iter::once((group.license, group.text)).chain(
                 group
                     .variants
                     .iter()
                     .map(|variant| (variant.crates[0], variant.text)),
             );
             for (carrier, text) in texts {
-                // Hard wrapping differs between copies of the same licence.
+                // Hard wrapping differs between copies of the same license.
                 let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 for phrase in *required {
                     assert!(
                         words.contains(phrase),
                         "{carrier}: the {:?} text lacks {phrase:?}",
-                        group.licence
+                        group.license
                     );
                 }
             }
@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn no_crate_text_is_an_unfilled_licence_template() {
+    fn no_crate_text_is_an_unfilled_license_template() {
         let unfilled = |text: &str| {
             let text = text.to_lowercase();
             ["<year>", "<owner>", "<copyright holder"]
@@ -871,7 +871,7 @@ mod tests {
                 .any(|placeholder| text.contains(placeholder))
         };
         for group in crates::GROUPS {
-            assert!(!unfilled(group.text), "{} is a template", group.licence);
+            assert!(!unfilled(group.text), "{} is a template", group.license);
             for holder in group.holders {
                 assert!(
                     !unfilled(holder.notice),
@@ -889,7 +889,7 @@ mod tests {
         }
     }
 
-    /// A licence sentence about copyright must not be filed as a notice of one.
+    /// A license sentence about copyright must not be filed as a notice of one.
     #[test]
     fn every_holder_notice_claims_a_copyright() {
         for group in crates::GROUPS {
@@ -908,9 +908,9 @@ mod tests {
     }
 
     #[test]
-    fn a_group_counts_every_crate_under_its_licence() {
+    fn a_group_counts_every_crate_under_its_license() {
         let one = Group {
-            licence: "ISC",
+            license: "ISC",
             text: "",
             holders: &[Holder {
                 notice: "Copyright (c) 2015, Simonas Kazlauskas",
@@ -920,7 +920,7 @@ mod tests {
             variants: &[],
         };
         let four = Group {
-            licence: "MIT",
+            license: "MIT",
             text: "",
             holders: &[Holder {
                 notice: "Copyright (c) 2015 nwin",
@@ -940,7 +940,7 @@ mod tests {
 
     /// A count sums each holder's and each variant's crates, so a repeat inflates it.
     #[test]
-    fn no_crate_is_listed_twice_under_one_licence() {
+    fn no_crate_is_listed_twice_under_one_license() {
         for group in crates::GROUPS {
             let mut crates: Vec<_> = group
                 .holders
@@ -951,20 +951,20 @@ mod tests {
                 .collect();
             crates.sort_unstable();
             let repeated = crates.windows(2).find(|pair| pair[0] == pair[1]);
-            assert_eq!(repeated, None, "{} lists a crate twice", group.licence);
+            assert_eq!(repeated, None, "{} lists a crate twice", group.license);
         }
     }
 
     #[test]
-    fn the_vendored_crate_licences_match_the_lockfile() {
+    fn the_vendored_crate_licenses_match_the_lockfile() {
         let locked: BTreeSet<_> = registry_packages(include_str!("../../Cargo.lock"));
         let vendored: BTreeSet<_> = crates::LOCKED.iter().copied().collect();
         let added: Vec<_> = locked.difference(&vendored).collect();
         let removed: Vec<_> = vendored.difference(&locked).collect();
         assert!(
             added.is_empty() && removed.is_empty(),
-            "Cargo.lock's registry packages changed since the crate licences were vendored; \
-             run scripts/licences.bash.\nadded: {added:?}\nremoved: {removed:?}"
+            "Cargo.lock's registry packages changed since the crate licenses were vendored; \
+             run scripts/licenses.bash.\nadded: {added:?}\nremoved: {removed:?}"
         );
     }
 
@@ -1048,22 +1048,22 @@ source = "git+https://example.com/forked#0000"
     }
 
     #[test]
-    fn the_ubuntu_fonts_are_listed_under_their_licence() {
+    fn the_ubuntu_fonts_are_listed_under_their_license() {
         assert!(
             NOTICES
                 .iter()
                 .any(|notice| notice.covers.starts_with("Ubuntu")
-                    && notice.licence == "Ubuntu Font Licence 1.0"),
+                    && notice.license == "Ubuntu Font Licence 1.0"),
             "the About box does not list the Ubuntu Font Licence"
         );
     }
 
     #[test]
-    fn the_compiled_in_licence_is_the_workspace_licence() {
+    fn the_compiled_in_license_is_the_workspace_license() {
         let drawbar = NOTICES
             .iter()
             .find(|notice| notice.covers == "drawbar")
-            .expect("drawbar lists its own licence");
+            .expect("drawbar lists its own license");
         assert_eq!(
             drawbar.text,
             include_str!("../../LICENSE"),

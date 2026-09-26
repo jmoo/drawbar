@@ -52,8 +52,8 @@ let
           || hasInfix "/tests/scripts/" path
           # The vendored glyphs and fonts, which drawbar `include_bytes!`s.
           || hasInfix "/drawbar/assets/" path
-          # The licence texts the About box `include_str!`s.
-          || hasInfix "/drawbar/licences/" path
+          # The license texts the About box `include_str!`s.
+          || hasInfix "/drawbar/licenses/" path
           # The page, whose small-screen gate a test holds to the shell's.
           || path == toString (workspace + "/drawbar/index.html")
           # The page's icon, which a test holds to the titlebar's mark.

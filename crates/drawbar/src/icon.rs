@@ -1,6 +1,6 @@
 //! The vendored Lucide glyphs, and the one way they are drawn.
 //!
-//! The art in `assets/icons` is Lucide 0.469.0 under the ISC licence beside it,
+//! The art in `assets/icons` is Lucide 0.469.0 under the ISC license beside it,
 //! rewritten once from `currentColor` to white so a tint multiplies to exactly the
 //! colour asked for. Sizes in use are 10-15 px; a row picks one and keeps it.
 
