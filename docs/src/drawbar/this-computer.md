@@ -11,9 +11,10 @@ activity log tells you if one does not. A file drawbar cannot read still gets a
 row, so you can see what went wrong.
 
 **New** makes a fresh program, live slot, set list, settings file or preset for
-each supported instrument, a sample instrument or Sample Editor project from WAVs,
-a piano library from WAVs, or a folder. A fresh Stage file has every control at
-zero. It is not a factory program.
+each supported instrument, a sample instrument or piano library from WAVs, a
+text note, a Sample Editor project, or a folder. The rule across the menu parts
+what an instrument holds from what only this computer keeps. A fresh Stage file
+has every control at zero. It is not a factory program.
 
 ## Views
 

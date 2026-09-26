@@ -222,6 +222,11 @@ pub struct LocalEntity {
     pub entity: Option<Entity>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
+    /// Whether the bytes are a note, from [`crate::document::text::is_text`].
+    ///
+    /// ⚠️ Read when the bytes land and never per frame: deciding it walks every one of
+    /// them, and every listed row asks what kind it is on every frame.
+    pub is_text: bool,
     pub verify: VerifyState,
     /// What this asset was last saved as. Unsaved is bytes that are not these, or an
     /// editor holding an edit that has not reached them — see
@@ -269,6 +274,7 @@ impl LocalEntity {
             Some(entity) => verify(entity, &bytes),
             None => VerifyState::NotApplicable("the file did not decode"),
         };
+        let is_text = crate::document::text::is_text(&bytes);
         let mut held = LocalEntity {
             id,
             name,
@@ -277,6 +283,7 @@ impl LocalEntity {
             entity,
             parse_error,
             container,
+            is_text,
             verify,
             saved: Baseline::default(),
             pending: false,
@@ -315,10 +322,14 @@ impl LocalEntity {
     }
 
     /// The format tag, from the decode where there is one and the container otherwise.
+    ///
+    /// A note has neither: its bytes are what say what it is, so it is the one asset
+    /// answering from them — see [`crate::document::text::is_text`].
     pub fn tag(&self) -> String {
         match (&self.entity, &self.container) {
             (Some(entity), _) => entity.identity().format.to_string(),
             (None, Some(container)) => container.tag(),
+            (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
             (None, None) => "?".into(),
         }
     }
@@ -424,6 +435,9 @@ fn format_tag(bytes: &[u8]) -> String {
     if bytes.starts_with(nsmpproj::MAGIC) {
         return nsmpproj::FORMAT.to_string();
     }
+    if crate::document::text::is_text(bytes) {
+        return crate::document::text::EXTENSION.to_string();
+    }
     "bin".to_string()
 }
 
@@ -474,10 +488,11 @@ macro_rules! zeroed {
 /// The objects the New menu offers, across every format this app can build from
 /// nothing.
 ///
-/// ⚠️ Only bodies that **decode** are here. A stub format — the Stage 3's song, the
-/// settings of any Stage — round-trips its container and nothing more, so a zeroed one
-/// is 45 bytes of nothing under a tag rather than an object, and offering it would put a
-/// file in front of the operator that this app cannot say a single true thing about.
+/// ⚠️ Only bodies that **decode** are here, and the one kind with no body at all. A
+/// stub format — the Stage 3's song, the settings of any Stage — round-trips its
+/// container and nothing more, so a zeroed one is 45 bytes of nothing under a tag rather
+/// than an object, and offering it would put a file in front of the operator that this
+/// app cannot say a single true thing about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fresh {
     /// The Electro 5's four, each from the library's own constructor.
@@ -492,10 +507,12 @@ pub enum Fresh {
     Stage4Organ,
     Stage4Piano,
     Stage4Synth,
+    /// An empty note. No instrument holds one.
+    Text,
 }
 
 impl Fresh {
-    pub const ALL: [Fresh; 11] = [
+    pub const ALL: [Fresh; 12] = [
         Fresh::Program,
         Fresh::Live,
         Fresh::SetList,
@@ -507,7 +524,12 @@ impl Fresh {
         Fresh::Stage4Organ,
         Fresh::Stage4Piano,
         Fresh::Stage4Synth,
+        Fresh::Text,
     ];
+
+    /// The kinds no product family makes, which the New menu offers under its rule.
+    /// Together with [`Fresh::FAMILIES`] this is every kind, each offered once.
+    pub const LOOSE: [Fresh; 1] = [Fresh::Text];
 
     pub const FAMILIES: [Family; 4] = [
         Family {
@@ -545,6 +567,7 @@ impl Fresh {
             Fresh::Stage3Synth | Fresh::Stage4Synth => "Synth preset",
             Fresh::Stage4Organ => "Organ preset",
             Fresh::Stage4Piano => "Piano preset",
+            Fresh::Text => "Text note",
         }
     }
 
@@ -561,6 +584,7 @@ impl Fresh {
             Fresh::Stage4Organ => ns4::organ_preset::FORMAT,
             Fresh::Stage4Piano => ns4::piano_preset::FORMAT,
             Fresh::Stage4Synth => ns4::synth::FORMAT,
+            Fresh::Text => crate::document::text::EXTENSION,
         }
     }
 
@@ -569,19 +593,41 @@ impl Fresh {
     /// The distinction the menu has to carry: an Electro 5 program comes from the
     /// library's own constructor, and a Stage anything is every control at zero.
     pub fn zeroed(self) -> bool {
-        !matches!(
-            self,
-            Fresh::Program | Fresh::Live | Fresh::SetList | Fresh::Settings
-        )
+        match self {
+            Fresh::Program | Fresh::Live | Fresh::SetList | Fresh::Settings | Fresh::Text => false,
+            Fresh::Stage2Program
+            | Fresh::Stage3Program
+            | Fresh::Stage3Synth
+            | Fresh::Stage4Program
+            | Fresh::Stage4Organ
+            | Fresh::Stage4Piano
+            | Fresh::Stage4Synth => true,
+        }
     }
 
     /// The sentence a hover puts on the menu entry, where there is something the
     /// operator would otherwise have to find out by opening the file.
     pub fn note(self) -> Option<&'static str> {
-        self.zeroed().then_some(
-            "Every control at zero. The file decodes and re-saves byte for byte, but it \
-             is not a factory program — nothing here knows what one would hold.",
-        )
+        match self {
+            Fresh::Text => Some(
+                "A text file. It stays on this computer — no instrument has a folder \
+                 for one.",
+            ),
+            Fresh::Program
+            | Fresh::Live
+            | Fresh::SetList
+            | Fresh::Settings
+            | Fresh::Stage2Program
+            | Fresh::Stage3Program
+            | Fresh::Stage3Synth
+            | Fresh::Stage4Program
+            | Fresh::Stage4Organ
+            | Fresh::Stage4Piano
+            | Fresh::Stage4Synth => self.zeroed().then_some(
+                "Every control at zero. The file decodes and re-saves byte for byte, but \
+                 it is not a factory program — nothing here knows what one would hold.",
+            ),
+        }
     }
 
     /// The file this makes, byte for byte what [`Workspace::create`] puts on the list.
@@ -654,6 +700,9 @@ impl Fresh {
                 ns4::synth::KNOWN_VERSIONS,
                 |f| Entity::Synth(Synth::Stage4(f))
             ),
+            // A note is its own bytes: an empty file, with nothing to encode and
+            // nothing that could refuse.
+            Fresh::Text => return Ok(Vec::new()),
         };
         nord_format::to_bytes(&entity).map_err(|e| e.to_string())
     }
@@ -866,6 +915,16 @@ impl Workspace {
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
         let arrival = match (&entity.parse_error, &entity.verify) {
+            // A note is bytes this app has no format for and needs none: the words are
+            // the whole of it, so nothing here failed to read them.
+            (Some(_), _) if entity.is_text => {
+                log.info(format!(
+                    "{}: text ({} bytes)",
+                    entity.name,
+                    entity.bytes.len()
+                ));
+                Arrival::Read
+            }
             (Some(e), _) => {
                 log.error(format!("{}: {e}", entity.name));
                 Arrival::Unreadable
@@ -1120,7 +1179,8 @@ impl Workspace {
         let Some(verify) = self.respell(id, bytes) else {
             return;
         };
-        if let VerifyState::Ok = verify {
+        let note = self.get(id).is_some_and(|held| held.is_text);
+        if note || matches!(verify, VerifyState::Ok) {
             return;
         }
         log.warn(format!(
@@ -1173,7 +1233,10 @@ impl Workspace {
 
     pub fn duplicate(&mut self, id: u64, log: &mut Log) -> Option<u64> {
         let source = self.entities.iter().find(|e| e.id == id)?;
-        let name = format!("{} copy", source.name);
+        let name = crate::strings::tagged(
+            &source.name,
+            &format!("{} copy", crate::strings::display_name(&source.name)),
+        );
         let (origin, bytes) = (source.origin.clone(), source.bytes.clone());
         Some(self.ingest(name, origin, bytes, log))
     }
@@ -1429,9 +1492,9 @@ mod tests {
     /// re-saves byte for byte.
     #[test]
     fn every_fresh_default_round_trips_under_its_own_tag() {
-        for kind in Fresh::ALL {
+        for kind in Fresh::ALL.iter().filter(|kind| **kind != Fresh::Text) {
             let entity = ingest("untitled", kind.bytes().unwrap());
-            assert!(entity.parse_error.is_none(), "{:?}", kind);
+            assert!(entity.parse_error.is_none(), "{kind:?}");
             assert_eq!(entity.tag(), kind.tag(), "{kind:?}");
             assert!(matches!(entity.verify, VerifyState::Ok), "{kind:?}");
             assert!(
@@ -1441,18 +1504,31 @@ mod tests {
         }
     }
 
-    /// The menu is the families, and the families are the menu: a kind reachable from
-    /// neither or from two places is one nobody can find or one offered twice.
     #[test]
-    fn every_kind_sits_in_exactly_one_family() {
+    fn a_new_note_is_an_empty_file_that_is_already_a_note() {
+        let entity = ingest("untitled.txt", Fresh::Text.bytes().unwrap());
+        assert!(entity.bytes.is_empty());
+        assert!(entity.container.is_none(), "a note is under no container");
+        assert_eq!(entity.tag(), Fresh::Text.tag());
+        assert_eq!(
+            crate::browser::Kind::of(&entity),
+            crate::browser::Kind::Text
+        );
+    }
+
+    /// The menu is the kinds and the kinds are the menu: one reachable from nowhere or
+    /// from two places is one nobody can find or one offered twice.
+    #[test]
+    fn every_kind_is_offered_exactly_once() {
         let mut seen: Vec<Fresh> = Fresh::FAMILIES
             .iter()
             .flat_map(|family| family.kinds.iter().copied())
+            .chain(Fresh::LOOSE)
             .collect();
         assert_eq!(seen.len(), Fresh::ALL.len());
         for kind in Fresh::ALL {
             let at = seen.iter().position(|held| *held == kind);
-            seen.remove(at.unwrap_or_else(|| panic!("{kind:?} is in no family")));
+            seen.remove(at.unwrap_or_else(|| panic!("{kind:?} is on no menu")));
         }
         assert!(seen.is_empty());
     }
@@ -1476,6 +1552,65 @@ mod tests {
         let held = tags.len();
         tags.dedup();
         assert_eq!(tags.len(), held);
+    }
+
+    /// ⚠️ `Africa Split.ne5p copy` puts the tag in the middle of the name, where nothing
+    /// reads it: an export then stacks a second one on the end.
+    #[test]
+    fn a_duplicate_is_a_copy_of_the_name_under_the_same_tag() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        for (name, copied, exported) in [
+            ("untitled.txt", "untitled copy.txt", "untitled-copy.txt"),
+            (
+                "Africa Split.ne5p",
+                "Africa Split copy.ne5p",
+                "Africa-Split-copy.ne5p",
+            ),
+            // No tag to keep, so the export takes one from the bytes, which are words.
+            (
+                "no tag at all",
+                "no tag at all copy",
+                "no-tag-at-all-copy.txt",
+            ),
+        ] {
+            let id = workspace.ingest(
+                name.to_string(),
+                Origin::Fresh,
+                b"Set 1\n".to_vec(),
+                &mut log,
+            );
+            let copy = workspace
+                .duplicate(id, &mut log)
+                .expect("it is on the list");
+            let copy = workspace.get(copy).expect("the copy");
+            assert_eq!(copy.name, copied);
+            assert_eq!(
+                export_filename(&copy.name, &copy.bytes),
+                exported,
+                "and an export does not stack a second tag on it"
+            );
+        }
+    }
+
+    /// ⚠️ It is read once, when they land. A cache that outlived the bytes it was taken
+    /// from would leave a document editing a file that is no longer there.
+    #[test]
+    fn whether_an_asset_is_words_follows_its_bytes() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let id = workspace.ingest("held".into(), Origin::Fresh, b"Set 1\n".to_vec(), &mut log);
+        assert!(workspace.get(id).expect("held").is_text);
+
+        workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], &mut log);
+        let held = workspace.get(id).expect("held");
+        assert!(!held.is_text, "these bytes are no longer words");
+        assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
+
+        workspace.revert(id, &mut log);
+        assert!(workspace.get(id).expect("held").is_text, "and back again");
     }
 
     /// A slot opened for a look is a working copy that nothing lists, and it goes when
@@ -1773,8 +1908,13 @@ mod tests {
         assert_eq!(file("../../etc/passwd"), "etc-passwd.ne5p");
         assert_eq!(file("  "), "unnamed.ne5p");
         assert_eq!(
-            export_filename("Big strings", b"no header"),
+            export_filename("Big strings", &[0x00, 0xff, 0x01, 0xfe]),
             "Big-strings.bin",
+        );
+        assert_eq!(
+            export_filename("Set 1", b"Set 1\n"),
+            "Set-1.txt",
+            "words are a note, and a note is exported as one"
         );
     }
 
@@ -1958,12 +2098,43 @@ mod tests {
     /// A file that does not decode is still a row: the error is the report.
     #[test]
     fn bytes_that_do_not_decode_are_kept_with_their_error() {
-        let entity = ingest("junk.bin", b"not a nord file at all".to_vec());
+        let entity = ingest("junk.bin", vec![0x00, 0xff, 0x01, 0xfe]);
         assert!(entity.entity.is_none());
         assert!(entity.parse_error.is_some());
         assert!(entity.container.is_none());
         assert!(matches!(entity.verify, VerifyState::NotApplicable(_)));
         assert_eq!(entity.tag(), "?");
+    }
+
+    #[test]
+    fn a_malformed_sample_editor_project_keeps_its_error_and_is_not_a_note() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let bytes = b"SMACEditorProject {\n  m_fileFormatVersion = oops\n".to_vec();
+        let id = workspace.ingest("broken.nsmpproj".into(), Origin::Fresh, bytes, &mut log);
+
+        let held = workspace.get(id).expect("held");
+        let error = held
+            .parse_error
+            .clone()
+            .expect("the project did not decode");
+        assert!(!held.is_text);
+        assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
+        assert!(
+            log.iter()
+                .any(|entry| entry.level == crate::log::Level::Error && entry.text.contains(&error)),
+            "the decode error is logged"
+        );
+    }
+
+    #[test]
+    fn words_longer_than_a_note_holds_stay_a_record() {
+        let words = "Set 1\n".repeat(crate::document::text::MAX_BYTES / 6 + 1);
+        let held = ingest("a long log.txt", words.into_bytes());
+        assert!(!held.is_text);
+        assert_eq!(crate::browser::Kind::of(&held), crate::browser::Kind::Other);
+        assert!(matches!(held.verify, VerifyState::NotApplicable(_)));
     }
 
     /// The name is this app's metadata and the only record of what an object is — a

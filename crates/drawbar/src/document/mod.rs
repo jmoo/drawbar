@@ -31,6 +31,7 @@ mod project;
 pub(crate) mod sample;
 mod setlist;
 mod table;
+pub(crate) mod text;
 mod verbatim;
 
 use advanced::Advanced;
@@ -66,6 +67,8 @@ pub(super) enum Shape {
     Project,
     /// An `npno` piano library, edited as a plan over bytes nothing copies.
     Piano,
+    /// Bytes that did not decode and are words, edited as the text they are.
+    Text,
     /// A body no registry describes, kept byte for byte.
     Verbatim,
     /// Bytes that did not decode, and are audio an instrument can be built from.
@@ -100,8 +103,13 @@ fn shape(entity: &LocalEntity) -> Shape {
     use nord_format::Entity as E;
 
     let Some(decoded) = &entity.entity else {
-        return match encode::is_wav(&entity.bytes) {
-            true => Shape::Wav,
+        // ⚠️ Ordered: a WAV is the one undecoded thing this app can make an instrument
+        // out of, and it is not text, so nothing here reads one as words.
+        if encode::is_wav(&entity.bytes) {
+            return Shape::Wav;
+        }
+        return match entity.is_text {
+            true => Shape::Text,
             false => Shape::Undecoded,
         };
     };
@@ -228,6 +236,8 @@ struct Opened {
     /// What the set list editor keeps: the half-typed address boxes and whether a
     /// reorder has been made.
     list: setlist::State,
+    /// What the note editor keeps between frames: the words in its box.
+    text: text::State,
 }
 
 impl Opened {
@@ -255,12 +265,14 @@ impl Opened {
                 | Shape::Sample
                 | Shape::Project
                 | Shape::Piano
+                | Shape::Text
                 | Shape::Verbatim
                 | Shape::Undecoded => None,
             },
             sample: sample::State::default(),
             fields: field::State::default(),
             list: setlist::State::default(),
+            text: text::State::default(),
         }
     }
 }
@@ -361,6 +373,7 @@ impl Document {
             | Shape::SetList
             | Shape::Sample
             | Shape::Project
+            | Shape::Text
             | Shape::Verbatim
             | Shape::Wav
             | Shape::Undecoded => extras(asset, device, workspace, pending),
@@ -703,6 +716,11 @@ impl Document {
                 field::body(ui, &open.ctx, &mut open.fields, doc?, piano, sets)
                     .then_some(Asked::Advanced)
             }
+            Shape::Text => {
+                let open = self.open.as_mut()?;
+                open.text.ui(ui, asset.entity, sets);
+                None
+            }
             Shape::Verbatim => verbatim::ui(ui, asset.entity).then_some(Asked::Export),
         }
     }
@@ -760,6 +778,7 @@ impl Document {
             | Shape::Sample
             | Shape::Project
             | Shape::Verbatim
+            | Shape::Text
             | Shape::Wav
             | Shape::Undecoded => record(ui, asset),
         }
@@ -797,6 +816,7 @@ impl Document {
             Shape::SetList
             | Shape::Sample
             | Shape::Project
+            | Shape::Text
             | Shape::Verbatim
             | Shape::Wav
             | Shape::Undecoded => {
@@ -837,7 +857,7 @@ impl Document {
                 }
                 None
             }
-            Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+            Shape::SetList | Shape::Text | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
         }
     }
 
@@ -1050,6 +1070,7 @@ impl Document {
             // see [`Document::replan`].
             Shape::Piano => self.piano.take(&sets).map(|()| None),
             Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
+            Shape::Text => text::apply(&entity.bytes, &sets).map(Some),
             Shape::Fields | Shape::Verbatim | Shape::Wav | Shape::Undecoded => {
                 fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
             }
@@ -1090,6 +1111,7 @@ fn faces(shape: Shape) -> Vec<Face> {
         | Shape::Sample
         | Shape::Project
         | Shape::Piano
+        | Shape::Text
         | Shape::Verbatim
         | Shape::Wav => true,
         Shape::Undecoded => false,
@@ -1143,9 +1165,12 @@ fn extras(
                 ..header::Extras::default()
             }
         }
-        Shape::Sample | Shape::Project | Shape::Piano | Shape::Wav | Shape::Undecoded => {
-            header::Extras::default()
-        }
+        Shape::Sample
+        | Shape::Project
+        | Shape::Piano
+        | Shape::Text
+        | Shape::Wav
+        | Shape::Undecoded => header::Extras::default(),
     }
 }
 
@@ -1177,6 +1202,7 @@ fn record(ui: &mut egui::Ui, asset: Asset<'_>) {
         Shape::Fields
         | Shape::SetList
         | Shape::Piano
+        | Shape::Text
         | Shape::Verbatim
         | Shape::Wav
         | Shape::Undecoded => {}
@@ -1205,7 +1231,7 @@ fn capabilities(ui: &mut egui::Ui, asset: Asset<'_>) {
         }
         Shape::SetList => setlist::stored(ui, decoded),
         Shape::Verbatim => verbatim::bytes(ui, asset.entity),
-        Shape::Fields | Shape::Piano | Shape::Wav | Shape::Undecoded => {}
+        Shape::Fields | Shape::Piano | Shape::Text | Shape::Wav | Shape::Undecoded => {}
     }
 }
 
@@ -1812,6 +1838,10 @@ mod tests {
     /// strip.
     const NAME_BOX: egui::Pos2 = egui::pos2(100.0, 19.0);
 
+    /// The bottom-right corner of the page a document draws in, which is inside a
+    /// note's box only if the box fills the page.
+    const PAGE_CORNER: egui::Pos2 = egui::pos2(SCREEN.x - 24.0, SCREEN.y - 24.0);
+
     fn click(at: egui::Pos2) -> egui::Event {
         egui::Event::PointerButton {
             pos: at,
@@ -2187,7 +2217,7 @@ mod tests {
         let junk = workspace.ingest(
             "junk.bin".into(),
             Origin::File("junk.bin".into()),
-            b"not a nord file".to_vec(),
+            junk_bytes(),
             &mut log,
         );
         assert_eq!(offered(&workspace, junk), ["Advanced"]);
@@ -2714,7 +2744,92 @@ mod tests {
         assert_eq!(held(fields::blank::stage3_song()), Shape::Verbatim);
         assert_eq!(held(piano_library_bytes()), Shape::Verbatim);
         assert_eq!(held(wav_bytes()), Shape::Wav);
-        assert_eq!(held(b"not a nord file".to_vec()), Shape::Undecoded);
+        assert_eq!(held(junk_bytes()), Shape::Undecoded);
+        assert_eq!(
+            held(b"Set 1\n  1. One More Time\n".to_vec()),
+            Shape::Text,
+            "words are the one thing a file that decoded into nothing can still be"
+        );
+    }
+
+    #[test]
+    fn typing_in_a_note_lands_on_the_bytes_it_is_measured_against() {
+        let mut open = Open::file("Set 1.txt", b"Set 1\n".to_vec());
+        assert!(!open.entity().is_unsaved(), "as opened, it is what it was");
+        let said = open.twice();
+        assert_eq!(
+            faces(Shape::Text),
+            vec![Face::Basic, Face::Advanced],
+            "the box is the page, and the record is under Advanced"
+        );
+        assert!(
+            said.iter().any(|word| word == "1 line"),
+            "the strip counts the lines, and the page is only the words: {said:?}"
+        );
+        assert!(
+            said.iter().any(|word| word == "Set 1\n"),
+            "the words are what the page draws: {said:?}"
+        );
+
+        // ⚠️ The far corner of the page: a box that did not fill the room under the
+        // header would not have the caret here, and nothing would be typed.
+        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+
+        let written = String::from_utf8(open.entity().bytes.clone()).expect("still text");
+        assert!(written.contains('X'), "what was typed landed: {written:?}");
+        assert_eq!(
+            written.replace('X', ""),
+            "Set 1\n",
+            "and nothing else moved: {written:?}"
+        );
+        assert!(
+            open.entity().is_unsaved(),
+            "it holds what it was not saved as"
+        );
+        assert!(
+            open.log
+                .iter()
+                .all(|entry| entry.level == crate::log::Level::Info),
+            "a note has nothing to verify, and typing in one is not a warning: {}",
+            open.log.transcript()
+        );
+
+        open.workspace.mark_saved(open.id);
+        assert!(!open.entity().is_unsaved(), "a save settles it");
+    }
+
+    #[test]
+    fn an_unedited_note_keeps_its_bytes_exactly() {
+        let bytes = "\u{feff}Set 1\r\n\tcue\r\nlast line".as_bytes().to_vec();
+        let mut open = Open::file("Set 1.txt", bytes.clone());
+        open.twice();
+        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(Vec::new());
+        open.document.leave();
+        assert_eq!(open.entity().bytes, bytes);
+        assert!(!open.entity().is_unsaved());
+    }
+
+    #[test]
+    fn tab_in_a_note_types_a_tab() {
+        let mut open = Open::file("Set 1.txt", b"Set 1\n".to_vec());
+        open.twice();
+        open.frame(vec![click(PAGE_CORNER)]);
+        // The box takes the Tab key for itself only from the frame after it gains focus.
+        open.frame(Vec::new());
+        open.frame(vec![egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        open.frame(vec![egui::Event::Text("cue".to_string())]);
+        assert_eq!(
+            String::from_utf8_lossy(&open.entity().bytes),
+            "Set 1\n\tcue"
+        );
     }
 
     /// A piano library this app cannot decode is a document like any other body it can
@@ -2763,11 +2878,16 @@ mod tests {
     /// Bytes that do not decode still have a document — it says so and shows the record.
     #[test]
     fn a_file_that_did_not_decode_still_paints() {
-        let said = Open::file("junk.bin", b"not a nord file".to_vec()).twice();
+        let said = Open::file("junk.bin", junk_bytes()).twice();
         assert!(
             said.iter().any(|word| word.contains("did not decode")),
             "the record is all these bytes have: {said:?}"
         );
+    }
+
+    /// Bytes that are neither a format this app reads nor a note.
+    fn junk_bytes() -> Vec<u8> {
+        vec![0x00, 0xff, 0x01, 0xfe]
     }
 
     /// One second of 44.1 kHz mono — long enough for the encoder's shortest stroke.

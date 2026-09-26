@@ -13,7 +13,7 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::controls::{self, Sets};
-use super::{encode, piano, project, sample, setlist, SendBack, Shape};
+use super::{encode, piano, project, sample, setlist, text, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::Kind;
 use crate::device::{read_only, DeviceState};
@@ -22,7 +22,7 @@ use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
 use crate::queue::Queue;
 use crate::room;
-use crate::strings::{carries_tag, display_name, folder, kind_word, place, shown};
+use crate::strings::{display_name, folder, kind_word, place, shown, tagged};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Origin};
 
@@ -351,7 +351,7 @@ fn left(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
-    let glyph = Kind::of(entity.entity.as_ref()).glyph();
+    let glyph = Kind::of(entity).glyph();
     icon(ui, glyph, KIND, accent(&visuals));
 
     let (held, stored) = named(entity, facts.shape, facts.view, facts.renaming.clone());
@@ -835,7 +835,12 @@ fn stored_name(
                 name.unwrap_or(held.name),
             ))
         }
-        Shape::Fields | Shape::SetList | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+        Shape::Fields
+        | Shape::SetList
+        | Shape::Text
+        | Shape::Verbatim
+        | Shape::Wav
+        | Shape::Undecoded => None,
     }
 }
 
@@ -849,7 +854,7 @@ fn named(
     if let Some(held) = stored_name(entity, shape, renaming) {
         return held;
     }
-    let settings = Kind::of(entity.entity.as_ref()) == Kind::Settings;
+    let settings = Kind::of(entity) == Kind::Settings;
     match view && settings {
         true => (Named::Device, display_name(&entity.name).to_string()),
         false => (Named::Asset, display_name(&entity.name).to_string()),
@@ -947,28 +952,13 @@ fn settled(
     response.lost_focus()
 }
 
-/// What a typed name is stored as: the words that were typed, under the format tag the
-/// stored name carries.
-///
-/// The glyph beside the box already says what kind of file it is, so the tag is never in
-/// the box — and it must not be lost by typing in one.
-fn tagged(stored: &str, typed: &str) -> String {
-    match carries_tag(stored) {
-        true => match stored.rsplit_once('.') {
-            Some((_, tag)) => format!("{typed}.{tag}"),
-            None => typed.to_string(),
-        },
-        false => typed.to_string(),
-    }
-}
-
 /// The mono badge over a document, and the sentence behind it.
 ///
 /// ⚠️ Exhaustive over [`Kind`], so a kind the browser learns is a badge decided here
 /// rather than a blank one.
 pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     let tag = entity.tag();
-    let kind = Kind::of(entity.entity.as_ref());
+    let kind = Kind::of(entity);
     let word = kind_word(kind, Family::of_tag(&tag));
     let version = entity.container.as_ref().map(|held| held.header.version);
     let sentence = match version {
@@ -1013,6 +1003,7 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
             false => (tag, "these bytes did not decode".to_string()),
         },
         Kind::Live
+        | Kind::Text
         | Kind::Synth
         | Kind::OrganPreset
         | Kind::PianoPreset
@@ -1071,9 +1062,26 @@ fn folder_of(path: &str, home: Option<String>) -> String {
 /// How big the document is, in whatever it is that a document of this kind has: bytes,
 /// or the entries a set list orders. Settings are one block and there is nothing to say.
 fn sized(entity: &LocalEntity) -> Option<SizeLine> {
-    let kind = Kind::of(entity.entity.as_ref());
+    let kind = Kind::of(entity);
     if kind == Kind::Settings {
         return None;
+    }
+    if kind == Kind::Text {
+        return Some(match text::read(&entity.bytes).map(text::lines) {
+            Ok(lines) => SizeLine {
+                text: match lines {
+                    1 => "1 line".to_string(),
+                    lines => format!("{lines} lines"),
+                },
+                warn: false,
+                hint: format!("{} bytes", entity.bytes.len()),
+            },
+            Err(why) => SizeLine {
+                text: "not text".to_string(),
+                warn: true,
+                hint: why.to_string(),
+            },
+        });
     }
     if kind == Kind::SetList {
         let entries = setlist::entries(entity.entity.as_ref()?)?;
@@ -1150,8 +1158,9 @@ fn phrase(mark: Mark, waiting: bool) -> StateLine {
 /// The one loud action, and which of its three states it is in.
 ///
 /// ⚠️ Ordered, and the order is what makes the label honest: a project has nothing to
-/// send whatever is attached, an unattached instrument cannot be written to whatever the
-/// asset is, and a class this app does not write into is never a question of room.
+/// send whatever is attached, nor has a kind no folder holds that stands on no slot, an
+/// unattached instrument cannot be written to whatever the asset is, and a class this
+/// app does not write into is never a question of room.
 pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let send = |hint: String| Loud {
         label: "Queue send".to_string(),
@@ -1167,7 +1176,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
         ..send(hint)
     };
 
-    if Kind::of(entity.entity.as_ref()) == Kind::Project {
+    if Kind::of(entity) == Kind::Project {
         return Loud {
             label: "Build → .nsmp".to_string(),
             short: "Build".to_string(),
@@ -1176,6 +1185,13 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
             hint: "the codec is not understood yet".to_string(),
             send: None,
         };
+    }
+    let kind = Kind::of(entity);
+    if entity.spot().is_none() && kind.home().is_none() {
+        return idle(format!(
+            "no instrument has a folder for this {}",
+            kind.chip()
+        ));
     }
     if !device.connected() {
         return idle("no instrument attached — nothing to send to".to_string());
@@ -1224,7 +1240,7 @@ fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Optio
 /// an indented empty line under the name reads as a field that failed to draw.
 fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
     let mut cells = Vec::new();
-    if Kind::of(entity.entity.as_ref()) == Kind::Program {
+    if Kind::of(entity) == Kind::Program {
         let worn: Vec<String> = tags
             .worn(entity.id)
             .iter()
@@ -1405,10 +1421,17 @@ mod tests {
             )
         );
 
-        let (held, id) = opened("junk.bin", b"not a nord file".to_vec());
+        let (held, id) = opened("junk.bin", vec![0x00, 0xff, 0x01, 0xfe]);
         assert_eq!(
             badge(held.get(id).unwrap()),
             ("?".to_string(), "these bytes did not decode".to_string())
+        );
+
+        let (held, id) = opened("Set 1.txt", b"Set 1\n".to_vec());
+        assert_eq!(
+            badge(held.get(id).unwrap()),
+            ("txt".to_string(), "note".to_string()),
+            "a note is the one badge the bytes decide rather than a container"
         );
 
         let (held, id) = opened("Marimba.nsmp", sample_bytes());
@@ -1619,6 +1642,17 @@ mod tests {
         assert_eq!(loud.label, "Build → .nsmp");
         assert_eq!(loud.short, "Build");
         assert_eq!(loud.send, None);
+    }
+
+    #[test]
+    fn a_note_says_no_instrument_has_a_folder_for_it() {
+        let mut device = crate::device::Device::new(egui::Context::default());
+        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        let (held, id) = opened("Set 1.txt", b"Set 1\n".to_vec());
+        let loud = action(held.get(id).unwrap(), &device.state);
+        assert_eq!(loud.tone, Tone::Idle);
+        assert_eq!(loud.send, None);
+        assert_eq!(loud.hint, "no instrument has a folder for this note");
     }
 
     fn wav_bytes() -> Vec<u8> {

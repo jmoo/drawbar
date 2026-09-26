@@ -24,9 +24,12 @@ use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
 
-/// The New menu: every kind this app can build from nothing, the project that is laid
-/// out from audio files rather than started from a default, and the folder that groups
-/// them once they exist.
+/// The New menu, parted by the rule across it: above it the files an instrument holds,
+/// below it the files only this computer keeps.
+///
+/// Above are each family's own defaults and the two instrument files laid out from
+/// audio rather than started from a default. Below are a note, the Sample Editor's own
+/// project file, and the folder that groups what is here.
 ///
 /// ⚠️ Written once and offered whole. The tree's context menu, the File menu, the toolbar
 /// and the tab strip all say "New", and four menus of that name holding different things
@@ -36,26 +39,19 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     for family in &Fresh::FAMILIES {
         ui.menu_button(family.label, |ui| {
             for kind in family.kinds {
-                let mut entry = ui.button(kind.label());
-                if let Some(note) = kind.note() {
-                    entry = entry.on_hover_text(note);
-                }
-                if entry.clicked() {
-                    acts.push(Act::New(*kind));
-                    ui.close();
-                }
+                entry(ui, *kind, acts);
             }
         });
     }
+    for making in Making::FROM_WAVS.iter().filter(|it| it.instrument_file()) {
+        from_wavs(ui, *making, acts);
+    }
     ui.separator();
-    // Not families: each is laid out from audio files rather than started from a
-    // default, so they ask for the files before they exist.
-    for making in Making::FROM_WAVS {
-        let (item, hint) = making.item();
-        if ui.button(item).on_hover_text(hint).clicked() {
-            acts.push(Act::NewFromWavs(making));
-            ui.close();
-        }
+    for kind in Fresh::LOOSE {
+        entry(ui, kind, acts);
+    }
+    for making in Making::FROM_WAVS.iter().filter(|it| !it.instrument_file()) {
+        from_wavs(ui, *making, acts);
     }
     if ui
         .button("New folder")
@@ -63,6 +59,28 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         .clicked()
     {
         acts.push(Act::NewFolder);
+        ui.close();
+    }
+}
+
+/// One kind this app builds from nothing, wherever the menu offers it from.
+fn entry(ui: &mut egui::Ui, kind: Fresh, acts: &mut Vec<Act>) {
+    let mut button = ui.button(kind.label());
+    if let Some(note) = kind.note() {
+        button = button.on_hover_text(note);
+    }
+    if button.clicked() {
+        acts.push(Act::New(kind));
+        ui.close();
+    }
+}
+
+/// One kind laid out from audio files rather than started from a default, which is why
+/// it asks for the files before it exists.
+fn from_wavs(ui: &mut egui::Ui, making: Making, acts: &mut Vec<Act>) {
+    let (item, hint) = making.item();
+    if ui.button(item).on_hover_text(hint).clicked() {
+        acts.push(Act::NewFromWavs(making));
         ui.close();
     }
 }
@@ -533,7 +551,7 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         let item = Item::Local(entity.id);
-        let kind = Kind::of(entity.entity.as_ref());
+        let kind = Kind::of(entity);
         let selected = self.selection.holds(item);
         let depth = match folder {
             Some(_) => 2,
@@ -1219,8 +1237,7 @@ impl Browser {
             if drawn.response.clicked() {
                 narrow(acts, asked);
             }
-            let of_it =
-                Browser::standing_for(workspace, |entity| Kind::of(entity.entity.as_ref()) == kind);
+            let of_it = Browser::standing_for(workspace, |entity| Kind::of(entity) == kind);
             drawn.response.context_menu(|ui| {
                 self.set_menu(ui, &of_it, workspace, device, acts, |_, _, _| {});
             });
@@ -1349,6 +1366,48 @@ mod tests {
             assert!(said.iter().any(|word| word == item), "{item} is missing");
         }
         assert!(said.iter().any(|word| word == "New folder"));
+    }
+
+    /// ⚠️ The rule across the New menu parts the files an instrument holds from the
+    /// files only this computer keeps. A kind on the wrong side of it says something
+    /// untrue about where what the operator is making can go.
+    #[test]
+    fn the_new_menu_parts_instrument_files_from_the_rest() {
+        let ctx = context();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
+        });
+        let said = words(&output);
+        let at = |word: &str| {
+            said.iter()
+                .position(|held| held == word)
+                .unwrap_or_else(|| panic!("{word} is missing: {said:?}"))
+        };
+        let rule = Fresh::FAMILIES
+            .iter()
+            .map(|family| at(family.label))
+            .chain(
+                Making::FROM_WAVS
+                    .iter()
+                    .filter(|making| making.instrument_file())
+                    .map(|making| at(making.item().0)),
+            )
+            .max()
+            .expect("the instrument files are above it");
+        let below: Vec<&str> = Fresh::LOOSE
+            .iter()
+            .map(|kind| kind.label())
+            .chain(
+                Making::FROM_WAVS
+                    .iter()
+                    .filter(|making| !making.instrument_file())
+                    .map(|making| making.item().0),
+            )
+            .chain(["New folder"])
+            .collect();
+        for item in below {
+            assert!(at(item) > rule, "{item} belongs below the rule: {said:?}");
+        }
     }
 
     /// ⚠️ A row says what a sound is called, not what file it is in. The name the
