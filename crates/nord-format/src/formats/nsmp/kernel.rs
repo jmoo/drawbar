@@ -46,6 +46,9 @@ pub const TAPS: usize = 30;
 /// The `m` of tap 0. Tap `j` weights the source sample at `⌊t⌋ − (j − FIRST)`.
 const FIRST: i128 = 15;
 
+/// Source samples past `⌊t⌋` the furthest tap reads: tap 0's.
+pub const REACH: usize = FIRST as usize;
+
 /// Half-width of the support, in source samples.
 const HALF_WIDTH: f64 = 15.0;
 

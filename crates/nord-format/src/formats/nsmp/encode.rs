@@ -5,7 +5,8 @@
 //! [`kernel`](super::kernel) is the instrument's to within a few `1e-8` per tap, and a
 //! handful of taps the editor evaluates a ulp off the closed form leave the occasional
 //! field one count from the editor's. No structural field moves with it, and neither
-//! does the pitch, the length, or anything else about what the instrument plays.
+//! does the pitch, the length, or anything else about what the instrument plays. The
+//! one deliberate departure is a [`Loop`] that ends at the end of its audio, below.
 //!
 //! The record coding the editor picks, [`Predictor::Minimising`], is the default here.
 //! [`Predictor::Plain`] opts out and states every content field outright: the same
@@ -60,6 +61,12 @@
 //! and the short loop's as a percentage of its length — and it arrives here already in
 //! frames, fraction and all.
 //!
+//! The resampler reads a few frames either side of each field, so the fields before
+//! the loop end see the audio after it. Where there is none, it reads the loop's own
+//! opening, which is what playback plays there. The editor reads silence instead,
+//! so on bright material its loop clicks once per pass. Inferred from specimens; not
+//! confirmed on hardware.
+//!
 //! For [`Layout::V2`], the Electro 5 sustains a looped encode to note-off, and the
 //! seam is clean. Confirmed on hardware. The wide generations: Inferred from
 //! specimens; not confirmed on hardware.
@@ -72,6 +79,7 @@ use super::{Sample, SampleV3};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
 use crate::formats::nsmpproj;
+use std::borrow::Cow;
 
 /// Content version this writes per generation: `format × 100 + revision`, at the
 /// revision the editor emits.
@@ -338,7 +346,8 @@ pub enum Predictor {
 pub struct Loop {
     /// First frame of the loop.
     pub start: usize,
-    /// One past its last frame. Audio after it is not encoded.
+    /// One past its last frame. Audio after it is not stored, though the resampler
+    /// reads the first few frames of it.
     pub end: usize,
     /// Frames of the loop's tail that fade into the frames before [`start`](Loop::start).
     /// The fade is applied to the samples here, because that is where the instrument
@@ -904,6 +913,24 @@ fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
     for k in 0..lead {
         raw[end + k] = raw[at - lead + k];
     }
+}
+
+/// What the kernel resamples: `source`, continued past its last frame by the loop's
+/// own opening when a loop ends within [`kernel::REACH`] of it.
+///
+/// ⚠️ The editor reads silence there, so this is where an encode parts from its bytes.
+fn kernel_source(source: &[i16], channels: usize, loops: Option<Loop>) -> Cow<'_, [i16]> {
+    let frames = source.len() / channels;
+    let Some(points) = loops.filter(|l| l.end + kernel::REACH > frames) else {
+        return Cow::Borrowed(source);
+    };
+    let length = points.end - points.start;
+    let mut continued = source.to_vec();
+    for frame in frames..points.end + kernel::REACH {
+        let from = points.start + (frame - points.end) % length;
+        continued.extend_from_slice(&source[from * channels..(from + 1) * channels]);
+    }
+    Cow::Owned(continued)
 }
 
 /// Resample and choose the smallest nonnegative shift that fits the stroke's peak into
@@ -1510,7 +1537,11 @@ fn encode_stroke(
             .into());
         }
     }
-    let q = quantise(zone.source, &plan, zone.shift);
+    let q = quantise(
+        &kernel_source(zone.source, channels, zone.loops),
+        &plan,
+        zone.shift,
+    );
     let low = q.values.iter().copied().min().unwrap_or(0);
     let high = q.values.iter().copied().max().unwrap_or(0);
     if width_of(i64::from(low), i64::from(high)) > MAX_STORED_WIDTH {
@@ -3368,6 +3399,54 @@ mod tests {
             values[plan.fields - points.lead..],
             values[points.at - points.lead..points.at]
         );
+    }
+
+    #[test]
+    fn a_loop_to_the_end_of_the_audio_plays_through_its_seam() {
+        // 22,050 frames is a whole 17,501 fields, so the lattice closes on itself.
+        let (start, length) = (4_410, 22_050);
+        let frames = start + length;
+        // Harmonics of 110 Hz to 3.3 kHz: 55 whole cycles of the fundamental per loop.
+        let source: Vec<i16> = (0..frames)
+            .map(|i| {
+                let t = i as f64 / f64::from(codec::SOURCE_RATE);
+                let sum: f64 = (1..=30)
+                    .map(|n| {
+                        let phase = std::f64::consts::PI * f64::from(n * n) / 30.0;
+                        (std::f64::consts::TAU * 110.0 * f64::from(n) * t + phase).sin()
+                            / f64::from(n)
+                    })
+                    .sum();
+                (4_000.0 * sum) as i16
+            })
+            .collect();
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let options = Options::new("Seam")
+                .layout(layout)
+                .loops(Loop::new(start, frames));
+            let file = instrument(&source, &options).unwrap();
+            let (at, stroke) = file.stroke_streams()[0];
+            let walk = codec::walk(stroke, at, layout).unwrap();
+            let mark = walk.records.iter().find(|r| r.mark).unwrap().first_field;
+            let decoded = codec::decode(stroke, at, layout).unwrap().samples;
+            let end = decoded.len();
+            // Two passes of the loop, as the instrument plays them.
+            let played: Vec<i64> = decoded[mark..]
+                .iter()
+                .chain(&decoded[mark..])
+                .map(|&v| i64::from(v))
+                .collect();
+            let bend = |i: usize| (played[i + 1] - 2 * played[i] + played[i - 1]).abs();
+            let seam = end - mark;
+            let body = (64..seam - 64).map(bend).max().unwrap();
+            let (worst, place) = (seam - 64..seam + 64).map(|i| (bend(i), i)).max().unwrap();
+            assert!(
+                worst <= body + body / 8,
+                "{layout:?}: second difference {worst} at {} fields from the loop end, \
+                 against at most {body} across the loop",
+                place as i64 - seam as i64,
+            );
+        }
     }
 
     // (loop length, crossfade frames, fields the ramp covers).
